@@ -50,6 +50,11 @@ pub struct MachineHostView {
     pub allow_operating: bool,
     /// `pairing.keepAwake`, shared with phones.
     pub keep_awake: bool,
+    /// `machines.listen` (PRO-487): where this Mac listens for computers and
+    /// phones. `None`: never chosen, so every interface, as before the setting.
+    pub listen: Option<crate::listen::Listen>,
+    /// `machines.allowPublic`: callers from public addresses are answered.
+    pub allow_public: bool,
     /// `None` while the runtime cannot be reached.
     pub status: Option<Status>,
     /// The attached runtime cannot verify this window and was left running
@@ -93,6 +98,9 @@ pub struct Machines {
     /// The runtime's last status, so a settings change re-emits it.
     last_status: Mutex<Option<Status>>,
     approval_wait: std::time::Duration,
+    /// The app's account, once it is up: pairing through the relay keeps
+    /// its credential for the account signed in (PRO-487).
+    account: std::sync::OnceLock<Arc<crate::account::AccountManager>>,
 }
 
 impl Default for Machines {
@@ -103,7 +111,12 @@ impl Default for Machines {
 
 impl Machines {
     fn new(secrets: MachineSecrets, store_dir: Option<std::path::PathBuf>) -> Self {
-        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT }
+        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT, account: std::sync::OnceLock::new() }
+    }
+
+    /// The account whose sign-in pairing through the relay uses.
+    pub fn set_account(&self, account: Arc<crate::account::AccountManager>) {
+        let _ = self.account.set(account);
     }
 
     #[cfg(test)]
@@ -183,7 +196,8 @@ impl Machines {
         let secrets = self.clone();
         let secret = tauri::async_runtime::spawn_blocking(move || secrets.secrets.client_secret()).await??;
         let label = this_computer_label();
-        let me = pair::Me { client_secret: &secret, label: &label, platform: std::env::consts::OS };
+        let relay_user = self.account.get().and_then(|account| account.current_scope()).map(|scope| scope.user_id);
+        let me = pair::Me { client_secret: &secret, label: &label, platform: std::env::consts::OS, relay_user: relay_user.as_deref() };
         let outcome = pair::pair(&code, me, self.approval_wait, cancelled).await;
         let paired = match outcome? {
             Ok(paired) => paired,
@@ -202,15 +216,21 @@ impl Machines {
             paired_at: now,
             last_seen_at: Some(now),
             last_route: None,
-            relay: None,
+            // Paired through the relay: its credential came with the pairing.
+            relay: paired.relay.as_ref().map(|credential| credential.info.clone()),
             named_here: false,
             other: Default::default(),
         };
         let keep = self.clone();
         let token = zeroize::Zeroizing::new(code.device_token.clone());
+        let relay_token = paired.relay.map(|credential| credential.resume_token);
         let machine = tauri::async_runtime::spawn_blocking(move || -> Result<PairedMachine> {
-            // The token first, so a record never names a machine without one.
+            // The tokens first, so a record never names a machine, or a
+            // relay credential, without one.
             keep.secrets.save_token(&machine.machine_id, &token)?;
+            if let Some(relay_token) = &relay_token {
+                keep.secrets.save_relay_token(&machine.machine_id, relay_token)?;
+            }
             keep.store()?.put(machine)
         })
         .await??;
@@ -253,7 +273,14 @@ fn view(status: Option<Status>) -> MachineHostView {
     let restart_required = crate::local_runtime::window_consent::offered_now().map(|required| required.to_string());
     #[cfg(not(all(unix, feature = "desktop")))]
     let restart_required = None;
-    MachineHostView { allow_operating: settings.machines.allow_operating, keep_awake: settings.pairing.keep_awake, status, restart_required }
+    MachineHostView {
+        allow_operating: settings.machines.allow_operating,
+        keep_awake: settings.pairing.keep_awake,
+        listen: settings.machines.listen,
+        allow_public: settings.machines.allow_public == Some(true),
+        status,
+        restart_required,
+    }
 }
 
 // ---------------------------------------------------------------- Tauri commands
@@ -311,8 +338,34 @@ pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_,
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = crate::store::settings::load();
         settings.machines.allow_operating = enabled;
+        // Turned on for the first time on a Mac that listens nowhere yet:
+        // "Relay only", the default (PRO-487). One that already listens for
+        // its phones, or that computers were paired with before the setting
+        // (the switch turned off and on again), keeps what it has until the
+        // person chooses.
+        let paired_before = crate::store::root().ok().is_some_and(|data| crate::machine_host::registry::Registry::in_data_dir(&data).list().is_ok_and(|computers| !computers.is_empty()));
+        if enabled && settings.machines.listen.is_none() && !pairing.direct_listening() && !paired_before {
+            settings.machines.listen = Some(crate::listen::Listen::Relay);
+            settings.machines.allow_public = Some(false);
+        }
         crate::store::settings::save(&settings).map_err(err)?;
         pairing.machine_operating_changed();
+        pairing.listen_setting_changed();
+        Ok(host_view(&machines, runtime))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// "Where this Mac listens" (PRO-487): `listen` is `relay`, `tailscale`,
+/// `lan` or `all`. The runtime and the window's phone listener follow the
+/// file.
+#[tauri::command]
+pub async fn machines_set_listen(listen: crate::listen::Listen, allow_public: bool, state: tauri::State<'_, crate::AppState>, machines: tauri::State<'_, Arc<Machines>>) -> CmdResult<MachineHostView> {
+    let (runtime, machines, pairing) = (state.runtime(), machines.inner().clone(), state.pairing.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::listen::choose(listen, allow_public).map_err(err)?;
+        pairing.listen_setting_changed();
         Ok(host_view(&machines, runtime))
     })
     .await
@@ -496,6 +549,6 @@ mod tests {
         settings.pairing.keep_awake = false;
         crate::store::settings::save(&settings).unwrap();
         let value = serde_json::to_value(view(None)).unwrap();
-        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "status": null, "restartRequired": null }));
+        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "listen": null, "allowPublic": false, "status": null, "restartRequired": null }));
     }
 }

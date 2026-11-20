@@ -8,6 +8,7 @@ import type {
   MachineActivityEntry,
   MachineConnectionView,
   MachineHostView,
+  MachineListen,
   MachinePairingCode,
   MachinePairResult,
   MachineRoute,
@@ -22,6 +23,8 @@ import type {
 export const machinesApi = {
   hostStatus: () => invoke<MachineHostView>("machines_host_status"),
   setAllowOperating: (enabled: boolean) => invoke<MachineHostView>("machines_set_allow_operating", { enabled }),
+  /** Where this Mac listens for computers and phones, and whether public callers are answered (PRO-487). */
+  setListen: (listen: MachineListen, allowPublic: boolean) => invoke<MachineHostView>("machines_set_listen", { listen, allowPublic }),
   createCode: () => invoke<MachinePairingCode>("machines_create_code"),
   /** Restart runtime `epoch`, which cannot verify this window, with what it runs; resolves once a fresh one is attached (PRO-486). */
   restartRuntimeForWindow: (epoch: string) => invoke<void>("local_runtime_restart_for_window", { epoch }),
@@ -138,6 +141,11 @@ async function command(run: () => Promise<unknown>, answersView = false): Promis
 /** Let other computers operate this Mac (`machines.allowOperating`). */
 export function setAllowOperating(enabled: boolean): Promise<boolean> {
   return command(() => machinesApi.setAllowOperating(enabled), true);
+}
+
+/** Where this Mac listens (`machines.listen`), and whether it answers public callers (`machines.allowPublic`). */
+export function setMachineListen(listen: MachineListen, allowPublic: boolean): Promise<boolean> {
+  return command(() => machinesApi.setListen(listen, allowPublic), true);
 }
 
 /** Let the waiting computer finish pairing: the person compared the fingerprints. */

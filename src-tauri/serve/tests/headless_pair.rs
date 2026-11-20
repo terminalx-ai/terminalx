@@ -255,6 +255,12 @@ async fn phone_pairs_from_terminal_and_answers_an_agent_approval_without_a_windo
     let mut pair = Terminal::start(cli(&world, &["pair", "--phone"]));
     pair.wait_for("Let other computers operate this server? [y/N]");
     pair.type_line("y");
+    pair.wait_for("Where should this server listen for them?");
+    pair.wait_for("Choice [1]:");
+    // All interfaces, so the test's loopback connection reaches it; public callers stay refused.
+    pair.type_line("4");
+    pair.wait_for("Also answer callers whose own address is public? [y/N]");
+    pair.type_line("n");
     let screen = pair.wait_for("Waiting for the phone");
     assert!(screen.contains('▀'), "shows a terminal QR");
     let link = screen.split_whitespace().find(|word| word.starts_with("terminalx://pair?")).unwrap();
@@ -328,9 +334,20 @@ async fn a_person_pairs_a_computer_from_the_servers_terminal_and_revokes_it() {
     let mut pair = Terminal::start(cli(&world, &["pair"]));
     pair.wait_for("Let other computers operate this server? [y/N]");
     pair.type_line("y");
+    // The first time hosting is turned on it asks where to listen, saying what each choice opens (PRO-487).
+    let asked = pair.wait_for("Choice [1]:");
+    for said in ["1) Relay only", "No port is opened", "2) Tailscale", "3) Local network", "4) All interfaces", "public ones included", "Callers from public addresses are refused under every choice unless you allow them."] {
+        assert!(asked.contains(said), "the question says {said:?}:\n{asked}");
+    }
+    assert!(!hosting(&world.data), "nothing is turned on before the answer");
+    // All interfaces, so the test's loopback connection reaches it; public callers stay refused.
+    pair.type_line("4");
+    pair.wait_for("Also answer callers whose own address is public? [y/N]");
+    pair.type_line("n");
     let screen = pair.wait_for("Waiting for a computer to pair");
     assert!(hosting(&world.data), "pair turned hosting on");
     let settings: Value = serde_json::from_str(&std::fs::read_to_string(world.data.join("settings.json")).unwrap()).unwrap();
+    assert_eq!((settings["machines"]["listen"].as_str(), settings["machines"]["allowPublic"].as_bool()), (Some("all"), Some(false)), "the answer is kept: {settings}");
     assert_eq!(settings["keepMe"]["unknown"], 1, "the settings store kept a key it does not know");
     let machine_id = status(&serve)["machineId"].as_str().unwrap().to_string();
     assert!(screen.contains("TerminalX "), "{screen}");

@@ -198,7 +198,7 @@ fn runtime(role: &str) {
         // Only the endpoint used to format the code is needed. The
         // synthetic computer enters below without a TCP listener.
         let _runtime = executor.enter();
-        state.listening = Some(direct::Listening::for_window_consent_test());
+        state.listeners = vec![direct::Listening::for_window_consent_test()];
     }
     let loaded = host.load_key().unwrap();
     assert_eq!(loaded.is_some(), role == "runtime-restarted");
@@ -220,6 +220,7 @@ fn runtime(role: &str) {
                         platform: None,
                         fingerprint: "fixture fingerprint".into(),
                         transport: "lan",
+                        relay_device_id: None,
                     })
                 else {
                     panic!("the synthetic computer must wait for consent");

@@ -169,8 +169,11 @@ main() {
     fail "sha256sum or shasum is required (apt install coreutils)"
   fi
   [ -n "${HOME:-}" ] && [ -d "$HOME" ] || fail "HOME is not set to a directory"
+  # Root may install and run it (PRO-487): the installer never creates or
+  # switches to another user. It says what that means.
   if [ "$(id -u)" = 0 ]; then
-    warn "running as root installs TerminalX for root; run this as the user who will use it"
+    warn "installing as root: the runtime will run as root, so every paired computer and every agent on this server will act as root."
+    warn "To avoid that, stop now (Ctrl-C) and run this installer as another user; docs/HEADLESS-SERVER.md, \"Which user to run as\", describes the set-ups."
   fi
   check_openssh
 
@@ -281,26 +284,28 @@ main() {
 
   say ""
   say "TerminalX $VERSION is installed, with a user service (what it runs now is said above)."
+  # The commands to run next come first, in a form that works as printed:
+  # by name when ~/.local/bin is on PATH, by full path when it is not.
   case ":${PATH:-}:" in
-    *":$BIN_DIR:"*)
-      say "Next, pair it with your computer:"
-      say ""
-      say "  terminalx-serve pair"
-      ;;
-    *)
-      say "$BIN_DIR is not on your PATH. Add it, for example:"
-      say ""
-      say "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.profile && . ~/.profile"
-      say ""
-      say "(use ~/.bashrc or ~/.zshrc if your shell reads that instead). Then pair it with your computer:"
-      say ""
-      say "  terminalx-serve pair"
-      say ""
-      say "or run it by its full path now: $ROOT/current/terminalx-serve pair"
-      ;;
+    *":$BIN_DIR:"*) SERVE=terminalx-serve ;;
+    *) SERVE="$ROOT/current/terminalx-serve" ;;
   esac
+  say "Next, sign it in to your TerminalX account and pair it with your computer:"
   say ""
-  say "It shows a code: enter it in TerminalX under Settings → Machines → Add a machine → Headless server."
+  say "  $SERVE login"
+  say "  $SERVE pair"
+  say ""
+  say "\`pair\` asks where this server should listen. The default opens no port: your computer reaches it"
+  say "through the TerminalX relay, which is what \`login\` is for. It then shows a code: enter it in TerminalX"
+  say "under Settings → Machines → Add a machine → Headless server."
+  if [ "$SERVE" != terminalx-serve ]; then
+    say ""
+    say "The full path is used above because $BIN_DIR is not on your PATH. To run \`terminalx-serve\` by name, add it:"
+    say ""
+    say "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.profile && . ~/.profile"
+    say ""
+    say "(use ~/.bashrc or ~/.zshrc if your shell reads that instead)."
+  fi
 }
 
 main "$@"

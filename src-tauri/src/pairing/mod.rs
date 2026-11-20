@@ -64,7 +64,25 @@ use self::model::{
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
-use crate::direct_endpoints::advertised_endpoints;
+/// The direct endpoints a phone is given: only addresses the listen setting
+/// binds (PRO-487). Empty under "Relay only". Addresses, not the listener's
+/// state, so an offer regains its LAN route when a busy port frees.
+fn advertised_endpoints() -> Vec<String> {
+    crate::direct_endpoints::listening_endpoints(crate::direct_endpoints::DIRECT_PORT, "")
+}
+
+/// An offer's required `endpoint`: the first direct one, or the stand-in
+/// when nothing listens.
+fn first_endpoint(endpoints: &[String]) -> String {
+    endpoints.first().cloned().unwrap_or_else(|| crate::direct_endpoints::NO_DIRECT_ENDPOINT.into())
+}
+
+/// Refused public callers of the window's listener, for one log line an hour.
+static DIRECT_REFUSALS: std::sync::LazyLock<crate::listen::Refusals> = std::sync::LazyLock::new(Default::default);
+
+/// How often the window checks that its listener still matches the listen
+/// setting and this Mac's addresses.
+const LISTEN_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
@@ -87,8 +105,12 @@ struct Inner {
     /// so they come back when the runtime gives the port up again.
     direct_wanted: bool,
     direct_via_runtime: bool,
-    /// The window's own listener on the port.
+    /// The window's own listeners on the port: one per bound address.
     direct_accept: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// The addresses those listeners are bound to (PRO-487).
+    direct_bound: Vec<std::net::Ipv4Addr>,
+    /// The watcher that keeps them in step with the listen setting runs.
+    direct_watching: bool,
     last_error: Option<String>,
 }
 
@@ -446,7 +468,7 @@ impl PairingManager {
         let direct_endpoints = advertised_endpoints();
         let offer = PairingOffer {
             v: 2,
-            endpoint: direct_endpoints[0].clone(),
+            endpoint: first_endpoint(&direct_endpoints),
             direct_endpoints,
             device_token: token,
             public_key_b64: keypair.public_key_b64(),
@@ -996,7 +1018,7 @@ impl PairingManager {
             let direct_endpoints = advertised_endpoints();
             let offer = PairingOffer {
                 v: 2,
-                endpoint: direct_endpoints[0].clone(),
+                endpoint: first_endpoint(&direct_endpoints),
                 direct_endpoints,
                 device_token: token,
                 public_key_b64: keypair.public_key_b64(),
@@ -1071,14 +1093,96 @@ impl PairingManager {
             drop(inner);
             return self.take_phones_from_runtime();
         }
-        let listener = direct::bind(self.direct_port)?;
+        // Where the listen setting says (PRO-487): one listener per address,
+        // none under "Relay only".
+        let plan = crate::listen::Plan::current();
+        crate::listen::remember(plan);
+        let addresses = plan.binds(&crate::listen::interfaces());
+        if !inner.direct_watching {
+            inner.direct_watching = true;
+            self.watch_listen_setting();
+        }
+        let listeners = direct::bind_each(&addresses, self.direct_port)?;
         inner.direct_listener_started = true;
+        inner.direct_bound = addresses;
         let manager = self.clone();
         inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
+            // Aborting this task drops the set, which ends every listener.
+            let mut accepting = tokio::task::JoinSet::new();
+            for listener in listeners {
+                accepting.spawn(manager.clone().accept_direct(listener));
+            }
+            while accepting.join_next().await.is_some() {}
+        }));
+        Ok(())
+    }
+
+    /// Check the window's own listeners against the listen setting and this
+    /// Mac's addresses, and bind again when they differ: the setting
+    /// changed, Tailscale came up, the Mac joined another network.
+    /// Blocking: reads `settings.json`.
+    pub fn listen_setting_changed(self: &Arc<Self>) {
+        let plan = crate::listen::Plan::current();
+        crate::listen::remember(plan);
+        let wanted = plan.binds(&crate::listen::interfaces());
+        let (own, bound, wants) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.direct_listener_started && !inner.direct_via_runtime, inner.direct_bound.clone(), inner.direct_wanted)
+        };
+        if self.is_stopped() || !wants || self.runtime_owns_direct() || (own && bound == wanted) {
+            return;
+        }
+        if own {
+            self.close_direct_listener();
+            log::info!("the listen setting or this Mac's addresses changed: the phone listener moves");
+        } else if wanted.is_empty() {
+            return;
+        }
+        if let Err(error) = self.ensure_direct_listener() {
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                self.retry_direct_listener();
+            } else {
+                log::debug!("the phone listener is closed: {error}");
+            }
+        }
+        self.emit();
+    }
+
+    /// Whether phones reach this Mac directly now, on the window's listener
+    /// or the runtime's.
+    pub fn direct_listening(&self) -> bool {
+        self.inner.lock().unwrap().direct_listener_started
+    }
+
+    /// Follow the listen setting for the life of the manager.
+    fn watch_listen_setting(self: &Arc<Self>) {
+        let manager = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
             loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
+                tokio::time::sleep(LISTEN_CHECK_EVERY).await;
+                let Some(manager) = manager.upgrade() else { return };
+                if manager.is_stopped() {
+                    return;
+                }
+                let _ = tauri::async_runtime::spawn_blocking(move || manager.listen_setting_changed()).await;
+            }
+        });
+    }
+
+    /// Take phones on one of the window's listeners until it is closed.
+    async fn accept_direct(self: Arc<Self>, listener: tokio::net::TcpListener) {
+        let manager = self;
+        {
+            loop {
+                let Ok((mut stream, peer)) = listener.accept().await else {
                     return;
                 };
+                // Before a byte is read: a caller from a public address is
+                // not answered unless the person allowed it (PRO-487).
+                if !crate::listen::admit(peer, crate::listen::remembered().allow_public, &DIRECT_REFUSALS, "phone listener") {
+                    drop(stream);
+                    continue;
+                }
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
                     let result = async {
@@ -1110,8 +1214,7 @@ impl PairingManager {
                     }
                 });
             }
-        }));
-        Ok(())
+        }
     }
 
     pub(super) async fn handle_relay_connection(

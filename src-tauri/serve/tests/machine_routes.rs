@@ -23,6 +23,11 @@
 //!   refuses the resume credential from then on, the machine refuses the
 //!   computer on the direct route, and the supervisor stops in
 //!   `accessRemoved` with nothing retried on either route.
+//! - `a_relay_only_machine_opens_no_port_and_is_paired_by_code_through_the_relay`
+//!   (PRO-487): a machine set to "Relay only" binds nothing; its code carries
+//!   no address and a relay invite; a computer that is not signed in is told
+//!   to sign in; a signed-in one pairs through the relay once the person
+//!   allows it, and its supervisor then operates the machine over the relay.
 #![cfg(unix)]
 
 mod common;
@@ -579,4 +584,194 @@ async fn revoking_the_computer_ends_its_relay_connection_and_the_relay_refuses_i
     assert_eq!(rig.direct.accepted(), accepted, "nothing retried on the direct route");
     rig.web.drain();
     assert!(matches!(rig.web.told.last(), Some(ClientState::Stopped)), "the web view was told it stopped: {:?}", rig.web.told);
+}
+
+/// A real terminal-owned witness for the headless machine's guarded commands
+/// (creating a code, Allow), as `machines_e2e.rs` has for its fixture.
+#[test]
+fn terminal_consent_helper() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let Ok(socket) = std::env::var("TX_E2E_SOCKET") else { return };
+    let command = std::env::var("TX_E2E_COMMAND").unwrap();
+    let mut params: Value = serde_json::from_str(&std::env::var("TX_E2E_PARAMS").unwrap()).unwrap();
+    let run = std::path::PathBuf::from(std::env::var_os("TX_E2E_RUN").unwrap());
+    let _witness = raccoon_lib::serve_cli::consent::witness_for(&command, &run, &mut params).unwrap().unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    writeln!(stream, "{}", json!({ "id": "t", "token": std::env::var("TX_E2E_TOKEN").unwrap(), "command": command, "params": params })).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    println!("TX_E2E_RESPONSE {}", line.trim());
+}
+
+/// The person at the machine: `command` from a terminal of their own.
+fn person(serve: &Serve, data: &std::path::Path, command: &str, extra: Value) -> Value {
+    let attached = serve.control("runtime.attach", json!({ "protocol": 1 }));
+    let mut params = json!({ "epoch": attached["epoch"], "lease": attached["lease"] });
+    for (name, value) in extra.as_object().unwrap() {
+        params[name] = value.clone();
+    }
+    let response = if raccoon_lib::serve_cli::consent::guards(command) {
+        let mut helper = std::process::Command::new(std::env::current_exe().unwrap());
+        helper
+            .args(["--exact", "terminal_consent_helper", "--nocapture"])
+            .env("TX_E2E_SOCKET", &serve.socket)
+            .env("TX_E2E_TOKEN", &serve.token)
+            .env("TX_E2E_RUN", data.join("run"))
+            .env("TX_E2E_COMMAND", command)
+            .env("TX_E2E_PARAMS", params.to_string());
+        let mut terminal = common::world::Terminal::start(helper);
+        assert_eq!(terminal.exit_code(), 0, "terminal helper failed: {}", terminal.screen());
+        let screen = terminal.wait_for("test result:");
+        let response = screen.lines().find_map(|line| line.split_once("TX_E2E_RESPONSE ").map(|(_, value)| value)).expect("terminal helper response");
+        serde_json::from_str(response).expect("terminal helper returned JSON")
+    } else {
+        serve.try_control(command, params)
+    };
+    assert_eq!(response["ok"], true, "{command}: {response}");
+    response["result"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_only_machine_opens_no_port_and_is_paired_by_code_through_the_relay() {
+    use raccoon_lib::machine_wire::MachineCode;
+    use raccoon_lib::machine_pair as pair;
+
+    let relay = TestRelay::start();
+    let world = AgentWorld::new();
+    let secret = random_bytes::<32>();
+    let machine_id = relay_host_id_for_secret(secret);
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("link.json");
+    let contents = json!({
+        "v": 1,
+        "hostSecretB64": STANDARD.encode(secret),
+        "relayToken": TestRelay::relay_token(&machine_id, RUNTIME_GENERATION),
+        "directorUrl": relay.director_url(),
+        "attachments": [],
+        "revocations": [],
+    });
+    std::fs::write(&link, contents.to_string()).unwrap();
+    // A fresh install after `terminalx-serve login` and the first `pair`: Relay only.
+    std::fs::write(world.data.join("settings.json"), json!({ "machines": { "allowOperating": true, "listen": "relay", "allowPublic": false } }).to_string()).unwrap();
+    let project = world.project.to_string_lossy().into_owned();
+    std::fs::write(world.data.join("projects.json"), json!({ "projects": [{ "path": project, "name": "project", "kind": "git" }] }).to_string()).unwrap();
+
+    let port = free_port();
+    let mut command = world.machine_command();
+    command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string()).args(["--runtime-kind", "local", "--relay-link"]).arg(&link);
+    let serve = Serve::start(command, &world.data);
+    wait_until("the machine's relay registration", || serve.lines.lock().unwrap().iter().rev().find(|line| line["type"] == "relay" && line["status"]["state"] == "registered").cloned());
+
+    // No listener: nothing is bound, on the port it would use or any other.
+    let status = common::machine::status(&serve);
+    assert_eq!(status["enabled"], true, "{status}");
+    assert!(status["listening"].is_null(), "Relay only opens no port: {status}");
+    assert_eq!(status["listen"]["choice"], "relay", "{status}");
+    assert_eq!(status["listen"]["addresses"], json!([]), "{status}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "nothing listens on {port}");
+    assert!(status["runsAs"]["user"].as_str().is_some_and(|user| !user.is_empty()), "{status}");
+
+    // Its code names no address, and carries a single-use relay invite.
+    let created = person(&serve, &world.data, "runtime.machineHost.createCode", json!({}));
+    let code = MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
+    assert!(code.direct_endpoints.is_empty(), "no address to advertise: {:?}", code.direct_endpoints);
+    let invite = code.relay.clone().expect("a relay invite in the code");
+    assert_eq!(invite.relay_host_id, machine_id);
+    assert_eq!(relay.invites(&invite.relay_device_id), vec![(invite.invite_token.clone(), false)], "minted for this code's computer, not used yet");
+
+    // A computer nobody is signed in on cannot use the relay, and is told so; the code is still live.
+    let client_secret = random_bytes::<32>();
+    let (_cancel, cancelled) = tokio::sync::watch::channel(false);
+    let signed_out = pair::Me { client_secret: &client_secret, label: "Test MacBook", platform: "macos", relay_user: None };
+    let failure = pair::pair(&code, signed_out, Duration::from_secs(30), cancelled.clone()).await.unwrap().err().expect("pairing needs a sign-in");
+    assert_eq!(failure.reason, "sign-in-required", "{}", failure.message);
+    assert_eq!(relay.invites(&invite.relay_device_id), vec![(invite.invite_token.clone(), false)], "the invite was not spent");
+
+    // Signed in: it asks through the relay, and nothing is granted before Allow.
+    let pairing = {
+        let code = code.clone();
+        tokio::spawn(async move {
+            let me = pair::Me { client_secret: &client_secret, label: "Test MacBook", platform: "macos", relay_user: Some(USER) };
+            pair::pair(&code, me, WAIT, cancelled).await
+        })
+    };
+    let pending = wait_until("the computer to ask through the relay", || common::machine::status(&serve)["pending"].as_object().map(|pending| Value::Object(pending.clone())));
+    assert_eq!(pending["transport"], "relay", "{pending}");
+    assert_eq!(pending["label"], "Test MacBook");
+    assert_eq!(common::machine::status(&serve)["computers"], json!([]), "nothing is granted before Allow");
+    let approved = person(&serve, &world.data, "runtime.machineHost.approve", json!({ "requestId": pending["requestId"] }));
+    assert_eq!(approved["approved"], true, "{approved}");
+    let paired = pairing.await.unwrap().unwrap().unwrap_or_else(|failure| panic!("pairing through the relay failed: {} ({})", failure.reason, failure.message));
+    let credential = paired.relay.expect("a relay credential kept with the pairing");
+    assert_eq!(credential.info.relay_device_id, invite.relay_device_id);
+    assert!(relay.credential(&machine_id, &invite.relay_device_id).is_some(), "the relay keeps its resume credential's hash");
+    let computers = common::machine::status(&serve)["computers"].clone();
+    assert_eq!(computers.as_array().map(Vec::len), Some(1), "{computers}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "pairing opened no port");
+
+    // From then on its supervisor operates the machine through the relay alone.
+    let keypair = host_key(&world.data);
+    let kept = Arc::new(Kept {
+        target: Mutex::new(Target {
+            machine_id: machine_id.clone(),
+            public_key_b64: keypair.public_key_b64(),
+            direct_endpoints: Vec::new(),
+            route: MachineRoute::RelayAndNearby,
+            last_route: None,
+            last_seen_at: None,
+            device_token: Zeroizing::new(code.device_token.clone()),
+            client_secret: Zeroizing::new(client_secret),
+            label: "Test MacBook".into(),
+            platform: "macos".into(),
+            relay: Some(credential),
+        }),
+        saved: Mutex::new(Vec::new()),
+        dropped: Mutex::new(0),
+    });
+    let (events, web_events) = mpsc::unbounded_channel();
+    let (states_tx, mut states) = mpsc::unbounded_channel();
+    let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
+        let _ = states_tx.send(view.state.clone());
+    });
+    let supervisor = MachineSupervisor::start(&machine_id, kept.clone(), Arc::new(NetDialer), events, on_state);
+    let mut web = Web { events: web_events, messages: Vec::new(), told: Vec::new(), next: 0 };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut seen = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, states.recv()).await {
+            Ok(Some(state)) if self::relay(&state) => break,
+            Ok(Some(state)) => {
+                assert!(!direct(&state), "there is no direct route to take: {state:?}");
+                seen.push(state);
+            }
+            _ => panic!("never connected through the relay; saw {seen:?}"),
+        }
+    }
+    let described = web.ok(&supervisor, "machine.describe", json!({})).await;
+    assert_eq!(described["machineId"], json!(machine_id));
+    assert_eq!(described["listen"]["choice"], "relay", "its page reads where it listens: {described}");
+    assert_eq!(described["listen"]["addresses"], json!([]));
+    assert_eq!(*kept.dropped.lock().unwrap(), 0, "the relay never refused its credential");
+
+    // The computer that manages it chooses where it listens (`machine.setListen`, machine/9):
+    // the runtime writes the setting and opens the listeners with no restart; the relay link stays.
+    let chosen = web.ok(&supervisor, "machine.setListen", json!({ "listen": "all", "allowPublic": false })).await;
+    assert_eq!((chosen["listen"]["choice"].as_str(), chosen["listen"]["chosen"].as_bool(), chosen["listen"]["allowPublic"].as_bool()), (Some("all"), Some(true), Some(false)), "{chosen}");
+    let settings: Value = serde_json::from_str(&std::fs::read_to_string(world.data.join("settings.json")).unwrap()).unwrap();
+    assert_eq!((settings["machines"]["listen"].as_str(), settings["machines"]["allowPublic"].as_bool(), settings["machines"]["allowOperating"].as_bool()), (Some("all"), Some(false), Some(true)), "{settings}");
+    eventually("the listener to open where it was chosen", || {
+        let status = common::machine::status(&serve);
+        (status["listen"]["addresses"] == json!([format!("0.0.0.0:{port}")])).then_some(()).ok_or_else(|| status["listen"].to_string())
+    })
+    .await;
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(), "it listens on {port} now");
+    let refused = web.call(&supervisor, "machine.setListen", json!({ "listen": "everywhere" })).await;
+    assert_eq!(refused["ok"], false, "a word it does not know is refused, not read as a choice: {refused}");
+    // Back to Relay only: the port closes, and the computer is still served through the relay.
+    let back = web.ok(&supervisor, "machine.setListen", json!({ "listen": "relay", "allowPublic": false })).await;
+    assert_eq!(back["listen"]["choice"], "relay", "{back}");
+    eventually("the listener to close", || std::net::TcpStream::connect(("127.0.0.1", port)).is_err().then_some(()).ok_or_else(|| "still listening".to_string())).await;
+    assert_eq!(web.ok(&supervisor, "machine.describe", json!({})).await["listen"]["addresses"], json!([]));
+    supervisor.stop();
 }

@@ -9,15 +9,63 @@
 /// The port phones and operating computers reach directly.
 pub const DIRECT_PORT: u16 = 6768;
 
-/// A phone's direct endpoints: `ws://<address>:6768`.
-pub fn advertised_endpoints() -> Vec<String> {
-    endpoints(DIRECT_PORT, "")
-}
-
-/// An operating computer's direct endpoints on `port`, each ending in `path`
-/// (`crate::machine_wire::MACHINE_PATH`).
+/// The direct endpoints on `port` of a listener bound to every interface,
+/// each ending in `path` (`crate::machine_wire::MACHINE_PATH`, or nothing
+/// for a phone's `ws://<address>:6768`).
+#[cfg(test)]
 pub fn machine_endpoints(port: u16, path: &str) -> Vec<String> {
     endpoints(port, path)
+}
+
+/// The endpoints of a listener bound to `bound`, each ending in `path`
+/// (PRO-487): only addresses it answers on. The wildcard is every usable
+/// address; otherwise each bound address, Tailscale
+/// first, and this Mac's `.local` name when a private network address is
+/// bound. Nothing bound is no endpoint: never a loopback stand-in.
+pub fn bound_endpoints(bound: &[std::net::SocketAddr], path: &str) -> Vec<String> {
+    if let Some(wildcard) = bound.iter().find(|address| address.ip().is_unspecified()) {
+        return endpoints(wildcard.port(), path);
+    }
+    let Some(port) = bound.first().map(std::net::SocketAddr::port) else { return Vec::new() };
+    let addresses: Vec<_> = bound
+        .iter()
+        .filter_map(|address| match address.ip() {
+            std::net::IpAddr::V4(address) if usable_ipv4(address) => Some((interface_rank("", address), address)),
+            _ => None,
+        })
+        .collect();
+    let private = addresses.iter().any(|(_, address)| address.is_private());
+    let mut endpoints = direct_ipv4_endpoints(addresses, port, path);
+    if private {
+        endpoints.extend(local_host_name().map(|name| format!("ws://{name}.local:{port}{path}")));
+    }
+    endpoints
+}
+
+/// What an offer's required `endpoint` field holds when no address listens
+/// ("Relay only"): the v2 phone wire wants one even for a relay-only offer.
+pub const NO_DIRECT_ENDPOINT: &str = "ws://127.0.0.1:0";
+
+/// The endpoints on `port` of the addresses the listen setting binds on this
+/// computer now (`crate::listen::remembered`), each ending in `path`. Empty
+/// under "Relay only", or while the chosen kind of address is absent.
+pub fn listening_endpoints(port: u16, path: &str) -> Vec<String> {
+    let bound: Vec<std::net::SocketAddr> = crate::listen::remembered().binds(&crate::listen::interfaces()).into_iter().map(|ip| std::net::SocketAddr::from((ip, port))).collect();
+    bound_endpoints(&bound, path)
+}
+
+/// macOS publishes LocalHostName via its built-in mDNS responder.
+fn local_host_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("/usr/sbin/scutil").args(["--get", "LocalHostName"]).output().ok()?;
+        let name = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        (output.status.success() && !name.is_empty() && name.len() <= 63 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')).then_some(name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
 }
 
 fn endpoints(port: u16, path: &str) -> Vec<String> {
@@ -32,25 +80,9 @@ fn endpoints(port: u16, path: &str) -> Vec<String> {
         })
         .collect();
     let mut endpoints = direct_ipv4_endpoints(addresses, port, path);
-    // macOS publishes LocalHostName via its built-in mDNS responder. Resolve it
-    // anew on each phone connection so LAN address changes need no new pairing.
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("/usr/sbin/scutil")
-        .args(["--get", "LocalHostName"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(name) = String::from_utf8(output.stdout) {
-                let name = name.trim();
-                if !name.is_empty()
-                    && name.len() <= 63
-                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                {
-                    endpoints.push(format!("ws://{name}.local:{port}{path}"));
-                }
-            }
-        }
-    }
+    // Resolved anew on each phone connection, so LAN address changes need no
+    // new pairing.
+    endpoints.extend(local_host_name().map(|name| format!("ws://{name}.local:{port}{path}")));
     if endpoints.is_empty() {
         endpoints.push(format!("ws://127.0.0.1:{port}{path}"));
     }
@@ -125,7 +157,20 @@ mod tests {
         let every = machine_endpoints(4321, "/machine/1");
         assert!(!every.is_empty(), "at least loopback");
         assert!(every.iter().all(|endpoint| endpoint.starts_with("ws://") && endpoint.ends_with(":4321/machine/1")), "{every:?}");
-        assert!(advertised_endpoints().iter().all(|endpoint| endpoint.ends_with(":6768")), "the phone's are unchanged");
+        assert!(machine_endpoints(DIRECT_PORT, "").iter().all(|endpoint| endpoint.ends_with(":6768")), "the phone's are unchanged");
+    }
+
+    #[test]
+    fn a_bound_listener_offers_only_the_addresses_it_answers_on() {
+        let bound = |addresses: &[&str]| addresses.iter().map(|address| address.parse().unwrap()).collect::<Vec<std::net::SocketAddr>>();
+        assert_eq!(bound_endpoints(&[], "/machine/1"), Vec::<String>::new(), "relay only: no endpoint, not even loopback");
+        assert_eq!(bound_endpoints(&bound(&["100.93.49.78:6768"]), "/machine/1"), vec!["ws://100.93.49.78:6768/machine/1"], "Tailscale only: no .local name");
+        let lan = bound_endpoints(&bound(&["192.168.1.2:6768", "100.93.49.78:6768"]), "");
+        assert_eq!(&lan[..2], ["ws://100.93.49.78:6768", "ws://192.168.1.2:6768"], "Tailscale first");
+        assert!(lan[2..].iter().all(|endpoint| endpoint.ends_with(".local:6768")), "{lan:?}");
+        assert!(!lan.iter().any(|endpoint| endpoint.contains("127.0.0.1")));
+        let every = bound_endpoints(&bound(&["0.0.0.0:4321"]), "/machine/1");
+        assert_eq!(every, machine_endpoints(4321, "/machine/1"), "the wildcard is every usable address");
     }
 
     #[test]

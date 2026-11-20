@@ -9,7 +9,8 @@ import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MachineHostError } from "./MachineHostError";
-import { bootMachineHost, clearMachineHostError, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { bootMachineHost, clearMachineHostError, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, setMachineListen, useMachineHost } from "@/lib/machines";
+import { MachineHosting } from "./MachineHosting";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineVersion } from "@/lib/machineUpdate";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -106,6 +107,14 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
         {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
         {view?.status?.error && <p role="alert" className="pb-2 text-[12.5px] text-destructive">{view.status.error}</p>}
       </div>
+      {/* Where this Mac listens for computers and phones (PRO-487): shown while it can be operated. */}
+      {allow && view?.status?.listen && (
+        <RegisteredSetting setting="machines.listen">
+          <div className="border-b border-hairline py-3">
+            <MachineHosting name="This Mac" status={view.status.listen} runsAs={view.status.runsAs ?? null} busy={host.busy} onChange={(listen, allowPublic) => void setMachineListen(listen, allowPublic)} />
+          </div>
+        </RegisteredSetting>
+      )}
       <div className="border-b border-hairline py-1.5">
         <ThisMac machineId={view?.status?.machineId ?? null} />
       </div>

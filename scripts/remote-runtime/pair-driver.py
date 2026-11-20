@@ -2,7 +2,7 @@
 """The person at the server in scripts/remote-runtime/e2e-install-linux.sh.
 
 Runs `terminalx-serve pair` over `ssh -tt` in a pseudo-terminal of its own,
-answers "y" to turning hosting on, hands the printed code to the operating
+answers "y" to turning hosting on and "Local network" to where it listens, hands the printed code to the operating
 computer (`install_e2e`, step `pair`), checks that the request names that
 computer with the fingerprint, and answers "y" to Allow.
 
@@ -75,6 +75,10 @@ def type_line(line):
 
 wait_for("Let other computers operate this server? [y/N]", 60)
 type_line("y")
+# Where to listen (PRO-487): the server's private address, which the operating
+# computer's container reaches. Nothing more is asked for that choice.
+wait_for("Choice [1]:", 60)
+type_line("3")
 seen = wait_for("Waiting for a computer to pair", 60)
 codes = CODE.findall(seen)
 if not codes:

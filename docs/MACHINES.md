@@ -878,6 +878,7 @@ the pull request that adds it.
 | `machine.runAction` | `machine/7` | Served | Manage only; runs a saved action in the session's folder on the machine |
 | `machine.setupRerun` | `machine/7` | Served | Manage only; runs the session's setup script again on the machine |
 | `machine.setupStop` | `machine/7` | Served | Manage only; stops the session's setup attempt |
+| `machine.setListen` | `machine/9` | Served | Manage only; `listen` (`relay`, `tailscale`, `lan`, `all`) and `allowPublic`; answers the new listen status. Refused (`unavailable`) for `relay` on a machine not registered with the relay, which would leave it unreachable (PRO-487) |
 | `session.usage` | `machine/8` | Served | Names the session; its tokens and cost read again from the machine's transcripts, how each agent signs in there, and the machine's usage windows (PRO-408, [Session parity](#as-built-pro-408-cost-account-continue-and-fix-check-errors)) |
 | `session.prepareContinuation` | `machine/8` | Served | Names the session and an agent tab; the tab's context with the machine's own transcript path |
 | `session.checkFailures` | `machine/8` | Served | Manage only; names the session, an agent tab and a pull request's https URL; its failed check logs read with the machine's `gh` into the session's attachments folder there |
@@ -1093,9 +1094,10 @@ as a user service and is paired from its own terminal. The user's guide is
   (terminalx-saas `machine-relay-access.md`, "Device-code sign-in") and keeps
   the desktop Cloud Session it ends in at `<data dir>/account/session.json`
   (0600, in a 0700 folder; `src-tauri/src/machine_account.rs`). The runtime
-  registers with the relay from it while the switch is on (PRO-368). The code
-  still carries no `relay`, so a server is paired over a direct route first;
-  pairing one through the relay is a follow-up.
+  registers with the relay from it while the switch is on (PRO-368). Since
+  PRO-487 a code made on a registered machine carries `relay` (a single-use
+  invite), so a server with no listener is paired through the relay
+  ([As built (PRO-487)](#as-built-pro-487-where-a-machine-listens-and-what-it-runs-as)).
 - **Signed releases.** `SHA256SUMS` of each runtime release is signed as an SSH
   signature (namespace `terminalx-runtime`, principal `release@terminalx`) on
   the owner's Mac (`scripts/release/sign-runtime.py`); no signing key is on
@@ -1911,6 +1913,8 @@ person compares on both screens.
 | **A hostile account server** | It cannot read an offer (HPKE-sealed to the requester's key) and cannot pair a computer: an account grant still waits for "Allow" and the fingerprint (decision 5). A forged directory entry leads to a machine whose fingerprint does not match. Revoking a computer revokes its grant, best effort. | `pairing_tests::a_computer_paired_through_a_grant_still_waits_for_allow_and_its_revocation_removes_it` |
 | **A hostile agent on the machine** | It has a shell (decision 5), so the boundary is letting someone else in. Making a code, Allow and Let back need a person's witness (`serve_cli::consent`): the kernel says which process asks, and the runtime refuses itself, its descendants and its terminals. The window's attachment is no boundary here: any process of the user can attach. Revoke and Disconnect are not guarded, since they only take access away (Accepted risks). | `security_tests::an_agent_on_the_machine_cannot_approve_pair_or_let_a_computer_back`, `serve_cli::consent` tests |
 | **A hostile agent on the operating computer** | It drives what the person drives: the machine's projects with full rights (decision 5). It cannot add a machine: a code waits for "Allow" on the machine. No `terminalx` command adds or removes one; only the app's own windows do. No method pairs others, changes the operate switch, or reaches the browser, computer use, dictation, Local VM or runs; `fs.*` stays inside the projects. | `security_tests::a_code_alone_adds_no_machine_without_allow_on_the_machine`, `…::no_terminalx_command_adds_or_removes_a_machine`, `…::an_operating_computer_cannot_change_the_switch_or_reach_this_machines_own_controls`, `…::an_operating_computer_reads_only_inside_the_machines_projects`, `pairing_tests::a_paired_computer_has_no_pairing_browser_or_computer_methods` |
+| **A listener on the public internet** (PRO-487) | A new install opens no port ("Relay only"); every other choice binds only the addresses of its kind (Tailscale; private and Tailscale), and "All interfaces" is never a default. Whatever is bound, a connection whose source address is public is closed before a byte is read, unless the person allowed public callers (`machines.allowPublic`); the first refusal each hour is logged. An install from before the setting keeps its bind and refuses public callers until the person answers once. Codes and offers advertise bound addresses only. The phone listener follows the same setting. | `security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed`, `…::the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port`, `…::a_machine_from_before_the_setting_asks_once_about_its_public_address`, `listen::tests`, `pairing::direct::tests::the_listen_setting_decides_which_addresses_are_bound` |
+| **A stolen pairing code used through the relay** (PRO-487) | The code's relay invite is for one relay device and works once; only that device, with the code's token, may ask, and it still waits for "Allow" and the fingerprint. Another relay device with the token is refused; an unused invite is revoked when its code ends. | `security_tests::a_computer_pairs_through_the_relay_only_with_the_codes_invite_and_allow`, `pairing::tests::a_code_with_a_relay_invite_pairs_only_its_relay_device_and_retires_an_unused_one`, serve `machine_routes::a_relay_only_machine_opens_no_port_and_is_paired_by_code_through_the_relay` |
 | **A replayed message** | E2EE frames carry a counter: a replay closes the connection. A code works once. A rotated token replaces the old one once a connection is made with it, and a token whose answer was lost is never promoted. A consent witness answers its own nonce once. | `relay_e2ee::tests::e2ee_frame_nonce_is_fixed_and_replays_fail`, `security_tests::a_credential_rotates_on_each_connection` |
 
 Data privacy mode turns off both sides: the runtime treats the operate switch as
@@ -1922,6 +1926,20 @@ which runs in a child process because data privacy is one switch per process.
 
 ### Accepted risks
 
+- **The runtime's user decides what a paired computer is** (PRO-487). Every
+  paired computer and every agent acts as the user the runtime runs as: root
+  if it runs as root, root in effect if that user has passwordless `sudo` or
+  is in the `docker` group. TerminalX does not sandbox them and the installer
+  never creates a user; it says which user it is and whether it has
+  passwordless `sudo` (`service status`, the machine's page), and
+  `docs/HEADLESS-SERVER.md` ("Which user to run as") describes the set-ups.
+- **The listen setting is a file the runtime's user can change**
+  (`settings.json`, `machines.listen` and `machines.allowPublic`). An agent
+  on the machine has a shell as that user, so it can widen the bind, as it
+  could start a listener of its own. The setting protects against exposure
+  by default and by mistake, not against a hostile process of the same user.
+  A paired computer that manages the machine may change it too
+  (`machine.setListen`): it already has a shell there.
 - **A paired computer has a shell** (decision 5, confirmed). Revoking ends its
   credential, not what it already did; the UI says only that.
 - **A shell on the operating computer can remove a machine** by editing
@@ -1991,6 +2009,73 @@ which runs in a child process because data privacy is one switch per process.
   window (`machines_disabled`). Unlike cloud control there is no second
   switch: nothing is billed, and the machines are the person's own. A run's worker may not pair a machine or start a session
   on one.
+
+### As built (PRO-487): where a machine listens, and what it runs as
+
+- **The setting.** `machines.listen` in `settings.json`: `relay` (no
+  listener), `tailscale` (100.64.0.0/10 addresses), `lan` (RFC 1918 and
+  Tailscale addresses) or `all` (the wildcard). Absent means nobody chose:
+  an install that listened before the setting keeps every interface. A word
+  this build does not know reads as `relay`, so a typo never opens a port.
+  `machines.allowPublic` (absent: unanswered, refused) says whether callers
+  from public addresses are answered. `src-tauri/src/listen.rs` holds the
+  choices, the address classes, the plan read from settings and the
+  admission check; both listeners use it.
+- **Binding.** The runtime's listener (`machine_host/direct.rs`) and the
+  window's phone listener (`pairing/direct.rs`) bind one socket per chosen
+  address instead of the wildcard, and follow the setting and the
+  computer's interfaces while running: a reconcile pass closes listeners
+  that no longer belong (and the connections that came in on them) and
+  opens new ones, with no restart. `Relay only` binds nothing. Loopback is
+  bound only under `all`.
+- **Public callers.** `MachineHost::answers(peer)` runs in the accept loop
+  before the handshake; the window's listener does the same. A refusal is
+  logged once an hour and its time kept in
+  `<data dir>/machine-host/public-callers.json`, which is how the one-time
+  question survives a restart.
+- **The one-time question** (decision 3). `ListenStatus.askPublic` is true
+  while nobody chose and either the machine has a public address or a public
+  caller was refused. `service status`, Settings → Machines and the
+  machine's page show it with its two answers: keep (`all` and
+  `allowPublic`) or close (`relay`, `tailscale` or `lan`; the page's button
+  closes to `lan`). Any choice ends it.
+- **Advertised endpoints** come from the bound sockets
+  (`direct_endpoints::bound_endpoints`): a code, `machine.describe`, a
+  phone's QR code and the account directory list only addresses that
+  answer. With nothing bound a code carries no direct endpoint.
+- **Pairing by code through the relay.** On a machine registered with the
+  relay, `createCode` asks the relay for a single-use invite (`invite-create`,
+  as `machine.relayAccess` does) and puts it in the code's `relay`, with the
+  relay device id it is for. The operating computer, which must be signed
+  in, tries the code's direct endpoints first and then connects with the
+  invite (`machine_client::pair_through_relay`): E2EE pinned to the code's
+  key, the code's token, the same wait for "Allow" and fingerprint, then a
+  resume credential installed on that connection
+  (`pairing.provisionRelay`). On the machine,
+  `MachineRoutes::pair_computer` accepts only the invite's relay device and
+  records it with the computer, so later connections are admitted as for
+  any computer with relay access. An invite whose code ends unused is
+  revoked. With neither a listener nor a registration, `createCode` refuses
+  (`not_reachable`) and says to run `terminalx-serve login` or choose a
+  listener. A signed-out operating computer gets `sign-in-required`.
+- **Commands.** `terminalx-serve pair` asks where to listen the first time
+  hosting is turned on (default `relay`); `terminalx-serve hosting
+  [--listen …] [--allow-public]` shows or changes it;
+  `terminalx-serve service status` prints the choice, the bound addresses,
+  the open question if any, the user, and its passwordless `sudo`. On a Mac
+  the same setting is in Settings → Machines under the operate switch
+  (`machines_set_listen`); turning the switch on for the first time writes
+  `relay` unless a phone listener is already serving. From another
+  computer: `machine.setListen` (`machine/9`).
+- **What it runs as.** `listen::runs_as` reads the effective user and, for a
+  hosting runtime that is not root, whether `sudo -n true` succeeds (once,
+  5 s limit). `Status.runsAs` and `machine.describe` carry
+  `{ user, root, passwordlessSudo }`. The runtime logs a warning at start
+  when root; the installer and `service install` warn that every paired
+  computer and every agent on the server will act as root, and carry on.
+- **UI.** No Superdesign screen draws these, so "Listening and privileges"
+  on the machine page and the block under the operate switch are built from
+  the Machines board's parts (`MachineHosting.tsx`).
 
 ### As built (PRO-357)
 

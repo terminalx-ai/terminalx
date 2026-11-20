@@ -176,7 +176,7 @@ impl PairingManager {
             expires_at: credential_expires_at,
             pairing: PairingOffer {
                 v: 2,
-                endpoint: endpoints[0].clone(),
+                endpoint: super::first_endpoint(&endpoints),
                 direct_endpoints: endpoints,
                 device_token: token.clone(),
                 public_key_b64: keypair.public_key_b64(),

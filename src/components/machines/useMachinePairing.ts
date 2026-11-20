@@ -18,6 +18,8 @@ export function failureCopy(reason: MachinePairingFailure, name: string): { titl
       return { title: `Pairing is paused on ${name}`, detail: "Too many wrong codes were tried there. Try again in a minute.", retry: true };
     case "unreachable":
       return { title: `This Mac could not reach ${name}`, detail: `Check that ${name} is awake and on this network or Tailscale, then try again.`, retry: true };
+    case "sign-in-required":
+      return { title: `Sign in to pair with ${name}`, detail: `${name} opens no port: it is reached through the TerminalX relay, which needs this Mac signed in to your account. Sign in under Settings → Account, then paste the code again.`, retry: true };
     case "invalid-code":
       return { title: "This is not a machine pairing code", detail: "Copy it again from Settings → Machines on the other computer.", retry: false };
     case "cancelled":
