@@ -2,7 +2,17 @@ import { useEffect, useMemo, useRef, useState, type HTMLAttributes, type RefObje
 import { files as filesApi } from "@/lib/api";
 import { registerFileDropTarget } from "@/lib/fileDrop";
 import { peekInstance } from "@/lib/terminal";
-import { MAX_DROPPED_TEXT, droppedPathsText, droppedText } from "@/lib/terminalDrop";
+import { MAX_DROPPED_TEXT, defaultQuoteStyle, droppedPathsText, droppedText, unquotableMessage, type QuoteStyle } from "@/lib/terminalDrop";
+
+/** The quoting the terminals' shell reads, asked of the app once. */
+let quoteStyle: Promise<QuoteStyle> | null = null;
+
+/** Dropped paths as the terminals' shell reads them, or why one cannot be typed safely. */
+async function quotedPaths(paths: readonly string[]): Promise<string | { refused: string }> {
+  quoteStyle ??= Promise.resolve().then(() => filesApi.terminalQuoteStyle()).catch(() => defaultQuoteStyle);
+  const style = await quoteStyle;
+  return droppedPathsText(paths, style) ?? { refused: unquotableMessage(style) };
+}
 
 /**
  * Why this terminal takes no dropped files, or no dropped text: said on the
@@ -65,7 +75,7 @@ export function useTerminalDrop({
 
   // `text` is read only once the drop is known to be allowed.
   const paste = useMemo(
-    () => async (kind: "files" | "text", text: () => string | Promise<string>) => {
+    () => async (kind: "files" | "text", text: () => string | { refused: string } | Promise<string | { refused: string }>) => {
       setDragging(null);
       const reason = latest.current?.[kind];
       if (reason) {
@@ -74,6 +84,10 @@ export function useTerminalDrop({
       }
       setRefused(null);
       const data = await text();
+      if (typeof data !== "string") {
+        setRefused(data.refused);
+        return;
+      }
       const term = peekInstance(id)?.term;
       if (!term) return;
       if (kind === "text" && data.length > MAX_DROPPED_TEXT) {
@@ -96,7 +110,7 @@ export function useTerminalDrop({
       onDragChange: (over, kind) => setDragging(over ? kind : null),
       // No paths: text dragged from another app, which the window's event does not carry.
       onDrop: (paths) =>
-        paths.length ? paste("files", () => droppedPathsText(paths)) : paste("text", async () => (await filesApi.droppedText().catch(() => null)) ?? ""),
+        paths.length ? paste("files", () => quotedPaths(paths)) : paste("text", async () => (await filesApi.droppedText().catch(() => null)) ?? ""),
     });
     return () => {
       off();

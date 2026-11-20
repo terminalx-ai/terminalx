@@ -8,7 +8,7 @@
 export type MachineRoute = "relayAndNearby" | "thisNetwork";
 
 export interface MachineOs {
-  family: "macos" | "linux" | string;
+  family: "macos" | "linux" | "windows" | string;
   version: string | null;
 }
 
