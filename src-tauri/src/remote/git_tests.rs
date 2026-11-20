@@ -1101,6 +1101,53 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
 }
 
 #[test]
+fn bulk_cleanup_keeps_a_worktree_whose_pr_readback_failed_after_a_switch_to_a_merged_branch() {
+    use crate::worktree_cleanup as cleanup;
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("pending-checkout");
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let request = machine_pr_request(&f, &checkout);
+    let projects: Vec<crate::store::projects::Project> = vec![serde_json::from_value(json!({ "path": f.root, "name": "workspace" })).unwrap()];
+    let live = |_: &[crate::store::index::SessionEntry]| cleanup::Live::default();
+    let with_host = |run: &dyn Fn(&cleanup::Host<'_>) -> Value| run(&cleanup::Host {
+        projects: &projects, protected: &[], confine: None, live: &live, fetch: crate::landed::Fetch::Skip, stop_agents: None, archive: None,
+    });
+    let candidate = || with_host(&|host| {
+        let found = cleanup::scan(host, None).unwrap().into_iter().flat_map(|project| project.candidates)
+            .find(|candidate| std::path::Path::new(&candidate.path) == cleanup::canonical(&checkout)).unwrap();
+        serde_json::to_value(found).unwrap()
+    });
+    // Reviewed on a clean, merged branch before the create.
+    git(&checkout, &["checkout", "-qb", "merged-branch", "main"]);
+    let reviewed = candidate();
+    assert_eq!(reviewed["verdict"], "eligible", "{reviewed}");
+
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+    f.fault("view-offline");
+    f.fault("live-pr-head");
+    assert_eq!(f.code("git.prCreateForSession", request), "outcome_unknown");
+    git(&checkout, &["checkout", "-q", "merged-branch"]);
+
+    let now = candidate();
+    assert_eq!(now["verdict"], "unverifiable");
+    assert_eq!(now["reason"], "Verify the pull request at https://github.test/octo/repo/pull/1 before removing this workspace.");
+    let sink = crate::sink::BroadcastSink::new(8);
+    for token in [reviewed["token"].as_str().unwrap(), now["token"].as_str().unwrap()] {
+        let item: cleanup::RemoveItem = serde_json::from_value(json!({
+            "projectPath": f.root, "path": now["path"], "token": token, "deleteSessions": true, "acceptIgnored": true,
+        })).unwrap();
+        let done = with_host(&|host| serde_json::to_value(cleanup::remove(host, &sink, std::slice::from_ref(&item), cleanup::Watch::default())).unwrap());
+        assert_eq!(done[0]["outcome"], "skipped", "{done}");
+        assert!(done[0]["reason"].as_str().unwrap().contains("Verify the pull request at https://github.test/octo/repo/pull/1"), "{done}");
+        assert!(checkout.is_dir() && crate::store::index::get("native").is_ok());
+    }
+}
+
+#[test]
 fn a_nested_project_session_cannot_create_its_parents_pr() {
     let _home = crate::store::temp_home();
     let mut f = fixture();
