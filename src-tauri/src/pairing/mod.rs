@@ -700,9 +700,7 @@ impl PairingManager {
             .map_err(|_| {
                 anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
             })?
-            .ok_or_else(|| {
-                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
-            })
+            .ok_or_else(|| anyhow::Error::new(crate::serve_cli::consent::WindowKeyMissing))
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {

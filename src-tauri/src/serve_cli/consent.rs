@@ -34,6 +34,13 @@
 //! desktop runtime without a pinned consent key cannot identify its window, so
 //! guarded pairing actions are unavailable there, including when macOS app
 //! identification fails.
+//!
+//! The key is pinned only in the environment of a runtime the window itself
+//! launches, and a handover execs the newer runtime in the same environment,
+//! so a runtime first launched without the window's key (by a build before
+//! PRO-369, before the key was saved, or by another build) keeps none for
+//! good. The window repairs that by launching a fresh runtime
+//! (`local_runtime::window_consent`, PRO-486); nothing pins a key over IPC.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -96,7 +103,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    fn says(self) -> &'static str {
+    pub(crate) fn says(self) -> &'static str {
         match self {
             Self::Runtime => "the runtime itself asked",
             Self::Descendant => "it was asked by a process this runtime started (an agent, or a terminal it runs)",
@@ -208,6 +215,19 @@ fn window_message(socket: &Path, nonce: &str) -> Vec<u8> {
 pub(crate) fn launch_public_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
 }
+
+/// This window's consent key is not in its Keychain: a runtime launch saves
+/// one, so the runtime attached was not launched by this window with it.
+#[derive(Debug)]
+pub struct WindowKeyMissing;
+
+impl std::fmt::Display for WindowKeyMissing {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+    }
+}
+
+impl std::error::Error for WindowKeyMissing {}
 
 /// Loads the window's signing key. Only runtime launch may request creation.
 pub type WindowKey = Box<dyn Fn(bool) -> Result<Ed25519KeyPair> + Send + Sync>;

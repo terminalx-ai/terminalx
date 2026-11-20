@@ -208,6 +208,48 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(screen.getByRole("button", { name: "Create a new code" })).toBeTruthy();
   });
 
+  it("offers Restart runtime when the runtime running cannot verify this window, then makes the code (PRO-486)", async () => {
+    const EPOCH = "6f1c2f6e-8d0a-4c55-9a43-0c3f1d2b7e11";
+    const unverified = `runtime_restart_required:${EPOCH}: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops what it runs: Claude in api. Each agent picks up its conversation again when its tab next starts.`;
+    let restarted = false;
+    view = { ...view, allowOperating: true };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "machines_create_code" && !restarted) throw unverified;
+      if (command === "local_runtime_restart_for_window") {
+        restarted = true;
+        return null;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create pairing code" }));
+    const alert = await screen.findByText(/was not started by this window/);
+    expect(alert.textContent).not.toContain("runtime_restart_required");
+    expect(alert.textContent).not.toContain(EPOCH);
+    expect(alert.textContent).toContain("Restarting stops what it runs: Claude in api. Each agent picks up its conversation again when its tab next starts.");
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH }));
+    // Once the fresh runtime is attached, the code is made again by itself.
+    expect((await screen.findByTestId("machine-pairing-code")).textContent).toContain(CODE.code);
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "machines_create_code")).toHaveLength(2);
+  });
+
+  it("shows any other pairing-code failure as it is, with no restart offered", async () => {
+    const denied = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
+    view = { ...view, allowOperating: true };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "machines_create_code") throw denied;
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create pairing code" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(denied);
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+  });
+
   it("says pairing is paused and does not offer a code then", async () => {
     view = hostView({}, { pausedUntil: Date.now() + 42_000 });
     render(<MachinesSettings />);
