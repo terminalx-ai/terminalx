@@ -57,6 +57,8 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
+pub mod precheck;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleKind {
@@ -104,6 +106,7 @@ pub enum AutomationWorkspace {
 #[serde(rename_all = "camelCase")]
 pub struct AutomationPrecheck {
     pub command: String,
+    #[serde(default = "precheck::default_timeout_seconds")]
     pub timeout_seconds: u32,
 }
 
@@ -171,6 +174,9 @@ pub struct AutomationIssueTrigger {
 fn default_poll_interval() -> u32 {
     5
 }
+
+/// The most issue runs one poll may start; the editor offers the same.
+const MAX_RUNS_PER_TICK: u32 = 50;
 
 fn default_max_runs() -> u32 {
     3
@@ -360,13 +366,17 @@ pub fn definition_from_input(
         keep_latest_run_visible: input.keep_latest_run_visible,
         base_ref: input.base_ref,
         schedule: input.schedule,
-        precheck: input.precheck,
+        precheck: precheck::normalized(input.precheck),
         missed_run_grace_minutes: input.missed_run_grace_minutes,
         run_timeout_minutes: input.run_timeout_minutes,
         next_run_at: next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
-        issue_trigger: input.issue_trigger,
+        // At most what the editor offers; an older, larger value is clamped.
+        issue_trigger: input.issue_trigger.map(|mut trigger| {
+            trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            trigger
+        }),
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -864,6 +874,10 @@ fn start_run(
     emit_run(app, &run);
     let started_at = run.started_at.clone().unwrap_or_else(index::now);
     update_summary(app, &automation.id, run.status, &started_at);
+    // The first check runs before any session exists (PRO-484).
+    let Some(prompt) = precheck::gate(app, automation, &mut run, prompt)? else {
+        return Ok(run);
+    };
 
     let result = (|| -> Result<()> {
         let available = crate::harness::offered()
@@ -1697,9 +1711,16 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             automation_store::save_seen(&automation.id, &state)?;
         }
         IssueSelection::Dispatch(candidates) => {
+            // An automation's first check gates the whole poll (PRO-484).
+            let Some(candidates) = precheck::gate_poll(app, automation, candidates)? else {
+                return Ok(());
+            };
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
             for issue in candidates {
+                if !precheck::batch_goes_on(automation) {
+                    break;
+                }
                 let run = dispatch_issue(app, automation, &issue, &mut state)?;
                 if run.status == AutomationRunStatus::Failed && run.issue.is_some() {
                     let entry = run.session_id.as_deref().and_then(|id| index::get(id).ok());
@@ -1729,35 +1750,45 @@ fn evaluate(app: &impl AutomationHost) -> Result<()> {
     let _guard = EvaluationGuard;
     let now = Utc::now();
     for automation in automation_store::list()? {
-        if automation.issue_trigger.is_some() {
-            if let Err(error) = evaluate_issue(app, &automation, now) {
-                log::warn!("issue automation {}: {error:#}", automation.id);
-            }
+        // One with a first check is evaluated on a thread of its own, so its
+        // check never holds up the others (PRO-484).
+        if precheck::evaluate_apart(app, &automation, now) {
             continue;
         }
-        let Some(action) = due_action(&automation, now)? else {
-            continue;
-        };
-        let next = next_run_after(&automation.schedule, now)?
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        automation_store::update(&automation.id, |value| {
-            value.next_run_at = next;
-            value.modified = index::now();
-            Ok(())
-        })?;
-        emit_definitions(app);
-        match action {
-            DueAction::Dispatch { scheduled_for } => {
-                dispatch(
-                    app,
-                    &automation.id,
-                    AutomationTrigger::Scheduled,
-                    Some(scheduled_for),
-                )?;
-            }
-            DueAction::SkipMissed { scheduled_for } => {
-                record_missed(app, &automation, scheduled_for)?
-            }
+        evaluate_automation(app, &automation, now)?;
+    }
+    Ok(())
+}
+
+fn evaluate_automation(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
+    if automation.issue_trigger.is_some() {
+        if let Err(error) = evaluate_issue(app, automation, now) {
+            log::warn!("issue automation {}: {error:#}", automation.id);
+        }
+        return Ok(());
+    }
+    let Some(action) = due_action(automation, now)? else {
+        return Ok(());
+    };
+    let next = next_run_after(&automation.schedule, now)?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    automation_store::update(&automation.id, |value| {
+        value.next_run_at = next;
+        value.modified = index::now();
+        Ok(())
+    })?;
+    emit_definitions(app);
+    match action {
+        DueAction::Dispatch { scheduled_for } => {
+            dispatch(
+                app,
+                &automation.id,
+                AutomationTrigger::Scheduled,
+                Some(scheduled_for),
+            )?;
+        }
+        DueAction::SkipMissed { scheduled_for } => {
+            record_missed(app, automation, scheduled_for)?
         }
     }
     Ok(())

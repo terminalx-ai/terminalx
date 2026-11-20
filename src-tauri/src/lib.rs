@@ -831,6 +831,7 @@ pub fn run() {
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,
+            commands::automation_precheck_try,
             commands::automation_run_now,
             commands::bot_list,
             commands::bot_get,

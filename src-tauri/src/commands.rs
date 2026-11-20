@@ -2097,6 +2097,14 @@ pub async fn automation_delete(state: State<'_, AppState>, id: String) -> CmdRes
     tauri::async_runtime::spawn_blocking(move || sessions.delete_automation(&id).map_err(err)).await.map_err(err)?
 }
 
+/// The editor's Try it for an automation's first check (PRO-484). The owner
+/// runs it, with the environment an automation session would get.
+#[tauri::command]
+pub async fn automation_precheck_try(state: State<'_, AppState>, input: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.try_automation_precheck(input).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn automation_run_now(state: State<'_, AppState>, id: String) -> CmdResult<crate::automations::AutomationRun> {
     let sessions = state.sessions().map_err(err)?;
