@@ -740,10 +740,10 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
     let bot = super::get(string("id")?)?;
     let duty = || duty_of(&bot, string("dutyId")?);
     Ok(match operation {
-        // What the window shows beside the duties it reads as automations: the bot's quiet hours and each duty's note.
+        // What the window shows beside the duties it reads as automations: the bot's quiet hours, each duty's note, and the home its first check runs in.
         "duties" => {
             let notes: serde_json::Map<String, Value> = duties_of(&bot.id)?.iter().map(|duty| (duty.id.clone(), note_json(&read_note(&bot.id, &duty.id)))).collect();
-            json!({"quietHours": settings(&bot.id).quiet_hours, "notes": notes})
+            json!({"quietHours": settings(&bot.id).quiet_hours, "notes": notes, "home": super::home(&bot)})
         }
         "dutySave" => {
             let input: DutyInput = serde_json::from_value(params["input"].clone()).map_err(|error| refused(format!("Invalid duty: {error}")))?;

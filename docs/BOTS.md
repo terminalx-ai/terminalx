@@ -83,6 +83,54 @@ the first sub-issues.
   saved back exactly as it was. Unknown fields on a record, or on a pause,
   are kept too.
 
+## Duties (PRO-471)
+
+A duty is an ordinary automation that names its bot: `automations.json`
+keeps `bot: {id, reportsTo, template?}` on it, and the code is
+`src-tauri/src/bots/duties.rs`, called from the automation scheduler at
+three points: whether a due run wakes (`may_wake`), what a run goes ahead as
+(`bind`, and `open_session` / `prompt` after the first check), and what
+happens when it ends (`ended`). There is no second scheduler, session or
+permission system.
+
+- **Runs as the bot.** A run's session is one of the bot's chats (marked
+  `botDuty`, listed under "Duty runs" in its view), in its home folder, on its
+  agent, model and effort, in the mode its access maps to
+  (`chat::permission_mode`). Its agent gets the role and memory as any chat
+  does, then the duty's prompt with the first check's output, a "Your duty"
+  section and the duty's own note, fenced as the bot's notes.
+- **Free first check.** The automation's first check (PRO-484) runs in the
+  bot's home. Printing nothing ends the run as "nothing new": no session, no
+  model, nobody told. A failing check is a failed run, which notifies.
+- **Reports to.** `terminalx`: a status line in the bot's home chat and a
+  notification (`bot_duty_report`). `lead`: a status line in the lead bot's
+  home chat, labelled with the sender and its access, and no notification
+  (the owner when the bot reports to the owner). A reply of "Nothing new."
+  tells nobody; one that starts "URGENT:" notifies even in quiet hours. A
+  target this build does not know is kept and reported to TerminalX.
+- **Remembers between runs.** `duties/<duty id>.md` in the bot's home, read
+  capped (8 KB) and fenced; the agent is asked to replace it, and a
+  read-only bot is told it cannot.
+- **Quiet hours** are per bot, in `bot-duties.json` at the store root (not in
+  the home folder, which the bot can write). Inside them only urgent reports
+  notify; every report still goes in the home chat.
+- **Pause.** A paused bot's due runs are recorded as skipped (one folded row)
+  and its next run moves to the schedule's next; Run now is refused. A run
+  that reaches its start while the bot is paused ends cancelled.
+- **Who may change one.** Add, change, run, copy, remove, switch on and quiet
+  hours carry the window's proof (`bots::enforce::needs_person`,
+  `consent::guards_request`); switching one off is open. The Automations
+  page's own routes refuse a duty. A bot's session cannot read or change
+  duties.
+- **At hire** the role template's duties that wake on a schedule are created
+  switched off; the ones that wake on events wait for PRO-472.
+- **With Bots off** a duty does not wake, nothing about it is read, and every
+  duty call is refused.
+
+Not held here (PRO-489): the first check is a shell command in the bot's home,
+which the bot can write; a check that runs a script the bot rewrote runs that
+script.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -100,7 +148,7 @@ issue.
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
 | PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
 | PRO-470 | Role and memory, with history and undo | 23.06 | Backlog |
-| PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Backlog |
+| PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | In review |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
 | PRO-473 | Week calendar of duties | 23.13 | Backlog |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |

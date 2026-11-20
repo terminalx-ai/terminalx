@@ -19,6 +19,7 @@ import { useCloudDashboard } from "@/lib/cloudDashboard";
 import type { Project } from "@/types/session";
 import { MASCOTS, PROJECT_COLORS, PixelMascot, colorCss } from "./PixelMascot";
 import { useAutomationStore } from "@/lib/automations";
+import { isDuty } from "@/lib/botDuties";
 import { useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { visibleDashboardSessions } from "@/lib/organizationSessions";
 import type { SettingsTab } from "@/components/settings/SettingsPage";
@@ -70,8 +71,9 @@ export function AppDestinations({
     ...store.sessions.map((session) => ({ ...session, rowStatus: localFacts[session.id] ?? session.rowStatus })),
     ...visibleDashboardSessions(cloudSessions, cloud.visibleIds),
   ]), [store.sessions, localFacts, cloudSessions, cloud.visibleIds]);
-  const automationRunning = automationStore.automations.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
-  const automationFailures = automationStore.automations.filter((automation) => automation.lastOutcome === "failed").length;
+  const owned = automationStore.automations.filter((automation) => !isDuty(automation));
+  const automationRunning = owned.some((automation) => automation.lastOutcome === "pending" || automation.lastOutcome === "running");
+  const automationFailures = owned.filter((automation) => automation.lastOutcome === "failed").length;
   // A destination looks active only while it is what the main slot shows: no session and no cloud workspace selected.
   const onNavView = !store.selectedSessionId && !store.selectedCloudWorkspace;
   const active = onNavView ? store.view : null;

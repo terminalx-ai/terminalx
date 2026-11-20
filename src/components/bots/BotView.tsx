@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
+import { BotDuties } from "@/components/bots/BotDuties";
 import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -26,9 +27,8 @@ const TABS: { id: BotTab; label: string; icon: typeof Home }[] = [
 ];
 
 /** What a tab this ticket does not fill says, until its own ticket does. */
-const COMING: Record<Exclude<BotTab, "chat">, string> = {
+const COMING: Record<Exclude<BotTab, "chat" | "duties">, string> = {
   home: "The bot's work list (what needs you, what is in progress and what is planned) is coming.",
-  duties: "Duties, the schedules and events that wake the bot, are coming.",
   role: "Editing the bot's role and memory here is coming. Its ROLE.md and MEMORY.md are in its home folder.",
   settings: "The bot's settings (its agent, where it runs, what it works in and its access) are coming.",
 };
@@ -61,7 +61,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   const store = useSessionStore();
   const [tab, setTab] = useState<BotTab>("chat");
   const bot = bots.bots.find((value) => value.id === botId) ?? null;
-  const { chats, startedBy } = useMemo(() => botChats(store.sessions, botId), [store.sessions, botId]);
+  const { chats, startedBy, dutyRuns } = useMemo(() => botChats(store.sessions, botId), [store.sessions, botId]);
   // A session one of the bot's chats started, opened here rather than in its project.
   const [startedId, setStartedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,9 +98,9 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
     return () => { live = false; };
   }, [botId, botKnown, spentKey, day]);
 
-  const open = startedBy.find((chat) => chat.id === startedId) ?? chats.find((chat) => chat.id === chatId) ?? chats[0] ?? null;
+  const open = startedBy.find((chat) => chat.id === startedId) ?? [...chats, ...dutyRuns].find((chat) => chat.id === chatId) ?? chats[0] ?? null;
   const select = (chat: SessionEntry) => {
-    if (chats.includes(chat)) selectSession(chat.id);
+    if (chats.includes(chat) || dutyRuns.includes(chat)) selectSession(chat.id);
     else setStartedId(chat.id);
   };
 
@@ -146,7 +146,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
-          <ChatList bot={bot} chats={chats} startedBy={startedBy} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
+          <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             {bot.paused && (
               <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
@@ -163,6 +163,11 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
               )
             )}
           </section>
+        </div>
+      ) : tab === "duties" ? (
+        <div role="tabpanel" aria-label="Duties" className="flex min-h-0 flex-1 flex-col">
+          {/* A duty's run opens on Chat, among the bot's duty runs. */}
+          <BotDuties bot={bot} onOpenSession={(sessionId) => { selectSession(sessionId); setTab("chat"); }} />
         </div>
       ) : (
         <div role="tabpanel" aria-label={TABS.find((value) => value.id === tab)?.label} className="px-6 py-8">
@@ -241,10 +246,11 @@ function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: bool
   );
 }
 
-function ChatList({ bot, chats, startedBy, openId, onOpen, onNewChat, busy }: {
+function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewChat, busy }: {
   bot: Bot;
   chats: SessionEntry[];
   startedBy: SessionEntry[];
+  dutyRuns?: SessionEntry[];
   openId: string | null;
   onOpen: (chat: SessionEntry) => void;
   onNewChat: () => void;
@@ -262,6 +268,11 @@ function ChatList({ bot, chats, startedBy, openId, onOpen, onNewChat, busy }: {
       {startedBy.length > 0 && (
         <ChatGroup label={`Started by ${bot.name}`}>
           {startedBy.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
+        </ChatGroup>
+      )}
+      {dutyRuns.length > 0 && (
+        <ChatGroup label="Duty runs">
+          {dutyRuns.slice(0, 20).map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
         </ChatGroup>
       )}
     </nav>
