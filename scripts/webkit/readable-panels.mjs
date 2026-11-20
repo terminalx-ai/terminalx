@@ -161,16 +161,37 @@ try {
       composer: !node.closest("[data-chat-scroller]") && !!node.parentElement?.parentElement?.querySelector("[data-composer-box]"),
       inTranscript: [...document.querySelectorAll("[data-chat-scroller] [data-ask-card]")].length,
     }));
-    // Scroll the transcript up by the banner's height and a little more, as a reader would, until it settles.
-    const lift = await banner.evaluate((node) => Math.ceil(node.getBoundingClientRect().height) + 48);
-    const scrollerBox = await scroller.boundingBox();
-    await stopped.mouse.move(scrollerBox.x + scrollerBox.width / 2, scrollerBox.y + 80);
-    await stopped.mouse.wheel(0, -lift);
-    await stopped.waitForFunction(() => new Promise((done) => {
+    // The chat opens pinned to its foot; a wheel turned while it is still getting there is partly undone, and a
+    // fixed turn can leave only the turn's tail behind the banner. So: wait until the transcript rests at its foot,
+    // then wheel, as a reader would, by what brings the last reply's last line under the banner's middle, until it
+    // rests there (the wheel may land short; each turn is measured again).
+    const settled = (atFoot) => stopped.waitForFunction((atFoot) => new Promise((done) => {
       const el = document.querySelector("[data-chat-scroller]");
       const before = el.scrollTop;
-      requestAnimationFrame(() => requestAnimationFrame(() => done(el.scrollTop === before && el.scrollHeight - el.clientHeight - el.scrollTop > 8)));
-    }));
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const fromFoot = el.scrollHeight - el.clientHeight - el.scrollTop;
+        done(el.scrollTop === before && (atFoot ? fromFoot <= 1 : true));
+      }));
+    }), atFoot);
+    await settled(true);
+    const lastLine = () => banner.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const lines = [...document.querySelectorAll("[data-chat-scroller] p")].filter((p) => p.textContent.startsWith("Readable over panels"))
+        .flatMap((p) => { const range = document.createRange(); range.selectNodeContents(p); return [...range.getClientRects()]; })
+        .filter((line) => line.width > 0);
+      const line = lines[lines.length - 1];
+      const scroller = document.querySelector("[data-chat-scroller]");
+      return { offset: Math.round((box.top + box.height / 2) - (line.top + line.bottom) / 2), inside: line.top >= box.top && line.bottom <= box.bottom,
+        scrollTop: scroller.scrollTop, fromFoot: scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop };
+    });
+    const scrollerBox = await scroller.boundingBox();
+    await stopped.mouse.move(scrollerBox.x + scrollerBox.width / 2, scrollerBox.y + 80);
+    const scrolled = [await lastLine()];
+    for (let turn = 0; turn < 6 && !scrolled[scrolled.length - 1].inside; turn++) {
+      await stopped.mouse.wheel(0, -scrolled[scrolled.length - 1].offset);
+      await settled(false);
+      scrolled.push(await lastLine());
+    }
     await stopped.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))));
     const placed = await banner.evaluate((node) => {
       const box = node.getBoundingClientRect();
@@ -207,7 +228,7 @@ try {
       "nothing shows through the banner's wrapper on the chat's colour": solid(wrapperGround),
       "nothing shows through the question card in the banner, and its muted text reads at 4.5:1": solid(bannerCardGround),
       "no browser errors": stoppedErrors.length === 0,
-    }, { where, placed, bannerGround, wrapperGround, bannerCardGround, stoppedErrors });
+    }, { where, scrolled, placed, bannerGround, wrapperGround, bannerCardGround, stoppedErrors });
     await stopped.close();
 
     // Reduce transparency: glass is off from the first paint, nothing blurs,
