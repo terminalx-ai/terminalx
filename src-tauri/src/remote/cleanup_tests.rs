@@ -406,7 +406,7 @@ async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
         companion.id = "cleanup-companion".into();
         for tab in &mut companion.tabs { tab.id = format!("companion-{}", tab.id); }
         crate::store::index::update(|entries| { entries.insert(0, companion.clone()); Ok(()) }).unwrap();
-        let manager = peer(&f.rpc, Authority::Manage, &crate::remote::protocol::CAPABILITIES).await;
+        let manager = peer(&f.rpc, Authority::Manage, crate::remote::protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":done.id,"clientRequestId":"cleanup-open"})).await.unwrap();
         let companion_opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":companion.id,"clientRequestId":"companion-open"})).await.unwrap();
         let companion_id = companion_opened["ptyId"].as_str().unwrap();

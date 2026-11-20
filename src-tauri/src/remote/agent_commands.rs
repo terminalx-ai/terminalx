@@ -319,6 +319,7 @@ pub fn reply(session_id: &str, tab_id: &str, outcome: &str, category: Option<&st
         "payload-invalid" => ("invalid_params", "the command is malformed"),
         crate::cloud_agents::mailbox::ATTACHMENT_MISSING => ("invalid_params", "an image of this message did not reach the runtime"),
         "request-not-pending" => ("conflict", "this request was already answered, or it is gone"),
+        crate::cloud_agents::mailbox::FOLLOW_UP_GONE => ("conflict", crate::cloud_agents::mailbox::FOLLOW_UP_GONE_MESSAGE),
         "apply-failed" => ("internal", "the agent could not take the command"),
         crate::cloud_agents::slash::NOT_QUEUED_CATEGORY => ("conflict", crate::cloud_agents::slash::NOT_QUEUED_MESSAGE),
         // The slash, shell and file-mention refusals of PRO-88, with their sentence.

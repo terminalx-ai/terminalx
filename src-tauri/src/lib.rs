@@ -924,6 +924,7 @@ pub fn run() {
             commands::list_queued,
             commands::respond_permission,
             commands::answer_questions,
+            commands::answer_terminal_prompt,
             commands::set_tab_model,
             commands::set_tab_permission_mode,
             commands::set_tab_effort,

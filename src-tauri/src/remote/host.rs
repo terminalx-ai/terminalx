@@ -96,6 +96,9 @@ const SLOW_METHODS: &[&str] = &[
     // it held up everything the connection asked next: the transcript, and
     // the agent's terminal, whose keys the desktop drops until it is attached (#449).
     "session.commands",
+    // The composer's `#` list asks GitHub with the runtime's `gh` (#1329).
+    "session.prs",
+    "session.prContext",
     // CS-12: removing a worktree, and the first read of Codex's model list.
     "session.delete",
     // Fetches, asks GitHub for the branch's pull request, removes a worktree.

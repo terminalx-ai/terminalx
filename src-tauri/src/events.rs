@@ -543,6 +543,12 @@ pub enum Payload {
 
     Recovery { kind: Option<crate::recovery::RecoveryKind> },
 
+    /// The agent's CLI is stopped on a question it drew in its own terminal,
+    /// one no hook reports (PRO-460); `None` once it is gone. A prompt with
+    /// no options is one that could not be read: the chat sends the reader
+    /// to the terminal for it.
+    TerminalPrompt { prompt: Option<crate::harness::tui::ScreenPrompt> },
+
     /// The tab's terminal changed hands (#437): the events from here to the
     /// next one of these belong to another of the tab's conversations.
     /// Another agent was started in the tab's terminal, or the same agent on

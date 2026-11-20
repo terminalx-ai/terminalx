@@ -56,13 +56,21 @@ export function againNow(action: HeldQueueChange, target: number, queue: HeldQue
  * one card above the composer, a one-line row each. Editing one keeps the
  * queue running; a change that fails is said in a toast with Try again.
  */
-export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" }: {
+export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held", unavailable, row }: {
   queue: HeldQueue;
   onChange(change: HeldQueueChange): Promise<void>;
   disabled?: boolean;
   busy: boolean;
   /** Keeps one tab's failure toasts apart from another's: the tab's id. */
   scope?: string;
+  /**
+   * What this queue cannot do, and why (#1328: a cloud or machine runtime
+   * holds its follow-ups in the order they were sent, and never pauses
+   * them). Those controls are shown disabled with the reason.
+   */
+  unavailable?: { move?: string; pause?: string };
+  /** Who sent a held message, and why this person may not change it, where that applies (a shared workspace). */
+  row?: (id: string) => { author?: string | null; locked?: string | null; editLocked?: string | null } | undefined;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
@@ -154,7 +162,9 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
     setEditing(null);
     if (sendNow) await change({ type: "sendNow", id: editing.id });
   };
-  const move = (id: string, beforeId: string | null) => void change({ type: "move", id, beforeId });
+  const moveOff = unavailable?.move ?? null;
+  const pauseOff = unavailable?.pause ?? null;
+  const move = (id: string, beforeId: string | null) => { if (!moveOff) void change({ type: "move", id, beforeId }); };
   const count = queue.items.length;
   const headerButton = "flex h-6 items-center gap-1 whitespace-nowrap rounded-md px-1.5 text-[11.5px] font-normal normal-case tracking-normal text-muted-foreground hover:bg-veil-strong hover:text-foreground disabled:opacity-50";
   return <>
@@ -166,7 +176,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
         <Pause aria-hidden className="size-2.5" />Paused
       </span>}
       <span className="ml-auto flex shrink-0 items-center gap-2">
-        {!busy && !queue.paused && count > 0 && <button type="button" className={headerButton} disabled={locked || !!editing} onClick={() => void change({ type: "pause", paused: false })}>
+        {!busy && !queue.paused && !pauseOff && count > 0 && <button type="button" className={headerButton} disabled={locked || !!editing} onClick={() => void change({ type: "pause", paused: false })}>
           <Send aria-hidden className="size-3" />Send next
         </button>}
         {queue.paused
@@ -174,7 +184,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
               className={cn(headerButton, "px-2.5 text-foreground ring-1 ring-accent/50 hover:ring-accent")}>
               <Play aria-hidden className="size-3" />Resume
             </button>
-          : <button type="button" disabled={locked} onClick={() => void change({ type: "pause", paused: true })} className={headerButton}>
+          : <button type="button" disabled={locked || !!pauseOff} title={pauseOff ?? undefined} onClick={() => void change({ type: "pause", paused: true })} className={headerButton}>
               <Pause aria-hidden className="size-3" />Pause queue
             </button>}
         <button type="button" aria-expanded={expanded} aria-label={expanded ? "Hide held follow-ups" : "Show held follow-ups"}
@@ -186,6 +196,8 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
     {expanded && count > 0 && <ol className="grid max-h-[40vh] gap-1.5 overflow-y-auto">
       {queue.items.map((item, index) => {
         const attachments = [...item.images.map(image => ({ name: image.name ?? "Image", image: true })), ...(item.files ?? []).map(file => ({ name: file.name, image: false }))];
+        const about = row?.(item.id);
+        const rowLocked = locked || !!about?.locked;
         const drop = {
           onDragOver: (e: React.DragEvent) => { if (dragging && !locked) e.preventDefault(); },
           onDrop: (e: React.DragEvent) => { e.preventDefault(); if (dragging && dragging !== item.id) move(dragging, item.id); setDragging(null); },
@@ -217,16 +229,17 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
         return <li key={item.id} {...drop}
           onKeyDown={e => {
             // The rows reorder from the keyboard too: Alt+Up and Alt+Down, as a list in the sidebar does.
-            if (!e.altKey || locked || editing || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+            if (!e.altKey || locked || moveOff || editing || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
             e.preventDefault();
             if (e.key === "ArrowUp" && index > 0) move(item.id, queue.items[index - 1].id);
             if (e.key === "ArrowDown" && index < count - 1) move(item.id, queue.items[index + 2]?.id ?? null);
           }}
           className={cn("group/held flex h-9 min-w-0 items-center gap-2 rounded-md bg-raised px-2 text-[12.5px]", wentBack && "ring-1 ring-warning/40")}>
-          <button type="button" aria-label={`Drag follow-up ${index + 1}`} title="Drag to reorder (Alt+Up and Alt+Down from the keyboard)" disabled={locked}
-            tabIndex={-1} draggable={!locked && !editing} onDragStart={e => { setDragging(item.id); e.dataTransfer.setData("text/plain", item.id); e.dataTransfer.effectAllowed = "move"; }}
+          <button type="button" aria-label={`Drag follow-up ${index + 1}`} title={moveOff ?? "Drag to reorder (Alt+Up and Alt+Down from the keyboard)"} disabled={locked || !!moveOff}
+            tabIndex={-1} draggable={!locked && !moveOff && !editing} onDragStart={e => { setDragging(item.id); e.dataTransfer.setData("text/plain", item.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragEnd={() => setDragging(null)} className="shrink-0 cursor-grab text-faint"><GripVertical className="size-[13px]" /></button>
           <span className="w-4 shrink-0 font-mono text-[11px] text-faint">{index + 1}</span>
+          {about?.author && <span className="max-w-32 shrink-0 truncate text-muted-foreground" data-held-author="">{about.author}:</span>}
           <span className="min-w-0 truncate" title={item.text}>{item.text || (item.images.length ? "Image attachment" : "Attached files")}</span>
           {attachments.map((attachment, i) => <span key={i} className="inline-flex h-5 min-w-0 max-w-40 shrink-0 items-center gap-1 rounded bg-veil-strong px-1.5 text-[11px] text-muted-foreground" title={attachment.name}>
             {attachment.image ? <Image aria-hidden className="size-[11px] shrink-0" /> : <FileText aria-hidden className="size-[11px] shrink-0" />}
@@ -236,12 +249,12 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held" 
             <Undo2 aria-hidden className="size-2.5" />moved back
           </span>}
           <span className="ml-auto flex shrink-0 items-center gap-0.5 text-faint">
-            <RowButton label={`Edit follow-up ${index + 1}`} editId={item.id} disabled={locked || !!editing || queue.next === item.id} onClick={() => {
+            <RowButton label={`Edit follow-up ${index + 1}`} title={about?.locked ?? about?.editLocked ?? undefined} editId={item.id} disabled={rowLocked || !!about?.editLocked || !!editing || queue.next === item.id} onClick={() => {
               lastEdited.current = item.id;
               setEditing({ id: item.id, text: item.text });
             }}><Pencil /></RowButton>
-            <RowButton label={`Send follow-up ${index + 1} now`} title="Send now: interrupts the turn" disabled={locked || !!editing} onClick={() => void change({ type: "sendNow", id: item.id })}><Send /></RowButton>
-            <RowButton label={`Delete follow-up ${index + 1}`} disabled={locked || !!editing} onClick={() => void change({ type: "delete", id: item.id })}><X /></RowButton>
+            <RowButton label={`Send follow-up ${index + 1} now`} title={about?.locked ?? "Send now: interrupts the turn"} disabled={rowLocked || !!editing} onClick={() => void change({ type: "sendNow", id: item.id })}><Send /></RowButton>
+            <RowButton label={`Delete follow-up ${index + 1}`} title={about?.locked ?? undefined} disabled={rowLocked || !!editing} onClick={() => void change({ type: "delete", id: item.id })}><X /></RowButton>
           </span>
         </li>;
       })}

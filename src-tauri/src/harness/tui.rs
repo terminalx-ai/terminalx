@@ -143,6 +143,83 @@ pub enum Composer {
     Unseen,
 }
 
+/// A question the CLI is asking in its own screen, outside the hooks
+/// (PRO-460): a choice it drew itself and is stopped on, such as Claude
+/// Code's "We recommend compacting earlier". No hook says it is there and
+/// none answers it; the chat learns of it from the screen and answers it
+/// with the keys the CLI's own hint names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrompt {
+    /// Which question this is: the same for as long as its title and choices
+    /// stay the same, so an answer cannot land on a different one.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What it says between its title and its choices, paragraphs apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Empty when something is waiting in the terminal that could not be
+    /// read: the chat can then only send the reader there.
+    #[serde(default)]
+    pub options: Vec<ScreenOption>,
+    /// The choice the CLI's pointer is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<usize>,
+    /// What Escape does here, in the hint's words ("Not now"), when the
+    /// hint offers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismiss: Option<String>,
+    /// The keys line the CLI draws under the choices, as drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ScreenPrompt {
+    /// The terminal is stopped on something this cannot read.
+    pub const UNREAD: &'static str = "unread";
+
+    pub fn unread() -> Self {
+        Self { id: Self::UNREAD.into(), title: None, text: None, options: Vec::new(), selected: None, dismiss: None, hint: None }
+    }
+
+    /// An id from what makes the question this one: its title and the
+    /// choices' labels, not where the pointer is.
+    pub fn identify(title: Option<&str>, options: &[ScreenOption]) -> String {
+        // FNV-1a: the same in every build, unlike the std hasher.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |text: &str| {
+            for byte in text.bytes().chain([0u8]) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        feed(title.unwrap_or(""));
+        for option in options {
+            feed(&option.label);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+/// Arrow keys, as the terminal sends them in its current cursor-key mode.
+pub fn arrow(up: bool, application: bool) -> &'static [u8] {
+    match (up, application) {
+        (true, false) => b"\x1b[A",
+        (false, false) => b"\x1b[B",
+        (true, true) => b"\x1bOA",
+        (false, true) => b"\x1bOB",
+    }
+}
+
 /// How often an input box that holds something is looked at again.
 pub const INPUT_POLL: Duration = Duration::from_millis(250);
 /// How long an input box may go on holding something before the prompt to be

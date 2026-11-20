@@ -156,8 +156,29 @@ export interface Goal {
   tokensUsed: number;
 }
 
+/**
+ * A question the agent's CLI drew in its own terminal, which no hook reports
+ * (PRO-460): Claude Code's "We recommend compacting earlier", say. `options`
+ * is empty when something waits there that could not be read.
+ */
+export interface ScreenPrompt {
+  /** Which question: answers name it, so they cannot land on another. */
+  id: string;
+  title?: string;
+  text?: string;
+  options: { label: string; description?: string }[];
+  /** The option the CLI's pointer is on. */
+  selected?: number;
+  /** What Escape does, in the CLI's words ("Not now"), when it offers that. */
+  dismiss?: string;
+  /** The keys line the CLI draws under the options. */
+  hint?: string;
+}
+
 export type Payload =
   | { type: "held_queue"; queue: HeldQueue }
+  /** The agent's CLI is stopped on a question it drew itself (PRO-460); null once it is gone. */
+  | { type: "terminal_prompt"; prompt: ScreenPrompt | null }
   | { type: "goal_updated"; goal: Goal }
   | { type: "goal_cleared" }
   | { type: "recovery"; kind: RecoveryKind | null }

@@ -773,7 +773,7 @@ describe("workspace RPC client", () => {
 
   describe("CS-12: agents/1, session/2 and pty/2", () => {
     it("asks for the same namespace versions the runtime serves, and gates each addition by its own version", () => {
-      const served = /pub const CAPABILITIES: \[&str; \d+\] =\s*\[([^\]]*)\]/.exec(protocolSource)?.[1];
+      const served = /pub const CAPABILITIES: &\[&str\] =\s*&\[([^\]]*)\]/.exec(protocolSource)?.[1];
       expect(served?.match(/"[^"]+"/g)?.map((entry) => JSON.parse(entry))).toEqual([...WORKSPACE_CAPABILITIES]);
       const methods = [...protocolSource.matchAll(/method\("([^"]+)", "([^"]+)", (Manage|Participate), (true|false)\)/g)].map(([, name, capability, authority, idempotent]) => ({
         name: name!,

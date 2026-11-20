@@ -332,6 +332,25 @@ struct InputBox {
     /// rather than typed: once the box empties, once the CLI is ready (#746),
     /// or in place of its Enter.
     stops: u64,
+    /// A question the CLI drew in its own screen, as the chat was told of it
+    /// (PRO-460).
+    prompt: ScreenPromptState,
+}
+
+/// What the session watcher knows of a question the CLI is stopped on in its
+/// own screen (PRO-460).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ScreenPromptState {
+    /// The question the chat was last told of, if one is up.
+    shown: Option<tui::ScreenPrompt>,
+    /// The tab's status before the question set it waiting, to go back to.
+    was: Option<TabStatus>,
+    /// The CLI's input box has been seen since it started: one missing from
+    /// then on is something in its place.
+    box_seen: bool,
+    /// Watcher passes in a row the box was missing with nothing readable in
+    /// its place.
+    unread_passes: u8,
 }
 
 /// How the wait for a pane's CLI to listen ended.
@@ -1059,6 +1078,20 @@ pub struct CliTab {
     /// and it is never restarted by the app.
     pub by_hand: Option<Box<follow::ByHand>>,
 }
+
+/// How long a question drawn in the CLI's screen must have stood still
+/// before the chat is told of it (PRO-460): not a frame half drawn.
+const SCREEN_PROMPT_QUIET: Duration = Duration::from_millis(500);
+/// How long the CLI must have drawn nothing, its input box gone, before
+/// that is taken for a question that could not be read.
+const SCREEN_PROMPT_UNREAD_QUIET: Duration = Duration::from_secs(2);
+/// Between arrow keys answering such a question.
+const SCREEN_PROMPT_KEY_GAP: Duration = Duration::from_millis(120);
+/// Between the last arrow and Enter: Claude Code 2.1.328 refuses an Enter
+/// within 250 ms of an arrow as a stray key.
+const SCREEN_PROMPT_CONFIRM_GAP: Duration = Duration::from_millis(500);
+/// How long after answering the screen is looked at again.
+const SCREEN_PROMPT_SETTLE: Duration = Duration::from_millis(600);
 
 /// How soon after it was started a CLI that goes again never got going.
 const STARTUP_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -2086,6 +2119,9 @@ impl SessionManager {
             // Only a PTY-first tab has a pane; the other engines are judged
             // on their events alone, as before.
             let drawn = pane.and_then(|pane| drawn_at(&pane));
+            // A question the CLI drew in its own screen has the tab waiting
+            // on the reader, not stalled (PRO-460).
+            self.watch_screen_prompt(&mut rt, drawn.map(|drawn| now.saturating_duration_since(drawn)));
             if let Some(at) = rt.stalled_at {
                 if drawn.is_some_and(|drawn| drawn > at) {
                     rt.incidents.progress("terminal_output");
@@ -2110,6 +2146,173 @@ impl SessionManager {
                 rt.stalled_at = Some(now);
             }
         }
+    }
+
+    /// Look at what the tab's CLI has drawn for a question it is stopped on
+    /// that no hook reported (PRO-460), and tell the chat when one comes or
+    /// goes. `quiet`: how long the pane has gone without drawing.
+    ///
+    /// One it can read is shown with its choices. Its input box gone for two
+    /// looks in a row, with nothing readable in its place, is a question
+    /// too, one the chat can only send the reader to the terminal for. Either
+    /// has the tab waiting on the reader, and its going puts the tab back.
+    /// A question a hook asked has its own card, and is left to it.
+    fn watch_screen_prompt(&self, rt: &mut TabRuntime, quiet: Option<Duration>) {
+        let Engine::Cli(p) = &rt.engine else { return };
+        if p.harness != CliKind::Claude || p.by_hand.is_some() || !p.ready.marked() || !rt.pending.is_empty() {
+            return;
+        }
+        let pane = p.pane_id.clone();
+        // A prompt being typed in is not something the CLI is asking.
+        let writer = self.writers.lock().unwrap().get(&pane).cloned();
+        let Ok(_typing) = writer.as_ref().map_or(Ok(None), |writer| writer.try_lock().map(Some)) else { return };
+        if !self.terminals.is_running(&pane) || self.left_the_terminal(rt).is_some() {
+            return;
+        }
+        let Some((read, composer)) = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), claude::pty::composer(screen))) else { return };
+        let quiet = quiet.unwrap_or_default();
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        let state = &mut p.input.prompt;
+        if composer != tui::Composer::Unseen {
+            state.box_seen = true;
+        }
+        let found = match read {
+            // Still being drawn: looked at again on the next pass.
+            Some(_) if quiet < SCREEN_PROMPT_QUIET => return,
+            Some(prompt) => {
+                state.unread_passes = 0;
+                Some(prompt)
+            }
+            None if composer == tui::Composer::Unseen && state.box_seen && quiet >= SCREEN_PROMPT_UNREAD_QUIET => {
+                state.unread_passes = state.unread_passes.saturating_add(1);
+                if state.unread_passes < 2 && state.shown.is_none() {
+                    return;
+                }
+                Some(tui::ScreenPrompt::unread())
+            }
+            None => {
+                state.unread_passes = 0;
+                None
+            }
+        };
+        self.screen_prompt_is(rt, found);
+    }
+
+    /// The question the CLI's screen shows now, if any: told to the chat when
+    /// it changed, and the tab's status kept in step with it.
+    fn screen_prompt_is(&self, rt: &mut TabRuntime, found: Option<tui::ScreenPrompt>) {
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        let state = &mut p.input.prompt;
+        let changed = state.shown != found;
+        let gone = found.is_none() && state.shown.is_some();
+        let was = state.was;
+        state.shown = found.clone();
+        let made_waiting = p.input.made_waiting;
+        if changed {
+            self.publish(rt, Payload::TerminalPrompt { prompt: found.clone() }, None);
+        }
+        if found.is_some() {
+            // Again if something since (a Stop hook) said otherwise while it stayed up.
+            if rt.status != TabStatus::Waiting && rt.pending.is_empty() {
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.input.prompt.was = Some(rt.status);
+                }
+                self.set_status(rt, TabStatus::Waiting);
+            }
+        } else if gone {
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.input.prompt.was = None;
+            }
+            // Back to what it was, unless something else has it waiting now.
+            if rt.status == TabStatus::Waiting && rt.pending.is_empty() && rt.recovery.is_none() && !made_waiting {
+                let back = if rt.turn_open {
+                    TabStatus::InProgress
+                } else {
+                    match was {
+                        Some(TabStatus::Completed) => TabStatus::Completed,
+                        _ => TabStatus::Idle,
+                    }
+                };
+                self.set_status(rt, back);
+            }
+        }
+    }
+
+    /// Answer the question the tab's CLI drew in its own screen (PRO-460):
+    /// `choice`, by moving its pointer there with the arrow keys and pressing
+    /// Enter, or with no choice, Escape, where its hint offers that. Only
+    /// the question the chat showed (`prompt_id`), and only while the screen
+    /// still shows it: keys meant for it would answer anything else.
+    pub fn answer_terminal_prompt(&self, session_id: &str, tab_id: &str, prompt_id: &str, choice: Option<usize>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let (pane, writer) = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { bail!("This agent does not ask questions in its terminal.") };
+            if p.harness != CliKind::Claude {
+                bail!("This agent does not ask questions in its terminal.");
+            }
+            if self.left_the_terminal(&rt).is_some() || !self.terminals.is_running(&p.pane_id) {
+                bail!("The agent is no longer running.");
+            }
+            (p.pane_id.clone(), self.writers.lock().unwrap().get(&p.pane_id).cloned())
+        };
+        let still_up = |what: &str| -> Result<(tui::ScreenPrompt, bool)> {
+            let read = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), screen.application_cursor()));
+            match read {
+                Some((Some(prompt), application)) if prompt.id == prompt_id => Ok((prompt, application)),
+                Some((Some(_), _)) => bail!("The question in the agent's terminal has changed. Look at it again before {what}."),
+                _ => bail!("That question is no longer showing in the agent's terminal."),
+            }
+        };
+        {
+            // Nothing else types into the pane meanwhile.
+            let _typing = match writer.as_ref().map(|writer| writer.try_lock()) {
+                Some(Err(std::sync::TryLockError::WouldBlock)) => bail!("A message is being typed into the agent right now. Try again in a moment."),
+                Some(Err(std::sync::TryLockError::Poisoned(poisoned))) => Some(poisoned.into_inner()),
+                Some(Ok(held)) => Some(held),
+                None => None,
+            };
+            let (prompt, application) = still_up("answering")?;
+            match choice {
+                None => {
+                    if prompt.dismiss.is_none() {
+                        bail!("This question cannot be dismissed. Choose one of its options.");
+                    }
+                    self.terminals.write(&pane, tui::ESCAPE).context("Could not reach the agent's terminal")?;
+                }
+                Some(choice) => {
+                    if choice >= prompt.options.len() {
+                        bail!("That option is not one of this question's.");
+                    }
+                    let from = prompt.selected.ok_or_else(|| anyhow!("The agent's terminal shows no option chosen. Open the terminal to answer there."))?;
+                    let key = tui::arrow(choice < from, application);
+                    let moves = choice.abs_diff(from);
+                    for _ in 0..moves {
+                        self.terminals.write(&pane, key).context("Could not reach the agent's terminal")?;
+                        std::thread::sleep(SCREEN_PROMPT_KEY_GAP);
+                    }
+                    if moves > 0 {
+                        // Claude Code refuses an Enter right after an arrow as a stray key.
+                        std::thread::sleep(SCREEN_PROMPT_CONFIRM_GAP);
+                        let (moved, _) = still_up("answering")?;
+                        if moved.selected != Some(choice) {
+                            bail!("The agent's terminal did not move to that option. Open the terminal to answer there.");
+                        }
+                    }
+                    self.terminals.write(&pane, tui::SUBMIT).context("Could not reach the agent's terminal")?;
+                }
+            }
+        }
+        self.observer.answered(session_id, tab_id);
+        // Take the card down as soon as the CLI has, not at the watcher's next pass.
+        std::thread::sleep(SCREEN_PROMPT_SETTLE);
+        let mut rt = rt_arc.lock().unwrap();
+        let quiet = self.terminals.quiet_for(&pane);
+        self.watch_screen_prompt(&mut rt, quiet);
+        Ok(())
     }
 
     /// Write the awaited prompt's Enter once more, if that is due.
@@ -2157,7 +2360,8 @@ impl SessionManager {
             Some(Ok(held)) => Some(held),
             None => None,
         };
-        if !rt.pending.is_empty() {
+        // Nor into a question the CLI drew itself (PRO-460), which it would answer.
+        if !rt.pending.is_empty() || matches!(&rt.engine, Engine::Cli(p) if p.input.prompt.shown.is_some()) {
             return Nudged::Asking;
         }
         let (elapsed, continuation) = match &rt.engine {

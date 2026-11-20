@@ -36,6 +36,21 @@ use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry};
 
+/// `text` cut to at most `max` bytes at a character boundary, and whether
+/// it was cut; a cut text says so at its end.
+fn bounded_text(mut text: String, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str("\n\n… (cut short: the rest did not fit)\n");
+    (text, true)
+}
+
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
@@ -51,6 +66,10 @@ fn attachment_owner(peer: &Peer) -> String {
 const MAX_FILE_QUERY_BYTES: usize = 400;
 const DEFAULT_FILE_HITS: usize = 30;
 const MAX_FILE_HITS: usize = 50;
+/// The most of a pull request's context file sent to a composer
+/// (`session.prContext`): well inside a frame, and far more than a
+/// description and a list of changed files usually take.
+const MAX_PR_CONTEXT_BYTES: usize = 512 * 1024;
 
 /// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
 /// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
@@ -1478,7 +1497,7 @@ impl WorkspaceRpc {
         // and a runtime with a mailbox has no live steer, stop or decision.
         let Some(spec) = protocol::find_method(method)
             .filter(|_| !(self.is_machine() && machine::UNSERVED.contains(&method)))
-            .filter(|spec| spec.capability != protocol::AGENT_COMMANDS || self.agent_commands.get().is_some())
+            .filter(|spec| !(spec.capability == protocol::AGENT_COMMANDS || spec.name == protocol::FOLLOW_UP_METHOD) || self.agent_commands.get().is_some())
         else {
             return Err(RpcError::new("method_not_found", format!("{method} is not a workspace method")));
         };
@@ -1677,7 +1696,7 @@ impl WorkspaceRpc {
                 if let Some(hook) = hook { hook(); }
             }
             let action = if matches!(method.as_str(), "session.decide") { collab::v2::Action::Approve }
-                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt") { collab::v2::Action::Drive }
+                else if matches!(method.as_str(), "session.send" | "session.steer" | "session.stop" | "session.interrupt" | protocol::FOLLOW_UP_METHOD) { collab::v2::Action::Drive }
                 else { collab::v2::Action::Configure };
             let permit = collab::v2::Permit::new(rpc.collab.clone(), peer.user_id.as_deref().unwrap_or(""), policy_stamp.clone(), action).for_peer(&peer);
             permit.with(|| crate::github_process::with_ticket(ticket, || rpc.execute_blocking(&peer, &method, params, policy_stamp)))
@@ -1806,7 +1825,7 @@ impl WorkspaceRpc {
                 self.agent_command(peer, "session.send", params, policy_stamp)
             }
             "session.send" => self.session_send(peer, params),
-            "session.steer" | "session.stop" | "session.decide" => self.agent_command(peer, method, params, policy_stamp),
+            "session.steer" | "session.stop" | "session.decide" | protocol::FOLLOW_UP_METHOD => self.agent_command(peer, method, params, policy_stamp),
             "session.interrupt" => {
                 let _admission = self.collab.enter_admission();
                 if let Some(permit) = collab::v2::current().filter(|_| self.collab.runtime_policy.is_v2()) {
@@ -1827,6 +1846,8 @@ impl WorkspaceRpc {
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),
             "session.attach" => self.session_attach(peer, params),
+            "session.prs" => self.session_prs(peer, params),
+            "session.prContext" => self.session_pr_context(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -4598,7 +4619,7 @@ impl WorkspaceRpc {
     /// connection was granted it.
     fn durable_command(&self, peer: &Peer, spec: &protocol::Method) -> bool {
         self.agent_commands.get().is_some()
-            && (spec.capability == protocol::AGENT_COMMANDS || (spec.name == "session.send" && peer.granted(protocol::AGENT_COMMANDS)))
+            && (spec.capability == protocol::AGENT_COMMANDS || spec.name == protocol::FOLLOW_UP_METHOD || (spec.name == "session.send" && peer.granted(protocol::AGENT_COMMANDS)))
     }
 
     /// `agent-commands/1` (PRO-343): send, steer, stop or a permission
@@ -4624,6 +4645,7 @@ impl WorkspaceRpc {
             "session.steer" => "steer",
             "session.stop" => "stop",
             "session.decide" => "permission-decision",
+            protocol::FOLLOW_UP_METHOD => "follow-up",
             other => return Err(RpcError::new("method_not_found", format!("{other} is not a workspace method"))),
         };
         // Checked by the dispatcher already.
@@ -4648,6 +4670,9 @@ impl WorkspaceRpc {
         let tab = self.visible_tab(peer, &params)?;
         if kind == "permission-decision" && params.get("requestId").and_then(Value::as_str).is_none_or(str::is_empty) {
             return Err(RpcError::invalid("requestId names the request this decision answers"));
+        }
+        if kind == "follow-up" && params.get("followUpId").and_then(Value::as_str).is_none_or(str::is_empty) {
+            return Err(RpcError::invalid("followUpId names the held follow-up this changes"));
         }
         let actor = attachment_owner(peer);
         let command = crate::cloud_agents::mailbox::Command {
@@ -4838,6 +4863,54 @@ impl WorkspaceRpc {
             Err(AttachError::Full) => Err(RpcError::new("conflict", "too many attachments are waiting to be sent here; try again later").with_data(json!({ "reason": "attachments-full" }))),
             Err(AttachError::Failed(error)) => Err(RpcError::internal(error)),
         }
+    }
+
+    /// The pull requests a session's composer `#` list offers for `query`
+    /// (`composer/5`, #1329): a number names one, open or not; words match
+    /// open pull requests' titles and authors. Read with the workspace's own
+    /// `gh` in the session's checkout, so they are the workspace's pull
+    /// requests, not those of a checkout on the reader's computer. Anyone who
+    /// may see the session may ask.
+    fn session_prs(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.len() > MAX_FILE_QUERY_BYTES {
+            return Err(RpcError::invalid("the query is too long"));
+        }
+        let (project, dir) = self.session_checkout(&session)?;
+        Ok(json!({ "prs": project.git.mention_prs(&dir, query)? }))
+    }
+
+    /// The context file a `#` mention attaches for pull request `number`: its
+    /// title, description and changed files as Markdown, named
+    /// `pr-<number>.md` (`composer/5`, #1329). The composer attaches it as a
+    /// file (`composer/4`), so it reaches the agent as a local tab's PR
+    /// context does, stored in the session's attachments folder here. Needs
+    /// what attaching needs.
+    fn session_pr_context(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
+            return Err(RpcError::forbidden("attaching a pull request needs driver access to the workspace"));
+        }
+        let number = params.get("number").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("number is required"))?;
+        let (project, dir) = self.session_checkout(&session)?;
+        let (text, truncated) = bounded_text(project.git.mention_pr_context(&dir, number)?, MAX_PR_CONTEXT_BYTES);
+        Ok(json!({ "number": number, "name": format!("pr-{number}.md"), "text": text, "truncated": truncated }))
+    }
+
+    /// The Git of the project a session belongs to, and the directory its
+    /// agent runs in there (its worktree), or the project's root when that
+    /// directory is gone or outside it.
+    fn session_checkout(&self, session: &SessionEntry) -> Result<(Arc<ServedProject>, std::path::PathBuf), RpcError> {
+        let project = match &self.scope {
+            Scope::Machine { projects, .. } => projects.get(&machine::project_id(&session.project_path))?,
+            Scope::Workspace { project, .. } => project.clone(),
+        };
+        let dir = std::fs::canonicalize(&session.cwd)
+            .ok()
+            .filter(|cwd| project.files.contains(cwd) && cwd.is_dir())
+            .unwrap_or_else(|| project.root.clone());
+        Ok((project, dir))
     }
 
     /// The files of a session's directory whose path matches `query`, best
