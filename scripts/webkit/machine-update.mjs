@@ -127,6 +127,12 @@ async function settings(page) {
   return main;
 }
 
+/** A machine's page (21.10), from its card's menu: choosing the card itself opens the machine's view and leaves Settings. */
+async function openMachinePage(page, main, name) {
+  await main.getByRole("button", { name: `More for ${name}`, exact: true }).click();
+  await page.getByRole("menuitem", { name: "Version and updates…" }).click();
+}
+
 for (const [viewportName, viewport] of [["design", { width: 1440, height: 900 }], ["small", { width: 760, height: 520 }]]) {
   for (const colorScheme of ["dark", "light"]) {
     const name = `${viewportName}, ${colorScheme}`;
@@ -154,7 +160,7 @@ for (const [viewportName, viewport] of [["design", { width: 1440, height: 900 }]
     await shot("settings-machines");
 
     // 21.10: dev-server's page.
-    await cards.getByRole("button", { name: "Open dev-server" }).click();
+    await openMachinePage(page, main, "dev-server");
     const banner = main.getByTestId("machine-version-banner");
     await banner.waitFor();
     await page.waitForTimeout(300);
@@ -241,7 +247,7 @@ for (const colorScheme of ["dark", "light"]) {
   const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: fixture(true), colorScheme: "dark" });
   await sidebar(page);
   const main = await settings(page);
-  await main.getByRole("button", { name: "Open dev-server" }).click();
+  await openMachinePage(page, main, "dev-server");
   const banner = main.getByTestId("machine-version-banner");
   await banner.waitFor();
   await page.waitForTimeout(300);
