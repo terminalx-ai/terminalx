@@ -233,6 +233,8 @@ export class CloudApi {
       body = await this.request("POST", `/v1/desktop/orgs/${id(orgId)}/delete`, { confirmationName });
     } catch (error) {
       // As the desktop decodes it: a known refusal, or signed out before sending; anything else may have deleted it.
+      // The auth middleware refuses a bad bearer with 401 `unauthorized` before the handler runs (#1349).
+      if (error instanceof CloudApiError && error.status === 401 && error.code === "unauthorized") throw new CloudApiError("invalid_access_token", 401);
       if (error instanceof CloudApiError && (error.code === "account_signed_out" || (ORGANIZATION_DELETION_REFUSALS as readonly string[]).includes(error.code))) throw error;
       throw new CloudApiError("organization_delete_outcome_unknown", error instanceof CloudApiError ? error.status : null);
     }
