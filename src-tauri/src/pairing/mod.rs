@@ -1967,6 +1967,15 @@ mod startup_tests;
 #[cfg(test)]
 mod approval_tests;
 
+/// The category the relay diagnostics record a phone session's error under,
+/// as written there (`fell-behind`, `timeout`, …): what a phone test asserts
+/// its connection ended as (#1334).
+#[cfg(test)]
+pub(crate) fn phone_session_category(error: anyhow::Error) -> String {
+    let failure = diagnostics::Failure::from_error(&error.context(diagnostics::Stage::PhoneSession));
+    serde_json::to_value(failure.category).unwrap().as_str().unwrap().to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
