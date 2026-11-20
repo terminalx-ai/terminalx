@@ -8,7 +8,7 @@ name: Release terminalx-serve
 # After CI succeeds on a push to main (or by hand from main), and only if the
 # commit is a strict descendant of the newest runtime prerelease's commit and
 # is still on main, this builds and publishes
-# `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
+# `runtime-v<TerminalX version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
 # else, including a re-run of an old CI or release run, is a skip, so a
 # publish can never roll the fleet back. Prereleases are never marked latest
 # (the desktop updater's latest.json is never involved), and only the newest
@@ -111,8 +111,11 @@ jobs:
               || { echo "::error::cannot fetch $base for $previous"; exit 1; }
             git merge-base --is-ancestor "$base" "$sha" || skip "$sha is not newer than $previous"
           fi
-          version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
-          [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }
+          # The version the binary itself reports (`terminalx-serve --version` is
+          # compiled into the library crate, src-tauri/Cargo.toml): the installer
+          # and `terminalx-serve update` refuse a release whose binary says another.
+          version=$(git show "$sha:src-tauri/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
+          [ -n "$version" ] || { echo "::error::no TerminalX version at $sha"; exit 1; }
           # The committer time orders tags by commit, not by when this ran.
           committed=$(git show -s --format=%ct "$sha")
           out mode runtime
@@ -202,7 +205,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.plan.outputs.ref }}
-          sparse-checkout: src-tauri/serve/Cargo.toml
+          sparse-checkout: |
+            src-tauri/Cargo.toml
+            src-tauri/serve/Cargo.toml
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -215,8 +220,11 @@ jobs:
           import json, os, tomllib
           with open('src-tauri/serve/Cargo.toml', 'rb') as f:
               crate = tomllib.load(f)['package']
+          # The version the binary reports, which is the library crate's.
+          with open('src-tauri/Cargo.toml', 'rb') as f:
+              version = tomllib.load(f)['package']['version']
           manifest = {
-              'version': crate['version'],
+              'version': version,
               'protocol': int(crate['metadata']['terminalx']['runtime-protocol']),
               'commit': os.environ['REF'],
               'builtAt': os.environ['BUILT_AT'],

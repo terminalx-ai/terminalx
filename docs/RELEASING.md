@@ -491,8 +491,9 @@ It then:
 3. checks again, now serialized with every other publish, that the commit is
    `ahead` of the newest runtime prerelease (GitHub compare API), and creates
    a **prerelease** tagged
-   `runtime-v<serve crate version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
-   e.g. `runtime-v0.2.2-20260929121810-3001736`, with
+   `runtime-v<TerminalX version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
+   e.g. `runtime-v0.2.37-20261120132310-68a8fb2` (the version in
+   `src-tauri/Cargo.toml`, which `terminalx-serve --version` reports), with
    `terminalx-serve-linux-x64`, `terminalx-serve-linux-arm64`,
    `terminalx-serve-macos-arm64`, `terminalx-serve.json` and `SHA256SUMS`,
    **unsigned**;
