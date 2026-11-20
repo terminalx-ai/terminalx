@@ -705,8 +705,13 @@ pub fn linear_list_variables(filter: &IssueFilter) -> Result<Value> {
 }
 
 pub fn linear_list(key: &str, filter: &IssueFilter) -> Result<Vec<Issue>> {
+    linear_list_with(key, linear_list_variables(filter)?)
+}
+
+/// `linear_list` with variables a caller has narrowed further.
+pub fn linear_list_with(key: &str, variables: Value) -> Result<Vec<Issue>> {
     let query = format!("query($first: Int!, $filter: IssueFilter, $sort: [IssueSortInput!]) {{ issues(first: $first, filter: $filter, sort: $sort) {{ nodes {{ {ISSUE_FIELDS} }} }} }}");
-    let data = graphql(key, &query, linear_list_variables(filter)?)?;
+    let data = graphql(key, &query, variables)?;
     Ok(parse_linear_issues(&data))
 }
 

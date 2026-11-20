@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Switch } from "@/components/ui/controls";
 import { automationsApi, errorMessage, issues as issuesApi, type IssueTeam } from "@/lib/api";
 import { issueOps, type IssueUser, type WorkflowState } from "@/lib/issueOps";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -28,6 +29,19 @@ function splitList(value: string): string[] {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+/**
+ * A comma-separated list typed as text. The text is kept as typed, so a comma
+ * or a space being typed stays; the list it means is what is saved.
+ */
+function ListInput({ value, onChange, placeholder }: { value: string[]; onChange: (next: string[]) => void; placeholder?: string }) {
+  const [text, setText] = useState(() => value.join(", "));
+  useEffect(() => {
+    // Only a change from elsewhere replaces the text.
+    if (splitList(text).join("\n") !== value.join("\n")) setText(value.join(", "));
+  }, [value.join("\n")]);
+  return <input value={text} onChange={(event) => { setText(event.target.value); onChange(splitList(event.target.value)); }} className={INPUT} placeholder={placeholder} />;
+}
+
 export function defaultLinearTrigger(): AutomationEventTrigger {
   return {
     source: { kind: "linearIssue", teamId: "", teamName: null, state: "open", labels: [], assignee: null, text: null, report: { comment: true, moveToStateId: null, moveToStateName: null, commentOnFailure: true } },
@@ -38,7 +52,7 @@ export function defaultLinearTrigger(): AutomationEventTrigger {
 
 export function defaultPullRequestTrigger(repo = ""): AutomationEventTrigger {
   return {
-    source: { kind: "githubPullRequest", repo, events: ["opened", "pushed"], base: null, author: null, labels: [], draft: null },
+    source: { kind: "githubPullRequest", repo, events: ["opened", "pushed"], base: null, author: null, labels: [], draft: null, fromForks: false },
     pollIntervalMinutes: 5,
     maxRunsPerTick: 3,
   };
@@ -191,7 +205,7 @@ function LinearFields({ projectPath, source, onChange }: { projectPath: string; 
       </label>
       <label className={LABEL}>
         Labels (any of)
-        <input value={source.labels.join(", ")} onChange={(event) => onChange({ labels: splitList(event.target.value) })} className={INPUT} placeholder="bot" />
+        <ListInput value={source.labels} onChange={(labels) => onChange({ labels })} placeholder="bot" />
       </label>
       <label className={LABEL}>
         Assignee
@@ -258,7 +272,7 @@ function PullRequestFields({ projectPath, source, onChange }: { projectPath: str
       </label>
       <label className={LABEL}>
         Labels (all of)
-        <input value={source.labels.join(", ")} onChange={(event) => onChange({ labels: splitList(event.target.value) })} className={INPUT} placeholder="Optional" />
+        <ListInput value={source.labels} onChange={(labels) => onChange({ labels })} placeholder="Optional" />
       </label>
       <label className={LABEL}>
         Drafts
@@ -269,6 +283,18 @@ function PullRequestFields({ projectPath, source, onChange }: { projectPath: str
         </select>
       </label>
       <div />
+      <label className="col-span-2 flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5 text-xs">
+        <span>
+          <span className="block font-medium">Also wake on pull requests from forks</span>
+          <span className="text-faint">Anyone can open one, and the run works on their code in the Permissions mode chosen above. Off by default: only branches of this repository, pushed by people with write access, wake a run.</span>
+        </span>
+        <Switch aria-label="Also wake on pull requests from forks" checked={!!source.fromForks} onCheckedChange={(fromForks) => onChange({ fromForks })} />
+      </label>
+      {source.fromForks && (
+        <div role="note" className={WARNING_NOTE}>
+          <span className="font-medium text-foreground">Runs can work on outsiders' code.</span> A pull request from a fork can contain anything; an unattended run that builds or tests it runs that code on this Mac.
+        </div>
+      )}
     </>
   );
 }

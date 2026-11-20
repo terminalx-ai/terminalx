@@ -65,6 +65,9 @@ fn pr(number: i64, sha: &str) -> PullRequest {
         author: "octo".into(),
         labels: Vec::new(),
         draft: false,
+        from_fork: false,
+        // Opened well after every test's source started.
+        created_at: "2026-11-21T00:00:00Z".into(),
         review_requests: Vec::new(),
         check_failed: false,
     }
@@ -210,7 +213,7 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     let automation = automation(linear_source());
     // No key in Settings: the real read says so.
     let AutomationEventSource::LinearIssue(source) = linear_source() else { unreachable!() };
-    assert_eq!(read_linear(&source).unwrap_err().message, NO_LINEAR_KEY);
+    assert_eq!(read_linear(&source, None).unwrap_err().message, NO_LINEAR_KEY);
 
     poll(&host(), &automation, at(0), |_, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| unreachable!()).unwrap();
     let status = public_state(&automation.id).unwrap();
@@ -218,6 +221,7 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     let runs = automation_store::list_runs(&automation.id).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, AutomationRunStatus::SkippedUnavailable);
+    assert_eq!(runs[0].trigger, AutomationTrigger::LinearIssue, "listed under its own source, not as a GitHub issue");
 
     // The second failure doubles the wait.
     poll(&host(), &automation, at(5), |_, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| unreachable!()).unwrap();
@@ -344,4 +348,65 @@ fn an_event_trigger_saves_validates_and_stays_off_the_issue_trigger() {
     assert!(super::super::definition_from_input(input(empty), None, at(0)).unwrap_err().to_string().contains("event"));
     let no_team = json!({"source": {"kind": "linearIssue", "teamId": " "}});
     assert!(super::super::definition_from_input(input(no_team), None, at(0)).unwrap_err().to_string().contains("Linear team"));
+}
+
+#[test]
+fn linear_polls_only_read_issues_made_after_the_source_started() {
+    let _home = crate::store::temp_home();
+    let AutomationEventSource::LinearIssue(source) = linear_source() else { unreachable!() };
+    assert!(linear_variables(&source, None).unwrap()["filter"].get("createdAt").is_none(), "the preview lists what matches now");
+    let variables = linear_variables(&source, Some("2026-11-20T09:00:00.000Z")).unwrap();
+    assert_eq!(variables["filter"]["createdAt"], json!({"gt": "2026-11-20T09:00:00.000Z"}));
+    assert_eq!(variables["filter"]["team"], json!({"id": {"eq": "team-1"}}), "and the rest of the filter stays");
+
+    // The read is given the moment the source started, kept across ticks.
+    let automation = automation(linear_source());
+    let seen = std::cell::RefCell::new(Vec::new());
+    for minute in [0, 5] {
+        poll(&host(), &automation, at(minute), |_, _, state| { seen.borrow_mut().push(state.started_at.clone()); Ok(Snapshot::Linear(Vec::new())) }, |_| unreachable!()).unwrap();
+    }
+    assert_eq!(*seen.borrow(), vec![Some(stamp(at(0))), Some(stamp(at(0)))]);
+}
+
+#[test]
+fn a_pull_request_open_before_the_start_does_not_wake_when_it_first_shows_up() {
+    let _home = crate::store::temp_home();
+    let automation = automation(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
+    // The first read lists one page; an older pull request is not on it.
+    tick(&automation, 0, pulls(vec![pr(1, "aaa")]));
+    let mut old = pr(2, "bbb");
+    old.created_at = "2026-10-01T00:00:00Z".into();
+    assert!(tick(&automation, 5, pulls(vec![pr(1, "aaa"), old.clone()])).is_empty(), "it existed before the trigger");
+    old.head_sha = "ccc".into();
+    assert_eq!(tick(&automation, 10, pulls(vec![old.clone()])), vec![WakeSubject::PullRequest(Box::new(old), PullRequestEvent::Pushed)], "its next push is new");
+}
+
+#[test]
+fn pull_requests_from_forks_wake_only_when_asked_for() {
+    let mut source = PullRequestSource { repo: "acme/widgets".into(), events: vec![PullRequestEvent::Opened], ..Default::default() };
+    let mut fork = pr(4, "aaa");
+    fork.from_fork = true;
+    assert!(!pull_request_matches(&source, &fork), "anyone can open one");
+    assert!(pull_request_matches(&source, &pr(5, "bbb")));
+    source.from_forks = true;
+    assert!(pull_request_matches(&source, &fork));
+    let parsed = parse_pull_requests(&json!([{ "number": 1, "headRefOid": "a", "isCrossRepository": true, "createdAt": "2026-11-20T10:00:00Z" }]));
+    assert!(parsed[0].from_fork);
+    assert_eq!(parsed[0].created_at, "2026-11-20T10:00:00Z");
+    assert!(gh_list_args(&source).iter().any(|arg| arg.contains("isCrossRepository") && arg.contains("createdAt")));
+}
+
+#[test]
+fn a_run_is_reported_by_the_issue_it_worked_on_not_the_trigger_now() {
+    let _home = crate::store::temp_home();
+    // The automation now watches pull requests; its two older runs are an issue each.
+    let automation = automation(pr_source(&[PullRequestEvent::Opened]));
+    let mut linear = new_run(&automation.id, AutomationTrigger::LinearIssue, None, AutomationRunStatus::Running);
+    linear.issue = Some(linear_ref(&issue("1")));
+    let linear = automation_store::insert_run(linear).unwrap();
+    let mut github = new_run(&automation.id, AutomationTrigger::Issue, None, AutomationRunStatus::Running);
+    github.issue = Some(index::IssueRef { provider: "github".into(), id: "node-1".into(), identifier: "#1".into(), title: "Bug".into(), url: "u".into() });
+    let github = automation_store::insert_run(github).unwrap();
+    assert!(is_linear_run(&automation.id, &linear.run_id));
+    assert!(!is_linear_run(&automation.id, &github.run_id), "a GitHub issue run keeps the GitHub report");
 }

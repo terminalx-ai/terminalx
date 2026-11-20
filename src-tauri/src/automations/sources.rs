@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    emit_run, index, issue_prompt, issue_worktree_name, new_run, record_poll_error, start_run, Automation, AutomationHost,
+    emit_run, index, issue_prompt, issue_worktree_name, new_run, record_source_error, start_run, Automation, AutomationHost,
     AutomationReported, AutomationRun, AutomationRunStatus, AutomationTrigger, AutomationWorkspace,
 };
 use crate::store::automations as automation_store;
@@ -123,6 +123,12 @@ pub struct PullRequestSource {
     /// Only drafts, only ready ones, or either when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<bool>,
+    /// Also wake on pull requests from forks. Off by default: anyone can
+    /// open one, and an unattended run would be working on their code. A
+    /// pull request from a branch of the repository itself was pushed by
+    /// someone with write access.
+    #[serde(default)]
+    pub from_forks: bool,
 }
 
 fn filled(value: &Option<String>) -> Option<&str> {
@@ -182,6 +188,9 @@ pub struct SourceSeen {
     pub source: String,
     #[serde(default)]
     pub initialized: bool,
+    /// When the source was switched on: only what was made after it wakes a run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
     #[serde(default)]
     pub events: BTreeMap<String, SeenEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +274,11 @@ pub struct PullRequest {
     pub author: String,
     pub labels: Vec<String>,
     pub draft: bool,
+    /// Opened from a fork rather than a branch of the repository.
+    #[serde(default)]
+    pub from_fork: bool,
+    #[serde(default)]
+    pub created_at: String,
     /// Logins (and team slugs) asked to review.
     pub review_requests: Vec<String>,
     /// Whether a check on the head commit failed.
@@ -331,12 +345,24 @@ pub(crate) fn linear_filter(source: &LinearIssueSource) -> crate::issues::IssueF
     }
 }
 
-fn read_linear(source: &LinearIssueSource) -> Result<Vec<crate::issues::Issue>, SourceError> {
-    let key = linear_key()?;
-    crate::issues::linear_list(&key, &linear_filter(source)).map_err(|error| linear_error(&error))
+/// The variables a poll reads Linear with: the source's filter, narrowed to
+/// issues created after `created_after` when it is given. Only those can be
+/// new: an older issue the first read did not list (it lists one page) must
+/// not wake a run when someone edits it.
+pub(crate) fn linear_variables(source: &LinearIssueSource, created_after: Option<&str>) -> Result<Value, SourceError> {
+    let mut variables = crate::issues::linear_list_variables(&linear_filter(source)).map_err(|error| SourceError::plain(format!("{error:#}")))?;
+    if let Some(after) = created_after {
+        variables["filter"]["createdAt"] = json!({"gt": after});
+    }
+    Ok(variables)
 }
 
-const PR_FIELDS: &str = "number,title,url,headRefName,headRefOid,baseRefName,author,labels,isDraft,reviewRequests,statusCheckRollup";
+fn read_linear(source: &LinearIssueSource, created_after: Option<&str>) -> Result<Vec<crate::issues::Issue>, SourceError> {
+    let key = linear_key()?;
+    crate::issues::linear_list_with(&key, linear_variables(source, created_after)?).map_err(|error| linear_error(&error))
+}
+
+const PR_FIELDS: &str = "number,title,url,headRefName,headRefOid,baseRefName,author,labels,isDraft,isCrossRepository,createdAt,reviewRequests,statusCheckRollup";
 const FAILED: [&str; 5] = ["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED", "ERROR"];
 
 pub(crate) fn parse_pull_requests(value: &Value) -> Vec<PullRequest> {
@@ -362,6 +388,8 @@ pub(crate) fn parse_pull_requests(value: &Value) -> Vec<PullRequest> {
                         author: item["author"]["login"].as_str().unwrap_or_default().into(),
                         labels: names(&item["labels"], "name"),
                         draft: item["isDraft"].as_bool().unwrap_or(false),
+                        from_fork: item["isCrossRepository"].as_bool().unwrap_or(false),
+                        created_at: item["createdAt"].as_str().unwrap_or_default().into(),
                         review_requests: names(&item["reviewRequests"], "login"),
                         check_failed: checks.iter().any(|check| {
                             let verdict = check["conclusion"].as_str().filter(|value| !value.is_empty()).or_else(|| check["state"].as_str()).unwrap_or_default();
@@ -381,6 +409,7 @@ pub(crate) fn pull_request_matches(source: &PullRequestSource, pr: &PullRequest)
         && filled(&source.author).is_none_or(|author| same(author.trim_start_matches('@'), &pr.author) || author == "@me")
         && source.labels.iter().map(|label| label.trim()).filter(|label| !label.is_empty()).all(|label| pr.labels.iter().any(|have| same(have, label)))
         && source.draft.is_none_or(|draft| pr.draft == draft)
+        && (source.from_forks || !pr.from_fork)
 }
 
 fn gh_list_args(source: &PullRequestSource) -> Vec<String> {
@@ -419,7 +448,7 @@ pub enum Snapshot {
 /// One read of the source, the request the interval allows.
 fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceSeen) -> Result<Snapshot, SourceError> {
     match source {
-        AutomationEventSource::LinearIssue(source) => read_linear(source).map(Snapshot::Linear),
+        AutomationEventSource::LinearIssue(source) => read_linear(source, state.started_at.as_deref()).map(Snapshot::Linear),
         AutomationEventSource::GithubPullRequest(source) => {
             let cwd = Path::new(&automation.project_path);
             let pulls = read_pull_requests(cwd, source)?;
@@ -490,6 +519,13 @@ fn observed(pr: &PullRequest, viewer: Option<&str>) -> Vec<(PullRequestEvent, St
 pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceSeen, active: &BTreeSet<String>, cap: usize) -> Plan {
     let mut out = Plan::default();
     let is_new = |key: &str, value: &str| state.events.get(key).is_none_or(|seen| seen.value != value);
+    let started = parse(state.started_at.as_deref());
+    let made_before_start = |created: &str| match (parse(Some(created)), started) {
+        (Some(created), Some(started)) => created <= started,
+        // An unreadable date is treated as old: missing one run beats waking on history.
+        (None, Some(_)) => true,
+        (_, None) => false,
+    };
     match (source, snapshot) {
         (AutomationEventSource::LinearIssue(_), Snapshot::Linear(issues)) => {
             for issue in issues {
@@ -513,7 +549,10 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                     out.forget.push(review_key);
                 }
                 let fresh: Vec<_> = events.into_iter().filter(|(_, key, value)| is_new(key, value)).collect();
-                if !state.initialized {
+                // One the first read did not list (it lists one page) but that was
+                // open before the source started is recorded as it is, not woken on.
+                let first_seen = fresh.iter().any(|(event, ..)| *event == PullRequestEvent::Opened);
+                if !state.initialized || (first_seen && made_before_start(&pr.created_at)) {
                     out.record.extend(fresh.into_iter().map(|(_, key, value)| (key, value)));
                     continue;
                 }
@@ -605,6 +644,9 @@ fn poll(
     }
     let at = stamp(now);
     state.last_polled_at = Some(at.clone());
+    if !state.initialized {
+        state.started_at = Some(at.clone());
+    }
     let snapshot = match read(automation, &trigger.source, &state) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -613,7 +655,7 @@ fn poll(
             state.last_poll_error = Some(error.message.clone());
             save_seen(&automation.id, &state)?;
             emit_state(app, &automation.id, &state);
-            record_poll_error(app, automation, &error.message)?;
+            record_source_error(app, automation, run_trigger(&trigger.source), &error.message)?;
             return Ok(());
         }
     };
@@ -696,6 +738,14 @@ pub fn pull_request_prompt(template: &str, pr: &PullRequest, event: PullRequestE
     )
 }
 
+/// The trigger a source's runs, and its read errors, are listed under.
+fn run_trigger(source: &AutomationEventSource) -> AutomationTrigger {
+    match source {
+        AutomationEventSource::LinearIssue(_) => AutomationTrigger::LinearIssue,
+        AutomationEventSource::GithubPullRequest(_) => AutomationTrigger::PullRequest,
+    }
+}
+
 fn launch(app: &impl AutomationHost, automation: &Automation, wake: &Wake) -> Result<AutomationRun> {
     let run = match &wake.what {
         WakeSubject::Linear(issue) => {
@@ -725,6 +775,14 @@ fn launch(app: &impl AutomationHost, automation: &Automation, wake: &Wake) -> Re
 }
 
 // ------------------------------------------------------------------ reporting
+
+/// Whether a run worked on a Linear issue, whatever the automation's trigger is now.
+pub(super) fn is_linear_run(automation_id: &str, run_id: &str) -> bool {
+    automation_store::list_runs(automation_id)
+        .ok()
+        .and_then(|runs| runs.into_iter().find(|run| run.run_id == run_id))
+        .is_some_and(|run| run.issue.is_some_and(|issue| issue.provider == "linear"))
+}
 
 /// Report a Linear run's end on its issue, off the calling thread.
 pub(super) fn spawn_report(app: &impl AutomationHost, automation_id: String, run_id: String, failed: bool) {
@@ -807,7 +865,7 @@ pub fn preview(project_path: &Path, source: &AutomationEventSource) -> Result<Ve
             if source.team_id.trim().is_empty() {
                 bail!("Choose a Linear team.");
             }
-            let issues = read_linear(source).map_err(|error| anyhow::anyhow!(error.message))?;
+            let issues = read_linear(source, None).map_err(|error| anyhow::anyhow!(error.message))?;
             Ok(issues
                 .into_iter()
                 .map(|issue| SourceMatch { id: issue.id, identifier: issue.identifier, title: issue.title, url: issue.url, detail: issue.state })

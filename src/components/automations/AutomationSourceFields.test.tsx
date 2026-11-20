@@ -96,6 +96,28 @@ describe("GitHub pull request trigger", () => {
     expect(eventTriggerReady(latest!)).toBe(false);
   });
 
+  it("keeps what is typed in a label list, commas and spaces too", async () => {
+    sourcePreview.mockResolvedValue([]);
+    render(<Harness initial={defaultPullRequestTrigger("acme/widgets")} />);
+    const labels = screen.getByRole("textbox", { name: "Labels (all of)" }) as HTMLInputElement;
+    fireEvent.change(labels, { target: { value: "bot," } });
+    expect(labels.value).toBe("bot,");
+    fireEvent.change(labels, { target: { value: "bot, needs review" } });
+    expect(labels.value).toBe("bot, needs review");
+    expect(latest?.source.labels).toEqual(["bot", "needs review"]);
+  });
+
+  it("leaves pull requests from forks out unless they are allowed, and warns when they are", async () => {
+    sourcePreview.mockResolvedValue([]);
+    render(<Harness initial={defaultPullRequestTrigger("acme/widgets")} />);
+    expect(latest?.source).toMatchObject({ fromForks: false });
+    expect(screen.queryByText(/Runs can work on outsiders' code/)).toBeNull();
+    fireEvent.click(screen.getByRole("switch", { name: "Also wake on pull requests from forks" }));
+    expect(latest?.source).toMatchObject({ fromForks: true });
+    expect(screen.getByText(/Runs can work on outsiders' code/)).toBeTruthy();
+    await waitFor(() => expect(sourcePreview).toHaveBeenLastCalledWith("/repo", expect.objectContaining({ fromForks: true })));
+  });
+
   it("describes each trigger in a sentence", () => {
     expect(eventTriggerSentence(defaultPullRequestTrigger("acme/widgets"))).toBe("GitHub pull requests in acme/widgets: opened, new commits pushed, checked every 5 min");
     const linear = defaultLinearTrigger();

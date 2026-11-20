@@ -1341,7 +1341,8 @@ fn spawn_issue_report(
     run_id: String,
     failed: bool,
 ) {
-    if automation_store::get(&automation_id).is_ok_and(|automation| automation.event_trigger.is_some()) {
+    // Routed by the run, not the automation's trigger now: that may have changed since the run started.
+    if sources::is_linear_run(&automation_id, &run_id) {
         return sources::spawn_report(app, automation_id, run_id, failed);
     }
     let app = app.clone();
@@ -1633,11 +1634,17 @@ fn issue_poll_due(
 }
 
 fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message: &str) -> Result<()> {
+    record_source_error(app, automation, AutomationTrigger::Issue, message)
+}
+
+/// A source that could not be read, as one run row listed under `trigger`;
+/// the same error again counts as a repeat of that row.
+fn record_source_error(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, message: &str) -> Result<()> {
     if let Some(previous) = automation_store::list_runs(&automation.id)?
         .into_iter()
         .next()
     {
-        if previous.trigger == AutomationTrigger::Issue
+        if previous.trigger == trigger
             && previous.status == AutomationRunStatus::SkippedUnavailable
             && previous.issue.is_none()
             && previous.error.as_deref() == Some(message)
@@ -1653,7 +1660,7 @@ fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message
     }
     let mut run = new_run(
         &automation.id,
-        AutomationTrigger::Issue,
+        trigger,
         None,
         AutomationRunStatus::SkippedUnavailable,
     );

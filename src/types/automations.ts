@@ -77,6 +77,8 @@ export interface PullRequestSource {
   labels: string[];
   /** Only drafts (true), only ready ones (false), or either. */
   draft?: boolean | null;
+  /** Also wake on pull requests from forks: anyone can open one. Off by default. */
+  fromForks?: boolean;
 }
 
 /** Open to more kinds later (another bot's event, a watched file, a webhook). */
