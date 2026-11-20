@@ -131,7 +131,18 @@ const EXPIRED =
 export type AttemptOutcome =
   | { kind: "connected"; message: string }
   | { kind: "notice"; message: string }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  /** The desktop stopped checking before the server said how the attempt ended; the caller re-reads its installations. */
+  | { kind: "unsettled"; message: string };
+
+/** The desktop gave up waiting on its own clock: the attempt may still have connected. */
+export function unsettledOutcome(): AttemptOutcome {
+  return {
+    kind: "unsettled",
+    message:
+      "TerminalX stopped waiting for the account service to confirm the connection. The installations were read again: if the one you installed is not listed, connect again.",
+  };
+}
 
 /**
  * What to tell the admin about an attempt that is no longer waiting. `source`

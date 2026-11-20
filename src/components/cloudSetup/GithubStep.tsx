@@ -231,6 +231,9 @@ export function GithubStep({ organization, onContinue, pollIntervalMs = CONNECT_
       if (outcome.kind === "connected") {
         if (ended?.installation) setActive(ended.installation.id);
         void load();
+      } else if (outcome.kind === "unsettled") {
+        // The attempt may have connected on the server: re-read to reconcile.
+        void load();
       }
     },
   });

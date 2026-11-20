@@ -17,6 +17,32 @@ struct StandInOwner {
     build: Build,
     /// Whether the terminal's one delta was handed out.
     delta: std::sync::atomic::AtomicBool,
+    permit: Arc<PermitGate>,
+}
+
+/// Holds the next connection check the test arms it for, as a slow runtime
+/// holds the check an output permit makes.
+#[derive(Default)]
+struct PermitGate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl PermitGate {
+    fn hold(&self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            let open = self.open.lock().unwrap();
+            drop(self.opened.wait_while(open, |open| !*open).unwrap());
+        }
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
 }
 
 impl Owner for StandInOwner {
@@ -24,6 +50,9 @@ impl Owner for StandInOwner {
         Ok(AttachmentIdentity { epoch: "epoch".into(), lease: "lease".into() })
     }
     fn mobile(&self, _: &Actor, method: &str, _: serde_json::Value) -> Result<serde_json::Value> {
+        if method == "check" {
+            self.permit.hold();
+        }
         Ok(match method {
             // A terminal subscription opens with its scrollback snapshot …
             "observe" => json!({ "subscriptionId": "terminal", "snapshot": "scrollback" }),
@@ -95,16 +124,37 @@ impl Phone {
     }
 }
 
-/// A served connection, its phone end, and the sink agents' events go through.
-async fn served(
-    slow: Duration,
-) -> (Phone, Arc<crate::sink::BroadcastSink>, tokio::task::JoinHandle<Result<Ended>>, crate::store::TempHome) {
+/// A request the test holds unanswered: `entered` once the Mac is answering
+/// it, and its answer only after `release`.
+#[derive(Default)]
+struct Held {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+/// A served connection, its phone end, and what the test drives it with.
+struct Served {
+    phone: Phone,
+    /// The sink agents' events go through.
+    sink: Arc<crate::sink::BroadcastSink>,
+    server: tokio::task::JoinHandle<Result<Ended>>,
+    /// The host's signals, as `PairingManager::disconnect_device` sends them.
+    signals: mpsc::UnboundedSender<ConnectionSignal>,
+    connection: Arc<rpc::MobileConnection>,
+    held: Arc<Held>,
+    /// The connection check the test may hold.
+    permit: Arc<PermitGate>,
+    _home: crate::store::TempHome,
+}
+
+async fn served(slow: Duration) -> Served {
     let home = crate::store::temp_home();
     registry::DeviceRegistry.add(device()).unwrap();
     let host = Arc::new(PhoneHost::new(|| 0));
     let sink = Arc::new(crate::sink::BroadcastSink::new(64));
     host.configure(sink.clone()).unwrap();
-    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default(), delta: Default::default() })));
+    let permit = Arc::new(PermitGate::default());
+    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default(), delta: Default::default(), permit: permit.clone() })));
 
     let keypair = HostKeypair::from_secret([3; 32]);
     let handshake = E2eeClientHandshake::with_secret([4; 32], &keypair.public_key_b64(), "direct", None).unwrap();
@@ -118,39 +168,52 @@ async fn served(
     let (outbound, inbound) = mpsc::channel(OUTBOUND_QUEUE);
     let connection = Arc::new(rpc::MobileConnection::open(&host, &device(), outbound, wire::Transport::Direct, None).await.unwrap());
     let (signals_tx, signals) = mpsc::unbounded_channel();
-    let server = tokio::spawn(async move {
-        serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
-            let signals_tx = signals_tx.clone();
-            let (host, connection) = (host.clone(), connection.clone());
-            async move {
-                if request["method"] == "terminal.subscribe" {
-                    let response = rpc::off_runtime(move || {
-                        let id = request["id"].as_str().unwrap_or_default().to_string();
-                        Ok(match rpc::dispatch(&host, &connection, &request, &device()).expect("a phone method") {
-                            Ok(result) => rpc::success_response(&id, result),
-                            Err(error) => error_response(&id, &error),
+    let held = Arc::new(Held::default());
+    let server = {
+        let (connection, signals_tx, held) = (connection.clone(), signals_tx.clone(), held.clone());
+        tokio::spawn(async move {
+            serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
+                let (signals_tx, held) = (signals_tx.clone(), held.clone());
+                let (host, connection) = (host.clone(), connection.clone());
+                async move {
+                    if request["method"] == "terminal.subscribe" {
+                        let response = rpc::off_runtime(move || {
+                            let id = request["id"].as_str().unwrap_or_default().to_string();
+                            Ok(match rpc::dispatch(&host, &connection, &request, &device()).expect("a phone method") {
+                                Ok(result) => rpc::success_response(&id, result),
+                                Err(error) => error_response(&id, &error),
+                            })
                         })
-                    })
-                    .await
-                    .unwrap();
-                    // Its first poll ran meanwhile: the delta was queued before this reply.
-                    tokio::time::sleep(slow).await;
-                    return response;
+                        .await
+                        .unwrap();
+                        // Its first poll ran meanwhile: the delta was queued before this reply.
+                        tokio::time::sleep(slow).await;
+                        return response;
+                    }
+                    if request["method"] == "slow" {
+                        tokio::time::sleep(slow).await;
+                    }
+                    if request["params"]["held"] == true {
+                        held.entered.notify_one();
+                        held.release.notified().await;
+                    }
+                    // As `pairing.forget` does: the connection is cancelled before its reply is sent.
+                    if request["method"] == "pairing.forget" && request["params"]["held"] != true {
+                        signals_tx.send(ConnectionSignal::Cancel).unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    // As revoking the phone on the Mac does (#1315).
+                    if request["method"] == "revoke" {
+                        signals_tx.send(ConnectionSignal::Revoke).unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    json!({ "id": request["id"], "ok": true, "result": {} })
                 }
-                if request["method"] == "slow" {
-                    tokio::time::sleep(slow).await;
-                }
-                // As `pairing.forget` does: the connection is cancelled before its reply is sent.
-                if request["method"] == "forget" {
-                    signals_tx.send(ConnectionSignal::Cancel).unwrap();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                json!({ "id": request["id"], "ok": true, "result": {} })
-            }
+            })
+            .await
         })
-        .await
-    });
-    (Phone { socket: phone, session: phone_session }, sink, server, home)
+    };
+    Served { phone: Phone { socket: phone, session: phone_session }, sink, server, signals: signals_tx, connection, held, permit, _home: home }
 }
 
 fn agent_event(seq: u64) -> Value {
@@ -167,7 +230,7 @@ fn agent_event(seq: u64) -> Value {
 /// the phone as fallen behind within seconds of it connecting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_stays_connected_to_a_busy_mac_through_a_slow_request() {
-    let (mut phone, sink, server, _home) = served(Duration::from_secs(2)).await;
+    let Served { mut phone, sink, server, _home, .. } = served(Duration::from_secs(2)).await;
     phone.request("slow", "slow").await;
     let emitter = std::thread::spawn(move || {
         for seq in 0..1500 {
@@ -204,7 +267,7 @@ async fn a_phone_stays_connected_to_a_busy_mac_through_a_slow_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_are_still_answered_in_the_order_they_came() {
-    let (mut phone, _sink, server, _home) = served(Duration::from_millis(300)).await;
+    let Served { mut phone, server, _home, .. } = served(Duration::from_millis(300)).await;
     phone.request("first", "slow").await;
     phone.request("second", "status.get").await;
     phone.request("third", "slow").await;
@@ -224,7 +287,7 @@ async fn requests_are_still_answered_in_the_order_they_came() {
 /// A phone that reads nothing at all still falls behind, and says so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
-    let (phone, sink, server, _home) = served(Duration::ZERO).await;
+    let Served { phone, sink, server, _home, .. } = served(Duration::ZERO).await;
     let payload = "x".repeat(64 * 1024);
     for seq in 0..400 {
         let mut event = agent_event(seq);
@@ -244,8 +307,8 @@ async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reply_goes_out_before_a_signal_that_came_while_it_was_answered() {
     for _ in 0..20 {
-        let (mut phone, _sink, server, _home) = served(Duration::ZERO).await;
-        phone.request("forget", "forget").await;
+        let Served { mut phone, server, _home, .. } = served(Duration::ZERO).await;
+        phone.request("forget", "pairing.forget").await;
         phone.request("after", "status.get").await;
         let reply = phone.read().await.expect("the acknowledgement");
         assert_eq!(reply["id"], "forget");
@@ -255,12 +318,123 @@ async fn a_reply_goes_out_before_a_signal_that_came_while_it_was_answered() {
     }
 }
 
+/// The close frame after the replies: its code, or `None` when the socket ended without one.
+async fn close_code(phone: &mut Phone) -> Option<u16> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), phone.socket.next()).await.expect("the Mac closed the phone") {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(frame))) => return frame.map(|frame| u16::from(frame.code)),
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    }
+}
+
+/// #1315: a revoked phone is closed as refused (4401), so it stops using that
+/// pairing; any other cancellation closes it with no such code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_phone_is_closed_as_refused_and_a_cancelled_one_is_not() {
+    for (id, method, expected) in [("revoke", "revoke", Some(crate::phone::CREDENTIAL_REFUSED)), ("forget", "pairing.forget", None)] {
+        let Served { mut phone, server, _home, .. } = served(Duration::ZERO).await;
+        phone.request(id, method).await;
+        assert_eq!(phone.read().await.expect("the reply")["id"], id);
+        let code = close_code(&mut phone).await;
+        assert_eq!(code.filter(|code| *code == crate::phone::CREDENTIAL_REFUSED), expected, "{method}: closed with {code:?}");
+        let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::Cancelled);
+    }
+}
+
+/// What a Mac with agents at work sends a phone after the Mac disconnects
+/// it: agent events, each queuing a `session.event` and raising
+/// `sessions.changed`, and an invalidation raised directly.
+fn emit_after_disconnect(served: &Served) {
+    for seq in 0..50 {
+        served.sink.emit_raw("agent_event", serde_json::value::to_raw_value(&agent_event(seq)).unwrap());
+    }
+    served.connection.invalidations().raise(Invalidation::Settings);
+}
+
+/// Disconnected on the Mac while a request is still answered (#1332): the
+/// phone is told at once, before the request completes, and none of the
+/// session events or invalidations raised after the Mac disconnected it
+/// reach the phone. The request in flight is dropped with the connection;
+/// a reply already answered is withheld by the test after this one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disconnect_on_the_mac_fences_output_while_a_request_is_answered() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("held", "session.tail", json!({ "held": true })).await;
+        served.phone.request("after", "status.get").await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the request is being answered");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+
+        // The request is still held: the disconnect did not wait for it.
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "nothing after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
+        served.held.release.notify_one();
+    }
+}
+
+/// A reply already answered but waiting for its output permit when the Mac
+/// disconnects the phone is withheld (#1332): the permit's check is held
+/// until after the disconnect, and the phone reads only the disconnect notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disconnect_while_a_reply_waits_for_its_permit_withholds_the_reply() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("held", "session.tail", json!({ "held": true })).await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the request is being answered");
+        // The next check is the reply's permit, unless the grant check's
+        // tick takes it first; either way the Mac waits on the runtime there.
+        served.permit.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        served.held.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), served.permit.entered.notified()).await.expect("a check is held");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+        served.permit.release();
+
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "no reply after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
+    }
+}
+
+/// A `pairing.forget` already being answered when the Mac disconnects the
+/// phone still has its acknowledgement delivered; nothing else raised after
+/// the disconnect follows it, and the request after it is not answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forget_in_flight_is_acknowledged_but_nothing_else_after_a_disconnect() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("forget", "pairing.forget", json!({ "held": true })).await;
+        served.phone.request("after", "status.get").await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the forget is being answered");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+        // Time for anything unfenced to reach the phone before the forget completes.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        served.held.release.notify_one();
+
+        let reply = served.phone.read().await.expect("the acknowledgement");
+        assert_eq!(reply["id"], "forget");
+        assert_eq!(reply["ok"], true);
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "nothing after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
+    }
+}
+
 /// #1333: a terminal subscription's first poll can find a delta before its
 /// reply, with the scrollback snapshot, is sent. The phone resets its screen
 /// to the snapshot, so a delta ahead of it would be lost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_subscription_reply_comes_before_its_first_stream_item() {
-    let (mut phone, _sink, server, _home) = served(Duration::from_millis(600)).await;
+    let Served { mut phone, server, _home, .. } = served(Duration::from_millis(600)).await;
     let params = json!({ "worktreeId": "session", "tabId": "tab", "attachMode": "observe", "client": {}, "capabilities": {} });
     phone.request_with("subscribe", "terminal.subscribe", params).await;
     let mut order = Vec::new();

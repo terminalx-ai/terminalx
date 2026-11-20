@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredHost } from "../store/hosts";
-import { endPairingInstance } from "../store/pairing-instance";
-import { RelayOuterError } from "./relay-client";
+import { endPairingInstance, isCurrentPairingInstance, pairingInstance } from "../store/pairing-instance";
+import { CredentialRefusedError, RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
 // code, `opening` open their socket and then wait in the handshake.
-const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false, requests: [] as { method: string; params?: unknown }[], describe: "refuse" as "refuse" | "fail" }));
+const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number | Error>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false, requests: [] as { method: string; params?: unknown }[], describe: "refuse" as "refuse" | "fail" }));
 vi.mock("../store/hosts", () => ({ updateStoredHost: mocks.writes, writeHostCredential: vi.fn() }));
 vi.mock("./e2ee-keypair", () => ({ loadOrCreateE2EESecretKey: async () => new Uint8Array(32) }));
 vi.mock("./credential-rotation", () => ({ rotateCredentialIfNeeded: async (args: unknown) => args }));
@@ -20,8 +20,9 @@ vi.mock("./relay-client", async (importOriginal) => {
     connect() {
       const path = this.options.endpoint ?? "relay";
       if (mocks.reachable.has(path)) { this.state = "connected"; return Promise.resolve(); }
-      const refusal = mocks.refused.get(path);
-      if (refusal) { this.state = "disconnected"; return Promise.reject(new original.RelayOuterError(refusal)); }
+      // A relay credential can be refused on its own (`relay:<token>`), as a grace credential is after a rotation.
+      const refusal = mocks.refused.get(this.options.endpoint ?? `relay:${this.options.credential}`) ?? mocks.refused.get(path);
+      if (refusal) { this.state = "disconnected"; return Promise.reject(typeof refusal === "number" ? new original.RelayOuterError(refusal) : refusal); }
       if (mocks.opening.has(path)) this.setState("handshaking");
       return new Promise<void>((resolve, reject) => { this.reject = reject; this.finish = () => { this.setState("connected"); resolve(); }; });
     }
@@ -597,5 +598,68 @@ describe("the Mac's paired-device controls", () => {
     old.notify({ method: "pairing.disconnected" }); await flush();
     expect(connection.disconnectedOnMac()).toBe(false);
     expect(stages.at(-1)).toBe("connected");
+  });
+});
+
+// #1315: the relay or the pinned Mac refusing the credential revokes the
+// pairing's report authorization; nothing else that ends a connection does.
+describe("a refused credential", () => {
+  const owned: StoredHost = { ...host, id: "owned", provenance: { kind: "automatic", userId: "first" },
+    relay: { v: 1, directorUrl: "https://relay.example", cellUrl: "https://relay.example", assignmentEpoch: 1, relayHostId: "1234567890123456", e2eeFraming: 2 } };
+  const expiresAt = Date.now() + 1_000_000;
+  const relayCredential = { ...credential, current: { token: "current", hash: "hash", version: 2, expiresAt }, grace: { token: "grace", hash: "hash", version: 1, expiresAt } };
+  const window = { from: 0, to: Number.MAX_SAFE_INTEGER };
+  const live = () => mocks.clients.filter((client) => client.state === "connected");
+  let logs: ConnectionLogEntry[];
+  const reported = () => scopedConnectionSnapshot(logs, "first", [owned], window);
+  beforeEach(() => {
+    logs = []; connection.onLog((entry) => logs.push(entry));
+    endPairingInstance(owned.id);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("director offline"); }));
+  });
+
+  it("revokes the pairing when the relay refuses the current credential while connecting", async () => {
+    mocks.refused.set("relay:current", new CredentialRefusedError());
+    connection.start(owned, relayCredential); await flush();
+    const ended = pairingInstance(owned.id);
+    expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+    // Retries of the refused pairing stay unauthorized; the instance made since is not ended by them.
+    await vi.advanceTimersByTimeAsync(60_000); await flush();
+    expect(reported().events).toEqual([]);
+    expect(isCurrentPairingInstance({ hostId: owned.id, instance: ended })).toBe(true);
+  });
+
+  it("revokes the pairing when a live connection is closed with the credential refused", async () => {
+    mocks.reachable.add(lan); connection.start(owned, relayCredential); await flush();
+    expect(reported().events).not.toEqual([]);
+    live()[0].drop(new CredentialRefusedError("Access removed")); await flush();
+    expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+  });
+
+  it("keeps the pairing through a network failure, another relay refusal, a refused grace credential and a disconnect on the Mac", async () => {
+    mocks.refused.set("relay:grace", new CredentialRefusedError()); mocks.refused.set("relay:current", 4404);
+    mocks.reachable.add(lan); connection.start(owned, relayCredential); await flush();
+    live()[0].drop(new RelayOuterError(1006)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[0]); await flush();
+    // A 4401 from an unverified direct peer is not the pinned Mac's refusal.
+    live()[0].drop(new RelayOuterError(4401)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[1]); await flush();
+    live()[0].notify({ method: "pairing.disconnected", params: { reason: "disconnected-on-mac" } });
+    live()[0].drop(new RelayOuterError(1000)); await flush();
+    expect(connection.disconnectedOnMac()).toBe(true);
+    const snapshot = reported();
+    expect(snapshot.pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+    expect((snapshot.events as { kind: string }[]).map(({ kind }) => kind)).toEqual(expect.arrayContaining(["connected", "connection-lost", "disconnected-on-mac"]));
+  });
+
+  it("does not end a pairing made again after the refused attempt began", async () => {
+    let refuse!: (error: Error) => void;
+    mocks.reachable.clear();
+    connection.start(owned, relayCredential); await flush();
+    const pending = mocks.clients.find((client) => client.options.credential === "current");
+    refuse = pending.reject;
+    // Paired again meanwhile: savePairedHost ends the old instance, and the new connection takes a fresh one.
+    endPairingInstance(owned.id);
+    const fresh = pairingInstance(owned.id);
+    refuse(new CredentialRefusedError()); await flush();
+    expect(isCurrentPairingInstance({ hostId: owned.id, instance: fresh })).toBe(true);
   });
 });
