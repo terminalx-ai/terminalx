@@ -368,6 +368,8 @@ pub fn restore_role(sink: &dyn EventSink, bot: &Bot, change: Option<&str>) -> Re
 /// What a conversation with `bot` is given of its memory: the bot's own
 /// notes, then its place's, [`BUDGET`] lines in all. `None` when the
 /// owner turned its memory off.
+// The bot chat's launch note (PRO-468, bots/chat.rs) gives this to the agent once it is on main.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn for_conversation(bot: &Bot) -> Option<String> {
     if bot.memory_off {
         return None;
@@ -497,7 +499,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let shown = |rel: &str| home.join(rel).to_string_lossy().into_owned();
     let log = changes::read_log(&bot.id)?;
 
-    let role = read_in_home(&home, &bot_store::ROLE_FILE);
+    let role = read_in_home(&home, bot_store::ROLE_FILE);
     let template = super::templates::find(&bot.role_template_id);
     let mut versions: Vec<RoleVersion> = log.changes.iter().rev().filter_map(|change| {
         Some(RoleVersion { change: Some(change.id.clone()), at: change.at.clone(), by: change.by.clone(), kind: change.kind.clone(), source: change.source.clone(), text: role_after(change)? })
@@ -512,7 +514,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();
     let mut counts = BTreeMap::new();
     for rel in &read_files {
-        counts.insert(rel.clone(), changes::lines_of(&read_in_home(&home, &rel).text).len());
+        counts.insert(rel.clone(), changes::lines_of(&read_in_home(&home, rel).text).len());
     }
     let (own_read, place_read) = read_split(counts[&Place::Bot.memory_file()], counts[&working.memory_file()]);
     let mut place_views = Vec::new();
