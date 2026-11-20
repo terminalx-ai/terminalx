@@ -1510,8 +1510,9 @@ pub struct SessionManager {
     /// Explicit command grants for this tab's conversation. Kept across
     /// turns and CLI restarts; forgotten when the owner runtime exits.
     session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
-    /// Tabs launched for a bot, by `key_of`, with their pane (PRO-468): see [`Self::bot_working`].
-    bot_tabs: Arc<Mutex<HashMap<String, String>>>,
+    /// Each tab's agent process, by `key_of`, as `TabRuntime::child_pid` says,
+    /// kept apart so placing a process (PRO-468) never waits on a tab's lock.
+    children: Arc<Mutex<HashMap<String, u32>>>,
     /// One writer per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter, nor overtake one another.
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
@@ -2034,7 +2035,7 @@ impl SessionManager {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             provider_states: Arc::default(),
             session_commands: Arc::default(),
-            bot_tabs: Arc::default(),
+            children: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3199,21 +3200,19 @@ impl SessionManager {
     /// own: up its ancestry to a pane's process or a native agent's child;
     /// else by its session's leader, which a process reparented to launchd
     /// still keeps; else by its controlling terminal, when exactly one pane
-    /// has it. Matched in memory: the index is read only to name the session
-    /// of a pane that matched. A tab whose runtime is busy or poisoned is
-    /// skipped, never waited for. A process that made itself a new session
+    /// has it. Matched in memory, with no tab's lock taken: the index is read
+    /// only to name the session of a pane that matched, and a failed read is
+    /// an error, never "no one's". A process that made itself a new session
     /// with a terminal of its own (`script`, an existing tmux server) is no one's.
     #[cfg(unix)]
-    pub(crate) fn session_of_process(&self, pid: i32) -> Option<Placed> {
+    pub(crate) fn session_of_process(&self, pid: i32) -> Result<Option<Placed>> {
         #[derive(Clone)]
         enum Root { Pane(String), Tab(String, String) }
         let mut roots: HashMap<i32, Root> = self.terminals.panes().into_iter()
             .filter_map(|pane| Some((pane.pid? as i32, Root::Pane(pane.id)))).collect();
-        let runtimes: Vec<_> = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
-        for runtime in runtimes {
-            let Ok(rt) = runtime.try_lock() else { continue };
-            if let Some(child) = rt.child_pid {
-                roots.insert(child as i32, Root::Tab(rt.session_id.clone(), rt.tab_id.clone()));
+        for (key, child) in self.children.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if let Some((session, tab)) = key.split_once('/') {
+                roots.insert(*child as i32, Root::Tab(session.to_owned(), tab.to_owned()));
             }
         }
         use crate::serve_cli::consent;
@@ -3240,10 +3239,11 @@ impl SessionManager {
                     (Some((_, found)), None) => Some(found.clone()),
                     _ => None,
                 }
-            })?;
-        Some(match found {
-            Root::Tab(session, tab) => Placed { session: Some(session), tab: Some(tab) },
-            Root::Pane(pane) => Self::place_pane(&pane),
+            });
+        Ok(match found {
+            None => None,
+            Some(Root::Tab(session, tab)) => Some(Placed { session: Some(session), tab: Some(tab) }),
+            Some(Root::Pane(pane)) => Some(Self::place_pane(&pane)?),
         })
     }
 
@@ -3252,56 +3252,24 @@ impl SessionManager {
     /// in a session with tabs or none. A pane of no session (an agent's
     /// setup) is still a TerminalX pane: placed, in no session.
     #[cfg(unix)]
-    fn place_pane(pane: &str) -> Placed {
-        let sessions = index::load().unwrap_or_else(|error| {
-            log::warn!("read the sessions to place a process in pane {pane}: {error:#}");
-            Vec::new()
-        });
-        sessions.iter().find_map(|session| {
+    fn place_pane(pane: &str) -> Result<Placed> {
+        let sessions = index::load().with_context(|| format!("read the sessions to place a process in pane {pane}"))?;
+        Ok(sessions.iter().find_map(|session| {
             if let Some(tab) = session.tabs.iter().find(|tab| tab.pane_id() == pane) {
                 return Some(Placed { session: Some(session.id.clone()), tab: Some(tab.id.clone()) });
             }
             pane.starts_with(&format!("{}:", session.id))
                 .then(|| Placed { session: Some(session.id.clone()), tab: session.tabs.first().map(|tab| tab.id.clone()) })
-        }).unwrap_or(Placed { session: None, tab: None })
+        }).unwrap_or(Placed { session: None, tab: None }))
     }
 
-    /// Note that tab `tab_id` of `session_id` launches for a bot (PRO-468),
-    /// so the runtime's own calls look for bots' processes while it runs.
-    pub(crate) fn note_bot_tab(&self, session_id: &str, tab_id: &str, pane: &str) {
-        self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner()).insert(key_of(session_id, tab_id), pane.to_owned());
-    }
-
-    /// Whether any tab launched for a bot still runs, from memory alone: no
-    /// index read and no wait on a busy tab (a busy one counts as running).
-    /// Tabs that stopped are forgotten; a launch notes them again.
-    pub(crate) fn bot_working(&self) -> bool {
-        let noted: Vec<(String, String)> = self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(key, pane)| (key.clone(), pane.clone())).collect();
-        if noted.is_empty() {
-            return false;
-        }
-        let mut stopped = Vec::new();
-        let mut working = false;
-        for (key, pane) in noted {
-            let runtime = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
-            let child = runtime.map(|runtime| match runtime.try_lock() {
-                Ok(rt) => rt.child.is_some(),
-                Err(std::sync::TryLockError::WouldBlock) => true,
-                Err(std::sync::TryLockError::Poisoned(_)) => false,
-            }).unwrap_or_default();
-            if child || self.terminals.is_running(&pane) {
-                working = true;
-            } else {
-                stopped.push(key);
-            }
-        }
-        if !stopped.is_empty() {
-            let mut noted = self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner());
-            for key in stopped {
-                noted.remove(&key);
-            }
-        }
-        working
+    /// Keep [`Self::children`] as `rt.child_pid` says: called wherever it changes.
+    fn note_child(&self, rt: &TabRuntime) {
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        match rt.child_pid {
+            Some(pid) => children.insert(rt.key(), pid),
+            None => children.remove(&rt.key()),
+        };
     }
 
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
@@ -3572,6 +3540,7 @@ impl SessionManager {
         *sink.child.lock().unwrap() = Some(Arc::downgrade(&child));
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
+        self.note_child(rt);
         self.with_provider_state(rt, |state| {
             state.binding = None;
             for context in state.operations.values().chain(state.settings.values()) { context.withdraw(); }
@@ -4243,6 +4212,8 @@ impl SessionManager {
 
     fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        // A bot's work runs only where its rules and access reach (PRO-468).
+        crate::bots::chat::refuse_unheld_launch(&index::get(&rt.session_id)?, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("ACP launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -4258,6 +4229,8 @@ impl SessionManager {
 
     fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        // A bot's work runs only where its rules and access reach (PRO-468).
+        crate::bots::chat::refuse_unheld_launch(&index::get(&rt.session_id)?, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("OpenCode launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -5210,6 +5183,7 @@ impl SessionManager {
             crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             rt.engine = Engine::None;
             self.retire_provider(&rt);
             // A headless engine's process is gone too (`let_go_of_cli` has
@@ -5650,10 +5624,6 @@ impl SessionManager {
     /// Bring the tab's mode, and one waiting for the next launch, within
     /// the limit of the bot `entry` works for, if it works for one.
     pub(crate) fn hold_to_bot(&self, rt: &mut TabRuntime, entry: &index::SessionEntry) -> Result<()> {
-        if crate::bots::chat::acting_bot(entry).is_some() {
-            let pane = entry.tab(&rt.tab_id).map(TabEntry::pane_id).unwrap_or_else(|| Self::pane_id(&rt.tab_id));
-            self.note_bot_tab(&rt.session_id, &rt.tab_id, &pane);
-        }
         let Some(limit) = entry.tab(&rt.tab_id).and_then(|tab| crate::bots::chat::tab_limit(entry, tab)) else { return Ok(()) };
         self.update_settings(rt, |s| {
             s.permission_mode = limit.clamp(&s.permission_mode);
@@ -6092,6 +6062,7 @@ impl SessionManager {
             crate::cloud_grants::forget_launch(&rt.key());
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             rt.engine = Engine::None;
             self.retire_provider(&rt);
         }
@@ -9296,6 +9267,7 @@ impl SessionManager {
         self.withdraw_acp_input(&mut rt);
         rt.child = None;
         rt.child_pid = None;
+        self.note_child(&rt);
         rt.engine = Engine::None;
         self.retire_provider(&rt);
         self.settle_settings_without_process(&mut rt);
@@ -10216,6 +10188,7 @@ impl SessionManager {
             child.close_stdin();
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             self.with_provider_state(&rt, |state| {
                 state.binding = None;
                 for original in state.operations.values() { original.withdraw(); }

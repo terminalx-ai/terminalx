@@ -31,8 +31,12 @@
   names; a command it cannot place counts as the owner's only from a terminal
   of the person's own, one whose process has already exited is refused, and
   one that has made itself a terminal of its own (`script`, tmux) is not
-  placed. A process that detaches with no terminal and calls the runtime
-  directly is not yet told apart from the window (PRO-489).
+  placed. While Bots is on, the runtime's own calls that change sessions or
+  terminals are taken from the window (by its process and start time), from
+  a session no bot works for, or from a terminal of the person's own, and
+  refused otherwise; a bot's process that gives itself a terminal of its own
+  still counts as the person's (PRO-489). A bot's work on an agent that cannot
+  be given its rules (ACP, OpenCode) is refused at launch.
   Hiring, resuming, deleting and raising access are confirmed by the
   TerminalX window on a Mac, which restarts its runtime to do so when needed,
   as pairing does. A resume or more access gives each tab back its own mode,

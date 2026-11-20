@@ -177,6 +177,27 @@ pub fn refuses_mode(entry: &SessionEntry, tab: Option<&TabEntry>, mode: &str) ->
     (!limit.allows(mode)).then(|| format!("This session works for a bot and {}, so it runs in {} at most.", limit.why, crate::harness::settings::mode_label(limit.mode)))
 }
 
+/// Why a bot's work does not run on `harness`, which cannot be given its rules.
+fn unheld_agent(name: &str, harness: &str) -> String {
+    format!("{name} runs on {harness}, which cannot be given a bot's role and memory yet. Choose Claude Code or Codex for it.")
+}
+
+/// Refused at launch: a session that works for a listed bot, on an agent
+/// that cannot be given the bot's rules or held to its access (PRO-468),
+/// with what a chat with the bot on that agent is told.
+pub fn refuse_unheld_launch(entry: &SessionEntry, harness: &str) -> Result<()> {
+    if takes_bot_instructions(harness) || !super::enabled() {
+        return Ok(());
+    }
+    let Some(id) = acting_bot(entry) else { return Ok(()) };
+    match crate::store::bots::get(&id) {
+        // Its bot is gone: an ordinary session.
+        Ok(None) => Ok(()),
+        Ok(Some(bot)) => Err(super::refused(unheld_agent(&bot.name, harness))),
+        Err(_) => Err(super::refused(unheld_agent("Its bot", harness))),
+    }
+}
+
 /// Whether `harness` can be given a bot's rules, role and memory at launch.
 pub fn takes_bot_instructions(harness: &str) -> bool {
     matches!(harness, "claude" | "codex")
@@ -212,7 +233,7 @@ static HOME_CHAT_LOCK: Mutex<()> = Mutex::new(());
 /// A new chat with `bot` in its home folder; the home chat when `home`.
 fn create_chat(sink: &dyn EventSink, bot: &Bot, home: bool) -> Result<SessionEntry> {
     if !takes_bot_instructions(&bot.harness) {
-        return Err(super::refused(format!("{} runs on {}, which cannot be given a bot's role and memory yet. Choose Claude Code or Codex for it.", bot.name, bot.harness)));
+        return Err(super::refused(unheld_agent(&bot.name, &bot.harness)));
     }
     let folder = super::home(bot).filter(|folder| folder.is_dir()).with_context(|| format!("{}'s home folder is missing", bot.name))?;
     let req = crate::session_ops::NewQuickChat {

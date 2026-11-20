@@ -80,8 +80,9 @@ struct Service {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
     calls: AtomicUsize,
-    /// The process that registered, as the kernel says: the window (PRO-468).
-    pid: Option<i32>,
+    /// The process that registered, as the kernel says, and when it started:
+    /// the window (PRO-468). A later process given the same pid is not it.
+    process: Option<(i32, u64)>,
 }
 
 #[derive(Default)]
@@ -116,14 +117,15 @@ impl Registry {
         }
         let registered = attachment.enter().map_err(|_| unavailable("The desktop detached during registration."))?;
         *current = Some(Arc::new(Service { attachment: attachment.clone(), epoch: registration.epoch, lease: registration.lease, socket: registration.socket,
-            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0), pid: crate::hooks::caller_pid() }));
+            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0),
+            process: crate::hooks::caller_pid().and_then(|pid| Some((pid, crate::serve_cli::consent::started_at(pid)?))) }));
         drop(registered);
         Ok(json!({"registered":true}))
     }
 
-    /// The process of the window attached now, when the kernel named it (PRO-468).
-    pub(crate) fn window_pid(&self) -> Option<i32> {
-        self.0.lock().unwrap().as_ref().filter(|service| service.attachment.valid()).and_then(|service| service.pid)
+    /// The process of the window attached now, and when it started, when the kernel named it (PRO-468).
+    pub(crate) fn window_process(&self) -> Option<(i32, u64)> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).as_ref().filter(|service| service.attachment.valid()).and_then(|service| service.process)
     }
 
     pub(crate) fn available(&self) -> bool {

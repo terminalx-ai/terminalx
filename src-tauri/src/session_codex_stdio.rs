@@ -630,6 +630,7 @@ impl SessionManager {
             let cancelled = !same_launch(&rt, launch) || rt.stopping || matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
             rt.environment = environment.stamp;
             rt.child_pid = Some(child.pid);
+            self.note_child(&rt);
             rt.child = Some(child.clone());
             cancelled
         };
@@ -1083,6 +1084,7 @@ impl SessionManager {
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
+        self.note_child(&rt);
         crate::cloud_grants::forget_launch(&rt.key());
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
@@ -1102,6 +1104,7 @@ impl SessionManager {
         if !ended || !gone || rt.stdio_starting || rt.stopping { return; }
         rt.stdio_writer = None; rt.stdio_receipt = None; rt.stdio_authority = None; rt.stdio_compaction = None;
         rt.child = None; rt.child_pid = None;
+        self.note_child(rt);
         rt.engine = Engine::None;
     }
 }

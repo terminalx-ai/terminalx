@@ -578,6 +578,19 @@ pub fn alive(pid: libc::pid_t) -> bool {
     }
 }
 
+/// When `pid` started, in the kernel's own units: with its pid, what tells a
+/// process from a later one given the same pid.
+pub fn started_at(pid: libc::pid_t) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        bsd_info(pid).map(|info| info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stat_field(pid, 19)?.parse().ok()
+    }
+}
+
 /// The session `pid` is in: the pid of its leader.
 pub fn session_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     // SAFETY: getsid has no preconditions; it fails for a pid it cannot see.

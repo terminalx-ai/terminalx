@@ -435,6 +435,13 @@ fn cost_on(events: Vec<UsageEvent>, day: &str) -> f64 {
     events.iter().filter(|event| event.day == day).filter_map(event_cost).sum()
 }
 
+/// When local `day` (`%Y-%m-%d`) began.
+pub(crate) fn day_began(day: &str) -> Option<std::time::SystemTime> {
+    use chrono::TimeZone;
+    let midnight = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?.and_hms_opt(0, 0, 0)?;
+    Some(Local.from_local_datetime(&midnight).earliest()?.into())
+}
+
 /// Today, as Stats names a day: the local date.
 pub(crate) fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
@@ -1425,6 +1432,13 @@ mod tests {
         let events = vec![today.clone(), today, test_event(Provider::Codex, "s", "2026-11-19", "/repo", 5_000_000)];
         assert!((cost_on(events.clone(), "2026-11-20") - 2.0 * price).abs() < 1e-9);
         assert_eq!(cost_on(events, "2026-11-18"), 0.0);
+    }
+
+    #[test]
+    fn a_day_begins_at_local_midnight() {
+        let began: DateTime<Local> = day_began("2026-11-20").unwrap().into();
+        assert_eq!(began.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-11-20 00:00:00");
+        assert!(day_began("not a day").is_none());
     }
 
     fn test_event(

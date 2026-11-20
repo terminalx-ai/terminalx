@@ -342,3 +342,21 @@ fn a_reference_this_build_cannot_read_is_none() {
     set_session_bot(&mut entry, &BotRef { id: "b".into(), home: false });
     assert_eq!(serde_json::to_value(&entry).unwrap()["bot"], serde_json::json!({"id": "b"}));
 }
+
+/// A session a bot's chat started, on an agent that cannot be given the
+/// bot's rules (ACP, OpenCode), is refused at launch as a chat on that agent
+/// is; once its bot is gone it is an ordinary session (PRO-468 review 5).
+#[test]
+fn a_bots_session_on_an_agent_it_cannot_reach_is_refused_at_launch() {
+    let (_home, sink) = bots_on();
+    let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let mut started = home_chat(sink.as_ref(), &bot.id).unwrap();
+    started.unknown.remove(SESSION_KEY);
+    started.unknown.insert(STARTED_KEY.into(), serde_json::json!({ "id": bot.id }));
+    let refused = refuse_unheld_launch(&started, "opencode").unwrap_err().to_string();
+    assert_eq!(refused, "Atlas runs on opencode, which cannot be given a bot's role and memory yet. Choose Claude Code or Codex for it.");
+    refuse_unheld_launch(&started, "claude").unwrap();
+    refuse_unheld_launch(&started, "codex").unwrap();
+    crate::bots::delete(sink.as_ref(), &bot.id).unwrap();
+    refuse_unheld_launch(&started, "opencode").unwrap();
+}

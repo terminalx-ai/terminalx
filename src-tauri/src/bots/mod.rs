@@ -271,6 +271,25 @@ pub fn enabled() -> bool {
     crate::store::settings::load().experimental.bots
 }
 
+/// [`enabled`] for a path taken on every keystroke (the runtime's guard):
+/// read again after any settings write in this process, and at least once a
+/// second for a change another process made; a stat and a clone otherwise.
+pub fn enabled_cached() -> bool {
+    use std::time::{Duration, Instant};
+    static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, Instant, bool)>> = std::sync::Mutex::new(None);
+    let Ok(path) = crate::store::root() else { return enabled() };
+    let writes = crate::store::settings::writes();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, at_writes, at, on)) = cache.as_ref() {
+        if *cached == path && *at_writes == writes && at.elapsed() < Duration::from_secs(1) {
+            return *on;
+        }
+    }
+    let on = enabled();
+    *cache = Some((path, writes, Instant::now(), on));
+    on
+}
+
 pub fn require_enabled() -> Result<()> {
     if enabled() { Ok(()) } else { Err(BotError::Off.into()) }
 }

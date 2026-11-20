@@ -1947,9 +1947,12 @@ terminalx bots delete <bot> --json
   terminal of the person's own, or a TerminalX pane: with neither it is refused those four with
   `person_required`, and while any bot is paused it starts no work (`bot_paused`; reads such as
   `machine list` still answer). A command whose process exits before the app looks at it is
-  refused with `person_required`: let `terminalx` wait for its answer. Known gap (PRO-489): a
-  process that detaches with no terminal and calls the runtime's own socket directly is not yet
-  told from the window; the fix is a credential only the window holds.
+  refused with `person_required`: let `terminalx` wait for its answer. While Bots is on, the
+  runtime's own calls that change sessions or terminals are taken from the TerminalX window (its
+  process, checked by pid and start time) and otherwise only from a session no bot works for or
+  a terminal of the person's own; everything else is refused. Known gap (PRO-489): a bot's
+  process that gives itself a terminal of its own (`script`, an existing tmux server) counts as
+  the person's; the fix is a credential only the window holds.
   Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
   person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
   `resume` says so with `person_required` rather than waiting.
