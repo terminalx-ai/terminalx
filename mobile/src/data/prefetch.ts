@@ -7,7 +7,11 @@ const KNOWN_LIMIT = 128;
 
 /** Asks the connected Mac to start sending, from the checkpoints this phone keeps for it. */
 export async function startPrefetch(api: HostApi, host: string): Promise<boolean> {
-  const known = await savedCursors(host, KNOWN_LIMIT);
+  // A phone may keep more conversations than it names: the ones the Mac
+  // will send are named first, so none it keeps comes as a newest part it
+  // would drop (#1339). One that became a target since is still left alone.
+  const targets = await api.prefetchTargets().catch(() => []);
+  const known = await savedCursors(host, KNOWN_LIMIT, targets);
   named.set(host, new Set(known.map(({ sessionId, tabId }) => JSON.stringify([sessionId, tabId]))));
   // Open ones read for themselves: the Mac is asked not to send them (#1337).
   return api.prefetch(true, known, openTranscriptsOf(host).slice(0, KNOWN_LIMIT));
