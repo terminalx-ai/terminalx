@@ -3326,7 +3326,7 @@ mod tests {
         // Without a caller it is the owner's terminal, and still only asks.
         assert_eq!(ask("bots.resume", json!({"bot": "atlas"})).unwrap()["waiting"], true);
         assert!(crate::bots::get(&id).unwrap().paused.is_some());
-        assert!(crate::bots::dismiss_resume(service.sink.as_ref(), &id).unwrap().unknown.get(crate::bots::RESUME_REQUEST_KEY).is_none());
+        assert!(!crate::bots::dismiss_resume(service.sink.as_ref(), &id).unwrap().unknown.contains_key(crate::bots::RESUME_REQUEST_KEY));
     }
 
     /// N1 (PRO-468): on the runtime's route, what gives a bot more than it
