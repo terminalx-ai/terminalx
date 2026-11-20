@@ -485,6 +485,9 @@ pub fn run() {
             // window, which has no terminal (PRO-369).
             #[cfg(target_os = "macos")]
             install_window_pairing_consent(&pairing);
+            // A runtime that cannot verify this window is relaunched by it (PRO-486).
+            #[cfg(target_os = "macos")]
+            local_runtime::window_consent::install_for(app.handle());
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
             #[cfg(desktop)]
@@ -606,6 +609,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
+            local_runtime::window_consent::local_runtime_restart_for_window,
             local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_work,
             local_runtime::ui::local_runtime_plan_update,
@@ -831,6 +835,7 @@ pub fn run() {
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,
+            commands::automation_precheck_try,
             commands::automation_run_now,
             commands::bot_list,
             commands::bot_get,

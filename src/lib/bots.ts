@@ -85,6 +85,11 @@ export async function bootBots() {
   await listBots(mine);
 }
 
+/** Read the bots again (Retry after a failed read). Nothing while the switch is off. */
+export async function reloadBots() {
+  if (booted) await listBots(generation);
+}
+
 /** The switch went off: stop listening and forget what was read. */
 export function shutBots() {
   if (!booted) return;

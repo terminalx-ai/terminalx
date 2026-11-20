@@ -604,7 +604,8 @@ export function CommandPalette({
   }, [account]);
 
   const commandEntries = useMemo<CommandEntry[]>(() => {
-    const shortcutEntries = SHORTCUT_ACTIONS.map((shortcut, index) =>
+    // An action behind an Experimental switch that is off (Bots) is not offered.
+    const shortcutEntries = SHORTCUT_ACTIONS.filter((shortcut) => !shortcut.requires || switches?.[shortcut.requires] === true).map((shortcut, index) =>
       indexPaletteItem({
         id: `command:shortcut:${shortcut.id}`,
         group: "commands" as const,
@@ -715,7 +716,7 @@ export function CommandPalette({
         ]
       : [];
     return [...runEntries, ...shortcutEntries, ...extras];
-  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme, switches]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({

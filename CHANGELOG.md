@@ -7,8 +7,12 @@
   `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
   A bot is hired from one of eight bundled role templates with a role and a
   name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
-  deleting it moves that folder, with its record, to `trash/bots/`. No screens
-  yet (PRO-466).
+  deleting it moves that folder, with its record, to `trash/bots/` (PRO-466).
+  With the switch on, a Bots section sits above the sidebar's project lists
+  (each bot's role, status and where it runs, with a + to hire), and a Bots
+  page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
+  no bots it offers three roles to hire in one click, and Hire a bot lists
+  every role with its duties and skills and asks only for a name (PRO-467).
 - Bots (experimental): each bot has a home chat, made at hire, that runs in its
   home folder; its agent is given the bot's role, the first 200 lines of its
   memory and a few fixed rules each time it starts, so an edited `ROLE.md`

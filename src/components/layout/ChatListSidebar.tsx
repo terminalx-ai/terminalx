@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { BotsSidebarSection } from "@/components/bots/BotsSidebarSection";
 import { LocalSidebarSections } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
 import { Settings, SquarePen } from "@/icons";
@@ -102,6 +103,8 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
 
       <SidebarOrderError />
       <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2 pb-2" aria-label="Conversations" data-testid="conversation-list">
+        {/* Bots (PRO-467) sit above the project lists, only while their experimental switch is on. */}
+        <BotsSidebarSection />
         <ListHeading label="Sessions" note={byStatus ? "by status" : hasSections ? "sections" : undefined} actions={<ViewMenu />} />
         {/* One drag scope: sessions move between the sections and the main list (PRO-174). */}
         <SidebarDragScope>

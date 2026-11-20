@@ -14,7 +14,7 @@
 import { appWindow } from "@/lib/appWindow";
 import type { PanelTab } from "@/lib/panelTab";
 import {
-  getSessionStore, openAgents, openAutomations, openHome, openIssues, openProjectOverview, openSkills,
+  getSessionStore, openAgents, openAutomations, openBots, openHome, openIssues, openProjectOverview, openSkills,
   selectSession, subscribeSessionStore,
 } from "@/lib/sessions";
 import { whenSessionsLoaded } from "@/lib/tabDeepLink";
@@ -26,7 +26,8 @@ const MAX_PANEL_TABS = 200;
 const PANEL_TABS: readonly PanelTab[] = ["branch", "changes", "files", "browser", "ports", "computer"];
 
 /** The pages a launch can reopen. The new-session form is a draft and is not one: the session behind it is. */
-const PAGES = ["welcome", "home", "issues", "agents", "automations", "skills", "project"] as const;
+/** `bots` reopens only while Settings → Experimental → Bots is on: off, the app leaves it for the welcome screen. */
+const PAGES = ["welcome", "home", "issues", "agents", "automations", "skills", "project", "bots"] as const;
 /** Pages the main window no longer has, and where a launch saved on one opens instead: Stats moved to Settings (PRO-463). */
 const RETIRED_PAGES: Readonly<Record<string, LastPage>> = { stats: "home" };
 export type LastPage = (typeof PAGES)[number];
@@ -134,6 +135,7 @@ export function restoreLastView(saved: LastView = readLastView()): { sessionId: 
     case "agents": openAgents(); break;
     case "automations": openAutomations(); break;
     case "skills": openSkills(); break;
+    case "bots": openBots(); break;
     case "welcome": return null;
   }
   return { view: saved.view };

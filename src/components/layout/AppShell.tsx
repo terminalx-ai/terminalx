@@ -85,6 +85,8 @@ import { bootAutomations } from "@/lib/automations";
 import { bootBots, shutBots, useBotStore } from "@/lib/bots";
 import { botViewFor } from "@/lib/botChats";
 import { BotView } from "@/components/bots/BotView";
+import { showBotsTeam, useLeaveBotsWhenOff } from "@/lib/botsPage";
+import { BotsView } from "@/components/bots/BotsView";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -340,6 +342,9 @@ export function AppShell() {
     if (botsOn) void bootBots();
     else shutBots();
   }, [botsOn]);
+  // Registered only while the switch is on, so with it off ⇧⌘J reaches whatever else has it.
+  useShortcut("app.bots", () => { if (!canLeave()) return; setSettingsOpen(false); showBotsTeam(); }, { enabled: botsOn });
+  useLeaveBotsWhenOff();
   useEffect(() => startMachineConnections(), []);
   // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.
   useEffect(() => {
@@ -546,6 +551,7 @@ function UnselectedWorkspace({
   const store = useSessionStore();
   const view = underDialog ?? store.view;
   const editors = useEditors();
+  const botsOn = useExperimentalSettings()?.bots === true;
   const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
 
@@ -587,7 +593,7 @@ function UnselectedWorkspace({
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
             {view === "issues"
               ? "Issues"
-              : view === "agents" || view === "skills" || view === "project"
+              : view === "agents" || view === "skills" || view === "project" || view === "bots"
                 ? ""
                 : view === "automations"
                   ? "Automations"
@@ -617,6 +623,9 @@ function UnselectedWorkspace({
               <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
             ) : view === "agents" ? (
               <AgentDashboard />
+            ) : view === "bots" ? (
+              // Nothing until the switch is read on: off, AppShell sends the view back to the welcome screen.
+              botsOn ? <BotsView /> : null
             ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : view === "skills" ? (

@@ -107,6 +107,23 @@ export interface AutomationPrecheckResult {
   durationMs: number;
 }
 
+/** What a run does after its first check: skip, go ahead, or fail. */
+export type PrecheckOutcome = "nothingNew" | "proceed" | "failed";
+
+/** One try of a first check from the editor. Nothing is recorded. */
+export interface PrecheckTrial {
+  outcome: PrecheckOutcome;
+  reason?: string | null;
+  result: AutomationPrecheckResult;
+}
+
+export interface PrecheckTryInput {
+  projectPath: string;
+  workspace: AutomationWorkspace;
+  sessionId?: string | null;
+  precheck: AutomationPrecheck;
+}
+
 export interface AutomationRun {
   runId: string;
   runNumber: number;

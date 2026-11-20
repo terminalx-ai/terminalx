@@ -80,6 +80,7 @@ vi.mock("@/lib/sessions", () => ({
 }));
 
 const { AutomationsView } = await import("./AutomationsView");
+const { automationsApi } = await import("@/lib/api");
 const initialModels = structuredClone(catalog.models);
 const initialHarnesses = structuredClone(discovery.harnesses);
 
@@ -240,7 +241,7 @@ describe("automation workspace navigation", () => {
     render(<AutomationsView />);
     fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
 
-    for (const label of ["Starting", "Running", "Completed", "Failed", "Cancelled", "Timed out", "Precheck skipped", "Missed", "Unavailable"]) {
+    for (const label of ["Starting", "Running", "Completed", "Failed", "Cancelled", "Timed out", "Nothing new", "Missed", "Unavailable"]) {
       expect(await screen.findByText(label)).toBeTruthy();
     }
 
@@ -596,5 +597,105 @@ describe("archiving a run when it completes", () => {
     fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
     await screen.findByRole("table", { name: "Automation runs" });
     expect(screen.queryByText("Archived")).toBeNull();
+  });
+});
+
+describe("an automation's first check", () => {
+  const firstCheck = () => screen.getByRole("switch", { name: "Run a first check" });
+  const openNew = async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Review duty" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Review what is new." } });
+  };
+  const trial = (outcome: "nothingNew" | "proceed" | "failed", stdoutTail = "", reason: string | null = null) => ({
+    outcome,
+    reason,
+    result: { exitCode: outcome === "failed" ? 2 : 0, stdoutTail, stderrTail: "", truncated: false, timedOut: false, durationMs: 120 },
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("is off for a new automation, which saves with no check", async () => {
+    await openNew();
+    expect(firstCheck().getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByRole("textbox", { name: "Command" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review duty" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ precheck: null }));
+  });
+
+  it("saves the command and timeout, and needs a command once turned on", async () => {
+    await openNew();
+    fireEvent.click(firstCheck());
+    expect((screen.getByRole("button", { name: "Create automation" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "gh pr list --json number" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Timeout (seconds)" }), { target: { value: "5000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review duty" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ precheck: { command: "gh pr list --json number", timeoutSeconds: 300 } }));
+  });
+
+  it.each([
+    ["nothingNew", "", /Nothing new: the run would end here/],
+    ["proceed", "PR #12 needs review", /would go ahead/],
+    ["failed", "", /would fail without starting the agent/],
+  ] as const)("Try it shows what a %s check printed and what would happen", async (outcome, output, verdict) => {
+    const tryPrecheck = vi.spyOn(automationsApi, "tryPrecheck").mockResolvedValue(trial(outcome, output, outcome === "failed" ? "The first check exited with status 2." : null));
+    await openNew();
+    fireEvent.click(firstCheck());
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./check.sh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    const result = await screen.findByRole("status", { name: "First check result" });
+    expect(result.textContent).toMatch(verdict);
+    if (output) expect(result.textContent).toContain(output);
+    else expect(result.textContent).toContain("It printed nothing.");
+    if (outcome === "failed") expect(result.textContent).toContain("exited with status 2");
+    expect(tryPrecheck).toHaveBeenCalledWith({ projectPath: "/repo", workspace: "newWorktree", sessionId: null, precheck: { command: "./check.sh", timeoutSeconds: 60 } });
+    expect(createAutomation).not.toHaveBeenCalled();
+  });
+
+  it("shows no Try it result for a command that changed while it ran", async () => {
+    let answer: (value: ReturnType<typeof trial>) => void = () => {};
+    vi.spyOn(automationsApi, "tryPrecheck").mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    await openNew();
+    fireEvent.click(firstCheck());
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./check.sh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./other.sh" } });
+    answer(trial("proceed", "from the old command"));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Try it" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole("status", { name: "First check result" })).toBeNull();
+    expect(screen.queryByText(/from the old command/)).toBeNull();
+  });
+
+  it("lets the timeout field be cleared while typing and restores it on leaving", async () => {
+    await openNew();
+    fireEvent.click(firstCheck());
+    const timeout = screen.getByRole("spinbutton", { name: "Timeout (seconds)" }) as HTMLInputElement;
+    fireEvent.change(timeout, { target: { value: "" } });
+    expect(timeout.value).toBe("");
+    fireEvent.change(timeout, { target: { value: "45" } });
+    expect(timeout.value).toBe("45");
+    fireEvent.change(timeout, { target: { value: "" } });
+    fireEvent.blur(timeout);
+    expect(timeout.value).toBe("45");
+  });
+
+  it("reads a nothing-new run as such, quietly, with its output one click away", async () => {
+    automationStore.runs = { "automation-1": [run({
+      status: "skippedPrecheck", sessionId: null, tabId: null, worktreeName: null, finalMessage: null, changedFiles: null, reported: null,
+      precheck: { exitCode: 0, stdoutTail: "", stderrTail: "checked 4 PRs", truncated: false, timedOut: false, durationMs: 800 },
+    })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    const status = await screen.findByText("Nothing new");
+    expect(status.parentElement?.querySelector(".bg-destructive, .bg-warning")).toBeNull();
+    expect(screen.queryByText("Error")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Check output" }));
+    expect(screen.getByText(/no session started and no model was called/)).toBeTruthy();
+    expect(screen.getByText("checked 4 PRs")).toBeTruthy();
+    expect(screen.getByText(/First check · exit 0/)).toBeTruthy();
   });
 });

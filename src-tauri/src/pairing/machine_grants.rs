@@ -150,13 +150,15 @@ impl PairingManager {
         }
     }
 
-    /// The runtime's code for `grant`, sealed. Blocking: runtime IPC.
+    /// The runtime's code for `grant`, sealed. Blocking: runtime IPC. No one
+    /// at this Mac asked, so a runtime that cannot verify the window is never
+    /// restarted for it: Settings → Machines offers the restart (PRO-486).
     fn runtime_offer(&self, grant: &AccountPairingGrant, generation: u64) -> Result<AccountPairingEnvelope> {
         if !self.machine_operating() {
             bail!("other computers may not operate this Mac now");
         }
         let runtime = self.runtime.lock().unwrap().clone().context("the local runtime is unavailable")?;
-        let created = runtime.machine_host(wire::CREATE_CODE, json!({ "grantRequestId": grant.grant_request_id }))?;
+        let created = runtime.machine_host_unattended(wire::CREATE_CODE, json!({ "grantRequestId": grant.grant_request_id }))?;
         let created: wire::CreatedCode = serde_json::from_value(created).context("decode the runtime's code")?;
         let keypair = self.host_key(false)?;
         machine_code_envelope(grant, generation, &created.code, keypair.public())
