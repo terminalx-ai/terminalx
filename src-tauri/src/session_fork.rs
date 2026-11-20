@@ -351,6 +351,20 @@ pub(crate) fn non_worktree_fork_note(scratch_copy: Option<&std::io::Result<()>>)
     }
 }
 
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let dest = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &dest)?;
+        } else {
+            std::fs::copy(e.path(), dest)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod fork_notice_tests {
     use super::*;
@@ -412,18 +426,4 @@ mod fork_notice_tests {
         assert!(note.contains("copying the current files failed") && note.contains("may be incomplete"));
         assert!(note.contains("not restored to this turn"));
     }
-}
-
-pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)? {
-        let e = e?;
-        let dest = to.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            copy_dir(&e.path(), &dest)?;
-        } else {
-            std::fs::copy(e.path(), dest)?;
-        }
-    }
-    Ok(())
 }
