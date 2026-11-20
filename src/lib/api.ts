@@ -43,7 +43,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
-import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, AutomationEventSource, SourceMatch } from "@/types/automations";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
@@ -2130,6 +2130,8 @@ export const automationsApi = {
   issueStates: () => invoke<AutomationIssueState[]>("automation_issue_states"),
   issuePreview: (projectPath: string, repo: string, query: string) =>
     invoke<Issue[]>("automation_issue_preview", { projectPath, repo, query }),
+  sourcePreview: (projectPath: string, source: AutomationEventSource) =>
+    invoke<SourceMatch[]>("automation_source_preview", { projectPath, source }),
   create: (input: AutomationInput) => invoke<Automation>("automation_create", { input }),
   update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
   remove: (id: string) => invoke<void>("automation_delete", { id }),

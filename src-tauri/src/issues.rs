@@ -183,7 +183,7 @@ pub(crate) fn gh() -> Result<Command> {
     Ok(c)
 }
 
-fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(gh_dir(cwd)).args(args);
     let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).with_context(|| format!("gh {}", args.join(" ")))?;

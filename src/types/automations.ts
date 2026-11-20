@@ -42,6 +42,61 @@ export interface AutomationIssueTrigger {
   report: AutomationIssueReport;
 }
 
+export type PullRequestEvent = "opened" | "pushed" | "reviewRequested" | "checkFailed";
+
+export interface LinearIssueReport {
+  comment: boolean;
+  moveToStateId?: string | null;
+  moveToStateName?: string | null;
+  commentOnFailure: boolean;
+}
+
+/** A Linear team's issues, optionally narrowed. */
+export interface LinearIssueSource {
+  kind: "linearIssue";
+  teamId: string;
+  teamName?: string | null;
+  /** `open` (the default), `all`, or a Linear workflow state type. */
+  state?: string | null;
+  /** Issues with any of these labels. */
+  labels: string[];
+  /** `me`, `unassigned`, or a Linear user id. */
+  assignee?: string | null;
+  text?: string | null;
+  report: LinearIssueReport;
+}
+
+/** Pull request events in the automation's repository, read with `gh`. */
+export interface PullRequestSource {
+  kind: "githubPullRequest";
+  repo: string;
+  events: PullRequestEvent[];
+  base?: string | null;
+  author?: string | null;
+  /** Pull requests with all of these labels. */
+  labels: string[];
+  /** Only drafts (true), only ready ones (false), or either. */
+  draft?: boolean | null;
+}
+
+/** Open to more kinds later (another bot's event, a watched file, a webhook). */
+export type AutomationEventSource = LinearIssueSource | PullRequestSource;
+
+export interface AutomationEventTrigger {
+  source: AutomationEventSource;
+  pollIntervalMinutes: number;
+  maxRunsPerTick: number;
+}
+
+/** One thing an event source would wake on now. */
+export interface SourceMatch {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string;
+  detail: string;
+}
+
 export type AutomationRunStatus =
   | "pending"
   | "running"
@@ -80,6 +135,8 @@ export interface Automation {
   lastRunAt?: string | null;
   lastOutcome?: AutomationRunStatus | null;
   issueTrigger?: AutomationIssueTrigger | null;
+  /** A Linear issue or pull request source; never set with issueTrigger. */
+  eventTrigger?: AutomationEventTrigger | null;
   created: string;
   modified: string;
 }
@@ -89,7 +146,18 @@ export type AutomationInput = Omit<
   "id" | "nextRunAt" | "lastRunAt" | "lastOutcome" | "created" | "modified"
 >;
 
-export type AutomationTrigger = "scheduled" | "manual" | "issue";
+export type AutomationTrigger = "scheduled" | "manual" | "issue" | "linearIssue" | "pullRequest";
+
+/** The pull request event a run was woken by. */
+export interface AutomationRunPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  head: string;
+  headSha: string;
+  base: string;
+  event: PullRequestEvent;
+}
 
 export interface AutomationUsage {
   inputTokens?: number | null;
@@ -120,6 +188,7 @@ export interface AutomationRun {
   tabId?: string | null;
   worktreeName?: string | null;
   issue?: AutomationIssueRef | null;
+  pullRequest?: AutomationRunPullRequest | null;
   finalMessage?: string | null;
   changedFiles?: number | null;
   usage?: AutomationUsage | null;

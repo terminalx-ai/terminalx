@@ -57,6 +57,14 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
+mod sources;
+pub use sources::{AutomationEventSource, AutomationEventTrigger, SourceMatch};
+
+/// What a Linear issue or pull request source would wake on now (PRO-485).
+pub fn source_preview(project_path: &Path, source: &AutomationEventSource) -> Result<Vec<SourceMatch>> {
+    sources::preview(project_path, source)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleKind {
@@ -221,6 +229,9 @@ pub struct Automation {
     pub last_outcome: Option<AutomationRunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    /// A Linear issue or pull request source (PRO-485); never set with `issue_trigger`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<AutomationEventTrigger>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
     pub created: String,
@@ -266,6 +277,8 @@ pub struct AutomationInput {
     pub run_timeout_minutes: Option<u32>,
     #[serde(default)]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    #[serde(default)]
+    pub event_trigger: Option<AutomationEventTrigger>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
 }
@@ -334,7 +347,12 @@ pub fn definition_from_input(
             bail!("Issue automations need a new worktree per run.");
         }
     }
+    if let Some(trigger) = input.event_trigger.as_ref() {
+        sources::validate(trigger, input.issue_trigger.is_some(), input.workspace)?;
+    }
     let next = if let Some(trigger) = input.issue_trigger.as_ref() {
+        now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
+    } else if let Some(trigger) = input.event_trigger.as_ref() {
         now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
     } else {
         next_run_after(&input.schedule, now)?
@@ -367,6 +385,7 @@ pub fn definition_from_input(
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
         issue_trigger: input.issue_trigger,
+        event_trigger: input.event_trigger,
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -384,6 +403,8 @@ pub enum AutomationTrigger {
     Scheduled,
     Manual,
     Issue,
+    LinearIssue,
+    PullRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1320,6 +1341,9 @@ fn spawn_issue_report(
     run_id: String,
     failed: bool,
 ) {
+    if automation_store::get(&automation_id).is_ok_and(|automation| automation.event_trigger.is_some()) {
+        return sources::spawn_report(app, automation_id, run_id, failed);
+    }
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("automation-issue-report".into())
@@ -1581,8 +1605,11 @@ fn emit_issue_state(app: &impl AutomationHost, automation_id: &str, state: &auto
 pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
     automation_store::list()?
         .into_iter()
-        .filter(|automation| automation.issue_trigger.is_some())
+        .filter(|automation| automation.issue_trigger.is_some() || automation.event_trigger.is_some())
         .map(|automation| {
+            if automation.event_trigger.is_some() {
+                return sources::public_state(&automation.id);
+            }
             let state = automation_store::load_seen(&automation.id)?.unwrap_or_default();
             Ok(public_issue_state(&automation.id, &state))
         })
@@ -1732,6 +1759,12 @@ fn evaluate(app: &impl AutomationHost) -> Result<()> {
         if automation.issue_trigger.is_some() {
             if let Err(error) = evaluate_issue(app, &automation, now) {
                 log::warn!("issue automation {}: {error:#}", automation.id);
+            }
+            continue;
+        }
+        if automation.event_trigger.is_some() {
+            if let Err(error) = sources::evaluate(app, &automation, now) {
+                log::warn!("event automation {}: {error:#}", automation.id);
             }
             continue;
         }
@@ -1885,6 +1918,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            event_trigger: None,
             pipeline: None,
             created: "2026-09-01T00:00:00Z".into(),
             modified: "2026-09-01T00:00:00Z".into(),

@@ -598,3 +598,32 @@ describe("archiving a run when it completes", () => {
     expect(screen.queryByText("Archived")).toBeNull();
   });
 });
+
+describe("event trigger sources", () => {
+  it("saves a GitHub pull request trigger from the picker and shows its pull request in the run history", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    expect(screen.getByRole("radio", { name: "Linear issue" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub pull request" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "acme/widgets" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Review pushes" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Review #{{number}}." } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review pushes" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({
+      issueTrigger: null,
+      workspace: "newWorktree",
+      eventTrigger: expect.objectContaining({ source: expect.objectContaining({ kind: "githubPullRequest", repo: "acme/widgets", events: ["opened", "pushed"] }) }),
+    }));
+    expect(screen.getByText("GitHub pull requests in acme/widgets: opened, new commits pushed, checked every 5 min")).toBeTruthy();
+  });
+
+  it("links a pull request run to its pull request", async () => {
+    automationStore.runs = { "automation-1": [run({ trigger: "pullRequest", pullRequest: { number: 12, title: "Add cache", url: "https://github.com/acme/widgets/pull/12", head: "cache", headSha: "abc", base: "main", event: "pushed" } })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(await screen.findByText("Pushed · Add cache"));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/acme/widgets/pull/12");
+  });
+});

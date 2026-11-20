@@ -2079,6 +2079,14 @@ pub async fn automation_issue_preview(project_path: String, repo: String, query:
         .map_err(err)?
 }
 
+/// What a Linear issue or pull request trigger would wake on now (PRO-485).
+#[tauri::command]
+pub async fn automation_source_preview(project_path: String, source: crate::automations::AutomationEventSource) -> CmdResult<Vec<crate::automations::SourceMatch>> {
+    github_work(move || crate::automations::source_preview(Path::new(&project_path), &source).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 pub async fn automation_create(state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
     let sessions = state.sessions().map_err(err)?;
