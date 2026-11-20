@@ -448,13 +448,22 @@ fn model_list(entry: Option<&Value>) -> Option<Vec<String>> {
 /// is listed without a key, and Disconnect removes it. A catalogue provider's
 /// address is a gateway instead, and stays.
 ///
-/// Without the catalogue (`catalog` empty) only a server with a name counts:
-/// OpenCode's docs give a hand-made provider one, and TerminalX never writes
-/// one for a gateway, so a gateway whose keys are gone doesn't look connected.
+/// Without the catalogue (`catalog` empty) the providers models.dev listed
+/// when TerminalX was built stand in for it, as OpenCode's own snapshot does
+/// for OpenCode: a gateway whose keys are gone doesn't look connected, and a
+/// hand-made server is listed with or without a name.
 fn own_server(id: &str, entry: &Value, catalog: &Map<String, Value>) -> bool {
     let server = entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some();
-    let named = entry.get("name").and_then(Value::as_str).is_some_and(|name| !name.trim().is_empty());
-    server && (id == OLLAMA || if catalog.is_empty() { named } else { !catalog.contains_key(id) })
+    server && (id == OLLAMA || if catalog.is_empty() { !known_provider(id) } else { !catalog.contains_key(id) })
+}
+
+/// The provider ids in models.dev's list, one per line, taken from OpenCode's
+/// `models.json` cache (2026-11-07). Refresh it with
+/// `python3 -c "import json,sys; print('\n'.join(sorted(json.load(open(sys.argv[1])))))" ~/.cache/opencode/models.json > provider_ids.txt`.
+const KNOWN_PROVIDERS: &str = include_str!("provider_ids.txt");
+
+fn known_provider(id: &str) -> bool {
+    KNOWN_PROVIDERS.lines().any(|known| known == id)
 }
 
 fn connected(config: &Map<String, Value>, auth: &Map<String, Value>, catalog: &Map<String, Value>) -> Vec<Connected> {
@@ -648,12 +657,16 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
     let catalogue = catalog_value(paths, false);
     let remove_server = maybe_server && match &catalogue {
         Ok(catalog) => own_server(id, &entry, catalog),
-        // Without the catalogue a hand-made server can't be told from a gateway, which must
-        // stay: the keys still go, the address and SDK are left for a later Disconnect.
+        // Without the catalogue a hand-made server can't be told for sure from a gateway, which
+        // must stay: a known provider's keys still go, the address and SDK are left for a later
+        // Disconnect.
         Err(_) => id == OLLAMA,
     };
+    // The list shows a server the built-in ids don't know as one of its own. Removing its keys
+    // alone would leave it listed, and its address may yet be a gateway of a newer provider.
+    let listed_as_server = catalogue.is_err() && !remove_server && own_server(id, &entry, &Map::new());
     let edits_config = has_key || remove_server;
-    if !in_auth && !edits_config {
+    if listed_as_server || (!in_auth && !edits_config) {
         if let (Err(problem), true) = (&catalogue, maybe_server) {
             return Err(format!("{problem} Without it TerminalX can’t tell whether {id}’s address is a server set up by hand or a gateway to keep, so nothing was removed. Try again once OpenCode has its provider list, or remove it from {} yourself.", shown(&config.path)));
         }
@@ -677,7 +690,7 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
             if let Err(problem) = update_auth(paths, |auth| { auth.remove(id); }) {
                 return Err(match crate::store::write_atomic(&config.path, &before) {
                     Ok(()) => format!("{problem} Nothing was disconnected."),
-                    Err(error) => format!("{problem} The config file changed already and couldn’t be put back ({error:#}); connect {id} again to restore it."),
+                    Err(error) => format!("{problem} The config file changed already and couldn’t be put back ({error:#}); {}", restore_hint(id, &entry, remove_server, &config.path)),
                 });
             }
         }
@@ -685,6 +698,26 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
         update_auth(paths, |auth| { auth.remove(id); })?;
     }
     Ok(overview_in(paths, false))
+}
+
+/// How to undo a Disconnect whose config edit stuck while its key stayed in
+/// auth.json. The form connects a catalogue provider or Ollama again; a server
+/// set up by hand it can't, so its SDK and address are named instead (never
+/// its key, which auth.json still holds).
+fn restore_hint(id: &str, entry: &Value, removed_server: bool, config_path: &Path) -> String {
+    if !removed_server || id == OLLAMA { return format!("connect {id} again to restore it."); }
+    let npm = entry.get("npm").and_then(Value::as_str).unwrap_or_default();
+    let base = entry.pointer("/options/baseURL").and_then(Value::as_str).unwrap_or_default();
+    // An address may carry a sign-in (https://user:secret@host); the message never shows it.
+    let base = match url::Url::parse(base) {
+        Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+            let _ = url.set_password(None);
+            let _ = url.set_username("");
+            url.to_string()
+        }
+        _ => base.to_owned(),
+    };
+    format!("to restore it, set {id}’s \"npm\" back to \"{npm}\" and its \"options\" › \"baseURL\" to \"{base}\" in {}.", shown(config_path))
 }
 
 fn valid_model(model: &str) -> Result<&str, String> {
@@ -1203,12 +1236,62 @@ mod tests {
         let (_dir, paths) = paths();
         std::fs::remove_file(paths.catalog_file()).unwrap();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
-        let config = json!({"provider": {"lmstudio": {"npm": "@ai-sdk/openai-compatible", "name": "LM Studio", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "models": {"qwen3": {}}}}}).to_string();
+        let config = json!({"provider": {"lab-server": {"npm": "@ai-sdk/openai-compatible", "name": "Lab server", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "models": {"qwen3": {}}}}}).to_string();
         std::fs::write(paths.config_file(), &config).unwrap();
-        assert!(overview_in(&paths, false).connected.iter().any(|provider| provider.id == "lmstudio"), "a named server is listed without the catalogue");
-        let problem = disconnect_in(&paths, "lmstudio").unwrap_err();
+        assert!(overview_in(&paths, false).connected.iter().any(|provider| provider.id == "lab-server"), "a hand-made server is listed without the catalogue");
+        let problem = disconnect_in(&paths, "lab-server").unwrap_err();
         assert!(problem.contains("nothing was removed"), "{problem}");
         assert_eq!(std::fs::read_to_string(paths.config_file()).unwrap(), config);
+    }
+
+    #[test]
+    fn without_the_catalogue_a_server_without_a_name_is_still_listed_and_offered() {
+        let (_dir, paths) = paths();
+        std::fs::remove_file(paths.catalog_file()).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.config_file(), json!({"provider": {
+            "lab-server": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "whitelist": ["qwen3"], "models": {"qwen3": {"name": "Qwen 3"}}},
+            "openrouter": {"npm": "@ai-sdk/openai-compatible", "name": "My gateway", "options": {"baseURL": "https://gateway.example.internal/v1"}, "whitelist": ["openai/gpt-5"]},
+        }}).to_string()).unwrap();
+        let overview = overview_in(&paths, false);
+        assert!(overview.catalog_problem.is_some(), "the test runs without a provider list");
+        assert_eq!(overview.connected.iter().map(|provider| provider.id.as_str()).collect::<Vec<_>>(), vec!["lab-server"], "a known provider's keyless gateway stays unlisted, named or not");
+        assert_eq!(overview.models.iter().map(|model| (model.id.as_str(), model.name.as_str())).collect::<Vec<_>>(), vec![("lab-server/qwen3", "Qwen 3")]);
+    }
+
+    #[test]
+    fn without_the_catalogue_disconnect_of_a_listed_server_with_a_key_changes_nothing() {
+        let (_dir, paths) = paths();
+        std::fs::remove_file(paths.catalog_file()).unwrap();
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let config = json!({"provider": {"lab-server": {"npm": "@ai-sdk/openai-compatible", "name": "Lab server",
+            "options": {"baseURL": "https://lab.example.internal/v1", "apiKey": "lab-0123456789abcdef"}, "whitelist": ["qwen3"], "models": {"qwen3": {}}}}}).to_string();
+        std::fs::write(paths.config_file(), &config).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let auth = json!({"lab-server": {"type": "api", "key": "lab-fedcba9876543210"}}).to_string();
+        std::fs::write(paths.auth_file(), &auth).unwrap();
+        assert!(overview_in(&paths, false).connected.iter().any(|provider| provider.id == "lab-server"));
+        let problem = disconnect_in(&paths, "lab-server").unwrap_err();
+        assert!(problem.contains("nothing was removed"), "{problem}");
+        assert_eq!((std::fs::read_to_string(paths.config_file()).unwrap(), std::fs::read_to_string(paths.auth_file()).unwrap()), (config, auth), "no success while it stays listed");
+    }
+
+    #[test]
+    fn a_stuck_disconnect_says_how_to_restore_what_the_form_cannot() {
+        let config = Path::new("/home/someone/.config/opencode/opencode.json");
+        let gateway = json!({"options": {"baseURL": "https://gateway.example.internal/v1", "apiKey": "gw-0123456789abcdef"}});
+        assert_eq!(restore_hint("openrouter", &gateway, false, config), "connect openrouter again to restore it.");
+        assert_eq!(restore_hint(OLLAMA, &json!({"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": OLLAMA_URL}}), true, config), "connect ollama again to restore it.");
+        let server = json!({"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "https://lab:secret-0123456789@lab.example.internal/v1", "apiKey": "lab-0123456789abcdef"}});
+        let hint = restore_hint("lab-server", &server, true, config);
+        assert!(hint.contains("\"@ai-sdk/openai-compatible\"") && hint.contains("\"https://lab.example.internal/v1\""), "{hint}");
+        assert!(!hint.contains("secret") && !hint.contains("lab-0123456789abcdef") && !hint.contains("connect lab-server again"), "{hint}");
+    }
+
+    #[test]
+    fn the_built_in_provider_ids_are_one_per_line() {
+        assert!(known_provider("openrouter") && known_provider("anthropic") && !known_provider("lab-server") && !known_provider(""));
+        assert!(KNOWN_PROVIDERS.lines().all(|id| !id.is_empty() && id.trim() == id));
     }
 
     #[cfg(unix)]
