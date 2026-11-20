@@ -950,10 +950,10 @@ impl ControlService {
     /// Bots (`bots`, PRO-466): hire, list, rename, pause and delete them. With
     /// Settings → Experimental → Bots off every one answers `bots_off`.
     ///
-    /// Every caller is recorded as the owner today: a pause made here is by
-    /// `owner`, and anyone who can reach this socket can resume any bot. Once
-    /// sessions carry a bot reference (PRO-468), a call from a bot's own
-    /// session must be recorded as that bot, and a bot must not resume itself.
+    /// A pause from a bot's own chat (PRO-468) is recorded as that bot's, and
+    /// a bot's chat may not resume that bot, nor every bot at once: a paused
+    /// bot never resumes itself. Any other caller is the owner. Like every
+    /// caller here, the session is what the command says it runs in.
     fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
@@ -976,23 +976,32 @@ impl ControlService {
             }
         };
         let shown = |bot: &bots::Bot| json!({"bot": bot, "home": bots::home(bot)});
+        let calling_bot = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).and_then(|session| bots::chat::session_bot(&session)).map(|bot| bot.id);
+        let by = calling_bot.clone().unwrap_or_else(|| bots::OWNER.into());
+        let no_self_resume = || ControlError::new("forbidden", "A bot does not resume itself. Only your owner resumes you.", None::<String>);
         match command {
             "bots.list" => Ok(json!(bots::listing().map_err(failed)?)),
             "bots.show" => Ok(shown(&named()?)),
-            "bots.create" => Ok(shown(&bots::create(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)),
+            "bots.create" => Ok(shown(&bots::chat::hire(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)),
             "bots.rename" => {
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
                 Ok(json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?}))
             }
-            // Recorded as the owner's; see above.
-            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, bots::OWNER).map_err(failed)?})),
-            "bots.resume" => Ok(json!({"bot": bots::resume(sink, &named()?.id).map_err(failed)?})),
+            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?})),
+            "bots.resume" => {
+                let bot = named()?;
+                if calling_bot.as_deref() == Some(bot.id.as_str()) {
+                    return Err(no_self_resume());
+                }
+                Ok(json!({"bot": bots::resume(sink, &bot.id).map_err(failed)?}))
+            }
             "bots.delete" => {
                 let bot = named()?;
                 bots::delete(sink, &bot.id).map_err(failed)?;
                 Ok(json!({"deleted": bot.id, "name": bot.name}))
             }
-            "bots.pauseAll" => Ok(json!(bots::pause_all(sink, bots::OWNER).map_err(failed)?)),
+            "bots.pauseAll" => Ok(json!(bots::pause_all(sink, &by).map_err(failed)?)),
+            _ if calling_bot.is_some() => Err(no_self_resume()),
             _ => Ok(json!(bots::resume_all(sink).map_err(failed)?)),
         }
     }
@@ -3063,6 +3072,30 @@ mod tests {
         for (status, running) in [(TabStatus::Completed, true), (TabStatus::Idle, true), (TabStatus::Idle, false)] {
             assert_eq!(open_turn(&view(status, false, false, running)), None, "{status:?} {running}");
         }
+    }
+
+    /// PRO-468: a pause run from a bot's own chat is that bot's, and that
+    /// chat cannot resume it, nor every bot at once. The owner still can.
+    #[test]
+    fn a_bot_chat_pauses_as_the_bot_and_never_resumes_it() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id && bot.home)).expect("a hire makes the home chat");
+        let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+
+        assert_eq!(ask("bots.pause", json!({"bot": "atlas", "caller": caller})).unwrap()["bot"]["paused"]["by"], id);
+        for (command, params) in [("bots.resume", json!({"bot": "atlas", "caller": caller})), ("bots.resumeAll", json!({"caller": caller}))] {
+            let refused = ask(command, params).unwrap_err();
+            assert_eq!(refused.code, "forbidden", "{command}");
+        }
+        assert_eq!(crate::bots::get(&id).unwrap().paused.unwrap().by, id);
+        assert_eq!(ask("bots.pauseAll", json!({"caller": caller})).unwrap()["bots"][0]["paused"]["by"], id, "already paused: who paused it first stands");
+        assert!(ask("bots.resume", json!({"bot": "atlas"})).unwrap()["bot"].get("paused").is_none());
     }
 
     /// `terminalx bots …` (PRO-466): refused while the experimental switch

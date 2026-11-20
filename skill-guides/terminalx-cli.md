@@ -1899,7 +1899,9 @@ for them.
 
 A bot is a standing role with a name: a record in `$TERMINALX_HOME/bots.json` and a home folder
 `$TERMINALX_HOME/bots/<id>/` holding `ROLE.md` (its standing instructions), `MEMORY.md` and
-`memory/`. These commands keep the records; they start no session and schedule nothing.
+`memory/`. These commands keep the records and schedule nothing. `create` also makes the bot's
+home chat: a quick chat that runs in its home folder, whose agent is given the bot's `ROLE.md`,
+the first 200 lines of its `MEMORY.md` and a few fixed rules each time it starts.
 
 ```text
 terminalx bots list --json
@@ -1928,7 +1930,10 @@ terminalx bots delete <bot> --json
   newer app's). Those are kept as they are and never overwritten.
 - `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`); `resume` clears
   it. Pausing a paused bot keeps the first record. `pause-all` pauses every bot not already
-  paused and `resume-all` resumes every bot. Today every caller is recorded as `owner`.
+  paused and `resume-all` resumes every bot. Run from a bot's own chat, `pause` and `pause-all`
+  are recorded as that bot (its id in `by`), and that chat's `resume` of itself and its
+  `resume-all` are refused with `forbidden`: a paused bot never resumes itself. Anywhere else
+  the caller is recorded as `owner`.
 - `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`,
   with the record beside it as `bot.json`. Nothing in it is erased.
 - Refusals: `invalid_arguments` for a role, name or value the app does not accept;

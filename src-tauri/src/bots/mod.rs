@@ -7,6 +7,7 @@
 //! Everything is behind Settings → Experimental → Bots. With the switch off
 //! every operation here refuses, and nothing about the app changes.
 
+pub mod chat;
 pub mod templates;
 
 use std::collections::BTreeMap;
@@ -113,7 +114,6 @@ impl BotAccess {
 
     /// The level this build acts on: one it does not know counts as the
     /// most restrictive one it knows.
-    #[allow(dead_code)] // Nothing acts on access yet; the bot's sessions do from PRO-468.
     pub fn effective(&self) -> Self {
         match self {
             Self::Other(_) => Self::ReadReport,
@@ -167,10 +167,9 @@ string_serde!(BotRunsOn);
 #[serde(rename_all = "camelCase")]
 pub struct BotPause {
     pub at: String,
-    /// [`OWNER`], or the id of the bot that paused it. Today every caller is
-    /// the owner: the app and the `terminalx` CLI both record `owner`. Once a
-    /// session carries a bot reference (PRO-468), a bot's own pause must be
-    /// recorded as that bot, and a bot must not be able to resume itself.
+    /// [`OWNER`], or the id of the bot that paused it: `terminalx bots pause`
+    /// run from a bot's own chat is that bot's (PRO-468), and that chat may
+    /// not resume it.
     pub by: String,
     /// What a newer build records about a pause (its source, a reason) survives a save by this one.
     #[serde(flatten, default)]
@@ -623,12 +622,16 @@ pub fn home(bot: &Bot) -> Option<std::path::PathBuf> {
 /// The app's commands, as the runtime that owns the store answers them
 /// (`runtime.session.bots`). A change made in the app is by the owner.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Value> {
+    if let Some(answer) = chat::call(sink, operation, params) {
+        return answer;
+    }
     let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
     Ok(match operation {
         "list" => serde_json::to_value(listing()?)?,
         "get" => serde_json::to_value(get(string("id")?)?)?,
         "templates" => serde_json::to_value(role_templates()?)?,
-        "create" => serde_json::to_value(create(sink, string("roleTemplateId")?, string("name")?)?)?,
+        // A hire makes the bot's home chat too (PRO-468).
+        "create" => serde_json::to_value(chat::hire(sink, string("roleTemplateId")?, string("name")?)?)?,
         "update" => {
             let patch: BotPatch = serde_json::from_value(params["patch"].clone()).map_err(|error| refused(format!("Invalid change: {error}")))?;
             serde_json::to_value(update(sink, string("id")?, patch)?)?

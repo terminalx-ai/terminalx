@@ -86,6 +86,15 @@ fn computer_launch(
     Ok((guest.env, crate::container_vm::VmLaunch { args: guest.args, note: None }))
 }
 
+/// The one appended prompt a terminal launch of `tab` gives its agent: the
+/// workspace's prompts, the desktop tools' note, a sparse checkout's folders
+/// and, in a bot's chat, the bot's rules, role and memory as they are now.
+pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> String {
+    let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
+    let bot = crate::bots::chat::launch_note(entry, tab);
+    crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()])
+}
+
 #[derive(Clone)]
 pub struct PendingAsk {
     pub tool_use_id: String,
@@ -6311,11 +6320,11 @@ impl SessionManager {
             }
         }
         // One appended prompt for everything the agent is told: the
-        // workspace's prompts, the Local VM's note, and which folders a
-        // sparse checkout has (`sparse_checkout.rs`). A second
-        // `--append-system-prompt` or `developer_instructions` would replace the first.
-        let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
-        let prompt = crate::cloud_config::prompt_args(&tab.harness, &[config.prompt.as_deref(), computer.note, sparse.as_deref()]);
+        // workspace's prompts, the Local VM's note, which folders a sparse
+        // checkout has (`sparse_checkout.rs`), and a bot's role and memory
+        // (`bots::chat`). A second `--append-system-prompt` or
+        // `developer_instructions` would replace the first.
+        let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note);
         let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);

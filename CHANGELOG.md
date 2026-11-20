@@ -9,6 +9,14 @@
   name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
   deleting it moves that folder, with its record, to `trash/bots/`. No screens
   yet (PRO-466).
+- Bots (experimental): each bot has a home chat, made at hire, that runs in its
+  home folder; its agent is given the bot's role, the first 200 lines of its
+  memory and a few fixed rules each time it starts, so an edited `ROLE.md`
+  reaches the next conversation. A bot's view has its header and tabs, with
+  Chat filled: its chats and the sessions they started beside the transcript.
+  Its chats leave the sidebar's lists. A paused bot still answers and says it
+  is paused; a pause from a bot's own chat is recorded as that bot's, and it
+  cannot resume itself (PRO-468).
 
 ## 0.2.37
 

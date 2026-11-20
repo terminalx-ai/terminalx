@@ -593,7 +593,19 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
     create_quick_chat_entry_on(req, None)
 }
 
+/// Create a quick chat whose entry `mark` finishes before it is first saved
+/// (a bot's chat, PRO-468, carries its bot from its first moment), and tell listeners.
+pub(crate) fn create_quick_chat_marked(sink: &dyn EventSink, req: NewQuickChat, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    let entry = create_quick_chat_entry_marked(req, None, mark)?;
+    sink.emit("session_created", &entry);
+    Ok(entry)
+}
+
 fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
+    create_quick_chat_entry_marked(req, account, |_| {})
+}
+
+fn create_quick_chat_entry_marked(req: NewQuickChat, account: Option<&str>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
@@ -635,6 +647,7 @@ fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Resul
         };
         let mut entry = entry;
         inherit_run_limits(&mut entry);
+        mark(&mut entry);
         index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
         Ok(entry)
     })();

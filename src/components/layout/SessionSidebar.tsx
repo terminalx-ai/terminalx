@@ -37,6 +37,8 @@ import {
 import { openSessionShare } from "@/lib/localSharing";
 import { showFloatingWindow } from "@/lib/floating";
 import { isQuickChat } from "@/lib/quickChats";
+import { listedUnderBot } from "@/lib/botChats";
+import { useBotStore } from "@/lib/bots";
 import { useShortcutKeys } from "@/lib/hotkeys";
 import { archiveWithUndo } from "@/lib/archiveNotices";
 import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
@@ -264,9 +266,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const pipelines = useIssuePipelines();
   const reviewers = useMemo(() => legacyReviewerSessions(pipelines, store.sessions), [pipelines, store.sessions]);
   // Unread or Needs you: only the conversations that pass (and the open one), and so only their projects.
+  // A bot's chats are listed under the bot (PRO-468), while Bots is on and the bot is there to list them.
+  const { bots } = useBotStore();
   const listed = useMemo(
-    () => store.sessions.filter((session) => !reviewers.has(session.id) && (!filter.active || filter.shows(session.id))),
-    [filter, store.sessions, reviewers],
+    () => store.sessions.filter((session) => !reviewers.has(session.id) && !listedUnderBot(session, bots) && (!filter.active || filter.shows(session.id))),
+    [filter, store.sessions, reviewers, bots],
   );
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
   const showArchived = store.showArchived && filter.filter === "all";

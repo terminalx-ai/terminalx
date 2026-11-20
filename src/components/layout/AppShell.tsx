@@ -82,7 +82,9 @@ import { bootStatus, useStatus } from "@/lib/status";
 import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
-import { bootBots, shutBots } from "@/lib/bots";
+import { bootBots, shutBots, useBotStore } from "@/lib/bots";
+import { botViewFor } from "@/lib/botChats";
+import { BotView } from "@/components/bots/BotView";
 import { bootIssuePipelines } from "@/lib/issuePipeline";
 import { PanelPresence } from "./PanelPresence";
 import { RightPanel } from "@/components/layout/RightPanel";
@@ -327,11 +329,13 @@ export function AppShell() {
 
   const sidebarOpen = prefs.sidebarOpen;
   const selected = store.sessions.find((s) => s.id === store.selectedSessionId) ?? null;
+  const { bots } = useBotStore();
   // Every paired machine stays attached while the window is open (PRO-345). With none paired this reads
   // the empty list and connects to nothing (PRO-360).
   const experimentalSwitches = useExperimentalSettings();
   // Bots (PRO-466) are read and listened for only while Settings → Experimental → Bots is on.
   const botsOn = experimentalSwitches?.bots === true;
+  const botView = botViewFor(botsOn, bots, selected, store);
   useEffect(() => {
     if (botsOn) void bootBots();
     else shutBots();
@@ -459,6 +463,11 @@ export function AppShell() {
                   <CloudSessionHost sessionKey={cloudKey} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} />
                 </ErrorBoundary>
               </main>
+            ) : botView ? (
+              // A bot's view (PRO-468): its header, tabs and chats, a selected chat of the bot's open in it.
+              <ErrorBoundary key={botView.botId} label="the bot">
+                <BotView botId={botView.botId} chatId={botView.chatId} sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} titlebarInset={TITLEBAR_INSET} />
+              </ErrorBoundary>
             ) : selected ? (
               <main className={MAIN}>
                 <ErrorBoundary key={branchSessionsAsTabs(prefs) ? `${workspaceKey(selected, store.chatsPath)}:${conversationBranch(selected, store.chatsPath, store.workspaces)}` : selected.id} label="the session">

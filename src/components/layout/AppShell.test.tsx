@@ -110,8 +110,10 @@ vi.mock("@/lib/hotkeys", () => ({
 const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, bots: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
 vi.mock("@/lib/experimentalSettings", () => ({ getExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }), useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }) }));
 // PRO-466: the bots' store is booted only while Settings → Experimental → Bots is on.
-const botStore = vi.hoisted(() => ({ bootBots: vi.fn(async () => {}), shutBots: vi.fn() }));
-vi.mock("@/lib/bots", () => botStore);
+const botStore = vi.hoisted(() => ({ bootBots: vi.fn(async () => {}), shutBots: vi.fn(), listed: [] as { id: string }[] }));
+vi.mock("@/lib/bots", () => ({ bootBots: botStore.bootBots, shutBots: botStore.shutBots, useBotStore: () => ({ bots: botStore.listed }) }));
+// PRO-468: a bot's view, with the chat it shows.
+vi.mock("@/components/bots/BotView", () => ({ BotView: ({ botId, chatId }: { botId: string; chatId: string | null }) => <main data-testid="bot-view" data-bot={botId} data-chat={chatId ?? ""} /> }));
 // PRO-345, PRO-360: every paired machine stays attached while the window is open.
 const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
 vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
@@ -533,6 +535,53 @@ describe("the bots' store (PRO-466)", () => {
     rerender(<AppShell />);
     expect(botStore.shutBots).toHaveBeenCalledTimes(1);
     expect(botStore.bootBots).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a bot's view (PRO-468)", () => {
+  const home = { id: "home", kind: "quick", projectPath: "/scratch/home", cwd: "/bots/b1", title: "Home chat", tabs: [], activeTab: null, bot: { id: "b1", home: true } };
+  afterEach(() => {
+    runShortcut.bots = false;
+    botStore.listed = [];
+    sessionStore.sessions = [];
+    sessionStore.selectedSessionId = null;
+    (sessionStore as { selectedBotId?: string | null }).selectedBotId = null;
+    sessionStore.view = "new";
+  });
+
+  it("shows a selected chat of a listed bot in its bot's view", () => {
+    runShortcut.bots = true;
+    botStore.listed = [{ id: "b1" }];
+    sessionStore.sessions = [home as never];
+    sessionStore.selectedSessionId = "home" as never;
+    sessionStore.view = "welcome";
+    render(<AppShell />);
+    expect(screen.getByTestId("bot-view").getAttribute("data-bot")).toBe("b1");
+    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("home");
+    expect(screen.queryByTestId("session")).toBeNull();
+  });
+
+  it("opens a bot's view on its home chat from openBot", () => {
+    runShortcut.bots = true;
+    botStore.listed = [{ id: "b1" }];
+    sessionStore.view = "bot" as never;
+    (sessionStore as { selectedBotId?: string | null }).selectedBotId = "b1";
+    render(<AppShell />);
+    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("");
+  });
+
+  it("shows the chat as an ordinary session while Bots is off, or when its bot is not listed", () => {
+    sessionStore.sessions = [home as never];
+    sessionStore.selectedSessionId = "home" as never;
+    sessionStore.view = "welcome";
+    const { unmount } = render(<AppShell />);
+    expect(screen.queryByTestId("bot-view")).toBeNull();
+    expect(screen.getByTestId("session")).toBeTruthy();
+    unmount();
+    runShortcut.bots = true;
+    render(<AppShell />);
+    expect(screen.queryByTestId("bot-view")).toBeNull();
+    expect(screen.getByTestId("session")).toBeTruthy();
   });
 });
 

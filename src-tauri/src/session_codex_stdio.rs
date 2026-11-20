@@ -558,13 +558,15 @@ impl SessionManager {
         }
         let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
-        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`).
-        let computer = {
+        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`),
+        // and in a bot's chat the bot's rules, role and memory (`bots::chat`).
+        let (computer, bot) = {
             let entry = index::get(session)?;
             let retained = entry.tab(tab).context("This tab no longer exists")?;
-            crate::computer_targets::launch_args(session, retained)?
+            (crate::computer_targets::launch_args(session, retained)?, crate::bots::chat::launch_note(&entry, retained))
         };
-        let mut native = native_launch(&grant, &config, &computer, sparse.as_deref());
+        let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
+        let mut native = native_launch(&grant, &config, &computer, note.as_deref());
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {

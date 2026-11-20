@@ -6240,6 +6240,18 @@ pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String
     bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text})).await
 }
 
+/// The bot's home chat (PRO-468), made again when it is missing.
+#[tauri::command]
+pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "homeChat", serde_json::json!({"id": id})).await
+}
+
+/// Another conversation with the bot, in its home folder.
+#[tauri::command]
+pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "newChat", serde_json::json!({"id": id})).await
+}
+
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
 
 /// Settings → Orchestrator: the app-wide values and each project's own.
