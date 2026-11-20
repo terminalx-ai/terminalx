@@ -165,7 +165,8 @@ impl Sessions {
         self.call("runtime.session.automationDelete", json!({"id":id}))
     }
 
-    /// Room for an automation's longest first check plus the usual call.
+    /// Room for an automation's longest first check (Try it waits for it)
+    /// plus the usual call.
     fn precheck_timeout() -> std::time::Duration {
         std::time::Duration::from_secs(u64::from(crate::automations::precheck::MAX_TIMEOUT_SECONDS) + 120)
     }
@@ -175,8 +176,7 @@ impl Sessions {
     }
 
     pub fn run_automation(&self, id: &str) -> Result<crate::automations::AutomationRun> {
-        // Run now waits for the automation's first check before its session starts.
-        self.0.call_within("runtime.session.automationRun", json!({"id":id}), Self::precheck_timeout())
+        self.call("runtime.session.automationRun", json!({"id":id}))
     }
 
     pub fn resource_overview(&self) -> Result<Value> {

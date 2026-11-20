@@ -34,6 +34,13 @@ function upsertRun(run: AutomationRun) {
   }
 }
 
+/** A pending run whose first check's result was folded into an earlier record. */
+export function removeRun(automationId: string, runId: string) {
+  const current = state.runs[automationId];
+  if (!current?.some((value) => value.runId === runId)) return;
+  set({ runs: { ...state.runs, [automationId]: current.filter((value) => value.runId !== runId) } });
+}
+
 let booted = false;
 export async function bootAutomations() {
   if (booted) return;
@@ -42,6 +49,7 @@ export async function bootAutomations() {
     await Promise.all([
       listen<Automation[]>("automations_changed", (event) => set({ automations: event.payload, loaded: true })),
       listen<AutomationRun>("automation_run", (event) => upsertRun(event.payload)),
+      listen<{ automationId: string; runId: string }>("automation_run_removed", (event) => removeRun(event.payload.automationId, event.payload.runId)),
       listen<AutomationIssueState>("automation_issue_state", (event) => {
         const value = event.payload;
         set({ issueStates: { ...state.issueStates, [value.automationId]: value } });

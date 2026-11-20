@@ -656,6 +656,33 @@ describe("an automation's first check", () => {
     expect(createAutomation).not.toHaveBeenCalled();
   });
 
+  it("shows no Try it result for a command that changed while it ran", async () => {
+    let answer: (value: ReturnType<typeof trial>) => void = () => {};
+    vi.spyOn(automationsApi, "tryPrecheck").mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    await openNew();
+    fireEvent.click(firstCheck());
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./check.sh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./other.sh" } });
+    answer(trial("proceed", "from the old command"));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Try it" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole("status", { name: "First check result" })).toBeNull();
+    expect(screen.queryByText(/from the old command/)).toBeNull();
+  });
+
+  it("lets the timeout field be cleared while typing and restores it on leaving", async () => {
+    await openNew();
+    fireEvent.click(firstCheck());
+    const timeout = screen.getByRole("spinbutton", { name: "Timeout (seconds)" }) as HTMLInputElement;
+    fireEvent.change(timeout, { target: { value: "" } });
+    expect(timeout.value).toBe("");
+    fireEvent.change(timeout, { target: { value: "45" } });
+    expect(timeout.value).toBe("45");
+    fireEvent.change(timeout, { target: { value: "" } });
+    fireEvent.blur(timeout);
+    expect(timeout.value).toBe("45");
+  });
+
   it("reads a nothing-new run as such, quietly, with its output one click away", async () => {
     automationStore.runs = { "automation-1": [run({
       status: "skippedPrecheck", sessionId: null, tabId: null, worktreeName: null, finalMessage: null, changedFiles: null, reported: null,

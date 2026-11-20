@@ -106,6 +106,7 @@ pub enum AutomationWorkspace {
 #[serde(rename_all = "camelCase")]
 pub struct AutomationPrecheck {
     pub command: String,
+    #[serde(default = "precheck::default_timeout_seconds")]
     pub timeout_seconds: u32,
 }
 
@@ -173,6 +174,9 @@ pub struct AutomationIssueTrigger {
 fn default_poll_interval() -> u32 {
     5
 }
+
+/// The most issue runs one poll may start; the editor offers the same.
+const MAX_RUNS_PER_TICK: u32 = 50;
 
 fn default_max_runs() -> u32 {
     3
@@ -331,6 +335,9 @@ pub fn definition_from_input(
         }
         if trigger.max_runs_per_tick < 1 {
             bail!("Runs per tick must be at least one.");
+        }
+        if trigger.max_runs_per_tick > MAX_RUNS_PER_TICK {
+            bail!("Runs per tick can be at most {MAX_RUNS_PER_TICK}.");
         }
         if input.workspace != AutomationWorkspace::NewWorktree {
             bail!("Issue automations need a new worktree per run.");
@@ -1703,6 +1710,10 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             automation_store::save_seen(&automation.id, &state)?;
         }
         IssueSelection::Dispatch(candidates) => {
+            // An automation's first check gates the whole poll (PRO-484).
+            let Some(candidates) = precheck::gate_poll(app, automation, candidates)? else {
+                return Ok(());
+            };
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
             for issue in candidates {

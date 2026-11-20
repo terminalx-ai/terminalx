@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -31,23 +31,41 @@ export function PrecheckSection({ input, onChange }: { input: AutomationInput; o
   const [trial, setTrial] = useState<PrecheckTrial | null>(null);
   const [trying, setTrying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The timeout as typed: an empty field stays empty until it loses focus.
+  const [timeoutText, setTimeoutText] = useState(String(precheck?.timeoutSeconds ?? PRECHECK_DEFAULT_TIMEOUT));
   const folderReady = input.workspace === "newWorktree" || !!input.sessionId;
+  // A result belongs to the command, timeout and folder it ran with.
+  const key = JSON.stringify([precheck?.command, precheck?.timeoutSeconds, input.projectPath, input.workspace, input.sessionId]);
+  const latest = useRef(key);
+  latest.current = key;
 
-  // A result belongs to the command and folder it ran with.
   useEffect(() => {
     setTrial(null);
     setError(null);
-  }, [precheck?.command, precheck?.timeoutSeconds, input.projectPath, input.workspace, input.sessionId]);
+  }, [key]);
+
+  useEffect(() => {
+    if (precheck && Number(timeoutText) !== precheck.timeoutSeconds) setTimeoutText(String(precheck.timeoutSeconds));
+    // Only an outside change (a reset) rewrites what is being typed.
+  }, [precheck?.timeoutSeconds]);
+
+  const setTimeoutFrom = (text: string) => {
+    if (!precheck) return;
+    const value = Math.round(Number(text));
+    if (text.trim() && Number.isFinite(value)) onChange({ ...precheck, timeoutSeconds: Math.min(PRECHECK_MAX_TIMEOUT, Math.max(1, value)) });
+  };
 
   const tryIt = async () => {
     if (!precheck || !precheck.command.trim()) return;
+    const asked = key;
     setTrying(true);
     setError(null);
     setTrial(null);
     try {
-      setTrial(await automationsApi.tryPrecheck({ projectPath: input.projectPath, workspace: input.workspace, sessionId: input.sessionId ?? null, precheck }));
+      const result = await automationsApi.tryPrecheck({ projectPath: input.projectPath, workspace: input.workspace, sessionId: input.sessionId ?? null, precheck });
+      if (latest.current === asked) setTrial(result);
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (latest.current === asked) setError(errorMessage(cause));
     } finally {
       setTrying(false);
     }
@@ -63,7 +81,10 @@ export function PrecheckSection({ input, onChange }: { input: AutomationInput; o
         <Switch
           aria-label="Run a first check"
           checked={!!precheck}
-          onCheckedChange={(on) => onChange(on ? { command: "", timeoutSeconds: PRECHECK_DEFAULT_TIMEOUT } : null)}
+          onCheckedChange={(on) => {
+            setTimeoutText(String(PRECHECK_DEFAULT_TIMEOUT));
+            onChange(on ? { command: "", timeoutSeconds: PRECHECK_DEFAULT_TIMEOUT } : null);
+          }}
         />
       </label>
       {precheck && (
@@ -88,8 +109,12 @@ export function PrecheckSection({ input, onChange }: { input: AutomationInput; o
                 type="number"
                 min={1}
                 max={PRECHECK_MAX_TIMEOUT}
-                value={precheck.timeoutSeconds}
-                onChange={(event) => onChange({ ...precheck, timeoutSeconds: Math.min(PRECHECK_MAX_TIMEOUT, Math.max(1, Math.round(Number(event.target.value) || PRECHECK_DEFAULT_TIMEOUT))) })}
+                value={timeoutText}
+                onChange={(event) => {
+                  setTimeoutText(event.target.value);
+                  setTimeoutFrom(event.target.value);
+                }}
+                onBlur={() => setTimeoutText(String(precheck.timeoutSeconds))}
                 className={INPUT}
               />
             </label>
