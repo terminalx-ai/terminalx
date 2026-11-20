@@ -237,6 +237,14 @@ export class FakeAgentRuntime implements WorkspaceTransport {
         if (this.toTerminalRefusal) return { id: frame.id, ok: false, error: this.toTerminalRefusal };
         this.tabs = this.tabs.map((tab) => (tab.tabId === params.tabId ? { ...tab, transport: undefined } : tab));
         return ok({ sessionId: params.sessionId, tabId: params.tabId });
+      // A tab closed with `remove` leaves the session (#1325); its process stops with it.
+      case "session.close": {
+        const tabId = String(params.tabId ?? "");
+        this.tabs = this.tabs.filter((tab) => tab.tabId !== tabId);
+        this.sessions = this.sessions.map((session) => (session.id === params.sessionId ? { ...session, tabs: session.tabs.filter((tab) => tab.id !== tabId) } : session));
+        queueMicrotask(() => this.notify("session.tabs", { tabs: this.tabs }));
+        return ok({ sessionId: params.sessionId });
+      }
       case "session.nudge":
       case "session.markRead":
       case "session.unsubscribe":

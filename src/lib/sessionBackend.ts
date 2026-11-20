@@ -91,6 +91,15 @@ export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
   runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
 });
 
+/**
+ * What a cloud workspace session leaves on this computer (#1325, as
+ * MACHINES.md decision 7 does for a machine): browser tabs and orchestration
+ * runs act on the computer a person sits at, and a runtime answers
+ * `browser.*` with `unsupported`. A workspace's port opens in this computer's
+ * browser from Ports and previews.
+ */
+export const REMOTE_LOCAL_ONLY = "Browser tabs and orchestration runs stay on this computer. A workspace's port opens in this computer's browser from Ports and previews.";
+
 /** Why a message cannot be sent again from its place in the chat. */
 export const RESEND_ATTACHMENTS = "This message had attachments, which are not kept to send again. Attach them again in the composer and send it from there.";
 export const RESEND_MISSING = "That message is not in this tab's conversation any more.";

@@ -28,6 +28,7 @@ import type { SessionEntry } from "@/types/session";
 import { ContinuationDialog } from "./ContinuationDialog";
 import { followedLayout, layoutOf, tabKey, useTabState, workspaceKey } from "@/lib/tabLayouts";
 import { TabView } from "./TabView";
+import { useRemoteTabRow } from "@/lib/remoteTabRow";
 import { WorkspacePanes, useWorkspacePaneLayout } from "./WorkspacePanes";
 import { EmptySession } from "./EmptySession";
 import { TabAccountLabel, TabActions } from "./TabStrip";
@@ -336,6 +337,48 @@ function CloudLastSaved({ cloud }: { cloud: CloudSessionModel }) {
   ) : null;
 }
 
+/** A cloud or machine session with no tab: its lock, or one state of its workspace (stopped, loading, empty) with what this person can do about it. */
+function CloudSessionEmpty({ cloud }: { cloud: CloudSessionModel }) {
+  const machine = cloud.machine;
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
+      {cloud.locked ? (
+        // No access (never shared, or removed): the lock pane replaces the whole session body.
+        <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
+      ) : (
+        // One state at a time: stopped, loading, or empty (with what this person can do about it).
+        machine ? (
+          !cloud.connected ? (
+            <span data-testid="machine-session-loading">{machine.state.state === "offline" ? `${machine.name} isn't reachable.` : `Connecting to ${machine.name}…`}</span>
+          ) : (
+            <>
+              <span>No tabs in this session</span>
+              <span className="text-xs text-faint">Add an agent tab, or open a terminal on {machine.name} from the side panel.</span>
+            </>
+          )
+        ) : cloud.asleep ? (
+          <>
+            <span>Workspace stopped</span>
+            <span className="text-xs text-faint">
+              {cloud.backend.readOnlyReason ? "Its saved conversations appear here; nothing runs while it is stopped." : "Its saved conversations appear here; nothing runs until you send a message."}
+            </span>
+            <CloudLastSaved cloud={cloud} />
+          </>
+        ) : !cloud.connected ? (
+          <span data-testid="cloud-session-loading">Loading the session…</span>
+        ) : (
+          <>
+            <span>No tabs in this session</span>
+            <span className="text-xs text-faint">
+              {cloud.manage ? "Add an agent tab or a terminal on the VM." : "Only this workspace's creator or an organization owner or admin can add an agent tab or a terminal."}
+            </span>
+          </>
+        )
+      )}
+    </div>
+  );
+}
+
 /** Where a cloud session runs, and whether this window is attached to it. The location chip holds the workspace's lifecycle actions. */
 function CloudLocation({
   cloud,
@@ -488,9 +531,14 @@ export function SessionView({
   const [pieceColumn, setPieceColumn] = useState<HTMLDivElement | null>(null);
   const prefs = usePrefs();
   const store = useSessionStore();
-  // The workspace's tabs as a row under the title bar: a local session's, unless the reader turned the row off
-  // (the floating window says for itself whether it has one).
-  const stripRow = local && !cloud && (chrome ? !!chrome.tabStrip : prefs.tabStrip);
+  // A cloud workspace session's tabs in the strip and panes (#1325): the runtime's agent tabs and shells, laid out per
+  // viewer on this computer. A machine session keeps its own strip and terminal dock (21.08), the floating window its
+  // one tab, and a locked session its lock pane.
+  const remotePanes = !!cloud && !machine && !compact && !cloud.locked;
+  const remoteTabRow = useRemoteTabRow(session, cloud, remotePanes);
+  // The session's tabs as a row under the title bar: a local or cloud workspace session's, unless the reader turned
+  // the row off (the floating window says for itself whether it has one).
+  const stripRow = ((local && !cloud) || remotePanes) && (chrome ? !!chrome.tabStrip : prefs.tabStrip);
   // A tab's panel is named by the tab that shows it: the row's while there is one, else the sidebar's row.
   const labelledBy = stripRow ? stripTabId : tabNodeId;
   // What the chat's Delete workspace acts on; a cloud session's is its runtime's.
@@ -627,12 +675,14 @@ export function SessionView({
   });
   // A local session's files are tabs in its panes, beside the chat (PRO-402). A cloud session's, and the
   // floating window's (it has no panes), are the editor pane's.
-  const tabsInPanes = !cloud && !compact;
-  const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow);
+  const filesInPanes = !cloud && !compact;
+  // A local session's tabs are in panes, and a cloud workspace session's (#1325).
+  const tabsInPanes = filesInPanes || remotePanes;
+  const paneLayout = useWorkspacePaneLayout(session, selected, !!stripRow, remoteTabRow);
   const switchInPaneStrip = tabsInPanes && paneLayout.showStrip;
-  const hasEditors = !tabsInPanes && ed.editors.some((e) => e.sessionId === session.id);
-  const shownFile = tabsInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
-  useFileTabShortcuts(session.id, shownFile, tabsInPanes);
+  const hasEditors = !filesInPanes && ed.editors.some((e) => e.sessionId === session.id);
+  const shownFile = filesInPanes && selected?.kind === "review" ? (ed.editors.find((e) => e.id === selected.id && e.sessionId === session.id && isFileTab(e))?.id ?? null) : null;
+  useFileTabShortcuts(session.id, shownFile, filesInPanes);
   // The same switch as a row of the title bar's '…' menu.
   const menuTerminalView: SessionMenuTerminalView = {
     available: !!activeTab && !!terminalOffer?.available && (!activeIsTerminal || terminalHasConversation),
@@ -1022,7 +1072,21 @@ export function SessionView({
               onPointerDownCapture={() => setLastFocused("chat")}
               onFocusCapture={() => setLastFocused("chat")}
             >
-              {tabsInPanes ? <WorkspacePanes session={session} selected={selected} strip={!!stripRow} layout={paneLayout} selectionRequested={selectionShown}continuationOpen={!!continuationSource} /> : <>
+              {tabsInPanes ? (
+                <WorkspacePanes
+                  session={session}
+                  selected={selected}
+                  strip={!!stripRow}
+                  layout={paneLayout}
+                  selectionRequested={selectionShown}
+                  continuationOpen={!!continuationSource}
+                  remote={remotePanes && cloud ? {
+                    cloud,
+                    newTab: <TabActions key={session.id} session={session} selected={selected} cloud={cloud} onShowPorts={showPorts} />,
+                    empty: <CloudSessionEmpty cloud={cloud} />,
+                  } : undefined}
+                />
+              ) : <>
               {session.tabs.map((t) => (
                 <div
                   key={t.id}
@@ -1100,43 +1164,7 @@ export function SessionView({
                   A browser page belongs to the folder, so one another session there opened is listed in this row too, but it is
                   shown only when picked: until then this session's page is, with its closed tabs (#721). */}
               {!session.tabs.length && !shellPanes.length && !selected && !cloud && <EmptySession session={session} />}
-              {!session.tabs.length && !cloudTerminals.length && cloud && (
-                <div className="flex flex-1 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
-                  {cloud.locked ? (
-                    // No access (never shared, or removed): the lock pane replaces the whole session body.
-                    <NotSharedNotice kind={cloud.locked} onBack={() => selectSession(null)} onRecheck={cloud.recheckAccess} />
-                  ) : (
-                    // One state at a time: stopped, loading, or empty (with what this person can do about it).
-                    machine ? (
-                      !cloud.connected ? (
-                        <span data-testid="machine-session-loading">{machine.state.state === "offline" ? `${machine.name} isn't reachable.` : `Connecting to ${machine.name}…`}</span>
-                      ) : (
-                        <>
-                          <span>No tabs in this session</span>
-                          <span className="text-xs text-faint">Add an agent tab, or open a terminal on {machine.name} from the side panel.</span>
-                        </>
-                      )
-                    ) : cloud.asleep ? (
-                      <>
-                        <span>Workspace stopped</span>
-                        <span className="text-xs text-faint">
-                          {cloud.backend.readOnlyReason ? "Its saved conversations appear here; nothing runs while it is stopped." : "Its saved conversations appear here; nothing runs until you send a message."}
-                        </span>
-                        <CloudLastSaved cloud={cloud} />
-                      </>
-                    ) : !cloud.connected ? (
-                      <span data-testid="cloud-session-loading">Loading the session…</span>
-                    ) : (
-                      <>
-                        <span>No tabs in this session</span>
-                        <span className="text-xs text-faint">
-                          {cloud.manage ? "Add an agent tab or a terminal on the VM." : "Only this workspace's creator or an organization owner or admin can add an agent tab or a terminal."}
-                        </span>
-                      </>
-                    )
-                  )}
-                </div>
-              )}
+              {!session.tabs.length && !cloudTerminals.length && cloud && <CloudSessionEmpty cloud={cloud} />}
               </>}
             </div>
             {hasEditors && <EditorSplit sessionId={session.id} active selectedTab={selected} />}

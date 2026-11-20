@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { PeerTab } from "./sessionTabs";
 
 vi.mock("@tauri-apps/api/core", async () => {
@@ -516,5 +516,64 @@ describe("split pane actions", () => {
     expect(store().selectedSessionId).toBe("a");
     expect(closedKeys()).toEqual(["agent:b1"]);
     expect(row().tabs.some((tab) => tab.key === "agent:a1")).toBe(true);
+  });
+});
+
+describe("a cloud session's row (#1325)", () => {
+  const KEY = "cloud:org-1:ws-1:s-1";
+  const session = (): Parameters<typeof import("./sessionTabs").remoteRow>[0] => ({
+    id: KEY, projectPath: "/workspace/api", cwd: "/workspace/api", title: "Fix login", created: "", modified: "", archived: false, pinned: false, worktreeRemoved: false,
+    tabs: [tabEntry("t-1", 0), tabEntry("t-2", 2)],
+  });
+  /** A runtime terminal: a shell (no tab, no run) unless the fields say otherwise. */
+  const terminal = (id: string, fields: Record<string, unknown> = {}) =>
+    ({ id, ptyId: id, number: 1, title: `Terminal ${id}`, exited: false, exitCode: null, gone: null, tabId: null, run: null, createdAt: Date.UTC(2026, 9, 1, 10, 0, 1), ...fields }) as unknown as import("./cloudTerminals").CloudTerminal;
+  const TERMINALS = [terminal("sh-1"), terminal("agent-pty", { tabId: "t-1" }), terminal("run-1", { run: { kind: "setup" } })];
+  let remote: { open: Mock<(tab: PeerTab) => void>; close: Mock<(tab: PeerTab) => Promise<void>>; current: () => import("./sessionTabs").TabRow; terminalView: () => null };
+  const cloudRow = (): import("./sessionTabs").TabRow => sessionTabsModule.remoteRow(session(), TERMINALS, getTabState(), remote);
+  let sessionTabsModule: typeof import("./sessionTabs");
+  beforeEach(async () => {
+    sessionTabsModule = await import("./sessionTabs");
+    remote = { open: vi.fn<(tab: PeerTab) => void>(), close: vi.fn<(tab: PeerTab) => Promise<void>>(async () => undefined), current: () => cloudRow(), terminalView: () => null };
+  });
+
+  it("lists the runtime's agent tabs and shells by when they were opened, never an agent's own terminal or a script's run", () => {
+    expect(cloudRow().tabs.map((tab) => tab.key)).toEqual(["agent:t-1", "terminal:sh-1", "agent:t-2"]);
+    expect(cloudRow().workspace).toBe(`remote:${KEY}`);
+  });
+
+  it("keeps a pin and an order on this computer, without dropping tabs this computer's stores do not hold", async () => {
+    actions.setTabPinned(cloudRow(), cloudRow().tabs[2], true);
+    actions.moveTab(cloudRow(), cloudRow().tabs.find((tab) => tab.key === "agent:t-1")!, 2);
+    expect(cloudRow().tabs.map((tab) => [tab.key, tab.pinned])).toEqual([["agent:t-2", true], ["terminal:sh-1", false], ["agent:t-1", false]]);
+    expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual(["agent:t-2"]);
+    await flush();
+    expect(backend.callsOf("set_tab_layout").map((args) => args.workspace)).toEqual([`remote:${KEY}`, `remote:${KEY}`]);
+  });
+
+  it("opens a tab through the session and splits it into a pane of this viewer's own", () => {
+    actions.openTabAt(cloudRow(), 2);
+    expect(remote.open).toHaveBeenLastCalledWith(expect.objectContaining({ key: "terminal:sh-1" }));
+    actions.moveTabToPane(cloudRow(), cloudRow().tabs[2], "right");
+    expect(layoutOf(getTabState(), `remote:${KEY}`).panes?.map((pane) => [pane.id, pane.tabs])).toEqual([["left", ["agent:t-1", "terminal:sh-1"]], ["right", ["agent:t-2"]]]);
+    expect(remote.open).toHaveBeenLastCalledWith(expect.objectContaining({ key: "agent:t-2" }));
+    // Nothing of this computer's own sessions or terminals was touched.
+    expect(closedKeys()).toEqual([]);
+  });
+
+  it("closes a tab on the runtime, hands the view to its neighbour first, and forgets it in the layout", async () => {
+    actions.setTabPinned(cloudRow(), cloudRow().tabs[2], true);
+    // Pinned, it leads the row: its neighbour is the next tab, t-1.
+    await actions.closeRemoteTab(cloudRow(), cloudRow().tabs[0], { kind: "agent", id: "t-2" });
+    expect(remote.open).toHaveBeenCalledWith(expect.objectContaining({ key: "agent:t-1" }));
+    expect(remote.close).toHaveBeenCalledWith(expect.objectContaining({ key: "agent:t-2" }));
+    expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual([]);
+    expect(closedKeys()).toEqual([]);
+  });
+
+  it("goes back to a tab the runtime would not close", async () => {
+    remote.close.mockRejectedValueOnce(new Error("Agent tabs close once the workspace is connected."));
+    await expect(actions.closeRemoteTab(cloudRow(), cloudRow().tabs[0], { kind: "agent", id: "t-1" })).rejects.toThrow("connected");
+    expect(remote.open.mock.calls.map(([tab]) => tab.key)).toEqual(["terminal:sh-1", "agent:t-1"]);
   });
 });

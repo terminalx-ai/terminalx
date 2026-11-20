@@ -27,12 +27,13 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 
 | Area | Local | Cloud and machine now | Remaining |
 | --- | --- | --- | --- |
-| Tab strip row | yes | hidden | #1325 |
+| Tab strip row | yes | cloud: **yes**, the runtime's agent tabs and shells, closed on the runtime; machine: its own strip (21.08) | — |
 | Header: Run menu | yes | machine: its own (PRO-403); cloud: shown disabled with why | — |
 | Header: branch and Git button | yes | machine: its own; cloud: **Git** opens the Changes panel (commit, push, PR) | — |
 | Header: Share | yes | machine: none; cloud: **Share** opens the workspace's people | — |
 | Header: account label | yes | machine: yes; cloud: none. A cloud agent signs in with the organization's login, and the sign-in notice says when it cannot | — |
-| Lead chat, orchestration run, panes, browser tabs | yes | no | #1325 |
+| Split panes | yes | cloud: **yes**, laid out per viewer on this computer; machine: no (one pane and its terminal dock) | — |
+| Lead chat, orchestration run, browser tabs | yes | no: they stay on this computer, and the "+" menu says so (see below) | — |
 | Second opinion | yes | disabled with why | #1327 |
 | Agent handoff (composer) | yes | no | #1327 |
 | Retry in new chat | yes | disabled with why | #1327 |
@@ -45,6 +46,37 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 | PR and dropped-file mentions | yes | off | #1329 |
 | Terminal view toggle | always | with `agent-pty/1` and a terminal-first agent; otherwise the reason (`TERMINAL_VIEW_*`) | runtime update |
 | Interrupt | yes | with `session/3` while connected; otherwise Stop is the hard stop | runtime update |
+
+## Tabs and panes of a cloud session (#1325)
+
+A cloud workspace session draws the same strip and panes as a local one
+(`WorkspaceTabStrip`, `WorkspacePanes`) from a remote row
+(`useRemoteTabRow` in `src/lib/remoteTabRow.ts`, over `remoteRow` in
+`src/lib/sessionTabs.ts`):
+
+- **Tabs** are the runtime's: the session's agent tabs and the shells it
+  opened for the session. An agent tab's own terminal is its terminal view,
+  and a machine's script runs are its dock's, so neither is a tab.
+- **Showing** a tab selects it in the session, as the sidebar does; the
+  runtime's active tab still decides only what the view opens on.
+- **Closing** a tab closes it on the runtime, for everyone in the workspace
+  (`CloudSessionModel.closeTab`: `session.close` with `remove`, or the
+  shell's `pty.kill`). A viewer has no close.
+- **Layout** (order, pins, the split into two panes and its ratio) is the
+  viewer's own, kept on this computer under `remote:<session key>` with the
+  other tab layouts. Nothing of it is sent to the runtime, so two people in
+  one workspace each keep their own arrangement.
+- A tab's menu holds only what applies to a runtime tab: pin, the other pane,
+  terminal view (where the runtime serves it), move, close.
+
+**Decision: browser tabs and orchestration runs stay on this computer.**
+Both act on the computer a person sits at: a browser page is this
+computer's webview, and a run needs the project's checkout here to start
+workers (`orchestrateOffered` already refuses a cloud place). A runtime
+answers `browser.*` with `unsupported` (as for machines, MACHINES.md
+decision 7). A cloud session therefore leads no run and holds no browser
+tab; its "+" menu says so (`REMOTE_LOCAL_ONLY`), and a workspace's port
+opens in this computer's browser from Ports and previews.
 
 The cloud-only parts stay additions to the same layout: the location chip with
 the workspace's lifecycle actions, ports, presence and access chips.

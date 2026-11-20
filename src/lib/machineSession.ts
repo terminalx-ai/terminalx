@@ -3,17 +3,17 @@ import type { MachineProject, RuntimeSession, WorkspaceConnectionState } from "@
 import { RemoteGit, listRepositories, type RemoteRepository } from "@terminalx/portable/workspaceGit";
 import { createTerminal } from "@/components/terminal/TerminalView";
 import { experimental } from "@/lib/api";
-import { loadCloudAgents, markCloudAgentsOffline, reconcileCloudAgents, syncLiveTabs, useCloudAgents, watchLiveTabs } from "@/lib/cloudAgents";
+import { closeCloudAgentTab, loadCloudAgents, markCloudAgentsOffline, reconcileCloudAgents, syncLiveTabs, useCloudAgents, watchLiveTabs } from "@/lib/cloudAgents";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
 import { tabEntry, type CloudSessionModel, type ConnectionChip } from "@/lib/cloudSession";
-import { createCloudTerminal, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals } from "@/lib/cloudTerminals";
+import { closeCloudTerminal, createCloudTerminal, followCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
 import { machineAgentScope, useMachineProjects } from "@/lib/machineCatalog";
 import { machineConnection, useMachineConnections } from "@/lib/machineConnections";
 import { machineWorkspaceHost } from "@/lib/machineWorkspaceHost";
 import { agentPtyServed, cloudSessionBackend } from "@/lib/sessionBackend";
-import { selectSessionTab } from "@/lib/terminal";
+import { selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
 import { setPrefs } from "@/lib/prefs";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource } from "@/lib/workspaceFiles";
@@ -427,6 +427,17 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     [sendBlocked, client, name, runtimeSessionId, scope, key],
   );
 
+  const closeTab = useCallback(
+    async (tab: SelectedSessionTab) => {
+      if (tab.kind === "terminal") return closeCloudTerminal(workspaceKey, client && state.state === "connected" ? client : null, tab.id);
+      if (tab.kind !== "agent") return;
+      if (!client) throw new Error(`Tabs close once ${name} is connected.`);
+      await closeCloudAgentTab(scope, tab.id, client);
+      await syncLiveTabs(scope, client).catch(() => undefined);
+    },
+    [client, state.state, name, scope, workspaceKey],
+  );
+
   if (!parsed?.sessionId || !parsed.projectId) return null;
   return {
     backend,
@@ -450,6 +461,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
     terminals,
     openTerminal,
     addAgentTab,
+    closeTab,
     canAddTabs: manage && !!client?.hasCapability("session/2"),
     agents: agentList,
     client: connected ? client : null,

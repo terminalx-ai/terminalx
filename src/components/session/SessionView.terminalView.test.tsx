@@ -557,11 +557,86 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(document.querySelector('[role="tabpanel"]')!.getAttribute("aria-labelledby")).toBe("session-agent-tab-st-1");
   });
 
-  it("is not drawn for a cloud session", async () => {
-    await open();
-    expect(screen.queryByRole("tablist", { name: "Workspace tabs" })).toBeNull();
-    expect(screen.getByTestId("session-project")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Continue in New Session…" })).toBeNull();
+  describe("for a cloud session (#1325)", () => {
+    /** The runtime's session with a second agent tab, "Review the fix". */
+    const twoTabs = () => {
+      runtime.tabs = [agentTab(), agentTab({ tabId: "t-2", title: "Review the fix", created: "2026-09-29T00:00:01Z" })];
+      runtime.sessions = runtime.sessions.map((session) => ({ ...session, tabs: [...session.tabs, { id: "t-2", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }] }));
+    };
+    const strips = () => screen.getAllByTestId("workspace-tab-strip");
+    const contextMenu = async (tab: HTMLElement) => {
+      fireEvent.contextMenu(tab);
+      return screen.findByRole("menu");
+    };
+    const layoutSaves = () => guard.calls.filter((call) => call.command === "set_tab_layout").map((call) => call.args as { workspace: string; layout: { panes?: { id: string; tabs: string[] }[] } });
+
+    it("draws the runtime's tabs in the row, ended by the cloud session's +, which says what stays on this computer", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      await waitFor(() => expect(within(strip).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual(["Fix login", "Review the fix"]));
+      expect(screen.getByTestId("session-project")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Continue in New Session…" })).toBeNull();
+      // The + is the strip's, not the title bar's, and it is the cloud one: agents and a terminal on the VM.
+      expect(within(screen.getByRole("banner")).queryByRole("button", { name: "New tab" })).toBeNull();
+      const plus = within(strip).getByRole("button", { name: "New tab" });
+      fireEvent.pointerDown(plus, { button: 0, pointerType: "mouse" });
+      fireEvent.pointerUp(plus, { button: 0, pointerType: "mouse" });
+      fireEvent.click(plus);
+      expect(await screen.findByRole("menuitem", { name: /Terminal.*on the VM/ })).toBeTruthy();
+      expect(screen.getByTestId("cloud-local-only").textContent).toMatch(/Browser tabs and orchestration runs stay on this computer/);
+      expect(screen.queryByRole("menuitem", { name: /Browser/ })).toBeNull();
+    });
+
+    it("shows the tab picked in the row, through the session's selection", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      const review = await within(strip).findByRole("tab", { name: "Review the fix" });
+      fireEvent.click(review);
+      await waitFor(() => expect(review.getAttribute("aria-selected")).toBe("true"));
+      expect(screen.getByRole("tabpanel", { name: "Review the fix" }).getAttribute("aria-hidden")).toBe("false");
+    });
+
+    it("splits the row into panes on this computer, never on the runtime", async () => {
+      twoTabs();
+      await open();
+      const review = await within(strips()[0]).findByRole("tab", { name: "Review the fix" });
+      const menu = await contextMenu(review);
+      // What the runtime cannot do for a tab yet is left out.
+      expect(within(menu).queryByRole("menuitem", { name: /Rename|Fork|Mute/ })).toBeNull();
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to the right pane" }));
+      await waitFor(() => expect(strips()).toHaveLength(2));
+      expect(strips().map((strip) => within(strip).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label")))).toEqual([["Fix login"], ["Review the fix"]]);
+      // Kept per viewer under the session's own key, and nothing about it reaches the runtime.
+      const saved = layoutSaves().at(-1)!;
+      expect(saved.workspace).toBe(`remote:${KEY}`);
+      expect(saved.layout.panes?.map((pane) => [pane.id, pane.tabs])).toEqual([["left", ["agent:t-1"]], ["right", ["agent:t-2"]]]);
+      for (const method of ["session.configure", "session.addTab", "session.close"]) expect(runtime.methods(method)).toEqual([]);
+      // Both panes' chats are on screen, side by side.
+      expect(screen.getAllByRole("textbox", { name: "Prompt" })).toHaveLength(2);
+    });
+
+    it("closes a tab on the runtime, for everyone, and the next tab takes its place", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      fireEvent.click(await within(strip).findByRole("tab", { name: "Review the fix" }));
+      fireEvent.click(within(strip).getByRole("button", { name: "Close Review the fix" }));
+      await waitFor(() => expect(runtime.params("session.close")).toHaveLength(1));
+      expect(runtime.params("session.close")[0]).toMatchObject({ sessionId: "s-1", tabId: "t-2", remove: true });
+      await waitFor(() => expect(within(strip).getAllByRole("tab").map((tab) => [tab.getAttribute("aria-label"), tab.getAttribute("aria-selected")])).toEqual([["Fix login", "true"]]));
+    });
+
+    it("leaves a viewer's row without a close, and the runtime's tabs untouched", async () => {
+      shared("viewer");
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      await within(strip).findByRole("tab", { name: "Review the fix" });
+      expect(within(strip).queryByRole("button", { name: /^Close / })).toBeNull();
+      expect(runtime.methods("session.close")).toEqual([]);
+    });
   });
 
   it("leaves the reader on the terminal they are in when the last agent tab is closed from the strip", async () => {

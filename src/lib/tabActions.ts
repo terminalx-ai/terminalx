@@ -6,7 +6,7 @@ import { getDraft } from "@/lib/drafts";
 import { MODE_SET_IN_TERMINAL } from "@/lib/models";
 import { getPrefs } from "@/lib/prefs";
 import { addTab, getSessionStore, openWelcome, reopenTab, selectSession } from "@/lib/sessions";
-import { activatePeer, agentTabsOf, endPeer, isShellPeer, noteClosed, offerUndoFor, offersUndo, openPeer, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { activatePeer, agentTabsOf, endPeer, isShellPeer, noteClosed, offerUndoFor, offersUndo, openPeer, openRowTab, peerIsLive, peerPaneId, peerShell, peerStatus, sessionOfPeer, workspaceRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { forgetCloseUndoFor } from "@/lib/closeUndo";
 import { isByHand } from "@/lib/tabFront";
 import { closedTabsOf, dropClosedTab, forgetClosed, getTabState, moveToPane, panesOf, moveKey, refreshTabState, rememberClosed, saveTabLayout, settleLayout, tabKey, type ClosedHere, type TabStore } from "@/lib/tabLayouts";
@@ -22,8 +22,9 @@ export { workspaceRow, type TabRow };
  * and the tab shortcuts all act through these, on one row.
  */
 
-/** The row again, after something changed it. */
+/** The row again, after something changed it. A remote row is drawn from its runtime's tabs, which this computer's stores do not hold: it says itself what it is now. */
 function fresh(row: TabRow): TabRow {
+  if (row.remote) return row.remote.current();
   return workspaceRow(getSessionStore().sessions.find((session) => session.id === row.session.id) ?? row.session);
 }
 
@@ -42,9 +43,38 @@ function isGone(key: string): boolean {
   return false;
 }
 
-/** Save the row's layout with `patch` applied and its tabs in the order `visible`. */
+/**
+ * Save the row's layout with `patch` applied and its tabs in the order `visible`.
+ * A remote row's tabs are its runtime's, unknown to `isGone`: nothing is taken
+ * out for them here, only when one is closed from this row (`closeRemoteTab`).
+ */
 function arrange(row: TabRow, patch: Partial<TabLayout> = {}, visible: string[] = row.tabs.map((tab) => tab.key)) {
-  saveTabLayout(row.workspace, settleLayout({ ...row.layout, ...patch }, visible, isGone));
+  saveTabLayout(row.workspace, settleLayout({ ...row.layout, ...patch }, visible, row.remote ? () => false : isGone));
+}
+
+/**
+ * Close a tab of a remote row on its runtime (#1325). When it was the tab on
+ * screen its neighbour takes its place first, as `closePeer` does, and its
+ * traces leave this viewer's layout once the runtime has closed it.
+ */
+export async function closeRemoteTab(row: TabRow, tab: PeerTab, selected: SelectedSessionTab | null) {
+  const remote = row.remote;
+  if (!remote) throw new Error("closeRemoteTab needs a remote row");
+  // The neighbour is taken from the row the tab was closed in (its pane's, in a split).
+  const index = row.tabs.findIndex((candidate) => candidate.key === tab.key);
+  const others = row.tabs.filter((candidate) => candidate.key !== tab.key);
+  const next = others[Math.max(0, Math.min(index, others.length - 1))];
+  const shown = selected?.kind === tab.kind && selected.id === tab.id;
+  if (shown && next) openRowTab(row, next);
+  try {
+    await remote.close(tab);
+  } catch (error) {
+    // Still open: the view goes back to it.
+    if (shown) remote.open(tab);
+    throw error;
+  }
+  const whole = remote.current();
+  saveTabLayout(whole.workspace, settleLayout(whole.layout, whole.tabs.filter((candidate) => candidate.key !== tab.key).map((candidate) => candidate.key), (key) => key === tab.key));
 }
 
 // ---------------------------------------------------------------- order, pins, mutes, titles
@@ -76,7 +106,8 @@ export function moveTabToPane(row: TabRow, tab: PeerTab, target: "left" | "right
   const layout = moveToPane(now.layout, now.tabs.map((peer) => peer.key), tab.key, target, selected ? tabKey(selected.kind, selected.id) : null);
   if (layout === now.layout) return;
   saveTabLayout(now.workspace, layout);
-  openPeer(now.session.id, tab);
+  if (now.remote) now.remote.open(tab);
+  else openPeer(now.session.id, tab);
 }
 
 export function otherPane(row: TabRow, tab: PeerTab): "left" | "right" {
@@ -395,7 +426,7 @@ export async function reopenClosedTab(row: TabRow): Promise<boolean> {
 export function openTabAt(row: TabRow, position: number): boolean {
   const tab = row.tabs[position - 1];
   if (!tab) return false;
-  openPeer(row.session.id, tab);
+  openRowTab(row, tab);
   return true;
 }
 
@@ -406,6 +437,7 @@ export function stepTab(row: TabRow, selected: SelectedSessionTab | null, direct
   const current = tabs.findIndex((tab) => tab.kind === selected?.kind && tab.id === selected.id);
   const next = current < 0 ? (direction === 1 ? 0 : tabs.length - 1) : (current + direction + tabs.length) % tabs.length;
   const tab = tabs[next];
+  if (row.remote) return openRowTab(row, tab);
   // Inside one session this is what it always was; across sessions the session is selected with the tab.
   if (sessionOfPeer(row.session.id, tab) === row.session.id) activatePeer(row.session.id, tab);
   else openPeer(row.session.id, tab);
