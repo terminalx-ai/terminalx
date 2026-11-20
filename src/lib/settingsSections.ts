@@ -23,7 +23,7 @@ export const SETTINGS_SECTIONS = [
   { id: "repositories", title: "Projects", description: "Project paths, preview URLs, files to copy, scripts, actions and workspace cleanup", terms: ["repositories repository project git root worktrees ignored glob patterns env worktreeinclude setup archive hooks terminal"] },
   { id: "organizations", title: "Organizations", description: "Members, cloud workspaces and organization settings", terms: ["team invite billing compute environment agent logins routes github setup"] },
   { id: "storage", title: "Storage", description: "Clean up merged worktrees and leftover files", terms: ["disk space remove delete cleanup"] },
-  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks and OpenCode", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer", "opencode providers models"] },
+  { id: "experimental", title: "Experimental", description: "Try Native Codex, session cost, orchestration runs, Local VM tasks, OpenCode and Bots", terms: ["app server stdio", "session cost", "tokens", "orchestrator lead workers", "local vm tasks computer", "opencode providers models", "bots roles employees"] },
   { id: "advanced", title: "Advanced", description: "Which Claude Code and Codex programs TerminalX runs", terms: ["executable binary path program use system claude code codex homebrew npm"] },
   { id: "about", title: "About", description: "Version, updates and changelog", terms: ["release channel beta"] },
 ] as const;

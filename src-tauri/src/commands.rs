@@ -6147,8 +6147,12 @@ pub fn set_experimental_settings(
     orchestrator_runs: Option<bool>,
     local_vm_tasks: Option<bool>,
     opencode: Option<bool>,
+    bots: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
+    if let Some(on) = bots {
+        settings.experimental.bots = on;
+    }
     if let Some(on) = opencode {
         settings.experimental.opencode = on;
     }
@@ -6166,6 +6170,82 @@ pub fn set_experimental_settings(
     }
     store::settings::save(&settings).map_err(err)?;
     Ok(settings.experimental)
+}
+
+// ---------------------------------------------------------------- bots (PRO-466)
+
+// The runtime owns the bots' store and announces each change (`bots_changed`).
+// With Settings → Experimental → Bots off it refuses every one of these.
+
+async fn bots_call<T: serde::de::DeserializeOwned + Send + 'static>(state: State<'_, AppState>, operation: &'static str, params: serde_json::Value) -> CmdResult<T> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.bots(operation, params).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn bot_list(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn bot_get(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "get", serde_json::json!({"id": id})).await
+}
+
+/// The bundled role templates, as the runtime has them.
+#[tauri::command]
+pub async fn bot_templates(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "templates", serde_json::json!({})).await
+}
+
+/// Hire a bot: a role and a name, everything else on its default. The list
+/// answers (`bot_list`, `bots_pause_all`, `bots_resume_all`) and `bots_changed`
+/// carry the store's revision: the higher one is the newer list.
+#[tauri::command]
+pub async fn bot_create(state: State<'_, AppState>, role_template_id: String, name: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "create", serde_json::json!({"roleTemplateId": role_template_id, "name": name})).await
+}
+
+#[tauri::command]
+pub async fn bot_update(state: State<'_, AppState>, id: String, patch: serde_json::Value) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "update", serde_json::json!({"id": id, "patch": patch})).await
+}
+
+/// The bot's home folder goes to the app's trash, not away.
+#[tauri::command]
+pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    bots_call(state, "delete", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+pub async fn bot_pause(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "pause", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "resume", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+pub async fn bots_pause_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "pauseAll", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn bots_resume_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "resumeAll", serde_json::json!({})).await
+}
+
+/// A bot's standing instructions, its `ROLE.md`.
+#[tauri::command]
+pub async fn bot_role_read(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    bots_call(state, "roleRead", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text})).await
 }
 
 // ---------------------------------------------------------------- orchestration runs (PRO-274)

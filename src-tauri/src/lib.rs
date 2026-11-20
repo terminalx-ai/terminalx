@@ -21,6 +21,7 @@ mod project_overview;
 #[cfg(feature = "desktop")]
 mod desktop_links;
 mod automations;
+mod bots;
 mod binpath;
 mod chat_link;
 mod cleanup;
@@ -832,6 +833,18 @@ pub fn run() {
             commands::automation_update,
             commands::automation_delete,
             commands::automation_run_now,
+            commands::bot_list,
+            commands::bot_get,
+            commands::bot_templates,
+            commands::bot_create,
+            commands::bot_update,
+            commands::bot_delete,
+            commands::bot_pause,
+            commands::bot_resume,
+            commands::bots_pause_all,
+            commands::bots_resume_all,
+            commands::bot_role_read,
+            commands::bot_role_write,
             commands::session_summaries,
             commands::stats_usage_snapshot,
             commands::app_activity_summary,

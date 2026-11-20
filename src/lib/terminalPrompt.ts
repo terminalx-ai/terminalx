@@ -13,6 +13,7 @@ const REFUSALS = [
   "The agent's terminal shows no option chosen. Open the terminal to answer there.",
   "The agent's terminal did not move to that option. Open the terminal to answer there.",
   "The agent is no longer running.",
+  "The agent is asking something else first. Answer that request, then this question.",
 ];
 
 export const TERMINAL_PROMPT_FAILED = "The answer could not be typed into the agent's terminal. Open the terminal view to answer there.";

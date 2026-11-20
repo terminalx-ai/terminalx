@@ -54,6 +54,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "experimental.orchestratorRuns",
   "experimental.opencode",
   "experimental.localVmTasks",
+  "experimental.bots",
   "orchestrator.requireApproval",
   "orchestrator.workersPerRun",
   "orchestrator.workersAtOnce",

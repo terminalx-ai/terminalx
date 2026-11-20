@@ -8,13 +8,14 @@ const mocks = vi.hoisted(() => ({
   setSessionCost: vi.fn(),
   setOrchestratorRuns: vi.fn(),
   setOpenCode: vi.fn(),
+  setBots: vi.fn(),
   refreshHarnesses: vi.fn(async () => {}),
   refreshModels: vi.fn(async () => {}),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode, setBots: mocks.setBots },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
 
@@ -36,6 +37,7 @@ beforeEach(() => {
   mocks.setSessionCost.mockReset();
   mocks.setOrchestratorRuns.mockReset();
   mocks.setOpenCode.mockReset();
+  mocks.setBots.mockReset();
   mocks.refreshHarnesses.mockClear();
   mocks.refreshModels.mockClear();
 });
@@ -148,6 +150,49 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     fireEvent.click(runs());
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
     expect(runs().getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("Settings → Experimental: Bots (PRO-466)", () => {
+  const bots = () => screen.getByRole("switch", { name: "Bots" });
+
+  it("is off by default and says what it turns on", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    expect(bots().getAttribute("aria-checked")).toBe("false");
+    const text = screen.getByTestId("experimental-settings").textContent ?? "";
+    for (const said of ["AI employees with standing roles", "the terminalx bots commands"]) expect(text).toContain(said);
+  });
+
+  it("saves only its own switch and tells the rest of the app at once", async () => {
+    mocks.settings.mockResolvedValue({ nativeCodex: true, bots: false });
+    mocks.setBots.mockResolvedValue({ nativeCodex: true, bots: true });
+    const { useExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+    resetExperimentalSettingsForTests();
+    const Shown = () => <output data-testid="bots-on">{String(useExperimentalSettings()?.bots === true)}</output>;
+    render(<><ExperimentalTab /><Shown /></>);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    expect(screen.getByTestId("bots-on").textContent).toBe("false");
+    fireEvent.click(bots());
+    await waitFor(() => expect(mocks.setBots).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(bots().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    expect(mocks.setOrchestratorRuns).not.toHaveBeenCalled();
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    await waitFor(() => expect(screen.getByTestId("bots-on").textContent).toBe("true"));
+    resetExperimentalSettingsForTests();
+  });
+
+  it("follows a change made elsewhere, and goes back with the reason when saving fails", async () => {
+    mocks.setBots.mockRejectedValue(new Error("settings.json is not writable"));
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(true));
+    mocks.listeners.get("experimental_settings_changed")!({ payload: { nativeCodex: false, bots: true } });
+    await waitFor(() => expect(bots().getAttribute("aria-checked")).toBe("true"));
+    fireEvent.click(bots());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
+    expect(bots().getAttribute("aria-checked")).toBe("true");
   });
 });
 

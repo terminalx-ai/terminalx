@@ -2,7 +2,7 @@
   "expo": {
     "name": "TerminalX",
     "slug": "terminalx-mobile",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "terminalx",
@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.terminalx.next.mobile",
-      "buildNumber": "2",
+      "buildNumber": "3",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSLocalNetworkUsageDescription": "TerminalX connects directly to a Mac you choose to pair."
