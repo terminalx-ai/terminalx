@@ -832,6 +832,7 @@ pub fn run() {
             commands::automation_runs,
             commands::automation_issue_states,
             commands::automation_issue_preview,
+            commands::automation_source_preview,
             commands::automation_create,
             commands::automation_update,
             commands::automation_delete,
