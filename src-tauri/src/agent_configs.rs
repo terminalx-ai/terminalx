@@ -1323,52 +1323,122 @@ pub fn apply_in(homes: &Homes, changes: &[Change], token: &str) -> Result<Vec<Wr
     let date = today();
     let mut done: Vec<Written> = Vec::new();
     for write in &plan.writes {
-        if let Err(error) = apply_one(homes, write, &date, &mut done) {
-            if done.is_empty() {
-                bail!("Nothing was written: {error:#}");
-            }
-            let list = done.iter().map(|w| match &w.backup {
-                Some(b) => format!("{} (backed up to {b})", w.path),
-                None => w.path.clone(),
-            }).collect::<Vec<_>>().join(", ");
-            bail!("Wrote {list}, then stopped: {error:#}. Nothing after that was written.");
+        match apply_one(homes, write, &date) {
+            Ok(written) => done.push(written),
+            Err(stopped) => bail!("{}", stopped_message(homes, &done, &stopped)),
         }
     }
     Ok(done)
 }
 
-fn apply_one(homes: &Homes, write: &Write, date: &str, done: &mut Vec<Written>) -> Result<()> {
+/// A write that stopped part way, with what it had already put on disk.
+struct Stopped {
+    error: anyhow::Error,
+    /// What was being written.
+    target: PathBuf,
+    /// The backup made before the write began, which stays.
+    backup: Option<PathBuf>,
+    /// Skill files already copied into the target before the one that failed,
+    /// relative to it. Each one is in place: `write_atomic` renames a whole
+    /// file in, so the file that failed is the only one left as it was.
+    copied: Vec<PathBuf>,
+    /// The last of `copied` when its bytes landed but its mode was not set.
+    mode_unset: Option<PathBuf>,
+    /// How many files the skill copy meant to write.
+    of: usize,
+}
+
+/// The error text for a stop: every file written before it, including those
+/// of a skill copy that stopped part way, so "nothing" is only said when
+/// nothing was.
+fn stopped_message(homes: &Homes, done: &[Written], stopped: &Stopped) -> String {
+    let mut wrote: Vec<String> = done.iter().map(|w| match &w.backup {
+        Some(b) => format!("{} (backed up to {b})", w.path),
+        None => w.path.clone(),
+    }).collect();
+    if !stopped.copied.is_empty() {
+        let names = stopped.copied.iter().map(|rel| match &stopped.mode_unset {
+            Some(unset) if unset == rel => format!("{} (its mode was not set)", rel.display()),
+            _ => rel.display().to_string(),
+        }).collect::<Vec<_>>().join(", ");
+        let backup = stopped.backup.as_ref().map(|b| format!("; backed up to {}", homes.pretty(b))).unwrap_or_default();
+        wrote.push(format!("{} of {} files into {} ({names}{backup})", stopped.copied.len(), stopped.of, homes.pretty(&stopped.target)));
+    }
+    let error = &stopped.error;
+    if wrote.is_empty() {
+        return match &stopped.backup {
+            Some(b) => format!("Nothing was written: {error:#}. A backup was made at {} first.", homes.pretty(b)),
+            None => format!("Nothing was written: {error:#}"),
+        };
+    }
+    let note = match (&stopped.backup, stopped.copied.is_empty()) {
+        (Some(b), true) => format!(" A backup was made at {} first.", homes.pretty(b)),
+        _ => String::new(),
+    };
+    format!("Wrote {}, then stopped: {error:#}. Nothing after that was written.{note}", wrote.join(", "))
+}
+
+fn apply_one(homes: &Homes, write: &Write, date: &str) -> Result<Written, Stopped> {
     let backup = backup_of(homes, write, date);
+    let of = match write {
+        Write::Skill { files, .. } => files.len(),
+        Write::File { .. } => 1,
+    };
+    let mut stopped = Stopped { error: anyhow!("stopped"), target: write.target().to_path_buf(), backup: None, copied: Vec::new(), mode_unset: None, of };
     if let Some(backup) = &backup {
-        make_backup(write.target(), backup).with_context(|| format!("back up {}", homes.pretty(write.target())))?;
-    }
-    match write {
-        Write::File { path, bytes, .. } => {
-            let real = through_link(path)?;
-            if let Some(parent) = real.parent() {
-                fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-            }
-            crate::store::write_atomic(&real, bytes)?;
+        if let Err(e) = make_backup(write.target(), backup).with_context(|| format!("back up {}", homes.pretty(write.target()))) {
+            // A backup cut short is not one to point at; nothing of the write has begun.
+            stopped.error = e;
+            return Err(stopped);
         }
-        Write::Skill { source, target, files, .. } => {
-            for file in files {
-                // `plan` checked every landing already; checked again so a link
-                // made since cannot carry a write out of the folder.
-                let to = landing(target, &file.rel).map_err(|e| anyhow!("{e}"))?;
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-                }
-                let bytes = fs::read(source.join(&file.rel)).with_context(|| format!("read {}", source.join(&file.rel).display()))?;
-                if Sha256::digest(&bytes).as_slice() != file.hash {
-                    bail!("{} changed since the preview", homes.pretty(&source.join(&file.rel)));
-                }
-                crate::store::write_atomic(&to, &bytes)?;
-                // The source's mode, executable bits included, not write_atomic's owner-only default.
-                fs::set_permissions(&to, fs::metadata(source.join(&file.rel))?.permissions())?;
-            }
+        stopped.backup = Some(backup.clone());
+    }
+    let result = match write {
+        Write::File { path, bytes, .. } => write_file(path, bytes),
+        Write::Skill { source, target, files, .. } => copy_skill(homes, source, target, files, &mut stopped),
+    };
+    match result {
+        Ok(()) => Ok(Written { path: homes.pretty(write.target()), backup: backup.map(|b| homes.pretty(&b)) }),
+        Err(error) => {
+            stopped.error = error;
+            Err(stopped)
         }
     }
-    done.push(Written { path: homes.pretty(write.target()), backup: backup.map(|b| homes.pretty(&b)) });
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let real = through_link(path)?;
+    if let Some(parent) = real.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    crate::store::write_atomic(&real, bytes)
+}
+
+/// Copies each file in turn, recording each one in `progress` as soon as it
+/// is in place, so a stop part way names what is already there.
+fn copy_skill(homes: &Homes, source: &Path, target: &Path, files: &[SkillFile], progress: &mut Stopped) -> Result<()> {
+    for file in files {
+        // `plan` checked every landing already; checked again so a link
+        // made since cannot carry a write out of the folder.
+        let to = landing(target, &file.rel).map_err(|e| anyhow!("{e}"))?;
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let from = source.join(&file.rel);
+        let bytes = fs::read(&from).with_context(|| format!("read {}", from.display()))?;
+        if Sha256::digest(&bytes).as_slice() != file.hash {
+            bail!("{} changed since the preview", homes.pretty(&from));
+        }
+        // Named as the user knows it, not as `landing` resolved it.
+        let shown = homes.pretty(&target.join(&file.rel));
+        crate::store::write_atomic(&to, &bytes).with_context(|| format!("write {shown}"))?;
+        progress.copied.push(file.rel.clone());
+        // The source's mode, executable bits included, not write_atomic's owner-only default.
+        if let Err(e) = fs::metadata(&from).and_then(|m| fs::set_permissions(&to, m.permissions())) {
+            progress.mode_unset = Some(file.rel.clone());
+            return Err(anyhow!(e).context(format!("set the mode of {shown}")));
+        }
+    }
     Ok(())
 }
 
