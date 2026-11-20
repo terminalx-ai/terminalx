@@ -10,6 +10,7 @@
 //! window reaches the runtime over its authenticated desktop IPC, and the
 //! runtime calls its own owner operations in process.
 
+mod latest_worker;
 pub(crate) mod registry;
 pub(crate) mod rpc;
 pub(crate) mod send_ids;

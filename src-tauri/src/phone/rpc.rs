@@ -20,7 +20,8 @@ use uuid::Uuid;
 use crate::local_runtime::mobile::model::{AccountMirror, DeviceEntry, DeviceProvenance, DeviceScope};
 use super::send_ids::{Reply, SendIds, SendKey, ID_REUSED, STILL_SENDING};
 use crate::local_runtime::mobile::Repeat;
-use super::sync_cache::{Reader, SyncCache, Verified};
+use super::latest_worker::LatestWorker;
+use super::sync_cache::{Reader, Stopped, SyncCache, Verified, Wanted, WANTED_EVERY};
 use super::wire::{megabytes, ReplyLimits, Transport, Wire};
 use super::PhoneHost;
 use crate::events::{AgentEvent, Payload};
@@ -592,8 +593,9 @@ pub(crate) struct MobileConnection {
     closed: std::sync::atomic::AtomicBool,
     /// The transcript checkpoints this connection's `session.sync` replies ended at (#1283).
     sync_cache: SyncCache,
-    /// Counts this connection's `sync.prefetch` calls: a sender stops once it is not the latest.
-    prefetch: std::sync::atomic::AtomicU64,
+    /// Sends what this connection's latest `sync.prefetch` asked for, on one
+    /// thread: a newer request or a stop ends the one under way (#1338).
+    prefetch: LatestWorker<PrefetchJob>,
     #[cfg(unix)]
     authority: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
 }
@@ -630,7 +632,7 @@ impl MobileConnection {
             polling: std::sync::atomic::AtomicBool::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
             sync_cache: SyncCache::default(),
-            prefetch: std::sync::atomic::AtomicU64::new(0),
+            prefetch: LatestWorker::new("mobile-prefetch", run_prefetch),
             #[cfg(unix)]
             authority: None,
         })
@@ -716,6 +718,7 @@ impl MobileConnection {
         {
             return;
         }
+        self.prefetch.stop();
         if let Some(sink) = self.runtime.sink.get() {
             for (_, listener) in self.subscriptions.lock().unwrap().drain() {
                 sink.unlisten(listener);
@@ -1285,25 +1288,33 @@ fn session_sync(connection: &MobileConnection, request_id: &str, params: Session
 /// or hashing the log again (#1283); any other, or a log that is not the one
 /// verified plus appended lines, is checked against the whole log as before.
 /// The page's end is kept as `reader`'s checkpoint, beside the other's.
-fn synced_page((cache, reader): (&SyncCache, Reader), path: &Path, cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
+fn synced_page(reader: (&SyncCache, Reader), path: &Path, cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
+    synced_page_while(reader, path, cursor, session, tab, request_id, limits, Wanted::ALWAYS)
+}
+
+/// `synced_page`, given up with `Stopped` once it is no longer `wanted`: a
+/// prefetch that a newer one replaced stops inside a whole-log read (#1338).
+/// Nothing is kept of a page given up.
+#[allow(clippy::too_many_arguments)]
+fn synced_page_while((cache, reader): (&SyncCache, Reader), path: &Path, cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits, wanted: Wanted) -> Result<Value> {
     if let Some(cursor) = cursor {
         if let Some(verified) = cache.matching(session, tab, cursor) {
-            if let Some(tail) = super::sync_cache::read_after(path, &verified)? {
+            if let Some(tail) = super::sync_cache::read_after(path, &verified, wanted)? {
                 let page = forward_page(verified.hash.clone(), verified.offset, &tail.events, request_id, limits)?;
                 cache.store(session, tab, reader, verified.advance(&page, &tail));
                 return Ok(page.value);
             }
         }
     }
-    let log = super::sync_cache::read_log(path)?;
-    let page = sync_page_state(&log.events, cursor, session, tab, request_id, limits)?;
+    let log = super::sync_cache::read_log(path, wanted)?;
+    let page = sync_page_state(&log.events, cursor, session, tab, request_id, limits, wanted)?;
     cache.store(session, tab, reader, Verified::of_log(&page, &log));
     Ok(page.value)
 }
 
 #[cfg(test)]
 fn sync_page(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<Value> {
-    Ok(sync_page_state(events, cursor, session, tab, request_id, limits)?.value)
+    Ok(sync_page_state(events, cursor, session, tab, request_id, limits, Wanted::ALWAYS)?.value)
 }
 
 /// A sync page, and the checkpoint it ends at: its cursor's offset and the
@@ -1322,8 +1333,9 @@ pub(super) fn sync_hash(session: &str, tab: &str) -> Result<Sha256> {
     Ok(hash)
 }
 
-fn hash_events<'a>(hash: &mut Sha256, events: impl IntoIterator<Item = &'a AgentEvent>) -> Result<()> {
-    for event in events {
+fn hash_events<'a>(hash: &mut Sha256, events: impl IntoIterator<Item = &'a AgentEvent>, wanted: Wanted) -> Result<()> {
+    for (index, event) in events.into_iter().enumerate() {
+        if index % WANTED_EVERY == 0 { wanted.check()?; }
         hash.update(serde_json::to_vec(event)?);
         hash.update(b"\n");
     }
@@ -1343,12 +1355,12 @@ fn sync_envelope(request_id: &str, total: usize, limits: ReplyLimits) -> Result<
     Ok((budget, single))
 }
 
-fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits) -> Result<SyncedPage> {
+fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: &str, tab: &str, request_id: &str, limits: ReplyLimits, wanted: Wanted) -> Result<SyncedPage> {
     // Hash canonical records with explicit boundaries, including conversation
     // identity and protocol generation. Stable across desktop restarts.
     let mut hash = sync_hash(session, tab)?;
     let offset = cursor.map_or(0, |c| c.offset);
-    hash_events(&mut hash, events.iter().take(offset))?;
+    hash_events(&mut hash, events.iter().take(offset), wanted)?;
     let valid = cursor.is_some_and(|c| c.offset <= events.len()
         && c.digest == format!("{:x}", hash.clone().finalize()));
     if valid {
@@ -1366,7 +1378,7 @@ fn sync_page_state(events: &[AgentEvent], cursor: Option<&SyncCursor>, session: 
     // event: it is sent alone, and cut down to fit if it must be.
     start = events.len() - sync_event_count(events[start..].iter().rev(), budget)?;
     let mut hash = sync_hash(session, tab)?;
-    hash_events(&mut hash, events)?;
+    hash_events(&mut hash, events, wanted)?;
     let page = events[start..].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
     Ok(SyncedPage {
         value: json!({
@@ -1385,7 +1397,8 @@ pub(super) fn forward_page(mut hash: Sha256, start: usize, rest: &[AgentEvent], 
     let total = start + rest.len();
     let (budget, single) = sync_envelope(request_id, total, limits)?;
     let count = sync_event_count(rest.iter().take(SYNC_PAGE_EVENTS), budget)?;
-    hash_events(&mut hash, &rest[..count])?;
+    // At most a page of records: not worth a check.
+    hash_events(&mut hash, &rest[..count], Wanted::ALWAYS)?;
     let page = rest[..count].iter().map(|event| fit_event(event, single)).collect::<Result<Vec<_>>>()?;
     let end = start + count;
     Ok(SyncedPage {
@@ -1450,44 +1463,62 @@ struct KnownTranscript {
 /// it, from the checkpoint the phone named, or the newest part when it named
 /// none; a conversation with nothing new is not sent.
 fn prefetch(connection: &Arc<MobileConnection>, params: PrefetchParams) -> Result<Value> {
-    use std::sync::atomic::Ordering;
-    let generation = connection.prefetch.fetch_add(1, Ordering::SeqCst) + 1;
     if !params.enabled {
+        connection.prefetch.stop();
         return Ok(json!({ "enabled": false }));
     }
     if params.known.len() > PREFETCH_KNOWN || params.open.len() > PREFETCH_KNOWN {
+        connection.prefetch.stop();
         bail!("a prefetch names at most {PREFETCH_KNOWN} conversations");
     }
     let open: HashSet<(String, String)> = params.open.into_iter().map(|open| (open.session_id, open.tab_id)).collect();
     let known: HashMap<(String, String), SyncCursor> = params.known.into_iter()
         .map(|known| ((known.session_id, known.tab_id), known.cursor)).collect();
-    let targets = prefetch_targets(index::load()?);
-    let weak = Arc::downgrade(connection);
-    std::thread::Builder::new().name("mobile-prefetch".into()).spawn(move || {
-        let current = |connection: &MobileConnection| !connection.closed.load(Ordering::SeqCst)
-            && connection.prefetch.load(Ordering::SeqCst) == generation;
-        let mut sent = 0;
-        for (session, tab) in targets {
-            let Some(connection) = weak.upgrade() else { return };
-            if PREFETCH_BYTES - sent < 16 * 1024 || !current(&connection) || !connection.room_for_prefetch(&current) { return; }
-            if reading_for_itself(&connection.sync_cache, &open, &session, &tab) { continue; }
-            let after = known.get(&(session.clone(), tab.clone()));
-            match prefetch_message(&connection, &session, &tab, after, PREFETCH_BYTES - sent) {
-                Ok(Some(message)) => {
-                    let size = serde_json::to_vec(&message).map_or(usize::MAX, |bytes| bytes.len());
-                    if size > PREFETCH_BYTES - sent { return; }
-                    // Room was made for it; a queue that filled since is left to live events.
-                    if connection.outbound.try_send(message).is_err() { return; }
-                    sent += size;
-                }
-                Ok(None) => {}
-                Err(error) => log::debug!("prefetch of {session}/{tab} skipped: {error:#}"),
-            }
-            drop(connection);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-    })?;
+    // Replaces the one under way, if any: never more than one thread at work for a connection.
+    connection.prefetch.submit(PrefetchJob { connection: Arc::downgrade(connection), known, open })?;
     Ok(json!({ "enabled": true, "sessions": PREFETCH_SESSIONS, "bytes": PREFETCH_BYTES }))
+}
+
+/// What one `sync.prefetch` asked for.
+struct PrefetchJob {
+    connection: std::sync::Weak<MobileConnection>,
+    known: HashMap<(String, String), SyncCursor>,
+    open: HashSet<(String, String)>,
+}
+
+/// Sends one `sync.prefetch`'s conversations, until it is done, no longer
+/// `wanted`, or the connection closes. Each check comes before an expensive
+/// step and before each send, and the log reads and hashes check as they go,
+/// so a replaced prefetch reads and sends nothing more.
+fn run_prefetch(job: PrefetchJob, wanted: &dyn Fn() -> bool) {
+    use std::sync::atomic::Ordering;
+    let current = |connection: &MobileConnection| !connection.closed.load(Ordering::SeqCst) && wanted();
+    let targets = match index::load() {
+        Ok(sessions) => prefetch_targets(sessions),
+        Err(error) => { log::warn!("prefetch skipped: the session index did not load: {error:#}"); return; }
+    };
+    let mut sent = 0;
+    for (session, tab) in targets {
+        let Some(connection) = job.connection.upgrade() else { return };
+        if PREFETCH_BYTES - sent < 16 * 1024 || !current(&connection) || !connection.room_for_prefetch(&current) { return; }
+        if reading_for_itself(&connection.sync_cache, &job.open, &session, &tab) { continue; }
+        let after = job.known.get(&(session.clone(), tab.clone()));
+        let still = || current(&connection);
+        match prefetch_message(&connection, &session, &tab, after, PREFETCH_BYTES - sent, Wanted(&still)) {
+            Ok(Some(message)) => {
+                let size = serde_json::to_vec(&message).map_or(usize::MAX, |bytes| bytes.len());
+                if size > PREFETCH_BYTES - sent || !current(&connection) { return; }
+                // Room was made for it; a queue that filled since is left to live events.
+                if connection.outbound.try_send(message).is_err() { return; }
+                sent += size;
+            }
+            Ok(None) => {}
+            Err(error) if error.is::<Stopped>() => return,
+            Err(error) => log::debug!("prefetch of {session}/{tab} skipped: {error:#}"),
+        }
+        drop(connection);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// Whether the phone reads this conversation for itself, so a prefetch leaves
@@ -1514,7 +1545,7 @@ fn prefetch_targets(sessions: Vec<SessionEntry>) -> Vec<(String, String)> {
 
 /// One conversation's `session.prefetch`, at most `budget` bytes of page;
 /// `None` when the phone's checkpoint is already the end.
-fn prefetch_message(connection: &MobileConnection, session: &str, tab: &str, after: Option<&SyncCursor>, budget: usize) -> Result<Option<Value>> {
+fn prefetch_message(connection: &MobileConnection, session: &str, tab: &str, after: Option<&SyncCursor>, budget: usize, wanted: Wanted) -> Result<Option<Value>> {
     let path = store::log_path(session, tab)?;
     // The wrapper around the page, at its largest, is left out of the page's room.
     let wrapper = serde_json::to_vec(&json!({ "method": "session.prefetch", "params": {
@@ -1528,7 +1559,7 @@ fn prefetch_message(connection: &MobileConnection, session: &str, tab: &str, aft
         single: limits.single.min(budget).checked_sub(wrapper).context("no room left for a prefetch")?,
     };
     // Kept apart from the phone reader's checkpoint (#1337): the phone may drop this page.
-    let page = synced_page((&connection.sync_cache, Reader::Prefetch), &path, after, session, tab, "prefetch", limits)?;
+    let page = synced_page_while((&connection.sync_cache, Reader::Prefetch), &path, after, session, tab, "prefetch", limits, wanted)?;
     if page["reset"] == false && page["events"].as_array().is_some_and(Vec::is_empty) {
         return Ok(None);
     }
@@ -2834,6 +2865,45 @@ mod tests {
         }
     }
 
+    /// #1338: a prefetch that a newer one replaced stops inside a whole-log
+    /// read, parse or hash, at whichever check comes first after it was
+    /// replaced, and keeps no checkpoint of the page it gave up.
+    #[test]
+    fn a_prefetch_read_stops_at_its_next_check_once_it_is_no_longer_wanted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        write_log(&path, &(1..=1300).map(prompt).collect::<Vec<_>>());
+        let read = |cache: &SyncCache, cursor: Option<&SyncCursor>, wanted: Wanted| synced_page_while(
+            (cache, Reader::Prefetch), &path, cursor, "session", "tab", "prefetch", direct(), wanted);
+
+        // How many checks a whole read and hash makes.
+        let checks = AtomicUsize::new(0);
+        let counting = || { checks.fetch_add(1, Ordering::SeqCst); true };
+        let whole = read(&SyncCache::default(), None, Wanted(&counting)).unwrap();
+        let total = checks.load(Ordering::SeqCst);
+        assert!(total > 1300 / WANTED_EVERY * 2, "the read and the hash both check as they go: {total}");
+
+        // Stopped at each of them in turn: the read ends at that check and keeps nothing.
+        for stop_at in 1..=total {
+            let checks = AtomicUsize::new(0);
+            let wanted = || checks.fetch_add(1, Ordering::SeqCst) + 1 < stop_at;
+            let cache = SyncCache::default();
+            let error = read(&cache, None, Wanted(&wanted)).expect_err("a read no longer wanted stops");
+            assert!(error.is::<Stopped>(), "{error:#}");
+            assert_eq!(checks.load(Ordering::SeqCst), stop_at, "nothing more is read once it is not wanted");
+            assert!(cache.matching("session", "tab", &cursor(&whole)).is_none(), "a page given up leaves no checkpoint");
+        }
+
+        // From a checkpoint the prefetch kept: the appended part stops too.
+        let cache = SyncCache::default();
+        let page = read(&cache, None, Wanted::ALWAYS).unwrap();
+        append_log(&path, &(1301..=2000).map(prompt).collect::<Vec<_>>());
+        let never = || false;
+        let error = read(&cache, Some(&cursor(&page)), Wanted(&never)).expect_err("a read no longer wanted stops");
+        assert!(error.is::<Stopped>(), "{error:#}");
+    }
+
     #[test]
     fn a_verified_cursor_continues_from_the_appended_bytes_and_any_other_change_reads_the_whole_log() {
         use std::io::Write;
@@ -2848,7 +2918,7 @@ mod tests {
         // Appended: read from where the checkpoint ends, across pages, and the same as a whole read.
         append_log(&path, &(101..=1300).map(prompt).collect::<Vec<_>>());
         let verified = cache.matching("session", "tab", &checkpoint).expect("the connection kept its checkpoint");
-        let tail = super::super::sync_cache::read_after(&path, &verified).unwrap().expect("only lines were appended");
+        let tail = super::super::sync_cache::read_after(&path, &verified, Wanted::ALWAYS).unwrap().expect("only lines were appended");
         assert_eq!(tail.events.len(), 1200);
         let (seqs, checkpoint, reset) = drain_cached(&cache, &path, Some(checkpoint), direct());
         assert!(!reset);
@@ -2858,7 +2928,7 @@ mod tests {
         let partial = serde_json::to_string(&prompt(1301)).unwrap();
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&partial.as_bytes()[..20]).unwrap();
         let verified = cache.matching("session", "tab", &checkpoint).unwrap();
-        assert!(super::super::sync_cache::read_after(&path, &verified).unwrap().is_none());
+        assert!(super::super::sync_cache::read_after(&path, &verified, Wanted::ALWAYS).unwrap().is_none());
         let (seqs, checkpoint, _) = drain_cached(&cache, &path, Some(checkpoint), direct());
         assert!(seqs.is_empty());
         std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(format!("{}\n", &partial[20..]).as_bytes()).unwrap();
