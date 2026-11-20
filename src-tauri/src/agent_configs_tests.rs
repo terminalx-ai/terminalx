@@ -428,6 +428,88 @@ fn a_write_that_fails_part_way_names_what_was_already_written() {
     assert!(error.ends_with("Nothing after that was written."), "{error}");
 }
 
+/// release-notes given a second file, `scripts/build.sh`, whose folder on the
+/// Codex side cannot be written into: SKILL.md lands, then the copy stops.
+/// Returns the Codex target and its read-only `scripts` folder.
+#[cfg(unix)]
+fn skill_that_stops_after_its_first_file(rig: &Rig) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let source = rig.homes.claude_dir.join("skills/release-notes");
+    fs::create_dir_all(source.join("scripts")).unwrap();
+    fs::write(source.join("scripts/build.sh"), "#!/bin/sh\necho notes\n").unwrap();
+    let target = rig.homes.codex_dir.join("skills/release-notes");
+    let scripts = target.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::set_permissions(&scripts, fs::Permissions::from_mode(0o555)).unwrap();
+    (target, scripts)
+}
+
+#[cfg(unix)]
+fn writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_skill_copy_that_stops_first_names_the_files_it_wrote() {
+    let rig = rig();
+    let (target, scripts) = skill_that_stops_after_its_first_file(&rig);
+    let changes = [change(Kind::Skill, "release-notes", Direction::ToCodex)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    let error = apply_in(&rig.homes, &changes, &preview.token).unwrap_err().to_string();
+    writable(&scripts);
+    let backup = format!("~/terminalx/backups/skills/codex/release-notes.bak-{}", today());
+    assert!(
+        error.starts_with(&format!("Wrote 1 of 2 files into ~/.codex/skills/release-notes (SKILL.md; backed up to {backup}), then stopped: write ~/.codex/skills/release-notes/scripts/build.sh: ")),
+        "{error}"
+    );
+    assert!(error.ends_with("Nothing after that was written."), "{error}");
+    assert!(!error.contains("Nothing was written"), "{error}");
+    // What the message says is what is on disk.
+    assert_eq!(fs::read(target.join("SKILL.md")).unwrap(), fs::read(rig.homes.claude_dir.join("skills/release-notes/SKILL.md")).unwrap());
+    assert!(!scripts.join("build.sh").exists());
+    assert!(rig.homes.backups.join(format!("skills/codex/release-notes.bak-{}", today())).join("scripts").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_skill_copy_that_stops_after_an_earlier_write_names_both() {
+    let rig = rig();
+    let (target, scripts) = skill_that_stops_after_its_first_file(&rig);
+    let changes = [change(Kind::Command, "review", Direction::ToCodex), change(Kind::Skill, "release-notes", Direction::ToCodex)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    let error = apply_in(&rig.homes, &changes, &preview.token).unwrap_err().to_string();
+    writable(&scripts);
+    assert!(
+        error.starts_with("Wrote ~/.codex/prompts/review.md, 1 of 2 files into ~/.codex/skills/release-notes (SKILL.md; backed up to "),
+        "{error}"
+    );
+    assert!(error.contains("then stopped: write ~/.codex/skills/release-notes/scripts/build.sh: "), "{error}");
+    assert!(error.ends_with("Nothing after that was written."), "{error}");
+    assert!(rig.homes.codex_dir.join("prompts/review.md").is_file());
+    assert!(target.join("SKILL.md").is_file());
+    assert!(!scripts.join("build.sh").exists());
+}
+
+/// A skill copy that fails on its first file wrote nothing of its own, but its
+/// backup stays and is named.
+#[cfg(unix)]
+#[test]
+fn a_skill_copy_that_fails_on_its_first_file_names_its_backup() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig();
+    let target = unlisted_codex_target(&rig);
+    let changes = [change(Kind::Skill, "release-notes", Direction::ToCodex)];
+    let preview = preview_in(&rig.homes, &changes).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+    let error = apply_in(&rig.homes, &changes, &preview.token).unwrap_err().to_string();
+    writable(&target);
+    assert!(error.starts_with("Nothing was written: write ~/.codex/skills/release-notes/SKILL.md: "), "{error}");
+    assert!(error.ends_with(&format!("A backup was made at ~/terminalx/backups/skills/codex/release-notes.bak-{} first.", today())), "{error}");
+    assert!(!target.join("SKILL.md").exists());
+}
+
 /// A Codex folder named like a Claude skill but without SKILL.md: not a listed
 /// skill, yet every file of the copy lands in it.
 #[cfg(unix)]
