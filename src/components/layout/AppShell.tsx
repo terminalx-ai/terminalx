@@ -7,7 +7,7 @@ import { SelfUiAccess } from "@/components/computer/SelfUiAccess";
 import { SignInLinkDialog } from "@/components/account/PasteSignInLink";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { WorktreeCopyNotices } from "@/components/ui/WorktreeCopyNotices";
-import { onOpenOrganizationSettings, onOpenSettingRow } from "@/lib/settingsLinks";
+import { onOpenOrganizationSettings, onOpenSettingRow, onStatsSettingsRequest } from "@/lib/settingsLinks";
 import { onOpenCloudSetup, type CloudSetupTarget } from "@/lib/cloudSetupFlow";
 import { useAccount } from "@/lib/account";
 import { CloudSetupFlow } from "@/components/cloudSetup/CloudSetupFlow";
@@ -46,7 +46,7 @@ import { setPrefs, usePrefs } from "@/lib/prefs";
 import { NewSessionDialog } from "@/components/session/NewSessionDialog";
 import { UpdateNotice } from "./UpdateNotice";
 import { checkForUpdate, startUpdateChecks } from "@/lib/updates";
-import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, openStats, startIdleArchive, useSessionStore } from "@/lib/sessions";
+import { getSessionStore, bootSessions, closeNewSession, openNewSession, openHome, openAgents, openAutomations, openIssues, openSkills, startIdleArchive, useSessionStore } from "@/lib/sessions";
 import { subscribeAgentEvents } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
 import { sendHeldFirstMessage } from "@/lib/sessionBackend";
@@ -112,7 +112,6 @@ import { stepAttentionSession, stepVisibleSession } from "@/lib/sessionNavigatio
 import { ImageViewerHost } from "@/components/ui/ImageViewer";
 
 const StatusBar = lazy(() => import("@/components/layout/StatusBar").then((module) => ({ default: module.StatusBar })));
-const StatsUsageView = lazy(() => import("@/components/stats/StatsUsageView").then((module) => ({ default: module.StatsUsageView })));
 const CloudWorkspaceMain = lazy(() => import("@/components/cloud/CloudWorkspaceMain").then((module) => ({ default: module.CloudWorkspaceMain })));
 const MachineMain = lazy(() => import("@/components/machines/MachineMain").then((module) => ({ default: module.MachineMain })));
 /** Where Settings opens when no section is asked for: General (PRO-374; it was Account, PRO-81). SettingsPage falls back to the same one. */
@@ -286,7 +285,9 @@ export function AppShell() {
   }, [canLeave]);
   const showIssues = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openIssues(); }, [canLeave]);
   const showAgents = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openAgents(); }, [canLeave]);
-  const showStats = useCallback(() => { if (canLeave()) openStats(); }, [canLeave]);
+  // Stats & usage is a page of Settings (PRO-463): the status bar's usage menu, a session's cost, the shortcut and ⌘K open it there.
+  const showStats = useCallback(() => openSettings("stats"), [openSettings]);
+  useEffect(() => onStatsSettingsRequest(showStats), [showStats]);
   const showSkills = useCallback(() => { if (canLeave()) openSkills(); }, [canLeave]);
   const showAutomations = useCallback(() => { if (!canLeave()) return; setSettingsOpen(false); openAutomations(); }, [canLeave]);
   const showQuickChat = useCallback(() => void showFloatingWindow().catch((e) => console.error("floating window", e)), []);
@@ -417,11 +418,6 @@ export function AppShell() {
                 setSettingsOpen(false);
                 showSkills();
               }}
-              onOpenUsage={() => {
-                if (!canLeave()) return;
-                setSettingsOpen(false);
-                showStats();
-              }}
             />
           </Suspense>
         ) : (
@@ -436,7 +432,6 @@ export function AppShell() {
                 onNewSession={newSession}
                 onOpenIssues={showIssues}
                 onOpenAgents={showAgents}
-                onOpenStats={showStats}
                 onOpenAutomations={showAutomations}
                 onOpenSkills={showSkills}
                 onSearch={() => setPaletteOpen(true)}
@@ -576,7 +571,7 @@ function UnselectedWorkspace({
           <span className="min-w-0 flex-1 truncate px-1 text-sm text-muted-foreground">
             {view === "issues"
               ? "Issues"
-              : view === "agents" || view === "skills" || view === "stats" || view === "project"
+              : view === "agents" || view === "skills" || view === "project"
                 ? ""
                 : view === "automations"
                   ? "Automations"
@@ -606,10 +601,6 @@ function UnselectedWorkspace({
               <ProjectOverview key={store.selectedProject} path={store.selectedProject} />
             ) : view === "agents" ? (
               <AgentDashboard />
-            ) : view === "stats" ? (
-              <Suspense fallback={viewFallback}>
-                <StatsUsageView />
-              </Suspense>
             ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : view === "skills" ? (

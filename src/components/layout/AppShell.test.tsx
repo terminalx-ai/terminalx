@@ -55,7 +55,7 @@ const { sessionStore } = vi.hoisted(() => ({
     selectedSessionId: null,
     selectedAutomationId: null as string | null,
     selectedCloudWorkspace: null as string | null,
-    view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "stats" | "automations" | "skills",
+    view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
     workspaces: {
@@ -90,7 +90,6 @@ vi.mock("@/lib/sessions", () => ({
   openAutomations: vi.fn(),
   openIssues: vi.fn(),
   openSkills: vi.fn(),
-  openStats: vi.fn(),
   selectSession: vi.fn(),
   startIdleArchive: vi.fn(),
   useSessionStore: () => sessionStore,
@@ -129,8 +128,8 @@ vi.mock("@/lib/orchestration", async (importOriginal) => ({
 }));
 vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
 vi.mock("@/components/layout/StatusBar", () => ({
-  StatusBar: ({ onOpenAgentSettings }: { onOpenAgentSettings: () => void }) => (
-    <button type="button" onClick={onOpenAgentSettings}>Agent settings</button>
+  StatusBar: ({ onOpenAgentSettings, onOpenUsageDetails }: { onOpenAgentSettings: () => void; onOpenUsageDetails: () => void }) => (
+    <><button type="button" onClick={onOpenAgentSettings}>Agent settings</button><button type="button" onClick={onOpenUsageDetails}>Open Stats & Usage</button></>
   ),
 }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
@@ -264,7 +263,7 @@ const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
 const { forgetSettingToasts, getSettingToasts } = await import("@/lib/settingsToasts");
-const { openSettingRow } = await import("@/lib/settingsLinks");
+const { openSettingRow, openStatsSettings } = await import("@/lib/settingsLinks");
 const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
@@ -627,6 +626,20 @@ describe("settings page navigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first + 2));
     expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("agents");
+  });
+
+  // PRO-463: Stats & usage is a page of Settings; every way in opens it there.
+  it("opens Stats & usage in Settings from the usage menu, a session's cost, the shortcut and the palette's entry", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Stats & Usage" }));
+    expect(await section()).toBe("stats");
+    close();
+    act(() => openStatsSettings());
+    expect(await section()).toBe("stats");
+    close();
+    // ⌘K's entry runs the same shortcut action.
+    act(() => shortcuts.get("app.stats")!());
+    expect(await section()).toBe("stats");
   });
 
   it("goes from a named section straight to General when the shortcut is pressed with Settings open", async () => {

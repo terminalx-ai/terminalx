@@ -58,7 +58,7 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><LocalSectionDialogs /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><LocalSectionDialogs /></TooltipProvider>);
 async function seed(sections: LocalSection[]) { saved = { revision: saved.revision + 1, sections }; await act(() => local.refreshLocalSections()); }
 async function menu(name: string, action: string) { fireEvent.click(screen.getByRole("button", { name: `Menu for section ${name}` })); fireEvent.click(await screen.findByRole("menuitem", { name: action })); }
 async function submit(name: string) { fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name })); await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); }

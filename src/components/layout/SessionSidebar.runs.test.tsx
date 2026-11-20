@@ -83,7 +83,7 @@ afterEach(cleanup);
 function RunShown({ id }: { id: string }) {
   return <span data-testid={`run-shown-${id}`}>{String(useRunViewShown(id))}</span>;
 }
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><RunShown id="lead" /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /><RunShown id="lead" /></TooltipProvider>);
 async function boot(list: SessionEntry[], listRuns: Run[]) {
   sessions = list;
   runs = listRuns;
