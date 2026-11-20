@@ -34,9 +34,9 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 | Header: account label | yes | machine: yes; cloud: none. A cloud agent signs in with the organization's login, and the sign-in notice says when it cannot | — |
 | Split panes | yes | cloud: **yes**, laid out per viewer on this computer; machine: no (one pane and its terminal dock) | — |
 | Lead chat, orchestration run, browser tabs | yes | no: they stay on this computer, and the "+" menu says so (see below) | — |
-| Second opinion | yes | disabled with why | #1327 |
-| Agent handoff (composer) | yes | no | #1327 |
-| Retry in new chat | yes | disabled with why | #1327 |
+| Second opinion | yes | **yes** with `handoff/1`, for a workspace admin; otherwise disabled with why (`HANDOFF_*`) | runtime update |
+| Agent handoff (composer) | yes | **yes** with `handoff/1`, for a workspace admin; otherwise shown off with why (`HANDOFF_*`) | runtime update |
+| Retry in new chat | yes | **yes** with `handoff/1`: the prompt's text; one with attachments is refused with why, as Retry is | runtime update |
 | Reset, Fork | yes | **yes** with `checkpoints/1`, for a workspace admin; otherwise disabled with why (`TURNS_*`) | runtime update |
 | Turn checkpoints (Keep, Undo turn) | yes | **yes** with `checkpoints/1`: everyone who reads the chat sees what a turn changed; an admin keeps or undoes it | runtime update |
 | First message preview | yes | not needed: a cloud session's first prompt goes with its `session.create`, so no send waits on this computer to be shown | — |
@@ -77,6 +77,32 @@ and `ResetChatDialog` call it and never the local commands directly. A
 remote session without it says why: not connected (`TURNS_OFFLINE`), a
 runtime from before `checkpoints/1` (`TURNS_OLD_RUNTIME`), or someone who is
 not a workspace admin (`TURNS_NEED_ADMIN`, whose turn cards still read).
+
+## Second opinion, Retry in a new chat and the agent handoff (#1327)
+
+Each opens another agent's tab with a first prompt: a finished turn's
+prompt, answer and recorded diffs for review (on Plan), a failed turn's
+prompt in the tab's own agent and mode, or the conversation's context for
+the other agent to carry on. On this computer that is `ContinuationDialog`;
+on a runtime it is one call, `handoff/1`:
+
+- `session.handoff` (manage): adds the tab as `session.addTab` does and sends
+  its first prompt as `session.create` sends a new session's, in the same
+  request. A resend is answered from the runtime's cache, so a dropped
+  connection never makes a second tab, and the prompt never waits on a
+  separate mailbox send. A prompt that cannot be sent leaves the one tab
+  open, says why in its chat, and comes back as `startError`.
+- `session.handoffContext` (manage): the source tab's context
+  (`continuation::prepare`) read on the runtime, so the transcript path the
+  handoff names is one the new tab's agent can open there.
+
+In the client, `SessionBackend.handoff` (`cloudHandoff`) holds both, and
+`TabView` opens `RemoteHandoffDialog` with it; the other agent is the one the
+runtime lists (`agents/1`). A remote session without it says why: not
+connected (`HANDOFF_OFFLINE`), a runtime from before `handoff/1`
+(`HANDOFF_OLD_RUNTIME`), or someone who is not a workspace admin
+(`HANDOFF_NEED_ADMIN`). A retried prompt's images and files are not kept on
+the runtime to send again, so a retry of one says so instead (`RESEND_ATTACHMENTS`).
 
 ## Tabs and panes of a cloud session (#1325)
 

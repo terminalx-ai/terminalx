@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Orchestration runs (experimental): a session that leads no run looks like
+  any other session. The Run | Lead chat strip and the Idle pill no longer
+  show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
+  (#1404).
+
 ## 0.2.36
 
 - Machines: operate TerminalX on another computer from this desktop (PRO-338,

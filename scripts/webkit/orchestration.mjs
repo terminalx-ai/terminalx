@@ -705,11 +705,18 @@ try {
         await page.close();
       }
 
-      // A session with no run (design 18.08).
+      // A session with no run (design 18.08). It looks like any other session (#1404): no Run strip and no run
+      // pill, until Go → Run View opens the page that says how to start one.
       {
         const { page, errors } = await start("none");
         const strip = page.getByTestId("run-strip");
-        await strip.getByRole("tab", { name: /^Run/ }).click();
+        const plain = (await strip.count()) === 0 && (await page.getByTestId("run-pill").count()) === 0;
+        // The keys do nothing until the session's run has been read (there is none): press until they take.
+        for (let tries = 0; tries < 40 && (await strip.count()) === 0; tries++) {
+          await page.keyboard.press("Meta+Shift+O");
+          await page.waitForTimeout(100);
+        }
+        await strip.getByRole("tab", { name: /^Run/, selected: true }).waitFor();
         const view = page.getByTestId("run-view");
         await view.getByRole("heading", { name: "This session has no run" }).waitFor();
         await page.waitForFunction(() => document.querySelector('[data-testid="run-limits"]').textContent.includes("8"));
@@ -719,14 +726,14 @@ try {
           "it says what a run is and offers both ways to start one": (await view.getByRole("button", { name: "Plan a run", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Choose file", exact: true }).count()) === 1 && (await view.getByText("terminalx runs create --from plan.json", { exact: true }).count()) === 1,
           "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass",
           "it says when to split and when not to": (await view.getByRole("list").getByRole("listitem").count()) === 4,
-          // PRO-383 (18.08): the title bar says Idle with no run.
-          "the title bar's run pill says Idle": (await page.getByTestId("run-pill").textContent()) === "Idle" && (await page.getByTestId("run-pill").getAttribute("data-pill")) === "idle",
+          "before the Run view is opened the session has no Run strip and no run pill": plain,
+          "the title bar has no run pill with no run": (await page.getByTestId("run-pill").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
         await view.getByRole("button", { name: "Plan a run", exact: true }).click();
         await view.waitFor({ state: "detached" });
         const calls = await page.evaluate(() => window.__RUNS__.calls);
-        checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.getByRole("tab", { name: "Lead chat" }).getAttribute("aria-selected")) === "true";
+        checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.count()) === 0;
         // The lead stores a plan: the Run tab says so without the view being open.
         await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { id: "run-2", lead: { sessionId: "local-s1" }, projectPath: "/repos/p0", goal: "A new plan", state: "awaitingApproval", budget: {}, workerMode: "bypassPermissions", created: new Date().toISOString(), modified: new Date().toISOString(), pieces: [] }; announce(); });
         await strip.getByRole("status", { name: "A plan waits for your approval" }).waitFor();

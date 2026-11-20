@@ -1,5 +1,6 @@
 import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { agent, attachments, errorMessage, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import { agent, attachments, errorMessage, experimental, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import type { ContinuationContext } from "@terminalx/portable/continuation";
 import type { FileRef } from "@/types/events";
 import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { showError } from "@/lib/errorToasts";
@@ -82,17 +83,18 @@ export interface SessionUnavailable {
   secondOpinion?: string;
   /** A failed turn: Retry in a new chat. */
   retryInNewChat?: string;
+  /** Composer, Agent menu: hand the conversation off to another agent in a new tab (#1327). */
+  agentHandoff?: string;
   /** Header: the project's saved actions and previews (PRO-363). */
   runMenu?: string;
 }
 
 /**
  * What a session that runs on a workspace runtime or a paired machine cannot
- * do yet, and why. Fork and Reset are its runtime's (#1326): see `TURNS_*`.
+ * do, and why. Fork and Reset are its runtime's (#1326): see `TURNS_*`; a
+ * second opinion, Retry in a new chat and the agent handoff too (#1327): see `HANDOFF_*`.
  */
 export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
-  secondOpinion: "A second opinion is not available here yet: this session's runtime cannot hand a turn to another agent.",
-  retryInNewChat: "Retry in a new chat is not available here yet: this session's runtime cannot open a chat with this prompt. Retry sends it again in this chat.",
   runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
 });
 
@@ -110,10 +112,58 @@ export const TURNS_NEED_ADMIN: Readonly<Pick<SessionUnavailable, "fork" | "reset
   reset: "Resetting a chat changes the workspace's files and conversation, which needs a workspace admin.",
 });
 
-/** `REMOTE_UNAVAILABLE` with why Fork and Reset are off, once per reason so a rebuilt backend keeps the same object. */
-const REMOTE_TURNS_OFF = new Map<object, Readonly<SessionUnavailable>>(
-  [TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN].map((off) => [off, Object.freeze({ ...REMOTE_UNAVAILABLE, ...off })]),
-);
+type HandoffOff = Pick<SessionUnavailable, "secondOpinion" | "retryInNewChat" | "agentHandoff">;
+
+/** Why a second opinion, Retry in a new chat and the agent handoff are off on a remote session that could offer them (#1327). */
+export const HANDOFF_OFFLINE: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion needs this session's runtime connected. It is offered once the workspace or machine is back.",
+  retryInNewChat: "Retry in a new chat needs this session's runtime connected. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off to another agent needs this session's runtime connected. It is offered once the workspace or machine is back.",
+});
+export const HANDOFF_OLD_RUNTIME: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion needs a newer runtime. It is offered here once this session's runtime is updated.",
+  retryInNewChat: "Retry in a new chat needs a newer runtime. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off to another agent needs a newer runtime. It is offered here once this session's runtime is updated.",
+});
+export const HANDOFF_NEED_ADMIN: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion opens a new tab in this session, which needs a workspace admin.",
+  retryInNewChat: "Retry in a new chat opens a new tab in this session, which needs a workspace admin. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off opens a new tab in this session, which needs a workspace admin.",
+});
+
+/**
+ * `REMOTE_UNAVAILABLE` with why Fork and Reset, and the handoffs, are off:
+ * one object per pair of reasons, so a rebuilt backend keeps the same one.
+ */
+const remoteOff = new Map<string, Readonly<SessionUnavailable>>();
+const TURNS_REASONS = [TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN];
+const HANDOFF_REASONS = [HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN];
+function remoteUnavailable(turns: object | null, handoff: object | null): Readonly<SessionUnavailable> {
+  if (!turns && !handoff) return REMOTE_UNAVAILABLE;
+  const key = `${turns ? TURNS_REASONS.indexOf(turns) : -1}:${handoff ? HANDOFF_REASONS.indexOf(handoff) : -1}`;
+  let off = remoteOff.get(key);
+  if (!off) remoteOff.set(key, off = Object.freeze({ ...REMOTE_UNAVAILABLE, ...turns, ...handoff }));
+  return off;
+}
+
+/**
+ * A second opinion, Retry in a new chat and the composer's agent handoff
+ * (#1327) on a remote session: another agent's tab in it, opened with its
+ * first prompt by the runtime in one call (`handoff/1`). A local session
+ * takes them through `ContinuationDialog` on this computer.
+ */
+export interface HandoffActions {
+  /**
+   * Add a tab running `agent` with these settings, sent `prompt` as its first
+   * message, and show it. `startError`: the tab was opened and its prompt
+   * could not be sent; its chat says why, and it is never opened twice.
+   * `requestId`: one id for every try of one handoff, so a try after an
+   * unknown outcome gets the tab the first try made instead of a second.
+   */
+  open(params: { agent: string; model?: string; effort?: string | null; mode?: string; prompt: string; requestId?: string }): Promise<{ tabId: string; startError: string | null }>;
+  /** What `tabId`'s conversation hands on, read on the runtime with its own transcript path. */
+  context(tabId: string): Promise<ContinuationContext>;
+}
 
 /** A fork made (PRO-379): the session it is in, by its selection key, and its tab. */
 export interface ForkedTab {
@@ -274,6 +324,12 @@ export interface SessionBackend {
   unavailable?: Readonly<SessionUnavailable>;
   /** Reset, Fork and turn checkpoints (#1326). Absent where the session cannot take them; `unavailable` says why. */
   turns?: TurnActions;
+  /**
+   * Remote only (#1327): a second opinion, Retry in a new chat and the agent
+   * handoff, on the session's runtime. Absent on a local session (it hands
+   * off on this computer) and where the runtime cannot take them; `unavailable` says why.
+   */
+  handoff?: HandoffActions;
   /**
    * Where turn cards read what a turn changed when this person may not
    * review it (a viewer, #1326): `keep`, `undo` and `restore` refuse.
@@ -611,6 +667,21 @@ function cloudTurnActions(ctx: CloudSessionContext, client: WorkspaceRpcClient):
   };
 }
 
+/** A remote session's handoffs (#1327): the runtime adds the tab and sends its first prompt, and it is shown at once. */
+function cloudHandoff(ctx: CloudSessionContext, client: WorkspaceRpcClient): HandoffActions {
+  return {
+    open: async ({ prompt, requestId, ...settings }) => {
+      // The desktop's Native Codex setting, as a tab added from the "+" menu takes it.
+      const nativeCodex = (await experimental.nativeCodexFor(settings.agent)) || undefined;
+      const made = await client.handoffAgentTab(ctx.sessionId, { ...settings, nativeCodex, prompt }, requestId);
+      if (made.tab) applyLiveTab(ctx.scope, made.tab);
+      selectSessionTab(ctx.key, { kind: "agent", id: made.tabId });
+      return { tabId: made.tabId, startError: made.startError };
+    },
+    context: (tabId) => client.handoffContext(ctx.sessionId, tabId),
+  };
+}
+
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
 export function cloudAsleep(state: WorkspaceConnectionState, workspaceState: string | null): boolean {
   if (state.state === "connected") return false;
@@ -651,6 +722,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   // Reset and Fork (#1326): live calls to a runtime that keeps the turns' checkpoints, by a workspace admin.
   const turnsOff = !client ? TURNS_OFFLINE : !client.hasCapability("checkpoints/1") ? TURNS_OLD_RUNTIME : ctx.authority !== "manage" ? TURNS_NEED_ADMIN : null;
   const turns = !turnsOff && write && client ? cloudTurnActions(ctx, client) : undefined;
+  // A second opinion, Retry in a new chat and the agent handoff (#1327): a new tab with its first prompt, by a workspace admin.
+  const handoffOff = !client ? HANDOFF_OFFLINE : !client.hasCapability("handoff/1") ? HANDOFF_OLD_RUNTIME : ctx.authority !== "manage" ? HANDOFF_NEED_ADMIN : null;
+  const handoff = !handoffOff && write && client ? cloudHandoff(ctx, client) : undefined;
   // Turn cards read what a turn changed while the runtime is up, whoever may read the chat.
   const readsCheckpoints = !!client?.hasCapability("checkpoints/1");
   return {
@@ -660,8 +734,9 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) ? !client || client.hasCapability("composer/4") : !!client?.hasCapability("composer/4"), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
-    unavailable: turnsOff ? REMOTE_TURNS_OFF.get(turnsOff)! : REMOTE_UNAVAILABLE,
+    unavailable: remoteUnavailable(turnsOff, handoffOff),
     turns,
+    handoff,
     checkpoints: turns?.checkpoints ?? (readsCheckpoints && client ? remoteTurnCheckpoints(client, false) : undefined),
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,

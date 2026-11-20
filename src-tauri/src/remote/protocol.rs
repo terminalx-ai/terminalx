@@ -94,17 +94,26 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   The runtime keeps the checkpoints itself, at every turn's start and end.
 ///   A reset rewrites the tab's history: `session.tabs` then names a new
 ///   `history`, and a reader drops what it kept of the old one.
+/// - `handoff/1` (#1327): a second opinion, Retry in a new chat and the
+///   composer's agent handoff, as a local tab has them. `session.handoff`
+///   adds an agent tab to a session and sends it its first prompt in the one
+///   call, so a resend never makes a second tab and the prompt never waits on
+///   a separate send; `session.handoffContext` reads a tab's conversation for
+///   the handoff's prompt, with this runtime's own transcript path.
 ///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 31] = [
+pub const CAPABILITIES: [&str; 32] = [
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1",
 ];
 
 /// A tab's turn checkpoints, Reset and Fork (#1326; spelled out in [`CAPABILITIES`]).
 pub const CHECKPOINTS: &str = "checkpoints/1";
+
+/// Another agent's tab with its first prompt, and the context it is handed (#1327; spelled out in [`CAPABILITIES`]).
+pub const HANDOFF: &str = "handoff/1";
 
 /// URL-bound PR reads and writes and actionable machine association locators.
 pub const GIT_PR_TARGET: &str = "git-pr-target/1";
@@ -212,6 +221,11 @@ pub const METHODS: &[Method] = &[
     method("session.restoreUndo", "checkpoints/1", Manage, true),
     method("session.reset", "checkpoints/1", Manage, true),
     method("session.fork", "checkpoints/1", Manage, true),
+    // #1327: a handoff adds a tab, as `session.addTab` does, so it is a
+    // manager's; a resend is answered from the cache, never a second tab.
+    // Its context is read for that handoff only, so by the same manager.
+    method("session.handoff", "handoff/1", Manage, true),
+    method("session.handoffContext", "handoff/1", Manage, false),
     // PRO-343: the mailbox's steer, stop and permission decision as live
     // calls, on a runtime with no mailbox. Each is decided by the mailbox's
     // own rules (a driver steers and stops, an approver decides) and
@@ -417,6 +431,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/3" => &["session.attach"],
         "composer/5" => &["session.prs", "session.prContext"],
         CHECKPOINTS => &["session.turnCheckpoint", "session.keepTurn", "session.undoTurn", "session.restoreUndo", "session.reset", "session.fork"],
+        HANDOFF => &["session.handoff", "session.handoffContext"],
         // `composer/4` adds no method: `session.attach` takes `kind: "file"`
         // and `session.send` names `files` (PRO-407).
         "ports/1" => &["ports."],

@@ -1029,7 +1029,8 @@ export function SessionView({
             {chrome?.trailing}
           </div>
         </header>
-        {runOffered && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
+        {/* Only a session that leads a run, or has its Run view open, has the two views: one with no run looks like any other (#1404). */}
+        {runOffered && (!!run || runShown) && <RunStrip runShown={runShown} waiting={run?.state === "awaitingApproval"} paused={run?.state === "needsYou"} onChange={(shown) => showRunView(session.id, shown)} />}
         {runShown && <RunView session={session} pieceColumn={pieceColumn} onShowChat={() => showRunView(session.id, false)} />}
         {machine && cloud && !compact && (
           <MachineSessionStrips
