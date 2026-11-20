@@ -196,7 +196,15 @@ describe("Agents › OpenCode (PRO-157, designs 10.14–10.16)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Configure providers" }));
     fireEvent.click(dialog().getByRole("button", { name: "Add OpenRouter" }));
     const form = within(dialog().getByTestId("connect-provider"));
+    expect(form.queryByTestId("base-url-clearing")).toBeNull();
     fireEvent.change(form.getByLabelText("Base URL"), { target: { value: "" } });
+    // The clear is said before it happens, with the saved address and a way back.
+    expect(form.getByTestId("base-url-clearing").textContent).toContain("removes the saved address https://gateway.example.internal/v1");
+    fireEvent.click(form.getByRole("button", { name: "Keep it" }));
+    expect((form.getByLabelText("Base URL") as HTMLInputElement).value).toBe("https://gateway.example.internal/v1");
+    expect(form.queryByTestId("base-url-clearing")).toBeNull();
+    fireEvent.change(form.getByLabelText("Base URL"), { target: { value: "  " } });
+    expect(form.getByTestId("base-url-clearing")).toBeTruthy();
     fireEvent.change(form.getByLabelText("OpenRouter API key"), { target: { value: "direct-key" } });
     fireEvent.click(form.getByRole("button", { name: /Connect OpenRouter/ }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("opencode_connect", { provider: "openrouter", key: "direct-key", baseUrl: "" }));
