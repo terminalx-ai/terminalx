@@ -385,3 +385,39 @@ fn a_link_in_the_home_takes_no_read_or_write_out_of_it() {
     assert!(add(sink.as_ref(), &bot, &Place::Bot, "Also not", OWNER, Source::of("app")).is_err());
     assert_eq!(std::fs::read_to_string(outside.path().join("MEMORY.md")).unwrap(), "- 2026-11-20 Not the bot's\n");
 }
+
+#[test]
+fn an_edit_made_before_the_first_look_is_recorded_not_taken_as_the_start() {
+    let (_home, sink, bot) = hired();
+    // Hiring started the history from the files it wrote.
+    assert!(crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::KNOWN_FILE).is_file());
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Rewritten by the bot before anyone looked.\n").unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert_eq!((shown.changes.len(), shown.changes[0].change.kind.as_str()), (1, "outside"));
+    undo(sink.as_ref(), &bot.id, &shown.changes[0].change.id, OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, "ROLE.md"), super::super::role_text(&super::super::templates::find("cto").unwrap()));
+
+    // A bot hired before the history existed has no start recorded: its files as hiring wrote them are the start.
+    let older = super::super::create(sink.as_ref(), "watcher", "Argus").unwrap();
+    std::fs::remove_file(crate::store::root().unwrap().join("bot-changes").join(&older.id).join(changes::KNOWN_FILE)).unwrap();
+    std::fs::write(home_of(&older).join("MEMORY.md"), format!("{}- 2026-11-01 Written by hand\n", file(&older, "MEMORY.md"))).unwrap();
+    let shown = view(sink.as_ref(), &older).unwrap();
+    assert_eq!(shown.changes.len(), 1);
+    assert!(shown.changes[0].change.known_edits().unwrap().iter().any(|edit| matches!(edit, Edit::AddLine { line, .. } if line.ends_with("Written by hand"))));
+}
+
+#[test]
+fn the_editor_is_given_the_whole_role_never_the_part_a_conversation_reads() {
+    let (_home, sink, bot) = hired();
+    let long = format!("{}\n", "a line of the role that is long enough\n".repeat(2_000));
+    assert!(long.len() as u64 > READ_LIMIT);
+    super::super::role_write(sink.as_ref(), &bot.id, &long).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert!(shown.role.read.over_limit && shown.role.editable);
+    assert_eq!(shown.role.text, long);
+
+    // Past what a role may be, the editor shows it but may not save it.
+    std::fs::write(home_of(&bot).join("ROLE.md"), "x".repeat(super::super::MAX_ROLE_BYTES + 1)).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert!(!shown.role.editable && shown.role.text.len() as u64 <= READ_LIMIT);
+}

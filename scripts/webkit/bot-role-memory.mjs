@@ -35,7 +35,7 @@ const extra = `(() => {
   answers.bot_memory = ({ operation }) => {
     if (operation !== "memoryView") return [];
     return {
-      role: { path: home + "ROLE.md", text: role, bytes: role.length, overLimit: false, templateTitle: "CTO",
+      role: { path: home + "ROLE.md", text: role, editable: true, bytes: role.length, overLimit: false, templateTitle: "CTO",
         templateDiff: role.split("\\n").map((text, n) => ({ kind: n % 7 === 3 ? "added" : "same", text })),
         versions: [
           { change: "c-9", at: now, by: "bot-1", kind: "outside", source: { kind: "outside" }, text: role },

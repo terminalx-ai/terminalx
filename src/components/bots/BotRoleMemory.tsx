@@ -208,6 +208,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
       </div>
       {role.problem && <Problem>ROLE.md: {role.problem}</Problem>}
       {role.overLimit && <Problem testId="bot-role-over-limit">ROLE.md is {kb(role.bytes)}. Only the first {kb(view.memory.readLimit)} is read at the start of a conversation.</Problem>}
+      {!role.editable && <Problem testId="bot-role-read-only">ROLE.md is {kb(role.bytes)}, more than a role saved here may be, so it is shown read-only. Shorten it in your editor.</Problem>}
       {outsideChange && dirty && (
         <Problem testId="bot-role-conflict">
           ROLE.md changed while you were editing.{" "}
@@ -219,6 +220,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
         aria-label="Standing instructions"
         value={draft}
         spellCheck={false}
+        readOnly={!role.editable}
         onChange={(event) => setDraft(event.target.value)}
         className="mt-1 block h-[360px] w-full min-w-0 resize-y rounded-lg border border-hairline bg-input px-3 py-2.5 font-mono text-[12.5px] leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
         data-testid="bot-role-text"
@@ -228,7 +230,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
         {error && <span role="alert" className="min-w-0 truncate text-[12px] text-destructive">{error}</span>}
         <div className="ml-auto flex items-center gap-2">
           <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={() => setDraft(base)}>Discard</Button>
-          <Button variant="accent" size="sm" disabled={!dirty || saving} onClick={save} data-testid="bot-role-save">
+          <Button variant="accent" size="sm" disabled={!dirty || saving || !role.editable} onClick={save} data-testid="bot-role-save">
             {saving && <Loader2 className="animate-spin" />} Save
           </Button>
         </div>

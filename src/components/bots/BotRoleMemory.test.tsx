@@ -45,7 +45,7 @@ const change = (id: string, extra: Partial<BotChange> = {}): BotChange => ({
 });
 const view = (extra: Partial<BotRoleMemory> = {}): BotRoleMemory => ({
   role: {
-    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", bytes: 17, overLimit: false, templateTitle: "CTO",
+    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", editable: true, bytes: 17, overLimit: false, templateTitle: "CTO",
     templateDiff: [{ kind: "removed", text: "You are a CTO." }, { kind: "added", text: "You are the CTO." }],
     versions: [
       { change: "c-role", at: "2026-11-18T10:00:00Z", by: "owner", kind: "role", source: { kind: "app" }, text: "You are the CTO.\n" },
@@ -122,6 +122,17 @@ describe("Role and memory (PRO-470)", () => {
     await act(async () => mocks.listeners.get("bot_memory_changed")!({ payload: { id: "atlas-id" } }));
     expect(await screen.findByTestId("bot-role-conflict")).toBeTruthy();
     expect((editor as HTMLTextAreaElement).value).toBe("My draft\n");
+  });
+
+  it("shows a role too large to save read-only, so a save never cuts it short", async () => {
+    const shown = view();
+    shown.role = { ...shown.role, editable: false, overLimit: true, bytes: 300_000 };
+    mocks.invoke.mockResolvedValue(shown);
+    show();
+    const editor = (await screen.findByTestId("bot-role-text")) as HTMLTextAreaElement;
+    expect(editor.readOnly).toBe(true);
+    expect(screen.getByTestId("bot-role-read-only").textContent).toContain("293 KB");
+    expect((screen.getByTestId("bot-role-save") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("keeps the role's history: versions can be put back, and the template's changes shown", async () => {

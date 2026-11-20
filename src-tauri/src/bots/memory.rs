@@ -412,7 +412,10 @@ pub struct RoleVersion {
 #[serde(rename_all = "camelCase")]
 pub struct RoleView {
     pub path: String,
+    /// The whole file, for the editor; only its first [`READ_LIMIT`] bytes reach a conversation.
     pub text: String,
+    /// Whether the editor may save it: not past the size a role may be, and read whole.
+    pub editable: bool,
     #[serde(flatten)]
     pub read: Limited,
     pub template_title: Option<String>,
@@ -508,7 +511,15 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
         versions.push(RoleVersion { change: None, at: bot.created.clone(), by: OWNER.into(), kind: "template".into(), source: Source::of("template"), text: Some(super::role_text(template)) });
     }
     let template_diff = template.as_ref().and_then(|template| changes::diff(&changes::lines_of(&super::role_text(template)), &changes::lines_of(&role.text)));
-    let role = RoleView { path: shown(bot_store::ROLE_FILE), text: role.text.clone(), read: role, template_title: template.map(|template| template.title.to_string()), template_diff, versions };
+    // The editor is given the whole file, never the part a conversation reads: saving that would cut the rest off.
+    let whole = (role.problem.is_none() && role.bytes <= super::MAX_ROLE_BYTES as u64)
+        .then(|| changes::no_links(&home, bot_store::ROLE_FILE).and_then(|()| changes::read_file(&home.join(bot_store::ROLE_FILE))).ok())
+        .flatten();
+    let (text, editable) = match whole {
+        Some(text) => (text.unwrap_or_default(), true),
+        None => (role.text.clone(), false),
+    };
+    let role = RoleView { path: shown(bot_store::ROLE_FILE), text, editable, read: role, template_title: template.map(|template| template.title.to_string()), template_diff, versions };
 
     let working = working_place(bot);
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();

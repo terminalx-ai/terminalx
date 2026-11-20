@@ -461,6 +461,24 @@ fn outside_text(edits: &[Edit]) -> String {
     }
 }
 
+/// The files of a bot's home as hiring wrote them: its role template's text
+/// and an empty memory. `None` for a bot whose template this build does not know.
+fn as_hired(id: &str) -> Option<BTreeMap<String, String>> {
+    let bot = bot_store::get(id).ok()??;
+    let template = super::templates::find(&bot.role_template_id)?;
+    Some(BTreeMap::from([(bot_store::ROLE_FILE.to_string(), super::role_text(&template)), (bot_store::MEMORY_FILE.to_string(), super::memory_text())]))
+}
+
+/// Start a new bot's history from its files as hiring wrote them.
+pub fn seed(id: &str) -> Result<()> {
+    if read_known(id)?.is_some() {
+        return Ok(());
+    }
+    let known = as_hired(id).context("the bot or its role template is unknown")?;
+    let folder = crate::store::ensure_dir(dir(id)?)?;
+    crate::store::write_json(&folder.join(KNOWN_FILE), &known)
+}
+
 /// Look for edits made outside the app since it last saw the files: they
 /// are recorded as one `outside` change. The first look only remembers.
 fn notice_outside(id: &str, files: &mut Files, known: &mut Option<BTreeMap<String, String>>) -> Result<()> {
@@ -484,7 +502,13 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<BTreeMap<Strin
             }
         }
     }
+    // Never looked at before: compare with the files as hiring wrote them, so
+    // an edit made before the first look is recorded too, never taken as the start.
+    if known.is_none() {
+        *known = as_hired(id);
+    }
     let Some(before) = known.as_ref() else {
+        log::warn!("bot {id}: its role template is unknown, so its files as they are now are where its history starts");
         *known = Some(now);
         return Ok(());
     };
@@ -516,15 +540,9 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
     notice_outside(id, &mut files, &mut known)?;
     let out = f(&mut files)?;
     files.write()?;
-    let mut known = known.unwrap_or_default();
-    for rel in &files.touched {
-        match &files.texts[rel] {
-            Some(text) => known.insert(rel.clone(), text.clone()),
-            None => known.remove(rel),
-        };
-    }
     let folder = crate::store::ensure_dir(dir(id)?)?;
-    crate::store::write_json(&folder.join(KNOWN_FILE), &known)?;
+    // The log before what the app knows of the files: a change whose line
+    // could not be appended is still unknown, and is found as an outside edit.
     let mut recorded = Vec::new();
     for change in std::mem::take(&mut files.recorded) {
         let change = Change {
@@ -541,6 +559,14 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
         crate::store::append_line(&folder.join(LOG_FILE), &format!("{}\n", serde_json::to_string(&change)?))?;
         recorded.push(change);
     }
+    let mut known = known.unwrap_or_default();
+    for rel in &files.touched {
+        match &files.texts[rel] {
+            Some(text) => known.insert(rel.clone(), text.clone()),
+            None => known.remove(rel),
+        };
+    }
+    crate::store::write_json(&folder.join(KNOWN_FILE), &known)?;
     if !recorded.is_empty() {
         sink.emit(EVENT, &serde_json::json!({"id": id}));
     }

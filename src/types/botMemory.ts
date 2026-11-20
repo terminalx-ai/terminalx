@@ -66,7 +66,10 @@ export interface BotRoleVersion {
 
 export interface BotRoleView extends BotFileRead {
   path: string;
+  /** The whole file, for the editor; only its first `readLimit` bytes reach a conversation. */
   text: string;
+  /** Whether the editor may save it: `false` past the size a role may be, so a save never cuts it short. */
+  editable: boolean;
   templateTitle: string | null;
   /** From the template's text to the role now; `null` with no template, or too long to compare. */
   templateDiff: BotDiffLine[] | null;

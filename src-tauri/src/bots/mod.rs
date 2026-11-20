@@ -444,6 +444,9 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
     });
     if saved.is_err() {
         bot_store::discard_home(&home);
+    } else if let Err(error) = changes::seed(&id) {
+        // The first look compares with the same files, so nothing is lost.
+        log::warn!("bot {id}'s history was not started at hire: {error:#}");
     }
     saved
 }
