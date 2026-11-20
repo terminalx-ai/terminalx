@@ -942,10 +942,8 @@ fn poll(
         // Another key is worth a read at once, whatever the last one met.
         let print = linear_key().ok().map(|key| credential_print(&key));
         if state.credential != print {
-            if state.credential.is_some() {
-                state.retry_after = None;
-                state.failures = 0;
-            }
+            state.retry_after = None;
+            state.failures = 0;
             state.credential = print;
         }
     }

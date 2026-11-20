@@ -134,7 +134,7 @@ fn a_new_linear_issue_wakes_exactly_one_run_and_what_matched_at_the_start_wakes_
 
 #[test]
 fn something_old_that_comes_to_match_later_wakes_once() {
-    let _home = crate::store::temp_home();
+    let home = crate::store::temp_home();
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(vec![issue("1")]));
     // Issue 9 is months old; someone labels it `bot` now, so it newly matches.
@@ -143,6 +143,7 @@ fn something_old_that_comes_to_match_later_wakes_once() {
     assert_eq!(tick(&automation, 5, Snapshot::Linear(vec![old.clone(), issue("1")])), vec![WakeSubject::Linear(Box::new(old))]);
 
     // The same for a pull request open long before, marked ready later.
+    drop(home);
     let _home = crate::store::temp_home();
     let watching = stored(pr_source(&[PullRequestEvent::Opened]));
     tick(&watching, 0, pulls(vec![pr(1, "aaa")]));
@@ -342,13 +343,14 @@ fn the_run_row_is_written_before_the_record_and_a_restart_does_not_start_it_agai
 
 #[test]
 fn each_tick_starts_at_most_its_cap_for_either_source() {
-    let _home = crate::store::temp_home();
+    let home = crate::store::temp_home();
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     let five = || Snapshot::Linear((1..=5).map(|n| issue(&n.to_string())).collect());
     assert_eq!(tick(&automation, 5, five()).len(), 3);
     assert_eq!(tick(&automation, 10, five()).len(), 2, "the rest wait for the next tick");
 
+    drop(home);
     let _home = crate::store::temp_home();
     let watching = stored(pr_source(&[PullRequestEvent::Opened]));
     tick(&watching, 0, pulls(Vec::new()));
@@ -436,12 +438,14 @@ fn only_the_events_asked_for_wake_and_reviews_and_checks_wake_again_when_they_ha
     assert_eq!(tick(&automation, 25, pulls(vec![asked.clone()])).len(), 1);
     finish_runs(&automation);
 
-    let mut failing = pr(3, "aaa");
+    // Checks on a pull request of their own, so the three-in-a-row cap does not come into it.
+    tick(&automation, 27, pulls(vec![pr(4, "aaa")]));
+    let mut failing = pr(4, "aaa");
     failing.check_failed = true;
     assert_eq!(tick(&automation, 30, pulls(vec![failing.clone()])), woke_pr(failing.clone(), PullRequestEvent::CheckFailed));
     finish_runs(&automation);
     assert!(tick(&automation, 35, pulls(vec![failing])).is_empty(), "one failure per head");
-    let mut again = pr(3, "bbb");
+    let mut again = pr(4, "bbb");
     again.check_failed = true;
     assert_eq!(tick(&automation, 40, pulls(vec![again])).len(), 1, "a new head that fails wakes again");
 }
