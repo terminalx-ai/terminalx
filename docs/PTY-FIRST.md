@@ -657,7 +657,8 @@ appears after a turn has ended, so nothing else would set the tab waiting and
 the chat would look idle. The session watcher reads the pane's screen on each
 pass (`claude::pty::terminal_prompt`): a list whose `❯` pointer is set in from
 the left edge, with a keys line under it naming Enter or Esc, inside the frame's
-top rule and title. Once it has stood still for half a second the chat is told
+top rule and title. Once it has stood still (the pane quiet for half a second,
+or the same question read on two passes while something else redraws) the chat is told
 (`terminal_prompt`, with the title, text, options, pointer and what Esc does)
 and the tab waits; when it goes the chat is told `null` and the tab goes back to
 what it was. The card answers with the keys the CLI takes: arrows to the
@@ -666,7 +667,10 @@ key), then Enter, or Esc; each answer names the question it was for, and goes
 in only while the screen still shows it. The input box gone for two passes with
 nothing readable in its place is shown as a question that could not be read,
 with a way to the terminal view. A question a hook asked has its own card and
-is left alone, and the delivery nudge never writes an Enter into such a dialog.
+is left alone (and the card refuses to answer while one is open), and the
+delivery nudge never writes an Enter into such a dialog. Which tabs' logs show a
+question is kept by the session manager, apart from the CLI, so a stop, an exit
+or a restart takes the card down on the next pass.
 
 ### Nested-session stamps are stripped
 
