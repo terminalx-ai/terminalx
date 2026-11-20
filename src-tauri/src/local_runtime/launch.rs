@@ -146,6 +146,11 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
     let mut command = Command::new(executable);
     command.env_remove(WINDOW_PUBLIC_KEY_ENV);
     if let Some(application) = application {
+        // A launch a relaunch waits for always pins the key it provisioned
+        // (PRO-489). Any other launch that cannot read Keychain still starts
+        // a runtime, unpinned: the window needs one to work at all, and the
+        // first command that needs the window's proof repairs it
+        // (`window_consent`).
         #[cfg(all(feature = "desktop", target_os = "macos"))]
         match crate::serve_cli::consent::launch_public_key() {
             Ok(Some(key)) => { command.env(WINDOW_PUBLIC_KEY_ENV, key); }
@@ -546,7 +551,7 @@ pub(crate) fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -728,7 +733,7 @@ mod tests {
         (std::fs::canonicalize(home).unwrap(), owner, terminal)
     }
 
-    fn running(pid: libc::pid_t) -> bool {
+    pub(crate) fn running(pid: libc::pid_t) -> bool {
         // SAFETY: signal zero only checks that the process exists.
         unsafe { libc::kill(pid, 0) == 0 }
     }
@@ -747,11 +752,11 @@ mod tests {
         assert!(!kill_owner(&home).unwrap(), "nothing is left to stop");
     }
 
-    fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
+    pub(crate) fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
         wedged_owner(fixture, installed_copy)
     }
 
-    fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
+    pub(crate) fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
         let _ = owner.kill();
         let _ = owner.wait();
         // SAFETY: the fixture's own terminal session.

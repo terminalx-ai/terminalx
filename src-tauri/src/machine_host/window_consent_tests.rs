@@ -463,6 +463,10 @@ impl crate::local_runtime::window_consent::Relauncher<Desktop> for WindowHost {
         crate::serve_cli::consent::provision_launch_key()?.map(drop).context("the window provisions its key")
     }
 
+    fn unprovision(&self) {
+        crate::serve_cli::consent::forget_launch_key();
+    }
+
     fn connected(&self, stale: &Desktop) -> Vec<String> {
         crate::local_runtime::window_consent::connected(stale)
     }
@@ -574,6 +578,11 @@ fn window_adopts() {
     let code = wire::MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
     assert_eq!(code.public_key_b64, manager.host_key(false).unwrap().public_key_b64());
     assert_eq!(relaunches.load(std::sync::atomic::Ordering::SeqCst), 1, "{case}");
+    // The relaunch is over, so the key it provisioned is not kept for a
+    // later launch, which reads Keychain again (PRO-489).
+    secrets.fail_reads(true);
+    assert!(crate::serve_cli::consent::launch_public_key().is_err(), "{case}: a later launch reads Keychain");
+    secrets.fail_reads(false);
     if !holds_item {
         assert!(secrets.stored(&service, CONSENT_ACCOUNT).is_some(), "{case}: the fresh launch saved a key");
     }

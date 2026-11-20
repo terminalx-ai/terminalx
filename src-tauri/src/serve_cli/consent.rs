@@ -211,12 +211,13 @@ fn window_message(socket: &Path, nonce: &str) -> Vec<u8> {
     ].concat()
 }
 
-/// The public key the next runtime launch pins: the one a relaunch
-/// provisioned (`provision_launch_key`), or else the window's key, read or
-/// created now.
+/// The public key a runtime launch pins: while a relaunch waits for its
+/// fresh runtime, the one it provisioned (`provision_launch_key`), so every
+/// launch it waits for pins it, however Keychain answers by then; otherwise
+/// the window's key, read or created now.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub(crate) fn launch_public_key() -> Result<Option<String>> {
-    if let Some(key) = PROVISIONED.lock().unwrap().take() {
+    if let Some(key) = PROVISIONED.lock().unwrap().clone() {
         return Ok(Some(key));
     }
     read_launch_key()
@@ -227,8 +228,9 @@ fn read_launch_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
 }
 
-/// A key read or saved before stopping a runtime so that the next launch
-/// pins it (PRO-486): that launch does not depend on reading Keychain again.
+/// A key read or saved before stopping a runtime so that the launch that
+/// replaces it pins it (PRO-486): that launch does not depend on reading
+/// Keychain again. Kept until the relaunch ends ([`forget_launch_key`]).
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 static PROVISIONED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -239,6 +241,13 @@ pub(crate) fn provision_launch_key() -> Result<Option<String>> {
     let key = read_launch_key()?;
     *PROVISIONED.lock().unwrap() = key.clone();
     Ok(key)
+}
+
+/// The relaunch is over, whether a launch followed or not: a later launch
+/// reads Keychain again (PRO-489).
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub(crate) fn forget_launch_key() {
+    PROVISIONED.lock().unwrap().take();
 }
 
 /// The window's consent key is in a Keychain it cannot read or write.

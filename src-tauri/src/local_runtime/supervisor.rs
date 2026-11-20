@@ -478,6 +478,11 @@ pub(crate) fn attach(app: &AppHandle) -> anyhow::Result<u64> {
         state.runtime_replacement.attached(next.epoch(), next.build(), plan.as_ref());
         Ok(())
     })?;
+    // A restart offered for the runtime this one replaced has gone with it.
+    #[cfg(unix)]
+    if let Some(previous) = &previous {
+        super::window_consent::attached_in_place_of(previous.epoch(), next.epoch());
+    }
     // Followed, or left with nothing to follow: either way the next
     // attachment starts from what it finds.
     if plan.is_some() { super::update_plan::clear(&home); }

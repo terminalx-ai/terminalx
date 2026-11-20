@@ -9,7 +9,7 @@ import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MachineHostError } from "./MachineHostError";
-import { clearMachineHostError, openMachineHost, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
+import { clearMachineHostError, setMachineHostError, openMachineHost, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineVersion } from "@/lib/machineUpdate";
 import { useSettingsFile } from "@/lib/settingsFile";
@@ -101,6 +101,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
               clearMachineHostError();
               void refreshMachineHost();
             }}
+            onFailed={setMachineHostError}
           />
         )}
         {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
@@ -284,7 +285,7 @@ function PairingCode() {
       {paused && (
         <p role="status" className="text-[12.5px] text-warning">Pairing is paused after too many wrong codes. Try again in {minutesSeconds(pausedLeft)}.</p>
       )}
-      {error && <MachineHostError error={error} onRestarted={() => void create()} />}
+      {error && <MachineHostError error={error} onRestarted={() => void create()} onFailed={setError} />}
     </div>
   );
 }

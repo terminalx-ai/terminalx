@@ -3,7 +3,7 @@ import { Check, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { approveMachine, bootMachineHost, clearMachineHostError, declineMachine, refreshMachineHost, setMachinesKeepAwake, useMachineHost } from "@/lib/machines";
+import { approveMachine, bootMachineHost, clearMachineHostError, setMachineHostError, declineMachine, refreshMachineHost, setMachinesKeepAwake, useMachineHost } from "@/lib/machines";
 import { MachineHostError } from "./MachineHostError";
 import type { PendingComputer } from "@/types/machines";
 import { FingerprintBox, PlatformIcon, sectionLabel } from "./machineText";
@@ -97,6 +97,7 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
                 clearMachineHostError();
                 void refreshMachineHost();
               }}
+              onFailed={setMachineHostError}
             />
           )}
         </div>

@@ -23,8 +23,11 @@ export const machinesApi = {
   hostStatus: () => invoke<MachineHostView>("machines_host_status"),
   setAllowOperating: (enabled: boolean) => invoke<MachineHostView>("machines_set_allow_operating", { enabled }),
   createCode: () => invoke<MachinePairingCode>("machines_create_code"),
-  /** Restart runtime `epoch`, which cannot verify this window, with what it runs; resolves once a fresh one is attached (PRO-486). */
-  restartRuntimeForWindow: (epoch: string) => invoke<void>("local_runtime_restart_for_window", { epoch }),
+  /**
+   * Restart runtime `epoch`, which cannot verify this window, with what it runs; resolves once a fresh one is attached
+   * (PRO-486). `shown` is the offer as displayed: the runtime is stopped only if it stops no more than that names (PRO-489).
+   */
+  restartRuntimeForWindow: (epoch: string, shown: string) => invoke<void>("local_runtime_restart_for_window", { epoch, shown }),
   approve: (requestId: string) => invoke<unknown>("machines_approve", { requestId }),
   decline: (requestId: string) => invoke<unknown>("machines_decline", { requestId }),
   revoke: (id: string) => invoke<unknown>("machines_revoke", { id }),
@@ -211,6 +214,14 @@ export function restartRequired(error: string | null | undefined): { epoch: stri
 /** Forget the last command's failure, as after the runtime it named was restarted. */
 export function clearMachineHostError() {
   set({ error: null });
+}
+
+/**
+ * Keep a failure as the last command's, as Restart runtime's: shown in place of the offer it answered, which may be
+ * withdrawn (a handover) before the failure is (PRO-489).
+ */
+export function setMachineHostError(error: string) {
+  set({ error });
 }
 
 /** For tests: forget what was read. */
