@@ -1023,21 +1023,27 @@ fn plan(homes: &Homes, changes: &[Change]) -> Result<Plan> {
                 let skill = from.skills.get(&change.name).ok_or_else(|| anyhow!("skill `{}` is no longer there", change.name))?;
                 let source_files = skill.files.clone().map_err(|e| anyhow!("skill `{}` can't be copied: {e}", change.name))?;
                 let target = homes.skills_dir(change.direction).join(&change.name);
-                let existing = onto.skills.get(&change.name);
-                if let Some(link) = existing.and_then(|s| s.link.as_ref()) {
-                    bail!("skill `{}` on the other side links to {}; change that folder instead", change.name, homes.pretty(link));
+                // The folder on disk is checked whether or not it is a listed
+                // skill: one without SKILL.md is still where every file lands.
+                let found = fs::symlink_metadata(&target).ok();
+                let exists = found.is_some();
+                if found.is_some_and(|m| m.file_type().is_symlink()) {
+                    let to = fs::read_link(&target).map(|to| homes.pretty(&target.parent().map_or(to.clone(), |p| p.join(&to)))).unwrap_or_default();
+                    bail!("skill `{}` on the other side links to {to}; change that folder instead", change.name);
                 }
-                let exists = fs::symlink_metadata(&target).is_ok();
                 if exists && !target.is_dir() {
                     bail!("{} is a file, not a skill folder", homes.pretty(&target));
                 }
-                let had: Vec<SkillFile> = match existing.map(|s| &s.files) {
-                    Some(Err(error)) => bail!("skill `{}` on the other side can't be copied over: {error}", change.name),
-                    Some(Ok(files)) => files.clone(),
-                    None => Vec::new(),
+                let had: Vec<SkillFile> = if exists {
+                    skill_files(&target).map_err(|e| anyhow!("skill `{}` on the other side can't be copied over: {e}", change.name))?
+                } else {
+                    Vec::new()
                 };
                 // Only what differs is written; files only the target has stay.
                 let files: Vec<SkillFile> = source_files.iter().filter(|f| !had.contains(f)).cloned().collect();
+                for file in &files {
+                    landing(&target, &file.rel).map_err(|e| anyhow!("skill `{}` can't be copied over: {e}", change.name))?;
+                }
                 let kept = had.iter().filter(|h| !source_files.iter().any(|f| f.rel == h.rel)).count();
                 if kept > 0 {
                     note(&mut out, format!("{kept} file{} only the other side has stay{}", if kept == 1 { "" } else { "s" }, if kept == 1 { "s" } else { "" }));
@@ -1346,8 +1352,9 @@ fn apply_one(homes: &Homes, write: &Write, date: &str, done: &mut Vec<Written>) 
         }
         Write::Skill { source, target, files, .. } => {
             for file in files {
-                // Links inside the target folder stay inside it (`skill_files` refused any other), so writing through them is safe.
-                let to = through_link(&target.join(&file.rel))?;
+                // `plan` checked every landing already; checked again so a link
+                // made since cannot carry a write out of the folder.
+                let to = landing(target, &file.rel).map_err(|e| anyhow!("{e}"))?;
                 if let Some(parent) = to.parent() {
                     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
                 }
@@ -1379,6 +1386,44 @@ fn through_link(path: &Path) -> Result<PathBuf> {
         }
     }
     bail!("{} is a loop of links", path.display())
+}
+
+/// Where a skill file `rel` is written inside `target`, following the links
+/// already there. Refused when that lands outside the folder, on a folder, or
+/// under a file: refusing in `plan` keeps a copy from stopping part way.
+fn landing(target: &Path, rel: &Path) -> Result<PathBuf, String> {
+    let shown = rel.display();
+    if rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err(format!("{shown} is not a path inside the skill folder"));
+    }
+    let Ok(real_root) = fs::canonicalize(target) else {
+        // A folder not made yet holds no links to follow.
+        return Ok(target.join(rel));
+    };
+    let to = through_link(&target.join(rel)).map_err(|e| format!("{e:#}"))?;
+    // The nearest part of the path that exists, and what is still to be made under it.
+    let mut base = to.as_path();
+    let mut rest = Vec::new();
+    let real = loop {
+        match fs::canonicalize(base) {
+            Ok(real) => break real,
+            Err(_) => {
+                let name = base.file_name().ok_or_else(|| format!("{shown} leads out of the skill folder"))?;
+                rest.push(name.to_os_string());
+                base = base.parent().ok_or_else(|| format!("{shown} leads out of the skill folder"))?;
+            }
+        }
+    };
+    if !real.starts_with(&real_root) {
+        return Err(format!("{shown} links outside the skill folder"));
+    }
+    if real.is_dir() && rest.is_empty() {
+        return Err(format!("{shown} is a folder on the other side"));
+    }
+    if !real.is_dir() && !rest.is_empty() {
+        return Err(format!("{} is a file on the other side", real.strip_prefix(&real_root).unwrap_or(&real).display()));
+    }
+    Ok(rest.into_iter().rev().fold(real, |path, name| path.join(name)))
 }
 
 fn make_backup(from: &Path, to: &Path) -> Result<()> {
