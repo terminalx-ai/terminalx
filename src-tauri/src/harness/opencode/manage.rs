@@ -298,16 +298,26 @@ fn provider_entry<'a>(config: &'a mut Map<String, Value>, id: &str) -> Result<&'
 /// rewrites the file in place (truncate, then write), so an empty or cut-off
 /// read is tried again briefly before it counts as broken.
 fn read_auth(paths: &Paths) -> Result<Map<String, Value>, String> {
+    read_auth_bytes(paths).map(|(_, map)| map)
+}
+
+/// The key file's text as read (None when missing) and the keys in it.
+fn auth_text(file: &Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(file) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Couldn’t read {}: {error}. TerminalX won’t change it until it can.", shown(file))),
+    }
+}
+
+/// [`read_auth`], with the text the keys came from.
+fn read_auth_bytes(paths: &Paths) -> Result<(Option<String>, Map<String, Value>), String> {
     let file = paths.auth_file();
     let mut tries = 0;
     loop {
-        let text = match std::fs::read_to_string(&file) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
-            Err(error) => return Err(format!("Couldn’t read {}: {error}. TerminalX won’t change it until it can.", shown(&file))),
-        };
+        let Some(text) = auth_text(&file)? else { return Ok((None, Map::new())) };
         let problem = match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => return Ok(map),
+            Ok(Value::Object(map)) => return Ok((Some(text), map)),
             Ok(_) => "isn’t a JSON object",
             Err(_) if text.trim().is_empty() => "is empty",
             Err(_) => "isn’t valid JSON",
@@ -322,6 +332,32 @@ fn read_auth(paths: &Paths) -> Result<Map<String, Value>, String> {
 
 const AUTH_READS: u32 = 3;
 const AUTH_RETRY: Duration = Duration::from_millis(100);
+
+/// Change the key file with `edit`, leaving every other entry as it is on disk
+/// at the moment of writing. OpenCode rewrites the file without a lock (say to
+/// refresh a sign-in), so the file is read again just before the write and,
+/// if it changed since `edit` saw it, the edit is made again on the new text,
+/// rather than putting back what OpenCode just replaced.
+fn update_auth(paths: &Paths, mut edit: impl FnMut(&mut Map<String, Value>)) -> Result<(), String> {
+    let file = paths.auth_file();
+    for _ in 0..AUTH_UPDATES {
+        let (seen, mut auth) = read_auth_bytes(paths)?;
+        edit(&mut auth);
+        #[cfg(test)]
+        BEFORE_AUTH_WRITE.with(|hook| if let Some(hook) = hook.borrow_mut().as_mut() { hook() });
+        if auth_text(&file)? != seen { continue; }
+        return write_json(&file, &Value::Object(auth), true);
+    }
+    Err(format!("{} kept changing while TerminalX was saving, so it was left as OpenCode wrote it. Try again in a moment.", shown(&file)))
+}
+
+const AUTH_UPDATES: u32 = 5;
+
+#[cfg(test)]
+thread_local! {
+    /// Run by [`update_auth`] between its edit and its write: where another writer's change lands.
+    static BEFORE_AUTH_WRITE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
 
 fn mask(key: &str) -> String {
     let chars: Vec<char> = key.chars().collect();
@@ -576,9 +612,7 @@ pub fn connect_in(paths: &Paths, id: &str, key: &str, base_url: Option<&str>) ->
     if !provider.local {
         // Read again after the check, which can take seconds: a running OpenCode may
         // have refreshed a sign-in meanwhile, and the snapshot from before would revert it.
-        let mut auth = read_auth(paths)?;
-        auth.insert(id.to_owned(), json!({"type": "api", "key": key}));
-        write_json(&paths.auth_file(), &Value::Object(auth), true)?;
+        update_auth(paths, |auth| { auth.insert(id.to_owned(), json!({"type": "api", "key": key})); })?;
     }
     edit_config(paths, |config| {
         let entry = provider_entry(config, id)?;
@@ -606,7 +640,7 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
     if !config.known { return Err(config.problem.unwrap_or_default()); }
     // Likewise a key file that can't be read may hold it: Disconnect must not say it
     // is gone while OpenCode still has it.
-    let mut auth = read_auth(paths)?;
+    let in_auth = read_auth(paths)?.contains_key(id);
     let entry = config.value.get("provider").and_then(|providers| providers.get(id)).cloned().unwrap_or(Value::Null);
     let has_key = entry.pointer("/options/apiKey").is_some();
     let maybe_server = entry.get("npm").is_some() && entry.pointer("/options/baseURL").is_some();
@@ -618,7 +652,6 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
         // stay: the keys still go, the address and SDK are left for a later Disconnect.
         Err(_) => id == OLLAMA,
     };
-    let in_auth = auth.remove(id).is_some();
     let edits_config = has_key || remove_server;
     if !in_auth && !edits_config {
         if let (Err(problem), true) = (&catalogue, maybe_server) {
@@ -641,7 +674,7 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
             Ok(())
         })?;
         if in_auth {
-            if let Err(problem) = write_json(&paths.auth_file(), &Value::Object(auth), true) {
+            if let Err(problem) = update_auth(paths, |auth| { auth.remove(id); }) {
                 return Err(match crate::store::write_atomic(&config.path, &before) {
                     Ok(()) => format!("{problem} Nothing was disconnected."),
                     Err(error) => format!("{problem} The config file changed already and couldn’t be put back ({error:#}); connect {id} again to restore it."),
@@ -649,7 +682,7 @@ pub fn disconnect_in(paths: &Paths, id: &str) -> Result<Overview, String> {
             }
         }
     } else {
-        write_json(&paths.auth_file(), &Value::Object(auth), true)?;
+        update_auth(paths, |auth| { auth.remove(id); })?;
     }
     Ok(overview_in(paths, false))
 }
@@ -920,6 +953,62 @@ mod tests {
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
         assert_eq!(auth["anthropic"], refreshed["anthropic"], "the rotated token is not put back to the old one");
         assert_eq!(auth["openrouter"], json!({"type": "api", "key": "gateway-key-0123456789"}));
+    }
+
+    #[test]
+    fn connecting_keeps_every_other_providers_login() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let others = json!({
+            "anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1},
+            "openrouter": {"type": "api", "key": "sk-or-0123456789abcdef"},
+            "custom": {"type": "wellknown", "key": "k", "token": "t"},
+        });
+        std::fs::write(paths.auth_file(), others.to_string()).unwrap();
+        connect_in(&paths, "weird", "weird-key-0123456789", None).unwrap();
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        for (id, entry) in others.as_object().unwrap() { assert_eq!(&auth[id], entry, "{id} is kept as it was"); }
+        assert_eq!(auth["weird"], json!({"type": "api", "key": "weird-key-0123456789"}));
+        disconnect_in(&paths, "weird").unwrap();
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        assert_eq!(auth, others, "disconnecting one removes only that one");
+    }
+
+    #[test]
+    fn a_sign_in_refreshed_just_before_the_write_is_kept() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.auth_file(), json!({"anthropic": {"type": "oauth", "refresh": "r1", "access": "a1", "expires": 1}}).to_string()).unwrap();
+        // OpenCode rotates the sign-in after TerminalX read the file and before it writes.
+        let refreshed = json!({"type": "oauth", "refresh": "r2", "access": "a2", "expires": 2});
+        let (file, during) = (paths.auth_file(), json!({"anthropic": refreshed}).to_string());
+        let mut once = Some(move || std::fs::write(&file, &during).unwrap());
+        BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || if let Some(write) = once.take() { write() })));
+        let connected = connect_in(&paths, "weird", "weird-key-0123456789", None);
+        BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = None);
+        connected.unwrap();
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        assert_eq!(auth["anthropic"], refreshed, "the rotated token is not put back to the old one");
+        assert_eq!(auth["weird"], json!({"type": "api", "key": "weird-key-0123456789"}));
+    }
+
+    #[test]
+    fn a_key_file_that_keeps_changing_is_left_as_its_writer_left_it() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.auth_file(), json!({"anthropic": {"type": "oauth", "refresh": "r0"}}).to_string()).unwrap();
+        let file = paths.auth_file();
+        let mut turn = 0;
+        BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || {
+            turn += 1;
+            std::fs::write(&file, json!({"anthropic": {"type": "oauth", "refresh": format!("r{turn}")}}).to_string()).unwrap();
+        })));
+        let refused = connect_in(&paths, "weird", "weird-key-0123456789", None);
+        BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = None);
+        assert!(refused.unwrap_err().contains("kept changing"));
+        let last = json!({"anthropic": {"type": "oauth", "refresh": format!("r{AUTH_UPDATES}")}}).to_string();
+        assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), last, "the other writer's last bytes stand");
+        assert!(!paths.config_file().exists(), "nothing else was written either");
     }
 
     #[test]
