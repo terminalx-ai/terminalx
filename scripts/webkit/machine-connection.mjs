@@ -18,7 +18,8 @@
 // PRO-398: while the view is not connected it speaks from the machine's own
 // state (an offline machine isn't reachable and its sessions keep running,
 // never the transport's "Reconnecting (attempt 0)…") and names the machine,
-// not a workspace, on every tab: Terminal, Agent, Files, Git and Ports; the last-seen time is on the 24-hour clock; Connecting and
+// not a workspace, on every tab: Terminal, Agent, Files, Git and Ports (the Agent tab lists the machine's
+// agent sessions since #1289, and the header chip is its connection state); the last-seen time is on the 24-hour clock; Connecting and
 // Reconnecting turn an arc; the "Runs on" strip is 36 px tall; and a Mac has
 // one icon in the sidebar, the chip and the strip.
 //
@@ -232,6 +233,8 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
           await page.waitForTimeout(100);
           said[tab] = await main.evaluate((node) => ({
             text: node.textContent,
+            chip: node.querySelector('[data-testid="machine-chip"]')?.textContent.replace("Mac mini", "") ?? null,
+            agents: node.querySelector('[data-testid="cloud-agents"]')?.textContent ?? null,
             connection: node.querySelector('[data-testid="cloud-agent-connection"]')?.textContent ?? null,
             provisioning: !!node.querySelector('[data-testid="cloud-agent-provisioning"]'),
           }));
@@ -241,8 +244,11 @@ for (const [viewportName, viewport] of [["small", { width: 760, height: 520 }], 
         failed += report(
           `machine ${expected.id}, other tabs (${name})`,
           {
-            [`the Agent tab's connection chip says ${expected.chip}`]: said.Agent.connection === `Connection: ${expected.chip}`,
-            "the Agent tab has no Workspace chip": said.Agent.provisioning === false,
+            // The Agent tab lists the machine's agent sessions and has no chat or status bar of its own (#1289):
+            // the header chip is its one connection state, and the list waits for the machine by name.
+            [`the header chip says ${expected.chip} on every tab`]: Object.values(said).every((tab) => tab.chip === expected.chip),
+            "the Agent tab has no connection chip of its own, and no Workspace chip": said.Agent.connection === null && said.Agent.provisioning === false,
+            "the Agent tab waits for the machine by name": said.Agent.agents === "Agent sessions on Mac miniAgent sessions appear here once Mac mini is connected or has saved conversations.",
             "Files waits for the machine by name": said.Files.text.includes("Files appear once Mac mini is connected."),
             "Git waits for the machine by name": said.Git.text.includes("Git appears once Mac mini is connected."),
             "Ports says what the machine's state is": said.Ports.text.split(expected.status).length - 1 >= 2,
