@@ -685,6 +685,15 @@ impl MobileConnection {
         }).await
     }
 
+    /// Whether this phone's credential is gone from the device registry:
+    /// revoked or replaced. `false` when the registry cannot be read.
+    pub(crate) async fn credential_revoked(&self) -> bool {
+        let device = self.device.clone();
+        off_runtime_within(move || super::registry::DeviceRegistry.list())
+            .await
+            .is_ok_and(|devices| !devices.iter().any(|entry| entry.id == device.id && entry.token == device.token))
+    }
+
     fn check_current(&self, manager: &PhoneHost) -> Result<()> {
         self.check_buffer()?;
         if self.closed.load(std::sync::atomic::Ordering::SeqCst) || self.actor.generation != manager.generation() {

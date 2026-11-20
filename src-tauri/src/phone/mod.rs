@@ -465,6 +465,24 @@ where
     let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(Some(frame))).await;
 }
 
+/// A check's failure, as the signal it stands for: a revocation when this
+/// phone's credential is gone, as its signal may still be on its way, so the
+/// phone is closed as refused and not dropped with no close frame (#1315).
+/// Any other failure ends the connection with its error.
+async fn revocation(connection: &rpc::MobileConnection, error: anyhow::Error) -> Result<Option<ConnectionSignal>> {
+    if connection.credential_revoked().await {
+        log::info!("phone: credential revoked during a check: {error:#}");
+        return Ok(Some(ConnectionSignal::Revoke));
+    }
+    Err(error)
+}
+
+/// Whether a reply answered under this ending may still go out, under its
+/// output permit: before any signal, or after a revocation (see `serve_connection`).
+fn replies_under_permit(ending: Option<Option<ConnectionSignal>>) -> bool {
+    matches!(ending, None | Some(Some(ConnectionSignal::Revoke)))
+}
+
 /// End a connection on its host's signal: `None` when the host dropped the
 /// sender, which cancels it.
 async fn end_on_signal<S>(socket: &mut WebSocketStream<S>, session: &mut E2eeSession, connection: &rpc::MobileConnection, signal: Option<ConnectionSignal>) -> Ended
@@ -497,10 +515,18 @@ where
 ///
 /// A host signal fences the connection as soon as it is seen, in flight
 /// request or not (#1332): nothing queued, no invalidation and no reply goes
-/// out after it, and no later request starts. The one exception is a
-/// `pairing.forget` already being answered, which itself cancels the
-/// connection: its acknowledgement, which carries no session data, still
-/// reaches the phone before the connection ends.
+/// out after it, and no later request starts. Two requests in flight are
+/// still answered first:
+/// - a `pairing.forget`, which itself cancels the connection: its
+///   acknowledgement carries no session data;
+/// - any request when the signal is a revocation (#1315): its reply goes out
+///   only under an output permit, which the registry refuses once the
+///   credential is gone and which a revocation waits for, so the permit, not
+///   the signal, decides whether it may. A disconnect leaves the credential,
+///   and the permit with it, in place, so it alone withholds the reply.
+///
+/// A check that fails because the credential is gone ends the connection as
+/// revoked, closed as refused, as the revocation's own signal would.
 pub(crate) async fn serve_connection<S, F, R>(
     socket: &mut WebSocketStream<S>,
     session: &mut E2eeSession,
@@ -530,9 +556,9 @@ where
             ending = pending_signal(&mut signals);
         }
         if let Some(signal) = ending {
-            // Only a forget's acknowledgement is waited for; any other
-            // request in flight is dropped with the connection.
-            if !(answering.is_some() && forgetting) {
+            // A forget's acknowledgement, or a reply after a revocation, is
+            // waited for; any other request in flight is dropped with the connection.
+            if !(answering.is_some() && (forgetting || replies_under_permit(ending))) {
                 return Ok(end_on_signal(socket, session, connection, signal).await);
             }
         } else if answering.is_none() {
@@ -543,26 +569,49 @@ where
         }
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
-            _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
+            _ = grant_health.tick(), if ending.is_none() => {
+                if let Err(error) = connection.check_off_runtime(host).await {
+                    ending = Some(revocation(connection, error).await?);
+                }
+            }
             signal = signals.recv(), if ending.is_none() => {
                 ending = Some(signal);
             }
             answered = async { answering.as_mut().expect("guarded").await }, if answering.is_some() => {
                 answering = None;
-                let (id, response) = answered?;
+                let (id, response) = match answered {
+                    Ok(answered) => answered,
+                    Err(error) => {
+                        // Its check failed before it was answered: no reply.
+                        let signal = revocation(connection, error).await?;
+                        ending.get_or_insert(signal);
+                        continue;
+                    }
+                };
                 // Revalidate after asynchronous work: queued replies must not
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
                 // its acknowledgement contains no session data.
                 if forgetting && response["ok"] == true {
                     tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
-                } else if ending.is_none() {
-                    // The permit first, then the signal: one that came while
-                    // the permit was taken withholds the reply (#1332).
-                    let _permit = connection.output_permit(host).await?;
-                    ending = pending_signal(&mut signals);
-                    if ending.is_none() {
-                        tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
+                } else if replies_under_permit(ending) {
+                    match connection.output_permit(host).await {
+                        Ok(_permit) => {
+                            // The permit first, then the signal: a disconnect
+                            // that came while the permit was taken withholds
+                            // the reply (#1332). A revocation cannot have been
+                            // written meanwhile: it waits for the permit.
+                            if ending.is_none() {
+                                ending = pending_signal(&mut signals);
+                            }
+                            if replies_under_permit(ending) {
+                                tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
+                            }
+                        }
+                        Err(error) => {
+                            let signal = revocation(connection, error).await?;
+                            ending.get_or_insert(signal);
+                        }
                     }
                 }
                 // Only now may the stream it opened follow it (#1333).
@@ -571,7 +620,13 @@ where
             _ = connection.invalidations().raised(), if ending.is_none() => {
                 let pending = connection.invalidations().take();
                 if !pending.is_empty() {
-                    let _permit = connection.output_permit(host).await?;
+                    let _permit = match connection.output_permit(host).await {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            ending = Some(revocation(connection, error).await?);
+                            continue;
+                        }
+                    };
                     for message in &pending {
                         // A signal that came while the permit was taken fences the rest.
                         ending = pending_signal(&mut signals);
@@ -589,7 +644,13 @@ where
                 };
                 // One permit for what is queued now, not a runtime round trip
                 // and a device file read for every message (#1282).
-                let _permit = connection.output_permit(host).await?;
+                let _permit = match connection.output_permit(host).await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        ending = Some(revocation(connection, error).await?);
+                        continue;
+                    }
+                };
                 let started = tokio::time::Instant::now();
                 let mut next = Some(first);
                 let mut sent = 0;
