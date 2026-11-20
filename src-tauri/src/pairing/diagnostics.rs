@@ -215,7 +215,10 @@ pub(super) enum Event {
     PhoneRequested,
     PhoneAttached,
     PhoneAuthenticated,
-    PhoneClosed,
+    /// A phone's session ended without a fault; `ended` says how (#1282).
+    /// Earlier versions wrote it as `phone-closed` whatever ended it.
+    #[serde(alias = "phone-closed")]
+    PhoneEnded,
     PhoneFailed,
 }
 
@@ -226,7 +229,7 @@ impl Event {
             Self::PhoneRequested
                 | Self::PhoneAttached
                 | Self::PhoneAuthenticated
-                | Self::PhoneClosed
+                | Self::PhoneEnded
                 | Self::PhoneFailed
         )
     }
@@ -244,7 +247,7 @@ struct Record {
     /// How a phone's session ended without a fault (#1282).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ended: Option<crate::phone::EndReason>,
-    /// The close code of the phone's close frame, when it sent one.
+    /// The code of the close frame that ended it, the phone's or the relay's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     close_code: Option<u16>,
 }
@@ -469,17 +472,30 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut log = DiagnosticLog::default();
         log.configure(directory.path().to_owned()).unwrap();
-        log.record_end(Event::PhoneClosed, 0, None, Some(Ended { reason: EndReason::PhoneClosed, close_code: Some(1000) })).unwrap();
-        log.record_end(Event::PhoneClosed, 0, None, Some(Ended::by(EndReason::StreamEnded))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4000)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4001)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4408)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(None))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::by(EndReason::StreamEnded))).unwrap();
         log.record(Event::PhoneFailed, 0, Some(Failure::from_error(&anyhow::Error::new(Fault::FellBehind).context(Stage::PhoneSession)))).unwrap();
         let bytes = std::fs::read_to_string(directory.path().join(FILE_NAME)).unwrap();
-        assert!(bytes.contains(r#""ended":"phone-closed","closeCode":1000"#), "{bytes}");
+        assert!(bytes.contains(r#""event":"phone-ended","attempt":0,"retryCount":0,"failure":null,"ended":"phone-closed","closeCode":4000"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"probe-timeout","closeCode":4001"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"relay-closed","closeCode":4408"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"unknown"}"#), "{bytes}");
         assert!(bytes.contains(r#""ended":"stream-ended"}"#), "{bytes}");
         assert!(bytes.contains(r#""category":"fell-behind""#), "{bytes}");
         // Records without an end, as earlier versions wrote them, still read.
         let mut relaunched = DiagnosticLog::default();
         relaunched.configure(directory.path().to_owned()).unwrap();
-        assert_eq!(relaunched.records.len(), 5);
+        assert_eq!(relaunched.records.len(), 8);
+        // So do the `phone-closed` events they wrote for every end.
+        let earlier = br#"[{"timestampMs":0,"event":"phone-closed","attempt":0,"failure":null,"ended":"phone-closed","closeCode":1000}]"#;
+        std::fs::write(directory.path().join(FILE_NAME), earlier).unwrap();
+        let mut upgraded = DiagnosticLog::default();
+        upgraded.configure(directory.path().to_owned()).unwrap();
+        assert!(matches!(upgraded.records[0].event, Event::PhoneEnded));
+        assert_eq!(upgraded.records[0].ended, Some(EndReason::PhoneClosed));
     }
 
     #[test]

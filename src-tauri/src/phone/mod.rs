@@ -69,12 +69,35 @@ pub(crate) enum Fault {
     TooManyRequests,
 }
 
+/// The close codes the phone app closes its connection with (#1282),
+/// mirrored in `mobile/src/transport/phone-close.ts`. The relay passes a
+/// phone's code in 4000–4999 through to the Mac's leg unchanged and turns any
+/// other into 4408, so only codes in that range say why the phone closed.
+pub(crate) const PHONE_CLOSE_CLOSED: u16 = 4000;
+pub(crate) const PHONE_CLOSE_PROBE_TIMEOUT: u16 = 4001;
+pub(crate) const PHONE_CLOSE_FAILED: u16 = 4002;
+
 /// How a phone's connection ended without a fault (#1282).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum EndReason {
-    /// The phone sent a close frame.
+    /// The phone app closed it on purpose: the person left, it reconnected
+    /// or another path won (4000), or an older app closed normally (1000).
     PhoneClosed,
+    /// The phone's liveness probe (`pairing.getEndpoints`) went unanswered
+    /// and it closed the connection to start again (4001).
+    ProbeTimeout,
+    /// Something failed on the phone's side of the connection and it closed
+    /// it (4002): a handshake that timed out, a frame it could not read.
+    PhoneFailed,
+    /// The relay closed this leg with one of its own codes: 4408 when the
+    /// phone's leg dropped or closed without a code of its own (older apps),
+    /// or the relay fell behind; 4413 for an oversized message; 4101 for a
+    /// superseded runtime. The code is kept beside it.
+    RelayClosed,
+    /// A close frame whose origin cannot be told: no code, or one neither
+    /// the phone app nor the relay sends (1001 when iOS ends the stream).
+    Unknown,
     /// The socket ended with no close frame: the relay or the network dropped it.
     StreamEnded,
     /// Disconnected on the Mac; the pairing stays.
@@ -87,7 +110,8 @@ pub(crate) enum EndReason {
     ShareEnded,
 }
 
-/// A connection's end: why, and the close code the phone's close frame carried.
+/// A connection's end: why, and the code its close frame carried, from the
+/// phone or from the relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ended {
     pub reason: EndReason,
@@ -97,6 +121,20 @@ pub(crate) struct Ended {
 impl Ended {
     pub(crate) fn by(reason: EndReason) -> Self {
         Self { reason, close_code: None }
+    }
+
+    /// The end a close frame with this code means.
+    pub(crate) fn closed_with(close_code: Option<u16>) -> Self {
+        let reason = match close_code {
+            Some(PHONE_CLOSE_CLOSED | 1000) => EndReason::PhoneClosed,
+            Some(PHONE_CLOSE_PROBE_TIMEOUT) => EndReason::ProbeTimeout,
+            Some(PHONE_CLOSE_FAILED) => EndReason::PhoneFailed,
+            // The relay's own close codes (terminalx-server
+            // `apps/relay/src/protocol/close-codes.ts`).
+            Some(4100..=4104 | 4401 | 4404 | 4408 | 4409 | 4413 | 4429 | 4503) => EndReason::RelayClosed,
+            _ => EndReason::Unknown,
+        };
+        Self { reason, close_code }
     }
 }
 
@@ -600,8 +638,7 @@ where
                     }
                     Message::Close(frame) => {
                         connection.close();
-                        let close_code = frame.map(|frame| u16::from(frame.code));
-                        return Ok(Ended { reason: EndReason::PhoneClosed, close_code });
+                        return Ok(Ended::closed_with(frame.map(|frame| u16::from(frame.code))));
                     }
                     Message::Ping(bytes) => {
                         send_pong(socket, bytes).await?;

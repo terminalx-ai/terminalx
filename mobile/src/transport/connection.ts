@@ -8,6 +8,7 @@ import { updateStoredHost, writeHostCredential, type HostCredential, type Stored
 import { hostDisplayName } from "../store/host-name";
 import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
 import { closeDetail, connectionProblem } from "./connection-errors";
+import { PHONE_CLOSE } from "./phone-close";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -223,6 +224,7 @@ export class HostConnection {
       },
       () => {
         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
+        client.close(PHONE_CLOSE.probeTimeout);
         this.reconnectNow("the connection from before the background did not answer");
       },
     );
@@ -609,7 +611,7 @@ export class HostConnection {
       const response = await client.request("pairing.getEndpoints", {}, 5_000).catch((error: unknown) => {
         // A network change can leave TCP apparently open. Probe the encrypted
         // channel so a silent dead path also starts a fresh candidate race.
-        if (generation === this.generation && this.client === client) client.close();
+        if (generation === this.generation && this.client === client) client.close(PHONE_CLOSE.probeTimeout);
         throw error;
       });
       if (!response.ok) return; // Older hosts can keep using their saved endpoint.
