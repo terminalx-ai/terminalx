@@ -52,6 +52,10 @@ pub struct MachineHostView {
     pub keep_awake: bool,
     /// `None` while the runtime cannot be reached.
     pub status: Option<Status>,
+    /// The attached runtime cannot verify this window and was left running
+    /// for what it serves: `runtime_restart_required:<epoch>: <message>`,
+    /// shown with Restart runtime beside it (PRO-486).
+    pub restart_required: Option<String>,
 }
 
 /// `InspectedMachineCode`.
@@ -245,7 +249,11 @@ fn this_computer_label() -> String {
 
 fn view(status: Option<Status>) -> MachineHostView {
     let settings = crate::store::settings::load();
-    MachineHostView { allow_operating: settings.machines.allow_operating, keep_awake: settings.pairing.keep_awake, status }
+    #[cfg(all(unix, feature = "desktop"))]
+    let restart_required = crate::local_runtime::window_consent::offered_now().map(|required| required.to_string());
+    #[cfg(not(all(unix, feature = "desktop")))]
+    let restart_required = None;
+    MachineHostView { allow_operating: settings.machines.allow_operating, keep_awake: settings.pairing.keep_awake, status, restart_required }
 }
 
 // ---------------------------------------------------------------- Tauri commands
@@ -283,12 +291,11 @@ async fn host_command(
     params: serde_json::Value,
 ) -> CmdResult<MachineHostView> {
     let (runtime, machines) = (runtime(&state)?, machines.inner().clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        runtime.machine_host(command, params).map_err(err)?;
-        Ok(host_view(&machines, Some(runtime)))
-    })
-    .await
-    .map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || runtime.machine_host(command, params).map(drop).map_err(err)).await.map_err(err)??;
+    // Read again: the command may have been answered by a fresh runtime
+    // that replaced this one (PRO-486).
+    let runtime = state.runtime();
+    tauri::async_runtime::spawn_blocking(move || host_view(&machines, runtime)).await.map_err(err)
 }
 
 #[tauri::command]
@@ -489,6 +496,6 @@ mod tests {
         settings.pairing.keep_awake = false;
         crate::store::settings::save(&settings).unwrap();
         let value = serde_json::to_value(view(None)).unwrap();
-        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "status": null }));
+        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "status": null, "restartRequired": null }));
     }
 }

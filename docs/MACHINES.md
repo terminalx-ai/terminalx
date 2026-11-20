@@ -1929,9 +1929,23 @@ which runs in a child process because data privacy is one switch per process.
   gains nothing, so no integrity key guards it.
 - **Consent identifies the window on supported Mac desktops**
   (`serve_cli::consent`, PRO-369). Desktop runtimes without a pinned
-  consent key refuse consent-guarded pairing actions. A runtime carried over
-  from a build that predates the pin needs a fresh desktop launch before it
-  can verify the window. A separately launched headless runtime still
+  consent key refuse consent-guarded pairing actions. The key is pinned only
+  in the environment of a runtime the window launches, and a handover keeps
+  that environment, so a runtime launched without this window's key (by a
+  build before the pin, while the Keychain write failed, by a build with
+  another bundle identifier, or before its Keychain item was removed) cannot
+  verify the window until it is relaunched. The window does that itself when
+  a guarded command it sends fails this way (PRO-486,
+  `local_runtime::window_consent`): once Keychain gives it the key (a
+  Keychain that refuses stops nothing and keeps its own message), and if
+  nothing the runtime runs would be cut short and no computer or phone is
+  connected to it or waiting for Allow, it stops the runtime, launches a
+  fresh one pinned to its key and sends the command again (Allow excepted:
+  the computer must ask again). Otherwise nothing is stopped and Settings →
+  Machines shows Restart runtime beside the error, naming what restarting
+  stops; it stops only a runtime offered that way. An account pairing grant,
+  which no one at the window asked for, never restarts the runtime: it only
+  makes that offer. Nothing pins or replaces a key over IPC. A separately launched headless runtime still
   permits an unrelated interactive terminal. A same-user process that opens
   its own pseudo-terminal can pass the terminal check on supported Mac
   desktops and headless runtimes.

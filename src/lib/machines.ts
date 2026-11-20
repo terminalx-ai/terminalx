@@ -23,6 +23,8 @@ export const machinesApi = {
   hostStatus: () => invoke<MachineHostView>("machines_host_status"),
   setAllowOperating: (enabled: boolean) => invoke<MachineHostView>("machines_set_allow_operating", { enabled }),
   createCode: () => invoke<MachinePairingCode>("machines_create_code"),
+  /** Restart runtime `epoch`, which cannot verify this window, with what it runs; resolves once a fresh one is attached (PRO-486). */
+  restartRuntimeForWindow: (epoch: string) => invoke<void>("local_runtime_restart_for_window", { epoch }),
   approve: (requestId: string) => invoke<unknown>("machines_approve", { requestId }),
   decline: (requestId: string) => invoke<unknown>("machines_decline", { requestId }),
   revoke: (id: string) => invoke<unknown>("machines_revoke", { id }),
@@ -186,6 +188,20 @@ export async function createMachineCode(): Promise<MachinePairingCode> {
   } finally {
     void refreshMachineHost();
   }
+}
+
+/**
+ * A command only a person may send failed because the runtime running was not started by this window, so it cannot
+ * verify it, and restarting it would stop work (PRO-486): `runtime_restart_required:<epoch>: <message>`.
+ */
+export function restartRequired(error: string | null | undefined): { epoch: string; message: string } | null {
+  const match = /^runtime_restart_required:([^:\s]+): ([\s\S]*)$/.exec(error ?? "");
+  return match ? { epoch: match[1], message: match[2] } : null;
+}
+
+/** Forget the last command's failure, as after the runtime it named was restarted. */
+export function clearMachineHostError() {
+  set({ error: null });
 }
 
 /** For tests: forget what was read. */

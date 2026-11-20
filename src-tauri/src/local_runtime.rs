@@ -61,6 +61,8 @@ pub mod ui;
 pub(crate) mod replace;
 #[cfg(all(unix, feature = "desktop"))]
 pub(crate) mod update_plan;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod window_consent;
 
 pub const PROTOCOL: u64 = 1;
 

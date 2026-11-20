@@ -680,7 +680,7 @@ pub(super) fn cut_short(app: &AppHandle, runtime: &Desktop) -> anyhow::Result<(V
 /// short: decided by the runtime under the lock that admits work when it can
 /// (`runtime.stopAllIfIdle`), or, for one too old to, by reading its work
 /// again just before asking it to stop.
-fn stop_if_idle(runtime: &Desktop) -> anyhow::Result<()> {
+pub(super) fn stop_if_idle(runtime: &Desktop) -> anyhow::Result<()> {
     if runtime.stop_all_if_idle()? { return Ok(()); }
     let work = work(runtime)?;
     if !work.is_empty() {
