@@ -80,6 +80,18 @@ pub fn guards(command: &str) -> bool {
     GUARDED.contains(&command)
 }
 
+/// The bots operations of `runtime.session.bots` that give a bot more than
+/// it has (PRO-468): only the window, a person, sends them. An `update` is
+/// witnessed always; the runtime asks for the proof only when it raises
+/// access or changes the reporting line (`bots::enforce::needs_person`).
+pub const BOTS_COMMAND: &str = "runtime.session.bots";
+pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update"];
+
+/// Whether this request needs a person's consent: a guarded command, or a guarded bots operation.
+pub fn guards_request(command: &str, params: &Value) -> bool {
+    guards(command) || (command == BOTS_COMMAND && params["operation"].as_str().is_some_and(|operation| GUARDED_BOTS.contains(&operation)))
+}
+
 /// Why a process that asks may not: it is this runtime, descends from it, or
 /// sits in one of its terminals. `None` lets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +164,7 @@ pub enum Window {
 pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_KEY";
 
 impl Window {
-    fn current() -> Self {
+    pub fn current() -> Self {
         if headless() {
             return Self::Headless;
         }
@@ -344,7 +356,7 @@ fn witness_with_window_key(
     params: &mut Value,
     provider: Option<&WindowKey>,
 ) -> Result<Option<Witness>> {
-    if !guards(command) {
+    if !guards_request(command, params) {
         return Ok(None);
     }
     // Fail locally if this window cannot read its key. A caller without a
@@ -354,7 +366,7 @@ fn witness_with_window_key(
 }
 
 fn witness_proving(command: &str, run: &Path, params: &mut Value, key: Option<&Ed25519KeyPair>) -> Result<Option<Witness>> {
-    if !guards(command) {
+    if !guards_request(command, params) {
         return Ok(None);
     }
     let witness = Witness::open(run)?;

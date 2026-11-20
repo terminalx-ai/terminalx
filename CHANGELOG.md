@@ -22,10 +22,14 @@
   or removed by retention. A bot's sessions, and what they start, run in no
   wider a permission mode than its access allows, and in plan mode while it is
   paused; a paused bot still answers. A resume from the `terminalx` CLI waits
-  for the owner to confirm it in the app, and a bot's own sessions cannot hire,
-  delete or resume bots. Deleting a bot stops and archives its chats; turning
-  Bots off stops them. A bot's memory reaches its agent as its own notes, read
-  safely and capped (PRO-468).
+  for the owner to confirm it in the app (shown on the team page and the
+  sidebar for a day), and a bot's own sessions cannot hire, delete or resume
+  bots, start cloud, pipeline or other-computer work, or approve permissions:
+  the app works out who asks from the calling process, not from what it
+  claims. A resume or more access gives each tab back its own mode, within the
+  bot's limit. Deleting a bot stops and archives its chats; turning Bots off
+  stops them. A bot's memory reaches its agent as its own notes, read safely
+  and capped (PRO-468).
 
 ## 0.2.37
 

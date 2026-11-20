@@ -2087,15 +2087,17 @@ mod tests {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
         assert!(parse(&args(&["bots", "create", "--name", "Atlas"])).unwrap_err().message.contains("bots create needs --role ROLE (cto, chief-of-staff"));
-        // PRO-468: from inside a session a pause or resume says which, so a bot's own chat is told apart.
+        // PRO-468: from inside a session every bots command says which, so a session working for a bot is told apart.
         let caller = json!({"session": "bot-chat", "tab": "bot-tab"});
         CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
-        let inside: Vec<Value> = [&["bots", "pause", "atlas"][..], &["bots", "resume", "atlas"], &["bots", "pause-all"], &["bots", "resume-all"], &["bots", "show", "atlas"]].iter().map(|words| rpc_of(words).1).collect();
+        let inside: Vec<Value> = [&["bots", "pause", "atlas"][..], &["bots", "resume", "atlas"], &["bots", "pause-all"], &["bots", "resume-all"], &["bots", "show", "atlas"], &["bots", "delete", "atlas"], &["bots", "create", "--role", "cto", "--name", "Echo"]].iter().map(|words| rpc_of(words).1).collect();
         CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
         assert_eq!(inside[0], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[1], json!({"bot": "atlas", "caller": caller}));
         assert_eq!((&inside[2]["caller"], &inside[3]["caller"]), (&caller, &caller));
-        assert_eq!(inside[4], json!({"bot": "atlas"}));
+        assert_eq!(inside[4], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!(inside[5], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!(inside[6], json!({"role": "cto", "name": "Echo", "caller": caller}));
         assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all or resume-all"));
         for said in ["terminalx bots list [--json]", "terminalx bots create --role ROLE --name NAME", "terminalx bots show|pause|resume|delete BOT", "terminalx bots rename BOT --name NAME", "terminalx bots pause-all|resume-all"] {
             assert!(help_text().contains(said), "{said}");

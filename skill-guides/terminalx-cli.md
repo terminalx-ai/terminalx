@@ -1935,21 +1935,27 @@ terminalx bots delete <bot> --json
   may pause.
 - `resume` and `resume-all` never resume a bot from the command line. They ask the owner,
   in TerminalX, and answer at once with `"waiting": true` and a message saying so; the bot
-  stays paused until the owner presses Resume in the app (or says no). Tell the person it is
+  stays paused until the owner presses Resume in the app (or says no). The request shows on the
+  team page and the bot's sidebar row, and is dropped after a day. Tell the person it is
   waiting for them; do not repeat the command.
-- **Who is asking.** Every bots command sends the session it runs in (`RACCOON_SESSION_ID`).
-  A session that works for a bot (a bot's chat, or a session one of them started) is refused
-  `create`, `delete`, `resume` and `resume-all` with `forbidden`, for any bot. Its `pause` is
-  recorded as that bot (its id in `by`) only when the tab's own launch secret
-  (`RACCOON_HOOK_TOKEN`) proves the session id; a session id alone is a claim, and a claim
-  is recorded as `owner`. Changing a bot's access or who it reports to is the owner's, in the
-  app.
+- **Who is asking** is worked out by the app, not taken from the command: a command run from a
+  bot's chat, or a session one started, or anything those terminals started, works for that bot
+  whatever session it names. Naming a session (`RACCOON_SESSION_ID`) can only take rights away.
+  A session that works for a bot is refused `create`, `delete`, `resume` and `resume-all` with
+  `forbidden`, for any bot. Its `pause` is recorded as that bot (its id in `by`). Resuming,
+  hiring, deleting, and raising a bot's access or changing who it reports to are a person's, in
+  the app.
 - A session that works for a bot runs in no wider a permission mode than the bot's access
-  allows (full: bypass; ask before acting: Ask every time; read and report: Plan), and in Plan
-  while the bot is paused. `sessions create` from it records it as the parent (`--parent` and
-  `--no-parent` are refused) and the new session works for the same bot, under the same
-  limit. While the bot is paused, `sessions create`, `runs create` and `runs start` from it
-  are refused with `bot_paused`.
+  allows (full: bypass; ask before acting: Ask every time, or Plan on native Codex, which cannot
+  ask; read and report: Plan), and in Plan while the bot is paused. A tab the limit cannot
+  reach while it runs is stopped. A resume or more access gives each tab back as much of its own
+  mode as the bot allows now. With Bots off, or the bot deleted, it is an ordinary session.
+  `sessions create` from it records it as the parent (`--parent` and `--no-parent` are refused)
+  and the new session works for the same bot, under the same limit. It may not start an issue
+  pipeline, a cloud session or anything on another computer, approve a permission, lead a run
+  from another session, or `send` to a session that does not work for the same bot
+  (`forbidden`). While the bot is paused, `sessions create`, `runs create`, `runs start` and
+  `send` from it are refused with `bot_paused`; it still answers in its own chat.
 - `delete` stops the bot's running chats, removes the record, moves the home folder to
   `$TERMINALX_HOME/trash/bots/<id>/` with the record beside it as `bot.json`, and archives the
   bot's chats. Nothing in it is erased.

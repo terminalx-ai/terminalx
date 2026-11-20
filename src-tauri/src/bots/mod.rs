@@ -344,12 +344,31 @@ pub fn list() -> Result<Vec<Bot>> {
 /// The bots with the revision they were read at.
 pub fn listing() -> Result<BotList> {
     require_enabled()?;
-    Ok(BotList::from(&bot_store::snapshot()?))
+    let mut list = BotList::from(&bot_store::snapshot()?);
+    let now = chrono::Utc::now();
+    list.bots.iter_mut().for_each(|bot| forget_stale_request(bot, now));
+    Ok(list)
 }
 
 pub fn get(id: &str) -> Result<Bot> {
     require_enabled()?;
-    bot_store::get(id)?.ok_or_else(|| not_found(id))
+    let mut bot = bot_store::get(id)?.ok_or_else(|| not_found(id))?;
+    forget_stale_request(&mut bot, chrono::Utc::now());
+    Ok(bot)
+}
+
+/// How long a resume asked for from the CLI waits for the owner's answer.
+pub const RESUME_REQUEST_LASTS: chrono::Duration = chrono::Duration::hours(24);
+
+/// A resume request older than [`RESUME_REQUEST_LASTS`] (or with no time
+/// that can be read) is no longer shown: the agent that asked is long gone.
+fn forget_stale_request(bot: &mut Bot, now: chrono::DateTime<chrono::Utc>) {
+    let fresh = bot.unknown.get(RESUME_REQUEST_KEY).and_then(|request| request["at"].as_str())
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| now - at.with_timezone(&chrono::Utc) < RESUME_REQUEST_LASTS);
+    if !fresh {
+        bot.unknown.remove(RESUME_REQUEST_KEY);
+    }
 }
 
 pub fn role_templates() -> Result<Vec<templates::RoleTemplate>> {

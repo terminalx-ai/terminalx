@@ -442,6 +442,19 @@ thread_local! {
     static CALLER: std::cell::RefCell<Option<std::sync::Arc<std::os::unix::net::UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// The process at the other end of the frame being answered on this thread,
+/// as the kernel says (PRO-468): who sent a control request, whatever it
+/// claims. `None` off unix, for an in-process call, or when it cannot be told.
+pub(crate) fn caller_pid() -> Option<i32> {
+    #[cfg(unix)]
+    {
+        let stream = CALLER.with(|caller| caller.borrow().clone())?;
+        crate::serve_cli::consent::peer_pid(&stream).ok()
+    }
+    #[cfg(not(unix))]
+    None
+}
+
 /// Inspect the hook transport without consuming bytes or spawning a watcher.
 /// No transport is installed for direct in-process calls and unit tests.
 #[derive(Clone, Default)]

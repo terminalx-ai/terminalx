@@ -1615,7 +1615,7 @@ pub(crate) fn add_tab_entry_on(session_id: &str, tab: &NewTab, account: Option<&
     let mut t = new_tab_entry(tab);
     index::update_session(session_id, |s| {
         // A new tab of a session that works for a bot starts within its access (PRO-468).
-        if let Some(limit) = crate::bots::chat::mode_limit(s) {
+        if let Some(limit) = crate::bots::chat::tab_limit(s, &t) {
             t.permission_mode = limit.clamp(&t.permission_mode);
         }
         let harness = t.harness.clone();

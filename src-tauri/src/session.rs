@@ -3183,6 +3183,48 @@ impl SessionManager {
         self.runtime(session_id, tab_id).unwrap().lock().unwrap().status
     }
 
+    /// The session and tab whose agent or terminal started process `pid`, or
+    /// is it: its pane's process, or a native agent's child, found up its
+    /// ancestry (PRO-468). A process that detached itself is no one's.
+    #[cfg(unix)]
+    pub(crate) fn session_of_process(&self, pid: i32) -> Option<(String, String)> {
+        let mut roots: HashMap<i32, (String, String)> = HashMap::new();
+        let panes: Vec<_> = self.terminals.panes().into_iter().filter_map(|pane| Some((pane.pid? as i32, pane.id))).collect();
+        if !panes.is_empty() {
+            if let Ok(sessions) = index::load() {
+                // A tab's own pane, or another terminal of its session (`<session>:…`).
+                let owner = |pane: &str| sessions.iter().find_map(|session| {
+                    let tab = session.tabs.iter().find(|tab| tab.pane_id() == pane)
+                        .or_else(|| pane.starts_with(&format!("{}:", session.id)).then(|| session.tabs.first()).flatten())?;
+                    Some((session.id.clone(), tab.id.clone()))
+                });
+                for (root, pane) in panes {
+                    if let Some(found) = owner(&pane) {
+                        roots.insert(root, found);
+                    }
+                }
+            }
+        }
+        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        for runtime in runtimes {
+            let rt = runtime.lock().unwrap();
+            if let Some(child) = rt.child_pid {
+                roots.insert(child as i32, (rt.session_id.clone(), rt.tab_id.clone()));
+            }
+        }
+        let mut current = pid;
+        for _ in 0..4096 {
+            if let Some(found) = roots.get(&current) {
+                return Some(found.clone());
+            }
+            match crate::serve_cli::consent::parent_of(current) {
+                Some(parent) if parent > 1 && parent != current => current = parent,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {
@@ -5529,7 +5571,7 @@ impl SessionManager {
     /// Bring the tab's mode, and one waiting for the next launch, within
     /// the limit of the bot `entry` works for, if it works for one.
     pub(crate) fn hold_to_bot(&self, rt: &mut TabRuntime, entry: &index::SessionEntry) -> Result<()> {
-        let Some(limit) = crate::bots::chat::mode_limit(entry) else { return Ok(()) };
+        let Some(limit) = entry.tab(&rt.tab_id).and_then(|tab| crate::bots::chat::tab_limit(entry, tab)) else { return Ok(()) };
         self.update_settings(rt, |s| {
             s.permission_mode = limit.clamp(&s.permission_mode);
             if let Some(mode) = s.requested_permission_mode.as_mut() {
@@ -5651,7 +5693,7 @@ impl SessionManager {
                 let mut held = None;
                 // So may one wider than the bot it works for allows (PRO-468),
                 // as when a plan is approved into another mode in the terminal.
-                let bot_limit = index::get(&rt.session_id).ok().and_then(|entry| crate::bots::chat::mode_limit(&entry));
+                let bot_limit = index::get(&rt.session_id).ok().and_then(|entry| crate::bots::chat::tab_limit(&entry, entry.tab(&rt.tab_id)?));
                 let result = self.update_settings(rt, |s| {
                     held = None;
                     let mode = stance.mode(&s.permission_mode);
@@ -5711,7 +5753,7 @@ impl SessionManager {
         // guest's prompt (`send_impl`): its mode is simply what it says.
         let by_hand = matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some());
         let entry = index::get(&rt.session_id).ok();
-        let bot_refusal = entry.as_ref().and_then(|entry| crate::bots::chat::refuses_mode(entry, &mode));
+        let bot_refusal = entry.as_ref().and_then(|entry| crate::bots::chat::refuses_mode(entry, entry.tab(&rt.tab_id), &mode));
         let shared = sharing.sessions.contains_key(&rt.session_id) && !settings::allowed_while_shared(&mode);
         if by_hand || (!shared && bot_refusal.is_none()) {
             if let Err(error) = self.update_settings(&mut rt, |s| s.reported_mode(&mode)) {
@@ -5827,7 +5869,8 @@ impl SessionManager {
 
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
         // No mode wider than a bot's access, from the picker, the CLI or a phone (PRO-468).
-        if let Some(refusal) = crate::bots::chat::refuses_mode(&index::get(session_id)?, mode) {
+        let entry = index::get(session_id)?;
+        if let Some(refusal) = crate::bots::chat::refuses_mode(&entry, entry.tab(tab_id), mode) {
             bail!(refusal);
         }
         let policy = collaboration_v2::current();

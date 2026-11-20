@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
 import { openBot } from "@/lib/sessions";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
-import { accessLabel, reportsToLabel, runsOnLabel, worksInLabel } from "./botLabels";
+import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
 import { BotsHeader } from "./BotsHeader";
 import { FirstBot } from "./FirstBot";
@@ -194,7 +194,7 @@ function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; un
       </td>
       <td className="px-2 py-2.5">
         {bot.paused ? (
-          <span className="inline-flex items-center gap-1.5 text-warning" data-testid="bot-doing-now"><Pause className="size-3.5" /> Paused</span>
+          <span className="inline-flex items-center gap-1.5 text-warning" data-testid="bot-doing-now"><Pause className="size-3.5" /> {statusLine(bot)}</span>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-testid="bot-doing-now"><Moon className="size-3.5" /> Quiet</span>
         )}

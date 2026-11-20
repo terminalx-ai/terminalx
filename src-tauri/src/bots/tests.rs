@@ -446,3 +446,24 @@ fn refusals_are_told_apart_from_failures() {
     crate::store::settings::save(&settings).unwrap();
     assert_eq!(kind(list().unwrap_err()), Some(BotError::Off));
 }
+
+/// A resume asked for from the CLI is shown for a day, then forgotten.
+#[test]
+fn a_resume_request_is_dropped_after_a_day() {
+    let (_home, sink, _events) = bots_on();
+    let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    pause(sink.as_ref(), &bot.id, OWNER).unwrap();
+    request_resume(sink.as_ref(), &bot.id, "cli").unwrap();
+    assert!(get(&bot.id).unwrap().unknown.contains_key(RESUME_REQUEST_KEY), "shown while fresh");
+    assert!(listing().unwrap().bots[0].unknown.contains_key(RESUME_REQUEST_KEY));
+
+    let mut stale = get(&bot.id).unwrap();
+    let day_ago = (chrono::Utc::now() - RESUME_REQUEST_LASTS - chrono::Duration::minutes(1)).to_rfc3339();
+    stale.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": day_ago, "by": "cli"}));
+    forget_stale_request(&mut stale, chrono::Utc::now());
+    assert!(!stale.unknown.contains_key(RESUME_REQUEST_KEY), "a day old: gone");
+    let mut unreadable = get(&bot.id).unwrap();
+    unreadable.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": "yesterday"}));
+    forget_stale_request(&mut unreadable, chrono::Utc::now());
+    assert!(!unreadable.unknown.contains_key(RESUME_REQUEST_KEY));
+}

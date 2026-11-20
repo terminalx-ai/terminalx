@@ -310,7 +310,18 @@ pub struct AppendedPrompt {
 }
 
 pub fn prompt_args(harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
+    prompt_args_for(cfg!(unix), harness, texts)
+}
+
+/// [`prompt_args`] for a unix shell, or for the PowerShell a Windows launch
+/// goes through: there `"$VAR"` is not a variable and a launch sets no
+/// variable before the command, so the text stays quoted on the command
+/// line, literally, as it was before.
+fn prompt_args_for(unix: bool, harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
     let Some((flag, value)) = prompt_flag(harness, texts) else { return AppendedPrompt::default() };
+    if !unix {
+        return AppendedPrompt { args: format!(" {flag} {}", quote(&value)), value: None };
+    }
     let args = match harness {
         "codex" => format!(" {flag} \"developer_instructions=${APPENDED_PROMPT_ENV}\""),
         _ => format!(" {flag} \"${APPENDED_PROMPT_ENV}\""),
@@ -971,6 +982,18 @@ mod tests {
         assert_eq!(config.env.iter().filter(|(name, _)| name == "API_KEY_A").count(), 1);
         assert!(config.env.contains(&("MCP_HEADER_SECRET_1".into(), SECRET.into())));
         assert!(config.env.contains(&("MCP_HEADER_SECRET_2".into(), OTHER_SECRET.into())));
+    }
+
+    /// Off unix the launch sets no variable and its shell does not expand
+    /// `"$VAR"`: the prompt is quoted on the command line itself, as before.
+    #[test]
+    fn off_unix_an_appended_prompt_is_quoted_on_the_command_line() {
+        let prompt = prompt_args_for(false, "claude", &[Some("Remember: it's done.")]);
+        assert_eq!(prompt, AppendedPrompt { args: " --append-system-prompt 'Remember: it'\\''s done.'".into(), value: None });
+        let prompt = prompt_args_for(false, "codex", &[Some("Be brief.")]);
+        assert_eq!(prompt.args, " -c 'developer_instructions=\"Be brief.\"'");
+        assert!(prompt.value.is_none() && !prompt.args.contains(APPENDED_PROMPT_ENV));
+        assert_eq!(prompt_args_for(true, "claude", &[Some("x")]).args, format!(" --append-system-prompt \"${APPENDED_PROMPT_ENV}\""));
     }
 
     /// Text the agent is told reaches it word for word through every login

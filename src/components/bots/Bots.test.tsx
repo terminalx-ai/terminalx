@@ -382,6 +382,16 @@ describe("Bots: the team table (23.02)", () => {
     expect(main().getByTestId("bots-pause-all")).toBeTruthy();
   });
 
+  it("shows a resume a bot asked for from the CLI on the team page and its sidebar row", async () => {
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    await boot(listOf(4, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }]));
+    render(<Screen />);
+    await waitFor(() => expect(main().getAllByTestId("bot-doing-now")).toHaveLength(2));
+    expect(main().getAllByTestId("bot-doing-now").map((cell) => cell.textContent?.trim())).toEqual(["Paused · asks to resume", "Paused"]);
+    expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · asks to resume, runs on/ })).toBeTruthy();
+    expect(sidebar().getByRole("button", { name: /Iris, .*, Paused, runs on/ })).toBeTruthy();
+  });
+
   it("pauses and resumes one bot from its row", async () => {
     await boot(listOf(4, [atlas]));
     mocks.api.pause.mockResolvedValue({ ...atlas, paused: { at: "2026-11-20T12:00:00Z", by: "owner" } });
