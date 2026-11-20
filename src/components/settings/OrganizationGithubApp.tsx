@@ -98,7 +98,8 @@ export function OrganizationGithubApp({
     if (!outcome) return;
     if (outcome.kind === "error") setError(outcome.message);
     else setNotice(outcome.message);
-    if (outcome.kind === "connected") void load();
+    // An unsettled attempt may have connected on the server: re-read to reconcile.
+    if (outcome.kind === "connected" || outcome.kind === "unsettled") void load();
   };
   const connectAttempt = useGithubConnectAttempt({ pollIntervalMs, epoch: contextEpoch, onEnd: showOutcome });
   const { attempt, waiting, reset: resetAttempt } = connectAttempt;

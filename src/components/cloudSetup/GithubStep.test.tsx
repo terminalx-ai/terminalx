@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { githubConnectClockScenarios } from "@/lib/githubConnectClockScenarios";
 import { organizationGithubApp, type GithubAppSummary } from "@/lib/organizationGithubApp";
 import { organizationMembers } from "@/lib/organizationMembers";
 import { newSetup } from "@/lib/organizationSetup";
@@ -85,4 +86,22 @@ it("shows Connection canceled. after the desktop's own cancel", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
   await screen.findByText("Connection canceled.");
   expect(api.cancelAttempt).toHaveBeenCalledWith("att_1", "rev-1");
+});
+
+describe("connect attempt clocks", () => {
+  githubConnectClockScenarios({
+    api,
+    connected: {
+      id: "ghinst_2",
+      installationId: 43,
+      accountLogin: "globex",
+      accountType: "Organization",
+      repositorySelection: "selected",
+      state: "connected",
+      permissions: { contents: "write", metadata: "read" },
+    },
+    begin: async () => {
+      fireEvent.click(await renderStep());
+    },
+  });
 });
