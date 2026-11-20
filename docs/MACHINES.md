@@ -750,6 +750,12 @@ the pull request that adds it.
 | `session.delete` | `session/2` | Served | |
 | `session.interrupt` | `session/3` | Served | Live only; never resent after a drop |
 | `session.toTerminal` | `session/3` | Served | |
+| `session.turnCheckpoint` | `checkpoints/1` | Served | A finished turn's checkpoint, kept by the machine (#1326) |
+| `session.keepTurn` | `checkpoints/1` | Served | Manage |
+| `session.undoTurn` | `checkpoints/1` | Served | Manage; an overlap is refused with a token |
+| `session.restoreUndo` | `checkpoints/1` | Served | Manage; as `session.undoTurn` |
+| `session.reset` | `checkpoints/1` | Served | Manage; the local `reset_chat` on the machine |
+| `session.fork` | `checkpoints/1` | Served | Manage; a new session stays in the source's project |
 | `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |
 | `session.stop` | `agent-commands/1` | Served | Drops queued sends, stops the agent; applied again after a crash (decision 3) |
 | `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |

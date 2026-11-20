@@ -3979,7 +3979,8 @@ impl crate::cloud_agents::AgentOps for StoredTabs {
 fn seed_chat(root: &Path) -> (SessionEntry, String) {
     let session = seed_session(root, "Fork me", None);
     let tab = session.tabs[0].id.clone();
-    let provider = "32610000-0000-4000-8000-000000001326";
+    // The fixture's own conversation id: a transcript of another conversation is refused.
+    let provider = "32610000-0000-4000-8000-000000000001";
     crate::store::index::update_session(&session.id, |entry| {
         entry.tab_mut(&tab).unwrap().provider_session_id = Some(provider.into());
         Ok(())
