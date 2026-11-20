@@ -4,6 +4,7 @@ import type { SettingId, SettingsSection } from "./settingsRegistry";
 import { AccountTab } from "./AccountTab";
 import { DevicesTab } from "./DevicesTab";
 import { OrganizationsTab } from "./OrganizationsTab";
+import type { OrganizationPage } from "./OrganizationSettings";
 import { GeneralTab, AppearanceTab, AgentsTab, IntegrationsTab, AboutTab } from "./SettingsSections";
 import { TranscriptionTab } from "./TranscriptionTab";
 import { MergedCleanupSettings } from "./MergedCleanupSettings";
@@ -28,6 +29,10 @@ interface SectionContext {
   row?: string | null;
   openRequest?: number;
   onSelectRow?: (row: SettingId) => void;
+  /** The organization, and its page, open in the menu (PRO-464); none: the list of organizations. */
+  organizationId?: string;
+  organizationPage?: OrganizationPage;
+  onOpenOrganization?: (organizationId: string | null) => void;
 }
 /** The state adapters mount only for the selected section. Their stores and lifetimes are unchanged. */
 export const settingsSectionRenderers: Record<SettingsSection, (context: SectionContext) => ReactNode> = {
@@ -37,7 +42,7 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   stats: () => <StatsUsageView />,
   general: () => <GeneralTab />,
   appearance: () => <AppearanceTab />,
-  organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
+  organizations: ({ organizationId, organizationPage, onOpenOrganization }) => <OrganizationsTab organizationId={organizationId} page={organizationPage} onOpenOrganization={onOpenOrganization} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,
   orchestrator: () => <OrchestratorTab />,
   environment: () => <EnvironmentSettings />,

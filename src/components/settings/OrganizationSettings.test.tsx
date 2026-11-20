@@ -44,9 +44,8 @@ vi.mock("./OrganizationCloudTeardown", () => ({ OrganizationCloudTeardown: () =>
 // The person's own model access (PRO-18) has tests of its own; here it shows which organization it is for.
 vi.mock("./OrganizationAgentRoutes", () => ({ OrganizationAgentRoutes: ({ organizationId }: { organizationId: string }) => <div data-testid="section-routes" data-organization={organizationId} /> }));
 
-const { OrganizationSettings } = await import("./OrganizationSettings");
-const { OrganizationsTab } = await import("./OrganizationsTab");
-const { openAgentLogins, takeAgentLoginsRequest, takeOrganizationRequest } = await import("@/lib/settingsLinks");
+const { OrganizationSettings, organizationPageForRow, organizationPages } = await import("./OrganizationSettings");
+const { takeAgentLoginsRequest, takeOrganizationRequest } = await import("@/lib/settingsLinks");
 
 const acme: OrganizationSummary = { id: "a", name: "Acme", role: "owner", isPersonal: false, cloud: { enabled: true, flags: {} } };
 const beta: OrganizationSummary = { id: "b", name: "Beta", role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } };
@@ -82,11 +81,9 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("an organization's settings page (PRO-107)", () => {
+describe("an organization's settings pages (PRO-107, PRO-464)", () => {
   it("changes a non-active organization's agent logins by its id, and leaves the active one's alone", async () => {
-    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
-    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Beta");
-    expect(screen.getByTestId("organization-settings").textContent).toContain("You are an administrator of Beta. It is not your default organization. What you change on this page applies to Beta only.");
+    render(<OrganizationSettings organization={beta} page="agentLogins" onDeleted={vi.fn()} />);
     await screen.findAllByTestId("agent-login");
     expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Beta");
     expect(mocks.api.cloudAgentLogins).toHaveBeenCalledWith("b");
@@ -109,16 +106,24 @@ describe("an organization's settings page (PRO-107)", () => {
     ]);
     expect(mocks.stored.a).toEqual([login({ fingerprint: "sha256:aa" })]);
     expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
+  });
 
-    // The settings the service keeps on the active organization are not shown for B; the way to them is.
-    expect(screen.queryByTestId("section-members")).toBeNull();
-    expect(screen.queryByText("Cloud diagnostics")).toBeNull();
+  it("offers a non-active organization's General the way to the pages the service keeps on the active one", () => {
+    render(<OrganizationSettings organization={beta} onDeleted={vi.fn()} />);
+    expect(screen.getByTestId("organization-settings").textContent).toContain("You are an administrator of Beta. It is not your default organization. What you change on this page applies to Beta only.");
     expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Members, compute, GitHub, workspace settings, environment, diagnostics and teardown of Beta are changed while it is your default organization.");
+    expect(screen.queryByTestId("section-teardown")).toBeNull();
+    cleanup();
+    // A page it does not have while not active shows General, with that way.
+    render(<OrganizationSettings organization={beta} page="members" onDeleted={vi.fn()} />);
+    expect(screen.getByTestId("organization-settings").dataset.organizationPage).toBe("general");
+    expect(screen.queryByTestId("section-members")).toBeNull();
+    expect(screen.getByTestId("organization-settings-inactive")).toBeTruthy();
   });
 
   it("makes it the active organization only when asked", async () => {
     mocks.api.organizationSelect.mockResolvedValue(mocks.status);
-    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={beta} onDeleted={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Make Beta your default organization" }));
     await waitFor(() => expect(mocks.refreshAccount).toHaveBeenCalled());
     expect(mocks.api.organizationSelect).toHaveBeenCalledWith("b", "rev-1");
@@ -130,66 +135,111 @@ describe("an organization's settings page (PRO-107)", () => {
       ready: false,
       checks: [{ kind: "agent-credential", cloneUrl: null, agent, status: "failed", errorCode: "cloud_workspace_agent_credential_required", retryable: false }],
     }));
-    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} page="agentLogins" onDeleted={vi.fn()} />);
     await waitFor(() => expect(screen.getAllByTestId("agent-login-member-status")).toHaveLength(3));
     expect(mocks.api.cloudWorkspacePreflight).toHaveBeenCalledWith([], "b", "codex");
-    expect(screen.getByTestId("organization-settings").textContent).toContain("You are a member of Beta.");
     expect(screen.queryByRole("button", { name: /Connect|Log in|Disconnect|Replace/ })).toBeNull();
+    cleanup();
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onDeleted={vi.fn()} />);
+    expect(screen.getByTestId("organization-settings").textContent).toContain("You are a member of Beta.");
   });
 
-  it("holds every section of the active organization, agent logins among them", async () => {
-    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+  it("puts each section of the active organization on its own page", async () => {
+    const shown = (page: Parameters<typeof OrganizationSettings>[0]["page"]) => {
+      cleanup();
+      render(<OrganizationSettings organization={acme} page={page} onDeleted={vi.fn()} />);
+      expect(screen.getByTestId("organization-settings").dataset.organizationPage).toBe(page);
+    };
+    shown("general");
     expect(screen.getByTestId("organization-settings").textContent).toContain("You are an owner of Acme. It is your default organization.");
-    for (const section of ["members", "compute", "github", "config", "environment", "teardown", "routes"]) expect(screen.getByTestId(`section-${section}`)).toBeTruthy();
     expect(screen.queryByTestId("organization-settings-inactive")).toBeNull();
+    // Removing cloud resources and deleting the organization are on General.
+    expect(screen.getByTestId("section-teardown")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Delete organization…" })).toBeTruthy();
+    for (const [page, section] of [["members", "members"], ["cloudCompute", "compute"], ["modelAccess", "routes"], ["github", "github"], ["workspace", "config"], ["environment", "environment"]] as const) {
+      shown(page);
+      expect(screen.getByTestId(`section-${section}`)).toBeTruthy();
+      expect(screen.queryByTestId("section-teardown")).toBeNull();
+    }
+    shown("cloudCompute");
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Providers", "Limits"]);
+    shown("agentLogins");
     await screen.findAllByTestId("agent-login");
     expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Acme");
     expect(mocks.api.cloudAgentLogins).toHaveBeenCalledWith("a");
     // Diagnostics are for owners and administrators (moved here from Settings → Account).
+    shown("diagnostics");
     expect(screen.getByText("Cloud diagnostics")).toBeTruthy();
     await waitFor(() => expect(mocks.api.cloudDiagnostics).toHaveBeenCalledWith(7, null));
   });
 
   it("has the organization's work status for its owners and administrators, active or not (#441)", async () => {
-    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={beta} onDeleted={vi.fn()} />);
     const share = await screen.findByRole("switch", { name: "Share work status in Beta" });
     expect(mocks.workStatus.organization).toHaveBeenCalledWith("b");
-    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins and work status above are changed as it is.");
-    // Personal and per organization, so it is on the page of any organization, active or not.
-    expect(screen.getByTestId("section-routes").dataset.organization).toBe("b");
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins and work status are changed as it is.");
     expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("So is your own model access in it.");
     fireEvent.click(share);
     await waitFor(() => expect(mocks.workStatus.setOrganization).toHaveBeenCalledWith("b", { shareWorkStatus: false }));
     expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
     cleanup();
 
-    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    // Personal and per organization, so model access is a page of any organization, active or not.
+    render(<OrganizationSettings organization={beta} page="modelAccess" onDeleted={vi.fn()} />);
+    expect(screen.getByTestId("section-routes").dataset.organization).toBe("b");
+    cleanup();
+
+    render(<OrganizationSettings organization={acme} onDeleted={vi.fn()} />);
     expect(await screen.findByRole("switch", { name: "Share work status in Acme" })).toBeTruthy();
     cleanup();
 
     // A member is shown no organization switch, and nothing is asked for it.
     mocks.workStatus.organization.mockClear();
-    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onDeleted={vi.fn()} />);
     expect(screen.getByTestId("organization-settings").dataset.organization).toBe("b");
     expect(screen.queryByTestId("organization-work-status")).toBeNull();
     expect(mocks.workStatus.organization).not.toHaveBeenCalled();
-    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Its agent logins above are changed as it is.");
+    expect(screen.getByTestId("organization-settings-inactive").textContent).toContain("Diagnostics of Beta are changed while it is your default organization. Its agent logins are changed as it is.");
+    cleanup();
     // A member sets their own model access too.
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} page="modelAccess" onDeleted={vi.fn()} />);
     expect(screen.getByTestId("section-routes").dataset.organization).toBe("b");
   });
 
   it("asks a member of the active organization for no diagnostics", async () => {
-    render(<OrganizationSettings organization={{ ...acme, role: "member" }} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={{ ...acme, role: "member" }} page="diagnostics" onDeleted={vi.fn()} />);
     expect(await screen.findByText(/Only organization owners and administrators/)).toBeTruthy();
     expect(mocks.api.cloudConnectionDiagnostics).toHaveBeenCalled();
     expect(mocks.api.cloudDiagnostics).not.toHaveBeenCalled();
   });
 });
 
+describe("which pages an organization has (PRO-464)", () => {
+  const labels = (role: string, active: boolean) => organizationPages({ role }, active).map((entry) => entry.label);
+  it("lists every page for an owner or administrator of the active organization", () => {
+    for (const role of ["owner", "admin"]) {
+      expect(labels(role, true)).toEqual(["General", "Members", "Cloud compute", "Agent logins", "Model access", "GitHub", "Workspace settings", "Environment", "Diagnostics"]);
+    }
+  });
+  it("leaves out the pages a member cannot manage, and the active-only pages of another organization", () => {
+    expect(labels("member", true)).toEqual(["General", "Agent logins", "Model access", "Diagnostics"]);
+    expect(labels("owner", false)).toEqual(["General", "Agent logins", "Model access"]);
+    expect(labels("member", false)).toEqual(["General", "Agent logins", "Model access"]);
+  });
+  it("finds the page each organization row is on", () => {
+    expect(organizationPageForRow("organizations.providers")).toBe("cloudCompute");
+    expect(organizationPageForRow("organizations.compute")).toBe("cloudCompute");
+    expect(organizationPageForRow("organizations.agentRoutes")).toBe("modelAccess");
+    expect(organizationPageForRow("organizations.teardown")).toBe("general");
+    expect(organizationPageForRow("organizations.delete")).toBe("general");
+    expect(organizationPageForRow(null)).toBe("general");
+  });
+});
+
 describe("the link to the organization's API keys and webhooks in the console (PRO-40)", () => {
   it("opens the active organization's console page for an owner", async () => {
     mocks.api.organizationConsoleOpen.mockResolvedValue(undefined);
-    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={acme} onDeleted={vi.fn()} />);
     const link = await screen.findByTestId("organization-console-link");
     expect(link.textContent).toContain("API keys and webhooks");
     fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
@@ -198,7 +248,7 @@ describe("the link to the organization's API keys and webhooks in the console (P
 
   it("opens another organization's page by its own id, for its administrator, without switching", async () => {
     mocks.api.organizationConsoleOpen.mockResolvedValue(undefined);
-    render(<OrganizationSettings organization={beta} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={beta} onDeleted={vi.fn()} />);
     const link = await screen.findByTestId("organization-console-link");
     expect(link.textContent).toContain("Beta");
     fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
@@ -207,116 +257,37 @@ describe("the link to the organization's API keys and webhooks in the console (P
   });
 
   it("shows nothing to a member", async () => {
-    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={{ ...beta, role: "member" }} onDeleted={vi.fn()} />);
     await screen.findByTestId("organization-settings");
     expect(screen.queryByTestId("organization-console-link")).toBeNull();
-    render(<OrganizationSettings organization={{ ...acme, role: "member" }} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={{ ...acme, role: "member" }} onDeleted={vi.fn()} />);
     expect(screen.queryByTestId("organization-console-link")).toBeNull();
   });
 
   it("says so when the browser could not be opened", async () => {
     mocks.api.organizationConsoleOpen.mockRejectedValue(new Error("No browser is available."));
-    render(<OrganizationSettings organization={acme} onBack={vi.fn()} />);
+    render(<OrganizationSettings organization={acme} onDeleted={vi.fn()} />);
     const link = await screen.findByTestId("organization-console-link");
     fireEvent.click(within(link).getByRole("button", { name: /Manage in the console/ }));
     expect((await within(link).findByRole("alert")).textContent).toContain("No browser is available.");
   });
 });
 
-describe("Settings → Organizations opens each organization's page (PRO-107)", () => {
-  it("from its row, and back to the list", async () => {
-    render(<OrganizationsTab />);
-    fireEvent.click(screen.getByRole("button", { name: "Settings for Beta" }));
-    expect(screen.getByTestId("organization-settings").dataset.organization).toBe("b");
-    fireEvent.click(screen.getByRole("button", { name: /All organizations/ }));
-    expect(screen.queryByTestId("organization-settings")).toBeNull();
-    expect(screen.getByRole("button", { name: "Settings for Acme" })).toBeTruthy();
-  });
-
-  it("at the organization a message asked for, with its agent logins in view, whether the section was open or not", async () => {
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
-    openAgentLogins("b");
-    render(<OrganizationsTab />);
-    expect((await screen.findByTestId("organization-settings")).dataset.organization).toBe("b");
-    await screen.findAllByTestId("agent-login");
-    expect(scrolled.mock.contexts.at(-1)).toBe(screen.getByTestId("agent-logins"));
-    expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Beta");
-
-    // Already open on Beta's page: a message about Acme opens Acme's.
-    openAgentLogins("a");
-    await waitFor(() => expect(screen.getByTestId("organization-settings").dataset.organization).toBe("a"));
-    await waitFor(() => expect(screen.getByTestId("agent-logins-title").textContent).toBe("Agent logins for Acme"));
-  });
-
-  it("drops a request for an organization with no page here, so a page opened later by hand is not scrolled", async () => {
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
-    // An organization this account is not a member of (any more).
-    openAgentLogins("org-left");
-    render(<OrganizationsTab />);
-    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
-    expect(screen.queryByTestId("organization-settings")).toBeNull();
-    expect(takeAgentLoginsRequest("org-left")).toBe(false);
-    cleanup();
-
-    // No organization named and no default one: the request names no page, and no later page takes it.
-    mocks.status = { ...mocks.status, identity: { ...mocks.status.identity!, organization: null, organizationId: null } } as AccountStatus;
-    openAgentLogins(null);
-    render(<OrganizationsTab />);
-    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
-    expect(takeAgentLoginsRequest("b")).toBe(false);
-    openAgentLogins(null);
-    await waitFor(() => expect(takeOrganizationRequest()).toBeUndefined());
-    fireEvent.click(screen.getByRole("button", { name: "Settings for Beta" }));
-    await screen.findAllByTestId("agent-login");
-    expect(scrolled).not.toHaveBeenCalled();
-  });
-
-  it("at the active organization when the message named none", async () => {
-    openAgentLogins(null);
-    render(<OrganizationsTab />);
-    expect((await screen.findByTestId("organization-settings")).dataset.organization).toBe("a");
-  });
-});
-
 describe("owner deletion wiring", () => {
   it("deletes an inactive owned test organization by its own id without selecting it", async () => {
-    const onBack = vi.fn();
-    render(<OrganizationSettings organization={{ ...beta, role: "owner" }} onBack={onBack} />);
-    await screen.findAllByTestId("agent-login");
+    const onDeleted = vi.fn();
+    render(<OrganizationSettings organization={{ ...beta, role: "owner" }} onDeleted={onDeleted} />);
     fireEvent.click(screen.getByRole("button", { name: "Delete organization…" }));
     fireEvent.change(screen.getByLabelText("Organization name to delete"), { target: { value: "Beta" } });
     fireEvent.click(screen.getByRole("button", { name: "Delete Beta permanently" }));
-    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
     expect(mocks.deleteOrganization).toHaveBeenCalledWith({ organizationId: "b", contextRevision: "rev-1", confirmationName: "Beta" });
     expect(mocks.api.organizationSelect).not.toHaveBeenCalled();
   });
-  it("protects personal organizations without hiding unrelated settings", async () => {
-    render(<OrganizationSettings organization={{ ...acme, isPersonal: true }} onBack={vi.fn()} />);
-    await screen.findAllByTestId("agent-login");
+  it("protects personal organizations without hiding unrelated settings", () => {
+    render(<OrganizationSettings organization={{ ...acme, isPersonal: true }} onDeleted={vi.fn()} />);
     expect(screen.getByText("Personal/default organizations cannot be deleted.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Delete organization…" })).toBeNull();
     expect(screen.getByTestId("section-teardown")).toBeTruthy();
-  });
-});
-
-describe("organization row entry points (PRO-123)", () => {
-  it("opens a direct row link on the active organization and lets Back stay on the list", async () => {
-    const view = render(<OrganizationsTab initialRow="organizations.agentLogins" />);
-    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Acme");
-    await screen.findAllByTestId("agent-login");
-    fireEvent.click(screen.getByRole("button", { name: "All organizations" }));
-    view.rerender(<OrganizationsTab initialRow="organizations.agentLogins" />);
-    expect(screen.queryByTestId("organization-settings-name")).toBeNull();
-    view.rerender(<OrganizationsTab initialRow="organizations.agentLogins" openRequest={1} />);
-    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Acme");
-  });
-
-  it("keeps an explicit organization request ahead of the active-organization fallback", async () => {
-    openAgentLogins("b");
-    render(<OrganizationsTab initialRow="organizations.agentLogins" />);
-    expect(screen.getByTestId("organization-settings-name").textContent).toBe("Beta");
-    await screen.findAllByTestId("agent-login");
   });
 });

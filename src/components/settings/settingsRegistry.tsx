@@ -21,7 +21,8 @@ export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run, splitting one goal into pieces for worker sessions. Shows the Run view and Settings → Orchestrator.";
 
 // PRO-131: the group of a person's projects is "Projects"; its templates page is "Project templates". Ids stay as they were.
-export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects", "Admin", "More"] as const;
+// PRO-464: projects and organizations share one heading, each one collapsible row in the menu.
+export const SETTINGS_GROUPS = ["Personal", "Agents & environment", "Projects & organizations", "More"] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number];
 // PRO-374: Personal is ordered as designed (General first, Settings opens there); each page has one introductory description.
 export const SETTINGS_SECTIONS = {
@@ -39,9 +40,9 @@ export const SETTINGS_SECTIONS = {
   localVms: { title: "Local VMs", group: "Agents & environment", entry: "localVms.tasks", subtitle: "Virtual machines an agent can use as its computer." },
   transcription: { title: "Transcription", group: "Agents & environment", entry: "transcription.model", subtitle: "Dictation: the model, your microphone and your words." },
   integrations: { title: "Integrations", group: "Agents & environment", entry: "integrations.github", subtitle: "GitHub and Linear, for issues and pull requests." },
-  projects: { title: "Project templates", group: "Projects", entry: "projects.templates", subtitle: "Starting points for new projects." },
-  repositories: { title: "Projects", group: "Projects", entry: "repositories.rootPath", subtitle: "Where this project’s workspaces live and what runs in them." },
-  organizations: { title: "Organizations", group: "Admin", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
+  projects: { title: "Project templates", group: "Projects & organizations", entry: "projects.templates", subtitle: "Starting points for new projects." },
+  repositories: { title: "Projects", group: "Projects & organizations", entry: "repositories.rootPath", subtitle: "Where this project’s workspaces live and what runs in them." },
+  organizations: { title: "Organizations", group: "Projects & organizations", entry: "organizations.sidebar", subtitle: "Organizations you belong to: members, compute and logins." },
   storage: { title: "Storage", group: "More", entry: "storage.mergedCleanup", subtitle: "When finished workspaces are deleted, and what is left behind." },
   experimental: { title: "Experimental", group: "More", entry: "experimental.nativeCodex", subtitle: "Early features. They may change or go away." },
   // PRO-157, design 09.29: the executables again, for whoever looks for them among the folders and limits.

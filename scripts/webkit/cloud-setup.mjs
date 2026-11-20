@@ -140,7 +140,10 @@ async function flowAt(browser, server, step, colorScheme, envStatus = environmen
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const statusBarInSettings = await page.locator("[data-status-bar]").count();
   await page.evaluate(() => window.__PW_STUB__.emit?.("status_bar_settings", window.__PW_STUB__.answers.status_bar_settings));
-  await page.getByRole("button", { name: "Organizations", exact: true }).first().click();
+  // PRO-464: Organizations is one row in the menu; an organization's General offers to finish its setup.
+  const nav = page.getByRole("navigation", { name: "Settings sections" });
+  await nav.getByRole("button", { name: /^Organizations \d+$/ }).click();
+  await nav.getByRole("group", { name: "Organizations", exact: true }).getByRole("button", { name: /^Demo/ }).click();
   await page.getByRole("button", { name: "Finish setting up Demo" }).click();
   await page.locator(`[data-testid="cloud-setup-flow"][data-step="${step}"]`).waitFor();
   return { page, statusBarInSettings };

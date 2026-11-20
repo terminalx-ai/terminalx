@@ -510,12 +510,14 @@ describe("Usage auto-refresh interval", () => {
 });
 
 describe("grouped settings navigation and row links (PRO-123)", () => {
-  it("shows all five navigation groups and keeps their section destinations", () => {
+  it("shows all four navigation groups and keeps their section destinations", () => {
     render(<SettingsPage onBack={vi.fn()} />);
     const nav = within(screen.getByRole("navigation", { name: "Settings sections" }));
-    for (const group of ["Personal", "Agents & environment", "Projects", "Admin", "More"]) expect(nav.getByRole("group", { name: group })).toBeTruthy();
+    for (const group of ["Personal", "Agents & environment", "Projects & organizations", "More"]) expect(nav.getByRole("group", { name: group })).toBeTruthy();
     expect(within(nav.getByRole("group", { name: "Personal" })).getByRole("button", { name: "Appearance" })).toBeTruthy();
-    expect(within(nav.getByRole("group", { name: "Admin" })).getByRole("button", { name: "Organizations" })).toBeTruthy();
+    // PRO-464: Projects and Organizations are one closed row each under one heading.
+    const both = within(nav.getByRole("group", { name: "Projects & organizations" }));
+    for (const name of [/^Projects/, /^Organizations/]) expect(both.getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
   });
 
   it("opens and focuses a row, keeps manual navigation, and handles a repeated request", () => {

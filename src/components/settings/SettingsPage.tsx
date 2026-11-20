@@ -7,21 +7,30 @@ import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSou
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, BarChart3, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, BarChart3, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, Folders, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Plus, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
+import { OrgMark } from "@/components/layout/OrgMark";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { hasEscapeOverlay, useHotkey } from "@/lib/hotkeys";
 import { useSessionStore } from "@/lib/sessions";
 import { userFileKeys } from "@/lib/settingSources";
-import { isRowLink, resolveSetting, sectionShowsUserValues, SETTINGS_ROWS, SettingControlSlots, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
+import { isRowLink, resolveSetting, sectionShowsUserValues, settingById, SETTINGS_ROWS, SettingControlSlots, SETTINGS_GROUPS, SETTINGS_SECTIONS, type SettingId, type SettingsSection } from "./settingsRegistry";
 import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
 import { ACTIONS_SUBTITLE } from "./RepositoryActionsPage";
+import { ORGANIZATION_PAGES, ORGANIZATION_ROLE, organizationPageForRow, organizationPages, roleManagesOrganizationPage, type OrganizationPage } from "./OrganizationSettings";
+import { signIn, useAccount } from "@/lib/account";
+import { defaultOrgId } from "@/lib/cloudCatalog";
+import { useDataPrivacy } from "@/lib/dataPrivacy";
+import { organizationName } from "@/lib/organizationVisibility";
+import { openCloudSetup } from "@/lib/cloudSetupFlow";
+import { forgetAgentLoginsRequest, onOpenOrganizationSettings, takeOrganizationRequest } from "@/lib/settingsLinks";
 import { issues } from "@/lib/api";
 import { shortPath } from "@/lib/paths";
+import type { OrganizationSummary } from "@/lib/api";
 import type { Project } from "@/types/session";
 import { HighlightedText } from "@/components/ui/HighlightedText";
 import { movePaletteSelection, type PaletteNavigationKey } from "@/lib/commandPalette";
@@ -70,6 +79,54 @@ const LIVE_CONTROL_SECTIONS: ReadonlySet<SettingsSection> = new Set<SettingsSect
 /** The row kept at a user-file key, for the Can't save toast to name. */
 const userKeySettingTitle = (key: string) => SETTINGS_ROWS.find((row) => row.layout !== "content" && userFileKeys(row.storage.location).includes(key))?.title;
 
+/** The menu's collapsible group a section's pages sit in (PRO-464): its projects, or its organizations. */
+const menuGroupOf = (section: SettingsSection): "projects" | "organizations" | null =>
+  section === "projects" || section === "repositories" ? "projects" : section === "organizations" ? "organizations" : null;
+
+/** "Owner" beside an organization in the menu (design 11.16). */
+const ROLE_LABEL: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
+
+/** Where a menu row, a search result or a link takes Settings. */
+interface Destination {
+  /** A project's path, on its pages. */
+  path?: string;
+  /** A row to mark and bring into view. */
+  row?: SettingId;
+  page?: ProjectPage;
+  /** An organization's id, on its pages. */
+  organization?: string;
+  organizationPage?: OrganizationPage;
+}
+
+// Menu rows (design 09.02): 32px, inset 8px from both edges with rounded corners, text 16px in.
+const navClass = (selected: boolean) => cn(
+  "flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+  selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground",
+);
+/** What an open row lists beneath it, indented along a hairline (design 11.02, 11.15). */
+const NESTED_CLASS = "ml-[15px] grid min-w-0 grid-cols-[minmax(0,1fr)] gap-px border-l border-hairline py-0.5 pl-2";
+
+/** Projects or Organizations in the menu: one row with its count, opening and closing what it lists (design 11.14). */
+function MenuGroupRow({ label, icon: Icon, count, open, controls, onToggle }: { label: string; icon: LucideIcon; count: number; open: boolean; controls: string; onToggle: () => void }) {
+  const Chevron = open ? ChevronDown : ChevronRight;
+  return <button type="button" aria-expanded={open} aria-controls={open ? controls : undefined} onClick={onToggle} className={navClass(false)}>
+    <Icon aria-hidden className="size-4 shrink-0" />
+    <span className={cn("truncate", open && "font-medium text-foreground")}>{label}</span>
+    <span className="ml-auto shrink-0 text-[12px] tabular-nums text-faint">{count}</span>
+    <Chevron aria-hidden className="size-3 shrink-0 text-faint" />
+  </button>;
+}
+
+/** One of a project's or an organization's pages, under its open row. */
+function MenuPageRow({ label, icon: Icon, current, onClick }: { label: string; icon: LucideIcon; current: boolean; onClick: () => void }) {
+  return <button type="button" aria-current={current ? "page" : undefined} onClick={onClick}
+    className={cn("flex h-7 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
+      current ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground")}>
+    <Icon aria-hidden className="size-3.5 shrink-0" />
+    <span className="truncate">{label}</span>
+  </button>;
+}
+
 /** The listbox option id of a search result. */
 const resultId = (id: string) => `settings-result-${id}`;
 
@@ -91,6 +148,18 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const [target, setTarget] = useState<string | null>(() => isRowLink(initialTab) ? initial.id : null);
   // A project page chosen in the sidebar; without one, the page holding the row asked for (PRO-387).
   const [projectPage, setProjectPage] = useState<ProjectPage | null>(null);
+  // The organization whose pages are open (PRO-107, PRO-464), and the page chosen in the menu; set by the effect below.
+  const [organizationId, setOrganizationId] = useState<string | undefined>(undefined);
+  const [organizationPage, setOrganizationPage] = useState<OrganizationPage | null>(null);
+  // Projects and Organizations are each one row in the menu, closed when Settings opens unless it opens on one of
+  // their pages. Each stays as the person leaves it until Settings closes, which unmounts this page (PRO-464).
+  const [projectsOpen, setProjectsOpen] = useState(() => menuGroupOf(initial.section) === "projects");
+  const [organizationsOpen, setOrganizationsOpen] = useState(() => menuGroupOf(initial.section) === "organizations");
+  const openMenuGroup = useCallback((next: SettingsSection) => {
+    const group = menuGroupOf(next);
+    if (group === "projects") setProjectsOpen(true);
+    if (group === "organizations") setOrganizationsOpen(true);
+  }, []);
   const content = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [headerSlot, setHeaderSlot] = useState<HTMLDivElement | null>(null);
@@ -107,7 +176,18 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks]);
   // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
-  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns, localVmTasks]);
+  // Every organization the person belongs to has pages, cloud-enabled or not; data privacy mode turns them off.
+  const { status: account } = useAccount();
+  const privacy = useDataPrivacy().enabled;
+  const activeOrganizationId = defaultOrgId(account);
+  const memberships: readonly OrganizationSummary[] = !privacy && account.state === "signed-in" ? (account.organizations ?? []) : [];
+  const organization = section === "organizations" && organizationId ? memberships.find((candidate) => candidate.id === organizationId) : undefined;
+  // An organization's row opens on the organization already open, else the active one (`open` below): a member of it
+  // is not offered the rows of pages they do not manage, which their menu leaves out too.
+  const searchRole = (organization ?? memberships.find((candidate) => candidate.id === activeOrganizationId))?.role;
+  const pages = useMemo(() => groupSettingsByPage(searchSettings(query).filter((match) =>
+    match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id)),
+  )), [query, orchestratorRuns, localVmTasks, searchRole]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   // The live control slot of each result row, by row id (see SettingControlSlots).
@@ -159,6 +239,22 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const project = repositories.find((candidate) => candidate.path === projectPath)
     ?? (section === "repositories" && target ? repositories[0] : undefined);
 
+  const organizationPageShown: OrganizationPage = organization
+    ? (() => { const wanted = organizationPage ?? organizationPageForRow(target); return organizationPages(organization, organization.id === activeOrganizationId).some((entry) => entry.page === wanted) ? wanted : "general"; })()
+    : "general";
+  const organizationPageLabel = ORGANIZATION_PAGES.find((entry) => entry.page === organizationPageShown)!.label;
+  // A message elsewhere asks for an organization's page (settingsLinks.ts): the one it names, else the active one.
+  // A request for one with no page here (not a member, or none active) is dropped with its logins request, as before.
+  const accountRef = useRef({ activeOrganizationId, memberships });
+  accountRef.current = { activeOrganizationId, memberships };
+  const takeRequestedOrganization = useCallback((): { id: string | undefined } | undefined => {
+    const wanted = takeOrganizationRequest();
+    if (wanted === undefined) return undefined;
+    const id = wanted ?? accountRef.current.activeOrganizationId;
+    if (!id || !accountRef.current.memberships.some((candidate) => candidate.id === id)) forgetAgentLoginsRequest();
+    return { id: id ?? undefined };
+  }, []);
+
   const page: ProjectPage = section === "repositories" && project
     ? (() => { const wanted = projectPage ?? projectPageForRow(target); return projectPages(project).some((entry) => entry.page === wanted) ? wanted : "general"; })()
     : "general";
@@ -169,10 +265,23 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     setProjectPath((open) => initial.section === "repositories" ? initialProjectPath ?? open : undefined);
     setTarget(isRowLink(initialTab) ? initial.id : null);
     setProjectPage(null);
+    // An organization's row opens on the organization a message asked for, else the one already open; a request
+    // taken here is not taken again by the listener below. Anything else in the section opens its list.
+    const requested = initial.section === "organizations" ? takeRequestedOrganization() : undefined;
+    const organizationRow = isRowLink(initialTab) && initial.scope === "organization";
+    setOrganizationId((open) => initial.section !== "organizations" ? undefined : requested ? requested.id : organizationRow ? open : undefined);
+    setOrganizationPage(null);
+    openMenuGroup(initial.section);
     setQuery("");
     setSelected(0);
     setSelectionRequest((request) => request + 1);
   }, [initial.id, initial.section, initialTab, initialProjectPath, openRequest]);
+
+  // A row of an organization names none: it opens on the active organization, once the account says which it is.
+  useEffect(() => {
+    if (section !== "organizations" || !activeOrganizationId || !target || settingById(target)?.scope !== "organization") return;
+    setOrganizationId((open) => open ?? activeOrganizationId);
+  }, [section, target, activeOrganizationId, openRequest]);
 
   // Rows can appear after account/native settings load. Resolve only inside this
   // page and stop observing on navigation, so a late response cannot steal focus.
@@ -214,7 +323,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     const observer = new MutationObserver(() => { if (reveal()) observer.disconnect(); });
     observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
     return () => observer.disconnect();
-  }, [section, projectPath, project?.path, projectPage, target, openRequest, selectionRequest, highlightRow]);
+  }, [section, projectPath, project?.path, projectPage, organization?.id, organizationPageShown, target, openRequest, selectionRequest, highlightRow]);
 
   useEffect(() => {
     resultsRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
@@ -236,28 +345,47 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
     inputRef.current?.select();
   }, { global: true });
   // A page chosen in the sidebar opens at its top with no row marked; only search and links name a row (PRO-387).
-  const choose = (next: SettingsSection, path?: string, row?: SettingId, page?: ProjectPage) => {
+  const choose = (next: SettingsSection, to: Destination = {}) => {
     if (!canLeave()) return;
-    if (!row) clearHighlight();
+    if (!to.row) clearHighlight();
     setSection(next);
-    setProjectPath(path);
-    setProjectPage(page ?? null);
-    setTarget(row ?? null);
+    setProjectPath(to.path);
+    setProjectPage(to.page ?? null);
+    setOrganizationId(to.organization);
+    setOrganizationPage(to.organizationPage ?? null);
+    setTarget(to.row ?? null);
+    openMenuGroup(next);
     changeQuery("");
     setSelectionRequest((request) => request + 1);
   };
+  // An organization's page opened by hand: no earlier message's request scrolls it.
+  const chooseOrganization = (id: string | null, organizationPage: OrganizationPage = "general") => {
+    forgetAgentLoginsRequest();
+    choose("organizations", id ? { organization: id, organizationPage } : {});
+  };
+  // A message elsewhere (settingsLinks.ts) while Settings is open: its organization's page, at the row it names.
+  const chooseRef = useRef(choose);
+  chooseRef.current = choose;
+  useEffect(() => onOpenOrganizationSettings((row) => {
+    if (!canLeave()) return;
+    const requested = takeRequestedOrganization();
+    if (requested) chooseRef.current("organizations", { organization: requested.id, row });
+  }), [canLeave, takeRequestedOrganization]);
   // A repository row opens on the repository already open, else the first one listed; with none added, on the
   // Projects page that says so.
+  // An organization's row, likewise, on the organization already open, else the active one.
   const open = (match: SettingSearchMatch) => {
-    if (match.section !== "repositories") return choose(match.section, undefined, match.id);
+    if (match.section === "organizations") {
+      return choose("organizations", { row: match.id, organization: match.row.scope === "organization" ? organization?.id ?? activeOrganizationId ?? undefined : undefined });
+    }
+    if (match.section !== "repositories") return choose(match.section, { row: match.id });
     const path = project?.path ?? repositories[0]?.path;
-    return path ? choose("repositories", path, match.id) : choose("repositories");
+    return path ? choose("repositories", { path, row: match.id }) : choose("repositories");
   };
-  // Menu rows (design 09.02): 32px, inset 8px from both edges with rounded corners, text 16px in.
-  const navClass = (selected: boolean) => cn(
-    "flex h-8 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
-    selected ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground",
-  );
+  const createOrganization = () => {
+    if (account.state === "signed-in" && account.identity) openCloudSetup({ kind: "create" });
+    else void signIn();
+  };
 
   return (
     // The settings menu stands where the project sidebar stands, at its width and in its row style, so opening Settings
@@ -310,40 +438,71 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
           {SETTINGS_GROUPS.map((group, index) => (
             <div key={group} role="group" aria-labelledby={`settings-group-${index}`}>
               <div id={`settings-group-${index}`} className="flex h-6 items-center px-2 text-[11px] font-medium uppercase tracking-[.08em] text-faint">{group}</div>
-              {group === "Projects" && (
-                <button type="button" aria-current={section === "projects" ? "page" : undefined} onClick={() => choose("projects")} className={navClass(section === "projects")}>
-                  <FolderPlus aria-hidden className="size-4 shrink-0" />
-                  <span className="truncate">{SETTINGS_SECTIONS.projects.title}</span>
-                </button>
-              )}
-              {group === "Projects" ? (
-                // A project's row opens its General page and, while open, lists its pages beneath it (design 11.02).
-                repositories.length ? repositories.map((repository) => {
-                  const open = section === "repositories" && project?.path === repository.path;
-                  const Chevron = open ? ChevronDown : ChevronRight;
-                  return (
-                    <div key={repository.path}>
-                      <button type="button" title={repository.path} aria-expanded={open} className={navClass(false)} onClick={() => choose("repositories", repository.path, undefined, "general")}>
-                        <ProjectGlyph project={repository} size={16} />
-                        <span className={cn("truncate", open && "font-medium text-foreground")}>{repository.name}</span>
-                        <Chevron aria-hidden className="ml-auto size-3 shrink-0 text-faint" />
-                      </button>
-                      {open && <div role="group" aria-label={`${repository.name} settings`} className="ml-[15px] grid gap-px border-l border-hairline py-0.5 pl-2">
-                        {projectPages(repository).map((entry) => {
-                          const current = entry.page === page;
-                          const Icon = entry.icon;
-                          return <button key={entry.page} type="button" aria-current={current ? "page" : undefined} onClick={() => choose("repositories", repository.path, undefined, entry.page)}
-                            className={cn("flex h-7 w-full min-w-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[12.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/40",
-                              current ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-selected/50 hover:text-foreground")}>
-                            <Icon aria-hidden className="size-3.5 shrink-0" />
-                            <span className="truncate">{entry.label}</span>
-                          </button>;
-                        })}
-                      </div>}
-                    </div>
-                  );
-                }) : <p className="px-2 py-2 text-xs text-faint">No projects added.</p>
-              ) : Object.entries(SETTINGS_SECTIONS).filter(([key, entry]) => entry.group === group && offered(key)).map(([key, entry]) => (
+              {group === "Projects & organizations" ? <>
+                {/* One row each, with its count, closed until opened (design 11.14). Opened, Projects lists Project
+                    templates and then each project; a project's row opens its General page and, while open, lists
+                    its pages beneath it (design 11.15). */}
+                <MenuGroupRow label="Projects" icon={Folders} count={repositories.length} open={projectsOpen} controls="settings-menu-projects" onToggle={() => setProjectsOpen((open) => !open)} />
+                {projectsOpen && <div id="settings-menu-projects" role="group" aria-label="Projects" className={NESTED_CLASS}>
+                  <button type="button" aria-current={section === "projects" ? "page" : undefined} onClick={() => choose("projects")} className={navClass(section === "projects")}>
+                    <FolderPlus aria-hidden className="size-4 shrink-0" />
+                    <span className="truncate">{SETTINGS_SECTIONS.projects.title}</span>
+                  </button>
+                  {repositories.length ? repositories.map((repository) => {
+                    const open = section === "repositories" && project?.path === repository.path;
+                    const Chevron = open ? ChevronDown : ChevronRight;
+                    return (
+                      <div key={repository.path}>
+                        <button type="button" title={repository.path} aria-expanded={open} className={navClass(false)} onClick={() => choose("repositories", { path: repository.path, page: "general" })}>
+                          <ProjectGlyph project={repository} size={16} />
+                          <span className={cn("truncate", open && "font-medium text-foreground")}>{repository.name}</span>
+                          <Chevron aria-hidden className="ml-auto size-3 shrink-0 text-faint" />
+                        </button>
+                        {open && <div role="group" aria-label={`${repository.name} settings`} className={NESTED_CLASS}>
+                          {projectPages(repository).map((entry) => (
+                            <MenuPageRow key={entry.page} label={entry.label} icon={entry.icon} current={entry.page === page} onClick={() => choose("repositories", { path: repository.path, page: entry.page })} />
+                          ))}
+                        </div>}
+                      </div>
+                    );
+                  }) : <p className="px-2 py-2 text-xs text-faint">No projects added.</p>}
+                </div>}
+                {/* Organizations work as projects do: each a row with the person's role, expanding to the pages
+                    they can manage, and Create organization at the end (design 11.16). */}
+                <MenuGroupRow label="Organizations" icon={Building2} count={memberships.length} open={organizationsOpen} controls="settings-menu-organizations" onToggle={() => setOrganizationsOpen((open) => !open)} />
+                {organizationsOpen && <div id="settings-menu-organizations" role="group" aria-label="Organizations" className={NESTED_CLASS}>
+                  {/* The list of organizations, with which of them the sidebar shows, leads the group as Project
+                      templates leads Projects. */}
+                  <button type="button" aria-current={section === "organizations" && !organization ? "page" : undefined} onClick={() => chooseOrganization(null)} className={navClass(section === "organizations" && !organization)}>
+                    <Building2 aria-hidden className="size-4 shrink-0" />
+                    <span className="truncate">All organizations</span>
+                  </button>
+                  {memberships.map((candidate) => {
+                    const open = organization?.id === candidate.id;
+                    const name = organizationName(candidate);
+                    const Chevron = open ? ChevronDown : ChevronRight;
+                    return (
+                      <div key={candidate.id}>
+                        <button type="button" title={name} aria-expanded={open} className={navClass(false)} onClick={() => chooseOrganization(candidate.id)}>
+                          <OrgMark name={name} />
+                          <span className={cn("truncate", open && "font-medium text-foreground")}>{name}</span>
+                          <span className="shrink-0 text-[12px] text-faint">{ROLE_LABEL[candidate.role] ?? candidate.role}</span>
+                          <Chevron aria-hidden className="ml-auto size-3 shrink-0 text-faint" />
+                        </button>
+                        {open && <div role="group" aria-label={`${name} settings`} className={NESTED_CLASS}>
+                          {organizationPages(candidate, candidate.id === activeOrganizationId).map((entry) => (
+                            <MenuPageRow key={entry.page} label={entry.label} icon={entry.icon} current={entry.page === organizationPageShown} onClick={() => chooseOrganization(candidate.id, entry.page)} />
+                          ))}
+                        </div>}
+                      </div>
+                    );
+                  })}
+                  {!privacy && <button type="button" onClick={createOrganization} className={navClass(false)}>
+                    <Plus aria-hidden className="size-4 shrink-0" />
+                    <span className="truncate">Create organization</span>
+                  </button>}
+                </div>}
+              </> : Object.entries(SETTINGS_SECTIONS).filter(([key, entry]) => entry.group === group && offered(key)).map(([key, entry]) => (
                 <button key={key} type="button" aria-current={section === key ? "page" : undefined} onClick={() => choose(key as SettingsSection)} className={navClass(section === key)}>
                   {(() => { const Icon = SECTION_ICONS[key as SettingsSection]; return <Icon aria-hidden className="size-4 shrink-0" />; })()}
                   <span className="truncate">{entry.title}</span>
@@ -365,6 +524,16 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             <span className="min-w-0 truncate">{project.name}</span>
             <ChevronRight aria-hidden className="size-3 shrink-0" />
             <span aria-current="page" className="whitespace-nowrap text-muted-foreground">{pageLabel}</span>
+          </nav>}
+          {/* And an organization's page: ⚙ › Organizations › organization › page (design 11.16). */}
+          {organization && !searching && <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 pl-2 text-[12px] text-faint">
+            <Settings aria-hidden className="size-3.5 shrink-0" />
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span className="whitespace-nowrap">Organizations</span>
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span className="min-w-0 truncate">{organizationName(organization)}</span>
+            <ChevronRight aria-hidden className="size-3 shrink-0" />
+            <span aria-current="page" className="whitespace-nowrap text-muted-foreground">{organizationPageLabel}</span>
           </nav>}
           <div className="ml-auto flex shrink-0 items-center gap-2 empty:hidden"><OpenSettingsFileButton projectPath={section === "repositories" && project && project.kind !== "folder" ? project.path : null} /></div>
         </div>
@@ -437,12 +606,16 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               <p className="mt-1 text-[12px] text-faint">Try fewer letters, or <button type="button" className="text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => choose("shortcuts")}>search keyboard shortcuts</button>.</p>
             </div>}
           </div>}
-          <div hidden={searching} data-search-page={section} className={cn("mx-auto w-full px-6 pt-2 pb-12", section === "stats" ? "max-w-[58rem]" : "max-w-[48rem]")} key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
-            <div className={cn("flex flex-wrap items-start justify-between gap-3", section === "repositories" && project ? "mb-3" : "mb-5")}>
+          <div hidden={searching} data-search-page={section} className={cn("mx-auto w-full px-6 pt-2 pb-12", section === "stats" ? "max-w-[58rem]" : "max-w-[48rem]")} key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}:${organization?.id ?? ""}:${organization ? organizationPageShown : ""}`}>
+            <div className={cn("flex flex-wrap items-start justify-between gap-3", (section === "repositories" && project) || organization ? "mb-3" : "mb-5")}>
               {section === "repositories" && project ? <div className="min-w-0 flex-1 basis-48">
                 {/* One title a page, the page's name, with the project beneath it (design 11.02, 11.10). */}
                 <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="break-words text-[22px] font-semibold tracking-tight outline-none">{pageLabel}</h2>
                 <ProjectPageSubtitle project={project} page={page} />
+              </div> : organization ? <div className="min-w-0 flex-1 basis-48">
+                {/* The page's name, with the organization and the person's role in it beneath (design 11.16). */}
+                <h2 ref={headingRef} tabIndex={-1} id="settings-section-title" className="break-words text-[22px] font-semibold tracking-tight outline-none">{organizationPageLabel}</h2>
+                <p className="mt-1 break-words text-[13px] text-muted-foreground">{organizationName(organization)} · you are {ORGANIZATION_ROLE[organization.role] ?? organization.role}</p>
               </div> : <div className="min-w-0 flex-1 basis-48"><h2 ref={headingRef} tabIndex={-1} id="settings-section-title" aria-describedby="settings-section-subtitle" className="break-words text-[22px] font-semibold leading-7 tracking-tight outline-none">{SETTINGS_SECTIONS[section].title}</h2><SettingsDescription section={section} id="settings-section-subtitle" className="mt-1" /></div>}
               {/* A page's own buttons beside its title (settingsHeaderActions.tsx). */}
               <div ref={setHeaderSlot} className="flex flex-wrap justify-end gap-2 empty:hidden" />
@@ -450,7 +623,11 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             {leaveWarning && <p role="alert" className="mb-3 text-sm text-destructive">Save your changes before leaving Settings. If a save is in progress, wait for it to finish.</p>}
             <SettingsHeaderSlotProvider value={headerSlot}>
               <SettingControlSlots.Provider value={searching ? slots : null}>
-                {settingsSectionRenderers[section]({ onOpenSkills, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+                {settingsSectionRenderers[section]({
+                  onOpenSkills, projectPath: project?.path, projectPage: page, row: target, openRequest,
+                  onSelectRow: (row) => choose(section, { path: project?.path, row, organization: organization?.id }),
+                  organizationId: organization?.id, organizationPage: organizationPageShown, onOpenOrganization: (id) => chooseOrganization(id),
+                })}
               </SettingControlSlots.Provider>
             </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />

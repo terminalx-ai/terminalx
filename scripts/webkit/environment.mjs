@@ -124,15 +124,15 @@ try {
     await page.getByRole("navigation", { name: "Settings sections" }).getByRole("button", { name: "Account", exact: true }).click(); // Settings opens on General (PRO-374).
     // The section is on the active organization's page (PRO-107), reached from Settings → Account.
     await page.getByTestId("account-organization-settings").getByRole("button", { name: "Open", exact: true }).click();
-    // PRO-391: the environment is the Environment tab of Cloud compute.
-    await page.getByRole("tab", { name: "Environment", exact: true }).click();
+    // PRO-464: the environment is the organization's Environment page, under it in the menu.
+    await page.getByRole("navigation", { name: "Settings sections" }).getByRole("group", { name: / settings$/ }).getByRole("button", { name: "Environment", exact: true }).click();
     const template = page.getByRole("form", { name: "Environment template" });
     await template.waitFor();
     await page.getByRole("region", { name: "Environment recipes" }).waitFor();
     const rows = await page.getByRole("list", { name: "Environment versions" }).evaluate((list) => [...list.children].map((row) => ({ height: row.getBoundingClientRect().height, line: row.firstElementChild.getBoundingClientRect().height, text: row.textContent })));
     const unbuilt = await page.getByRole("region", { name: "Unbuilt changes" }).textContent();
     // The page before anything is opened, as the design draws it.
-    await page.getByTestId("organization-cloud-compute").screenshot({ path: `/tmp/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
+    await page.getByTestId("organization-settings").screenshot({ path: `/tmp/pro-391-environment-${width}-${colorScheme ?? "default"}.png` });
     await page.getByRole("region", { name: "Environment builds" }).getByRole("button", { name: "Build environment" }).click();
     await page.getByRole("listitem", { name: "Version 4" }).getByRole("button", { name: "View log" }).click();
     await page.getByLabel("Build log of version 4").getByText(/Unable to locate/).waitFor();

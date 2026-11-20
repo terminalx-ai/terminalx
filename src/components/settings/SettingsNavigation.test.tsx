@@ -86,6 +86,9 @@ describe("registry navigation", () => {
 
   it("opens a repository's cleanup controls, then saves its Scripts from the Scripts page", async () => {
     render(<SettingsPage onBack={vi.fn()} />);
+    // Projects is one row, closed when Settings opens (PRO-464).
+    expect(screen.queryByRole("group", { name: "Projects" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Projects/ }));
     const group = within(screen.getByRole("group", { name: "Projects" }));
     fireEvent.click(group.getByRole("button", { name: "Two" }));
     expect(group.getByRole("button", { name: "Two" }).getAttribute("aria-expanded")).toBe("true");
@@ -126,6 +129,7 @@ describe("registry navigation", () => {
 
   it("opens each repository's cleanup controls from its one row", () => {
     const view = render(<SettingsPage onBack={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Projects/ }));
     const group = within(screen.getByRole("group", { name: "Projects" }));
     expect(group.queryByRole("button", { name: "Archived" })).toBeNull();
     expect(group.getByRole("button", { name: "Notes" })).toBeTruthy();
@@ -143,6 +147,28 @@ describe("registry navigation", () => {
     view.rerender(<SettingsPage onBack={vi.fn()} />);
     expect(screen.queryByRole("radiogroup", { name: "Delete merged workspaces of One" })).toBeNull();
     expect(screen.getByText("Choose a project to view its settings.")).toBeTruthy();
+  });
+
+  it("opens Projects, and the project, when a project page is opened from outside the menu (PRO-464)", () => {
+    const toggle = () => screen.getByRole("button", { name: /^Projects/ });
+    const view = render(<SettingsPage onBack={vi.fn()} />);
+    // One row with the number of projects, archived ones not counted.
+    expect(toggle().textContent).toContain("3");
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    view.rerender(<SettingsPage initialTab="repositories.scripts" initialProjectPath="/repos/two" openRequest={1} onBack={vi.fn()} />);
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    const group = within(screen.getByRole("group", { name: "Projects" }));
+    expect(group.getAllByRole("button").map((button) => button.textContent)).toEqual(["Project templates", "One", "Two", "General", "Scripts", "Actions", "Environment", "Settings files", "Notes"]);
+    expect(projectPages("Two").getByRole("button", { name: "Scripts" }).getAttribute("aria-current")).toBe("page");
+    // Closed by hand, it stays closed while the person moves about Settings.
+    fireEvent.click(toggle());
+    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    // Search finds project rows while the group is closed, and its result opens the group.
+    fireEvent.change(screen.getByRole("combobox", { name: "Search settings" }), { target: { value: "project templates" } });
+    fireEvent.click(document.getElementById("settings-result-projects.templates")!);
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    expect(within(screen.getByRole("group", { name: "Projects" })).getByRole("button", { name: "Project templates" }).getAttribute("aria-current")).toBe("page");
   });
 
   it("updates an open registry page when the paired phone changes an experimental setting", async () => {

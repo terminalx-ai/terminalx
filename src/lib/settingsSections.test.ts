@@ -31,9 +31,11 @@ describe("Settings → Machines for everyone (PRO-342, PRO-360)", () => {
 
 describe("the Projects group (PRO-131)", () => {
   it("labels the group and a project's page 'Projects', the templates page 'Project templates', and keeps their ids", () => {
-    expect(SETTINGS_GROUPS).toEqual(["Personal", "Agents & environment", "Projects", "Admin", "More"]);
-    expect(SETTINGS_SECTIONS.repositories).toMatchObject({ title: "Projects", group: "Projects", entry: "repositories.rootPath" });
-    expect(SETTINGS_SECTIONS.projects).toMatchObject({ title: "Project templates", group: "Projects", entry: "projects.templates" });
+    // PRO-464: projects and organizations share one heading.
+    expect(SETTINGS_GROUPS).toEqual(["Personal", "Agents & environment", "Projects & organizations", "More"]);
+    expect(SETTINGS_SECTIONS.repositories).toMatchObject({ title: "Projects", group: "Projects & organizations", entry: "repositories.rootPath" });
+    expect(SETTINGS_SECTIONS.projects).toMatchObject({ title: "Project templates", group: "Projects & organizations", entry: "projects.templates" });
+    expect(SETTINGS_SECTIONS.organizations).toMatchObject({ group: "Projects & organizations" });
     const palette = Object.fromEntries(PALETTE_SECTIONS.map((section) => [section.id, section.title]));
     expect(palette.repositories).toBe("Projects");
     expect(palette.projects).toBe("Project templates");
