@@ -196,6 +196,25 @@ pub fn checked(rel: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a path of the home that passes through a link: a folder of the
+/// home replaced by a link must not take a read or a write out of it.
+pub fn no_links(home: &Path, rel: &str) -> Result<()> {
+    checked(rel)?;
+    let mut at = home.to_path_buf();
+    let home_kind = std::fs::symlink_metadata(&at).with_context(|| format!("read {}", at.display()))?.file_type();
+    anyhow::ensure!(home_kind.is_dir(), "the bot's home folder is not a folder");
+    let parts: Vec<_> = Path::new(rel).components().collect();
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        at.push(part);
+        match std::fs::symlink_metadata(&at) {
+            Ok(meta) => anyhow::ensure!(meta.file_type().is_dir(), "{} is not a folder; it is left as it is", at.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).with_context(|| format!("read {}", at.display())),
+        }
+    }
+    Ok(())
+}
+
 /// What a file holds now: `None` when there is none. A file that is not a
 /// regular one (a link, a folder) or is too large is refused, and left as it is.
 pub fn read_file(path: &Path) -> Result<Option<String>> {
@@ -244,6 +263,7 @@ impl Files {
         if let Some(text) = self.texts.get(rel) {
             return Ok(text.clone());
         }
+        no_links(&self.home, rel)?;
         let text = read_file(&self.home.join(rel))?;
         self.texts.insert(rel.into(), text.clone());
         Ok(text)
@@ -301,6 +321,7 @@ impl Files {
 
     fn write(&self) -> Result<()> {
         for rel in &self.touched {
+            no_links(&self.home, rel)?;
             let path = self.home.join(rel);
             match &self.texts[rel] {
                 Some(text) => {
@@ -489,7 +510,7 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<BTreeMap<Strin
 pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> Result<T>) -> Result<(T, Vec<Change>)> {
     let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let home = bot_store::home_dir(id)?;
-    anyhow::ensure!(home.is_dir(), "the bot's home folder is missing");
+    anyhow::ensure!(std::fs::symlink_metadata(&home).is_ok_and(|meta| meta.is_dir()), "the bot's home folder is missing");
     let mut files = Files::new(home);
     let mut known = read_known(id)?;
     notice_outside(id, &mut files, &mut known)?;

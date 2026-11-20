@@ -358,3 +358,30 @@ fn the_app_calls_answer_for_the_owner_and_refuse_while_off() {
         assert_eq!(ask(operation, json!({"id": bot.id, "text": "x", "line": "x", "change": "x"})).unwrap_err().to_string(), super::super::OFF_MESSAGE, "{operation}");
     }
 }
+
+/// A bot with full access can replace a file or folder of its home with a
+/// link; the app neither writes through it nor reads it for a conversation.
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_home_takes_no_read_or_write_out_of_it() {
+    let (_home, sink, bot) = hired();
+    let bot = with_works_in(sink.as_ref(), &bot, &["Acme"]);
+    let acme = Place::parse(&bot, "Acme").unwrap();
+    view(sink.as_ref(), &bot).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("MEMORY.md"), "- 2026-11-20 Not the bot's\n").unwrap();
+    std::fs::create_dir_all(home_of(&bot).join("orgs")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), home_of(&bot).join(acme.dir().trim_end_matches('/'))).unwrap();
+    assert!(add(sink.as_ref(), &bot, &acme, "Through the link", OWNER, Source::of("app")).is_err());
+    assert_eq!(std::fs::read_to_string(outside.path().join("MEMORY.md")).unwrap(), "- 2026-11-20 Not the bot's\n");
+    let given = for_conversation(&bot).unwrap();
+    assert!(!given.contains("Not the bot's"), "{given}");
+    assert!(view(sink.as_ref(), &bot).unwrap().memory.places[1].file.problem.is_some());
+
+    // The bot's own memory file replaced by a link: refused, and the target untouched.
+    let memory = home_of(&bot).join("MEMORY.md");
+    std::fs::remove_file(&memory).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("MEMORY.md"), &memory).unwrap();
+    assert!(add(sink.as_ref(), &bot, &Place::Bot, "Also not", OWNER, Source::of("app")).is_err());
+    assert_eq!(std::fs::read_to_string(outside.path().join("MEMORY.md")).unwrap(), "- 2026-11-20 Not the bot's\n");
+}

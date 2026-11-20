@@ -170,6 +170,15 @@ pub fn read_limited(path: &Path) -> Limited {
     Limited { text: String::from_utf8_lossy(&bytes).into_owned(), bytes: meta.len(), over_limit, problem: None }
 }
 
+/// [`read_limited`] for a file of the home, by its path there: one reached
+/// through a link the home does not own reads as nothing, and says why.
+pub fn read_in_home(home: &Path, rel: &str) -> Limited {
+    match changes::no_links(home, rel) {
+        Ok(()) => read_limited(&home.join(rel)),
+        Err(error) => Limited { problem: Some(format!("{error:#}")), ..Default::default() },
+    }
+}
+
 /// The date of a note line (`- 2026-11-20 …`), if it has one.
 pub fn note_date(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("- ")?;
@@ -365,8 +374,8 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
     }
     let home = super::home(bot)?;
     let place = working_place(bot);
-    let own = read_limited(&home.join(Place::Bot.memory_file()));
-    let theirs = read_limited(&home.join(place.memory_file()));
+    let own = read_in_home(&home, &Place::Bot.memory_file());
+    let theirs = read_in_home(&home, &place.memory_file());
     let (own_lines, place_lines) = (changes::lines_of(&own.text), changes::lines_of(&theirs.text));
     let (own_read, place_read) = read_split(own_lines.len(), place_lines.len());
     let section = |title: String, file: &Limited, lines: &[String], read: usize| {
@@ -488,7 +497,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let shown = |rel: &str| home.join(rel).to_string_lossy().into_owned();
     let log = changes::read_log(&bot.id)?;
 
-    let role = read_limited(&home.join(bot_store::ROLE_FILE));
+    let role = read_in_home(&home, &bot_store::ROLE_FILE);
     let template = super::templates::find(&bot.role_template_id);
     let mut versions: Vec<RoleVersion> = log.changes.iter().rev().filter_map(|change| {
         Some(RoleVersion { change: Some(change.id.clone()), at: change.at.clone(), by: change.by.clone(), kind: change.kind.clone(), source: change.source.clone(), text: role_after(change)? })
@@ -503,24 +512,27 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();
     let mut counts = BTreeMap::new();
     for rel in &read_files {
-        counts.insert(rel.clone(), changes::lines_of(&read_limited(&home.join(rel)).text).len());
+        counts.insert(rel.clone(), changes::lines_of(&read_in_home(&home, &rel).text).len());
     }
     let (own_read, place_read) = read_split(counts[&Place::Bot.memory_file()], counts[&working.memory_file()]);
     let mut place_views = Vec::new();
     let mut topics = Vec::new();
     for place in places(bot) {
-        let file = read_limited(&home.join(place.memory_file()));
+        let file = read_in_home(&home, &place.memory_file());
         let lines = changes::lines_of(&file.text);
         let read_lines = if place == Place::Bot { own_read } else if place == working { place_read } else { 0 };
         let read = place == Place::Bot || place == working;
-        let archive_lines = read_limited(&home.join(place.archive_file())).text.lines().count();
+        let archive_lines = read_in_home(&home, &place.archive_file()).text.lines().count();
         place_views.push(PlaceView { key: place.key().into(), path: shown(&place.memory_file()), not_read: if read { lines.len() - read_lines } else { 0 }, read_lines, read, archive_lines, lines, file });
-        if let Ok(entries) = std::fs::read_dir(home.join(place.topics_dir())) {
-            let mut names: Vec<String> = entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file())).filter_map(|entry| entry.file_name().to_str().map(str::to_owned)).filter(|name| name.ends_with(".md")).collect();
+        // A topics folder reached through a link is not listed.
+        let listed = changes::no_links(&home, &format!("{}/{ARCHIVE_FILE}", place.topics_dir())).is_ok() && std::fs::symlink_metadata(home.join(place.topics_dir())).is_ok_and(|meta| meta.is_dir());
+        if let Some(entries) = listed.then(|| std::fs::read_dir(home.join(place.topics_dir())).ok()).flatten() {
+            let mut names: Vec<String> = entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file())).filter_map(|entry| entry.file_name().to_str().map(str::to_owned)).filter(|name| name.ends_with(".md") && changes::checked(name).is_ok()).collect();
             names.sort_by_key(|name| (name == ARCHIVE_FILE, name.clone()));
             for name in names {
-                let path = home.join(place.topics_dir()).join(&name);
-                topics.push(TopicView { place: place.key().into(), lines: read_limited(&path).text.lines().count(), modified: modified(&path), path: path.to_string_lossy().into_owned(), name });
+                let rel = format!("{}/{name}", place.topics_dir());
+                let path = home.join(&rel);
+                topics.push(TopicView { place: place.key().into(), lines: read_in_home(&home, &rel).text.lines().count(), modified: modified(&path), path: path.to_string_lossy().into_owned(), name });
             }
         }
     }
