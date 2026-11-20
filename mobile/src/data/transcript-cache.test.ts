@@ -1,21 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { AgentEvent } from "@terminalx/portable/events";
-import { clearTranscriptCaches, readCache, savedCursors, writeCache, type SyncCursor } from "./transcript-cache";
+import { clearTranscriptCaches, readCache, reclaimOrphanChunks, savedCursors, writeCache, type SyncCursor } from "./transcript-cache";
 import { keepPrefetched } from "./prefetch";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 /** Every key written, in order: what a save costs. */
 const written = vi.hoisted(() => [] as string[]);
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client" }));
+/** The next call of each named storage method fails, as a process stopped at that write would leave it. */
+const failNext = vi.hoisted(() => new Set<string>());
+const fail = (method: string) => { if (failNext.delete(method)) throw new Error(`${method} interrupted`); };
 vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
-  getItem: async (key: string) => storage.get(key) ?? null,
-  setItem: async (key: string, value: string) => { written.push(key); storage.set(key, value); },
+  getItem: async (key: string) => { fail("getItem"); return storage.get(key) ?? null; },
+  setItem: async (key: string, value: string) => { fail("setItem"); written.push(key); storage.set(key, value); },
   removeItem: async (key: string) => { storage.delete(key); },
-  getAllKeys: async () => [...storage.keys()],
-  multiRemove: async (keys: string[]) => { keys.forEach((key) => storage.delete(key)); },
-  multiGet: async (keys: string[]) => keys.map((key) => [key, storage.get(key) ?? null]),
-  multiSet: async (pairs: [string, string][]) => { pairs.forEach(([key, value]) => { written.push(key); storage.set(key, value); }); },
+  getAllKeys: async () => { fail("getAllKeys"); return [...storage.keys()]; },
+  multiRemove: async (keys: string[]) => { fail("multiRemove"); keys.forEach((key) => storage.delete(key)); },
+  multiGet: async (keys: string[]) => { fail("multiGet"); return keys.map((key) => [key, storage.get(key) ?? null]); },
+  multiSet: async (pairs: [string, string][]) => { fail("multiSet"); pairs.forEach(([key, value]) => { written.push(key); storage.set(key, value); }); },
 } }));
 
 const event = (seq: number, tab = "tab"): AgentEvent => ({ id: `event-${seq}`, seq, sessionId: "session", tabId: tab, harness: "codex", ts: "2026-11-19T00:00:00Z", payload: { type: "user_message", text: `turn ${seq}` } } as AgentEvent);
@@ -23,7 +26,7 @@ const range = (from: number, to: number, tab = "tab") => Array.from({ length: to
 const cursor = (offset: number): SyncCursor => ({ offset, digest: createHash("sha256").update(String(offset)).digest("hex") });
 const bytesWritten = () => written.reduce((sum, key) => sum + (storage.get(key)?.length ?? 0), 0);
 
-beforeEach(async () => { storage.clear(); await clearTranscriptCaches(); written.length = 0; });
+beforeEach(async () => { failNext.clear(); storage.clear(); await clearTranscriptCaches(); written.length = 0; });
 
 describe("a transcript kept in chunks (#1283)", () => {
   it("writes only the last chunk and the index when a page adds events", async () => {
@@ -145,5 +148,141 @@ describe("keeping what a prefetch sent (#1283)", () => {
     await clearTranscriptCaches("host");
     await keepPrefetched("host", { sessionId: "session", tabId: "tab", page: { events: range(1, 5), cursor: cursor(5), reset: true, hasMore: false, hasEarlier: false } }, epoch);
     expect(storage.size).toBe(0);
+  });
+});
+
+describe("reclaiming chunks a save cut short left behind (#1340)", () => {
+  const chunkKeys = (host = "host") => [...storage.keys()].filter((key) => key.startsWith("terminalx:transcript:v3c:") && key.includes(`["${host}"`)).sort();
+  const indexKey = (session = "session", tab = "tab") => "terminalx:transcript:v3:" + JSON.stringify(["host", session, tab]);
+  /** The ids the index on disk names. */
+  const indexed = (session = "session", tab = "tab") => {
+    const envelope = JSON.parse(storage.get(indexKey(session, tab))!);
+    return (JSON.parse(envelope.data).chunks as { id: string }[]).map((c) => c.id).sort();
+  };
+  const idOf = (key: string) => JSON.parse(key.slice("terminalx:transcript:v3c:".length))[3] as string;
+  /** A process that stopped and started again: nothing kept in memory. */
+  const restart = async () => { vi.resetModules(); return await import("./transcript-cache"); };
+
+  it("removes chunks written before an index that was never saved, and keeps the history that index replaced", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    const before = chunkKeys();
+    failNext.add("setItem");
+    await expect(writeCache("host", "session", "tab", { events: range(1, 200), cursor: cursor(200), hasEarlier: false })).rejects.toThrow("setItem interrupted");
+    expect(chunkKeys().length).toBeGreaterThan(before.length);
+    const cache = await restart();
+    expect(await cache.reclaimOrphanChunks("host")).toBe(4);
+    expect(chunkKeys()).toEqual(before);
+    expect(await cache.readCache("host", "session", "tab")).toEqual({ events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+  });
+
+  it("removes the chunks an append wrote when its index write stopped", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 60), cursor: cursor(60), hasEarlier: false });
+    failNext.add("setItem");
+    await expect(writeCache("host", "session", "tab", { events: range(1, 75), cursor: cursor(75), hasEarlier: false }, undefined, 15)).rejects.toThrow();
+    expect(await reclaimOrphanChunks("host")).toBe(1);
+    expect(chunkKeys().map(idOf).sort()).toEqual(indexed());
+    expect((await readCache("host", "session", "tab")).events).toEqual(range(1, 60));
+    // The next append still builds on what is kept.
+    await writeCache("host", "session", "tab", { events: range(1, 75), cursor: cursor(75), hasEarlier: false }, undefined, 15);
+    expect(await readCache("host", "session", "tab")).toEqual({ events: range(1, 75), cursor: cursor(75), hasEarlier: false });
+  });
+
+  it("removes chunks an index dropped but a save stopped before removing", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    const replaced = chunkKeys();
+    failNext.add("multiRemove");
+    await expect(writeCache("host", "session", "tab", { events: range(500, 560), cursor: cursor(560), hasEarlier: true })).rejects.toThrow("multiRemove interrupted");
+    const cache = await restart();
+    expect(await cache.reclaimOrphanChunks("host")).toBe(replaced.length);
+    expect(chunkKeys().some((key) => replaced.includes(key))).toBe(false);
+    expect(chunkKeys().map(idOf).sort()).toEqual(indexed());
+    expect(await cache.readCache("host", "session", "tab")).toEqual({ events: range(500, 560), cursor: cursor(560), hasEarlier: true });
+  });
+
+  it("removes the chunks of a first save that never wrote its index", async () => {
+    failNext.add("setItem");
+    await expect(writeCache("host", "session", "tab", { events: range(1, 80), cursor: cursor(80), hasEarlier: false })).rejects.toThrow();
+    expect(chunkKeys()).toHaveLength(2);
+    expect(await (await restart()).reclaimOrphanChunks("host")).toBe(2);
+    expect(storage.size).toBe(0);
+  });
+
+  it("removes the chunks under an index that cannot be read, which then reads empty and not as old history", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    storage.set(indexKey(), storage.get(indexKey())!.slice(0, 40));
+    const cache = await restart();
+    expect(await cache.reclaimOrphanChunks("host")).toBe(3);
+    expect(chunkKeys()).toEqual([]);
+    expect(await cache.readCache("host", "session", "tab")).toEqual({ events: [], hasEarlier: false });
+    await cache.writeCache("host", "session", "tab", { events: range(1, 10), cursor: cursor(10), hasEarlier: false });
+    expect(await cache.readCache("host", "session", "tab")).toEqual({ events: range(1, 10), cursor: cursor(10), hasEarlier: false });
+  });
+
+  it("drops every chunk of a transcript whose index cannot be read when the whole transcript is saved again", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    const envelope = JSON.parse(storage.get(indexKey())!);
+    storage.set(indexKey(), JSON.stringify({ ...envelope, checksum: "0".repeat(64) }));
+    const cache = await restart();
+    await cache.writeCache("host", "session", "tab", { events: range(1, 30), cursor: cursor(30), hasEarlier: false });
+    expect(chunkKeys().map(idOf).sort()).toEqual(indexed());
+    expect(chunkKeys()).toHaveLength(1);
+    expect(await cache.readCache("host", "session", "tab")).toEqual({ events: range(1, 30), cursor: cursor(30), hasEarlier: false });
+  });
+
+  it("keeps every indexed chunk of every transcript, and another Mac's", async () => {
+    for (const session of ["a", "b", "c"]) await writeCache("host", session, "tab", { events: range(1, 130).map((e) => ({ ...e, sessionId: session })), cursor: cursor(130), hasEarlier: false });
+    await writeCache("other", "session", "tab", { events: range(1, 10), cursor: cursor(10), hasEarlier: false });
+    const orphan = "terminalx:transcript:v3c:" + JSON.stringify(["other", "session", "tab", "orphan"]);
+    storage.set(orphan, "[]");
+    const before = new Map(storage);
+    expect(await reclaimOrphanChunks("host")).toBe(0);
+    expect(new Map(storage)).toEqual(before);
+    for (const session of ["a", "b", "c"]) expect((await readCache("host", session, "tab")).events).toHaveLength(130);
+  });
+
+  it("does not remove the chunks of a save queued before it", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 50), cursor: cursor(50), hasEarlier: false });
+    const save = writeCache("host", "session", "tab", { events: range(1, 260), cursor: cursor(260), hasEarlier: false });
+    const sweep = reclaimOrphanChunks("host");
+    const append = writeCache("host", "session", "tab", { events: range(1, 270), cursor: cursor(270), hasEarlier: false }, undefined, 10);
+    await Promise.all([save, sweep, append]);
+    expect(await sweep).toBe(0);
+    expect(chunkKeys().map(idOf).sort()).toEqual(indexed());
+    expect(await readCache("host", "session", "tab")).toEqual({ events: range(1, 270), cursor: cursor(270), hasEarlier: false });
+  });
+
+  it("does nothing for a Mac forgotten since it was asked, and writes nothing back", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    failNext.add("setItem");
+    await expect(writeCache("host", "session", "tab", { events: range(1, 200), cursor: cursor(200), hasEarlier: false })).rejects.toThrow();
+    const epoch = 0;
+    await clearTranscriptCaches("host");
+    expect(await reclaimOrphanChunks("host", epoch)).toBe(0);
+    expect(storage.size).toBe(0);
+  });
+
+  it("removes nothing when the indexes cannot be read", async () => {
+    await writeCache("host", "session", "tab", { events: range(1, 120), cursor: cursor(120), hasEarlier: false });
+    const before = new Map(storage);
+    const cache = await restart();
+    failNext.add("multiGet");
+    await expect(cache.reclaimOrphanChunks("host")).rejects.toThrow("multiGet interrupted");
+    expect(new Map(storage)).toEqual(before);
+    expect((await cache.readCache("host", "session", "tab")).events).toEqual(range(1, 120));
+  });
+
+  it("checks a bounded number of transcripts each pass, continuing where the last stopped", async () => {
+    const sessions = Array.from({ length: 5 }, (_, i) => `s${i}`);
+    for (const session of sessions) {
+      await writeCache("host", session, "tab", { events: [{ ...event(1), sessionId: session }], cursor: cursor(1), hasEarlier: false });
+      storage.set("terminalx:transcript:v3c:" + JSON.stringify(["host", session, "tab", "orphan"]), "[]");
+    }
+    const orphans = () => chunkKeys().filter((key) => key.endsWith('"orphan"]')).length;
+    expect(await reclaimOrphanChunks("host", undefined, 2)).toBe(2);
+    expect(orphans()).toBe(3);
+    expect(await reclaimOrphanChunks("host", undefined, 2)).toBe(2);
+    expect(await reclaimOrphanChunks("host", undefined, 2)).toBe(1);
+    expect(orphans()).toBe(0);
+    for (const session of sessions) expect((await readCache("host", session, "tab")).events).toHaveLength(1);
   });
 });
