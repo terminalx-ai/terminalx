@@ -21,6 +21,23 @@ export interface BotPause {
   by: string;
 }
 
+/**
+ * Someone besides the owner who may give a bot work (PRO-478), and what they may do. The owner is never listed: they
+ * always ask and approve. A `kind` or `may` a newer app wrote arrives as its own string, is shown as it is, and grants
+ * nothing here.
+ */
+export interface BotAsker {
+  kind: "person" | "bot" | (string & {});
+  /** A person's account user id, or a bot's id. */
+  id: string;
+  /** How a person is shown, as they were named when added. A bot is shown by its own name. */
+  name?: string;
+  may: BotAskerMay;
+}
+
+/** Ask and approve (a person only), ask, or hand off work (another bot only). */
+export type BotAskerMay = "askApprove" | "ask" | "handOff" | (string & {});
+
 export interface Bot {
   /** The one stable reference to a bot: keep this, never the slug. */
   id: string;
@@ -40,6 +57,8 @@ export interface Bot {
   /** `personal` when it works for its owner alone. */
   worksIn: string[];
   paused?: BotPause;
+  /** Who besides the owner may give it work. Absent or empty: the owner alone. */
+  whoCanAsk?: BotAsker[];
   created: string;
   modified: string;
 }
@@ -63,6 +82,8 @@ export interface BotPatch {
   runsOn?: BotRunsOn;
   reportsTo?: string;
   worksIn?: string[];
+  /** The whole list: an entry left out is removed. */
+  whoCanAsk?: BotAsker[];
 }
 
 /** What wakes a duty. Data only until a person switches the duty on. */

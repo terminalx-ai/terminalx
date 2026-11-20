@@ -13,6 +13,15 @@
   page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
   no bots it offers three roles to hire in one click, and Hire a bot lists
   every role with its duties and skills and asks only for a name (PRO-467).
+- Bots: each bot has a settings page (PRO-478): where it runs (this Mac;
+  cloud and another machine come later), its access, the organisations it
+  works in, its channels (TerminalX, and the state of the GitHub and Linear
+  connections), and who besides you may ask it for work. Access is enforced
+  on every tool call of the bot's chats, as it is set now: Ask before outward
+  actions asks you on a card before a push, merge, deploy, post or message;
+  Read and report refuses every change and asks before a report leaves. No
+  level lets a bot change its own record or the app's settings. Agent and
+  model, rename and delete are under the page's menu.
 
 ## 0.2.37
 

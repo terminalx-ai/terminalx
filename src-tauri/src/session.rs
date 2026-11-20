@@ -8131,6 +8131,26 @@ impl SessionManager {
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
                 }
             }
+            // A bot's chat (PRO-478) is held to the bot's access as it is now, in every
+            // permission mode: the frame showed this launch's token, so its session is its own.
+            match crate::bots::access::session_gate(&frame.session, &frame.payload) {
+                crate::bots::access::Gate::Leave => {}
+                crate::bots::access::Gate::Refuse(reason) => {
+                    log::info!("bot chat {}/{}: {reason}", frame.session, frame.tab);
+                    return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+                }
+                // The owner is asked on the app's card at this gate, in any mode, as Codex is in
+                // Ask every time. Claude Code reads only a `PreToolUse` answer here, and anything
+                // but the owner's allow (no answer, a tab that moved on) is a refusal.
+                crate::bots::access::Gate::Ask(reason) => {
+                    log::info!("bot chat {}/{} asks: {reason}", frame.session, frame.tab);
+                    let reply = self.ask_permission(&rt_arc, &frame, kind);
+                    return match kind {
+                        CliKind::Codex => reply,
+                        CliKind::Claude => HookReply { output: Some(crate::bots::access::claude_answer(reply.output.as_ref())), refused: None },
+                    };
+                }
+            }
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {

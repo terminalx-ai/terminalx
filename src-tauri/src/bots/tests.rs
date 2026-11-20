@@ -446,3 +446,58 @@ fn refusals_are_told_apart_from_failures() {
     crate::store::settings::save(&settings).unwrap();
     assert_eq!(kind(list().unwrap_err()), Some(BotError::Off));
 }
+
+/// PRO-478: who besides the owner may ask a bot for work, and what each may do.
+#[test]
+fn who_can_ask_keeps_people_and_bots_with_what_each_may_do() {
+    let (_home, sink, _events) = bots_on();
+    let sentry = create(sink.as_ref(), "security-auditor", "Sentry").unwrap();
+    let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let patch = |askers: Value| -> Result<Bot> { update(sink.as_ref(), &sentry.id, serde_json::from_value(json!({"whoCanAsk": askers})).unwrap()) };
+    assert!(sentry.who_can_ask.is_empty(), "a new bot is asked by its owner alone");
+    assert!(serde_json::to_value(&sentry).unwrap().get("whoCanAsk").is_none(), "an empty list is not written");
+
+    let saved = patch(json!([
+        {"kind": "person", "id": " user-ak ", "name": "Ankit Kumar", "may": "ask"},
+        {"kind": "bot", "id": atlas.id, "may": "handOff"},
+        {"kind": "person", "id": "user-ak", "name": "Again", "may": "askApprove"},
+    ]))
+    .unwrap();
+    let kept: Vec<(&str, &str, &str)> = saved.who_can_ask.iter().map(|asker| (asker.kind.as_str(), asker.id.as_str(), asker.may.as_str())).collect();
+    assert_eq!(kept, [("person", "user-ak", "ask"), ("bot", atlas.id.as_str(), "handOff")]);
+    assert_eq!(get(&sentry.id).unwrap().who_can_ask, saved.who_can_ask);
+
+    for (refused, why) in [
+        (json!([{"kind": "bot", "id": atlas.id, "may": "askApprove"}]), "only a person's words count as approval"),
+        (json!([{"kind": "bot", "id": sentry.id, "may": "handOff"}]), "A bot does not ask itself"),
+        (json!([{"kind": "bot", "id": "nobody", "may": "ask"}]), "No bot has the id nobody"),
+        (json!([{"kind": "person", "id": "u", "may": "handOff"}]), "A person may ask, or ask and approve"),
+        (json!([{"kind": "person", "id": "owner", "may": "ask"}]), "you are not listed"),
+        (json!([{"kind": "team", "id": "t", "may": "ask"}]), "Unknown kind team"),
+        (json!([{"kind": "person", "id": "", "may": "ask"}]), "an id of one line"),
+    ] {
+        let error = patch(refused.clone()).unwrap_err().to_string();
+        assert!(error.contains(why), "{refused}: {error}");
+    }
+    assert_eq!(get(&sentry.id).unwrap().who_can_ask, saved.who_can_ask, "a refused change changes nothing");
+
+    // A deleted bot asks nobody any more.
+    delete(sink.as_ref(), &atlas.id).unwrap();
+    assert_eq!(get(&sentry.id).unwrap().who_can_ask.iter().map(|asker| asker.id.as_str()).collect::<Vec<_>>(), ["user-ak"]);
+}
+
+/// An entry a newer build wrote is kept through a save of the whole list, as it was.
+#[test]
+fn an_asker_this_build_does_not_know_is_kept_as_it_was() {
+    let (_home, _sink, _events) = bots_on();
+    let sink = BroadcastSink::new(8);
+    let unknown = json!({"kind": "team", "id": "t1", "may": "triage", "since": "2027"});
+    write_file(json!({"version": 1, "revision": 1, "bots": [record("b1", "sentry", json!({"whoCanAsk": [unknown]}))]}));
+    let bot = get("b1").unwrap();
+    assert_eq!(serde_json::to_value(&bot.who_can_ask[0]).unwrap(), unknown);
+    let mut askers = serde_json::to_value(&bot.who_can_ask).unwrap();
+    askers.as_array_mut().unwrap().push(json!({"kind": "person", "id": "u2", "may": "ask"}));
+    let saved = update(&sink, "b1", serde_json::from_value(json!({"whoCanAsk": askers})).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(&saved.who_can_ask[0]).unwrap(), unknown);
+    assert_eq!(saved.who_can_ask.len(), 2);
+}

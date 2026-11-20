@@ -7,6 +7,7 @@
 //! Everything is behind Settings → Experimental → Bots. With the switch off
 //! every operation here refuses, and nothing about the app changes.
 
+pub mod access;
 pub mod templates;
 
 use std::collections::BTreeMap;
@@ -177,6 +178,37 @@ pub struct BotPause {
     pub unknown: BTreeMap<String, Value>,
 }
 
+/// Someone besides the owner who may give a bot work (PRO-478), and what
+/// they may do. The owner is never listed: they may always ask and approve.
+///
+/// `kind` and `may` a newer build wrote are kept as they are and written
+/// back; this build grants nothing for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotAsker {
+    /// [`ASKER_PERSON`] or [`ASKER_BOT`].
+    pub kind: String,
+    /// A person's account user id, or a bot's id.
+    pub id: String,
+    /// How a person is shown, as they were named when added. A bot is shown by its own name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// [`MAY_ASK_APPROVE`], [`MAY_ASK`] or [`MAY_HAND_OFF`].
+    pub may: String,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+pub const ASKER_PERSON: &str = "person";
+pub const ASKER_BOT: &str = "bot";
+/// Asks for work and approves what the bot asks about: a person only.
+pub const MAY_ASK_APPROVE: &str = "askApprove";
+/// Asks for work; the owner still approves.
+pub const MAY_ASK: &str = "ask";
+/// Hands work over to the bot: another bot only.
+pub const MAY_HAND_OFF: &str = "handOff";
+const MAX_ASKERS: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bot {
@@ -206,6 +238,9 @@ pub struct Bot {
     pub works_in: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<BotPause>,
+    /// Who besides the owner may give it work. Empty: the owner alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub who_can_ask: Vec<BotAsker>,
     pub created: String,
     pub modified: String,
     #[serde(flatten, default)]
@@ -260,6 +295,9 @@ pub struct BotPatch {
     pub reports_to: Option<String>,
     #[serde(default)]
     pub works_in: Option<Vec<String>>,
+    /// The whole list: an entry left out is removed.
+    #[serde(default)]
+    pub who_can_ask: Option<Vec<BotAsker>>,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -426,6 +464,7 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
             reports_to: owner(),
             works_in: personal(),
             paused: None,
+            who_can_ask: Vec::new(),
             created: now.clone(),
             modified: now,
             unknown: BTreeMap::new(),
@@ -495,12 +534,51 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
             refuse_unless!(!places.is_empty(), "A bot works somewhere: `{PERSONAL}` when it works for you alone.");
             bot.works_in = places;
         }
+        if let Some(askers) = &patch.who_can_ask {
+            bot.who_can_ask = clean_askers(askers, &bots[index], bots)?;
+        }
         if bot != bots[index] {
             bot.modified = crate::store::index::now();
             bots[index] = bot.clone();
         }
         Ok(bot)
     })
+}
+
+/// `askers` as a bot's list keeps them: each person or bot once, never the
+/// owner nor the bot itself, a bot that exists, and only what each may be
+/// given. Only a person's words count as approval, so a bot never approves;
+/// handing work over is between bots. An entry this build does not know is
+/// accepted only as the bot already has it, unchanged.
+fn clean_askers(askers: &[BotAsker], bot: &Bot, bots: &[Bot]) -> Result<Vec<BotAsker>> {
+    refuse_unless!(askers.len() <= MAX_ASKERS, "At most {MAX_ASKERS} people and bots may ask a bot for work.");
+    let mut kept: Vec<BotAsker> = Vec::new();
+    for asker in askers {
+        let id = asker.id.trim();
+        if kept.iter().any(|other| other.kind == asker.kind && other.id == id) {
+            continue;
+        }
+        if bot.who_can_ask.contains(asker) {
+            kept.push(asker.clone());
+            continue;
+        }
+        refuse_unless!(!id.is_empty() && id.chars().count() <= 200 && !id.chars().any(char::is_control), "Someone who may ask is named by an id of one line.");
+        refuse_unless!(asker.name.chars().count() <= MAX_NAME_CHARS * 2 && !asker.name.chars().any(char::is_control), "A name is one line of at most {} characters.", MAX_NAME_CHARS * 2);
+        refuse_unless!(id != OWNER, "You may always ask your bots; you are not listed.");
+        match asker.kind.as_str() {
+            ASKER_BOT => {
+                refuse_unless!(id != bot.id, "A bot does not ask itself for work.");
+                refuse_unless!(bots.iter().any(|other| other.id == id), "No bot has the id {id}.");
+                refuse_unless!(asker.may == MAY_HAND_OFF || asker.may == MAY_ASK, "Another bot may ask or hand off work, never approve: only a person's words count as approval.");
+            }
+            ASKER_PERSON => {
+                refuse_unless!(asker.may == MAY_ASK_APPROVE || asker.may == MAY_ASK, "A person may ask, or ask and approve.");
+            }
+            other => return Err(refused(format!("Unknown kind {other}. Use {ASKER_PERSON} or {ASKER_BOT}."))),
+        }
+        kept.push(BotAsker { id: id.into(), name: asker.name.trim().into(), ..asker.clone() });
+    }
+    Ok(kept)
 }
 
 /// Whether following `from`'s reporting line reaches `target`.
@@ -531,6 +609,11 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         let now = crate::store::index::now();
         for bot in bots.iter_mut().filter(|bot| bot.reports_to == id) {
             bot.reports_to = owner();
+            bot.modified = now.clone();
+        }
+        // Nor does it ask any bot for work any more.
+        for bot in bots.iter_mut().filter(|bot| bot.who_can_ask.iter().any(|asker| asker.kind == ASKER_BOT && asker.id == id)) {
+            bot.who_can_ask.retain(|asker| !(asker.kind == ASKER_BOT && asker.id == id));
             bot.modified = now.clone();
         }
         Ok(removed)

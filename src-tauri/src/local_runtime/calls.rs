@@ -216,7 +216,23 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         }
         "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         // Bots (PRO-466): the runtime owns `bots.json` and the homes, and announces each change.
-        "bots" => return crate::bots::call(manager.sink().as_ref(), string(&params, "operation")?, &params["params"]),
+        "bots" => {
+            let operation = string(&params, "operation")?;
+            let answer = crate::bots::call(manager.sink().as_ref(), operation, &params["params"])?;
+            // A new access reaches the bot's chats (PRO-478): each switches to the mode it maps
+            // to, the way its mode picker would. The tool gate holds them to it meanwhile.
+            if operation == "update" && params["params"]["patch"].get("access").is_some() {
+                if let Ok(bot) = serde_json::from_value::<crate::bots::Bot>(answer.clone()) {
+                    let mode = crate::bots::access::launch_mode(&bot.access);
+                    for (session, tab) in crate::bots::access::tabs_to_switch(&bot.id, mode) {
+                        if let Err(error) = manager.set_permission_mode(&session, &tab, mode) {
+                            log::warn!("bot {}'s chat {session}/{tab} stays in its mode: {error:#}", bot.id);
+                        }
+                    }
+                }
+            }
+            return Ok(answer);
+        }
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

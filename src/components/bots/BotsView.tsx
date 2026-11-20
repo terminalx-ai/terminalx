@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw } from "@/icons";
+import { Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
-import { focusTaken, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { focusTaken, showBotSettings, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { cn } from "@/lib/cn";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
 import { BotsHeader } from "./BotsHeader";
+import { BotSettingsPage } from "./BotSettingsPage";
 import { FirstBot } from "./FirstBot";
 import { HireBot } from "./HireBot";
 
@@ -23,6 +24,7 @@ export function BotsView() {
   const page = useBotsPage();
   const store = useBotStore();
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
+  if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -209,7 +211,12 @@ function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; un
       </td>
       <td className="px-2 py-2.5 font-mono text-faint">—</td>
       <td className="px-2 py-2.5 text-faint">—</td>
-      <td className="px-2 py-2.5 text-right">
+      <td className="px-2 py-2.5 text-right whitespace-nowrap">
+        <WithTooltip label={`${bot.name}'s settings`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s settings`} onClick={() => showBotSettings(bot.id)} data-testid="bot-settings-open">
+            <Settings2 />
+          </Button>
+        </WithTooltip>
         <WithTooltip label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`}>
           <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`} onClick={toggle} data-testid="bot-pause-toggle">
             {bot.paused ? <Play /> : <Pause />}
