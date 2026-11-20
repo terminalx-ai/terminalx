@@ -1963,9 +1963,15 @@ impl WorkspaceGit {
             open(self.list_prs(&repo, &branch, "open", NETWORK_TIMEOUT, github_repo)?)
         } else { None };
         if let Some(head) = pinned_head {
-            self.push_branch(&repo, &branch, head, |repo, branch, head| self.push_ref(repo, branch, head), verify_publish)?;
-            // `git push` can use a separate URL. Confirm the source GitHub
-            // reads through origin before relying on the successful push.
+            let push = |repo: &Repo, branch: &str, head: &str| {
+                // Resolved right before transmission, so a push URL or rewrite
+                // that leaves the verified origin receives nothing at all.
+                self.verify_push_destination(repo, origin.as_deref())?;
+                self.push_ref(repo, branch, head)
+            };
+            self.push_branch(&repo, &branch, head, push, verify_publish)?;
+            // Confirm the source GitHub reads through origin before relying
+            // on the successful push.
             self.verify_pr_remote_head(&repo, origin.as_deref(), &branch, head)?;
         }
         if let Some(pr) = recovered {
@@ -2023,6 +2029,21 @@ impl WorkspaceGit {
             return Ok(fixture.clone());
         }
         github_repository_from_origin(origin).ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))
+    }
+
+    /// Every URL `git push origin` would write to, after `pushurl`,
+    /// `pushInsteadOf` and `insteadOf`, must be the one verified fetch origin.
+    fn verify_push_destination(&self, repo: &Repo, origin: Option<&str>) -> Result<(), RpcError> {
+        let origin = origin.ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))?;
+        let urls = self.git(repo, &["remote", "get-url", "--push", "--all", "origin"])?;
+        let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
+        if urls != [origin] {
+            return Err(RpcError::new(
+                "conflict",
+                "Git would push this branch somewhere other than the verified origin. Check the repository's push URL and URL rewrites.",
+            ));
+        }
+        Ok(())
     }
 
     fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {
