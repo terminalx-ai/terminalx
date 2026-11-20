@@ -7,6 +7,8 @@
 //! Everything is behind Settings → Experimental → Bots. With the switch off
 //! every operation here refuses, and nothing about the app changes.
 
+pub mod changes;
+pub mod memory;
 pub mod templates;
 
 use std::collections::BTreeMap;
@@ -206,6 +208,10 @@ pub struct Bot {
     pub works_in: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<BotPause>,
+    /// The owner turned its memory off (PRO-470): a conversation is given
+    /// none, and the bot cannot write any.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_off: bool,
     pub created: String,
     pub modified: String,
     #[serde(flatten, default)]
@@ -260,6 +266,8 @@ pub struct BotPatch {
     pub reports_to: Option<String>,
     #[serde(default)]
     pub works_in: Option<Vec<String>>,
+    #[serde(default)]
+    pub memory_off: Option<bool>,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -426,6 +434,7 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
             reports_to: owner(),
             works_in: personal(),
             paused: None,
+            memory_off: false,
             created: now.clone(),
             modified: now,
             unknown: BTreeMap::new(),
@@ -494,6 +503,9 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
             }
             refuse_unless!(!places.is_empty(), "A bot works somewhere: `{PERSONAL}` when it works for you alone.");
             bot.works_in = places;
+        }
+        if let Some(off) = patch.memory_off {
+            bot.memory_off = off;
         }
         if bot != bots[index] {
             bot.modified = crate::store::index::now();
@@ -603,13 +615,17 @@ pub fn role_read(id: &str) -> Result<String> {
     bot_store::read_role(&bot.id)
 }
 
-/// Replace a bot's standing instructions.
+/// Replace a bot's standing instructions, by the owner in the app. The
+/// change is recorded in the bot's history (PRO-470) and can be undone.
 pub fn role_write(sink: &dyn EventSink, id: &str, text: &str) -> Result<Bot> {
     require_enabled()?;
     refuse_unless!(text.len() <= MAX_ROLE_BYTES, "A role is at most {} KB.", MAX_ROLE_BYTES / 1024);
+    let bot = get(id)?;
+    if memory::write_role(sink, &bot, text, OWNER, changes::Source::of("app"), "role")?.is_empty() {
+        return Ok(bot);
+    }
     change(sink, |bots| {
         let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
-        bot_store::write_role(&bot.id, text)?;
         bot.modified = crate::store::index::now();
         Ok(bot.clone())
     })
@@ -623,6 +639,9 @@ pub fn home(bot: &Bot) -> Option<std::path::PathBuf> {
 /// The app's commands, as the runtime that owns the store answers them
 /// (`runtime.session.bots`). A change made in the app is by the owner.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Value> {
+    if let Some(answer) = memory::call(sink, operation, params) {
+        return answer;
+    }
     let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
     Ok(match operation {
         "list" => serde_json::to_value(listing()?)?,

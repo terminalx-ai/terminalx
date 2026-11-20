@@ -6248,6 +6248,22 @@ pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String
     bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text})).await
 }
 
+/// A bot's role and memory (PRO-470), by the owner: the screen's view,
+/// adding and forgetting a note, undoing a change, and putting back a
+/// version of the role. Every change is recorded in the bot's history.
+#[tauri::command]
+pub async fn bot_memory(state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let operation: &'static str = match operation.as_str() {
+        "memoryView" => "memoryView",
+        "memoryAdd" => "memoryAdd",
+        "memoryForget" => "memoryForget",
+        "memoryUndo" => "memoryUndo",
+        "roleRestore" => "roleRestore",
+        other => return Err(err(format!("Unknown bot memory operation {other}"))),
+    };
+    bots_call(state, operation, params).await
+}
+
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
 
 /// Settings → Orchestrator: the app-wide values and each project's own.

@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw } from "@/icons";
+import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
-import { focusTaken, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { focusTaken, showBotRoleMemory, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { cn } from "@/lib/cn";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
+import { BotRoleMemory } from "./BotRoleMemory";
 import { BotsHeader } from "./BotsHeader";
 import { FirstBot } from "./FirstBot";
 import { HireBot } from "./HireBot";
@@ -23,6 +24,7 @@ export function BotsView() {
   const page = useBotsPage();
   const store = useBotStore();
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
+  if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -128,6 +130,28 @@ function BotsTeam({ focus }: { focus: boolean }) {
   );
 }
 
+/** One bot's Role and memory, reached from its row in the team (PRO-470). */
+function BotRoleMemoryPage({ botId }: { botId: string }) {
+  const store = useBotStore();
+  const bot = store.bots.find((value) => value.id === botId) ?? null;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="bot-role-memory-page">
+      <BotsHeader title={bot ? `${bot.name} · Role and memory` : "Role and memory"} note={bot?.roleTitle}>
+        <Button variant="outline" size="sm" onClick={() => showBotsTeam(true)} data-testid="bot-role-memory-back">
+          <ArrowLeft /> Team
+        </Button>
+      </BotsHeader>
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+        {bot ? <BotRoleMemory bot={bot} bots={store.bots} unreadable={store.unreadable} /> : (
+          <p className="px-6 py-6 text-[12.5px] text-faint" role={store.loaded ? "alert" : "status"}>
+            {!store.loaded ? "Reading the bots…" : store.error ? `Couldn't read the bots: ${store.error}` : "This bot is no longer on the team."}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StatCard({ label, value, note, accent = false }: { label: string; value: string; note: string; accent?: boolean }) {
   return (
     <div className="min-w-0 rounded-lg border border-hairline bg-card px-4 py-3" data-testid="bots-stat">
@@ -209,7 +233,12 @@ function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; un
       </td>
       <td className="px-2 py-2.5 font-mono text-faint">—</td>
       <td className="px-2 py-2.5 text-faint">—</td>
-      <td className="px-2 py-2.5 text-right">
+      <td className="whitespace-nowrap px-2 py-2.5 text-right">
+        <WithTooltip label={`${bot.name}'s role and memory`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s role and memory`} onClick={() => showBotRoleMemory(bot.id)} data-testid="bot-role-memory-open">
+            <BookUser />
+          </Button>
+        </WithTooltip>
         <WithTooltip label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`}>
           <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`} onClick={toggle} data-testid="bot-pause-toggle">
             {bot.paused ? <Play /> : <Pause />}

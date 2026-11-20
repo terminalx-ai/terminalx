@@ -40,6 +40,8 @@ export interface Bot {
   /** `personal` when it works for its owner alone. */
   worksIn: string[];
   paused?: BotPause;
+  /** The owner turned its memory off: a conversation is given none, and the bot writes none. */
+  memoryOff?: boolean;
   created: string;
   modified: string;
 }
@@ -63,6 +65,7 @@ export interface BotPatch {
   runsOn?: BotRunsOn;
   reportsTo?: string;
   worksIn?: string[];
+  memoryOff?: boolean;
 }
 
 /** What wakes a duty. Data only until a person switches the duty on. */

@@ -849,6 +849,7 @@ pub fn run() {
             commands::bots_resume_all,
             commands::bot_role_read,
             commands::bot_role_write,
+            commands::bot_memory,
             commands::session_summaries,
             commands::stats_usage_snapshot,
             commands::app_activity_summary,

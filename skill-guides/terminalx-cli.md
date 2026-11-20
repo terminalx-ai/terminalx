@@ -1936,6 +1936,30 @@ terminalx bots delete <bot> --json
   `ambiguous_selector` when several bots share the name (use the id); `internal` when the app
   cannot read or write its store, which no change to the arguments fixes.
 
+#### A bot's memory
+
+```text
+terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
+terminalx bots memory forget "<note>" [--bot <bot>] [--place <place>] --json
+terminalx bots memory list [--bot <bot>] [--place <place>] --json
+```
+
+- `MEMORY.md` holds one dated note per line (`- 2026-11-20 <note>`). **A bot writes its memory
+  with these commands, not by editing the file**: each write is recorded in the bot's change log
+  with where it came from, and the owner can undo it. Edits made to the files directly are found
+  and recorded as "edited outside the app".
+- Run from a bot's own chat, the commands act on that bot's memory and no other's (naming
+  another bot answers `forbidden`); the app checks the chat's tab by its launch token, and a
+  command that names a bot's chat it cannot prove answers `unauthorized`. From anywhere else
+  they are the owner's, and `--bot` names the bot.
+- `<place>` is `bot` (the default: notes that go with the bot), `personal`, or the name of an
+  organisation the bot works in. A conversation is given the bot's own notes and those of the
+  place it works in, 200 lines in all; past that, the oldest notes move to `memory/archive.md`.
+- A note is one line of at most 400 characters. One that looks like a key or a token is
+  refused: memory never keeps secrets. `forget` takes the note's text, or a part of it only
+  one note has. While the owner has turned the bot's memory off, `add` from its chat answers
+  `forbidden`.
+
 ### This guide
 
 ```text

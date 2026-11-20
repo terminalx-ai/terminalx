@@ -13,6 +13,18 @@
   page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
   no bots it offers three roles to hire in one click, and Hire a bot lists
   every role with its duties and skills and asks only for a name (PRO-467).
+- Bots (experimental): a bot's Role and memory. The owner edits its job title,
+  who it reports to and its standing instructions (`ROLE.md`, with a saved
+  state, Open in editor, every earlier version and the role it was built from).
+  Memory is one dated note per line, kept with the bot, in each organisation it
+  works in, or as personal notes; a conversation is given the bot's own and its
+  place's, 200 lines in all, and older notes move to `memory/archive.md`. The
+  bot writes memory with `terminalx bots memory add|forget|list` from its own
+  chat (proved by its launch token), notes that look like secrets are refused,
+  and memory can be switched off per bot. Every change, the bot's own and edits
+  made to the files outside the app included, is recorded with where it came
+  from in a change log kept outside the bot's home folder, each with Undo
+  (PRO-470).
 
 ## 0.2.37
 
