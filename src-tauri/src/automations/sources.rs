@@ -1039,9 +1039,6 @@ fn poll(
             return Ok(());
         }
     };
-    state.failures = 0;
-    state.retry_after = None;
-    state.last_poll_error = None;
     if !still_current(automation) {
         return Ok(());
     }
@@ -1057,6 +1054,11 @@ fn poll(
         emit_state(app, &automation.id, &state);
         return Ok(());
     }
+    // A complete read: whatever failed before is over. (An incomplete baseline
+    // keeps counting above, so its back-off grows.)
+    state.failures = 0;
+    state.retry_after = None;
+    state.last_poll_error = None;
     if let Snapshot::PullRequests { viewer: Some(viewer), .. } = &snapshot {
         state.viewer = Some(viewer.clone());
     }
@@ -1081,6 +1083,10 @@ fn poll(
     if !plan.wakes.is_empty() && !gate()? {
         // A first check found nothing new, or failed: it wrote its one history
         // row; everything read stays unseen for the next read to find again.
+        // A check that outlasted its trigger (changed or switched off meanwhile) writes nothing.
+        if !still_current(automation) {
+            return Ok(());
+        }
         save_seen(&automation.id, &state)?;
         emit_state(app, &automation.id, &state);
         return Ok(());

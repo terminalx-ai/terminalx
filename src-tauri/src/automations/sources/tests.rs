@@ -448,11 +448,11 @@ fn a_loop_the_own_head_guard_misses_is_held_to_the_limit() {
         }
     }
     assert_eq!(woken, vec![5, 10, 15, 20, 65, 70, 75, 80], "four an hour");
-    // Over a day it stops at twelve.
+    // Over a day it stops at twelve. (Every quarter hour: enough to fill each hour's four, with fewer reads.)
     let mut count = woken.len();
-    for step in 25..=24 * 12 {
+    for step in 9..=4 * 24 {
         finish_runs(&automation);
-        count += pushes(&automation, step * 5, 2, &format!("h{step}")).len();
+        count += pushes(&automation, step * 15, 2, &format!("q{step}")).len();
     }
     assert_eq!(count, 12);
 }
@@ -987,4 +987,36 @@ fn a_draft_filter_is_part_of_the_search_so_a_full_page_counts_only_what_can_matc
     assert!(gh_list_args(&source, 250).windows(2).any(|pair| pair == ["--search", "sort:updated-desc draft:false"]));
     source.draft = Some(true);
     assert!(gh_list_args(&source, 250).windows(2).any(|pair| pair == ["--search", "sort:updated-desc draft:true"]));
+}
+
+#[test]
+fn an_incomplete_baseline_backs_off_longer_each_time() {
+    let _home = crate::store::temp_home();
+    let automation = stored(linear_source());
+    let partial = || Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000) };
+    tick_read(&automation, 0, partial());
+    assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(5)).as_str()));
+    tick_read(&automation, 5, partial());
+    assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(15)).as_str()), "doubled");
+    tick_read(&automation, 15, partial());
+    assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(35)).as_str()), "doubled again");
+    tick(&automation, 35, Snapshot::Linear(vec![issue("1")]));
+    let state = seen(&automation);
+    assert_eq!((state.failures, state.retry_after, state.initialized), (0, None, true), "a complete read clears it");
+}
+
+#[test]
+fn a_first_check_that_outlasts_its_trigger_writes_nothing_back() {
+    let _home = crate::store::temp_home();
+    let automation = stored(linear_source());
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    let before = seen(&automation);
+    poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), || {
+        // While the check runs the automation is switched off and its record reset.
+        let mut off = automation.clone();
+        off.enabled = false;
+        resave(&off);
+        Ok(false)
+    }, |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
+    assert_eq!(seen(&automation), before, "the poll's state is not saved over it");
 }
