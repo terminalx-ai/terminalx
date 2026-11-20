@@ -274,6 +274,14 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         "cancelQueued" => serde_json::to_value(manager.cancel_queued(session, tab, string(&params, "messageId")?)?)?,
         "permission" => { manager.respond_permission(session, tab, string(&params, "requestId")?, string(&params, "optionId")?)?; Value::Null }
         "questions" => { manager.answer_questions(session, tab, string(&params, "requestId")?, serde_json::from_value(params["answers"].clone())?)?; Value::Null }
+        "terminalPrompt" => {
+            let choice = match &params["choice"] {
+                Value::Null => None,
+                choice => Some(choice.as_u64().context("choice must be an option's index")? as usize),
+            };
+            manager.answer_terminal_prompt(session, tab, string(&params, "promptId")?, choice)?;
+            Value::Null
+        }
         "model" => { manager.set_model(session, tab, string(&params, "model")?)?; Value::Null }
         "mode" => { manager.set_permission_mode(session, tab, string(&params, "mode")?)?; Value::Null }
         "effort" => { manager.set_effort(session, tab, params["effort"].as_str())?; Value::Null }

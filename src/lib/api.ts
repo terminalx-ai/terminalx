@@ -2570,6 +2570,9 @@ export const agent = {
     invoke<void>("respond_permission", { sessionId, tabId, requestId, optionId }),
   answerQuestions: (sessionId: string, tabId: string, requestId: string, answers: Record<string, string>) =>
     invoke<void>("answer_questions", { sessionId, tabId, requestId, answers }),
+  /** A question the agent's CLI drew in its own terminal (PRO-460): an option's index, or null for its Escape. */
+  answerTerminalPrompt: (sessionId: string, tabId: string, promptId: string, choice: number | null) =>
+    invoke<void>("answer_terminal_prompt", { sessionId, tabId, promptId, choice }),
   setModel: (sessionId: string, tabId: string, model: string) => invoke<void>("set_tab_model", { sessionId, tabId, model }),
   setPermissionMode: (sessionId: string, tabId: string, mode: string) =>
     invoke<void>("set_tab_permission_mode", { sessionId, tabId, mode }),

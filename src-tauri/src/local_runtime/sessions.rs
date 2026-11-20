@@ -388,6 +388,12 @@ impl Sessions {
         self.quick_tab("questions", session, tab, json!({"requestId":request,"answers":answers}))
     }
 
+    /// A question the CLI drew in its own terminal (PRO-460). Not a quick
+    /// call: the keys go in with the pauses the CLI needs between them.
+    pub fn answer_terminal_prompt(&self, session: &str, tab: &str, prompt: &str, choice: Option<usize>) -> Result<()> {
+        self.tab("terminalPrompt", session, tab, json!({"promptId":prompt,"choice":choice}))
+    }
+
     pub fn set_model(&self, session: &str, tab: &str, model: &str) -> Result<()> {
         self.tab("model", session, tab, json!({"model":model}))
     }

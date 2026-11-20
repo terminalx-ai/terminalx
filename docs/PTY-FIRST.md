@@ -643,6 +643,25 @@ that never ran `SessionStart` has its screen read, and a known first-run screen
 turns into an error on the tab (open the terminal view to answer it) instead
 of a prompt typed into a dialog and a tab that says "Working" forever.
 
+### Questions the CLI asks in its own screen (PRO-460)
+
+Once it is running, Claude Code can still stop on a dialog of its own that no
+hook reports: "We recommend compacting earlier" (the autocompact offer, 2.1.328)
+appears after a turn has ended, so nothing else would set the tab waiting and
+the chat would look idle. The session watcher reads the pane's screen on each
+pass (`claude::pty::terminal_prompt`): a list whose `❯` pointer is set in from
+the left edge, with a keys line under it naming Enter or Esc, inside the frame's
+top rule and title. Once it has stood still for half a second the chat is told
+(`terminal_prompt`, with the title, text, options, pointer and what Esc does)
+and the tab waits; when it goes the chat is told `null` and the tab goes back to
+what it was. The card answers with the keys the CLI takes: arrows to the
+option, a pause (the CLI drops an Enter within 250 ms of an arrow as a stray
+key), then Enter, or Esc; each answer names the question it was for, and goes
+in only while the screen still shows it. The input box gone for two passes with
+nothing readable in its place is shown as a question that could not be read,
+with a way to the terminal view. A question a hook asked has its own card and
+is left alone, and the delivery nudge never writes an Enter into such a dialog.
+
 ### Nested-session stamps are stripped
 
 If TerminalX itself was started from inside an agent's session — a `tauri dev` an

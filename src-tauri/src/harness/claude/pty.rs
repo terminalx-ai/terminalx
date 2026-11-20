@@ -286,6 +286,180 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     }
 }
 
+/// The glyph Claude Code points at the chosen option of a list with.
+const POINTER: &str = "❯";
+/// How far above its keys line a dialog's choices may start, and how far
+/// above those its title may be.
+const PROMPT_ROWS: u16 = 40;
+
+/// A question Claude Code is stopped on in its own screen, read from what it
+/// drew (PRO-460): its dialogs that no hook reports, such as "We recommend
+/// compacting earlier" (2.1.328).
+///
+/// Its dialogs share one frame: a rule across the top, the title in bold
+/// under it, what the dialog says, then the choices, the chosen one behind
+/// `❯` and the rest indented to its label, each perhaps with a line of
+/// description further in; and under them, faint, the keys it takes.
+///
+/// ```text
+/// ────────────────────────────────────────────────
+///  We recommend compacting earlier
+///
+///    Each message re-sends the whole conversation…
+///
+///    ❯ Autocompact at ‹ 400k › tokens
+///      Keep auto (1m tokens)
+///
+///    ↑/↓ choose · ←/→ change size · enter confirm · esc not now
+/// ```
+///
+/// Only a list whose pointer is set in from the left edge counts: the input
+/// box and the prompts echoed above it start at the edge with the same
+/// glyph. And only one with a keys line under it naming Enter or Escape:
+/// that is what says the dialog is up and listening, not a list in what the
+/// agent wrote. Numbering (`1. Yes`) is left off the labels.
+pub fn terminal_prompt(screen: &vt100::Screen) -> Option<crate::harness::tui::ScreenPrompt> {
+    use crate::harness::tui::{ScreenOption, ScreenPrompt};
+    let (rows, cols) = screen.size();
+    let (rows, cols) = (rows.get(), cols.get());
+    let blank = |text: &str| text.trim().is_empty();
+    // The side of a box is not what is in it.
+    let edge = |text: &str| matches!(text, "│" | "╭" | "╮" | "╰" | "╯" | "|");
+    let first_col = |row: u16| (0..cols).find(|col| screen.cell(row, *col).is_some_and(|cell| !blank(cell.contents()) && !edge(cell.contents())));
+    let text_from = |row: u16, from: u16| {
+        let mut line = String::new();
+        for col in from..cols {
+            let Some(cell) = screen.cell(row, col) else { continue };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let contents = cell.contents();
+            line.push_str(if contents.is_empty() || edge(contents) { " " } else { contents });
+        }
+        line.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let is_rule = |row: u16| {
+        let mut ruled = 0;
+        for col in 0..cols {
+            match screen.cell(row, col).map_or("", |cell| cell.contents()) {
+                "─" => ruled += 1,
+                "" | " " | "╭" | "╮" | "╰" | "╯" => {}
+                _ => return false,
+            }
+        }
+        ruled >= cols.saturating_mul(3) / 4
+    };
+    let top_limit = rows.saturating_sub(PROMPT_ROWS);
+
+    // The keys line: the lowest that names Enter or Escape as a key, among
+    // the segments the CLI separates with `·`.
+    let segments = |line: &str| line.split('·').map(|part| part.trim().to_lowercase()).collect::<Vec<_>>();
+    let names_key = |segment: &str| ["enter", "esc", "escape"].iter().any(|key| segment == *key || segment.starts_with(&format!("{key} ")));
+    let hint_row = (top_limit..rows).rev().find(|row| segments(&text_from(*row, 0)).iter().any(|segment| names_key(segment)))?;
+    let hint = text_from(hint_row, 0);
+
+    // The pointer: the nearest above the keys line, inside the same frame.
+    let mut pointer = None;
+    for row in (top_limit..hint_row).rev() {
+        if is_rule(row) {
+            break;
+        }
+        let Some(col) = first_col(row) else { continue };
+        if col > 0 && screen.cell(row, col).is_some_and(|cell| cell.contents() == POINTER) {
+            pointer = Some((row, col));
+            break;
+        }
+    }
+    let (pointer_row, pointer_col) = pointer?;
+    let label_col = (pointer_col + 1..cols).find(|col| screen.cell(pointer_row, *col).is_some_and(|cell| !blank(cell.contents())))?;
+    // The choices are the rows next to the pointer's that start at its
+    // label or further in, with no blank row between.
+    let in_list = |row: u16| first_col(row).is_some_and(|col| col >= label_col);
+    let mut first = pointer_row;
+    while first > top_limit && in_list(first - 1) {
+        first -= 1;
+    }
+    let mut last = pointer_row;
+    while last + 1 < hint_row && in_list(last + 1) {
+        last += 1;
+    }
+    let mut options: Vec<ScreenOption> = Vec::new();
+    let mut selected = None;
+    for row in first..=last {
+        let col = if row == pointer_row { label_col } else { first_col(row)? };
+        let line = text_from(row, col);
+        if col > label_col {
+            // A description, under the choice it describes.
+            if let Some(option) = options.last_mut() {
+                option.description = Some(match option.description.take() {
+                    Some(before) => format!("{before} {line}"),
+                    None => line,
+                });
+            }
+            continue;
+        }
+        if row == pointer_row {
+            selected = Some(options.len());
+        }
+        options.push(ScreenOption { label: unnumbered(&line).to_string(), description: None });
+    }
+    if options.is_empty() {
+        return None;
+    }
+
+    // The title and what the dialog says: from the frame's rule down to the
+    // choices, paragraphs split at blank rows. No rule, no title.
+    let rule = (top_limit..first).rev().find(|row| is_rule(*row));
+    let (title, text) = match rule {
+        Some(rule) => {
+            let mut paragraphs: Vec<String> = Vec::new();
+            let mut open = false;
+            for row in rule + 1..first {
+                let line = first_col(row).map(|col| text_from(row, col)).unwrap_or_default();
+                if line.is_empty() {
+                    open = false;
+                } else if open {
+                    let paragraph = paragraphs.last_mut().expect("an open paragraph");
+                    paragraph.push(' ');
+                    paragraph.push_str(&line);
+                } else {
+                    paragraphs.push(line);
+                    open = true;
+                }
+            }
+            let mut paragraphs = paragraphs.into_iter();
+            let title = paragraphs.next();
+            let text = paragraphs.collect::<Vec<_>>().join("\n\n");
+            (title, (!text.is_empty()).then_some(text))
+        }
+        None => (None, None),
+    };
+    let dismiss = segments(&hint).into_iter().find_map(|segment| {
+        let rest = segment.strip_prefix("escape").or_else(|| segment.strip_prefix("esc"))?;
+        if !(rest.is_empty() || rest.starts_with(' ')) {
+            return None;
+        }
+        let rest = rest.trim();
+        let rest = rest.strip_prefix("to ").unwrap_or(rest).trim();
+        let mut chars = rest.chars();
+        Some(match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => "Dismiss".to_string(),
+        })
+    });
+    let id = ScreenPrompt::identify(title.as_deref(), &options);
+    Some(ScreenPrompt { id, title, text, options, selected, dismiss, hint: Some(hint) })
+}
+
+/// A choice's label without the number Claude Code puts before it.
+fn unnumbered(label: &str) -> &str {
+    let digits = label.chars().take_while(char::is_ascii_digit).count();
+    match label[digits..].strip_prefix(". ") {
+        Some(rest) if (1..=2).contains(&digits) => rest,
+        _ => label,
+    }
+}
+
 /// The reply for a read-only command TerminalX ran itself (PRO-330). Only a
 /// denial lets a hook answer for the command without Claude Code running it
 /// in the user's shell. Claude gives the model the message as the call's
@@ -337,6 +511,85 @@ mod tests {
         let Composer::Holds(text) = composer(drawn(include_bytes!("fixtures/composer_restored.bin")).screen()) else { panic!("the restored prompt is in the box") };
         assert!(text.starts_with("This is a long prompt that the probe pastes"), "{text}");
         assert!(text.ends_with("so I want you to understand this scenario and create a proper issue with expected behavior"), "every wrapped row: {text}");
+    }
+
+    /// Claude Code 2.1.328, recorded in a pty: its folder trust dialog as it
+    /// opens, and again after one Down (PRO-460). The frame, the faint keys
+    /// line and the pointer are what every one of its dialogs draws.
+    #[test]
+    fn a_dialog_claude_code_drew_is_read_with_its_choices_and_keys() {
+        let prompt = terminal_prompt(drawn(include_bytes!("fixtures/dialog_trust.bin")).screen()).expect("the trust dialog is a prompt");
+        assert_eq!(prompt.title.as_deref(), Some("Accessing workspace:"));
+        assert!(prompt.text.as_deref().unwrap().contains("Quick safety check: Is this a project you created or one you trust?"), "{prompt:?}");
+        let labels: Vec<_> = prompt.options.iter().map(|option| option.label.as_str()).collect();
+        assert_eq!(labels, ["No, exit", "Yes, I trust this folder"]);
+        assert_eq!(prompt.selected, Some(0));
+        assert_eq!(prompt.dismiss.as_deref(), Some("Cancel"));
+        assert_eq!(prompt.hint.as_deref(), Some("Enter to confirm · Esc to cancel"));
+
+        let moved = terminal_prompt(drawn(include_bytes!("fixtures/dialog_trust_moved.bin")).screen()).expect("still up");
+        assert_eq!(moved.selected, Some(1), "the pointer moved down");
+        assert_eq!(moved.id, prompt.id, "the same question wherever the pointer is");
+    }
+
+    /// The autocompact offer as 2.1.328's source lays it out (`DEe`): a top
+    /// rule, the title, two paragraphs set in by three, the unnumbered choices
+    /// and the faint keys line. What the reader saw in PRO-460.
+    #[test]
+    fn the_autocompact_offer_is_read_from_the_screen() {
+        let rule = "─".repeat(80);
+        let screen = format!(
+            "\x1b[2J\x1b[1;1H❯ summarise the logs\r\n\r\n● Done. One background agent is still running.\r\n\
+             \x1b[5;1H\x1b[38;5;4m{rule}\x1b[39m\r\n \x1b[1mWe recommend compacting earlier\x1b[22m\r\n\r\n\
+             \x20  Each message re-sends the whole conversation, so long conversations use up\r\n\
+             \x20  your plan's usage limits faster.\r\n\r\n\
+             \x20  Want to autocompact at 400k tokens instead? Your model doesn't change.\r\n\r\n\
+             \x20  \x1b[38;5;4m❯\x1b[39m Autocompact at ‹ 400k › tokens\r\n\
+             \x20    Keep auto (1m tokens)\r\n\r\n\
+             \x20  \x1b[2m↑/↓ choose · ←/→ change size · enter confirm · esc not now\x1b[22m"
+        );
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(24).unwrap(), std::num::NonZeroU16::new(80).unwrap(), 0);
+        parser.process(screen.as_bytes());
+        let prompt = terminal_prompt(parser.screen()).expect("the offer is a prompt");
+        assert_eq!(prompt.title.as_deref(), Some("We recommend compacting earlier"));
+        assert_eq!(
+            prompt.text.as_deref(),
+            Some("Each message re-sends the whole conversation, so long conversations use up your plan's usage limits faster.\n\nWant to autocompact at 400k tokens instead? Your model doesn't change.")
+        );
+        let labels: Vec<_> = prompt.options.iter().map(|option| option.label.as_str()).collect();
+        assert_eq!(labels, ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]);
+        assert_eq!((prompt.selected, prompt.dismiss.as_deref()), (Some(0), Some("Not now")));
+        assert_eq!(composer(parser.screen()), Composer::Unseen, "no input box while it is up");
+    }
+
+    #[test]
+    fn numbered_choices_and_descriptions_are_read_apart() {
+        let rule = "─".repeat(40);
+        let screen = format!(
+            "\x1b[2J\x1b[1;1H{rule}\r\n Allow this?\r\n\r\n ❯ 1. Yes\r\n   2. No, and tell Claude\r\n        what to do instead\r\n\r\n Esc to cancel"
+        );
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(12).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process(screen.as_bytes());
+        let prompt = terminal_prompt(parser.screen()).unwrap();
+        assert_eq!((prompt.title.as_deref(), prompt.text.as_deref()), (Some("Allow this?"), None));
+        assert_eq!(prompt.options[0].label, "Yes");
+        assert_eq!(prompt.options[1].label, "No, and tell Claude");
+        assert_eq!(prompt.options[1].description.as_deref(), Some("what to do instead"));
+    }
+
+    /// The input box, a prompt echoed above it, and a list in the agent's
+    /// reply are not questions the CLI is stopped on.
+    #[test]
+    fn the_composer_and_what_the_agent_wrote_are_not_prompts() {
+        for fixture in [&include_bytes!("fixtures/composer_idle.bin")[..], include_bytes!("fixtures/composer_working.bin"), include_bytes!("fixtures/composer_restored.bin")] {
+            assert_eq!(terminal_prompt(drawn(fixture).screen()), None);
+        }
+        let rule = "─".repeat(40);
+        let reply = format!("\x1b[2J\x1b[1;1H● Pick one:\r\n  ❯ 1. Red\r\n    2. Blue\r\n{rule}\r\n❯ \r\n{rule}\r\n  ? for shortcuts");
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(12).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process(reply.as_bytes());
+        assert_eq!(terminal_prompt(parser.screen()), None, "no keys line under it");
+        assert_eq!(terminal_prompt(vt100::Parser::new(std::num::NonZeroU16::new(4).unwrap(), std::num::NonZeroU16::new(20).unwrap(), 0).screen()), None);
     }
 
     #[test]

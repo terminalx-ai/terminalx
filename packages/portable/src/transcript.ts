@@ -1,4 +1,4 @@
-import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
+import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ScreenPrompt, ToolResult, Usage } from "./events";
 import { shellRecord, withoutHarnessBlocks, type ShellRecord } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
@@ -161,6 +161,8 @@ export interface Transcript {
   workingSince?: number;
   authFailed: boolean;
   rateLimit?: { status?: string; resetsAt?: number; window?: string };
+  /** A question the agent's CLI drew in its own terminal and is stopped on (PRO-460). */
+  terminalPrompt?: ScreenPrompt;
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
   /** Settings the app recorded a change to somewhere in this transcript: a turn without its own record of one ran before it. */
@@ -327,6 +329,7 @@ export class TranscriptReducer {
   private modelRequestOpen = false;
   private authFailed = false;
   private rateLimit: Transcript["rateLimit"];
+  private terminalPrompt: ScreenPrompt | undefined;
   private usageWindows: Transcript["usageWindows"];
   private codexUsage: Transcript["codexUsage"];
   private workingSince: number | undefined;
@@ -450,7 +453,7 @@ export class TranscriptReducer {
     const eventAt = Date.parse(event.ts);
     if (!event.subagent && Number.isFinite(eventAt)) this.lastTs = eventAt;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
-    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
+    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared" && payload.type !== "terminal_prompt") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "goal_updated":
         if (!event.subagent && event.harness === "codex") this.goal = payload.goal;
@@ -856,7 +859,13 @@ export class TranscriptReducer {
         if (payload.effort) this.settings = { ...this.settings, effort: payload.effort };
         if (payload.permissionMode) this.settings = { ...this.settings, permissionMode: payload.permissionMode };
         break;
+      case "terminal_prompt":
+        if (!event.subagent) this.terminalPrompt = payload.prompt ?? undefined;
+        break;
       case "conversation":
+        // What the terminal asked belonged to the conversation before.
+        this.terminalPrompt = undefined;
+        break;
       case "delta":
       case "unknown":
         break;
@@ -950,6 +959,7 @@ export class TranscriptReducer {
       workingSince: live ? this.workingSince : undefined,
       authFailed: this.authFailed,
       rateLimit: this.rateLimit,
+      terminalPrompt: this.terminalPrompt,
       usageWindows: this.usageWindows,
       codexUsage: this.codexUsage,
       changedSettings: this.settings.effort || this.settings.permissionMode ? { effort: !!this.settings.effort, permissionMode: !!this.settings.permissionMode } : undefined,

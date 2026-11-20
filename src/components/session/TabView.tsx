@@ -32,6 +32,8 @@ import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
+import { TerminalPromptCard } from "@/components/chat/AskCards";
+import { terminalPromptError } from "@/lib/terminalPrompt";
 import { History, MessageSquare, Play, X } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -690,6 +692,22 @@ export function TabView({
     [backend, local, tab.id],
   );
 
+  // A question the CLI drew in its own terminal (PRO-460): only the runtime's own refusals are said as they are.
+  const answerTerminalPrompt = useCallback(
+    async (promptId: string, choice: number | null) => {
+      if (!backend.answerTerminalPrompt) return;
+      setAnswering(true);
+      try {
+        await backend.answerTerminalPrompt(tab.id, promptId, choice);
+      } catch (e) {
+        setError(terminalPromptError(e));
+      } finally {
+        setAnswering(false);
+      }
+    },
+    [backend, tab.id],
+  );
+
   // The goal card's Pause and Resume are Codex's own `/goal pause` and `/goal resume`, sent now rather than held
   // behind the turn; Edit puts the goal in the composer to change (PRO-380).
   const sendGoalCommand = useCallback((command: string) => {
@@ -866,7 +884,18 @@ export function TabView({
   // A quick chat (`isQuickChat`) has no project: its path is a scratch directory that names nothing.
   const projectName = session.kind === "quick" ? null : session.projectPath.split("/").filter(Boolean).pop() ?? null;
   const askMeta = [tab.permissionMode ? modeLabel(tab.permissionMode) : null, projectName].filter(Boolean).join(" · ") || null;
-  const banner = (placement: "top" | "composer") => (placement === "composer" && asksInChat ? null :
+  // A question the agent's CLI drew in its own terminal and is stopped on (PRO-460). A request or a recovery says
+  // more; over the terminal the reader is looking at the question itself.
+  const terminalPrompt = !recovery && tab.status === "waiting" && transcript.pendingAsks.length === 0 ? transcript.terminalPrompt : undefined;
+  const banner = (placement: "top" | "composer") => terminalPrompt ? (placement === "top" ? null :
+    <div className="mx-auto w-full max-w-3xl shrink-0 bg-chat px-6 pb-2">
+      <TerminalPromptCard prompt={terminalPrompt} agent={cloudAgentLabel(tab.harness)}
+        busy={recovering || answering || !backend.caps.write} blockedReason={backend.approveBlockedReason ?? null}
+        onAnswer={backend.answerTerminalPrompt ? (choice) => void answerTerminalPrompt(terminalPrompt.id, choice) : undefined}
+        onOpenTerminal={ptyFirst ? () => void enterTerminalView(session, tab) : undefined}
+        aside={<Button size="sm" variant="ghost" className="text-muted-foreground" disabled={recovering || !backend.caps.write} onClick={() => stop("banner")}>Stop session</Button>} />
+    </div>
+  ) : (placement === "composer" && asksInChat ? null :
     <RecoveryBanner placement={placement} kind={recovery} limit={transcript.rateLimit ?? null} waiting={tab.status === "waiting"} native={tab.transport === "experimentalCodexStdio"} asks={transcript.pendingAsks} busy={recovering || !backend.caps.write} answering={answering || deciding} answerBlockedReason={backend.approveBlockedReason ?? null}
         models={models.filter(m => m.id !== tab.model && !m.upgrade)} onOpenModels={refreshPickerModels} onPermission={answerPermission} onQuestions={answerQuestions}
         onPressed={actions.pressedWith}

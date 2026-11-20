@@ -3860,3 +3860,75 @@ fn a_shell_command_the_agent_answers_ends_with_the_agents_turn() {
     rig.tick();
     assert!(rig.turn_open());
 }
+
+/// A stand-in for Claude Code stopped on its autocompact offer (PRO-460):
+/// it draws the dialog, moves its pointer on the arrow keys, and on Enter
+/// writes the chosen label to `chosen` and goes back to its input box.
+const OFFER_STAND_IN: &str = r#"
+import os, sys, tty
+tty.setraw(0)
+options = ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]
+chosen = sys.argv[1]
+at = 0
+def draw():
+    out = "\x1b[2J\x1b[1;1H❯ summarise the logs\r\n\r\n● Done.\r\n\x1b[5;1H" + "─" * 80 + "\r\n"
+    out += " \x1b[1mWe recommend compacting earlier\x1b[22m\r\n\r\n   Want to autocompact at 400k tokens instead?\r\n\r\n"
+    for i, label in enumerate(options):
+        out += "   " + ("❯ " if i == at else "  ") + label + "\r\n"
+    out += "\r\n   \x1b[2m↑/↓ choose · enter confirm · esc not now\x1b[22m"
+    os.write(1, out.encode())
+draw()
+while True:
+    keys = os.read(0, 16)
+    if keys in (b"\x1b[A", b"\x1bOA"): at = max(0, at - 1); draw()
+    elif keys in (b"\x1b[B", b"\x1bOB"): at = min(len(options) - 1, at + 1); draw()
+    elif keys in (b"\r", b"\x1b"):
+        open(chosen, "w").write("esc" if keys == b"\x1b" else options[at])
+        rule = "─" * 80
+        os.write(1, ("\x1b[2J\x1b[1;1H● Done.\r\n\x1b[20;1H" + rule + "\r\n❯ \r\n" + rule).encode())
+"#;
+
+#[test]
+fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat() {
+    if crate::binpath::resolve("python3").is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("offer.py");
+    let chosen = dir.path().join("chosen");
+    std::fs::write(&script, OFFER_STAND_IN).unwrap();
+    let rig = Rig::running(&format!("python3 '{}' '{}'", script.display(), chosen.display()));
+    if let Engine::Cli(p) = &rig.rt.lock().unwrap().engine {
+        p.ready.mark();
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !rig.manager.terminals.screen(&rig.pane, |screen| screen.contents()).unwrap().contains("esc not now") {
+        assert!(Instant::now() < deadline, "the stand-in never drew its offer");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let shown = |rig: &Rig| rig.events().iter().filter_map(|e| match &e.payload { Payload::TerminalPrompt { prompt } => Some(prompt.clone()), _ => None }).next_back();
+
+    // Still being drawn a moment ago: not yet.
+    rig.pane_draws();
+    rig.tick();
+    assert_eq!((shown(&rig), rig.status()), (None, TabStatus::Idle));
+
+    rig.advance(Duration::from_secs(1));
+    rig.tick();
+    let prompt = shown(&rig).flatten().expect("the chat is told of the offer");
+    assert_eq!(prompt.title.as_deref(), Some("We recommend compacting earlier"));
+    assert_eq!(prompt.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]);
+    assert_eq!(rig.status(), TabStatus::Waiting, "the tab needs the reader");
+    // Told once, not on every pass it stays up.
+    rig.tick();
+    assert_eq!(rig.kinds().iter().filter(|k| *k == "terminal_prompt").count(), 1);
+
+    // A question that is no longer the one shown is not answered.
+    assert!(rig.manager.answer_terminal_prompt(SESSION, TAB, "another", Some(1)).unwrap_err().to_string().contains("has changed"));
+    assert!(!chosen.exists());
+
+    rig.manager.answer_terminal_prompt(SESSION, TAB, &prompt.id, Some(1)).unwrap();
+    assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "Keep auto (1m tokens)", "Down, then Enter");
+    assert_eq!(shown(&rig), Some(None), "the card is taken down with the dialog");
+    assert_eq!(rig.status(), TabStatus::Idle, "back to what it was");
+}
