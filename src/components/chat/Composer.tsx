@@ -170,7 +170,11 @@ export function Composer({
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
-  agentHandoff?: { name: string; id: string; run: () => void };
+  /**
+   * Hand the conversation off to another agent in a new tab. With `unavailable`
+   * (a remote session that cannot take it yet, #1327) the item is shown off, with why.
+   */
+  agentHandoff?: { name: string; id: string; run?: () => void; unavailable?: string };
   hasConversation?: boolean;
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
@@ -728,9 +732,9 @@ export function Composer({
                   {agentHandoff && (
                     <>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onSelect={agentHandoff.run}>
+                      <DropdownMenuItem disabled={!agentHandoff.run} onSelect={agentHandoff.run} data-testid="composer-agent-handoff">
                         <AgentMark id={agentHandoff.id} decorative />
-                        <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                        <span>Hand off to {agentHandoff.name}<span className="block max-w-[16rem] whitespace-normal text-xs text-faint">{agentHandoff.run ? "Opens in a new tab" : agentHandoff.unavailable}</span></span>
                       </DropdownMenuItem>
                     </>
                   )}
@@ -747,7 +751,7 @@ export function Composer({
                     <ModelPickerEmpty
                       agent={agentName(tab.harness)}
                       signIn={SIGN_INS[tab.harness]}
-                      other={agentHandoff?.name}
+                      other={agentHandoff?.run ? agentHandoff.name : undefined}
                       loading={!modelsLoaded}
                       retrying={retryingModels}
                       onRetry={retryModels}

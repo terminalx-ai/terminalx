@@ -17,7 +17,7 @@ import { useSessionIsGit } from "@/lib/quickChats";
 import { hasEscapeOverlay, useShortcut } from "@/lib/hotkeys";
 import { changeRange, useChanges } from "@/lib/changes";
 import { localGitSource, type GitSource } from "@/lib/gitSource";
-import { localSessionBackend, terminalViewOf, type SessionBackend } from "@/lib/sessionBackend";
+import { localSessionBackend, RESEND_ATTACHMENTS, terminalViewOf, type HandoffActions, type SessionBackend } from "@/lib/sessionBackend";
 import { CloudOutbox, SignInNotice, commandError as cloudCommandError } from "@/components/cloud/CloudAgents";
 import { CloudPendingMessages, usePendingCloudMessages } from "@/components/cloud/CloudPendingMessages";
 import { cloudAgentLabel } from "@/lib/cloudRowState";
@@ -48,6 +48,7 @@ import type { RecoveryKind } from "@/types/events";
 import { RecoveryBanner } from "./RecoveryBanner";
 import { useNoticeDeferral } from "@/lib/noticeDeferral";
 import { ResetChatDialog } from "./ResetChatDialog";
+import { RemoteHandoffDialog, type RemoteHandoffPurpose } from "./RemoteHandoffDialog";
 import { SaveSnippetDialog } from "@/components/chat/SaveSnippetDialog";
 import type { ResetTarget } from "@/components/chat/Chat";
 import { ContinuationDialog } from "./ContinuationDialog";
@@ -55,7 +56,7 @@ import { otherAgent, secondOpinionPrompt } from "@/lib/agentHandoff";
 import { modeLabel, modelLabel, useModels } from "@/lib/models";
 import { openAgentHandoff, openWorkspaceDelete } from "@/lib/dialogs";
 import { offersWorkspaceDelete, turnLive, useWorkspaceDisposition, type RemovableWorkspace } from "@/lib/workspaceRemoval";
-import { usePickerModels } from "@/lib/cloudModels";
+import { usePickerModels, useRuntimeModels } from "@/lib/cloudModels";
 import { TAB_STATUS_LABEL, type PastConversation, type SessionEntry, type TabEntry } from "@/types/session";
 import { interruptUnanswered } from "@/types/events";
 import { LocalVmTasks } from "@/components/localVm/LocalVmTasks";
@@ -241,8 +242,17 @@ export function TabView({
   const now = useNowUntil(lease?.expiresAt);
   const tabLive = tab.status === "in_progress" || tab.status === "waiting";
   const gate = shared ? tabGate(shared.you, lease, now, tabLive, nameOf) : null;
-  const counterpart = local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure)
-    ? otherAgent(tab.harness, harnesses) : undefined;
+  const mayHandOff = !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure);
+  const counterpart = local && mayHandOff ? otherAgent(tab.harness, harnesses) : undefined;
+  // A remote session hands off on its runtime (#1327), to an agent installed there: the other one, named
+  // even when the handoff is off so the composer can say why, and offered once the runtime lists it.
+  const runtimeAgents = useRuntimeModels(local ? null : backend.modelClient)?.agents ?? null;
+  const remoteOther = !local && !readOnly ? otherAgent(tab.harness, harnesses.map((harness) => ({ ...harness, available: true }))) : undefined;
+  const handoff = !local && mayHandOff ? backend.handoff : undefined;
+  const remoteCounterpart = handoff && remoteOther && runtimeAgents?.some((agent) => agent.id === remoteOther.id) ? remoteOther : undefined;
+  // The dialog keeps the actions it was opened with: a backend rebuilt meanwhile (a new outbox, a reconnect) neither reloads nor closes it.
+  const [remoteHandoff, setRemoteHandoff] = useState<{ agent: string; purpose: RemoteHandoffPurpose; actions: HandoffActions } | null>(null);
+  const handOffTo = remoteCounterpart && handoff ? (purpose: RemoteHandoffPurpose) => setRemoteHandoff({ agent: remoteCounterpart.id, purpose, actions: handoff }) : undefined;
   const [notesOpen, setNotesOpen] = useState(false);
   // The retry and resume flows restart a local agent process; a cloud tab's runtime recovers itself.
   // A tab that is a terminal has no agent to recover: what went wrong there is said as it is.
@@ -933,11 +943,18 @@ export function TabView({
       )}
       firstMessage={local && !readOnly && log.firstMessage && <FirstMessage message={log.firstMessage} session={session} agent={agentLabel} setup={setup} />}
       onReset={canReset ? (endSeq, target) => setResetTarget({ endSeq, target }) : undefined}
-      onRetryInNewChat={local && !readOnly && backend.caps.write && !backend.readOnlyReason && (!gate || gate.mayConfigure) ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); } : undefined}
+      onRetryInNewChat={local && mayHandOff ? (turn) => { if (turn.prompt) openAgentHandoff(session, tab, tab.harness, turn.prompt.text, true, { images: turn.prompt.images, files: turn.prompt.files }); }
+        // On a runtime (#1327) the prompt's text: its attachments are not kept to send again, as for Retry.
+        : handoff ? (turn) => {
+          if (!turn.prompt) return;
+          if (turn.prompt.images?.length || turn.prompt.files?.length) showError("Couldn't retry in a new chat", RESEND_ATTACHMENTS);
+          else setRemoteHandoff({ agent: tab.harness, purpose: { kind: "retry", prompt: turn.prompt.text }, actions: handoff });
+        } : undefined}
       onSendAgain={backend.resendMessage && !gate?.blocked ? sendAgain : undefined}
       onRetry={backend.resendMessage && !gate?.blocked && !readOnly ? sendAgain : undefined}
-      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn)) : undefined}
-      secondOpinionAgent={counterpart?.name}
+      onSecondOpinion={counterpart ? (turn) => openAgentHandoff(session, tab, counterpart.id, secondOpinionPrompt(turn))
+        : handOffTo ? (turn) => handOffTo({ kind: "review", prompt: secondOpinionPrompt(turn) }) : undefined}
+      secondOpinionAgent={(counterpart ?? remoteCounterpart)?.name}
       onFork={canFork && turnActions ? (endSeq, into) => void turnActions.fork(tab.id, endSeq, into).then(
         (forked) => { if (forked.note) showError(forked.note, undefined, { title: into === "tab" ? "Forked to a new tab" : "Forked to a new session" }); },
         (e) => showError("Couldn't fork the conversation", e)) : undefined}
@@ -1011,7 +1028,10 @@ export function TabView({
           sentAfter={sentAfter}
           history={history}
           hasConversation={transcript.turns.length > 0}
-          agentHandoff={counterpart ? { id: counterpart.id, name: counterpart.name, run: () => openAgentHandoff(session, tab, counterpart.id) } : undefined}
+          agentHandoff={counterpart ? { id: counterpart.id, name: counterpart.name, run: () => openAgentHandoff(session, tab, counterpart.id) }
+            : remoteCounterpart && handOffTo ? { id: remoteCounterpart.id, name: remoteCounterpart.name, run: () => handOffTo({ kind: "continue" }) }
+            // Off on this remote session, with why, where a local one offers it (#1289).
+            : remoteOther && !handoff && backend.unavailable?.agentHandoff ? { id: remoteOther.id, name: remoteOther.name, unavailable: backend.unavailable.agentHandoff } : undefined}
           // Stop is Escape first; once that went unanswered, the same control ends the process.
           onStop={interrupts && !unanswered ? () => interrupt() : () => stop("chat")}
           stopMode={!interrupts ? "stop" : unanswered ? "force" : "interrupt"}
@@ -1049,7 +1069,8 @@ export function TabView({
           disabledReason={gate?.blocked ?? busyNotice ?? error ?? (viewError && local && !viewRefusal ? safeError(viewError) : null) ?? (backend.sendHeldReason && backend.readOnlyReason === backend.sendHeldReason ? null : backend.readOnlyReason)}
           heldReason={backend.sendHeldReason ?? null}
           autoFocus={active && focused}
-          onOpenCodexTab={counterpart?.id === "codex" ? () => openAgentHandoff(session, tab, "codex") : undefined}
+          onOpenCodexTab={counterpart?.id === "codex" ? () => openAgentHandoff(session, tab, "codex")
+            : remoteCounterpart?.id === "codex" && handOffTo ? () => handOffTo({ kind: "continue" }) : undefined}
         />
         </>
         )
@@ -1215,6 +1236,18 @@ export function TabView({
       <Button size="xs" variant="ghost" onClick={() => setResetTarget({ endSeq: null })}>Undo reset</Button>
     </div>}
     {snippetPrompt !== null && <SaveSnippetDialog prompt={snippetPrompt} onClose={() => setSnippetPrompt(null)} />}
+    {remoteHandoff && (
+      <RemoteHandoffDialog
+        key={`${tab.id}:${remoteHandoff.agent}:${remoteHandoff.purpose.kind}`}
+        handoff={remoteHandoff.actions}
+        source={tab}
+        agent={remoteHandoff.agent}
+        modelClient={backend.modelClient ?? null}
+        purpose={remoteHandoff.purpose}
+        where={backend.key.startsWith("machine:") ? "the machine" : "the workspace"}
+        onClose={() => setRemoteHandoff(null)}
+      />
+    )}
     {resetTarget && turnActions && <ResetChatDialog reset={(endSeq, resetFiles, confirm) => turnActions.reset(tab.id, endSeq, resetFiles, confirm)} endSeq={resetTarget.endSeq} target={resetTarget.target} agent={agentLabel}
       filesRestored={resetTarget.endSeq === null ? (tab as ResetTab).resetFilesRestored : undefined} onClose={() => setResetTarget(null)} onWarning={setError} />}
     {continueOpen && <ContinuationDialog session={session} source={tab}

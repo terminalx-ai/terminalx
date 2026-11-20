@@ -750,6 +750,14 @@ the pull request that adds it.
 | `session.delete` | `session/2` | Served | |
 | `session.interrupt` | `session/3` | Served | Live only; never resent after a drop |
 | `session.toTerminal` | `session/3` | Served | |
+| `session.turnCheckpoint` | `checkpoints/1` | Served | What a finished turn changed, from the checkpoint the machine kept (#1326) |
+| `session.keepTurn` | `checkpoints/1` | Served | Manage only |
+| `session.undoTurn` | `checkpoints/1` | Served | Manage only; refused with the overlapping paths and a token, done when sent again with it |
+| `session.restoreUndo` | `checkpoints/1` | Served | Manage only; as `session.undoTurn` |
+| `session.reset` | `checkpoints/1` | Served | Manage only; the chat (and, when asked, the checkout) back to a turn, or the last reset undone |
+| `session.fork` | `checkpoints/1` | Served | Manage only; into a tab beside the source or a session on a worktree of its own |
+| `session.handoff` | `handoff/1` | Served | Manage only; another agent tab with its first prompt in one call: a second opinion, Retry in a new chat, the agent handoff (#1327) |
+| `session.handoffContext` | `handoff/1` | Served | Manage only; names the session and an agent tab; the tab's context with the machine's own transcript path, for a handoff's prompt |
 | `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |
 | `session.stop` | `agent-commands/1` | Served | Drops queued sends, stops the agent; applied again after a crash (decision 3) |
 | `session.decide` | `agent-commands/1` | Served | Answers the named permission request or question once (decision 3) |
@@ -2108,6 +2116,7 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
 | Cost chip | Works; the totals come with the machine's session list, and the popover reads them again, how each agent signs in and the usage windows on the machine (`session.usage`) | PRO-408 |
 | Agent account label and tab mark | Works; the account the tab runs on as the machine lists its agent's accounts (`accountLabel`), only when that agent has several there | PRO-408 |
 | Continue in a new tab | Works; a new agent tab in the session on the machine, handed the tab's context read there (`session.prepareContinuation`) | PRO-408 |
+| Second opinion, Retry in a new chat, composer's agent handoff | Works with `handoff/1`: the machine adds the tab and sends its first prompt in one call (`session.handoff`); the handoff's context is read there (`session.handoffContext`). An older machine runtime shows them off with why | #1327 |
 | Fix check errors | Works; the PR from the machine's `git/1`, its failed logs read with the machine's `gh` (`session.checkFailures`), the prompt sent to the tab on the machine | PRO-408 |
 | Built-in browser | Hidden; the "+" menu says once that it stays on this computer | Decision 7 |
 | Computer use | Hidden | Decision 7 |
