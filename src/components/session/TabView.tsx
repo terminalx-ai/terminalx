@@ -73,6 +73,8 @@ const NO_ENTRIES: OutboxEntry[] = [];
 const NO_FOLLOW_UPS: HeldFollowUpInfo[] = [];
 /** Said on a held message of someone else's in a shared workspace (#1328): the runtime refuses the change too. */
 const HELD_NOT_YOURS = "Only whoever sent this message, or a workspace manager, can change it.";
+/** A manager deletes or sends anyone's held message, but its words stay its sender's (#1328). */
+const HELD_EDIT_NOT_YOURS = "Only whoever sent this message can edit it.";
 const STOP_REFUSED = "Only the person driving this tab or an admin can stop the agent.";
 
 /**
@@ -771,7 +773,9 @@ export function TabView({
     const actorId = remoteFollowUps.find((followUp) => followUp.clientCommandId === id)?.actorId;
     if (!actorId || !shared?.you || shared.you.listed === false) return undefined;
     const mine = actorId === shared.you.userId;
-    return { author: mine ? null : nameOf(actorId), locked: mine || shared.you.role === "manager" ? null : HELD_NOT_YOURS };
+    if (mine) return undefined;
+    const manager = shared.you.role === "manager";
+    return { author: nameOf(actorId), locked: manager ? null : HELD_NOT_YOURS, editLocked: HELD_EDIT_NOT_YOURS };
   }, [remoteFollowUps, shared, nameOf]);
   const history = useMemo(
     () => sentMessages(transcript, outbox && { entries: outboxEntries, followUps: outboxFollowUps }),

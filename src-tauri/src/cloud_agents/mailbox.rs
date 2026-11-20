@@ -30,6 +30,9 @@ pub const FOLLOW_UP_OPS: [&str; 3] = ["edit", "withdraw", "release"];
 pub const FOLLOW_UP_GONE: &str = "follow-up-gone";
 pub const FOLLOW_UP_GONE_MESSAGE: &str = "That message is no longer held: it went to the agent, or was withdrawn.";
 pub const FOLLOW_UP_NOT_YOURS_MESSAGE: &str = "Only whoever sent a held message, or a workspace manager, can change it.";
+/// Why a manager may not edit someone else's held message: it is typed
+/// under its sender's name and policy, so the words must stay theirs.
+pub const FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE: &str = "Only whoever sent a held message can edit it. A workspace manager can delete it or send it now.";
 
 /// The text a command would type into the agent: a send's or steer's, or
 /// the new text of a held follow-up (#1328), which is typed as it is when
@@ -269,7 +272,9 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
     if !allowed {
         return refused("forbidden", json!({}));
     }
-    // A held follow-up (#1328) is its sender's to change, or a manager's.
+    // A held follow-up (#1328) is its sender's to change. A manager may
+    // withdraw or release anyone's, but not edit it: it is still typed as
+    // its sender's message, under their policy, so its words stay theirs.
     // One that is no longer held has nothing to change.
     if command.kind == "follow-up" {
         let op = command.plaintext.get("op").and_then(Value::as_str);
@@ -281,8 +286,13 @@ fn judge(agents: &CloudAgents, command: &Command, mark: impl FnOnce() -> anyhow:
         let Some(held) = agents.follow_ups.get(command.tab_id, id) else {
             return refused(FOLLOW_UP_GONE, json!({ "followUpId": id, "message": FOLLOW_UP_GONE_MESSAGE }));
         };
-        if !held.actor_id.is_empty() && held.actor_id != command.actor_id && access.role != Role::Manager {
-            return refused("forbidden", json!({ "followUpId": id, "message": FOLLOW_UP_NOT_YOURS_MESSAGE }));
+        if !held.actor_id.is_empty() && held.actor_id != command.actor_id {
+            if access.role != Role::Manager {
+                return refused("forbidden", json!({ "followUpId": id, "message": FOLLOW_UP_NOT_YOURS_MESSAGE }));
+            }
+            if op == "edit" {
+                return refused("forbidden", json!({ "followUpId": id, "message": FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE }));
+            }
         }
     }
     // Competing input is serialized by the tab's driver lease: nobody else

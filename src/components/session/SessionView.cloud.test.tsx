@@ -402,6 +402,11 @@ function cloudHandlers() {
   };
 }
 
+/** A list item from an API that takes the `follow-up` mailbox kind (terminalx-saas#289). */
+function withFollowUpKind(item: CloudWorkspaceListItem): CloudWorkspaceListItem {
+  return { ...item, workspace: { ...item.workspace, agentCommandKinds: ["send", "steer", "stop", "permission-decision", "follow-up"] } };
+}
+
 function setCatalog(item: CloudWorkspaceListItem) {
   mocks.catalog.orgs = { [ORG]: { orgId: ORG, workspaces: [item], repositories: null, repositoriesAt: null, quota: null, fetchedAt: 1, source: "live", error: null } };
 }
@@ -682,6 +687,7 @@ describe("cloud session actions", () => {
   });
 
   it("#1328: the runtime's held follow-ups are in the tray, where one is edited, deleted or sent now through the mailbox", async () => {
+    setCatalog(withFollowUpKind(workspaceItem("ready")));
     runtime.followUps = true;
     runtime.events = [ev({ type: "user_message", text: "clean up", queued: false })];
     runtime.tabs = [tabInfo({ status: "in_progress", followUps: [
@@ -715,7 +721,23 @@ describe("cloud session actions", () => {
     expect(guard.violations).toEqual([]);
   });
 
+  it("#1328: through an API that does not list the follow-up kind, there is no tray to change them in, whatever the runtime takes", async () => {
+    runtime.followUps = true;
+    runtime.tabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-a", text: "then run the tests", actorId: null }] })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(0));
+    expect(screen.queryByRole("region", { name: "Held follow-ups" })).toBeNull();
+    // The message still shows as held, and a mid-turn message is still the runtime's to hold.
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+    await waitFor(() => expect(enqueued.map((entry) => entry.kind)).toEqual(["send"]));
+  });
+
   it("#1328: with follow-ups sent now, a message mid-turn steers the running turn; holding sends it for the runtime to hold", async () => {
+    setCatalog(withFollowUpKind(workspaceItem("ready")));
     runtime.followUps = true;
     runtime.tabs = [tabInfo({ status: "in_progress" })];
     render(wrap(<CloudHarness />));

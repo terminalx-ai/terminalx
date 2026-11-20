@@ -312,7 +312,9 @@ describe("held follow-ups on a cloud or machine session (#1328)", () => {
     const client = { connection, hasCapability: (capability: string) => capabilities.includes(capability), interruptAgentTab: async (params: unknown) => (interrupts.push(params), { interrupted: true }) };
     return { connection, client: client as never, interrupts };
   };
-  const backend = (made: ReturnType<typeof connected> | null, options: { authority?: string; workspaceId?: string; organizationId?: string } = {}) => {
+  /** What an API that takes the `follow-up` kind lists (terminalx-saas#289). */
+  const KINDS = ["send", "steer", "stop", "permission-decision", "follow-up"];
+  const backend = (made: ReturnType<typeof connected> | null, options: { authority?: string; workspaceId?: string; organizationId?: string; mailboxKinds?: string[] | null } = {}) => {
     const organizationId = options.organizationId ?? "org-1";
     const workspaceId = options.workspaceId ?? "ws-held";
     return cloudSessionBackend({
@@ -326,6 +328,7 @@ describe("held follow-ups on a cloud or machine session (#1328)", () => {
       authority: options.authority ?? "manage",
       outbox: [],
       followUps: () => [],
+      mailboxKinds: options.mailboxKinds === undefined ? KINDS : options.mailboxKinds,
       wake: vi.fn(async () => undefined),
     });
   };
@@ -344,9 +347,13 @@ describe("held follow-ups on a cloud or machine session (#1328)", () => {
     expect(backend(null).changeHeldQueue).toBeTypeOf("function");
     // Not to a view-only reader.
     expect(backend(connected(["session/1", "follow-ups/1"]), { authority: "participate" }).changeHeldQueue).toBeUndefined();
-    // A machine takes them live only: none while it is away.
+    // An API that does not list the kind refuses every change for good: none offered, whatever the runtime says.
+    expect(backend(connected(["session/1", "follow-ups/1"]), { mailboxKinds: null }).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1", "follow-ups/1"]), { mailboxKinds: ["send", "steer", "stop", "permission-decision"] }).changeHeldQueue).toBeUndefined();
+    // A machine takes them live, without the API: none while it is away.
     expect(backend(connected(["session/1", "agent-commands/1", "follow-ups/1"]), { organizationId: "", workspaceId: "machine:m1" }).changeHeldQueue).toBeTypeOf("function");
     expect(backend(null, { organizationId: "", workspaceId: "machine:m1" }).changeHeldQueue).toBeUndefined();
+    expect(backend(connected(["session/1", "agent-commands/1", "follow-ups/1"]), { organizationId: "", workspaceId: "machine:m1", mailboxKinds: null }).changeHeldQueue).toBeTypeOf("function");
   });
 
   it("edits, deletes and sends one now by the command that sent it; reordering and pausing are off with why", async () => {

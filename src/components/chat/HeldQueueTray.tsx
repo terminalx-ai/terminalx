@@ -70,7 +70,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held",
    */
   unavailable?: { move?: string; pause?: string };
   /** Who sent a held message, and why this person may not change it, where that applies (a shared workspace). */
-  row?: (id: string) => { author?: string | null; locked?: string | null } | undefined;
+  row?: (id: string) => { author?: string | null; locked?: string | null; editLocked?: string | null } | undefined;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
@@ -249,7 +249,7 @@ export function HeldQueueTray({ queue, onChange, disabled, busy, scope = "held",
             <Undo2 aria-hidden className="size-2.5" />moved back
           </span>}
           <span className="ml-auto flex shrink-0 items-center gap-0.5 text-faint">
-            <RowButton label={`Edit follow-up ${index + 1}`} title={about?.locked ?? undefined} editId={item.id} disabled={rowLocked || !!editing || queue.next === item.id} onClick={() => {
+            <RowButton label={`Edit follow-up ${index + 1}`} title={about?.locked ?? about?.editLocked ?? undefined} editId={item.id} disabled={rowLocked || !!about?.editLocked || !!editing || queue.next === item.id} onClick={() => {
               lastEdited.current = item.id;
               setEditing({ id: item.id, text: item.text });
             }}><Pencil /></RowButton>

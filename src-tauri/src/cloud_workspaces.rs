@@ -864,6 +864,12 @@ pub struct CloudWorkspace {
     /// How many plain members hold a share; only for a caller with a role.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub shared_with: Option<u32>,
+    /// The agent command kinds the API takes for this workspace
+    /// (terminalx-saas#289). Absent from servers that take only the first
+    /// four, which refuse any other, so a kind added later (`follow-up`,
+    /// #1328) is offered only where it is listed.
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub agent_command_kinds: Option<Vec<String>>,
     /// Present on a preparation workspace only (PRO-20): when the server
     /// stops it, after which it cannot be started again.
     #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
@@ -7031,6 +7037,7 @@ mod tests {
                     authority: None,
                     you: None,
                     shared_with: None,
+                    agent_command_kinds: None,
                     preparation: None,
                     checkout: None,
                     runtime: None,

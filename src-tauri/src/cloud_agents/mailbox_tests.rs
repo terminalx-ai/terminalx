@@ -1460,11 +1460,22 @@ fn only_the_sender_or_a_manager_changes_a_held_follow_up() {
     assert_eq!(h.agents.follow_ups.list("tab-1")[0].text, "alice's");
     let alice = as_actor(lease(&h.agents, "f3", "follow-up", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "alice's, edited" })), "alice", "driver", false);
     assert_eq!(handle(&h.agents, &alice).outcome, "applied");
-    let boss = Lease {
+    let manager = |id: &str, plaintext: Value| Lease {
         actor: Actor { collaboration_revision: None, write_source: None, user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
-        ..lease(&h.agents, "f4", "follow-up", json!({ "v": 1, "op": "withdraw", "followUpId": "c1" }))
+        ..lease(&h.agents, id, "follow-up", plaintext)
     };
-    assert_eq!(handle(&h.agents, &boss).outcome, "applied");
+    // A manager does not put words in alice's message: it is still typed as hers, under her policy.
+    let reword = manager("f4", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "the manager's words" }));
+    let refused = handle(&h.agents, &reword);
+    assert_eq!(refused.category.as_deref(), Some("forbidden"));
+    assert_eq!(open_receipt(&h.agents, &reword, &refused)["message"], FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE);
+    let held = &h.agents.follow_ups.list("tab-1")[0];
+    assert_eq!((held.text.as_str(), held.actor_id.as_str()), ("alice's, edited", "alice"));
+    // It may send hers now, or withdraw it.
+    let release = manager("f5", json!({ "v": 1, "op": "release", "followUpId": "c1" }));
+    assert_eq!(handle(&h.agents, &release).outcome, "applied");
+    let withdraw = manager("f6", json!({ "v": 1, "op": "withdraw", "followUpId": "c1" }));
+    assert_eq!(handle(&h.agents, &withdraw).outcome, "applied");
     assert!(h.agents.follow_ups.list("tab-1").is_empty());
 }
 

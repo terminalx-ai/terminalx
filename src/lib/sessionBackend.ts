@@ -609,6 +609,9 @@ export function agentPtyServed(workspaceKey: string, served: boolean | null): bo
  */
 const followUpsSeen = new Map<string, boolean>();
 
+/** The mailbox kind that changes a held follow-up. */
+const FOLLOW_UP_KIND = "follow-up";
+
 export interface CloudSessionContext {
   key: string;
   /** `cloud:<orgId>:<workspaceId>`. */
@@ -625,6 +628,12 @@ export interface CloudSessionContext {
   authority: string | null;
   outbox: OutboxEntry[];
   followUps: (tabId: string) => HeldFollowUpInfo[];
+  /**
+   * The agent command kinds the cloud API takes for this workspace, as its
+   * list says (terminalx-saas#289); absent from an API that takes only the
+   * first four. Held follow-ups are changed only where it lists `follow-up`.
+   */
+  mailboxKinds?: readonly string[] | null;
   /** The header chip's state, for the line under a queued message (#1291). */
   workspaceStatus?: WorkspaceStatus;
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
@@ -756,9 +765,12 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   // Turn cards read what a turn changed while the runtime is up, whoever may read the chat.
   const readsCheckpoints = !!client?.hasCapability("checkpoints/1");
   // Held follow-ups (#1328): a machine's change is a live call; a cloud workspace's goes through the mailbox
-  // whether or not it is connected now, to a runtime that last said it takes it.
+  // whether or not it is connected now, to a runtime that last said it takes it, through an API that lists
+  // the `follow-up` kind (one that does not refuses every such change for good).
   if (client && !isDevScope(scope)) followUpsSeen.set(ctx.workspaceKey, changesFollowUps(scope, client));
-  const heldChanges = write && (isDevScope(scope) ? changesFollowUps(scope, client) : (followUpsSeen.get(ctx.workspaceKey) ?? false));
+  const heldChanges = write && (isDevScope(scope)
+    ? changesFollowUps(scope, client)
+    : (followUpsSeen.get(ctx.workspaceKey) ?? false) && !!ctx.mailboxKinds?.includes(FOLLOW_UP_KIND));
   const changeHeld = async (tabId: string, change: HeldQueueChange): Promise<SendResult> => {
     guard();
     switch (change.type) {

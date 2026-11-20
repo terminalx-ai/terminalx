@@ -41,6 +41,7 @@
         },
         "revision": 1790000007000,
         "authority": "participate",
+        "agentCommandKinds": ["send", "steer", "stop", "permission-decision", "follow-up"],
         "aFutureField": { "raw": "not passed on" }
       },
       "latestOperation": {
