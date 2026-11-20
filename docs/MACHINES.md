@@ -1963,7 +1963,13 @@ which runs in a child process because data privacy is one switch per process.
   Machines shows Restart runtime beside the error, naming what restarting
   stops; it stops only a runtime offered that way. An account pairing grant,
   which no one at the window asked for, never restarts the runtime: it only
-  makes that offer. Nothing pins or replaces a key over IPC. A separately launched headless runtime still
+  makes that offer, which reaches an open Settings → Machines at once and
+  one opened later. The offer lists what restarting would stop when it is
+  shown, and Restart runtime reads that again, asking once more when it
+  would now stop more. A status it cannot read counts as something
+  connected. An update that hands the runtime over during the restart is
+  relaunched the same way, once. The key provisioned before the stop is the
+  one the fresh launch pins. Nothing pins or replaces a key over IPC. A separately launched headless runtime still
   permits an unrelated interactive terminal. A same-user process that opens
   its own pseudo-terminal can pass the terminal check on supported Mac
   desktops and headless runtimes.

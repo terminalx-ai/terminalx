@@ -9,7 +9,7 @@ import { api, errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { MachineHostError } from "./MachineHostError";
-import { bootMachineHost, clearMachineHostError, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, setMachineListen, useMachineHost } from "@/lib/machines";
+import { clearMachineHostError, openMachineHost, createMachineCode, refreshMachineHost, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, setMachineListen, useMachineHost } from "@/lib/machines";
 import { MachineHosting } from "./MachineHosting";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
 import { useMachineVersion } from "@/lib/machineUpdate";
@@ -84,7 +84,7 @@ function thisMacListening(view: MachineHostView): MachineListenStatus {
 function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string) => void; showIntroduction: boolean }) {
   const host = useMachineHost();
   useEffect(() => {
-    void bootMachineHost();
+    void openMachineHost();
   }, []);
   const view = host.view;
   // A command's failure, or a restart a pairing grant could not make by itself (PRO-486).

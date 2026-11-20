@@ -449,6 +449,7 @@ struct WindowHost {
     root: PathBuf,
     relaunches: Arc<std::sync::atomic::AtomicUsize>,
     keys: Arc<crate::pairing::PairingManager>,
+    secrets: MemorySecrets,
 }
 
 static FRESH: Mutex<Option<(std::process::Child, Arc<Desktop>)>> = Mutex::new(None);
@@ -459,7 +460,8 @@ impl crate::local_runtime::window_consent::Relauncher<Desktop> for WindowHost {
     }
 
     fn provision(&self) -> Result<()> {
-        crate::serve_cli::consent::launch_public_key()?.map(drop).context("the window provisions its key")
+        // As the app's relaunch does (`AppHost::provision`).
+        crate::serve_cli::consent::provision_launch_key()?.map(drop).context("the window provisions its key")
     }
 
     fn connected(&self, stale: &Desktop) -> Vec<String> {
@@ -485,8 +487,12 @@ impl crate::local_runtime::window_consent::Relauncher<Desktop> for WindowHost {
 
     fn reattach(&self, _: &Desktop) -> Result<Arc<Desktop>> {
         // As `local_runtime::launch` does: the window's key pinned in the
-        // fresh runtime's environment.
-        let key = crate::serve_cli::consent::launch_public_key()?.expect("the window provisions its key");
+        // fresh runtime's environment. It is the key provisioned before the
+        // runtime was stopped, even when Keychain cannot be read by now.
+        self.secrets.fail_reads(true);
+        let key = crate::serve_cli::consent::launch_public_key();
+        self.secrets.fail_reads(false);
+        let key = key?.expect("the key provisioned before the stop");
         let mut command = child(&self.root, "runtime-relaunched");
         command.env(crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV, key).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
         // SAFETY: setsid is async-signal-safe.
@@ -536,8 +542,11 @@ fn window_adopts() {
         assert!(error.to_string().contains("missing from Keychain"), "{case}: {error:#}");
     }
 
+    // What the adopted runtime serves, read from it: nothing connected.
+    assert!(window_consent::connected(&desktop).is_empty(), "{case}");
+
     let relaunches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let host = WindowHost { root: root.clone(), relaunches: relaunches.clone(), keys: manager.clone() };
+    let host = WindowHost { root: root.clone(), relaunches: relaunches.clone(), keys: manager.clone(), secrets: secrets.clone() };
     window_consent::install(Box::new(move |stale| window_consent::relaunch_by(&host, stale, false)));
 
     // An account grant, with no one at the window: never a restart, only
@@ -569,6 +578,9 @@ fn window_adopts() {
     if !holds_item {
         assert!(secrets.stored(&service, CONSENT_ACCOUNT).is_some(), "{case}: the fresh launch saved a key");
     }
+    // The adopted runtime has gone: what it serves cannot be read, which
+    // is said, not taken for nothing.
+    assert_eq!(window_consent::connected(&desktop), [window_consent::CANNOT_TELL], "{case}");
     let (mut runtime, fresh) = FRESH.lock().unwrap().take().unwrap();
     // The fresh runtime verifies this window with no further restart, for
     // a grant too.

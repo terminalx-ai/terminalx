@@ -283,6 +283,59 @@ describe("Settings → Machines (screen 21.02)", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
   });
 
+  const grantOffer = (epoch: string, stops: string) =>
+    `runtime_restart_required:${epoch}: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops what it runs: ${stops}. Each agent picks up its conversation again when its tab next starts.`;
+
+  it("shows a restart offered while Machines was closed when it opens again (PRO-486 follow-up)", async () => {
+    view = { ...view, allowOperating: true, restartRequired: null };
+    const first = render(<MachinesSettings />);
+    await screen.findByTestId("machines-settings");
+    await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "machines_host_status")).toBe(true));
+    first.unmount();
+    // An account grant, with no window looking: the offer is made in the backend only.
+    view = { ...view, restartRequired: grantOffer("3d2e1f00-aaaa-4bbb-8ccc-000000000001", "the connection of MacBook") };
+    render(<MachinesSettings />);
+    expect((await screen.findByText(/was not started by this window/)).textContent).toContain("the connection of MacBook");
+    expect(screen.getByRole("button", { name: "Restart runtime" })).toBeTruthy();
+  });
+
+  it("shows a restart offered while Machines is open, as the backend announces it", async () => {
+    view = { ...view, allowOperating: true, restartRequired: null };
+    render(<MachinesSettings />);
+    await screen.findByTestId("machines-settings");
+    await waitFor(() => expect(mocks.listeners.has("machines_host_changed")).toBe(true));
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
+    act(() => mocks.listeners.get("machines_host_changed")!({ payload: { ...view, restartRequired: grantOffer("3d2e1f00-aaaa-4bbb-8ccc-000000000002", "Claude in api") } }));
+    expect(await screen.findByRole("button", { name: "Restart runtime" })).toBeTruthy();
+    // Withdrawn, as after a fresh runtime attached: it goes.
+    act(() => mocks.listeners.get("machines_host_changed")!({ payload: { ...view, restartRequired: null } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
+  it("asks again when Restart runtime would now stop more than was shown", async () => {
+    const EPOCH = "3d2e1f00-aaaa-4bbb-8ccc-000000000003";
+    view = { ...view, allowOperating: true, restartRequired: grantOffer(EPOCH, "Claude in api") };
+    let asked = 0;
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "local_runtime_restart_for_window") {
+        asked += 1;
+        if (asked === 1) throw grantOffer(EPOCH, "Claude in api; a terminal in web");
+        view = { ...view, restartRequired: null };
+        return null;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    await screen.findByText(/Restarting stops what it runs: Claude in api\./);
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    expect((await screen.findByText(/a terminal in web/)).textContent).toContain("Restarting stops what it runs: Claude in api; a terminal in web.");
+    expect(screen.queryByText(/runtime_restart_required/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(asked).toBe(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
   it("shows any other pairing-code failure as it is, with no restart offered", async () => {
     const denied = "TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.";
     view = { ...view, allowOperating: true };

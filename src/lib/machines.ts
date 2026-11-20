@@ -113,6 +113,15 @@ export function bootMachineHost(): Promise<void> {
   })());
 }
 
+/**
+ * For a view that opens: the first read and the event follow-up when nothing has booted yet, a fresh read otherwise,
+ * since what the event bus has not carried (a restart offered while no window looked, PRO-486) may have changed.
+ */
+export function openMachineHost(): Promise<void> {
+  if (!booted) return bootMachineHost();
+  return booted.then(refreshMachineHost);
+}
+
 /** Read the host again, as after a change made elsewhere. */
 export async function refreshMachineHost(): Promise<void> {
   try {
