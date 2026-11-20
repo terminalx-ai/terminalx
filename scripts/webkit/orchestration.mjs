@@ -787,6 +787,7 @@ try {
         let calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
         checks["each control saves its own setting, and a limit out of range is not saved"] = JSON.stringify(calls) === JSON.stringify([{ requireApproval: false }, { pieceLimit: 12 }, { workerMode: "acceptEdits" }]) && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "12";
         // A repository answers for itself, one setting at a time, and can follow the app again.
+        await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
         await nav.getByRole("button", { name: "local-0", exact: true }).click();
         const own = settings.getByTestId("repository-orchestrator-settings");
         await own.waitFor();
