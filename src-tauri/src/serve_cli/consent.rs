@@ -223,9 +223,34 @@ fn window_message(socket: &Path, nonce: &str) -> Vec<u8> {
     ].concat()
 }
 
+/// The public key the next runtime launch pins: the one a relaunch
+/// provisioned (`provision_launch_key`), or else the window's key, read or
+/// created now.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub(crate) fn launch_public_key() -> Result<Option<String>> {
+    if let Some(key) = PROVISIONED.lock().unwrap().take() {
+        return Ok(Some(key));
+    }
+    read_launch_key()
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn read_launch_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
+}
+
+/// A key read or saved before stopping a runtime so that the next launch
+/// pins it (PRO-486): that launch does not depend on reading Keychain again.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+static PROVISIONED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Read the window's key, or create and save it, for the next runtime
+/// launch to pin as it is.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+pub(crate) fn provision_launch_key() -> Result<Option<String>> {
+    let key = read_launch_key()?;
+    *PROVISIONED.lock().unwrap() = key.clone();
+    Ok(key)
 }
 
 /// The window's consent key is in a Keychain it cannot read or write.
