@@ -109,6 +109,7 @@ describe("what became of a message on its way to the agent (#722)", () => {
   it("puts what is in the agent's input box ahead of a change, and a replacement ahead of both", () => {
     expect(deliveryNote({})).toBeUndefined();
     expect(deliveryNote({ inputOccupied: true, sent: "x" })).toMatch(/input box already has text in it/);
+    expect(deliveryNote({ inputOccupied: true, inputChoice: true })).toMatch(/asking a question in its terminal/);
     expect(deliveryNote({ replaced: true, inputOccupied: true })).toMatch(/^Not answered/);
     expect(deliveryNote({ withdrawn: true })).toMatch(/^Not sent/);
     expect(deliveryNote({ withdrawn: true, unconfirmed: true })).toMatch(/^Delivery was not confirmed/);

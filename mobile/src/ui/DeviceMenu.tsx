@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { EyeOff, Eye, Laptop, Monitor, MoreHorizontal, Pencil, Plug, QrCode, Server, Trash2 } from "lucide-react-native";
+import { EyeOff, Eye, Laptop, Monitor, MoreHorizontal, Pencil, Plug, QrCode, Server, Trash2, Unplug } from "lucide-react-native";
 import { useApp } from "@mobile/state/AppProvider";
 import type { AvailableMachine, Machine, MachineIcon, PairedMachine } from "@mobile/state/machines";
 import { useMachines } from "@mobile/state/useMachines";
@@ -14,6 +14,7 @@ import { useTheme } from "@mobile/ui/theme";
  * one, online or offline, paired here or only on the account:
  *
  * - paired: Rename, Connect (off, with the reason, while it is offline),
+ *   Disconnect (the machine in use, where the screen offers it: PRO-465),
  *   Pair again, and Forget this machine after a confirmation;
  * - on the account only: Rename, Pair, and Hide on this phone.
  *
@@ -25,7 +26,7 @@ import { useTheme } from "@mobile/ui/theme";
  * edge (the rename sheet rides above the keyboard), closed by a tap outside;
  * Forget asks in a dialog in the middle of the screen.
  */
-export function useDeviceMenu(options: { onRemoved?(): void; onPairAgain?(): void; onScanServer?(): void; onConnect?(machine: PairedMachine): void } = {}) {
+export function useDeviceMenu(options: { onRemoved?(): void; onPairAgain?(): void; onScanServer?(): void; onConnect?(machine: PairedMachine): void; onDisconnect?(machine: PairedMachine): void } = {}) {
   const machines = useMachines();
   const [id, setId] = useState<string | null>(null);
   const all: Machine[] = [...machines.paired, ...machines.available, ...machines.hidden];
@@ -171,6 +172,8 @@ function PairedItems({ machine, busy, options, act, onForget, onClose }: { machi
   const blocked = machine.connectBlocked;
   return <>
     <MenuItem icon={<Plug size={18} color={palette.ink} />} label={machine.active ? "Reconnect" : "Connect"} detail={blocked ?? undefined} disabled={busy || blocked !== null} onPress={connect} />
+    {/* Drops the connection and keeps the pairing (PRO-465). */}
+    {options.onDisconnect && machine.active ? <MenuItem icon={<Unplug size={18} color={palette.ink} />} label="Disconnect" detail="Stays paired. Connect again from Machines." disabled={busy} onPress={() => { onClose(); options.onDisconnect!(machine); }} /> : null}
     {options.onPairAgain ? <MenuItem icon={<QrCode size={18} color={palette.ink} />} label="Pair again" disabled={busy} onPress={() => { onClose(); options.onPairAgain!(); }} /> : null}
     <MenuItem icon={<Trash2 size={18} color={palette.danger} />} label="Forget this machine" danger disabled={busy} onPress={onForget} />
   </>;

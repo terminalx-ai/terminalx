@@ -134,6 +134,10 @@ pub enum Composer {
     /// Something the app is not typing now, its words as drawn: what the
     /// reader typed in the terminal, or a prompt the CLI put back there.
     Holds(String),
+    /// A list of choices is drawn where the box was, one of them selected: a
+    /// question the CLI asks on its own, such as Codex's working-directory
+    /// prompt on resume (PRO-462). Nothing typed goes in until it is answered.
+    Choice,
     /// The box is not on screen (a picker or dialog is in its place), or
     /// this CLI's box cannot be read.
     Unseen,

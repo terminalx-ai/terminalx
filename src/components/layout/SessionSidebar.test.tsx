@@ -53,7 +53,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={store.openAgents} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const rowsIn = (element: HTMLElement) => within(element).getAllByRole("listitem").map((row) => row.querySelector("[title]")?.getAttribute("title"));
 
 async function boot(list: SessionEntry[]) {
@@ -74,7 +74,7 @@ describe("new-chat entry points", () => {
   it("opens the composer from the New session destination and a project's +, without creating a session", async () => {
     await boot([session("here", "/repos/web", new Date().toISOString())]);
     const onNewSession = vi.fn();
-    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+    render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={store.openHome} onNewSession={onNewSession} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
     // The titlebar only hides the sidebar: New session and Search are destinations (02.01).
     expect(within(screen.getByTestId("sidebar-titlebar")).getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(["Hide sidebar"]);
     fireEvent.click(within(screen.getByRole("toolbar", { name: "Destinations" })).getByRole("button", { name: "New session" }));

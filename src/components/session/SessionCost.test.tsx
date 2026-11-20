@@ -22,7 +22,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 vi.mock("@/lib/agentReadiness", () => ({ checkAgentReadiness: mocks.readiness }));
-vi.mock("@/lib/sessions", () => ({ upsertSession: mocks.upsertSession, openStats: mocks.openStats }));
+vi.mock("@/lib/sessions", () => ({ upsertSession: mocks.upsertSession }));
+vi.mock("@/lib/settingsLinks", () => ({ openStatsSettings: mocks.openStats }));
 vi.mock("@/lib/status", () => ({ useStatus: () => ({ usage: { windows: mocks.windows } }) }));
 vi.mock("@/lib/models", () => ({ modelLabel: (_harness: string, id: string) => ({ "gpt-6.1-sol": "GPT-6.1 Sol", "claude-sonnet-5-5": "Sonnet 5.5" })[id] ?? id }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));

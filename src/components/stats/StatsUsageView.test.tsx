@@ -150,7 +150,8 @@ describe("StatsUsageView", () => {
 
   it("renders the transcript-backed overview and provider totals", async () => {
     render(<StatsUsageView />);
-    expect(screen.getByText("TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here.")).toBeTruthy();
+    // Settings draws the page's title and description (PRO-463); Refresh is the page's own button.
+    expect(screen.getByRole("button", { name: "Refresh local analytics" })).toBeTruthy();
     expect(await screen.findByText("12.7B")).toBeTruthy();
     expect(screen.getByText("98%")).toBeTruthy();
     expect(screen.getByText("423 sessions")).toBeTruthy();
@@ -158,7 +159,6 @@ describe("StatsUsageView", () => {
     expect(screen.getByRole("button", { name: "Enable" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByText(/Agents spawned counts each live start of work/)).toBeTruthy();
     expect(screen.getByText(/Latest 30 local calendar dates/)).toBeTruthy();
-    expect(screen.getByText(/Cloud histories are not scanned here/)).toBeTruthy();
   });
 
   it("shows lifetime counters without a provider cache, through a failed refresh", async () => {

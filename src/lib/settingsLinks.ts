@@ -117,3 +117,15 @@ export function onOpenSettingRow(listener: (id: SettingId) => void): () => void 
   window.addEventListener(OPEN_SETTING_ROW, handler);
   return () => window.removeEventListener(OPEN_SETTING_ROW, handler);
 }
+
+const OPEN_STATS_SETTINGS = "terminalx:open-stats-settings";
+
+/** Ask the shell to open Settings → Stats & usage (PRO-463): a session's cost popover links there. */
+export function openStatsSettings(): void {
+  window.dispatchEvent(new Event(OPEN_STATS_SETTINGS));
+}
+
+export function onStatsSettingsRequest(listener: () => void): () => void {
+  window.addEventListener(OPEN_STATS_SETTINGS, listener);
+  return () => window.removeEventListener(OPEN_STATS_SETTINGS, listener);
+}

@@ -25,6 +25,7 @@ export function deliveryNote(delivery: Delivery): string | undefined {
   if (delivery.replaced) return "Not answered: the agent dropped this turn before replying, and took a later prompt in its place.";
   if (delivery.unconfirmed) return "Delivery was not confirmed. Check the conversation before sending again.";
   if (delivery.withdrawn) return "Not sent: the agent was stopped before it took this message.";
+  if (delivery.inputOccupied && delivery.inputChoice) return "Waiting: the agent is asking a question in its terminal. Answer it there, and this message goes in after.";
   if (delivery.inputOccupied) return "Waiting: the agent's input box already has text in it. Send or clear that text in the terminal, and this message goes in after it.";
   if (delivery.sent !== undefined) return "Changed on the way: this is what the agent received.";
   return undefined;

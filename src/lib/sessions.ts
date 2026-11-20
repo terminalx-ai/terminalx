@@ -38,7 +38,7 @@ interface State {
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
-  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "stats" | "project";
+  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project";
   /** The issues browser opens its new-issue form when it next shows; it sets this back. */
   newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
@@ -409,11 +409,6 @@ export function openProjectOverview(path: string) {
 /** The agent dashboard, like the issues browser, replaces the whole workspace. */
 export function openAgents() {
   set({ selectedSessionId: null, view: "agents", selectedAutomationId: null });
-}
-
-/** Local app activity and transcript-backed token analytics. */
-export function openStats() {
-  set({ selectedSessionId: null, view: "stats", selectedAutomationId: null });
 }
 
 /** Saved agent runs share the full workspace with issues and the dashboard. */

@@ -324,6 +324,9 @@ struct InputBox {
     marks: Vec<u64>,
     /// The tab was set waiting on the reader for them.
     made_waiting: bool,
+    /// What they wait on is a question the CLI drew in place of the box, not
+    /// text in it (PRO-462).
+    choice: bool,
     /// How many times the reader has stopped the turn from the chat. A
     /// message sent before the latest stop and not yet entered is withdrawn
     /// rather than typed: once the box empties, once the CLI is ready (#746),
@@ -2968,8 +2971,8 @@ impl SessionManager {
         let mut open: Vec<u64> = Vec::new();
         for event in events.iter().filter(|event| event.subagent.is_none()) {
             match &event.payload {
-                Payload::InputOccupied { prompt_seq, occupied: true } if !open.contains(prompt_seq) => open.push(*prompt_seq),
-                Payload::InputOccupied { prompt_seq, occupied: false } | Payload::PromptWithdrawn { prompt_seq, .. } => open.retain(|seq| seq != prompt_seq),
+                Payload::InputOccupied { prompt_seq, occupied: true, .. } if !open.contains(prompt_seq) => open.push(*prompt_seq),
+                Payload::InputOccupied { prompt_seq, occupied: false, .. } | Payload::PromptWithdrawn { prompt_seq, .. } => open.retain(|seq| seq != prompt_seq),
                 _ => {}
             }
         }
@@ -2978,7 +2981,7 @@ impl SessionManager {
             _ => Vec::new(),
         };
         for prompt_seq in open.into_iter().filter(|seq| !waiting.contains(seq)) {
-            events.push(self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false }, None));
+            events.push(self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false, choice: false }, None));
         }
     }
 
@@ -7362,7 +7365,8 @@ impl SessionManager {
             if let Engine::Cli(p) = &mut rt.engine {
                 p.input.marks.push(seq);
             }
-            self.publish(rt, Payload::InputOccupied { prompt_seq: seq, occupied: true }, None);
+            let choice = matches!(&rt.engine, Engine::Cli(p) if p.input.choice);
+            self.publish(rt, Payload::InputOccupied { prompt_seq: seq, occupied: true, choice }, None);
             self.wait_on_reader_for_input(rt);
         }
     }
@@ -7822,16 +7826,23 @@ impl SessionManager {
                 tui::Composer::Empty => break InputWait::Type(if held_since.is_some() { "cleared" } else { "empty" }),
                 tui::Composer::Unseen if held_since.is_none() => break InputWait::Type("unseen"),
                 tui::Composer::Unseen => {}
-                tui::Composer::Holds(held_text) => {
+                screen @ (tui::Composer::Holds(_) | tui::Composer::Choice) => {
+                    let choice = matches!(screen, tui::Composer::Choice);
                     let since = *held_since.get_or_insert_with(Instant::now);
-                    if !waiting && since.elapsed() >= tui::INPUT_SETTLE {
+                    if waiting {
+                        self.input_reason(&mut rt_arc.lock().unwrap(), choice);
+                    } else if since.elapsed() >= tui::INPUT_SETTLE {
                         // How much, never what: the diagnostics hold no prompt text.
-                        stage("input_occupied", serde_json::json!({ "chars": held_text.chars().count() }));
+                        let chars = match &screen {
+                            tui::Composer::Holds(held_text) => held_text.chars().count(),
+                            _ => 0,
+                        };
+                        stage("input_occupied", serde_json::json!({ "chars": chars, "choice": choice }));
                         if seq.is_none() {
                             break InputWait::Refused;
                         }
                         waiting = true;
-                        self.input_waits(&mut rt_arc.lock().unwrap(), seq);
+                        self.input_waits(&mut rt_arc.lock().unwrap(), seq, choice);
                     }
                 }
             }
@@ -7868,9 +7879,10 @@ impl SessionManager {
     /// told so of the message published under `seq`, and of every message
     /// sent and not yet typed behind it. A message sent to an idle CLI has
     /// the tab waiting on the reader meanwhile, not working.
-    fn input_waits(&self, rt: &mut TabRuntime, seq: Option<u64>) {
+    fn input_waits(&self, rt: &mut TabRuntime, seq: Option<u64>, choice: bool) {
         let Engine::Cli(p) = &mut rt.engine else { return };
         p.input.waiting = true;
+        p.input.choice = choice;
         let untyped = p.echoed.iter().filter(|echo| !echo.submitted && !echo.command).map(|echo| echo.seq);
         let mut fresh: Vec<u64> = Vec::new();
         for seq in seq.into_iter().chain(untyped) {
@@ -7880,9 +7892,24 @@ impl SessionManager {
         }
         p.input.marks.extend(&fresh);
         for prompt_seq in fresh {
-            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true }, None);
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true, choice }, None);
         }
         self.wait_on_reader_for_input(rt);
+    }
+
+    /// What the waiting messages wait on changed while they wait: the reader
+    /// answered the CLI's question and text is left in the box, or the other
+    /// way round. The chat is told again, so it says what is in the way.
+    fn input_reason(&self, rt: &mut TabRuntime, choice: bool) {
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        if p.input.choice == choice {
+            return;
+        }
+        p.input.choice = choice;
+        let marks = p.input.marks.clone();
+        for prompt_seq in marks {
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true, choice }, None);
+        }
     }
 
     /// The tab waits on the reader while the message it was to start on is
@@ -7901,10 +7928,11 @@ impl SessionManager {
     fn input_free(&self, rt: &mut TabRuntime, withdrawn: Option<u64>) {
         let Engine::Cli(p) = &mut rt.engine else { return };
         p.input.waiting = false;
+        p.input.choice = false;
         let marks = std::mem::take(&mut p.input.marks);
         let made_waiting = std::mem::take(&mut p.input.made_waiting);
         for prompt_seq in marks.into_iter().filter(|seq| Some(*seq) != withdrawn) {
-            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false }, None);
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false, choice: false }, None);
         }
         if made_waiting && rt.status == TabStatus::Waiting && rt.recovery.is_none() && rt.pending.is_empty() {
             self.set_status(rt, if rt.turn_open { TabStatus::InProgress } else { TabStatus::Idle });
