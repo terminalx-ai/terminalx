@@ -324,14 +324,25 @@ impl Client {
     }
 
     /// A call that gives up with [`Unresponsive`] after `timeout`.
-    pub fn call_within<T: DeserializeOwned>(&self, command: &str, mut params: Value, timeout: Duration) -> Result<T> {
+    pub fn call_within<T: DeserializeOwned>(&self, command: &str, params: Value, timeout: Duration) -> Result<T> {
+        self.call_witnessed(command, params, timeout, true)
+    }
+
+    /// [`Self::call_within`] with no witness, for a request the runtime
+    /// judges without one: the window's registration to a runtime that takes
+    /// none, or from a window that cannot read its key (`desktop`).
+    pub(crate) fn call_unwitnessed<T: DeserializeOwned>(&self, command: &str, params: Value, timeout: Duration) -> Result<T> {
+        self.call_witnessed(command, params, timeout, false)
+    }
+
+    fn call_witnessed<T: DeserializeOwned>(&self, command: &str, mut params: Value, timeout: Duration, witnessed: bool) -> Result<T> {
         if matches!(command, "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
             params["networkAuthority"] = serde_json::to_value(crate::github_process::ticket().forwarded(&self.epoch))?;
         }
-        // Making a pairing code and letting a computer in say who asks
-        // (`serve_cli::consent`): the runtime refuses its own agents.
+        // Making a pairing code, letting a computer in and registering as the
+        // window say who asks (`serve_cli::consent`): the runtime refuses its own agents.
         let run = self.socket.parent().context("the runtime's socket has no directory")?;
-        let witness = crate::serve_cli::consent::witness_for(command, run, &mut params)?;
+        let witness = if witnessed { crate::serve_cli::consent::witness_for(command, run, &mut params)? } else { None };
         let answer = match request(&self.socket, &self.token, command, params.clone(), timeout) {
             // A runtime from before the guard takes no `consent` and refuses
             // the field; it has no guard to satisfy.

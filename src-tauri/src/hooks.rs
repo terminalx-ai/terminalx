@@ -2418,6 +2418,53 @@ mod tests {
         assert_eq!(origin.transcript(&frame("", elsewhere.to_str().unwrap())), None);
     }
 
+    /// PRO-489: a control frame read and held as a handover begins is
+    /// answered by the runtime that takes over, once it thaws, and that
+    /// runtime sees its sender as the kernel says: what lets the window's
+    /// frames through there (`window::Registry::handed_over`).
+    #[cfg(unix)]
+    #[test]
+    fn a_control_frame_held_across_a_handover_is_answered_there_as_its_senders() {
+        let _home = crate::store::temp_home();
+        let endpoint = prepare_control().unwrap();
+        let (own, token) = (endpoint.socket.clone(), endpoint.token.clone());
+        let (_socket, bridge) = serve(endpoint, |_| HookReply::default(), |request| crate::control::ControlResponse::success(request.id, json!({"by": "old"}))).unwrap();
+        // Accepted before the freeze, which waits for it: the frame it sends
+        // once the bridge is frozen is read and held, not left in the queue.
+        let mut stream = std::os::unix::net::UnixStream::connect(&own).unwrap();
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait("the connection is accepted", &|| bridge.gate.lock().busy > 0);
+        let freezing = { let bridge = bridge.clone(); std::thread::spawn(move || bridge.freeze(Duration::from_secs(5))) };
+        wait("the bridge freezes", &|| bridge.gate.lock().frozen);
+        let request = json!({"id": "held", "token": token, "command": "probe", "params": {}});
+        stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+        freezing.join().unwrap().expect("frozen once the frame is held");
+        let sender = std::thread::spawn(move || {
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply).unwrap();
+            serde_json::from_str::<Value>(&reply).unwrap()
+        });
+        wait("the frame is read and held", &|| !bridge.gate.lock().held.is_empty());
+        let frozen = bridge.take(|_| false).unwrap();
+        assert_eq!(frozen.held.len(), 1);
+        let adopted = Adopted { own: frozen.own, published: frozen.published, held: frozen.held.into_iter().map(|(fd, line)| (std::os::unix::net::UnixStream::from(fd), line)).collect() };
+        let (_socket, replacement) = serve_adopted(ControlEndpoint::adopted(own, token), adopted, |_| HookReply::default(), |request| {
+            crate::control::ControlResponse::success(request.id, json!({"by": "new", "pid": caller_pid()}))
+        }).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!sender.is_finished(), "not answered before the new runtime thaws");
+        replacement.thaw();
+        let reply = sender.join().unwrap();
+        assert_eq!(reply["result"]["by"], "new", "{reply}");
+        assert_eq!(reply["result"]["pid"], json!(std::process::id()), "its sender, as the kernel says: {reply}");
+    }
+
     /// #765 review: a hook parked on a card answered after the bridge froze,
     /// before it was taken, gets its answer here, and the handover is called
     /// off for it: whether its thread is under way again, or has yet to wake

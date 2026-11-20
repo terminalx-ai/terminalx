@@ -830,6 +830,32 @@ mod tests {
         assert!(format!("{error:#}").contains("format 999"), "{error:#}");
     }
 
+    /// PRO-489: the window's process the runtime knew goes over in the
+    /// record and comes back as written, for `Registry::handed_over`.
+    #[test]
+    fn the_window_the_runtime_knew_goes_over_in_the_record() {
+        use std::os::fd::IntoRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handover.json");
+        let descriptor = || std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let (owner, own) = (descriptor(), descriptor());
+        let record = |window: Value| -> Record {
+            serde_json::from_value(json!({ "format": FORMAT, "from": env!("CARGO_PKG_VERSION"), "pid": std::process::id(), "owner": owner,
+                "control": { "socket": "/nowhere", "token": "t", "own": own, "published": null }, "window": window })).unwrap()
+        };
+        write(&path, &record(json!([4242, 99]))).unwrap();
+        let adopted = read(&path).unwrap();
+        assert_eq!(adopted.record.window, Some((4242, 99)));
+        // A record from a build before PRO-468 names no window.
+        let (owner, own) = (descriptor(), descriptor());
+        let mut older = serde_json::to_value(serde_json::from_value::<Record>(json!({ "format": FORMAT, "from": "0.2.30", "pid": std::process::id(), "owner": owner,
+            "control": { "socket": "/nowhere", "token": "t", "own": own, "published": null } })).unwrap()).unwrap();
+        older.as_object_mut().unwrap().remove("window");
+        std::fs::write(&path, older.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        assert_eq!(read(&path).unwrap().record.window, None);
+    }
+
     #[test]
     fn a_record_another_process_wrote_or_others_can_read_is_refused() {
         use std::os::unix::fs::PermissionsExt;

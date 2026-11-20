@@ -129,10 +129,15 @@ impl Registry {
 
     /// The window's process (pid and start time, PRO-468): the last one to
     /// register here, or the one the runtime this one replaced knew. Kept
-    /// until the next registration, so the window's frames held across a
-    /// handover, and those between its new attachment and its register
-    /// reply, are its own; the guard checks the start time against the
-    /// live process, so one that ended, or a later one given its pid, is not it.
+    /// until the next registration, so the same window process's frames held
+    /// across a handover, and those it sends between a new attachment and its
+    /// register reply, are its own. A window process this runtime has not
+    /// seen yet (an app launched afresh against a runtime that outlived the
+    /// old one) is not: while Bots is on its writes are refused until its
+    /// registration is answered. The guard checks the start time against the
+    /// live process, so one that ended, or a later one given its pid, is not
+    /// it. Where the window's key is pinned, only a registrant that proved it
+    /// is recognised (`control`, PRO-489).
     pub(crate) fn window_process(&self) -> Option<(i32, u64)> {
         *self.1.lock().unwrap_or_else(|e| e.into_inner())
     }

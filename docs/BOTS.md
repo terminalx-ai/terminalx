@@ -102,7 +102,37 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   `issues.assign`, `issues.label`) act with the owner's own GitHub or Linear
   sign-in. A session that works for a bot does them only when the bot has
   full access and is not paused. Stopping a pipeline, or having it look at
-  its pull request again, is left to any session.
+  its pull request again, is left to any session. While any bot is paused, a
+  process no tab holds and with no terminal does none of them either, as it
+  starts no work: it may be a bot's helper that left its tab. That includes
+  the owner's own script with no terminal (launchd, cron, a CI runner), which
+  runs them from a terminal, or once the bots are resumed.
+- **Only the window writes through the runtime directly.** The control token
+  is in every agent tab's environment, and a lease (`runtime.attach`) is
+  anyone's for the asking. So while Bots is on, a runtime whose window's key
+  is pinned (TerminalX on a Mac) takes for the window only a registrant that
+  proves it: `runtime.window.register` carries the consent witness signed
+  with the window's Keychain key, as pairing does, and the process that
+  proved it, as the kernel names it, is the window. Only that process (pid
+  and start time, carried across a runtime update) may then make the
+  `runtime.session.*` and `runtime.pty.*` calls that change anything, and
+  any `runtime.mobile.*` or `runtime.sharing.*` call, whose actor is in its
+  parameters. No other process is placed and let through there, whatever
+  session it runs in. The window's credential is its process, proved once,
+  rather than a secret it sends: no secret is written for a handover to
+  carry, and none can be read out of a request.
+- **Where no key can be pinned.** On Linux there is no store that keeps a
+  secret from another process of the same user, so the window cannot prove
+  itself: there, and on a runtime with no window, a registrant that runs in
+  no pane is taken for the window as before, and the changing calls are
+  otherwise taken only from a session no bot works for or a terminal of the
+  person's own. A bot's sessions still hire, delete and resume no bot there.
+  No window can confirm a resume, so a resume, or Resume all, applies only
+  when run in a terminal of the person's own (not a TerminalX tab, not under
+  the runtime), as `terminalx-serve pair` does.
+- **A caller that is gone steers nothing.** One that exited, or closed its
+  connection on macOS, before the runtime could place it, or whose place
+  could not be read, starts, steers, stops, merges and cleans up no run.
 - **What the agent is told fits one argument.** The role (16 KB read) and the
   memory (32 KB read) are cut again after decoding, without control
   characters, so role, memory and rules stay under 60 KB
@@ -123,7 +153,8 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   the command that does this, and a paused or read-only bot runs in plan
   mode and runs nothing. A full-access bot can do it, as it can run anything
   its owner can. A resume, or more access, is still only ever given in the
-  window.
+  window, or where there is none, in a terminal of the person's own. On a
+  Mac it cannot register as the window either: it has no key to prove it.
 
 ## Build map
 
@@ -154,7 +185,7 @@ issue.
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
-| PRO-489 | Hardening left over from reviews | n/a | In progress |
+| PRO-489 | Hardening left over from reviews | n/a | In review |
 
 ## Not in this epic
 

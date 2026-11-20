@@ -122,9 +122,21 @@ impl Desktop {
     /// The listener is private to this window. Only the owner publishes home discovery.
     fn register_window(&self, endpoint: crate::hooks::ControlEndpoint) -> Result<()> {
         let attachment = self.attachment()?;
-        let registered: Result<serde_json::Value> = self.client.call_within("runtime.window.register", serde_json::json!({
+        let registration = serde_json::json!({
             "epoch":attachment.epoch,"lease":attachment.lease,"socket":endpoint.socket,"token":endpoint.token
-        }), LIFECYCLE_TIMEOUT);
+        });
+        // Witnessed, with the window's proof (PRO-489): while Bots is on, a
+        // runtime whose window's key is pinned takes only a registrant that
+        // proves it for the window. A runtime from before that refuses the
+        // witness as an unknown field, and a window that cannot read its key
+        // makes none: both register as before, and the runtime judges.
+        let registered = match self.client.call_within::<serde_json::Value>(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), LIFECYCLE_TIMEOUT) {
+            Err(error) if error.downcast_ref::<super::client::Refused>().is_none_or(|refused| refused.message.contains("Invalid desktop registration")) => {
+                log::info!("register the window without its proof: {error:#}");
+                self.client.call_unwitnessed(crate::serve_cli::consent::WINDOW_REGISTER, registration, LIFECYCLE_TIMEOUT)
+            }
+            answered => answered,
+        };
         match registered {
             // Its own earlier lease was revoked before this one was taken, so
             // the window services belong to a different desktop process.

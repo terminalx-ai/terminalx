@@ -51,7 +51,13 @@
   that asks first has its owner do them. Its role, memory and rules are capped
   to fit one launch on Linux, a launch too long to make says what to shorten,
   and a csh or tcsh login shell starts a bot's chat. Bots stay off on Windows,
-  where TerminalX cannot yet tell a bot's commands from yours (PRO-489).
+  where TerminalX cannot yet tell a bot's commands from yours. While a bot is
+  paused, a script with no terminal (launchd, cron) writes to no issue and
+  merges no pipeline either; run it from a terminal. On a Mac only the
+  TerminalX window, proved with its Keychain key when it registers, changes
+  sessions and terminals through the runtime directly or acts for a paired
+  phone or a share. On Linux and servers, `terminalx bots resume` in a
+  terminal of your own resumes a bot at once (PRO-489).
 - Settings → Machines: Restart runtime is offered only for the runtime running
   now, restarts only what the window showed, and a failure stays on screen
   when a handover withdraws the offer (PRO-489).

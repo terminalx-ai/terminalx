@@ -92,11 +92,18 @@ pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "cr
 /// proof. The runtime judges that again itself (`bots::update_as`).
 pub const GIVES_MORE: &str = "givesMore";
 
-/// Whether this request needs a person's consent: a guarded command, or a
-/// guarded bots operation; an `update` only when it sets access or the
-/// reporting line, and the window did not find it gives nothing more.
+/// A window registering itself proves it is the window (PRO-489): the
+/// runtime recognises the registrant's process as the window, the only one
+/// that may then change sessions and terminals through the runtime directly
+/// while Bots is on (`control::refuse_bot_runtime_call`).
+pub const WINDOW_REGISTER: &str = "runtime.window.register";
+
+/// Whether this request needs a person's consent: a guarded command, the
+/// window's registration, or a guarded bots operation; an `update` only when
+/// it sets access or the reporting line, and the window did not find it
+/// gives nothing more.
 pub fn guards_request(command: &str, params: &Value) -> bool {
-    if guards(command) {
+    if guards(command) || command == WINDOW_REGISTER {
         return true;
     }
     if command != BOTS_COMMAND {
@@ -180,6 +187,13 @@ pub enum Window {
     Keyed([u8; 32]),
     /// A desktop launch without a pinned consent key.
     Unrecognisable,
+}
+
+impl Window {
+    /// Whether this window can prove it is the window: its key is pinned.
+    pub fn keyed(&self) -> bool {
+        matches!(self, Self::Keyed(_))
+    }
 }
 
 pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_KEY";
@@ -434,6 +448,19 @@ fn witness_proving(command: &str, run: &Path, params: &mut Value, key: Option<&E
     Ok(Some(witness))
 }
 
+/// A window keyed with `seed`, and a witness for `command` signed with it
+/// (or with none), as the window's client sends one: for other modules' tests.
+#[cfg(test)]
+pub(crate) fn window_for_test(seed: &[u8; 32]) -> Window {
+    Window::Keyed(Ed25519KeyPair::from_seed_unchecked(seed).unwrap().public_key().as_ref().try_into().unwrap())
+}
+
+#[cfg(test)]
+pub(crate) fn witness_for_test(command: &str, run: &Path, params: &mut Value, seed: Option<&[u8; 32]>) -> Result<Option<Witness>> {
+    let key = seed.map(|seed| Ed25519KeyPair::from_seed_unchecked(seed).unwrap());
+    witness_proving(command, run, params, key.as_ref())
+}
+
 fn sign_witness(key: &Ed25519KeyPair, socket: &Path, nonce: &str) -> String {
     STANDARD.encode(key.sign(&window_message(socket, nonce)))
 }
@@ -455,6 +482,12 @@ pub fn verify(run: &Path, params: &mut Value) -> Result<(), ControlError> {
 
 /// [`verify`], for a runtime whose window is `window`.
 pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(), ControlError> {
+    verify_peer_for(run, params, window).map(drop)
+}
+
+/// [`verify_for`], answering the process that proved it: the witness's, as
+/// the kernel says, for the caller to bind to the connection that asked.
+pub fn verify_peer_for(run: &Path, params: &mut Value, window: &Window) -> Result<libc::pid_t, ControlError> {
     let consent = params
         .as_object_mut()
         .and_then(|object| object.remove(PARAM))
@@ -475,7 +508,7 @@ pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(),
         }
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }
-    Ok(())
+    Ok(peer)
 }
 
 /// The pid of the process listening on `socket`, a private socket in `run`
@@ -1059,6 +1092,28 @@ mod tests {
             agent[PARAM][WINDOW_FIELD] = window[PARAM][WINDOW_FIELD].clone();
             not_window(verify_for(&run, &mut agent, &desktop), &format!("{command}: a borrowed proof"));
         }
+        std::fs::write(run.join("done"), b"").unwrap();
+    }
+
+    /// The window's registration is witnessed like pairing (PRO-489): with
+    /// the window's key it passes and names the process that proved it, the
+    /// one the runtime then recognises; a detached process without it does not.
+    #[test]
+    fn a_window_registering_proves_it_and_is_named_by_its_witness() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = [43u8; 32];
+        let desktop = keyed(&signing_key(&key));
+        assert!(guards_request(WINDOW_REGISTER, &json!({})), "the window's client always witnesses its registration");
+        let (pid, _, mut params) = detached_request(&run, WINDOW_REGISTER, Some(&key));
+        assert_eq!(verify_peer_for(&run, &mut params, &desktop).unwrap(), pid);
+        assert!(params.get(PARAM).is_none(), "taken out before the registration is read");
+        let (_, _, mut params) = detached_request(&run, WINDOW_REGISTER, None);
+        assert_eq!(verify_peer_for(&run, &mut params, &desktop).unwrap_err().code, "person_required");
+        assert!(desktop.keyed() && !Window::Headless.keyed() && !Window::Unrecognisable.keyed());
         std::fs::write(run.join("done"), b"").unwrap();
     }
 
