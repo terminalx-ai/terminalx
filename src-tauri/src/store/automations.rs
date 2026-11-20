@@ -326,6 +326,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            event_trigger: None,
             pipeline: None,
             created: "2026-09-02T12:00:00Z".into(),
             modified: "2026-09-02T12:00:00Z".into(),

@@ -149,6 +149,7 @@ function run(overrides: Partial<AutomationRun> = {}): AutomationRun {
 }
 
 beforeEach(() => {
+  automationStore.issueStates = {};
   catalog.models = structuredClone(initialModels);
   discovery.harnesses = structuredClone(initialHarnesses);
   automationStore.automations = [
@@ -597,6 +598,46 @@ describe("archiving a run when it completes", () => {
     fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
     await screen.findByRole("table", { name: "Automation runs" });
     expect(screen.queryByText("Archived")).toBeNull();
+  });
+});
+
+describe("event trigger sources", () => {
+  it("saves a GitHub pull request trigger from the picker and shows its pull request in the run history", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    expect(screen.getByRole("radio", { name: "Linear issue" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub pull request" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "acme/widgets" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Review pushes" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Review #{{number}}." } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review pushes" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({
+      issueTrigger: null,
+      workspace: "newWorktree",
+      eventTrigger: expect.objectContaining({ source: expect.objectContaining({ kind: "githubPullRequest", repo: "acme/widgets", events: ["opened", "pushed"] }) }),
+    }));
+    expect(screen.getByText("GitHub pull requests in acme/widgets: opened, new commits pushed, checked every 5 min")).toBeTruthy();
+  });
+
+  it("keeps the event trigger when the automation is switched off, and shows the trigger's notice", async () => {
+    const eventTrigger = { source: { kind: "githubPullRequest" as const, repo: "acme/widgets", events: ["pushed" as const], base: null, author: null, labels: [], draft: null, fromForks: false }, pollIntervalMinutes: 5, maxRunsPerTick: 3 };
+    automationStore.automations = automationStore.automations.map((value) => value.id === "automation-1" ? { ...value, workspace: "newWorktree", eventTrigger } : value);
+    automationStore.issueStates = { "automation-1": { automationId: "automation-1", notice: "Stopped waking on pull request #2 after 3 runs in a row with no push from anyone else." } };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText(/Stopped waking on pull request #2/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "Disable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, eventTrigger })));
+  });
+
+  it("links a pull request run to its pull request", async () => {
+    automationStore.runs = { "automation-1": [run({ trigger: "pullRequest", pullRequest: { number: 12, title: "Add cache", url: "https://github.com/acme/widgets/pull/12", head: "cache", headSha: "abc", base: "main", event: "pushed" } })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(await screen.findByText("Pushed · Add cache"));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/acme/widgets/pull/12");
   });
 });
 

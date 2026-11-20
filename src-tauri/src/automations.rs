@@ -57,6 +57,14 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
+mod sources;
+pub use sources::{AutomationEventSource, AutomationEventTrigger, SourceMatch};
+
+/// What a Linear issue or pull request source would wake on now (PRO-485).
+pub fn source_preview(project_path: &Path, source: &AutomationEventSource) -> Result<Vec<SourceMatch>> {
+    sources::preview(project_path, source)
+}
+
 pub mod precheck;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +235,9 @@ pub struct Automation {
     pub last_outcome: Option<AutomationRunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    /// A Linear issue or pull request source (PRO-485); never set with `issue_trigger`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<AutomationEventTrigger>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
     pub created: String,
@@ -272,6 +283,10 @@ pub struct AutomationInput {
     pub run_timeout_minutes: Option<u32>,
     #[serde(default)]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    /// Absent (a client that does not know event triggers) keeps the stored
+    /// one; `null` removes it.
+    #[serde(default, deserialize_with = "sources::present", skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<Option<AutomationEventTrigger>>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
 }
@@ -340,8 +355,14 @@ pub fn definition_from_input(
             bail!("Issue automations need a new worktree per run.");
         }
     }
+    let event_trigger = sources::trigger_after_save(input.event_trigger.clone(), existing, input.issue_trigger.is_some());
+    if let Some(trigger) = event_trigger.as_ref() {
+        sources::validate(trigger, input.issue_trigger.is_some(), input.workspace)?;
+    }
     let next = if let Some(trigger) = input.issue_trigger.as_ref() {
         now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
+    } else if event_trigger.is_some() {
+        sources::never()
     } else {
         next_run_after(&input.schedule, now)?
     };
@@ -377,6 +398,10 @@ pub fn definition_from_input(
             trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
             trigger
         }),
+        event_trigger: event_trigger.map(|mut trigger| {
+            trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            trigger
+        }),
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -394,6 +419,8 @@ pub enum AutomationTrigger {
     Scheduled,
     Manual,
     Issue,
+    LinearIssue,
+    PullRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,6 +767,7 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
     });
     let automation = if existing.is_some() { automation_store::replace(automation)? } else { automation_store::insert(automation)? };
     if reset_seen { automation_store::clear_seen(&automation.id)?; }
+    sources::saved(&automation.id, existing.as_ref().and_then(|value| value.event_trigger.as_ref()), automation.event_trigger.as_ref())?;
     emit_definitions(app);
     Ok(automation)
 }
@@ -1334,6 +1362,10 @@ fn spawn_issue_report(
     run_id: String,
     failed: bool,
 ) {
+    // Routed by the run, not the automation's trigger now: that may have changed since the run started.
+    if sources::is_linear_run(&automation_id, &run_id) {
+        return sources::spawn_report(app, automation_id, run_id, failed);
+    }
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("automation-issue-report".into())
@@ -1412,6 +1444,7 @@ fn finish_from_hook(
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
         archive_finished_run(app, &run);
+        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
         }
@@ -1521,6 +1554,7 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
+        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, true);
         }
@@ -1572,6 +1606,9 @@ pub struct AutomationIssueState {
     pub last_polled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    /// Something to know about the trigger that is not a failure to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 fn public_issue_state(
@@ -1582,6 +1619,7 @@ fn public_issue_state(
         automation_id: automation_id.into(),
         last_polled_at: state.last_polled_at.clone(),
         last_poll_error: state.last_poll_error.clone(),
+        notice: None,
     }
 }
 
@@ -1595,10 +1633,16 @@ fn emit_issue_state(app: &impl AutomationHost, automation_id: &str, state: &auto
 pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
     automation_store::list()?
         .into_iter()
-        .filter(|automation| automation.issue_trigger.is_some())
+        .filter(|automation| automation.issue_trigger.is_some() || automation.event_trigger.is_some())
         .map(|automation| {
-            let state = automation_store::load_seen(&automation.id)?.unwrap_or_default();
-            Ok(public_issue_state(&automation.id, &state))
+            if automation.event_trigger.is_some() {
+                return Ok(sources::public_state(&automation));
+            }
+            // One automation's unreadable record does not take the others' states with it.
+            Ok(match automation_store::load_seen(&automation.id) {
+                Ok(state) => public_issue_state(&automation.id, &state.unwrap_or_default()),
+                Err(error) => AutomationIssueState { automation_id: automation.id.clone(), last_polled_at: None, last_poll_error: Some(format!("{error:#}")), notice: None },
+            })
         })
         .collect()
 }
@@ -1620,11 +1664,17 @@ fn issue_poll_due(
 }
 
 fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message: &str) -> Result<()> {
+    record_source_error(app, automation, AutomationTrigger::Issue, message)
+}
+
+/// A source that could not be read, as one run row listed under `trigger`;
+/// the same error again counts as a repeat of that row.
+fn record_source_error(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, message: &str) -> Result<()> {
     if let Some(previous) = automation_store::list_runs(&automation.id)?
         .into_iter()
         .next()
     {
-        if previous.trigger == AutomationTrigger::Issue
+        if previous.trigger == trigger
             && previous.status == AutomationRunStatus::SkippedUnavailable
             && previous.issue.is_none()
             && previous.error.as_deref() == Some(message)
@@ -1640,7 +1690,7 @@ fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message
     }
     let mut run = new_run(
         &automation.id,
-        AutomationTrigger::Issue,
+        trigger,
         None,
         AutomationRunStatus::SkippedUnavailable,
     );
@@ -1761,6 +1811,12 @@ fn evaluate(app: &impl AutomationHost) -> Result<()> {
 }
 
 fn evaluate_automation(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
+    if automation.event_trigger.is_some() {
+        if let Err(error) = sources::evaluate(app, automation, now) {
+            log::warn!("event automation {}: {error:#}", automation.id);
+        }
+        return Ok(());
+    }
     if automation.issue_trigger.is_some() {
         if let Err(error) = evaluate_issue(app, automation, now) {
             log::warn!("issue automation {}: {error:#}", automation.id);
@@ -1916,6 +1972,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            event_trigger: None,
             pipeline: None,
             created: "2026-09-01T00:00:00Z".into(),
             modified: "2026-09-01T00:00:00Z".into(),
