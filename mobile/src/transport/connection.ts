@@ -7,7 +7,7 @@ import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
 import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
-import { closeDetail, connectionProblem } from "./connection-errors";
+import { closeDetail, ConnectionAttemptError, connectionProblem, decisiveProblem, pathProblem, type ConnectionProblem } from "./connection-errors";
 import { PHONE_CLOSE } from "./phone-close";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
@@ -454,7 +454,7 @@ export class HostConnection {
         client.close();
         const reason = `${redactEndpoint(endpoint)}: ${safeError(error)}`;
         if (racing()) this.log("info", "Direct path failed", reason);
-        throw new Error(reason);
+        throw new ConnectionAttemptError(reason, pathProblem(error));
       } finally {
         unwatch();
       }
@@ -482,7 +482,7 @@ export class HostConnection {
             // A grace credential refused after a rotation says nothing about the pairing.
             if (resume === credential.current) this.refusedBy(contributing, error);
             client.close();
-            throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`);
+            throw new ConnectionAttemptError(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`, pathProblem(error, resume === credential.current));
           }
           return { client, host, path: "relay", resumeVersion: resume.version };
         } catch (error) {
@@ -661,6 +661,7 @@ function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<Conne
     let failures = 0;
     let settled = false;
     const errors: string[] = [];
+    const problems: (ConnectionProblem | null)[] = [];
     for (const attempt of attempts) {
       void attempt.then((candidate) => {
         if (settled) return candidate.client.close();
@@ -668,8 +669,10 @@ function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<Conne
         resolve(candidate);
       }).catch((error: unknown) => {
         errors.push(safeError(error));
+        problems.push(connectionProblem(error));
         failures++;
-        if (!settled && failures === attempts.length) reject(new Error(errors.join("; ")));
+        // The joined reasons are for the log; the classification survives them (#1316).
+        if (!settled && failures === attempts.length) reject(new ConnectionAttemptError(errors.join("; "), decisiveProblem(problems)));
       });
     }
   });
