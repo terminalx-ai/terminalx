@@ -21,6 +21,8 @@ import { MachinesSection } from "@/components/machines/MachinesSection";
 import { CloudOrganizations } from "./CloudOrganizations";
 import { useSidebarOrder } from "@/lib/sidebarOrder";
 import { SortableStatusGroups, SidebarDragScope, SidebarSortList, SidebarOrderError } from "./SidebarSort";
+import { listedUnderBot } from "@/lib/botChats";
+import { useBotStore } from "@/lib/bots";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
@@ -42,7 +44,12 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   // One row per session: a pipeline's reviewer that was opened as a session of its own folds under its author's (PRO-331).
   const pipelines = useIssuePipelines();
   const folded = useMemo(() => legacyReviewerSessions(pipelines, store.sessions), [pipelines, store.sessions]);
-  const rows = useMemo(() => (folded.size ? store.sessions.filter((session) => !folded.has(session.id)) : store.sessions), [folded, store.sessions]);
+  // A bot's chats are listed under their bot (PRO-468), in this layout as in the projects one.
+  const { bots } = useBotStore();
+  const rows = useMemo(
+    () => (folded.size || bots.length ? store.sessions.filter((session) => !folded.has(session.id) && !listedUnderBot(session, bots)) : store.sessions),
+    [folded, bots, store.sessions],
+  );
   const selectedRow = store.selectedSessionId ? (folded.get(store.selectedSessionId) ?? store.selectedSessionId) : null;
   const conversations = useMemo(
     () => orderConversations(filter.active ? rows.filter((session) => filter.shows(session.id)) : rows, selectedRow, showArchived, sidebarSort, order),

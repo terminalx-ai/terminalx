@@ -292,6 +292,8 @@ for (const viewport of [{ width: 1000, height: 520 }, { width: 1280, height: 760
       const dialog = page.getByRole("dialog");
       const opened = await dialog.waitFor({ timeout: 5_000 }).then(() => true, () => false);
       await page.waitForTimeout(300);
+      // Measure the overlay once its fade-in is over: on a loaded runner 300 ms can end mid-fade (opacity 0.996).
+      if (opened) await page.evaluate(() => Promise.all((document.querySelector("[data-dialog-overlay]")?.getAnimations() ?? []).map((animation) => animation.finished.catch(() => undefined))));
       const modal = opened
         ? await page.evaluate(() => {
             const overlay = document.querySelector("[data-dialog-overlay]");

@@ -58,7 +58,8 @@ export function useLeaveBotsWhenOff() {
   const store = useSessionStore();
   const off = !!switches && switches.bots !== true;
   useEffect(() => {
-    if (off && store.view === "bots") openWelcome();
+    // A bot's own view too (PRO-468).
+    if (off && (store.view === "bots" || store.view === "bot")) openWelcome();
   }, [off, store.view]);
 }
 

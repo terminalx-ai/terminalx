@@ -1590,23 +1590,37 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
             _ => Err(invalid(format!("bots {command} needs {option} {what}."))),
         }
     };
+    // Every bots command says which session it runs in (PRO-468): one that
+    // works for a bot may pause but not hire, delete or resume, and the app
+    // checks the claim against the tab's own secret before it records a
+    // pause as the bot's.
+    let from_caller = |mut params: Value| {
+        if let Some(caller) = calling_session() {
+            params["caller"] = caller;
+        }
+        params
+    };
     match command.as_str() {
         "list" => rpc("bots.list", json!({}), tokens),
-        "pause-all" => rpc("bots.pauseAll", json!({}), tokens),
-        "resume-all" => rpc("bots.resumeAll", json!({}), tokens),
+        "pause-all" => rpc("bots.pauseAll", from_caller(json!({})), tokens),
+        "resume-all" => rpc("bots.resumeAll", from_caller(json!({})), tokens),
         "create" => {
             let role = said(tokens, "--role", "ROLE (cto, chief-of-staff, ux-designer, qa-engineer, release-manager, docs-writer, security-auditor or watcher)")?;
             let name = said(tokens, "--name", "NAME")?;
-            rpc("bots.create", json!({"role": role, "name": name}), tokens)
+            rpc("bots.create", from_caller(json!({"role": role, "name": name})), tokens)
         }
         "rename" => {
             let name = said(tokens, "--name", "NAME")?;
             let bot = tokens.required_front("bot")?;
-            rpc("bots.rename", json!({"bot": bot, "name": name}), tokens)
+            rpc("bots.rename", from_caller(json!({"bot": bot, "name": name})), tokens)
         }
-        "show" | "pause" | "resume" | "delete" => {
+        "pause" | "resume" => {
             let bot = tokens.required_front("bot")?;
-            rpc(&format!("bots.{command}"), json!({"bot": bot}), tokens)
+            rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
+        }
+        "show" | "delete" => {
+            let bot = tokens.required_front("bot")?;
+            rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
         }
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
@@ -2073,6 +2087,17 @@ mod tests {
             assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
         assert!(parse(&args(&["bots", "create", "--name", "Atlas"])).unwrap_err().message.contains("bots create needs --role ROLE (cto, chief-of-staff"));
+        // PRO-468: from inside a session every bots command says which, so a session working for a bot is told apart.
+        let caller = json!({"session": "bot-chat", "tab": "bot-tab"});
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+        let inside: Vec<Value> = [&["bots", "pause", "atlas"][..], &["bots", "resume", "atlas"], &["bots", "pause-all"], &["bots", "resume-all"], &["bots", "show", "atlas"], &["bots", "delete", "atlas"], &["bots", "create", "--role", "cto", "--name", "Echo"]].iter().map(|words| rpc_of(words).1).collect();
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+        assert_eq!(inside[0], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!(inside[1], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!((&inside[2]["caller"], &inside[3]["caller"]), (&caller, &caller));
+        assert_eq!(inside[4], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!(inside[5], json!({"bot": "atlas", "caller": caller}));
+        assert_eq!(inside[6], json!({"role": "cto", "name": "Echo", "caller": caller}));
         assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all or resume-all"));
         for said in ["terminalx bots list [--json]", "terminalx bots create --role ROLE --name NAME", "terminalx bots show|pause|resume|delete BOT", "terminalx bots rename BOT --name NAME", "terminalx bots pause-all|resume-all"] {
             assert!(help_text().contains(said), "{said}");

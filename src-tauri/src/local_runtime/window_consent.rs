@@ -193,7 +193,7 @@ pub(crate) fn guarded<R>(
 ) -> Result<Value> {
     let sent = send(runtime, params.clone());
     let error = match sent {
-        Err(error) if consent::guards(command) && unverifiable(&error) => error,
+        Err(error) if consent::guards_request(command, &params) && unverifiable(&error) => error,
         sent => return sent,
     };
     let Some(relaunch) = relaunch else { return Err(error) };
@@ -222,8 +222,9 @@ pub(crate) fn unattended<R: Attached>(
     repairable: bool,
     in_use: impl FnOnce(&R) -> Vec<String>,
 ) -> Result<Value> {
+    let guarded = consent::guards_request(command, &params);
     match send(runtime, params) {
-        Err(error) if repairable && consent::guards(command) && unverifiable(&error) => {
+        Err(error) if repairable && guarded && unverifiable(&error) => {
             log::warn!("the local runtime cannot verify this window ({error:#}); offering Restart runtime in Settings → Machines");
             Err(offer(RestartRequired { epoch: runtime.epoch().to_owned(), work: in_use(runtime) }))
         }

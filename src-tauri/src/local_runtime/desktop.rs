@@ -297,6 +297,31 @@ impl Desktop {
         super::window_consent::guarded(self, command, params, |runtime, params| runtime.machine_host_once(command, params), relaunch)
     }
 
+    /// A Bots action from this window (PRO-468). One that gives a bot more
+    /// carries this window's proof, and a runtime that cannot verify it is
+    /// repaired as for pairing: a fresh runtime when nothing would stop, else
+    /// Restart runtime offered (`window_consent::guarded`). An update that
+    /// lowers access asks for no proof: the runtime judges it again itself.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        use crate::serve_cli::consent;
+        let mut request = serde_json::json!({"operation": operation, "params": params});
+        if operation == "update" {
+            let access = request["params"]["patch"].get("access").filter(|access| !access.is_null()).and_then(|access| serde_json::from_value::<crate::bots::BotAccess>(access.clone()).ok());
+            let reports = request["params"]["patch"].get("reportsTo").is_some_and(|value| !value.is_null());
+            if let (Some(access), false) = (access, reports) {
+                let current = self.sessions()?.bots::<crate::bots::Bot>("get", serde_json::json!({"id": request["params"]["id"]})).ok();
+                let more = current.is_none_or(|bot| crate::bots::access_rank(&access) > crate::bots::access_rank(&bot.access) || matches!(access, crate::bots::BotAccess::Other(_)));
+                request[consent::GIVES_MORE] = serde_json::json!(more);
+            }
+        }
+        if !consent::guards_request(consent::BOTS_COMMAND, &request) {
+            return self.sessions()?.bots_request(request);
+        }
+        let relaunch = super::window_consent::installed().map(|relaunch| relaunch.as_ref() as super::window_consent::Relaunching<'_, Self>);
+        super::window_consent::guarded(self, consent::BOTS_COMMAND, request, |runtime, request| runtime.sessions()?.bots_request(request), relaunch)
+    }
+
     /// [`Self::machine_host`] with no one at the window to ask, as for an
     /// account pairing grant: a runtime that cannot verify the window is not
     /// restarted for it, and Settings → Machines offers the restart instead

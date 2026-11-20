@@ -43,7 +43,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
-import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, PrecheckTrial, PrecheckTryInput } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, AutomationEventSource, PrecheckTrial, PrecheckTryInput, SourceMatch } from "@/types/automations";
 import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
@@ -2131,6 +2131,8 @@ export const automationsApi = {
   issueStates: () => invoke<AutomationIssueState[]>("automation_issue_states"),
   issuePreview: (projectPath: string, repo: string, query: string) =>
     invoke<Issue[]>("automation_issue_preview", { projectPath, repo, query }),
+  sourcePreview: (projectPath: string, source: AutomationEventSource) =>
+    invoke<SourceMatch[]>("automation_source_preview", { projectPath, source }),
   create: (input: AutomationInput) => invoke<Automation>("automation_create", { input }),
   update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
   remove: (id: string) => invoke<void>("automation_delete", { id }),
@@ -2156,6 +2158,13 @@ export const botsApi = {
   /** The bot's standing instructions, its `ROLE.md`. */
   roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
   roleWrite: (id: string, text: string) => invoke<Bot>("bot_role_write", { id, text }),
+  /** The bot's home chat (PRO-468), made again when it is missing. */
+  homeChat: (id: string) => invoke<SessionEntry>("bot_home_chat", { id }),
+  /** Another conversation with the bot, in its home folder. */
+  newChat: (id: string) => invoke<SessionEntry>("bot_new_chat", { id }),
+  /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
+  dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
+  spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
 };
 
 export function errorMessage(e: unknown): string {

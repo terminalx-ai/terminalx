@@ -2079,6 +2079,14 @@ pub async fn automation_issue_preview(project_path: String, repo: String, query:
         .map_err(err)?
 }
 
+/// What a Linear issue or pull request trigger would wake on now (PRO-485).
+#[tauri::command]
+pub async fn automation_source_preview(project_path: String, source: crate::automations::AutomationEventSource) -> CmdResult<Vec<crate::automations::SourceMatch>> {
+    github_work(move || crate::automations::source_preview(Path::new(&project_path), &source).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 pub async fn automation_create(state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
     let sessions = state.sessions().map_err(err)?;
@@ -6141,7 +6149,8 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(
+pub async fn set_experimental_settings(
+    state: State<'_, AppState>,
     native_codex: Option<bool>,
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
@@ -6169,6 +6178,13 @@ pub fn set_experimental_settings(
         settings.experimental.local_vm_tasks = on;
     }
     store::settings::save(&settings).map_err(err)?;
+    // Bots switched off: the runtime stops the bots' running chats. Switched
+    // on again: their sessions are held to their bots' access once more (PRO-468).
+    if let Some(on) = bots {
+        if let Err(error) = bots_call::<serde_json::Value>(state, "reconcile", serde_json::json!({})).await {
+            log::warn!("hold the bots' sessions after Bots was switched {}: {error}", if on { "on" } else { "off" });
+        }
+    }
     Ok(settings.experimental)
 }
 
@@ -6178,8 +6194,11 @@ pub fn set_experimental_settings(
 // With Settings → Experimental → Bots off it refuses every one of these.
 
 async fn bots_call<T: serde::de::DeserializeOwned + Send + 'static>(state: State<'_, AppState>, operation: &'static str, params: serde_json::Value) -> CmdResult<T> {
-    let sessions = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.bots(operation, params).map_err(err)).await.map_err(err)?
+    // Through the window's own path: what gives a bot more carries its proof (PRO-468).
+    let Some(runtime) = state.runtime() else {
+        return Err(err(state.sessions().err().unwrap_or_else(|| anyhow::anyhow!("The runtime is not attached."))));
+    };
+    tauri::async_runtime::spawn_blocking(move || runtime.bots(operation, params).and_then(|value| Ok(serde_json::from_value(value)?)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -6246,6 +6265,30 @@ pub async fn bot_role_read(state: State<'_, AppState>, id: String) -> CmdResult<
 #[tauri::command]
 pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String) -> CmdResult<crate::bots::Bot> {
     bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text})).await
+}
+
+/// The bot's home chat (PRO-468), made again when it is missing.
+#[tauri::command]
+pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "homeChat", serde_json::json!({"id": id})).await
+}
+
+/// Another conversation with the bot, in its home folder.
+#[tauri::command]
+pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "newChat", serde_json::json!({"id": id})).await
+}
+
+/// The owner said no to a resume asked for from the `terminalx` CLI (PRO-468).
+#[tauri::command]
+pub async fn bot_dismiss_resume(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "dismissResume", serde_json::json!({"id": id})).await
+}
+
+/// What a bot's sessions spent today, at Stats' prices (PRO-468).
+#[tauri::command]
+pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "spentToday", serde_json::json!({"id": id})).await
 }
 
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
