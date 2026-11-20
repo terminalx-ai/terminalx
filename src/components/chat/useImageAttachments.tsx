@@ -58,6 +58,12 @@ export interface Attachments {
   fileRef: RefObject<HTMLInputElement | null>;
   /** Queue browser `File`s (from paste, the DOM drop path, or the hidden picker). */
   addFiles: (list: File[], verb?: OfferVerb) => Promise<void>;
+  /**
+   * Queue files already read into memory, by the same rules as any other
+   * (a pull request's context file read on a runtime, #1329). On a composer
+   * that takes images only they are left out, and it says so.
+   */
+  addInputs: (list: FileInput[]) => Promise<void>;
   /** Open the native picker, or the hidden browser picker outside Tauri. */
   chooseFiles: () => Promise<void>;
   remove: (id: string) => void;
@@ -129,6 +135,9 @@ function pathCandidate(facts: FileFacts): Candidate {
 
 const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
 
+/** How many bytes a base64 text decodes to. */
+const base64Bytes = (data: string) => Math.max(0, Math.floor((data.length * 3) / 4) - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0));
+
 /**
  * Everything a composer needs to carry files with a prompt (PRO-290): the
  * chips, the native and browser pickers, paste, and both drop paths. Any
@@ -137,12 +146,14 @@ const baseName = (path: string) => path.split(/[\\/]/).pop() || path;
  * counted and said in a toast. Dropped paths reach the app through the Tauri
  * window, not the DOM; a folder dropped there becomes an `@path` mention.
  *
- * A cloud tab (`mentionFiles` false) takes images only, as before: nothing
- * is stored for it, and its own limit of 8 is checked on upload. A machine
- * tab (`mentionFiles` false, `anyFile` true, PRO-407) takes any file by the
- * same rules as a local tab; its files are uploaded to the machine when the
- * message is sent, and a dropped folder is left out, since its path here
- * names nothing there.
+ * A tab on a runtime that takes images only (`mentionFiles` and `anyFile`
+ * false: a cloud workspace from before `composer/4`) takes images only:
+ * nothing is stored for it, and its own limit of 8 is checked on upload. A
+ * machine or cloud tab whose runtime takes files (`mentionFiles` false,
+ * `anyFile` true; PRO-407, #1329) takes any file by the same rules as a local
+ * tab; a dropped file is uploaded to the runtime when the message is sent
+ * rather than mentioned by its path here, and a dropped folder is left out,
+ * since its path here names nothing there.
  *
  * Shared by the in-session composer and the new-session screen so the first
  * prompt of a session can carry files like every one after it.
@@ -252,6 +263,11 @@ export function useAttachments({
       images.push({ name: f.name, image: { mediaType: f.type, data, name: f.name }, previewUrl: URL.createObjectURL(f) });
     }
     await addCloudImages(images, skipped);
+  }), [imagesOnly, offer, addCloudImages, readInput]);
+
+  const addInputs = useCallback((list: FileInput[]) => readInput(async () => {
+    if (imagesOnly) return addCloudImages([], list.map((file) => file.name));
+    await offer(list.map((file): Candidate => ({ name: file.name, size: base64Bytes(file.data ?? ""), read: async () => ({ file }) })), "picked");
   }), [imagesOnly, offer, addCloudImages, readInput]);
 
   const addPaths = useCallback(
@@ -412,8 +428,8 @@ export function useAttachments({
   // One stable object per change, so a composer's send callback can list it
   // as a dependency without being rebuilt on every render.
   return useMemo(
-    () => ({ attachments, notAdded, imagesOnly, dragging, fileRef, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps }),
-    [attachments, notAdded, imagesOnly, dragging, addFiles, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps],
+    () => ({ attachments, notAdded, imagesOnly, dragging, fileRef, addFiles, addInputs, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps }),
+    [attachments, notAdded, imagesOnly, dragging, addFiles, addInputs, chooseFiles, remove, clear, setAside, images, files, notice, dropZoneProps],
   );
 }
 

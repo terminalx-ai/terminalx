@@ -43,6 +43,10 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   attachments folder can store), and a send names them (`files: [{ id }]`,
 ///   with its images at most 10). The runtime stores them in the session's
 ///   attachments folder on its own computer and hands the agent those paths.
+/// - `composer/5` (#1329): the composer's `#` list, read with the runtime's
+///   own `gh`. `session.prs` lists the pull requests a number or words match
+///   in the session's checkout; `session.prContext` reads one's context file
+///   (Markdown), which the composer then attaches as a file (`composer/4`).
 /// - `ports/1` (PRO-28): streams to TCP ports on the workspace's loopback,
 ///   for private previews (`remote/ports.rs`, docs/CLOUD-PREVIEWS.md).
 /// - `mirror/1` (PRO-25): `mirror.manifest`, the files a desktop may copy
@@ -100,8 +104,8 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
-pub const CAPABILITIES: [&str; 31] = [
-    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1",
+pub const CAPABILITIES: [&str; 32] = [
+    "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
     "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1",
 ];
 
@@ -236,6 +240,8 @@ pub const METHODS: &[Method] = &[
     method("session.commands", "composer/1", Participate, false),
     method("session.files", "composer/2", Participate, false),
     method("session.attach", "composer/3", Participate, true),
+    method("session.prs", "composer/5", Participate, false),
+    method("session.prContext", "composer/5", Participate, false),
     method("pty.create", "pty/1", Manage, true),
     method("pty.list", "pty/1", Participate, false),
     // Input and size belong to the terminal's controller; `pty.control`
@@ -423,6 +429,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "composer/1" => &["session.commands"],
         "composer/2" => &["session.files"],
         "composer/3" => &["session.attach"],
+        "composer/5" => &["session.prs", "session.prContext"],
         CHECKPOINTS => &["session.turnCheckpoint", "session.keepTurn", "session.undoTurn", "session.restoreUndo", "session.reset", "session.fork"],
         HANDOFF => &["session.handoff", "session.handoffContext"],
         // `composer/4` adds no method: `session.attach` takes `kind: "file"`

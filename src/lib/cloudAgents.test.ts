@@ -2,7 +2,7 @@ import { configureCloudReadMarkers, reconcileCloudReadMarker } from "./cloudRead
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
-import { CLOUD_FILES_REFUSED } from "@/lib/cloudComposer";
+import { CLOUD_FILES_NEED_CONNECTION, CLOUD_FILES_OLD_RUNTIME } from "@/lib/cloudComposer";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -134,6 +134,7 @@ class FakeBackend {
           kind: args.kind as OutboxEntry["kind"],
           text: (payload.text as string) ?? null,
           ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images.length } : {}),
+          ...(Array.isArray(payload.files) && payload.files.length ? { files: payload.files.length } : {}),
           requestId: (payload.requestId as string) ?? null,
           state: "queued",
           wake: "not-needed",
@@ -961,7 +962,7 @@ describe("cloud agent tabs store", () => {
     expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
   });
 
-  it("PRO-407: uploads a machine message's files first, then names them in session.send; a cloud agent never gets one", async () => {
+  it("PRO-407: uploads a machine message's files first, then names them in session.send", async () => {
     const machine = { organizationId: "", workspaceId: "machine:m3" };
     await loadCloudAgents(machine);
     applyLiveTabs(machine, [tabInfo()]);
@@ -976,11 +977,50 @@ describe("cloud agent tabs store", () => {
     // The file itself never rides in the message.
     expect(JSON.stringify(send![1])).not.toContain("IyBQbGFu");
 
-    // A cloud workspace's agent takes images only: nothing is uploaded or enqueued.
+  });
+
+  it("#1329: uploads a cloud message's files to the runtime first, then names them in the mailbox command", async () => {
     applyLiveTabs(scope, [tabInfo()]);
-    const cloud = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: () => true });
-    await expect(sendToCloudAgent(scope, "t-1", "read this", cloud, [], { files: [{ name: "plan.md", data: "IyBQbGFu" }] })).rejects.toThrow(CLOUD_FILES_REFUSED);
-    expect(cloud.mutate).not.toHaveBeenCalled();
+    const order: string[] = [];
+    const mutate = vi.fn(async (method: string, _params: Record<string, unknown>) => {
+      order.push(method);
+      return {};
+    });
+    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      order.push(cmd);
+      return backend.handle(cmd, args);
+    });
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" || capability === "composer/4" });
+    const file = { name: "plan.md", data: "IyBQbGFu", mediaType: "text/markdown" };
+    const entry = await sendToCloudAgent(scope, "t-1", "read this", client, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }], { files: [file] });
+    const [attachFile, attachImage] = mutate.mock.calls;
+    expect(attachFile![1]).toEqual({ sessionId: "s-1", tabId: "t-1", attachmentId: expect.stringMatching(/^att-/), kind: "file", name: "plan.md", mediaType: "text/markdown", offset: 0, data: "IyBQbGFu", last: true });
+    expect(attachImage![1]).toMatchObject({ attachmentId: expect.stringMatching(/^att-/), data: "YWJj" });
+    const payload = backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload as { text: string; files: { id: string }[] };
+    expect(payload).toEqual({
+      text: "read this",
+      images: [{ id: (attachImage![1] as { attachmentId: string }).attachmentId, mediaType: "image/png", name: "shot.png" }],
+      files: [{ id: (attachFile![1] as { attachmentId: string }).attachmentId, name: "plan.md", mediaType: "text/markdown" }],
+    });
+    expect(order.lastIndexOf("session.attach")).toBeLessThan(order.indexOf("cloud_agent_enqueue"));
+    // The file itself never rides in the command.
+    expect(JSON.stringify(payload)).not.toContain("IyBQbGFu");
+    expect(entry.files).toBe(1);
+
+    // Send again carries the same file again, under the same upload id.
+    await sendAgain(scope, { ...entry, state: "outcome-unknown" }, client);
+    const again = backend.calls.filter((c) => c.cmd === "cloud_agent_enqueue")[1]!.args.payload as { files: { id: string }[] };
+    expect(again.files).toEqual(payload.files);
+  });
+
+  it("#1329: sends nothing when a cloud message's files cannot reach the runtime", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const files = [{ name: "plan.md", data: "IyBQbGFu" }];
+    await expect(sendToCloudAgent(scope, "t-1", "read this", null, [], { files })).rejects.toThrow(CLOUD_FILES_NEED_CONNECTION);
+    // A runtime from before `composer/4` takes images only.
+    const old = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: (capability: string) => capability === "composer/3" });
+    await expect(sendToCloudAgent(scope, "t-1", "read this", old, [], { files })).rejects.toThrow(CLOUD_FILES_OLD_RUNTIME);
+    expect(old.mutate).not.toHaveBeenCalled();
     expect(backend.calls.some((call) => call.cmd === "cloud_agent_enqueue")).toBe(false);
   });
 

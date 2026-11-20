@@ -2022,3 +2022,35 @@ fn oversized_file_contents_keep_actual_revision_byte_sizes() {
     let deleted = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
     assert!(deleted["afterSize"].is_null());
 }
+
+/// #1329: the composer's `#` list of a remote tab is read with the
+/// workspace's own `gh`, in the session's checkout: a number names one pull
+/// request (an unknown number none), words list open ones, and picking one
+/// reads its context file as Markdown.
+#[test]
+fn mention_lookups_read_the_workspaces_pull_requests_with_its_gh() {
+    let f = fixture();
+    let pr = json!({
+        "number": 7, "title": "Fix the parser", "body": "Why it broke", "url": "https://github.test/octo/repo/pull/7",
+        "state": "OPEN", "isDraft": false, "baseRefName": "main", "headRefName": "fix/parser", "author": { "login": "octocat" },
+        "additions": 3, "deletions": 1, "changedFiles": 1, "files": [{ "path": "src/parser.rs", "additions": 3, "deletions": 1 }],
+        "statusCheckRollup": [], "isCrossRepository": false,
+    });
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+
+    let found = f.git.mention_prs(&f.root, "#7").unwrap();
+    assert_eq!(found.iter().map(|pr| (pr.number, pr.title.as_str())).collect::<Vec<_>>(), [(7, "Fix the parser")]);
+    assert!(f.git.mention_prs(&f.root, "99").unwrap().is_empty(), "an unknown number is no pull request, not an error");
+    assert_eq!(f.git.mention_prs(&f.root, "").unwrap().len(), 1, "an empty query lists open pull requests");
+
+    let text = f.git.mention_pr_context(&f.root, 7).unwrap();
+    assert!(text.starts_with("# #7 Fix the parser"), "{text}");
+    assert!(text.contains("Why it broke") && text.contains("- src/parser.rs: +3 / -1"), "{text}");
+    assert_eq!(f.git.mention_pr_context(&f.root, 0).unwrap_err().code, "invalid_params");
+    assert!(f.gh_calls().contains("\"view\", \"7\""));
+
+    // The runtime's own refusal comes back, not a bare message.
+    f.fault("auth-expired");
+    assert_eq!(f.git.mention_prs(&f.root, "fix").unwrap_err().code, "auth_failed");
+    assert_eq!(f.git.mention_pr_context(&f.root, 7).unwrap_err().code, "auth_failed");
+}

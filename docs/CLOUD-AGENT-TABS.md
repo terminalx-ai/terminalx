@@ -466,7 +466,27 @@ instead of from this computer.
 
   A file dropped onto the composer from this computer is not turned into a
   mention for a cloud tab (it is for a local one): its path here names
-  nothing on the workspace. A dropped image is attached.
+  nothing on the workspace. It is attached instead: any file with
+  `composer/4`, only an image before it. A dropped folder is left out, and
+  the composer says so.
+
+- **Pull requests** (`composer/5`, #1329). The composer's `#` list asks the
+  runtime, whose own `gh` runs in the session's checkout there, so it names
+  the workspace's pull requests, not those of a checkout on this computer:
+  `session.prs { sessionId, query }` answers `{ prs }` as a local tab's list
+  is made (`github::search_prs`: a number names one pull request, open or
+  not; words match open ones' titles and authors). Picking one reads its
+  context file there, `session.prContext { sessionId, number }` →
+  `{ number, name: "pr-<n>.md", text, truncated }` (Markdown: title,
+  description, changed files; at most 512 KiB), and the composer attaches it
+  as a file (`composer/4`) in place of the `#` token, so it reaches the agent
+  as any other file does, stored in the session's attachments folder there.
+  It is never a `@` mention of a path on the runtime, which PRO-88 would
+  refuse to a plain driver. Reading the list needs only sight of the
+  session; reading a context file needs what attaching needs. Both are slow
+  methods (they ask GitHub). Only while the runtime is connected: a stopped
+  workspace is not woken to list pull requests, and `#` is then text. A
+  machine tab's `#` list is its runtime's in the same way.
 
 - **Images** (`composer/3`). A mailbox command holds at most 64 KiB and an
   RPC frame 1 MiB, so an image does not travel inside the message:
@@ -515,10 +535,10 @@ instead of from this computer.
   from before `composer/3` says it needs an update; the message is never
   sent without its images.
 
-- **Files other than images, on a machine** (`composer/4`, PRO-407). A
-  machine's agent takes any file a local tab takes (PRO-290: at most 10
-  per message with its images, 25 MB each, no name TerminalX uses for its
-  own files). A cloud workspace's agent still takes images only.
+- **Files other than images** (`composer/4`; a machine, PRO-407; a cloud
+  workspace, #1329). The agent takes any file a local tab takes (PRO-290: at
+  most 10 per message with its images, 25 MB each, no name TerminalX uses
+  for its own files).
   1. The desktop uploads each file as it uploads an image, with
      `session.attach { …, kind: "file", name, mediaType }`. `name` is the
      file's last name segment and `mediaType` may be empty; a file picked or
@@ -527,9 +547,13 @@ instead of from this computer.
      never does. An empty file is one empty last part. The machine refuses a
      reserved name (`file-refused`) or a file over 25 MB (`file-too-large`)
      in a sentence the composer shows with the file's name.
-  2. The message names them: `files: [{ id, name, mediaType? }]` in the live
-     `session.send` (or a `send` under `agent-commands/1`). Text is optional
-     when there are files. A `steer` never carries files.
+  2. The message names them: `files: [{ id, name, mediaType? }]` in the
+     encrypted plaintext of a mailbox `send` (a cloud workspace), or in the
+     live `session.send` (a machine, or a `send` under `agent-commands/1`).
+     Text is optional when there are files. A `steer` never carries files.
+     The outbox keeps how many files a message names, as it keeps its
+     images' count, and "Send again" uploads them again or says they are
+     gone.
   3. When the message is typed (or queued behind a running turn), the
      machine moves the uploads into one new folder of the session's
      attachments folder there (`$TERMINALX_HOME/attachments/<session>/…`,
@@ -539,12 +563,15 @@ instead of from this computer.
      them. A message naming a file that is not there in full is refused with
      `attachment-missing` before anything about the tab changes.
 
-  The composer of a machine tab takes any file as a local tab's does
+  The composer of a machine tab, and of a cloud tab whose connected runtime
+  serves `composer/4`, takes any file as a local tab's does
   (`SessionBackendCaps.files`); a folder dropped on it is left out and the
-  composer says so, since its path here names nothing on the machine.
+  composer says so, since its path here names nothing there. Sending files
+  to a stopped workspace starts it, as images do, and keeps the message.
 
   A machine from before `composer/4` takes images only: the composer says to
-  update it, and nothing is uploaded. In the transcript the files show as
+  update it, and nothing is uploaded. So does a cloud workspace's runtime
+  from before it. In the transcript the files show as
   chips by name; they are on the machine, so they do not open here.
 
   In the transcript, an image sent to a cloud tab shows by name: its file

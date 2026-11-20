@@ -24,7 +24,7 @@ import {
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { CLOUD_FILES_REFUSED, MACHINE_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_FILES_NEED_RUNNING, MACHINE_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudComposerPrs, cloudFilesBlocked, cloudImagesBlocked, type ComposerCommands, type ComposerFiles, type ComposerPrs } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
 import { selectSessionTab, type TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
@@ -51,10 +51,12 @@ export interface SessionBackendCaps {
   /** Images go with a prompt. */
   images: boolean;
   /**
-   * Files other than images go with a prompt: a local tab (PRO-290), and a
-   * machine that serves `composer/4` (PRO-407). Never a cloud workspace's tab.
-   * While a machine is away it is true: the send is held until it is back,
-   * and a machine from before `composer/4` then says it needs an update.
+   * Files other than images go with a prompt: a local tab (PRO-290), a
+   * machine that serves `composer/4` (PRO-407), and a cloud workspace whose
+   * connected runtime serves it (#1329; while it is not connected, as for
+   * images, none attach). While a machine is away it is true: the send is
+   * held until it is back, and a machine from before `composer/4` then says
+   * it needs an update.
    */
   files: boolean;
   /** The local recovery flows (retry safely, resume after a stop). */
@@ -371,6 +373,13 @@ export interface SessionBackend {
    * runtime from before `composer/2`.
    */
   files?(): ComposerFiles | null;
+  /**
+   * Cloud and machine tabs (#1329): the composer's `#` list, from the
+   * runtime's own `gh`, a picked pull request attached as a context file.
+   * Null while it is not connected, for a view-only reader, and on a runtime
+   * from before `composer/5`. A local tab's composer asks this computer.
+   */
+  prs?(): ComposerPrs | null;
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
@@ -722,7 +731,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     kind: "cloud",
     key: ctx.key,
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
-    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) && (!client || client.hasCapability("composer/4")), recovery: false, interrupt: interrupts },
+    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) ? !client || client.hasCapability("composer/4") : !!client?.hasCapability("composer/4"), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
     unavailable: remoteUnavailable(turnsOff, handoffOff),
@@ -752,16 +761,16 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     },
     send: async (tabId, text, images, options) => {
       guard();
-      // Files other than images are stored on this computer (PRO-290); a cloud agent takes images only.
-      // A machine takes them (PRO-407): they are uploaded to it and stored in the session's attachments folder there.
+      // Files other than images are uploaded to the runtime and stored in the session's attachments
+      // folder there: a machine's (PRO-407) and a cloud workspace's (#1329).
       const files = options?.files ?? [];
-      if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
-      if (files.length && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
-      // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
+      if (files.length && isDevScope(scope) && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
+      // Images and files are uploaded straight to a cloud runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
-      const blocked = images.length ? cloudImagesBlocked(client, cloudAsleep(ctx.state, ctx.workspaceState)) : null;
+      const asleep = cloudAsleep(ctx.state, ctx.workspaceState);
+      const blocked = (images.length ? cloudImagesBlocked(client, asleep) : null) ?? (files.length && !isDevScope(scope) ? cloudFilesBlocked(client, asleep) : null);
       if (blocked) {
-        if (blocked === CLOUD_IMAGES_NEED_RUNNING) followWake();
+        if (blocked === CLOUD_IMAGES_NEED_RUNNING || blocked === CLOUD_FILES_NEED_RUNNING) followWake();
         throw new CloudImageError(blocked);
       }
       // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
@@ -839,6 +848,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     commands: (tab) =>
       write ? cloudComposerCommands({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, tabId: tab.id, harness: tab.harness, client, you }) : null,
     files: () => (write ? cloudComposerFiles({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
+    prs: () => (write ? cloudComposerPrs({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
     agentTerminal: terminalBase && {
       workspaceKey: ctx.workspaceKey,
       client: client?.hasCapability("agent-pty/1") ? client : null,
