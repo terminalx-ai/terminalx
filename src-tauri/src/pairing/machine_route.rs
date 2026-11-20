@@ -81,6 +81,29 @@ impl MachineSide {
         self.status.as_ref().is_some_and(Status::runtime_owns_direct)
     }
 
+    /// As a runtime that hosts and takes the port (`true`) says it.
+    #[cfg(test)]
+    pub(super) fn set_status_for_test(&mut self, owns_port: bool) {
+        self.status = Some(Status {
+            enabled: owns_port,
+            host_key: wire::HostKeyState::Ready,
+            machine_id: None,
+            listening: None,
+            takes_port: owns_port,
+            phone_route: false,
+            computers: vec![],
+            error: None,
+            pending: None,
+            code: None,
+            paused_until: None,
+            phones: Default::default(),
+            listen: None,
+            runs_as: None,
+            relay_state: wire::RelayState::Off,
+            relay: None,
+        });
+    }
+
     fn runtime_relay(&self) -> RuntimeRelay {
         runtime_relay(self.status.as_ref())
     }

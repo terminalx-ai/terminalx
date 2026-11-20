@@ -2033,6 +2033,15 @@ which runs in a child process because data privacy is one switch per process.
   logged once an hour and its time kept in
   `<data dir>/machine-host/public-callers.json`, which is how the one-time
   question survives a restart.
+- **The window follows the setting whoever holds the port.** While the
+  runtime takes the phones' port, the window still reads the setting every
+  few seconds, so its phone offers name only what is chosen now. A relay
+  share needs no direct listener; only a local-network-only share is refused
+  when the setting binds nothing.
+- **The first choice.** Turning operating on with no choice made writes
+  `relay` when signed in and nothing is paired, `lan` when signed out (the
+  relay cannot reach a signed-out Mac), and nothing while a phone or computer
+  is paired. Never `all`.
 - **A plan change applies to connections already in.** Each direct
   connection keeps its listener and its peer address; withdrawing public
   callers closes the ones from public addresses at once, and a handshake

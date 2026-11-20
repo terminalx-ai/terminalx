@@ -190,11 +190,17 @@ change files. Allow only computers you own.
 
 ### Where this Mac listens
 
-Under the switch, **Where it listens** decides which addresses this Mac opens
-for paired computers and phones (TCP port 6768):
+**Where it listens** decides which addresses this Mac opens for paired
+computers and phones (TCP port 6768). It shows whether or not the switch is
+on, since your phones use the same addresses:
 
 - **Relay only**: no port. They reach this Mac through the TerminalX relay,
-  end-to-end encrypted. This is what turning the switch on chooses.
+  end-to-end encrypted. Turning the switch on for the first time chooses it
+  when you are signed in and nothing is paired yet. Signed out, there is no
+  relay, so it chooses **Local network** instead. With a phone or computer
+  already paired, nothing changes until you choose. Sharing a session through
+  the relay works under Relay only; a local-network-only share needs another
+  choice.
 - **Tailscale**: this Mac's Tailscale address only.
 - **Local network**: its private network and Tailscale addresses.
 - **All interfaces**: every address, public ones included.

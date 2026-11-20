@@ -1085,9 +1085,19 @@ impl PairingManager {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
         inner.direct_wanted = true;
+        // Follow the listen setting from now on, whoever holds the port
+        // (PRO-487): offers name the addresses it chooses, so a change made
+        // by another computer, `terminalx-serve hosting` or an edited file
+        // reaches them while the runtime owns the port too.
+        if !inner.direct_watching {
+            inner.direct_watching = true;
+            self.watch_listen_setting();
+        }
         if inner.direct_listener_started {
             return Ok(());
         }
+        let plan = crate::listen::Plan::current();
+        crate::listen::remember(plan);
         if self.runtime_owns_direct() {
             // The runtime holds the port and passes phones here (PRO-341).
             drop(inner);
@@ -1095,13 +1105,7 @@ impl PairingManager {
         }
         // Where the listen setting says (PRO-487): one listener per address,
         // none under "Relay only".
-        let plan = crate::listen::Plan::current();
-        crate::listen::remember(plan);
         let addresses = plan.binds(&crate::listen::interfaces());
-        if !inner.direct_watching {
-            inner.direct_watching = true;
-            self.watch_listen_setting();
-        }
         let listeners = direct::bind_each(&addresses, self.direct_port)?;
         inner.direct_listener_started = true;
         inner.direct_bound = addresses;
@@ -1146,6 +1150,23 @@ impl PairingManager {
             }
         }
         self.emit();
+    }
+
+    /// The addresses the window's own phone listener is bound to, as
+    /// `192.168.1.20:6768` (`0.0.0.0:6768` for every interface); none while
+    /// the runtime holds the port or nothing listens.
+    pub fn window_listening(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        if !inner.direct_listener_started || inner.direct_via_runtime {
+            return Vec::new();
+        }
+        inner.direct_bound.iter().map(|ip| std::net::SocketAddr::from((*ip, self.direct_port)).to_string()).collect()
+    }
+
+    /// Whether any phone is paired with this Mac.
+    pub fn has_paired_phones(&self) -> bool {
+        // Unreadable: count as paired, so nothing it relies on is changed.
+        self.registry.list().map_or(true, |devices| !devices.is_empty())
     }
 
     /// Whether phones reach this Mac directly now, on the window's listener

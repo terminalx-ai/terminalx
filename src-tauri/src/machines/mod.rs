@@ -55,6 +55,9 @@ pub struct MachineHostView {
     pub listen: Option<crate::listen::Listen>,
     /// `machines.allowPublic`: callers from public addresses are answered.
     pub allow_public: bool,
+    /// The addresses the window's own phone listener is bound to, while it
+    /// holds the port (the runtime's are in `status.listen`).
+    pub phone_listening: Vec<String>,
     /// `None` while the runtime cannot be reached.
     pub status: Option<Status>,
     /// The attached runtime cannot verify this window and was left running
@@ -101,6 +104,8 @@ pub struct Machines {
     /// The app's account, once it is up: pairing through the relay keeps
     /// its credential for the account signed in (PRO-487).
     account: std::sync::OnceLock<Arc<crate::account::AccountManager>>,
+    /// The window's phone pairing, whose listener follows the listen setting.
+    phones: std::sync::OnceLock<Arc<crate::pairing::PairingManager>>,
 }
 
 impl Default for Machines {
@@ -111,7 +116,17 @@ impl Default for Machines {
 
 impl Machines {
     fn new(secrets: MachineSecrets, store_dir: Option<std::path::PathBuf>) -> Self {
-        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT, account: std::sync::OnceLock::new() }
+        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT, account: std::sync::OnceLock::new(), phones: std::sync::OnceLock::new() }
+    }
+
+    /// The window's phone pairing, for the addresses its listener holds.
+    pub fn set_phones(&self, pairing: Arc<crate::pairing::PairingManager>) {
+        let _ = self.phones.set(pairing);
+    }
+
+    /// Whether someone is signed in to TerminalX in this app.
+    fn signed_in(&self) -> bool {
+        self.account.get().and_then(|account| account.current_scope()).is_some()
     }
 
     /// The account whose sign-in pairing through the relay uses.
@@ -278,6 +293,7 @@ fn view(status: Option<Status>) -> MachineHostView {
         keep_awake: settings.pairing.keep_awake,
         listen: settings.machines.listen,
         allow_public: settings.machines.allow_public == Some(true),
+        phone_listening: Vec::new(),
         status,
         restart_required,
     }
@@ -307,7 +323,9 @@ fn host_view(machines: &Machines, runtime: Option<Arc<crate::local_runtime::desk
     if status.is_some() {
         *machines.last_status.lock().unwrap() = status.clone();
     }
-    view(status)
+    let mut view = view(status);
+    view.phone_listening = machines.phones.get().map(|pairing| pairing.window_listening()).unwrap_or_default();
+    view
 }
 
 /// A machine host command that names the window's attachment, then the view.
@@ -338,15 +356,21 @@ pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_,
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = crate::store::settings::load();
         settings.machines.allow_operating = enabled;
-        // Turned on for the first time on a Mac that listens nowhere yet:
-        // "Relay only", the default (PRO-487). One that already listens for
-        // its phones, or that computers were paired with before the setting
-        // (the switch turned off and on again), keeps what it has until the
-        // person chooses.
-        let paired_before = crate::store::root().ok().is_some_and(|data| crate::machine_host::registry::Registry::in_data_dir(&data).list().is_ok_and(|computers| !computers.is_empty()));
-        if enabled && settings.machines.listen.is_none() && !pairing.direct_listening() && !paired_before {
-            settings.machines.listen = Some(crate::listen::Listen::Relay);
-            settings.machines.allow_public = Some(false);
+        // Turned on for the first time on a Mac nothing relies on reaching
+        // directly yet (PRO-487): no phone and no computer paired. Signed in,
+        // it takes "Relay only", the default, which the relay then reaches.
+        // Signed out it has no relay, so "Relay only" would leave it
+        // unreachable: it takes "Local network" (private and Tailscale
+        // addresses, never a public one) and the person can choose again.
+        // A Mac with paired devices keeps what it has until the person
+        // chooses. Whether the phone listener happens to be up says nothing
+        // here: a signed-in window opens it with no phone paired.
+        if enabled && settings.machines.listen.is_none() {
+            let paired_computers = crate::store::root().ok().is_none_or(|data| crate::machine_host::registry::Registry::in_data_dir(&data).list().map_or(true, |computers| !computers.is_empty()));
+            if let Some(first) = first_listen_choice(paired_computers || pairing.has_paired_phones(), machines.signed_in()) {
+                settings.machines.listen = Some(first);
+                settings.machines.allow_public = Some(false);
+            }
         }
         crate::store::settings::save(&settings).map_err(err)?;
         pairing.machine_operating_changed();
@@ -355,6 +379,19 @@ pub async fn machines_set_allow_operating(enabled: bool, state: tauri::State<'_,
     })
     .await
     .map_err(err)?
+}
+
+/// The listen choice written when "Let other computers operate this Mac" is
+/// turned on with none made yet (PRO-487): none while a device is paired
+/// (it keeps what it relies on), "Relay only" when signed in, and "Local
+/// network" when not, since nothing would reach a signed-out Mac through the
+/// relay. Never "All interfaces".
+fn first_listen_choice(devices_paired: bool, signed_in: bool) -> Option<crate::listen::Listen> {
+    use crate::listen::Listen;
+    if devices_paired {
+        return None;
+    }
+    Some(if signed_in { Listen::Relay } else { Listen::Lan })
 }
 
 /// "Where this Mac listens" (PRO-487): `listen` is `relay`, `tailscale`,
@@ -541,6 +578,17 @@ mod tests {
         assert_eq!(revoked_grant(&json!({ "revoked": false, "grantRequestId": "grant-1" })), None);
     }
 
+    /// PRO-487 review: the first choice depends on what relies on the Mac
+    /// and on the relay, not on whether the phone listener happens to be up.
+    #[test]
+    fn turning_operating_on_chooses_relay_only_when_signed_in_and_nothing_is_paired() {
+        use crate::listen::Listen;
+        assert_eq!(first_listen_choice(false, true), Some(Listen::Relay));
+        assert_eq!(first_listen_choice(false, false), Some(Listen::Lan), "signed out the relay cannot reach it");
+        assert_eq!(first_listen_choice(true, true), None, "a paired phone or computer keeps what it relies on");
+        assert_eq!(first_listen_choice(true, false), None);
+    }
+
     #[test]
     fn the_view_names_both_switches() {
         let _home = crate::store::temp_home();
@@ -549,6 +597,6 @@ mod tests {
         settings.pairing.keep_awake = false;
         crate::store::settings::save(&settings).unwrap();
         let value = serde_json::to_value(view(None)).unwrap();
-        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "listen": null, "allowPublic": false, "status": null, "restartRequired": null }));
+        assert_eq!(value, serde_json::json!({ "allowOperating": true, "keepAwake": false, "listen": null, "allowPublic": false, "phoneListening": [], "status": null, "restartRequired": null }));
     }
 }

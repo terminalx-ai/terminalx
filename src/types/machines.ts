@@ -158,6 +158,8 @@ export interface MachineHostView {
   listen?: MachineListen | null;
   /** `machines.allowPublic`: callers from public addresses are answered. */
   allowPublic?: boolean;
+  /** The addresses the window's own phone listener holds, while the runtime does not hold the port. */
+  phoneListening?: string[];
   /** Null while the runtime cannot be reached. */
   status: MachineHostStatus | null;
   /**

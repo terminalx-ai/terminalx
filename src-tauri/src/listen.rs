@@ -306,12 +306,14 @@ fn user_name(uid: libc::uid_t) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Whether `sudo -n true` succeeds: sudo is installed and lets this user run
-/// a command without typing a password. It runs nothing else and never
-/// prompts (`-n`). Blocking, for up to [`SUDO_PROBE_TIMEOUT`].
+/// Whether `sudo -k -n true` succeeds: sudo is installed and lets this user
+/// run a command without typing a password. `-k` ignores a credential cached
+/// from a password typed a moment ago (`sudo loginctl enable-linger` in the
+/// same terminal), and does not renew it; `-n` never prompts. It runs
+/// nothing else. Blocking, for up to [`SUDO_PROBE_TIMEOUT`].
 pub fn passwordless_sudo() -> bool {
     let child = std::process::Command::new("sudo")
-        .args(["-n", "true"])
+        .args(["-k", "-n", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

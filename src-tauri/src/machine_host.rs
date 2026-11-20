@@ -1146,11 +1146,14 @@ impl MachineHost {
         for (_, (_, cancel)) in state.phones.drain() {
             let _ = cancel.send(());
         }
-        #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.invalidate(); }
         drop(state);
+        // After the host's lock, never under it: the phones take their own
+        // lock and then this host's (`phone_route`), so holding both here
+        // in the other order deadlocks with a revocation under way. Nothing
+        // is admitted meanwhile: `track_phone` needs hosting, now off.
         #[cfg(unix)]
         if let Some(phones) = self.phones.get().cloned() {
+            phones.invalidate();
             Self::off_task(move || phones.stop());
         }
         log::info!("machine host: off; listener and connections closed");
@@ -1503,11 +1506,14 @@ impl MachineHost {
             return Err(ControlError::new("busy", "Another window takes this machine's phones.", None::<String>));
         }
         state.phone_route = Some(route);
-        #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.invalidate(); }
         drop(state);
+        // Not under the host's lock: see `stop_serving`. What began on the
+        // old route is fenced by the new epoch either way.
         #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.stop(); }
+        if let Some(phones) = self.phones.get() {
+            phones.invalidate();
+            phones.stop();
+        }
         Ok(())
     }
 

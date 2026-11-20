@@ -391,6 +391,7 @@ pub fn run() {
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
     machines.set_account(account.clone());
+    machines.set_phones(pairing.clone());
     let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
     let account_machines = Arc::new(machines::account::AccountPairing::new(machines.clone(), account.clone(), pairing.clone()));
     // The resource directory is only known once Tauri is up; the service

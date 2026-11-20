@@ -18,7 +18,7 @@ import { openCloudWorkspace } from "@/lib/sessions";
 import { MachinesGuideLink as GuideLink, SettingsDescription } from "@/components/settings/SettingsDescription";
 export { MACHINES_GUIDE_URL } from "@/components/settings/SettingsDescription";
 import { machineSectionKey } from "@/types/target";
-import type { MachineActivityEntry, MachineConnectionState, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
+import type { MachineActivityEntry, MachineConnectionState, MachineHostView, MachineListenStatus, MachinePairingCode, PairedComputer, PairedMachine } from "@/types/machines";
 import type { MachineName } from "@/types/pairing";
 import { AddMachineDialog } from "./AddMachineDialog";
 import { StepRow } from "./HeadlessServerTab";
@@ -69,6 +69,18 @@ function MachinesSettingsContent({ showIntroduction }: { showIntroduction: boole
   return <MachinesList onOpen={setPage} showIntroduction={showIntroduction} />;
 }
 
+/**
+ * Where this Mac listens: the runtime's reading, with the addresses the
+ * window's phone listener holds added (it holds the port while the runtime
+ * does not). Without a runtime, from the settings the view carries.
+ */
+function thisMacListening(view: MachineHostView): MachineListenStatus {
+  const phones = view.phoneListening ?? [];
+  const runtime = view.status?.listen;
+  if (runtime) return { ...runtime, addresses: [...new Set([...runtime.addresses, ...phones])] };
+  return { choice: view.listen ?? "all", chosen: view.listen != null, addresses: phones, allowPublic: view.allowPublic ?? false, askPublic: false, refusedPublicAt: null };
+}
+
 function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string) => void; showIntroduction: boolean }) {
   const host = useMachineHost();
   useEffect(() => {
@@ -78,6 +90,7 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
   // A command's failure, or a restart a pairing grant could not make by itself (PRO-486).
   const hostError = host.error ?? view?.restartRequired ?? null;
   const allow = view?.allowOperating ?? false;
+  const listenStatus = view ? thisMacListening(view) : null;
 
   return (
     <div className="flex flex-col" data-testid="machines-settings">
@@ -107,11 +120,11 @@ function MachinesList({ onOpen, showIntroduction }: { onOpen: (machineId: string
         {host.ready && view && !view.status && <p className="pb-2 text-[12.5px] text-muted-foreground">The TerminalX runtime cannot be reached, so this Mac cannot be operated right now.</p>}
         {view?.status?.error && <p role="alert" className="pb-2 text-[12.5px] text-destructive">{view.status.error}</p>}
       </div>
-      {/* Where this Mac listens for computers and phones (PRO-487): shown while it can be operated. */}
-      {allow && view?.status?.listen && (
+      {/* Where this Mac listens for computers and phones (PRO-487). Shown with the switch off too: the phone listener follows it. */}
+      {listenStatus && (
         <RegisteredSetting setting="machines.listen">
           <div className="border-b border-hairline py-3">
-            <MachineHosting name="This Mac" status={view.status.listen} runsAs={view.status.runsAs ?? null} busy={host.busy} onChange={(listen, allowPublic) => void setMachineListen(listen, allowPublic)} />
+            <MachineHosting name="This Mac" status={listenStatus} runsAs={view?.status?.runsAs ?? null} busy={host.busy} onChange={(listen, allowPublic) => void setMachineListen(listen, allowPublic)} />
           </div>
         </RegisteredSetting>
       )}
