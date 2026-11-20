@@ -202,6 +202,11 @@ async fn served(slow: Duration) -> Served {
                         signals_tx.send(ConnectionSignal::Cancel).unwrap();
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
+                    // As revoking the phone on the Mac does (#1315).
+                    if request["method"] == "revoke" {
+                        signals_tx.send(ConnectionSignal::Revoke).unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
                     json!({ "id": request["id"], "ok": true, "result": {} })
                 }
             })
@@ -308,6 +313,32 @@ async fn a_reply_goes_out_before_a_signal_that_came_while_it_was_answered() {
         let reply = phone.read().await.expect("the acknowledgement");
         assert_eq!(reply["id"], "forget");
         assert!(phone.read().await.is_none(), "nothing after the cancellation");
+        let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::Cancelled);
+    }
+}
+
+/// The close frame after the replies: its code, or `None` when the socket ended without one.
+async fn close_code(phone: &mut Phone) -> Option<u16> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), phone.socket.next()).await.expect("the Mac closed the phone") {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(frame))) => return frame.map(|frame| u16::from(frame.code)),
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    }
+}
+
+/// #1315: a revoked phone is closed as refused (4401), so it stops using that
+/// pairing; any other cancellation closes it with no such code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revoked_phone_is_closed_as_refused_and_a_cancelled_one_is_not() {
+    for (id, method, expected) in [("revoke", "revoke", Some(crate::phone::CREDENTIAL_REFUSED)), ("forget", "pairing.forget", None)] {
+        let Served { mut phone, server, _home, .. } = served(Duration::ZERO).await;
+        phone.request(id, method).await;
+        assert_eq!(phone.read().await.expect("the reply")["id"], id);
+        let code = close_code(&mut phone).await;
+        assert_eq!(code.filter(|code| *code == crate::phone::CREDENTIAL_REFUSED), expected, "{method}: closed with {code:?}");
         let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
         assert_eq!(ended.reason, EndReason::Cancelled);
     }

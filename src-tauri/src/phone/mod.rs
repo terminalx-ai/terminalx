@@ -28,7 +28,10 @@ use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{
+        protocol::{frame::coding::CloseCode, CloseFrame, WebSocketConfig},
+        Message,
+    },
     WebSocketStream,
 };
 
@@ -240,8 +243,12 @@ impl PhoneHost {
 /// Why a host ends a phone's connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConnectionSignal {
-    /// Revoked, signed out or stopping: close at once.
+    /// Signed out, stopping, or handed to another listener: close at once.
     Cancel,
+    /// The phone's pairing was revoked: close at once with
+    /// `CREDENTIAL_REFUSED`, so the phone knows its credential is gone and
+    /// not that the connection dropped (#1315).
+    Revoke,
     /// Disconnected on the Mac: tell the phone, then close; the pairing stays.
     Disconnect,
 }
@@ -404,6 +411,22 @@ fn pending_signal(signals: &mut mpsc::UnboundedReceiver<ConnectionSignal>) -> Op
     }
 }
 
+/// The close code for a credential this Mac no longer accepts, as at the
+/// relay ("Access removed"). Only a revoked or unknown device credential gets
+/// it: the phone takes it as its pairing gone, and stops offering that
+/// pairing's diagnostics (#1315). The relay passes it on to a phone on a
+/// relay connection as it is.
+pub(crate) const CREDENTIAL_REFUSED: u16 = 4401;
+
+/// Close a phone's socket as refused: its device credential is revoked or unknown.
+pub(crate) async fn close_refused<S>(socket: &mut WebSocketStream<S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let frame = CloseFrame { code: CloseCode::from(CREDENTIAL_REFUSED), reason: "credential refused".into() };
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(Some(frame))).await;
+}
+
 /// End a connection on its host's signal: `None` when the host dropped the
 /// sender, which cancels it.
 async fn end_on_signal<S>(socket: &mut WebSocketStream<S>, session: &mut E2eeSession, connection: &rpc::MobileConnection, signal: Option<ConnectionSignal>) -> Ended
@@ -417,7 +440,11 @@ where
         EndReason::Cancelled
     };
     connection.close();
-    let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
+    if signal == Some(ConnectionSignal::Revoke) {
+        close_refused(socket).await;
+    } else {
+        let _ = tokio::time::timeout(WRITE_TIMEOUT, socket.close(None)).await;
+    }
     Ended::by(reason)
 }
 

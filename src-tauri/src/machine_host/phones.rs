@@ -424,7 +424,7 @@ impl Phones {
             if stale {
                 log::info!("machine host: phone {device_id} is no longer paired; closing it");
                 self.end_grants(&device_id);
-                self.close(&device_id, ConnectionSignal::Cancel);
+                self.close(&device_id, ConnectionSignal::Revoke);
                 self.revoke_relay(&device_id);
             }
         }
@@ -711,7 +711,7 @@ impl Phones {
         self.queue_revocation(device_id)?;
         let revoked = self.registry.revoke(device_id)?.is_some();
         self.sessions.mobile.retire_device(device_id);
-        self.close(device_id, ConnectionSignal::Cancel);
+        self.close(device_id, ConnectionSignal::Revoke);
         self.revoke_relay(device_id);
         Ok(revoked)
     }
@@ -858,8 +858,12 @@ impl Phones {
             let device = lookup.registry.find_by_token(&auth.device_token, Some(generation))?;
             Ok::<_, anyhow::Error>(device.filter(|device| account_allows(device, account.as_ref())))
         })
-        .await??
-        .ok_or_else(|| anyhow!("paired-device credential was refused"))?;
+        .await??;
+        let Some(device) = device else {
+            // Closed as refused, not dropped: the phone stops using this pairing (#1315).
+            phone::close_refused(&mut socket).await;
+            bail!("paired-device credential was refused");
+        };
         if let PhoneConnection::Relay { connection, .. } = &context {
             anyhow::ensure!(connection.relay_device_id == device.id, "relay invite was used by a different device credential");
         }
@@ -1052,7 +1056,7 @@ impl Phones {
                 .await
                 .map(|()| {
                     // Closed after this reply goes out.
-                    self.close(&device.id, ConnectionSignal::Cancel);
+                    self.close(&device.id, ConnectionSignal::Revoke);
                     json!({ "forgotten": true })
                 })
             }
