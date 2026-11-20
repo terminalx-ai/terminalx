@@ -544,6 +544,7 @@ function UnselectedWorkspace({
   const store = useSessionStore();
   const view = underDialog ?? store.view;
   const editors = useEditors();
+  const botsOn = useExperimentalSettings()?.bots === true;
   const [useWorktree, setUseWorktree] = useState(prefs.useWorktree);
   const [issueProjectPath, setIssueProjectPath] = useState<string | null>(null);
 
@@ -616,7 +617,8 @@ function UnselectedWorkspace({
             ) : view === "agents" ? (
               <AgentDashboard />
             ) : view === "bots" ? (
-              <BotsView />
+              // Nothing until the switch is read on: off, AppShell sends the view back to the welcome screen.
+              botsOn ? <BotsView /> : null
             ) : view === "automations" ? (
               <AutomationsView initialAutomationId={store.selectedAutomationId} />
             ) : view === "skills" ? (
