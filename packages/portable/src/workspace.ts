@@ -69,10 +69,15 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * answered once per `clientRequestId` from the runtime's durable receipts.
  * Only a runtime with no cloud mailbox (a machine) grants it; a cloud
  * workspace's commands keep going through the mailbox.
+ * `checkpoints/1` (#1326): a tab's turn checkpoints, Reset and Fork.
+ * `handoff/1` (#1327): `session.handoff`, another agent's tab added with its
+ * first prompt in one call (a second opinion, Retry in a new chat, the
+ * composer's agent handoff), and `session.handoffContext`, a tab's
+ * conversation read on the runtime for a handoff's prompt.
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -134,6 +139,8 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.restoreUndo": "checkpoints/1",
   "session.reset": "checkpoints/1",
   "session.fork": "checkpoints/1",
+  "session.handoff": "handoff/1",
+  "session.handoffContext": "handoff/1",
   "runtime.agents": "agents/1",
   "environment.report": "environment/1",
   "environment.cancel": "environment/1",
@@ -191,6 +198,7 @@ export const MUTATING_METHODS = new Set([
   "session.restoreUndo",
   "session.reset",
   "session.fork",
+  "session.handoff",
   "cleanup.remove",
   "workspace.remove",
   "workspace.sweepMerged",
@@ -1630,6 +1638,29 @@ export class WorkspaceRpcClient {
   async forkAgentTab(params: { sessionId: string; tabId: string; endSeq: number; into: "tab" | "session" }): Promise<{ sessionId: string; tabId: string; note: string | null; tab: AgentTabInfo | null }> {
     const result = await this.mutate<{ sessionId: string; tabId: string; note?: string | null; tab?: AgentTabInfo | null }>("session.fork", params);
     return { sessionId: result.sessionId, tabId: result.tabId, note: result.note ?? null, tab: result.tab ?? null };
+  }
+
+  /**
+   * Another agent's tab in a session, sent its first prompt in the same call
+   * (`handoff/1`, #1327): a resend is answered from the runtime's cache, so
+   * it never makes a second tab. `startError`: the tab was opened and its
+   * prompt could not be sent; its chat says why. `requestId`: the same id for
+   * every try of one handoff, so a try after an unknown outcome is answered
+   * with the tab the first one made, never a second.
+   */
+  async handoffAgentTab(
+    sessionId: string,
+    params: { agent: string; model?: string; effort?: string | null; mode?: string; nativeCodex?: boolean; prompt: string },
+    requestId?: string,
+  ): Promise<{ sessionId: string; tabId: string; tab: AgentTabInfo | null; startError: string | null }> {
+    const defined = Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+    const result = await this.mutate<{ sessionId: string; tabId: string; tab?: AgentTabInfo | null; startError?: string | null }>("session.handoff", { sessionId, ...defined }, requestId);
+    return { sessionId: result.sessionId, tabId: result.tabId, tab: result.tab ?? null, startError: result.startError ?? null };
+  }
+
+  /** What a tab's conversation hands on (`handoff/1`): its context read on the runtime, with the runtime's own transcript path. */
+  handoffContext(sessionId: string, tabId: string): Promise<import("./continuation").ContinuationContext> {
+    return this.call("session.handoffContext", { sessionId, tabId });
   }
 
   /** A machine's projects (`machine/1`). */

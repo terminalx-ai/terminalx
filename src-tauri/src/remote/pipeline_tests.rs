@@ -430,3 +430,90 @@ async fn failed_start_cleanup_reports_storage_failure_without_losing_the_session
     assert!(manager.load_events(session_id, tab_id).unwrap().iter().any(|event| matches!(&event.payload,
         crate::events::Payload::Status { text: recorded } if recorded == &message)));
 }
+
+/// `handoff/1` (#1327): a second opinion, Retry in a new chat or the agent
+/// handoff is one call that adds the tab and sends its first prompt. It uses
+/// this file's runtime, whose stand-in Claude is what a sent prompt launches.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_hands_on() {
+    let f = fixture();
+    let (desktop, _events) = peer(&f.rpc, "desktop", Authority::Manage, &["session/1", "handoff/1"]).await;
+    let source = call(&f.rpc, &desktop, "session.create", json!({ "clientRequestId": "handoff-source", "agent": "claude", "pipeline": false })).await.unwrap();
+    let session_id = source["sessionId"].as_str().unwrap().to_string();
+    let source_tab = source["tabId"].as_str().unwrap().to_string();
+
+    // A conversation with nothing saved yet has nothing to hand on: refused, saying what to do.
+    let read = json!({ "sessionId": session_id, "tabId": source_tab });
+    let (refusal, why) = call(&f.rpc, &desktop, "session.handoffContext", read.clone()).await.unwrap_err();
+    assert_eq!(refusal, "refused");
+    assert!(why.contains("Send a message in the source conversation first"), "{why}");
+    // Once it has talked, the context a handoff carries is read here, where the new tab's agent runs.
+    let log = crate::store::log_path(&session_id, &source_tab).unwrap();
+    for (seq, payload) in [(1, json!({"type":"user_message","queued":false,"text":"Make the build pass"})), (2, json!({"type":"assistant_text","text":"Fixed two tests"}))] {
+        crate::store::append_line(&log, &json!({"id":format!("h{seq}"),"sessionId":session_id,"tabId":source_tab,"harness":"claude","seq":seq,"ts":"2026-11-20T10:00:00Z","payload":payload}).to_string()).unwrap();
+    }
+    let context = call(&f.rpc, &desktop, "session.handoffContext", read).await.unwrap();
+    assert_eq!((context["sessionId"].as_str(), context["tabId"].as_str()), (Some(session_id.as_str()), Some(source_tab.as_str())));
+    assert_eq!(context["lastPrompt"], "Make the build pass");
+    assert!(context["transcriptPath"].is_null() && context["fullUnavailableReason"].is_string(), "no provider transcript was saved: {context}");
+    assert_eq!(code(call(&f.rpc, &desktop, "session.handoffContext", json!({ "sessionId": session_id, "tabId": "missing" })).await), "not_found");
+
+    let params = json!({ "clientRequestId": "handoff-1", "sessionId": session_id, "agent": "claude", "mode": "plan", "prompt": "Give a second opinion on this turn" });
+    let handed = call(&f.rpc, &desktop, "session.handoff", params.clone()).await.unwrap();
+    assert!(handed["startError"].is_null(), "{handed}");
+    assert!(!handed["outcome"].is_null(), "the first prompt went with the tab: {handed}");
+    let tab_id = handed["tabId"].as_str().unwrap().to_string();
+    assert_ne!(tab_id, source_tab);
+    assert_eq!(handed["tab"]["tabId"], tab_id.as_str(), "the runtime lists the new tab at once");
+    let session = crate::store::index::get(&session_id).unwrap();
+    assert_eq!(session.tabs.len(), 2);
+    let tab = session.tab(&tab_id).unwrap();
+    assert_eq!((tab.harness.as_str(), tab.permission_mode.as_str()), ("claude", "plan"));
+    // The prompt launched the new tab's agent on its own conversation.
+    let provider_id = tab.provider_session_id.clone().expect("the new tab's conversation id");
+    let marker = f._dir.path().join("agent.ran");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&marker).is_ok_and(|args| args.lines().collect::<Vec<_>>().windows(2).any(|pair| pair == ["--session-id", provider_id.as_str()])) {
+        assert!(tokio::time::Instant::now() < deadline, "the handoff's tab did not launch: {:?}", std::fs::read_to_string(&marker));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A resend is answered from the cache: one tab, not two.
+    assert_eq!(call(&f.rpc, &desktop, "session.handoff", params).await.unwrap()["tabId"], tab_id.as_str());
+    assert_eq!(crate::store::index::get(&session_id).unwrap().tabs.len(), 2);
+
+    // Nothing is added for a handoff the runtime refuses.
+    for (params, expected) in [
+        (json!({ "clientRequestId": "handoff-2", "sessionId": session_id, "agent": "claude", "prompt": "  " }), "invalid_params"),
+        (json!({ "clientRequestId": "handoff-3", "sessionId": session_id, "agent": "claude" }), "invalid_params"),
+        (json!({ "clientRequestId": "handoff-4", "sessionId": session_id, "agent": "vim", "prompt": "Review" }), "invalid_params"),
+        (json!({ "clientRequestId": "handoff-5", "sessionId": session_id, "agent": "codex", "prompt": "Review" }), "unavailable"),
+        (json!({ "clientRequestId": "handoff-6", "sessionId": "missing", "agent": "claude", "prompt": "Review" }), "not_found"),
+    ] {
+        assert_eq!(code(call(&f.rpc, &desktop, "session.handoff", params.clone()).await), expected, "{params}");
+    }
+    // A handoff adds a tab, so it is a manager's, and only on a runtime that offers it.
+    let (viewer, _viewer_events) = peer(&f.rpc, "viewer", Authority::Participate, &["session/1", "handoff/1"]).await;
+    let review = json!({ "clientRequestId": "handoff-7", "sessionId": session_id, "agent": "claude", "prompt": "Review" });
+    assert_eq!(code(call(&f.rpc, &viewer, "session.handoff", review.clone()).await), "forbidden");
+    let (old, _old_events) = peer(&f.rpc, "old", Authority::Manage, &["session/1"]).await;
+    assert_eq!(code(call(&f.rpc, &old, "session.handoff", review).await), "capability_not_granted");
+    assert_eq!(crate::store::index::get(&session_id).unwrap().tabs.len(), 2);
+
+    // A prompt that cannot be sent leaves the one tab open, with why in its chat.
+    let mut failing = crate::harness::catalog().into_iter().find(|harness| harness.id == "claude").unwrap();
+    failing.id = "test-failing-agent".into();
+    failing.available = true;
+    f.rpc.set_offered_for_tests(vec![failing]);
+    let failed = call(&f.rpc, &desktop, "session.handoff", json!({ "clientRequestId": "handoff-8", "sessionId": session_id, "agent": "test-failing-agent", "prompt": "Retry this" })).await.unwrap();
+    let message = failed["startError"].as_str().unwrap();
+    assert!(message.starts_with("The new tab was opened, but its first prompt could not be sent"), "{message}");
+    assert!(failed["outcome"].is_null());
+    let failed_tab = failed["tabId"].as_str().unwrap();
+    assert_eq!(crate::store::index::get(&session_id).unwrap().tabs.len(), 3);
+    let events = f.rpc.manager().unwrap().load_events(&session_id, failed_tab).unwrap();
+    assert!(events.iter().any(|event| matches!(&event.payload, crate::events::Payload::Status { text } if text == message)));
+}
+
+fn code(result: Result<Value, (String, String)>) -> String {
+    result.expect_err("refused").0
+}
