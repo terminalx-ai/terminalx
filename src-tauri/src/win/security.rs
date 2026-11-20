@@ -51,8 +51,10 @@ pub(crate) fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// Longest path the plain Win32 form takes (`MAX_PATH` less its NUL).
-const PLAIN_PATH_LIMIT: usize = 259;
+/// Longest path the plain Win32 form takes for every call: `MAX_PATH` less
+/// the 12 `CreateDirectoryW` keeps for an 8.3 name, less its NUL. Files take
+/// up to 259, but one threshold keeps a directory and the files in it alike.
+const PLAIN_PATH_LIMIT: usize = 247;
 
 /// `path` as a NUL-terminated wide string for a Win32 file call. Past
 /// `MAX_PATH` the plain form fails, so a long path is made absolute and given

@@ -653,6 +653,8 @@ fn withheld_mobile_reply(reason: Withhold) {
     assert!(rig.observer.answered.lock().unwrap().is_empty());
 }
 
+// Its hook directories are POSIX paths, which only read as absolute on Unix.
+#[cfg(unix)]
 #[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).

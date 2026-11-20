@@ -87,7 +87,9 @@ fn browse_never_leaves_home() {
     let root = if cfg!(windows) { "C:\\" } else { "/" };
     assert_eq!(code(browse(&home.path(), &json!({ "path": root }))), "path_forbidden");
     // Outside home, a missing path is refused as one that exists: the answer never says which.
-    assert_eq!(code(browse(&home.path(), &json!({ "path": s(&outside.path().join("missing")) }))), "path_forbidden");
+    // At the root, since a temporary folder is under the account's own home on Windows.
+    let missing = format!("{root}terminalx-browse-missing-{}", std::process::id());
+    assert_eq!(code(browse(&home.path(), &json!({ "path": missing }))), "path_forbidden");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "work" }))), "invalid_params", "relative");
     assert_eq!(code(browse(&home.path(), &json!({ "path": "" }))), "invalid_params");
     assert_eq!(code(browse(&home.path(), &json!({ "path": 7 }))), "invalid_params");

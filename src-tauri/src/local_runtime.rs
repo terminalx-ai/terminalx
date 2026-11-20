@@ -341,7 +341,7 @@ impl Lifetime {
     /// grants belong to it. It needs no heartbeat. It ends with
     /// [`Self::release`], Stop all or shutdown, and while it is held the
     /// runtime is not idle. Answers its lease.
-    #[cfg(unix)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn hold(&self) -> anyhow::Result<String> {
         /// Far enough that it never lapses, near enough not to overflow.
         const HELD: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);

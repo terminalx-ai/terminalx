@@ -67,6 +67,22 @@ impl Locator for Told {
     }
 }
 
+/// The program a shell tab runs here: `cat`. On Windows a bare `cat` goes to
+/// the reader's shell, where PowerShell takes it as `Get-Content`, so it is
+/// Git for Windows' own, by path, which the pane runs as its program.
+fn stand_in_shell() -> String {
+    #[cfg(windows)]
+    {
+        let sh = crate::binpath::posix_sh().expect("Git for Windows");
+        let cat = sh.parent().and_then(Path::parent).expect("Git's root").join("usr").join("bin").join("cat.exe");
+        format!("'{}'", cat.display())
+    }
+    #[cfg(not(windows))]
+    {
+        "cat".to_string()
+    }
+}
+
 fn agent(harness: &'static str, pid: u32) -> Agent {
     Agent { harness, pid, pids: vec![pid], job: pid }
 }
@@ -171,7 +187,7 @@ impl Rig {
     /// echoes what is typed at it.
     fn shell(&self, n: u32) -> String {
         let id = format!("{SESSION}:{n}");
-        self.pane(&id, "cat");
+        self.pane(&id, &stand_in_shell());
         self.manager.terminals.set_title(&id, &format!("Terminal {n}"));
         id
     }

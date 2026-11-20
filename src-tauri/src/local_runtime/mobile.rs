@@ -672,12 +672,16 @@ pub fn actor(params: &Value) -> Result<Actor> {
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct ApprovalPhone {
     lifetime: Arc<Lifetime>,
     actor: Actor,
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 impl ApprovalPhone {
     pub(crate) fn register(manager: &crate::session::SessionManager) -> Self {
         use serde_json::json;

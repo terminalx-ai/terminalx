@@ -682,7 +682,7 @@ impl PairingManager {
         Arc::new(manager)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
         self.phone.set_owner(Some(owner));
     }
