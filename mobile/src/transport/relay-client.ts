@@ -38,6 +38,24 @@ export class RelayOuterError extends Error {
   }
 }
 
+/** The close code the relay and the Mac give a credential they no longer accept: "Access removed". */
+export const CREDENTIAL_REFUSED = 4401;
+
+/**
+ * A 4401 from a party entitled to refuse this pairing's credential (#1315):
+ * the relay refusing a resume credential, or the pinned Mac, once it has
+ * proved its key in the handshake, refusing the device token (the Mac closes
+ * a refused or revoked phone with 4401: `phone::close_refused` in src-tauri,
+ * which the relay passes on to a phone on a relay connection). A 4401 from
+ * an unverified direct peer (a stale LAN address now answered by another
+ * computer) or for a pairing invite stays a plain `RelayOuterError`.
+ */
+export class CredentialRefusedError extends RelayOuterError {
+  constructor(reason = "", wasClean?: boolean) {
+    super(CREDENTIAL_REFUSED, reason, wasClean);
+  }
+}
+
 /**
  * How long a pairing connection waits for `e2ee_authenticated` once it has
  * sent `e2ee_auth`: the Mac holds a QR pairing until the person compares the
@@ -307,7 +325,7 @@ export class RelayClient {
 
   private fail(cause: Error): void {
     if (this.state === "disconnected" && !this.connectPromise) return;
-    const error = this.refusal !== null && !(cause instanceof PairingNotApprovedError) ? new PairingNotApprovedError(this.refusal) : cause;
+    const error = this.refusal !== null && !(cause instanceof PairingNotApprovedError) ? new PairingNotApprovedError(this.refusal) : this.authoritative(cause);
     this.setState("disconnected", error);
     const socket = this.socket;
     this.socket = null;
@@ -326,6 +344,14 @@ export class RelayClient {
     this.terminalStreams.clear();
     this.terminalSnapshots.clear();
     socket?.close();
+  }
+
+  /** A 4401 from the relay for a resume credential, or from the pinned Mac, is the pairing's credential refused (#1315). */
+  private authoritative(cause: Error): Error {
+    if (!(cause instanceof RelayOuterError) || cause instanceof CredentialRefusedError || cause.code !== CREDENTIAL_REFUSED) return cause;
+    const options = this.options;
+    const entitled = options.transport === "direct" ? this.handshakeReady : options.credentialKind === "resume";
+    return entitled ? new CredentialRefusedError(cause.reason, cause.wasClean) : cause;
   }
 
   private sendRequestFrame(id: string, method: string, params?: unknown): void {
