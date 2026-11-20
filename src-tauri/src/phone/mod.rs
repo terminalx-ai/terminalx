@@ -382,14 +382,23 @@ const OUTPUT_BATCH_TIME: std::time::Duration = std::time::Duration::from_millis(
 
 /// Check a request's connection, then answer it. Off the serve loop, so the
 /// loop keeps the phone's queue draining while a slow request runs (#1282).
-async fn answer<F, R>(host: &Arc<PhoneHost>, connection: &Arc<rpc::MobileConnection>, respond: &F, request: serde_json::Value) -> Result<(bool, serde_json::Value)>
+async fn answer<F, R>(host: &Arc<PhoneHost>, connection: &Arc<rpc::MobileConnection>, respond: &F, request: serde_json::Value) -> Result<serde_json::Value>
 where
     F: Fn(serde_json::Value) -> R,
     R: std::future::Future<Output = serde_json::Value>,
 {
     connection.check_off_runtime(host).await?;
-    let forget = request["method"] == "pairing.forget";
-    Ok((forget, respond(request).await))
+    Ok(respond(request).await)
+}
+
+/// A host signal not yet read: `Some(None)` when the host dropped the
+/// sender, which cancels the connection.
+fn pending_signal(signals: &mut mpsc::UnboundedReceiver<ConnectionSignal>) -> Option<Option<ConnectionSignal>> {
+    match signals.try_recv() {
+        Ok(signal) => Some(Some(signal)),
+        Err(mpsc::error::TryRecvError::Disconnected) => Some(None),
+        Err(mpsc::error::TryRecvError::Empty) => None,
+    }
 }
 
 /// End a connection on its host's signal: `None` when the host dropped the
@@ -415,6 +424,13 @@ where
 /// loop still sends what is queued and reads what the phone sends. Every
 /// reply is checked again after it, so a reply queued meanwhile never
 /// discloses session data after a revocation.
+///
+/// A host signal fences the connection as soon as it is seen, in flight
+/// request or not (#1332): nothing queued, no invalidation and no reply goes
+/// out after it, and no later request starts. The one exception is a
+/// `pairing.forget` already being answered, which itself cancels the
+/// connection: its acknowledgement, which carries no session data, still
+/// reaches the phone before the connection ends.
 pub(crate) async fn serve_connection<S, F, R>(
     socket: &mut WebSocketStream<S>,
     session: &mut E2eeSession,
@@ -433,53 +449,67 @@ where
     let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
     let mut grant_health = tokio::time::interval(std::time::Duration::from_secs(1));
     grant_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut waiting = std::collections::VecDeque::new();
+    let mut waiting: std::collections::VecDeque<serde_json::Value> = std::collections::VecDeque::new();
     let mut answering = None;
+    // Whether the request being answered is a `pairing.forget`.
+    let mut forgetting = false;
+    // The host's signal, once seen: the connection is fenced from then on.
+    let mut ending: Option<Option<ConnectionSignal>> = None;
     loop {
-        if answering.is_none() && !waiting.is_empty() {
-            // A signal that came while the last request was answered ends the
-            // connection before the next one starts.
-            match signals.try_recv() {
-                Ok(signal) => return Ok(end_on_signal(socket, session, connection, Some(signal)).await),
-                Err(mpsc::error::TryRecvError::Disconnected) => return Ok(end_on_signal(socket, session, connection, None).await),
-                Err(mpsc::error::TryRecvError::Empty) => {}
+        if ending.is_none() {
+            ending = pending_signal(&mut signals);
+        }
+        if let Some(signal) = ending {
+            // Only a forget's acknowledgement is waited for; any other
+            // request in flight is dropped with the connection.
+            if !(answering.is_some() && forgetting) {
+                return Ok(end_on_signal(socket, session, connection, signal).await);
             }
-            let request = waiting.pop_front().expect("not empty");
-            answering = Some(Box::pin(answer(host, connection, &respond, request)));
+        } else if answering.is_none() {
+            if let Some(request) = waiting.pop_front() {
+                forgetting = request["method"] == "pairing.forget";
+                answering = Some(Box::pin(answer(host, connection, &respond, request)));
+            }
         }
         tokio::select! {
             _ = stream_health.tick() => { connection.check_buffer()?; }
             _ = grant_health.tick() => { connection.check_off_runtime(host).await?; }
-            // Not while a request is answered: its reply goes first, as an
-            // acknowledged `pairing.forget` must reach the phone although
-            // answering it cancels this connection.
-            signal = signals.recv(), if answering.is_none() => {
-                return Ok(end_on_signal(socket, session, connection, signal).await);
+            signal = signals.recv(), if ending.is_none() => {
+                ending = Some(signal);
             }
             answered = async { answering.as_mut().expect("guarded").await }, if answering.is_some() => {
                 answering = None;
-                let (forget, response) = answered?;
+                let response = answered?;
                 // Revalidate after asynchronous work: queued replies must not
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
                 // its acknowledgement contains no session data.
-                let send = send_message(socket, session, &response, connection.wire());
-                if forget && response["ok"] == true {
-                    tokio::time::timeout(WRITE_TIMEOUT, send).await??;
+                if forgetting && response["ok"] == true {
+                    tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
                 } else {
-                    send_with_grant(host, connection, send).await?;
+                    if ending.is_none() {
+                        ending = pending_signal(&mut signals);
+                    }
+                    if ending.is_none() {
+                        send_with_grant(host, connection, send_message(socket, session, &response, connection.wire())).await?;
+                    }
                 }
             }
-            _ = connection.invalidations().raised() => {
+            _ = connection.invalidations().raised(), if ending.is_none() => {
                 let pending = connection.invalidations().take();
                 if !pending.is_empty() {
                     let _permit = connection.output_permit(host).await?;
                     for message in &pending {
+                        // A signal that came while the permit was taken fences the rest.
+                        ending = pending_signal(&mut signals);
+                        if ending.is_some() {
+                            break;
+                        }
                         tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, message, connection.wire())).await??;
                     }
                 }
             }
-            outgoing = outbound.recv() => {
+            outgoing = outbound.recv(), if ending.is_none() => {
                 let Some(first) = outgoing else {
                     connection.close();
                     return Ok(Ended::by(EndReason::HostClosed));
@@ -491,6 +521,11 @@ where
                 let mut next = Some(first);
                 let mut sent = 0;
                 while let Some(message) = next.take() {
+                    // A signal that came meanwhile fences the rest of the batch.
+                    ending = pending_signal(&mut signals);
+                    if ending.is_some() {
+                        break;
+                    }
                     tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &message, connection.wire())).await??;
                     sent += 1;
                     if sent < OUTPUT_BATCH && started.elapsed() < OUTPUT_BATCH_TIME {

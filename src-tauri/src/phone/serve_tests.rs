@@ -60,7 +60,11 @@ struct Phone {
 
 impl Phone {
     async fn request(&mut self, id: &str, method: &str) {
-        let request = json!({ "id": id, "method": method, "params": {} });
+        self.request_with(id, method, json!({})).await
+    }
+
+    async fn request_with(&mut self, id: &str, method: &str, params: Value) {
+        let request = json!({ "id": id, "method": method, "params": params });
         let frame = self.session.seal(request.to_string().as_bytes(), PayloadKind::Text).unwrap();
         self.socket.send(Message::Text(STANDARD.encode(frame).into())).await.unwrap();
     }
@@ -80,10 +84,28 @@ impl Phone {
     }
 }
 
-/// A served connection, its phone end, and the sink agents' events go through.
-async fn served(
-    slow: Duration,
-) -> (Phone, Arc<crate::sink::BroadcastSink>, tokio::task::JoinHandle<Result<Ended>>, crate::store::TempHome) {
+/// A request the test holds unanswered: `entered` once the Mac is answering
+/// it, and its answer only after `release`.
+#[derive(Default)]
+struct Held {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+/// A served connection, its phone end, and what the test drives it with.
+struct Served {
+    phone: Phone,
+    /// The sink agents' events go through.
+    sink: Arc<crate::sink::BroadcastSink>,
+    server: tokio::task::JoinHandle<Result<Ended>>,
+    /// The host's signals, as `PairingManager::disconnect_device` sends them.
+    signals: mpsc::UnboundedSender<ConnectionSignal>,
+    connection: Arc<rpc::MobileConnection>,
+    held: Arc<Held>,
+    _home: crate::store::TempHome,
+}
+
+async fn served(slow: Duration) -> Served {
     let home = crate::store::temp_home();
     registry::DeviceRegistry.add(device()).unwrap();
     let host = Arc::new(PhoneHost::new(|| 0));
@@ -103,24 +125,32 @@ async fn served(
     let (outbound, inbound) = mpsc::channel(OUTBOUND_QUEUE);
     let connection = Arc::new(rpc::MobileConnection::open(&host, &device(), outbound, wire::Transport::Direct, None).await.unwrap());
     let (signals_tx, signals) = mpsc::unbounded_channel();
-    let server = tokio::spawn(async move {
-        serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
-            let signals_tx = signals_tx.clone();
-            async move {
-                if request["method"] == "slow" {
-                    tokio::time::sleep(slow).await;
+    let held = Arc::new(Held::default());
+    let server = {
+        let (connection, signals_tx, held) = (connection.clone(), signals_tx.clone(), held.clone());
+        tokio::spawn(async move {
+            serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
+                let (signals_tx, held) = (signals_tx.clone(), held.clone());
+                async move {
+                    if request["method"] == "slow" {
+                        tokio::time::sleep(slow).await;
+                    }
+                    if request["params"]["held"] == true {
+                        held.entered.notify_one();
+                        held.release.notified().await;
+                    }
+                    // As `pairing.forget` does: the connection is cancelled before its reply is sent.
+                    if request["method"] == "pairing.forget" && request["params"]["held"] != true {
+                        signals_tx.send(ConnectionSignal::Cancel).unwrap();
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    json!({ "id": request["id"], "ok": true, "result": {} })
                 }
-                // As `pairing.forget` does: the connection is cancelled before its reply is sent.
-                if request["method"] == "forget" {
-                    signals_tx.send(ConnectionSignal::Cancel).unwrap();
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                json!({ "id": request["id"], "ok": true, "result": {} })
-            }
+            })
+            .await
         })
-        .await
-    });
-    (Phone { socket: phone, session: phone_session }, sink, server, home)
+    };
+    Served { phone: Phone { socket: phone, session: phone_session }, sink, server, signals: signals_tx, connection, held, _home: home }
 }
 
 fn agent_event(seq: u64) -> Value {
@@ -137,7 +167,7 @@ fn agent_event(seq: u64) -> Value {
 /// the phone as fallen behind within seconds of it connecting.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_stays_connected_to_a_busy_mac_through_a_slow_request() {
-    let (mut phone, sink, server, _home) = served(Duration::from_secs(2)).await;
+    let Served { mut phone, sink, server, _home, .. } = served(Duration::from_secs(2)).await;
     phone.request("slow", "slow").await;
     let emitter = std::thread::spawn(move || {
         for seq in 0..1500 {
@@ -174,7 +204,7 @@ async fn a_phone_stays_connected_to_a_busy_mac_through_a_slow_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_are_still_answered_in_the_order_they_came() {
-    let (mut phone, _sink, server, _home) = served(Duration::from_millis(300)).await;
+    let Served { mut phone, server, _home, .. } = served(Duration::from_millis(300)).await;
     phone.request("first", "slow").await;
     phone.request("second", "status.get").await;
     phone.request("third", "slow").await;
@@ -194,7 +224,7 @@ async fn requests_are_still_answered_in_the_order_they_came() {
 /// A phone that reads nothing at all still falls behind, and says so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
-    let (phone, sink, server, _home) = served(Duration::ZERO).await;
+    let Served { phone, sink, server, _home, .. } = served(Duration::ZERO).await;
     let payload = "x".repeat(64 * 1024);
     for seq in 0..400 {
         let mut event = agent_event(seq);
@@ -214,14 +244,73 @@ async fn a_phone_that_stops_reading_is_recorded_as_fallen_behind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reply_goes_out_before_a_signal_that_came_while_it_was_answered() {
     for _ in 0..20 {
-        let (mut phone, _sink, server, _home) = served(Duration::ZERO).await;
-        phone.request("forget", "forget").await;
+        let Served { mut phone, server, _home, .. } = served(Duration::ZERO).await;
+        phone.request("forget", "pairing.forget").await;
         phone.request("after", "status.get").await;
         let reply = phone.read().await.expect("the acknowledgement");
         assert_eq!(reply["id"], "forget");
         assert!(phone.read().await.is_none(), "nothing after the cancellation");
         let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
         assert_eq!(ended.reason, EndReason::Cancelled);
+    }
+}
+
+/// What a Mac with agents at work sends a phone after the Mac disconnects
+/// it: agent events, each queuing a `session.event` and raising
+/// `sessions.changed`, and an invalidation raised directly.
+fn emit_after_disconnect(served: &Served) {
+    for seq in 0..50 {
+        served.sink.emit_raw("agent_event", serde_json::value::to_raw_value(&agent_event(seq)).unwrap());
+    }
+    served.connection.invalidations().raise(Invalidation::Settings);
+}
+
+/// Disconnected on the Mac while a request is still answered (#1332): the
+/// phone is told at once, before the request completes, and none of the
+/// session events or invalidations raised after the Mac disconnected it
+/// reach the phone, nor does the request's reply once it is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disconnect_on_the_mac_fences_output_while_a_request_is_answered() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("held", "session.tail", json!({ "held": true })).await;
+        served.phone.request("after", "status.get").await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the request is being answered");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+
+        // The request is still held: the disconnect did not wait for it.
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "nothing after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
+        served.held.release.notify_one();
+    }
+}
+
+/// A `pairing.forget` already being answered when the Mac disconnects the
+/// phone still has its acknowledgement delivered; nothing else raised after
+/// the disconnect follows it, and the request after it is not answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forget_in_flight_is_acknowledged_but_nothing_else_after_a_disconnect() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("forget", "pairing.forget", json!({ "held": true })).await;
+        served.phone.request("after", "status.get").await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the forget is being answered");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+        // Time for anything unfenced to reach the phone before the forget completes.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        served.held.release.notify_one();
+
+        let reply = served.phone.read().await.expect("the acknowledgement");
+        assert_eq!(reply["id"], "forget");
+        assert_eq!(reply["ok"], true);
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "nothing after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
     }
 }
 
