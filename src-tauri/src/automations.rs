@@ -336,9 +336,6 @@ pub fn definition_from_input(
         if trigger.max_runs_per_tick < 1 {
             bail!("Runs per tick must be at least one.");
         }
-        if trigger.max_runs_per_tick > MAX_RUNS_PER_TICK {
-            bail!("Runs per tick can be at most {MAX_RUNS_PER_TICK}.");
-        }
         if input.workspace != AutomationWorkspace::NewWorktree {
             bail!("Issue automations need a new worktree per run.");
         }
@@ -375,7 +372,11 @@ pub fn definition_from_input(
         next_run_at: next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
-        issue_trigger: input.issue_trigger,
+        // At most what the editor offers; an older, larger value is clamped.
+        issue_trigger: input.issue_trigger.map(|mut trigger| {
+            trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            trigger
+        }),
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -1717,6 +1718,9 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
             for issue in candidates {
+                if !precheck::batch_goes_on(automation) {
+                    break;
+                }
                 let run = dispatch_issue(app, automation, &issue, &mut state)?;
                 if run.status == AutomationRunStatus::Failed && run.issue.is_some() {
                     let entry = run.session_id.as_deref().and_then(|id| index::get(id).ok());

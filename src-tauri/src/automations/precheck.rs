@@ -442,6 +442,9 @@ pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation,
     if configured(automation.precheck.as_ref()).is_none() {
         return false;
     }
+    if !due(automation, now) {
+        return true;
+    }
     let Some(claim) = Claim::take(&automation.id) else {
         return true;
     };
@@ -450,15 +453,67 @@ pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation,
     let automation = automation.clone();
     let spawned = std::thread::Builder::new().name("automation-precheck-run".into()).spawn(move || {
         let _claim = claim;
-        if let Err(error) = super::evaluate_automation(&app, &automation, now) {
-            log::warn!("automation {}: {error:#}", automation.id);
-        }
+        finishing(&app, &automation.id, || super::evaluate_automation(&app, &automation, now).map(|_| ()));
         POLL.with(|poll| *poll.borrow_mut() = None);
     });
     if let Err(error) = spawned {
         log::warn!("automation {id}: could not start its evaluation: {error}");
     }
     true
+}
+
+/// Whether the scheduler has anything to do for `automation` now: a due run
+/// (or missed one to record), or an issue poll. Nothing is started otherwise.
+fn due(automation: &Automation, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match automation.issue_trigger.as_ref() {
+        Some(trigger) => {
+            automation.enabled && super::issue_poll_due(automation_store::load_seen(&automation.id).ok().flatten().as_ref(), trigger.poll_interval_minutes, now)
+        }
+        None => !matches!(super::due_action(automation, now), Ok(None)),
+    }
+}
+
+/// Run `work` for `automation_id`, and fail any run of it that `work` left
+/// pending without a session: a store error or a panic after the check must
+/// not leave a run "Starting" until the next runtime start.
+fn finishing(app: &impl AutomationHost, automation_id: &str, work: impl FnOnce() -> Result<()>) {
+    let since = chrono::Utc::now() - chrono::TimeDelta::seconds(1);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!("automation {automation_id}: {error:#}"),
+        Err(_) => log::warn!("automation {automation_id}: its run panicked"),
+    }
+    fail_orphans(app, automation_id, since);
+}
+
+fn fail_orphans(app: &impl AutomationHost, automation_id: &str, since: chrono::DateTime<chrono::Utc>) {
+    let Ok(runs) = automation_store::list_runs(automation_id) else {
+        return;
+    };
+    let started_since = |run: &AutomationRun| {
+        run.started_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).is_some_and(|at| at >= since)
+    };
+    for orphan in runs.into_iter().filter(|run| run.status == AutomationRunStatus::Pending && run.session_id.is_none() && started_since(run)) {
+        let Ok(run) = automation_store::replace_run(automation_id, &orphan.run_id, |value| {
+            if value.status == AutomationRunStatus::Pending && value.session_id.is_none() {
+                value.status = AutomationRunStatus::Failed;
+                value.ended_at = Some(index::now());
+                value.error = Some("The run stopped after its first check without starting.".into());
+            }
+            Ok(())
+        }) else {
+            continue;
+        };
+        emit_run(app, &run);
+        let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+        update_summary(app, automation_id, run.status, &ended_at);
+    }
+}
+
+/// Whether an issue poll goes on to its next issue: not once the automation
+/// was deleted or turned off, so the issues not yet started stay unseen.
+pub(super) fn batch_goes_on(automation: &Automation) -> bool {
+    configured(automation.precheck.as_ref()).is_none() || automation_store::get(&automation.id).is_ok_and(|current| current.enabled)
 }
 
 /// Run now. An automation with a first check returns its pending run at
@@ -470,7 +525,7 @@ pub fn run_now(app: &impl AutomationHost, automation_id: &str) -> Result<Automat
     if configured(automation.precheck.as_ref()).is_none() {
         return super::dispatch(app, automation_id, AutomationTrigger::Manual, None);
     }
-    let claim = Claim::take(automation_id).context("This automation's first check is already running.")?;
+    let claim = Claim::take(automation_id).context("This automation is already being checked or started. Try again in a moment.")?;
     let run = automation_store::insert_run(super::new_run(automation_id, AutomationTrigger::Manual, None, AutomationRunStatus::Pending))?;
     let worktree_name = (automation.workspace == AutomationWorkspace::NewWorktree)
         .then(|| super::automation_worktree_name(&automation, chrono::Utc::now()));
@@ -478,9 +533,7 @@ pub fn run_now(app: &impl AutomationHost, automation_id: &str) -> Result<Automat
     let spawned = std::thread::Builder::new().name("automation-run-now".into()).spawn(move || {
         let _claim = claim;
         let prompt = automation.prompt.clone();
-        if let Err(error) = super::start_run(&worker, &automation, pending, prompt, None, worktree_name) {
-            log::warn!("automation {}: run now: {error:#}", automation.id);
-        }
+        finishing(&worker, &automation.id, || super::start_run(&worker, &automation, pending, prompt, None, worktree_name).map(|_| ()));
     });
     if let Err(error) = spawned {
         let run = automation_store::replace_run(automation_id, &run.run_id, |value| {
@@ -575,13 +628,17 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
     if !agent_available(automation) {
         return Ok(Some(prompt));
     }
-    let trial = POLL.with(|poll| match &*poll.borrow() {
+    let polled = POLL.with(|poll| match &*poll.borrow() {
         Some(memo) if memo.automation_id == automation.id => Some(memo.trial.clone()),
         _ => None,
     });
-    let trial = trial.unwrap_or_else(|| check(automation, precheck));
+    // A poll's issue run was let through by the poll, which stops its batch
+    // when the automation is turned off (`batch_goes_on`).
+    let from_poll = polled.is_some();
+    let trial = polled.unwrap_or_else(|| check(automation, precheck));
     match stale(automation, run) {
         None => {}
+        Some(Stale::TurnedOff) if from_poll => {}
         Some(Stale::Deleted) => return Ok(None),
         Some(Stale::Ended(stored)) => {
             *run = *stored;

@@ -284,7 +284,7 @@ fn run_now_is_refused_while_the_check_is_already_running() {
     let automation = saved(project.path(), Some("sleep 1"), 30, "2099-01-01T00:00:00Z");
     run_now(&host(), &automation.id).unwrap();
     let error = run_now(&host(), &automation.id).unwrap_err().to_string();
-    assert!(error.contains("already running"), "{error}");
+    assert!(error.contains("already being checked or started"), "{error}");
     settle();
     assert_eq!(runs(&automation).len(), 1);
 }
@@ -519,6 +519,69 @@ fn a_poll_whose_automation_changed_during_the_check_leaves_everything_alone() {
 }
 
 #[test]
+fn an_issue_batch_stops_when_the_automation_is_turned_off_and_its_started_runs_go_on() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = issue_automation(project.path(), "echo work");
+    assert!(batch_goes_on(&automation));
+    assert!(gate_poll(&host(), &automation, issues()).unwrap().is_some_and(|candidates| !candidates.is_empty()));
+    automation_store::update(&automation.id, |value| {
+        value.enabled = false;
+        Ok(())
+    })
+    .unwrap();
+    // The poll's loop stops before the next issue's run and seen stamp.
+    assert!(!batch_goes_on(&automation));
+    // A run the poll already let through is not cancelled by its gate.
+    let mut started = pending(&automation, AutomationTrigger::Issue);
+    assert!(gate(&host(), &automation, &mut started, "Fix it.".into()).unwrap().is_some());
+    assert_eq!(started.status, AutomationRunStatus::Pending);
+    POLL.with(|poll| *poll.borrow_mut() = None);
+    // Without a check, a batch goes on as it always has.
+    let plain = saved(project.path(), None, 30, "2099-01-01T00:00:00Z");
+    assert!(batch_goes_on(&plain));
+}
+
+#[test]
+fn a_run_left_pending_after_its_check_is_ended_as_failed() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = saved(project.path(), Some("echo work"), 30, "2099-01-01T00:00:00Z");
+    let older = pending(&automation, AutomationTrigger::Manual);
+    automation_store::replace_run(&automation.id, &older.run_id, |value| {
+        value.started_at = Some("2026-01-01T00:00:00.000Z".into());
+        Ok(())
+    })
+    .unwrap();
+    let host = host();
+    finishing(&host, &automation.id, || {
+        pending(&automation, AutomationTrigger::Manual);
+        anyhow::bail!("store write failed")
+    });
+    finishing(&host, &automation.id, || {
+        pending(&automation, AutomationTrigger::Manual);
+        panic!("after the check")
+    });
+    let all = runs(&automation);
+    assert_eq!(all.iter().filter(|run| run.status == AutomationRunStatus::Failed).count(), 2);
+    // A run from before this work is not its to end.
+    assert_eq!(all.iter().find(|run| run.run_id == older.run_id).unwrap().status, AutomationRunStatus::Pending);
+}
+
+#[test]
+fn nothing_is_started_for_an_automation_with_nothing_due() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = saved(project.path(), Some("touch ran"), 30, "2099-01-01T00:00:00Z");
+    assert!(evaluate_apart(&host(), &automation, chrono::Utc::now()));
+    assert!(CHECKING.lock().unwrap().is_empty());
+    // Run now is not refused for a check that is not running.
+    run_now(&host(), &automation.id).unwrap();
+    settle();
+    assert!(project.path().join("ran").exists());
+}
+
+#[test]
 fn try_it_refuses_a_session_from_another_project() {
     let _home = crate::store::temp_home();
     let project = tempfile::tempdir().unwrap();
@@ -570,9 +633,10 @@ fn issue_runs_per_tick_are_capped_when_saved() {
         .unwrap()
     };
     let now = chrono::Utc::now();
-    assert!(super::super::definition_from_input(input(50), None, now).is_ok());
-    let error = super::super::definition_from_input(input(51), None, now).unwrap_err().to_string();
-    assert!(error.contains("at most 50"), "{error}");
+    let saved = |runs| super::super::definition_from_input(input(runs), None, now).unwrap().issue_trigger.unwrap().max_runs_per_tick;
+    assert_eq!(saved(50), 50);
+    // An older automation with more still saves and toggles, clamped.
+    assert_eq!(saved(80), 50);
 }
 
 #[test]

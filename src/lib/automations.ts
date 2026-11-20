@@ -34,8 +34,12 @@ function upsertRun(run: AutomationRun) {
   }
 }
 
+/** Runs the backend took out of the history, so a late answer cannot bring one back. */
+const removedRuns = new Set<string>();
+
 /** A pending run whose first check's result was folded into an earlier record. */
 export function removeRun(automationId: string, runId: string) {
+  removedRuns.add(runId);
   const current = state.runs[automationId];
   if (!current?.some((value) => value.runId === runId)) return;
   set({ runs: { ...state.runs, [automationId]: current.filter((value) => value.runId !== runId) } });
@@ -142,7 +146,10 @@ export async function deleteAutomation(id: string) {
 
 export async function runAutomationNow(id: string) {
   const run = await automationsApi.runNow(id);
-  upsertRun(run);
+  // The run's own events may have arrived first (a quick first check): the
+  // pending run returned here must not replace its outcome or come back.
+  const known = state.runs[run.automationId]?.some((value) => value.runId === run.runId);
+  if (!known && !removedRuns.has(run.runId)) upsertRun(run);
   return run;
 }
 

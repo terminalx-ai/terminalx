@@ -36,13 +36,17 @@ run is recorded as unavailable, as before: a quiet check never hides a missing
 agent.
 
 The scheduler evaluates an automation that has a check on a thread of its
-own, so a slow check never delays the other automations; while its check is
-still going, that automation's next tick is skipped. Run now on such an
-automation returns its pending run at once and goes on in the background; a
-Run now while its check is already running is refused. After the check, the
-run goes ahead only if the automation still exists, is still on (a Run now
-goes ahead either way) and the run is still pending; a scheduled run of an
-automation turned off meanwhile ends as cancelled.
+own, and only when something is due, so a slow check never delays the other
+automations; while it is being checked or started, that automation's next
+tick is skipped. Run now on such an automation returns its pending run at
+once and goes on in the background; a Run now while the automation is being
+checked or started is refused. After the check, the run goes ahead only if
+the automation still exists, is still on (a Run now goes ahead either way)
+and the run is still pending; a scheduled run of an automation turned off
+meanwhile ends as cancelled. Other edits made during the check (prompt,
+agent, workspace) are not looked at: the run goes ahead with the definition
+it started from. A run left pending without a session when its thread ends
+(a store error after the check) is ended as failed.
 
 ### Issue automations
 
@@ -56,8 +60,12 @@ For an issue automation the check gates the poll, not each issue:
   label on any issue; one failed record, with no issue, carries the reason;
 - output: every candidate goes ahead as before, each with the output in its
   prompt, from that one run of the check;
-- when the automation was edited, turned off or deleted while its check ran,
-  the poll does nothing.
+- when the automation was turned off or deleted, or its issue trigger or
+  check changed, while its check ran, the poll does nothing; other edits are
+  not looked at;
+- when it is turned off or deleted while the poll is starting its issues, the
+  poll stops: the issues not yet started are not marked seen, and are
+  candidates again once it is back on.
 
 ### History
 
