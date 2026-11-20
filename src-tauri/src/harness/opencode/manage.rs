@@ -1279,16 +1279,28 @@ mod tests {
     fn disconnect_removes_a_server_set_up_by_hand() {
         let (_dir, paths) = paths();
         std::fs::create_dir_all(&paths.config_dir).unwrap();
+        // A non-Ollama server with no key, beside a gateway kept in the config and a key in auth.json.
+        let gateway = json!({"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "https://gateway.example.internal/v1", "apiKey": "gw-0123456789abcdef"}, "whitelist": ["openai/gpt-5"]});
         std::fs::write(paths.config_file(), json!({"provider": {"lmstudio": {
-            "npm": "@ai-sdk/openai-compatible", "name": "LM Studio", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "whitelist": ["qwen3"], "models": {"qwen3": {}}}}}).to_string()).unwrap();
+            "npm": "@ai-sdk/openai-compatible", "name": "LM Studio", "options": {"baseURL": "http://127.0.0.1:1234/v1"}, "whitelist": ["qwen3"], "models": {"qwen3": {}}},
+            "openrouter": gateway}}).to_string()).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let auth = json!({"anthropic": {"type": "oauth", "refresh": "r", "access": "a", "expires": 1}}).to_string();
+        std::fs::write(paths.auth_file(), &auth).unwrap();
         let before = overview_in(&paths, false);
-        assert_eq!((before.connected.len(), before.connected[0].auth.as_str()), (1, "config"));
+        let server = before.connected.iter().find(|provider| provider.id == "lmstudio").unwrap();
+        assert_eq!((before.connected.len(), server.auth.as_str(), server.masked_key.as_deref()), (3, "config", None));
         let after = disconnect_in(&paths, "lmstudio").unwrap();
-        assert!(after.connected.is_empty(), "Disconnect does what it says");
+        let mut left: Vec<&str> = after.connected.iter().map(|provider| provider.id.as_str()).collect();
+        left.sort_unstable();
+        assert_eq!(left, ["anthropic", "openrouter"], "Disconnect does what it says, and only to this one");
+        assert!(!after.models.iter().any(|model| model.provider == "lmstudio"), "its models leave the picker");
         let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
         let entry = &config["provider"]["lmstudio"];
         assert!(entry.get("npm").is_none() && entry["options"].get("baseURL").is_none());
         assert_eq!((entry["whitelist"].clone(), entry["models"].clone()), (json!(["qwen3"]), json!({"qwen3": {}})), "its models stay for a reconnect");
+        assert_eq!(config["provider"]["openrouter"], gateway, "an unrelated provider is untouched");
+        assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), auth, "auth.json is not rewritten for a config-only server");
     }
 
     #[test]
