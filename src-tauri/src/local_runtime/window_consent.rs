@@ -94,7 +94,41 @@ static OFFERED: Mutex<Option<HashMap<String, RestartRequired>>> = Mutex::new(Non
 
 fn offer(required: RestartRequired) -> anyhow::Error {
     OFFERED.lock().unwrap().get_or_insert_with(HashMap::new).insert(required.epoch.clone(), required.clone());
+    changed(&required.epoch);
     required.into()
+}
+
+/// Called with a runtime's epoch whenever the restart offered for it is
+/// made, changed or withdrawn; the window's process installs one that
+/// sends Settings → Machines a fresh view.
+type OnChange = Box<dyn Fn(&str) + Send + Sync>;
+
+static ON_CHANGE: OnceLock<OnChange> = OnceLock::new();
+
+/// Tell the window about every change to the restarts offered.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn on_change(notify: OnChange) {
+    if ON_CHANGE.set(notify).is_err() {
+        log::warn!("the restart offer's watcher was installed twice");
+    }
+}
+
+fn changed(epoch: &str) {
+    if let Some(notify) = ON_CHANGE.get() {
+        notify(epoch);
+    }
+}
+
+/// The restart offered for runtime `epoch`, with what restarting it would
+/// stop now (`in_use`), which may differ from when it was offered: the
+/// offer is kept with the list as Settings → Machines shows it.
+pub(crate) fn offered_now_for(epoch: &str, in_use: impl FnOnce() -> Vec<String>) -> Option<RestartRequired> {
+    offered(epoch)?;
+    let now = RestartRequired { epoch: epoch.to_owned(), work: in_use() };
+    let mut offered = OFFERED.lock().unwrap();
+    let entry = offered.as_mut()?.get_mut(epoch)?;
+    *entry = now.clone();
+    Some(now)
 }
 
 /// The restart offered for runtime `epoch`, which Settings → Machines shows.
@@ -102,19 +136,10 @@ pub(crate) fn offered(epoch: &str) -> Option<RestartRequired> {
     OFFERED.lock().unwrap().as_ref().and_then(|offered| offered.get(epoch).cloned())
 }
 
-/// The epoch of the runtime attached now; the window's process installs it.
-type AttachedEpoch = Box<dyn Fn() -> Option<String> + Send + Sync>;
-
-static ATTACHED: OnceLock<AttachedEpoch> = OnceLock::new();
-
-/// The restart offered for the runtime attached now, if any.
-pub(crate) fn offered_now() -> Option<RestartRequired> {
-    ATTACHED.get().and_then(|attached| attached()).and_then(|epoch| offered(&epoch))
-}
-
 fn withdraw(epoch: &str) {
-    if let Some(offered) = OFFERED.lock().unwrap().as_mut() {
-        offered.remove(epoch);
+    let removed = OFFERED.lock().unwrap().as_mut().and_then(|offered| offered.remove(epoch));
+    if removed.is_some() {
+        changed(epoch);
     }
 }
 
@@ -229,7 +254,19 @@ pub(crate) trait Relauncher<R> {
 /// (Restart runtime), one that serves a computer or phone, or whose work
 /// would be cut short, is left running too, and the restart offered
 /// ([`RestartRequired`]).
+///
+/// An update that hands the runtime over while it is being stopped keeps its
+/// environment, so the runtime that took over cannot verify the window
+/// either: it is relaunched the same way, once.
 pub(crate) fn relaunch_by<R: Attached>(host: &impl Relauncher<R>, stale: &R, forced: bool) -> Result<Arc<R>> {
+    relaunch_once(host, stale, forced, true)
+}
+
+/// Said when the runtime was handed over while it was being stopped, and the
+/// one that took over cannot be relaunched in turn now.
+pub(crate) const HANDED_OVER: &str = "The TerminalX runtime was updated while it was being restarted, so it was not restarted. Try again in a moment.";
+
+fn relaunch_once<R: Attached>(host: &impl Relauncher<R>, stale: &R, forced: bool, again: bool) -> Result<Arc<R>> {
     let epoch = stale.epoch().to_owned();
     if let Some(current) = host.replaced(&epoch) {
         return Ok(current);
@@ -246,9 +283,22 @@ pub(crate) fn relaunch_by<R: Attached>(host: &impl Relauncher<R>, stale: &R, for
         }
     }
     match host.retire(stale, forced) {
-        Ok(()) => host.reattach(stale),
-        // Another runtime took its place meanwhile: that one is attached.
-        Err(error) if super::launch::refused(&error, "runtime_restarted") => host.reattach(stale),
+        Ok(()) => {
+            let fresh = host.reattach(stale)?;
+            // The runtime offered for has gone: so has the offer.
+            withdraw(&epoch);
+            Ok(fresh)
+        }
+        // Handed over meanwhile (an update): the runtime that took over
+        // keeps the environment, and so cannot verify the window either.
+        Err(error) if super::launch::refused(&error, "runtime_restarted") => {
+            log::info!("the local runtime was handed over while it was being restarted: {error:#}");
+            withdraw(&epoch);
+            match host.replaced(&epoch) {
+                Some(next) if again => relaunch_once(host, &*next, forced, false),
+                _ => Err(anyhow!(HANDED_OVER)),
+            }
+        }
         Err(error) if forced => Err(error.context("TerminalX could not restart its runtime")),
         Err(error) if super::launch::left_running(&error) => {
             log::info!("the local runtime that cannot verify this window was left running: {error:#}");
@@ -260,17 +310,22 @@ pub(crate) fn relaunch_by<R: Attached>(host: &impl Relauncher<R>, stale: &R, for
 
 /// What a runtime serves that a restart would cut off, by name: a computer
 /// or phone waiting for Allow, which would have to ask again, and the
-/// computers and phones connected to it. Nothing when it cannot tell.
+/// computers and phones connected to it. Nothing from a runtime too old to
+/// host any. When it cannot tell, it says so: that is no reason to restart
+/// it by itself.
 pub(crate) fn connected(runtime: &Desktop) -> Vec<String> {
     match runtime.machine_host_status() {
         Ok(Some(status)) => connections(&status),
         Ok(None) => Vec::new(),
         Err(error) => {
-            log::debug!("read what the local runtime serves: {error:#}");
-            Vec::new()
+            log::warn!("read what the local runtime serves: {error:#}");
+            vec![CANNOT_TELL.into()]
         }
     }
 }
+
+/// What a runtime serves, when its status cannot be read.
+pub(crate) const CANNOT_TELL: &str = "any computer or phone connected to it (TerminalX could not read which)";
 
 fn connections(status: &crate::machine_wire::Status) -> Vec<String> {
     let mut named = Vec::new();
@@ -300,14 +355,28 @@ pub(crate) fn in_use(runtime: &Desktop) -> Vec<String> {
 /// this Mac's security checks, as after a handover.
 const ATTACH_WITHIN: Duration = Duration::from_secs(60);
 
+/// The fresh runtime, as `attached` finds it, once it has attached within
+/// `within`, looking every `every`.
+fn attached_within<R>(within: Duration, every: Duration, attached: impl Fn() -> Option<Arc<R>>) -> Result<Arc<R>> {
+    let deadline = Instant::now() + within;
+    loop {
+        if let Some(fresh) = attached() {
+            return Ok(fresh);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("TerminalX restarted its runtime, but the new one has not attached yet. Try again in a moment.");
+        }
+        std::thread::sleep(every);
+    }
+}
+
 /// The app's relaunch, for every guarded command the window sends.
 #[cfg(target_os = "macos")]
 pub(crate) fn install_for(app: &tauri::AppHandle) {
-    use tauri::Manager;
-    let attached = app.clone();
-    if ATTACHED.set(Box::new(move || attached.state::<crate::AppState>().runtime().map(|runtime| runtime.epoch().to_owned()))).is_err() {
-        log::warn!("the attached runtime's epoch was installed twice");
-    }
+    let watcher = app.clone();
+    // Settings → Machines shows an offer made with no one at the window (an
+    // account grant) as soon as it is made, and one withdrawn as it goes.
+    on_change(Box::new(move |_| crate::machines::emit_host_view(&watcher)));
     let app = app.clone();
     install(Box::new(move |stale| relaunch(&app, stale, false)));
 }
@@ -325,9 +394,9 @@ impl Relauncher<Desktop> for AppHost<'_> {
     }
 
     fn provision(&self) -> Result<()> {
-        // The key `launch::launch` pins, read or created the same way.
+        // The key `launch::launch` then pins without reading it again.
         #[cfg(target_os = "macos")]
-        return consent::launch_public_key()?.map(drop).ok_or_else(|| anyhow!("this window has no consent key"));
+        return consent::provision_launch_key()?.map(drop).ok_or_else(|| anyhow!("this window has no consent key"));
         #[cfg(not(target_os = "macos"))]
         anyhow::bail!("this desktop cannot verify its window")
     }
@@ -361,16 +430,7 @@ impl Relauncher<Desktop> for AppHost<'_> {
         stale.disconnect();
         state.runtime_supervisor.retry_now();
         let _ = self.app.emit("local_runtime_state", ());
-        let deadline = Instant::now() + ATTACH_WITHIN;
-        let fresh = loop {
-            if let Some(fresh) = self.replaced(stale.epoch()) {
-                break fresh;
-            }
-            if Instant::now() >= deadline {
-                anyhow::bail!("TerminalX restarted its runtime, but the new one has not attached yet. Try again in a moment.");
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        };
+        let fresh = attached_within(ATTACH_WITHIN, Duration::from_millis(100), || self.replaced(stale.epoch()))?;
         // The host key the window holds, before the command needs it.
         state.pairing.reconcile_machine(&fresh);
         Ok(fresh)
@@ -390,20 +450,60 @@ fn relaunch(app: &tauri::AppHandle, stale: &Desktop, forced: bool) -> Result<Arc
 /// it. Only a runtime this window offered to restart is stopped. Each agent
 /// stopped picks up its conversation again when its tab next starts. A
 /// runtime another window or a switch already replaced is left alone.
+///
+/// What it stops is read again first: when that is more than Settings →
+/// Machines last showed, nothing is stopped and the offer, with the new list,
+/// is the answer, so the person is asked again.
 #[tauri::command]
 pub async fn local_runtime_restart_for_window(app: tauri::AppHandle, epoch: String) -> Result<(), String> {
     use tauri::Manager;
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(stale) = app.state::<crate::AppState>().runtime().filter(|runtime| runtime.epoch() == epoch) else { return Ok(()) };
-        if offered(&epoch).is_none() {
-            return Err("TerminalX did not offer to restart this runtime, so it was left running.".to_string());
+        let attached = app.state::<crate::AppState>().runtime();
+        match gate(attached.as_deref(), &epoch, in_use) {
+            Gate::LeftAlone => Ok(()),
+            Gate::NotOffered => Err(NOT_OFFERED.to_string()),
+            Gate::MoreToStop(required) => Err(required.to_string()),
+            Gate::Restart => {
+                let stale = attached.expect("an offered runtime is attached");
+                relaunch(&app, &stale, true).map_err(|error| format!("{error:#}"))?;
+                withdraw(&epoch);
+                Ok(())
+            }
         }
-        relaunch(&app, &stale, true).map_err(|error| format!("{error:#}"))?;
-        withdraw(&epoch);
-        Ok(())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+/// Restart runtime, for a runtime it was not offered for.
+pub(crate) const NOT_OFFERED: &str = "TerminalX did not offer to restart this runtime, so it was left running.";
+
+/// What Restart runtime does for runtime `epoch`.
+#[derive(Debug, PartialEq, Eq)]
+enum Gate {
+    /// Another runtime is attached now: nothing to stop.
+    LeftAlone,
+    /// No restart was offered for it: nothing is stopped.
+    NotOffered,
+    /// It would stop more than was shown: nothing is stopped, and this,
+    /// the offer as it stands now, is shown instead.
+    MoreToStop(RestartRequired),
+    Restart,
+}
+
+/// Whether Restart runtime may stop runtime `epoch`, with `attached` the
+/// runtime attached now and `in_use` what stopping it would stop now.
+fn gate<R: Attached>(attached: Option<&R>, epoch: &str, in_use: impl FnOnce(&R) -> Vec<String>) -> Gate {
+    let Some(runtime) = attached.filter(|runtime| runtime.epoch() == epoch) else { return Gate::LeftAlone };
+    let Some(shown) = offered(epoch) else { return Gate::NotOffered };
+    let now = in_use(runtime);
+    if now.iter().all(|named| shown.work.contains(named)) {
+        return Gate::Restart;
+    }
+    let required = RestartRequired { epoch: epoch.to_owned(), work: now };
+    OFFERED.lock().unwrap().get_or_insert_with(HashMap::new).insert(epoch.to_owned(), required.clone());
+    changed(epoch);
+    Gate::MoreToStop(required)
 }
 
 #[cfg(test)]
@@ -540,14 +640,16 @@ mod tests {
     struct Host {
         calls: RefCell<Vec<String>>,
         replaced: Option<&'static str>,
+        /// The runtime an update hands over to while one is being stopped.
+        handed_to: Option<&'static str>,
         provision: fn() -> Result<()>,
         connected: Vec<String>,
-        retire: fn(bool) -> Result<()>,
+        retire: fn(&str, bool) -> Result<()>,
     }
 
     impl Host {
         fn idle() -> Self {
-            Self { calls: RefCell::default(), replaced: None, provision: || Ok(()), connected: Vec::new(), retire: |_| Ok(()) }
+            Self { calls: RefCell::default(), replaced: None, handed_to: None, provision: || Ok(()), connected: Vec::new(), retire: |_, _| Ok(()) }
         }
 
         fn calls(&self) -> Vec<String> {
@@ -556,9 +658,10 @@ mod tests {
     }
 
     impl Relauncher<Runtime> for Host {
-        fn replaced(&self, _: &str) -> Option<Arc<Runtime>> {
+        fn replaced(&self, epoch: &str) -> Option<Arc<Runtime>> {
+            let handed = self.calls.borrow().iter().any(|call| call.starts_with("retire")) && self.handed_to != Some(epoch);
             self.calls.borrow_mut().push("replaced".into());
-            self.replaced.map(|epoch| Arc::new(Runtime(epoch)))
+            self.replaced.or(self.handed_to.filter(|_| handed)).map(|epoch| Arc::new(Runtime(epoch)))
         }
         fn provision(&self) -> Result<()> {
             self.calls.borrow_mut().push("provision".into());
@@ -572,9 +675,9 @@ mod tests {
             self.calls.borrow_mut().push("work".into());
             vec!["Claude in api".into(), "a terminal in web".into()]
         }
-        fn retire(&self, _: &Runtime, forced: bool) -> Result<()> {
-            self.calls.borrow_mut().push(format!("retire forced={forced}"));
-            (self.retire)(forced)
+        fn retire(&self, stale: &Runtime, forced: bool) -> Result<()> {
+            self.calls.borrow_mut().push(format!("retire {} forced={forced}", stale.0));
+            (self.retire)(stale.0, forced)
         }
         fn reattach(&self, _: &Runtime) -> Result<Arc<Runtime>> {
             self.calls.borrow_mut().push("reattach".into());
@@ -582,7 +685,7 @@ mod tests {
         }
     }
 
-    fn busy(_: bool) -> Result<()> {
+    fn busy(_: &str, _: bool) -> Result<()> {
         let refusal = anyhow::Error::from(Refused { code: "runtime_busy".into(), message: "It is running work.".into() });
         Err(refusal.context(super::super::launch::LeftRunning("The TerminalX runtime has work under way; nothing was stopped.")))
     }
@@ -591,7 +694,7 @@ mod tests {
     fn an_idle_runtime_is_stopped_once_the_key_is_saved_then_the_fresh_one_attached() {
         let host = Host::idle();
         assert_eq!(relaunch_by(&host, &Runtime("idle-1"), false).unwrap().0, "fresh");
-        assert_eq!(host.calls(), ["replaced", "provision", "connected", "retire forced=false", "reattach"]);
+        assert_eq!(host.calls(), ["replaced", "provision", "connected", "retire idle-1 forced=false", "reattach"]);
         assert_eq!(offered("idle-1"), None, "nothing to offer");
     }
 
@@ -610,16 +713,128 @@ mod tests {
         let host = Host { replaced: Some("other"), ..Host::idle() };
         assert_eq!(relaunch_by(&host, &Runtime("replaced-1"), true).unwrap().0, "other");
         assert_eq!(host.calls(), ["replaced"]);
-        // Replaced while it was being stopped: the one attached is used.
-        let host = Host {
-            retire: |_| {
-                let refusal = anyhow::Error::from(Refused { code: "runtime_restarted".into(), message: "Another runtime was attached meanwhile.".into() });
-                Err(refusal.context(super::super::launch::LeftRunning("replaced")))
-            },
-            ..Host::idle()
-        };
-        assert_eq!(relaunch_by(&host, &Runtime("replaced-2"), false).unwrap().0, "fresh");
-        assert_eq!(offered("replaced-2"), None);
+    }
+
+    fn handed_over(stale: &str, _: bool) -> Result<()> {
+        if stale.starts_with("handed-") {
+            return Ok(());
+        }
+        let refusal = anyhow::Error::from(Refused { code: "runtime_restarted".into(), message: "Another runtime was attached meanwhile.".into() });
+        Err(refusal.context(super::super::launch::LeftRunning("The TerminalX runtime was replaced before it could be stopped; nothing was stopped.")))
+    }
+
+    #[test]
+    fn a_runtime_handed_over_while_it_is_stopped_is_relaunched_as_the_one_that_took_over() {
+        for forced in [false, true] {
+            let _ = offer(RestartRequired { epoch: "handover-1".into(), work: Vec::new() });
+            let host = Host { handed_to: Some("handed-1"), retire: handed_over, ..Host::idle() };
+            assert_eq!(relaunch_by(&host, &Runtime("handover-1"), forced).unwrap().0, "fresh");
+            let calls = host.calls();
+            assert!(calls.contains(&format!("retire handover-1 forced={forced}")) && calls.contains(&format!("retire handed-1 forced={forced}")), "{calls:?}");
+            assert_eq!(calls.last().map(String::as_str), Some("reattach"), "{calls:?}");
+            assert_eq!(offered("handover-1"), None, "the offer for the runtime handed over is gone");
+        }
+    }
+
+    #[test]
+    fn a_handover_not_attached_yet_or_handed_over_twice_restarts_nothing_and_says_so() {
+        for forced in [false, true] {
+            // Nothing attached in its place yet.
+            let _ = offer(RestartRequired { epoch: "handover-2".into(), work: Vec::new() });
+            let host = Host { retire: handed_over, ..Host::idle() };
+            let error = relaunch_by(&host, &Runtime("handover-2"), forced).err().unwrap();
+            assert_eq!(error.to_string(), HANDED_OVER);
+            assert!(!host.calls().contains(&"reattach".to_string()));
+            assert_eq!(offered("handover-2"), None);
+            // The one that took over is handed over too: one try only.
+            let host = Host { handed_to: Some("handover-again"), retire: |_, _| handed_over("x", false), ..Host::idle() };
+            let error = relaunch_by(&host, &Runtime("handover-3"), forced).err().unwrap();
+            assert_eq!(error.to_string(), HANDED_OVER);
+            assert_eq!(host.calls().iter().filter(|call| call.starts_with("retire")).count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_fresh_runtime_attached_withdraws_the_restart_offered_for_the_one_it_replaced() {
+        // Offered for a grant; then a person's command repaired it.
+        let _ = offer(RestartRequired { epoch: "settle-1".into(), work: Vec::new() });
+        let host = Host::idle();
+        assert_eq!(relaunch_by(&host, &Runtime("settle-1"), false).unwrap().0, "fresh");
+        assert_eq!(offered("settle-1"), None);
+    }
+
+    /// Epochs the window was told about, by [`changed`].
+    static NOTIFIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    fn watch() {
+        static WATCHING: std::sync::Once = std::sync::Once::new();
+        WATCHING.call_once(|| on_change(Box::new(|epoch| NOTIFIED.lock().unwrap().push(epoch.to_owned()))));
+    }
+
+    fn notified(epoch: &str) -> usize {
+        NOTIFIED.lock().unwrap().iter().filter(|notified| *notified == epoch).count()
+    }
+
+    #[test]
+    fn the_window_is_told_when_an_offer_is_made_changed_or_withdrawn() {
+        watch();
+        // Made with no one at the window, as for an account grant.
+        let send = |_: &Runtime, _| Err(refused("pairing_unavailable", Refusal::UnsupportedDesktop.says()));
+        unattended(&Runtime("notify-1"), crate::machine_wire::CREATE_CODE, serde_json::json!({}), send, true, |_| Vec::new()).unwrap_err();
+        assert_eq!(notified("notify-1"), 1);
+        // Restart runtime finds more to stop: the new list is announced.
+        assert!(matches!(gate(Some(&Runtime("notify-1")), "notify-1", |_| vec!["a terminal in web".into()]), Gate::MoreToStop(_)));
+        assert_eq!(notified("notify-1"), 2);
+        withdraw("notify-1");
+        assert_eq!(notified("notify-1"), 3);
+        withdraw("notify-1");
+        assert_eq!(notified("notify-1"), 3, "nothing withdrawn, nothing to tell");
+        // A fresh runtime attached: the offer for the one it replaced goes, announced.
+        let _ = offer(RestartRequired { epoch: "notify-2".into(), work: Vec::new() });
+        relaunch_by(&Host::idle(), &Runtime("notify-2"), false).unwrap();
+        assert_eq!(notified("notify-2"), 2);
+        assert_eq!(offered("notify-2"), None);
+    }
+
+    #[test]
+    fn restart_runtime_stops_only_the_runtime_offered_with_no_more_than_was_shown() {
+        // Another runtime is attached now, or none: nothing is stopped.
+        assert_eq!(gate(Some(&Runtime("gate-other")), "gate-1", |_| panic!("not read")), Gate::LeftAlone);
+        assert_eq!(gate::<Runtime>(None, "gate-1", |_| panic!("not read")), Gate::LeftAlone);
+        // Attached, but no restart was offered for it: a web view naming any
+        // epoch it likes stops nothing.
+        assert_eq!(gate(Some(&Runtime("gate-1")), "gate-1", |_| panic!("not read")), Gate::NotOffered);
+        let _ = offer(RestartRequired { epoch: "gate-1".into(), work: vec!["Claude in api".into()] });
+        // Less or the same as shown: restarted.
+        assert_eq!(gate(Some(&Runtime("gate-1")), "gate-1", |_| Vec::new()), Gate::Restart);
+        assert_eq!(gate(Some(&Runtime("gate-1")), "gate-1", |_| vec!["Claude in api".into()]), Gate::Restart);
+        // More: asked again, with what it would stop now.
+        let Gate::MoreToStop(required) = gate(Some(&Runtime("gate-1")), "gate-1", |_| vec!["Claude in api".into(), "a terminal in web".into()]) else { panic!("asked again") };
+        assert_eq!(required.work, ["Claude in api", "a terminal in web"]);
+        assert_eq!(offered("gate-1"), Some(required));
+        assert_eq!(gate(Some(&Runtime("gate-1")), "gate-1", |_| vec!["Claude in api".into(), "a terminal in web".into()]), Gate::Restart, "once shown");
+    }
+
+    #[test]
+    fn the_offer_shown_names_what_a_restart_would_stop_now() {
+        assert_eq!(offered_now_for("now-1", || panic!("no offer, nothing read")), None);
+        let _ = offer(RestartRequired { epoch: "now-1".into(), work: vec!["Claude in api".into()] });
+        let shown = offered_now_for("now-1", || vec!["Codex in web".into()]).unwrap();
+        assert_eq!(shown.work, ["Codex in web"]);
+        assert_eq!(offered("now-1").unwrap().work, ["Codex in web"], "kept as shown");
+    }
+
+    #[test]
+    fn the_fresh_runtime_is_waited_for_until_it_attaches() {
+        let looked = Cell::new(0);
+        let fresh = attached_within(Duration::from_secs(5), Duration::from_millis(1), || {
+            looked.set(looked.get() + 1);
+            (looked.get() == 3).then(|| Arc::new(Runtime("fresh")))
+        })
+        .unwrap();
+        assert_eq!((fresh.0, looked.get()), ("fresh", 3));
+        let error = attached_within::<Runtime>(Duration::from_millis(20), Duration::from_millis(5), || None).err().unwrap();
+        assert!(error.to_string().contains("has not attached yet"), "{error:#}");
     }
 
     #[test]
@@ -642,20 +857,20 @@ mod tests {
 
     #[test]
     fn a_runtime_serving_a_computer_or_phone_is_not_restarted_by_itself() {
-        let host = Host { connected: vec!["the connection of MacBook".into()], retire: |_| panic!("not stopped"), ..Host::idle() };
+        let host = Host { connected: vec!["the connection of MacBook".into()], retire: |_, _| panic!("not stopped"), ..Host::idle() };
         let error = relaunch_by(&host, &Runtime("serving-1"), false).err().unwrap();
         let required = error.downcast_ref::<RestartRequired>().expect("restart required");
         assert_eq!(required.work, ["the connection of MacBook", "Claude in api", "a terminal in web"]);
         // Restart runtime stops it all the same.
         let host = Host { connected: vec!["the connection of MacBook".into()], ..Host::idle() };
         assert_eq!(relaunch_by(&host, &Runtime("serving-1"), true).unwrap().0, "fresh");
-        assert_eq!(host.calls(), ["replaced", "provision", "retire forced=true", "reattach"]);
+        assert_eq!(host.calls(), ["replaced", "provision", "retire serving-1 forced=true", "reattach"]);
     }
 
     #[test]
     fn restart_runtime_that_fails_says_why_instead_of_offering_itself_again() {
         let host = Host {
-            retire: |forced| {
+            retire: |_, forced| {
                 assert!(forced);
                 Err(anyhow!("/usr/bin/other is not a TerminalX runtime of this home").context(super::super::launch::LeftRunning("The process holding the runtime socket was left running.")))
             },
@@ -666,7 +881,7 @@ mod tests {
         assert!(format!("{error:#}").contains("was left running"), "{error:#}");
         assert_eq!(offered("forced-1"), None);
         // A failure that may have stopped something is no restart prompt either.
-        let host = Host { retire: |_| anyhow::bail!("did not exit"), ..Host::idle() };
+        let host = Host { retire: |_, _| anyhow::bail!("did not exit"), ..Host::idle() };
         let failed = relaunch_by(&host, &Runtime("failed-1"), false).err().unwrap();
         assert!(failed.downcast_ref::<RestartRequired>().is_none());
     }
