@@ -292,7 +292,13 @@ per-pane lock:
    box with `Ctrl+U`, but that deletes only back to the start of the cursor's
    row: a wrapped prompt lost its last row, and the rest went with the next
    message glued to it. A box that cannot be seen at all (a CLI drawing
-   something else) is typed into.
+   something else) is typed into. A list of choices Codex draws in the box's
+   place (its selected row's `›` in reverse video) is a question of its own,
+   not text: the message waits on it the same way, and the chat says the
+   agent is asking something in its terminal (`input_occupied` with
+   `choice`, PRO-462). The one Codex used to ask on every resume of a tab
+   whose folder changed, "Working directory · resume", is not asked at all:
+   the app chooses the folder, and resumes with `tui.resume_cwd="current"`.
 2. Any image attachments, each as its own bracketed paste of its path — a typed
    path is read as prose, only a paste becomes an attachment.
 3. The body, as a bracketed paste (`\x1b[200~` … `\x1b[201~`), with newlines

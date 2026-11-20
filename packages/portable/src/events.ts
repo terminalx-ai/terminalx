@@ -189,8 +189,11 @@ export type Payload =
     }
   /** The agent took the queued `user_message` at `promptSeq` while its turn was still running (#551). */
   | { type: "prompt_absorbed"; promptSeq: number }
-  /** The `user_message` at `promptSeq` waits to be typed: the agent's input box holds something else (#722). `occupied: false` once it went in. */
-  | { type: "input_occupied"; promptSeq: number; occupied: boolean }
+  /**
+   * The `user_message` at `promptSeq` waits to be typed: the agent's input box holds something else (#722). `occupied: false` once it went in.
+   * `choice`: what is in the way is a question the agent drew in place of its box, a list of choices to answer in the terminal (PRO-462).
+   */
+  | { type: "input_occupied"; promptSeq: number; occupied: boolean; choice?: boolean }
   /** The agent dropped the turn of the `user_message` at `promptSeq` before answering it, and took another prompt in its place (#722). */
   | { type: "prompt_replaced"; promptSeq: number }
   /** The agent recorded the `user_message` at `promptSeq` as `text`, not as it was sent (#722). */

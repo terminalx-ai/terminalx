@@ -32,6 +32,8 @@ const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previ
 export interface Delivery {
   /** Not typed yet: the agent's input box holds something else. */
   inputOccupied?: boolean;
+  /** What holds it up is a question the agent drew in place of its input box, not text in it (PRO-462). */
+  inputChoice?: boolean;
   /** The agent dropped its turn before answering it, and took another prompt in its place. */
   replaced?: boolean;
   /** Stopped while it waited on the agent's input box: never typed. */
@@ -226,8 +228,8 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   if (at == null) return undefined;
   const [item] = turn.work.splice(at, 1);
   if (item.kind !== "queued" && item.kind !== "message") return undefined;
-  const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
-  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
+  const { inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent } = item;
+  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -565,7 +567,7 @@ export class TranscriptReducer {
         break;
       }
       case "input_occupied": {
-        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined, inputChoice: (payload.occupied && payload.choice) || undefined }));
         break;
       }
       case "prompt_replaced": {
@@ -574,7 +576,7 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined, inputChoice: undefined }));
         break;
       }
       case "prompt_joined": {

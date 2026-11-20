@@ -407,6 +407,11 @@ pub enum Payload {
     InputOccupied {
         prompt_seq: u64,
         occupied: bool,
+        /// What holds it up is not text in the box but a question the agent
+        /// drew in its place, a list of choices to answer in the terminal
+        /// (PRO-462).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        choice: bool,
     },
     /// The agent dropped the turn of the `user_message` at `prompt_seq`
     /// before answering it, and took another prompt in its place (#722):

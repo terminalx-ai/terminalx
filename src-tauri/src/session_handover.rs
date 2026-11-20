@@ -242,6 +242,9 @@ pub(crate) struct InputRecord {
     pub marks: Vec<u64>,
     pub made_waiting: bool,
     pub stops: u64,
+    /// What the marks wait on is a question the CLI drew, not text in its box (PRO-462).
+    #[serde(default)]
+    pub choice: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -543,7 +546,7 @@ impl SessionManager {
             prompts: p.prompts.0.iter().map(|prompt| PromptRecord {
                 uuid: prompt.lineage.uuid.clone(), parent: prompt.lineage.parent.clone(), seq: prompt.seq, text: prompt.text.clone(), worked_on: prompt.worked_on,
             }).collect(),
-            input: InputRecord { waiting: p.input.waiting, marks: p.input.marks.clone(), made_waiting: p.input.made_waiting, stops: p.input.stops },
+            input: InputRecord { waiting: p.input.waiting, marks: p.input.marks.clone(), made_waiting: p.input.made_waiting, stops: p.input.stops, choice: p.input.choice },
             resend_after_abort: p.resend_after_abort,
             codex_interrupt_hooks_owed: p.codex_interrupt_hooks_owed,
             codex_prompt_starts_turn: p.codex_prompt_starts_turn,
@@ -643,7 +646,7 @@ impl SessionManager {
             prompts: RecordedPrompts(cli.prompts.into_iter().map(|prompt| RecordedPrompt {
                 lineage: tui::Lineage { uuid: prompt.uuid, parent: prompt.parent }, seq: prompt.seq, text: prompt.text, worked_on: prompt.worked_on,
             }).collect()),
-            input: InputBox { waiting: cli.input.waiting, marks: cli.input.marks, made_waiting: cli.input.made_waiting, stops: cli.input.stops },
+            input: InputBox { waiting: cli.input.waiting, marks: cli.input.marks, made_waiting: cli.input.made_waiting, stops: cli.input.stops, choice: cli.input.choice },
             resend_after_abort: cli.resend_after_abort,
             codex_interrupt_hooks_owed: cli.codex_interrupt_hooks_owed,
             codex_prompt_starts_turn: cli.codex_prompt_starts_turn,
