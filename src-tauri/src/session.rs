@@ -7000,9 +7000,6 @@ impl SessionManager {
         self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
     }
 
-    /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
-    /// a close with no turn behind it, and the latch stops the second of the
-    /// two closers that race for a PTY-first tab.
     /// A `!` command's output came (#1294). The turn a `!command` from the
     /// composer opened ends with it, once the tab has been quiet for a moment
     /// (`watch_tabs`): Claude Code runs no model turn and no `Stop` for it.
@@ -7015,6 +7012,9 @@ impl SessionManager {
         }
     }
 
+    /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
+    /// a close with no turn behind it, and the latch stops the second of the
+    /// two closers that race for a PTY-first tab.
     fn close_open_turn(&self, rt: &mut TabRuntime, status: TurnStatus, final_text: Option<String>) {
         if !rt.turn_open {
             return;

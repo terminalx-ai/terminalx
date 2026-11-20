@@ -381,6 +381,8 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
   const [error, setError] = useState<string | null>(null);
   const keyPage = KEY_PAGES[provider.id];
   const ready = provider.local ? !!baseUrl.trim() : !!key.trim();
+  // Emptying a saved address drops it from the config, so it is said out loud, with a way back.
+  const clearing = !provider.local && !!saved && !baseUrl.trim();
   const connect = async () => {
     if (!ready || busy) return;
     setBusy(true);
@@ -413,7 +415,14 @@ function ConnectForm({ provider, take, onCancel, onConnected, replacing }: {
       <label className="text-[12px] font-medium" htmlFor={`base-url-${provider.id}`}>Base URL</label>
       <input id={`base-url-${provider.id}`} value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} spellCheck={false} placeholder={provider.api ?? "https://…"}
         className="h-8 min-w-0 rounded-md border border-hairline bg-card px-2.5 font-mono text-[12px] outline-none placeholder:text-faint focus-visible:ring-2 focus-visible:ring-ring/40" />
-      <p className="text-[12px] text-faint">{provider.local ? "Where Ollama answers on this Mac. TerminalX checks that it does before saving." : "Leave empty unless you go through a proxy or your own gateway."}</p>
+      {clearing
+        ? <div role="status" data-testid="base-url-clearing" className="flex items-start gap-2 text-[12px] text-destructive">
+          <span className="min-w-0">{replacing ? "Saving" : "Connecting"} removes the saved address <span className="break-all font-mono">{saved}</span>; the key then goes to {provider.name} directly.</span>
+          <button type="button" onClick={() => setBaseUrl(saved ?? "")} className="shrink-0 underline underline-offset-2 hover:text-foreground">Keep it</button>
+        </div>
+        : <p className="text-[12px] text-faint">{provider.local ? "Where Ollama answers on this Mac. TerminalX checks that it does before saving."
+          : saved ? "Saved in OpenCode’s config, and kept. Empty it to send the key to the provider directly."
+          : "Leave empty unless you go through a proxy or your own gateway."}</p>}
     </div>
     {error && <p role="alert" className="mt-3 text-[12px] text-destructive">{error}</p>}
     <div className="mt-4 flex justify-end gap-2">

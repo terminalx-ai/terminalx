@@ -759,7 +759,7 @@ export function TabView({
     [transcript, outbox, outboxEntries, outboxFollowUps],
   );
   // #1291: a cloud tab's messages on their way, drawn at the transcript's end as Queued cards until the conversation has them.
-  const pendingMessages = usePendingCloudMessages(`${backend.key}:${tab.id}`, outboxEntries, outboxFollowUps, events, !tab.loadingHistory);
+  const pendingMessages = usePendingCloudMessages(`${backend.key}:${tab.id}`, outboxEntries, outboxFollowUps, events, tab.historyRead !== false);
   const resendCommand = useCallback((entry: OutboxEntry) => {
     if (!outbox) return;
     setError(null);

@@ -755,7 +755,7 @@ the pull request that adds it.
 | `session.undoTurn` | `checkpoints/1` | Served | Manage only; refused with the overlapping paths and a token, done when sent again with it |
 | `session.restoreUndo` | `checkpoints/1` | Served | Manage only; as `session.undoTurn` |
 | `session.reset` | `checkpoints/1` | Served | Manage only; the chat (and, when asked, the checkout) back to a turn, or the last reset undone |
-| `session.fork` | `checkpoints/1` | Served | Manage only; into a tab beside the source or a session on a worktree of its own |
+| `session.fork` | `checkpoints/1` | Served | Manage only; into a tab beside the source or a session on a worktree of its own; a new session stays in the source's project |
 | `session.handoff` | `handoff/1` | Served | Manage only; another agent tab with its first prompt in one call: a second opinion, Retry in a new chat, the agent handoff (#1327) |
 | `session.handoffContext` | `handoff/1` | Served | Manage only; names the session and an agent tab; the tab's context with the machine's own transcript path, for a handoff's prompt |
 | `session.steer` | `agent-commands/1` | Served | Into the running turn; a durable receipt (decision 3) |

@@ -56,8 +56,20 @@ export interface TabEntry {
    * on a tab of this computer, whose account is read from its own list.
    */
   accountLabel?: string | null;
-  /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
+  /**
+   * A cloud tab whose conversation has not been read yet and is on its way:
+   * the chat says it is loading, not that it is empty. False for a stopped
+   * workspace, which shows what was saved, even before that is read.
+   */
   loadingHistory?: boolean;
+  /**
+   * A cloud tab's conversation has been read (this desktop's cache, a
+   * checkpoint, the live replay), or it has none (#1341). Unlike
+   * `loadingHistory`, a stopped workspace's tab is not read until its saved
+   * history has merged: only then is its newest event the one a message on
+   * its way comes after. Absent on a local tab, whose log is its own.
+   */
+  historyRead?: boolean;
   /**
    * What is in the tab's terminal (#437). Absent, or `agent`, is the tab's
    * agent run by the app. `by_hand` is that agent started by hand in the

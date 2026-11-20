@@ -32,6 +32,50 @@ const ENTRIES: usize = 64;
 /// How long a page that said `hasMore` counts as one read under way: its next page skips the reconcile.
 const CONTINUATION: Duration = Duration::from_secs(30);
 
+/// Records parsed, or hashed, between checks that a read is still wanted.
+pub(super) const WANTED_EVERY: usize = 256;
+/// Bytes read between checks that a read is still wanted.
+const WANTED_BYTES: usize = 1024 * 1024;
+
+/// Whether a read is still wanted (#1338): a prefetch that a newer one
+/// replaced stops inside a whole-log read or hash, not only between logs.
+#[derive(Clone, Copy)]
+pub(super) struct Wanted<'a>(pub &'a dyn Fn() -> bool);
+
+fn always() -> bool { true }
+
+impl Wanted<'static> {
+    /// The phone's own reads are always wanted.
+    pub(super) const ALWAYS: Self = Wanted(&always);
+}
+
+impl Wanted<'_> {
+    pub(super) fn check(&self) -> Result<()> {
+        if (self.0)() { Ok(()) } else { Err(Stopped.into()) }
+    }
+}
+
+/// A read given up because it was no longer wanted.
+#[derive(Debug)]
+pub(super) struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("no longer wanted")
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// The rest of `file`, in chunks, checking between them that it is still wanted.
+fn read_rest(file: &mut impl Read, bytes: &mut Vec<u8>, wanted: Wanted) -> Result<()> {
+    loop {
+        wanted.check()?;
+        let read = file.by_ref().take(WANTED_BYTES as u64).read_to_end(bytes)?;
+        if read == 0 { return Ok(()); }
+    }
+}
+
 /// A log's records, and where each one's line ends in the file.
 pub(super) struct LogRead {
     pub events: Vec<AgentEvent>,
@@ -184,24 +228,25 @@ impl SyncCache {
 
 /// Every record of a log, read as `store::read_lines` reads it: lines that
 /// are blank or do not parse are skipped, and a log not there is empty.
-pub(super) fn read_log(path: &Path) -> Result<LogRead> {
+pub(super) fn read_log(path: &Path, wanted: Wanted) -> Result<LogRead> {
     let (bytes, identity) = match File::open(path) {
         Ok(mut file) => {
-            let identity = identity(&file.metadata()?);
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
+            let metadata = file.metadata()?;
+            let identity = identity(&metadata);
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            read_rest(&mut file, &mut bytes, wanted)?;
             (bytes, identity)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
         Err(error) => return Err(error.into()),
     };
-    let (events, ends) = parse_lines(std::str::from_utf8(&bytes)?, 0);
+    let (events, ends) = parse_lines(std::str::from_utf8(&bytes)?, 0, wanted)?;
     Ok(LogRead { events, ends, bytes, base: 0, identity })
 }
 
 /// The records appended after `verified`, or `None` when the log is not the
 /// one it was verified against plus whole lines: then it is read whole.
-pub(super) fn read_after(path: &Path, verified: &Verified) -> Result<Option<Tail>> {
+pub(super) fn read_after(path: &Path, verified: &Verified, wanted: Wanted) -> Result<Option<Tail>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -214,7 +259,7 @@ pub(super) fn read_after(path: &Path, verified: &Verified) -> Result<Option<Tail
     let from = verified.bytes - verified.fingerprint.len() as u64;
     file.seek(SeekFrom::Start(from))?;
     let mut bytes = Vec::with_capacity((metadata.len() - from) as usize);
-    file.take(metadata.len() - from).read_to_end(&mut bytes)?;
+    read_rest(&mut file.take(metadata.len() - from), &mut bytes, wanted)?;
     if bytes.len() as u64 != metadata.len() - from || !bytes.starts_with(&verified.fingerprint) {
         return Ok(None);
     }
@@ -225,15 +270,16 @@ pub(super) fn read_after(path: &Path, verified: &Verified) -> Result<Option<Tail
         return Ok(None);
     }
     let Ok(text) = std::str::from_utf8(&bytes) else { return Ok(None) };
-    let (events, ends) = parse_lines(text, verified.bytes);
+    let (events, ends) = parse_lines(text, verified.bytes, wanted)?;
     Ok(Some(Tail { events, ends, bytes }))
 }
 
 /// The records in `text`, and where each one's line ends, counting from `base`.
-fn parse_lines(text: &str, base: u64) -> (Vec<AgentEvent>, Vec<u64>) {
+fn parse_lines(text: &str, base: u64, wanted: Wanted) -> Result<(Vec<AgentEvent>, Vec<u64>)> {
     let (mut events, mut ends) = (Vec::new(), Vec::new());
     let mut at = base;
-    for line in text.split_inclusive('\n') {
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        if index % WANTED_EVERY == 0 { wanted.check()?; }
         at += line.len() as u64;
         let line = line.strip_suffix('\n').unwrap_or(line);
         if line.trim().is_empty() { continue; }
@@ -242,5 +288,5 @@ fn parse_lines(text: &str, base: u64) -> (Vec<AgentEvent>, Vec<u64>) {
             ends.push(at);
         }
     }
-    (events, ends)
+    Ok((events, ends))
 }

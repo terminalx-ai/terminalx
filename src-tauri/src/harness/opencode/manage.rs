@@ -907,6 +907,67 @@ mod tests {
         assert_eq!(after.catalog.iter().find(|provider| provider.id == "openrouter").unwrap().base_url.as_deref(), Some(url.as_str()));
     }
 
+    /// A gateway on this Mac that answers `count` requests, one after another, and says what each asked.
+    fn gateway_for(count: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || (0..count).map(|_| {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" { break; }
+                request.push_str(&line);
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+            request
+        }).collect());
+        (url, served)
+    }
+
+    /// Issue #1321: a catalogue provider connected through a custom gateway,
+    /// then disconnected, reconnects through that gateway when the address is
+    /// left as the form shows it, and loses it only when cleared on purpose.
+    #[test]
+    fn a_gateway_survives_disconnect_and_reconnect_until_cleared() {
+        let (_dir, paths) = paths();
+        let (gateway, gateway_served) = gateway_for(2);
+        let (catalogue, catalogue_served) = gateway_for(1);
+        std::fs::write(paths.catalog_file(), json!({
+            "acme": {"id": "acme", "name": "Acme", "env": ["ACME_API_KEY"], "npm": "@ai-sdk/openai", "api": catalogue, "models": {}},
+        }).to_string()).unwrap();
+        let saved_base = |paths: &Paths| -> Option<String> {
+            let config: Value = serde_json::from_str(&std::fs::read_to_string(paths.config_file()).unwrap()).unwrap();
+            config.pointer("/provider/acme/options/baseURL").and_then(Value::as_str).map(str::to_owned)
+        };
+
+        connect_in(&paths, "acme", "acme-key-first-0123", Some(&gateway)).unwrap();
+        assert_eq!(saved_base(&paths).as_deref(), Some(gateway.as_str()));
+
+        let gone = disconnect_in(&paths, "acme").unwrap();
+        assert!(gone.connected.is_empty() && !read_auth(&paths).unwrap().contains_key("acme"));
+        assert_eq!(saved_base(&paths).as_deref(), Some(gateway.as_str()), "disconnecting keeps the gateway");
+        let offered = gone.catalog.iter().find(|provider| provider.id == "acme").unwrap();
+        assert_eq!(offered.base_url.as_deref(), Some(gateway.as_str()), "the reconnect form starts from the gateway");
+
+        // The address left as the form showed it (None): checked at, and kept on, the gateway.
+        let back = connect_in(&paths, "acme", "acme-key-again-4567", None).unwrap();
+        assert!(matches!(back.check, KeyCheck::Accepted));
+        assert_eq!(saved_base(&paths).as_deref(), Some(gateway.as_str()), "reconnecting kept the gateway");
+        assert_eq!(back.overview.connected[0].base_url.as_deref(), Some(gateway.as_str()));
+        let asked = gateway_served.join().unwrap();
+        assert!(asked[0].contains("Bearer acme-key-first-0123") && asked[1].contains("Bearer acme-key-again-4567"), "{asked:?}");
+
+        // Cleared on purpose (""): only now is the gateway dropped, and the key goes to the catalogue's address.
+        disconnect_in(&paths, "acme").unwrap();
+        let direct = connect_in(&paths, "acme", "acme-key-direct-890", Some("")).unwrap();
+        assert!(matches!(direct.check, KeyCheck::Accepted));
+        assert!(catalogue_served.join().unwrap()[0].contains("Bearer acme-key-direct-890"));
+        assert_eq!(saved_base(&paths), None, "cleared, no base URL is kept");
+    }
+
     /// An address that must never be asked: it takes connections but answers none.
     fn untouched() -> (String, std::net::TcpListener) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
