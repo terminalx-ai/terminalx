@@ -82,7 +82,7 @@ User-facing webview choices are under `preferences`, for example:
     "mode": "system"
   },
   "agents": { "idleStopMinutes": 60 },
-  "experimental": { "nativeCodex": false, "sessionCost": false, "orchestratorRuns": false, "localVmTasks": false },
+  "experimental": { "nativeCodex": false, "sessionCost": false, "orchestratorRuns": false, "localVmTasks": false, "bots": false },
   "orchestrator": {
     "requireApproval": true,
     "pieceLimit": 8,
@@ -1891,6 +1891,42 @@ paired, through these commands, with the full rights pairing gave this computer 
 none paired there is nothing to reach. Every machine command answers `machines_disabled` while
 data privacy mode is on.
 
+### Bots
+
+Experimental, and off until the person turns on Settings → Experimental → Bots. While it is
+off every command below answers `bots_off`; tell the person, and do not edit `settings.json`
+for them.
+
+A bot is a standing role with a name: a record in `$TERMINALX_HOME/bots.json` and a home folder
+`$TERMINALX_HOME/bots/<id>/` holding `ROLE.md` (its standing instructions), `MEMORY.md` and
+`memory/`. These commands keep the records; they start no session and schedule nothing.
+
+```text
+terminalx bots list --json
+terminalx bots create --role <role> --name <name> --json
+terminalx bots show <bot> --json
+terminalx bots rename <bot> --name <name> --json
+terminalx bots pause <bot> --json
+terminalx bots resume <bot> --json
+terminalx bots pause-all --json
+terminalx bots resume-all --json
+terminalx bots delete <bot> --json
+```
+
+- `<role>` is a role template's id or title: `cto`, `chief-of-staff`, `ux-designer`,
+  `qa-engineer`, `release-manager`, `docs-writer`, `security-auditor` or `watcher`. A role and a
+  name are all a new bot needs; it starts with full access, on Claude Code, reporting to the
+  owner, with every duty of its template switched off.
+- `<bot>` is a bot's `slug`, its `id`, or its name when only one bot has that name. The slug
+  comes from the name (`Atlas` → `atlas`, a second one `atlas-2`) and follows a rename.
+- `create` and `show` answer `{"bot": {…}, "home": "<path>"}`; `list`, `pause-all` and
+  `resume-all` answer `{"bots": […]}`.
+- `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`); `resume` clears
+  it. Pausing a paused bot keeps the first record. `pause-all` pauses every bot not already
+  paused and `resume-all` resumes every bot.
+- `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`.
+  Nothing in it is erased.
+
 ### This guide
 
 ```text
@@ -2028,6 +2064,7 @@ JSON failures have this shape:
 - `parent_not_found`: `sessions create --parent` named a session the app does not have.
   Nothing was created; use an id from `sessions list`, or `--no-parent` to record none.
 - `invalid_arguments`: correct the named flag or missing value; do not invent a substitute.
+- `bots_off`: Settings → Experimental → Bots is off. Ask the person to turn it on.
 - `shared_file`, `dependency_cycle`, `unknown_dependency`, `no_done_check`, `too_many_pieces`,
   `mode_not_allowed`, `no_command_check`, `review_only_without_reason`, `empty_check`,
   `owns_outside_repository`, `unknown_key`, `duplicate_piece`, `agent_unavailable`, `invalid_mode`, `plan_invalid`:

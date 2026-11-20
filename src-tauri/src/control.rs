@@ -940,9 +940,49 @@ impl ControlService {
             // the desktop's runtime has those. A cloud workspace's runtime has one checkout, and says so.
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
+            "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
+        }
+    }
+
+    /// Bots (`bots`, PRO-466): hire, list, rename, pause and delete them. With
+    /// Settings → Experimental → Bots off every one answers `bots_off`. A
+    /// change made here is recorded as the owner's.
+    fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let sink = self.sink.as_ref();
+        let refused = |error: anyhow::Error| ControlError::invalid(format!("{error:#}"));
+        let named = || -> Result<bots::Bot, ControlError> {
+            let selector = required_string(&params, "bot")?;
+            match bots::named(&selector).map_err(ControlError::internal)? {
+                Named::One(bot) => Ok(*bot),
+                Named::Several => Err(ControlError::new("ambiguous_selector", bots::several_named(&selector), Some("Use the slug or id from `terminalx bots list --json`.".into()))),
+                Named::Nobody => Err(ControlError::not_found(bots::nobody_named(&selector))),
+            }
+        };
+        let shown = |bot: &bots::Bot| -> Result<Value, ControlError> { Ok(json!({"bot": bot, "home": bots::home(bot).map_err(ControlError::internal)?})) };
+        match command {
+            "bots.list" => Ok(json!({"bots": bots::list().map_err(ControlError::internal)?})),
+            "bots.show" => shown(&named()?),
+            "bots.create" => shown(&bots::create(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(refused)?),
+            "bots.rename" => {
+                let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
+                Ok(json!({"bot": bots::update(sink, &named()?.id, patch).map_err(refused)?}))
+            }
+            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, bots::OWNER).map_err(ControlError::internal)?})),
+            "bots.resume" => Ok(json!({"bot": bots::resume(sink, &named()?.id).map_err(ControlError::internal)?})),
+            "bots.delete" => {
+                let bot = named()?;
+                bots::delete(sink, &bot.id).map_err(ControlError::internal)?;
+                Ok(json!({"deleted": bot.id, "name": bot.name}))
+            }
+            "bots.pauseAll" => Ok(json!({"bots": bots::pause_all(sink, bots::OWNER).map_err(ControlError::internal)?})),
+            _ => Ok(json!({"bots": bots::resume_all(sink).map_err(ControlError::internal)?})),
         }
     }
 
@@ -3012,6 +3052,69 @@ mod tests {
         for (status, running) in [(TabStatus::Completed, true), (TabStatus::Idle, true), (TabStatus::Idle, false)] {
             assert_eq!(open_turn(&view(status, false, false, running)), None, "{status:?} {running}");
         }
+    }
+
+    /// `terminalx bots …` (PRO-466): refused while the experimental switch
+    /// is off; on, the records, the homes and the trash are the app's.
+    #[test]
+    fn the_cli_keeps_bots_only_while_the_switch_is_on() {
+        let _home = crate::store::temp_home();
+        let (service, sink) = headless_service();
+        let mut heard = sink.subscribe();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let changes = |heard: &mut tokio::sync::broadcast::Receiver<crate::sink::Published>| std::iter::from_fn(|| heard.try_recv().ok()).filter(|published| &*published.event == "bots_changed").count();
+
+        // Off: every command says so, and nothing is stored.
+        for command in ["bots.list", "bots.show", "bots.create", "bots.rename", "bots.pause", "bots.resume", "bots.delete", "bots.pauseAll", "bots.resumeAll"] {
+            let off = ask(command, json!({"bot": "atlas", "role": "cto", "name": "Atlas"})).unwrap_err();
+            assert_eq!((off.code.as_str(), off.message.as_str()), ("bots_off", "Bots are off. Turn them on in Settings → Experimental → Bots."), "{command}");
+        }
+        assert!(!crate::store::root().unwrap().join("bots.json").exists());
+        assert_eq!(changes(&mut heard), 0);
+
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(ask("bots.list", json!({})).unwrap(), json!({"bots": []}));
+
+        let created = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap();
+        let id = created["bot"]["id"].as_str().unwrap().to_owned();
+        let home = crate::store::root().unwrap().join("bots").join(&id);
+        assert_eq!((created["bot"]["slug"].as_str(), created["bot"]["roleTitle"].as_str(), created["bot"]["access"].as_str()), (Some("atlas"), Some("CTO"), Some("full")));
+        assert_eq!(created["home"], json!(home));
+        assert!(home.join("ROLE.md").is_file() && home.join("MEMORY.md").is_file() && home.join("memory").is_dir());
+        ask("bots.create", json!({"role": "Watcher", "name": "Argus"})).unwrap();
+        assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 2);
+        // Named by slug, id or name.
+        for selector in ["atlas", id.as_str(), "ATLAS"] {
+            assert_eq!(ask("bots.show", json!({"bot": selector})).unwrap(), created, "{selector}");
+        }
+
+        let renamed = ask("bots.rename", json!({"bot": "atlas", "name": "Kestrel"})).unwrap();
+        assert_eq!((renamed["bot"]["id"].as_str(), renamed["bot"]["name"].as_str(), renamed["bot"]["slug"].as_str()), (Some(id.as_str()), Some("Kestrel"), Some("kestrel")));
+        assert_eq!(ask("bots.pause", json!({"bot": "kestrel"})).unwrap()["bot"]["paused"]["by"], "owner");
+        assert!(ask("bots.resume", json!({"bot": "kestrel"})).unwrap()["bot"].get("paused").is_none());
+        let paused = ask("bots.pauseAll", json!({})).unwrap();
+        assert!(paused["bots"].as_array().unwrap().iter().all(|bot| bot["paused"]["by"] == "owner"));
+        // What the next start of the app reads: the file holds both, paused.
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("bots.json")).unwrap()).unwrap();
+        assert_eq!(stored["bots"], paused["bots"]);
+        assert!(ask("bots.resumeAll", json!({})).unwrap()["bots"].as_array().unwrap().iter().all(|bot| bot.get("paused").is_none()));
+
+        assert_eq!(ask("bots.delete", json!({"bot": "kestrel"})).unwrap(), json!({"deleted": id, "name": "Kestrel"}));
+        assert!(!home.exists() && crate::store::root().unwrap().join("trash").join("bots").join(&id).join("ROLE.md").is_file());
+        assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 1);
+        assert_eq!(changes(&mut heard), 8);
+
+        // Refusals name what was wrong.
+        assert_eq!(ask("bots.show", json!({"bot": "kestrel"})).unwrap_err().code, "not_found");
+        assert_eq!(ask("bots.show", json!({})).unwrap_err().code, "invalid_arguments");
+        let unknown = ask("bots.create", json!({"role": "janitor", "name": "Mop"})).unwrap_err();
+        assert!(unknown.code == "invalid_arguments" && unknown.message.contains("No role template janitor"), "{unknown:?}");
+        assert_eq!(ask("bots.rename", json!({"bot": "argus", "name": " "})).unwrap_err().code, "invalid_arguments");
+        ask("bots.create", json!({"role": "watcher", "name": "argus"})).unwrap();
+        assert_eq!(ask("bots.pause", json!({"bot": "Argus"})).unwrap_err().code, "ambiguous_selector");
+        assert_eq!(ask("bots.pause", json!({"bot": "argus-2"})).unwrap()["bot"]["name"], "argus");
     }
 
     /// `terminalx projects add|remove` (#1078): the app's checks and git

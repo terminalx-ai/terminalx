@@ -14,6 +14,9 @@ export const NATIVE_CODEX_DESCRIPTION =
 export const LOCAL_VM_TASKS_DESCRIPTION =
   "Settings → Local VMs, picking the computer a tab’s agent uses, and Local VM task cards in a conversation.";
 
+export const BOTS_DESCRIPTION =
+  "AI employees with standing roles: each has a name, a role, its own memory and a home folder. Also turns on the terminalx bots commands.";
+
 export const ORCHESTRATOR_RUNS_DESCRIPTION =
   "A session can lead a run, splitting one goal into pieces for worker sessions. Shows the Run view and Settings → Orchestrator.";
 
@@ -432,6 +435,12 @@ export const SETTINGS_ROWS = [
     description: LOCAL_VM_TASKS_DESCRIPTION,
     searchTerms: ["experimental", "local vm", "vm", "virtual machine", "computer", "desktop", "tasks", "guest", "linux", "macos"], scope: "user",
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.localVmTasks" },
+  }),
+  defineSetting({
+    id: "experimental.bots", section: "experimental", title: "Bots",
+    description: BOTS_DESCRIPTION,
+    searchTerms: ["experimental", "bots", "bot", "employees", "roles", "cto", "watcher", "hire"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#experimental.bots" },
   }),
   defineSetting({
     id: "orchestrator.requireApproval", section: "orchestrator", title: "Ask before a run starts",

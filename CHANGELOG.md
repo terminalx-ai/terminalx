@@ -6,6 +6,12 @@
   any other session. The Run | Lead chat strip and the Idle pill no longer
   show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
   (#1404).
+- Bots (experimental, off by default): the foundation for AI employees with
+  standing roles. Settings → Experimental → Bots turns on the bots' store and
+  `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
+  A bot is hired from one of eight bundled role templates with a role and a
+  name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
+  deleting it moves that folder to `trash/bots/`. No screens yet (PRO-466).
 
 ## 0.2.36
 
