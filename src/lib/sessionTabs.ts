@@ -9,6 +9,7 @@ import { followedSelection, isTerminalTab, tabLabel, tabPaneId } from "@/lib/tab
 import { closeTerminal, getTerminalState, setActiveTerminal, useTerminals, type SelectedSessionTab, type TerminalPane } from "@/lib/terminal";
 import { NO_LAYOUT, panesOf, selectPaneTab, branchSessionsAsTabs, followedLayout, getTabState, layoutOf, rememberClosed, saveTabLayout, settleLayout, sortByLayout, tabKey, useTabState, workspaceKey, workspaceSessions } from "@/lib/tabLayouts";
 import type { SessionEntry, TabEntry, TabStatus, Workspace } from "@/types/session";
+import type { CloudTerminal } from "@/lib/cloudTerminals";
 
 interface PeerBase {
   id: string;
@@ -105,6 +106,24 @@ export function workspaceTabs(
   return sortByLayout(tabs, layout);
 }
 
+/**
+ * How a row whose tabs are another computer's is driven (#1325): a cloud
+ * session's agent tabs and terminals are its runtime's, shared by everyone in
+ * the workspace, so showing one selects it in the session and closing one
+ * closes it on the runtime. Only the row's layout (order, pins, titles, the
+ * split into panes) is this computer's, kept per viewer under `workspace`.
+ */
+export interface RemoteTabs {
+  /** Put a tab on screen in the open session. */
+  open(tab: PeerTab): void;
+  /** Close a tab on the runtime, for everyone in the workspace. */
+  close(tab: PeerTab): Promise<void>;
+  /** The whole row as it stands now: a pane's strip holds only that pane's tabs. */
+  current(): TabRow;
+  /** Switches an agent tab between chat and terminal view, when its runtime serves the agent's terminal; else null. */
+  terminalView(tab: TabEntry): (() => void) | null;
+}
+
 /** A workspace's row of tabs, and the session of it that is open. */
 export interface TabRow {
   /** The open session: where a browser page is shown, and whose workspace this is. */
@@ -115,6 +134,8 @@ export interface TabRow {
   /** The workspace's layout, saying of a tab what it said of the shell the tab was (`followedLayout`). */
   layout: TabLayout;
   tabs: PeerTab[];
+  /** Set for a remote session's row: its tabs are opened and closed through the runtime, never this computer's stores. */
+  remote?: RemoteTabs;
 }
 
 /**
@@ -127,6 +148,60 @@ function rowOf(session: SessionEntry, all: readonly SessionEntry[], chatsPath: s
   const sessions = shared ? workspaceSessions(all, session, chatsPath, workspaces) : [session];
   const layout = followedLayout(layoutOf(saved, workspace), sessions);
   return { session, sessions, workspace, layout, tabs: workspaceTabs(sessions, panes, pagesFor(pages, session.cwd), layout, agents, reviews) };
+}
+
+/**
+ * Where this computer keeps the layout of a remote session's row: per viewer,
+ * by the session's key (`cloud:<org>:<workspace>:<session>`), never on the
+ * runtime. Distinct from every local workspace key (a path, `quick:`, `chat:`).
+ */
+export function remoteLayoutKey(sessionKey: string): string {
+  return `remote:${sessionKey}`;
+}
+
+/** When a runtime terminal was opened, as tabs are sorted: the time it was opened, else after every tab that has one, by number. */
+function terminalCreated(terminal: Pick<CloudTerminal, "createdAt" | "number">): string {
+  return terminal.createdAt ? new Date(terminal.createdAt).toISOString() : `9999-${String(terminal.number).padStart(8, "0")}`;
+}
+
+/**
+ * A remote session's tabs in one row (#1325): its agent tabs and the shells
+ * its runtime opened for it, in the order this viewer's layout gives. An
+ * agent tab's own terminal is its terminal view, and a script's run is the
+ * machine dock's, so neither is a tab of the row.
+ */
+export function remoteTabs(session: SessionEntry, terminals: readonly CloudTerminal[], layout: TabLayout): PeerTab[] {
+  const pinned = new Set(layout.pinned);
+  const peer = <T extends { kind: PeerTab["kind"]; id: string }>(tab: T) => {
+    const key = tabKey(tab.kind, tab.id);
+    return { ...tab, key, pinned: pinned.has(key) };
+  };
+  const tabs: PeerTab[] = [
+    ...session.tabs.map((tab): PeerTab => peer({ kind: "agent", id: tab.id, created: tab.created, sessionId: session.id, tab, pane: null, paneAgent: null })),
+    ...terminals
+      .filter((terminal) => !terminal.tabId && !terminal.run)
+      .map((terminal): PeerTab => {
+        const created = terminalCreated(terminal);
+        const pane: TerminalPane = { id: terminal.id, sessionId: session.id, title: terminal.title, created, exited: terminal.exited || !!terminal.gone, exitCode: terminal.exitCode };
+        return peer({ kind: "terminal", id: terminal.id, created, sessionId: session.id, pane, paneAgent: null });
+      }),
+  ];
+  return sortByLayout(tabs, layout);
+}
+
+/** A remote session's row, from this viewer's saved layouts. */
+export function remoteRow(session: SessionEntry, terminals: readonly CloudTerminal[], saved: TabState, remote: RemoteTabs): TabRow {
+  const workspace = remoteLayoutKey(session.id);
+  const layout = layoutOf(saved, workspace);
+  return { session, sessions: [session], workspace, layout, tabs: remoteTabs(session, terminals, layout), remote };
+}
+
+/** Show a tab of `row`: through its runtime for a remote row, else as `openPeer` does. */
+export function openRowTab(row: TabRow, tab: PeerTab) {
+  if (!row.remote) return openPeer(row.session.id, tab);
+  const whole = row.remote.current();
+  if (whole.layout.panes?.length) saveTabLayout(whole.workspace, selectPaneTab(whole.layout, whole.tabs.map((peer) => peer.key), tab.key));
+  row.remote.open(tab);
 }
 
 /** A session's workspace row as the stores have it now, outside React. */

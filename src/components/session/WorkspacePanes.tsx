@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { useShortcut } from "@/lib/hotkeys";
-import { openPeer, peerEditor, tabNodeId, tabPanelId, useTabRow, type PeerTab } from "@/lib/sessionTabs";
+import { openRowTab, peerEditor, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { moveTabToPane, otherPane } from "@/lib/tabActions";
 import { paneRatio, panesOf, saveTabLayout, selectPaneTab, tabKey } from "@/lib/tabLayouts";
 import { tabViewIn } from "@/lib/tabFront";
@@ -16,7 +16,9 @@ import type { TabEntry } from "@/types/session";
 import { localRemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { SelectedSessionTab } from "@/lib/terminal";
 import type { SessionEntry } from "@/types/session";
+import type { CloudSessionModel } from "@/lib/cloudSession";
 import { BrowserView } from "@/components/browser/BrowserView";
+import { CloudTerminalPane } from "@/components/cloud/CloudTerminalPane";
 import { ReviewTab } from "@/components/editor/EditorSplit";
 import { EnvironmentNotice } from "@/components/terminal/EnvironmentNotice";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -33,7 +35,7 @@ import { WorkspaceTabStrip, stripTabId } from "./WorkspaceTabStrip";
  * runs there ("Claude Code · same process"), which switches back. A tab that
  * is a terminal (#437) offers it only when it held a conversation.
  */
-export function TerminalViewSwitch({ session, tab }: { session: SessionEntry; tab: TabEntry }) {
+export function TerminalViewSwitch({ session, tab, onToggle }: { session: SessionEntry; tab: TabEntry; /** A remote tab's switch, through its runtime (`RemoteTabs.terminalView`); a local tab's is `toggleTabView`. */ onToggle?: () => void }) {
   const views = useTabViews();
   const keys = useShortcutKeys("session.toggleTerminalView");
   const agent = useSessionStore().harnesses.find((harness) => harness.id === tab.harness)?.name ?? cloudAgentLabel(tab.harness);
@@ -43,7 +45,7 @@ export function TerminalViewSwitch({ session, tab }: { session: SessionEntry; ta
   const label = terminal ? (on ? "Show the last conversation" : "Back to the terminal") : on ? "Back to chat" : "Show terminal view";
   return (
     <button type="button" data-testid="strip-terminal-view" aria-label={label} title={label} aria-pressed={on} disabled={!!views.switching[tab.id]}
-      onClick={() => void toggleTabView(session, tab)}
+      onClick={() => (onToggle ? onToggle() : void toggleTabView(session, tab))}
       className={cn("flex h-7 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-[12px] text-faint outline-none hover:bg-veil-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60")}>
       {/* A narrow strip keeps its room for the tabs: the switch is then its keys, or an icon, alone. */}
       {on ? <><MessageSquare className="size-3.5 @[560px]/strip:hidden" aria-hidden /><span className="hidden @[560px]/strip:inline">{agent} · same process</span></>
@@ -52,9 +54,13 @@ export function TerminalViewSwitch({ session, tab }: { session: SessionEntry; ta
   );
 }
 
-/** Shared with the header so switch placement follows the strips actually rendered. */
-export function useWorkspacePaneLayout(session: SessionEntry, selected: SelectedSessionTab | null, strip: boolean) {
-  const row = useTabRow(session);
+/**
+ * Shared with the header so switch placement follows the strips actually rendered.
+ * `remoteRow`: a remote session's row (#1325), drawn from its runtime's tabs; a local session's is its workspace's.
+ */
+export function useWorkspacePaneLayout(session: SessionEntry, selected: SelectedSessionTab | null, strip: boolean, remoteRow?: TabRow | null) {
+  const localRow = useTabRow(session);
+  const row = remoteRow ?? localRow;
   const keys = row.tabs.map((tab) => tab.key);
   const selectedKey = selected ? tabKey(selected.kind, selected.id) : null;
   const panes = panesOf(row.layout, keys, selectedKey);
@@ -62,13 +68,27 @@ export function useWorkspacePaneLayout(session: SessionEntry, selected: Selected
   return { row, keys, selectedKey, panes, split, showStrip: strip || split };
 }
 
-export function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen }: {
+/**
+ * What a remote session's panes draw with (#1325): its tabs talk to the
+ * runtime through `cloud.backend`, its shells are the runtime's terminals,
+ * and its "+" and empty page are its own.
+ */
+export interface RemotePaneParts {
+  cloud: CloudSessionModel;
+  /** The "+" that ends the first pane's strip. */
+  newTab: ReactNode;
+  /** Shown while the session has no tab: the workspace's state, or its lock. */
+  empty: ReactNode;
+}
+
+export function WorkspacePanes({ session, selected, strip, layout, selectionRequested, continuationOpen, remote }: {
   session: SessionEntry;
   selected: SelectedSessionTab | null;
   strip: boolean;
   layout: ReturnType<typeof useWorkspacePaneLayout>;
   selectionRequested: boolean;
   continuationOpen: boolean;
+  remote?: RemotePaneParts;
 }) {
   const { row, keys, selectedKey, panes, split, showStrip } = layout;
   const focused = panes.find((pane) => pane.tabs.includes(selectedKey ?? "")) ?? panes.find((pane) => pane.id === row.layout.focusedPane) ?? panes[0];
@@ -93,7 +113,7 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
   const focusPane = (id: "left" | "right") => {
     const pane = panes.find((pane) => pane.id === id);
     const tab = row.tabs.find((tab) => tab.key === pane?.active);
-    if (tab && tab.key !== selectedKey) openPeer(session.id, tab);
+    if (tab && tab.key !== selectedKey) openRowTab(row, tab);
   };
   useShortcut("session.focusOtherPane", () => {
     const other = panes.find((pane) => pane.id !== focused.id);
@@ -139,10 +159,16 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
         <div key={`strip-${pane.id}`} data-pane-id={pane.id} data-pane-focused={pane.id === focused.id} style={{ gridColumn: index * 2 + 1, gridRow: 1 }} className={cn("min-w-0", split && pane.id === focused.id && "bg-veil-raised")}>
           <WorkspaceTabStrip session={session} selected={row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey)) ?? null}
             paneRow={{ ...row, tabs: row.tabs.filter((tab) => pane.tabs.includes(tab.key)) }} paneDrag={paneDrag}
-            trailing={strip && index === 0 ? <TabActions session={session} selected={selected} /> : undefined}
+            trailing={strip && index === 0 ? (remote ? remote.newTab : <TabActions session={session} selected={selected} />) : undefined}
+            readOnlyReason={remote ? remote.cloud.closeBlockedReason : undefined}
+            accounts={!remote}
             end={(() => {
               const shown = row.tabs.find((tab) => tab.key === (split ? pane.active : selectedKey));
-              return shown?.kind === "agent" ? <TerminalViewSwitch session={row.sessions.find((owner) => owner.id === shown.sessionId) ?? session} tab={shown.tab} /> : null;
+              if (shown?.kind !== "agent") return null;
+              // A remote tab has the switch only while its runtime serves the agent's terminal; the header says why when it does not.
+              const toggle = row.remote ? row.remote.terminalView(shown.tab) : undefined;
+              if (toggle === null) return null;
+              return <TerminalViewSwitch session={row.sessions.find((owner) => owner.id === shown.sessionId) ?? session} tab={shown.tab} onToggle={toggle} />;
             })()} />
         </div>
       ))}
@@ -166,19 +192,42 @@ export function WorkspacePanes({ session, selected, strip, layout, selectionRequ
           data-pane-id={pane.id} className={cn("relative flex min-h-0 min-w-0 flex-col overflow-hidden", !active && "invisible pointer-events-none")}
           style={{ gridColumn: index * 2 + 1, gridRow: showStrip ? 2 : 1 }}
           onPointerDownCapture={() => { if (active) focusPane(pane.id); }} onFocusCapture={() => { if (active) focusPane(pane.id); }}>
-          {tab.kind === "agent" ? <>
+          {tab.kind === "agent" && remote ? (
+            <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen}
+              backend={remote.cloud.backend} gitSource={remote.cloud.gitSource} workspace={remote.cloud.removableWorkspace} />
+          ) : tab.kind === "agent" ? <>
             <EnvironmentNotice id={tab.tab.pane ?? `tab:${tab.id}`} active={active && tabViewIn(views.views, tab.tab) !== "terminal"} />
             <TabView session={owner} tab={tab.tab} active={active} focused={active && pane.id === focused.id} continuationOpen={continuationOpen} workspace={localRemovableWorkspace(owner)} />
-          </> : tab.kind === "terminal" ? <>
+          </> : tab.kind === "terminal" && remote ? (
+            <RemoteTerminal cloud={remote.cloud} id={tab.id} active={active} />
+          ) : tab.kind === "terminal" ? <>
             <TerminalView id={tab.id} visible={active} focused={active && pane.id === focused.id} moveToDock />
             {tab.pane.exited && <div className="absolute bottom-2 left-3 rounded-md bg-popover px-2 py-1 text-[11px] text-muted-foreground hairline">Process exited{tab.pane.exitCode != null ? ` (${tab.pane.exitCode})` : ""}.</div>}
           </> : tab.kind === "review" ? <ReviewTab entry={peerEditor(tab)} visible={active} focused={active && pane.id === focused.id} embedded />
           : <BrowserView session={session} page={tab.page} active={active} />}
         </div>;
       })}
-      {!selected && !split && <div className="flex min-h-0 flex-col" style={{ gridColumn: 1, gridRow: showStrip ? 2 : 1 }}><EmptySession session={session} /></div>}
+      {!selected && !split && <div className="flex min-h-0 flex-col" style={{ gridColumn: 1, gridRow: showStrip ? 2 : 1 }}>{remote ? remote.empty : <EmptySession session={session} />}</div>}
       {dragTarget && <div data-testid="pane-drop-preview" className="pointer-events-none absolute inset-y-0 z-30 flex items-center justify-center border-2 border-ring bg-ring/10 text-sm font-medium"
         style={dragTarget === "right" ? { right: 0, width: split ? `${(1 - ratio) * 100}%` : "50%" } : { left: 0, width: `${ratio * 100}%` }}>{split ? "Move to pane" : "Split right"}</div>}
     </div>
+  );
+}
+
+/** A runtime's shell in a pane: attached while it is on screen, as the cloud view always has (a hidden one streams nothing). */
+function RemoteTerminal({ cloud, id, active }: { cloud: CloudSessionModel; id: string; active: boolean }) {
+  const terminal = cloud.terminals.find((candidate) => candidate.id === id);
+  if (!active || !terminal || !cloud.client) return null;
+  return (
+    <CloudTerminalPane
+      workspace={cloud.workspaceKey}
+      terminal={terminal}
+      client={cloud.client}
+      connected={cloud.connected}
+      manage={cloud.manage}
+      mayControl={cloud.mayControlTerminals}
+      you={cloud.collab.live ? cloud.collab.you : null}
+      base={cloud.terminalBase}
+    />
   );
 }

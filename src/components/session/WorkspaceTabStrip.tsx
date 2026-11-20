@@ -15,8 +15,9 @@ import { useMobileDrivenTabs } from "@/lib/mobileDriver";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { useSessionStore } from "@/lib/sessions";
 import { useErrorToasts } from "@/lib/errorToasts";
-import { closeTabTelling } from "@/components/session/TabMenu";
-import { isShellPeer, openPeer, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
+import { closeRowTabTelling, RemoteTabMenuItems } from "@/components/session/TabMenu";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { isShellPeer, openRowTab, peerAgent, peerKind, peerLabel, peerShell, peerStateWords, peerStatus, tabNodeId, tabPanelId, useTabRow, type PeerTab, type TabRow } from "@/lib/sessionTabs";
 import { tabViewIn } from "@/lib/tabFront";
 import { landingIndex, moveTab } from "@/lib/tabActions";
 import { useTabViews } from "@/lib/tabViews";
@@ -141,7 +142,8 @@ export function WorkspaceTabStrip({
   // A row that goes away mid-drag (its session was switched) lets go of the window's pointer and of Escape.
   useEffect(() => () => dropHeld.current?.(), []);
 
-  const harnessName = (id: string) => store.harnesses.find((harness) => harness.id === id)?.name;
+  // A remote session's agents are its runtime's, named as the runtime names them when this computer has none by that id.
+  const harnessName = (id: string) => store.harnesses.find((harness) => harness.id === id)?.name ?? (row.remote ? cloudAgentLabel(id) : undefined);
   const { tabs } = row;
   const active = tabs.find((tab) => tab.kind === selected?.kind && tab.id === selected.id) ?? null;
   const activeKey = active?.key ?? null;
@@ -303,7 +305,7 @@ export function WorkspaceTabStrip({
                   onAuxClick={(event) => {
                     if (event.button !== 1 || readOnlyReason) return;
                     event.preventDefault();
-                    void closeTabTelling(session.id, tab, tabs, selected, label);
+                    void closeRowTabTelling(row, tab, selected, label);
                   }}
                   className={cn(
                     "group/tab relative flex h-9 select-none items-center",
@@ -330,7 +332,7 @@ export function WorkspaceTabStrip({
                         tabIndex={isActive || (!active && index === 0) ? 0 : -1}
                         onClick={() => {
                           if (dragged.current) return;
-                          openPeer(session.id, tab);
+                          openRowTab(row, tab);
                         }}
                         className={cn(
                           "flex min-w-0 flex-1 items-center gap-1.5 self-stretch rounded-md text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
@@ -360,7 +362,7 @@ export function WorkspaceTabStrip({
                       data-tab-close
                       aria-label={failedClose ? `Close ${label} (closing failed)` : `Close ${label}`}
                       data-close-failed={failedClose || undefined}
-                      onClick={() => void closeTabTelling(session.id, tab, tabs, selected, label)}
+                      onClick={() => void closeRowTabTelling(row, tab, selected, label)}
                       // Shown only while the tab is pointed at or has the focus. The open tab keeps its room for it,
                       // invisible, so its title does not shift as it appears; another tab takes no room until then, so a
                       // narrow tab shows its title instead.
@@ -376,7 +378,9 @@ export function WorkspaceTabStrip({
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="max-h-(--radix-context-menu-content-available-height) w-[286px] max-w-[calc(100vw-1rem)] overflow-y-auto">
-                <TabMenuItems row={row} tab={tab} selected={selected} readOnlyReason={readOnlyReason} />
+                {row.remote
+                  ? <RemoteTabMenuItems row={row} tab={tab} selected={selected} readOnlyReason={readOnlyReason} />
+                  : <TabMenuItems row={row} tab={tab} selected={selected} readOnlyReason={readOnlyReason} />}
               </ContextMenuContent>
             </ContextMenu>
           );
@@ -413,7 +417,7 @@ function AllTabsMenu({ row, active, describe }: { row: TabRow; active: string | 
           const { label, state, kind } = describe(tab);
           const status = peerStatus(tab);
           return (
-            <DropdownMenuItem key={tab.key} onSelect={() => openPeer(row.session.id, tab)} aria-current={tab.key === active ? "true" : undefined} className={cn("items-start whitespace-normal", tab.key === active && "bg-veil-raised")}>
+            <DropdownMenuItem key={tab.key} onSelect={() => openRowTab(row, tab)} aria-current={tab.key === active ? "true" : undefined} className={cn("items-start whitespace-normal", tab.key === active && "bg-veil-raised")}>
               <TabIcon tab={tab} className="mt-0.5 size-4 shrink-0" />
               <span className="min-w-0 flex-1">
                 <span className="block break-words">{label}</span>

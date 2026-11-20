@@ -13,7 +13,10 @@ import { getPrefs } from "@/lib/prefs";
 import { openBrowserTab } from "@/lib/browser";
 import { isShellPeer, paneRow, peerLabel, sessionOfPeer, useTabRow } from "@/lib/sessionTabs";
 import { addTab, forkSession, getSessionStore, useSessionStore } from "@/lib/sessions";
-import { closeTabTelling, openAgentTabTelling } from "@/components/session/TabMenu";
+import { closeRowTabTelling, closeTabTelling, openAgentTabTelling } from "@/components/session/TabMenu";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
+import { useRemoteTabRow } from "@/lib/remoteTabRow";
+import { REMOTE_LOCAL_ONLY } from "@/lib/sessionBackend";
 import { dismissErrorKey, showError } from "@/lib/errorToasts";
 import type { ShortcutId } from "@/lib/shortcuts";
 import { moveTabBy, openTabAt, reopenClosedTab, stepTab } from "@/lib/tabActions";
@@ -288,13 +291,17 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
   const { models, refresh } = usePickerModels(useModels(), true, cloud.asleep ? null : cloud.client);
   const picker = useRowMenu({ onOpenChange: (open) => open && void refresh() });
   const [error, setError] = useState<string | null>(null);
-  const tabs = useMemo<(SelectedSessionTab & { created: string })[]>(
+  // A cloud workspace session's tabs in the order of its strip (#1325); a machine session's, agents then terminals.
+  const row = useRemoteTabRow(session, cloud, !cloud.machine && !cloud.locked);
+  const tabs = useMemo<SelectedSessionTab[]>(
     () =>
-      [
-        ...session.tabs.map((tab) => ({ kind: "agent" as const, id: tab.id, created: tab.created })),
-        ...cloud.terminals.map((terminal) => ({ kind: "terminal" as const, id: terminal.id, created: String(terminal.number).padStart(8, "0") })),
-      ],
-    [session.tabs, cloud.terminals],
+      row
+        ? row.tabs.map((tab) => ({ kind: tab.kind, id: tab.id }))
+        : [
+            ...session.tabs.map((tab) => ({ kind: "agent" as const, id: tab.id })),
+            ...cloud.terminals.map((terminal) => ({ kind: "terminal" as const, id: terminal.id })),
+          ],
+    [row, session.tabs, cloud.terminals],
   );
   const step = useCallback(
     (direction: 1 | -1) => {
@@ -317,6 +324,15 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
   useShortcut("session.nextTab", () => step(1));
   useShortcut("session.previousTab", () => step(-1));
   useShortcut("session.lastTab", openLast);
+  // Close Tab closes the one on screen on the runtime, as its × in the strip does.
+  const latestRow = useRef(row);
+  latestRow.current = row;
+  useShortcut("session.closeTab", () => {
+    const current = latestRow.current;
+    const shown = current?.tabs.find((tab) => tab.kind === selected?.kind && tab.id === selected.id);
+    if (!current || !shown || cloud.closeBlockedReason) return;
+    void closeRowTabTelling(current, shown, selected, peerLabel(shown, current.layout, cloudAgentLabel));
+  }, { enabled: !!row });
   const blocked = newTabBlockedReason(cloud);
   // A stopped workspace this attachment may manage: Terminal is the one item that wakes it, and only when chosen.
   // Not for a viewer or a driver (PRO-30): terminals are a manager's, so their wake would end in a refusal.
@@ -353,15 +369,11 @@ function CloudTabActions({ session, selected, cloud, onShowPorts }: { session: S
             <TerminalSquare /><span>Terminal</span><span className="ml-auto pl-3 text-[12px] text-faint">{cloud.machine ? `on ${cloud.machine.name}` : "on the VM"}</span>
           </DropdownMenuItem>
         )}
-        {/* Where a local session offers a browser page: a machine session says, once, what stays on this Mac (decision 7). */}
-        {cloud.machine && (
-          <>
-            <DropdownMenuSeparator />
-            <NewTabHint>
-              <span data-testid="machine-local-only">{MACHINE_LOCAL_ONLY}</span>
-            </NewTabHint>
-          </>
-        )}
+        {/* Where a local session offers a browser page: a remote session says, once, what stays on this computer (MACHINES.md decision 7, #1325). */}
+        <DropdownMenuSeparator />
+        <NewTabHint>
+          {cloud.machine ? <span data-testid="machine-local-only">{MACHINE_LOCAL_ONLY}</span> : <span data-testid="cloud-local-only">{REMOTE_LOCAL_ONLY}</span>}
+        </NewTabHint>
         {onShowPorts && (
           <>
             <DropdownMenuSeparator />

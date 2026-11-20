@@ -19,6 +19,7 @@ import {
   type CloudLease,
 } from "@/lib/cloudConnections";
 import {
+  closeCloudAgentTab,
   flushCloudAgentCache,
   loadCloudAgents,
   markCloudAgentsOffline,
@@ -50,12 +51,12 @@ import {
   type SessionLock,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { closeCloudTerminal, createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
-import { selectSessionTab } from "@/lib/terminal";
+import { selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
 import { cloudProviderLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
@@ -244,6 +245,24 @@ export interface CloudSessionModel {
   openTerminal(options?: { wake?: boolean }): Promise<void>;
   /** Adds an agent tab and selects it; resolves to its id where the runtime names it. */
   addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<string | void>;
+  /**
+   * Close a tab on the runtime (#1325): an agent tab's process is stopped and
+   * the tab dropped from the session; a terminal's shell is ended. It is the
+   * runtime's, so it closes for everyone in the workspace.
+   */
+  closeTab(tab: SelectedSessionTab): Promise<void>;
+  /**
+   * Why this person may not close the session's tabs, or null when they may.
+   * Closing an agent tab or ending a shell is a manager's (docs/CLOUD-SHARING.md):
+   * a driver may type and approve, and the runtime refuses them a close.
+   */
+  closeBlockedReason: string | null;
+  /**
+   * The runtime has listed this session's agent tabs and its shells since it
+   * connected, so a tab that is in neither list is closed: what this viewer's
+   * layout says of it can go (#1325). False while either list may be partial.
+   */
+  tabsListed: boolean;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
   /** Agents the runtime has (`agents/1`), else the two every runtime ships. */
@@ -301,6 +320,8 @@ const DEFAULT_AGENTS = [
 /** How long until the list is read again while a lock pane shows: 5 s, then up to 30 s. */
 export const ACCESS_POLL_MS = [5_000, 10_000, 20_000, 30_000] as const;
 const NO_TABS: TabEntry[] = [];
+/** Why a driver or a viewer has no close on a cloud session's tabs. */
+export const CLOSE_NEEDS_MANAGER = "Closing tabs and terminals needs a workspace admin.";
 const NO_TERMINALS: CloudTerminal[] = [];
 
 function statusShown(tab: CloudAgentTab, asleep: boolean): TabEntry["status"] {
@@ -557,7 +578,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const mode = useRef(resolvedMode);
   mode.current = resolvedMode;
   const terminalBase = useCallback(() => createTerminal(mode.current), []);
-  const allTerminals = useCloudTerminals(workspaceKey).terminals;
+  const terminalStore = useCloudTerminals(workspaceKey);
+  const allTerminals = terminalStore.terminals;
   const terminals = useMemo(() => sessionTerminals(allTerminals, runtimeSessionId), [allTerminals, runtimeSessionId]);
   useEffect(() => {
     // Without access there is no terminal to list: what this window held was dropped with it, and is not read back.
@@ -845,6 +867,21 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [backend.readOnlyReason, client, connected, runtimeSessionId, scope, key],
   );
 
+  const closeBlockedReason = backend.readOnlyReason ?? (manage ? null : CLOSE_NEEDS_MANAGER);
+  const closeTab = useCallback(
+    async (tab: SelectedSessionTab) => {
+      if (closeBlockedReason) throw new Error(closeBlockedReason);
+      if (tab.kind === "terminal") return closeCloudTerminal(workspaceKey, connected ? client : null, tab.id);
+      if (tab.kind !== "agent") return;
+      if (!client || !connected) throw new Error("Agent tabs close once the workspace is connected.");
+      await closeCloudAgentTab(scope, tab.id, client);
+      await syncLiveTabs(scope, client).catch(() => undefined);
+    },
+    [closeBlockedReason, client, connected, scope, workspaceKey],
+  );
+  // Every tab of the session the runtime holds is known here: its live list of agent tabs, and its shells.
+  const tabsListed = connected && !locked && agents.loaded && !!terminalStore.listed && ownTabs.every((tab) => tab.source === "live");
+
   const recheckAccess = useCallback(() => {
     // An older server's list says nothing about roles: only connecting again can tell.
     if (!listedRole) {
@@ -878,6 +915,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     terminals: locked ? NO_TERMINALS : terminals,
     openTerminal,
     addAgentTab,
+    closeTab,
+    closeBlockedReason,
+    tabsListed,
     // session.addTab is a manager's (the runtime refuses anyone else).
     canAddTabs: manage && !!client?.hasCapability("session/2"),
     agents: agentList,

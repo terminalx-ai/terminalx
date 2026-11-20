@@ -60,6 +60,8 @@ interface WorkspaceTerminals {
   selected: string | null;
   /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
   shown?: boolean;
+  /** The runtime's list of terminals has been read at least once (`syncCloudTerminals`): `terminals` holds every shell there is. */
+  listed?: boolean;
 }
 
 let state: Record<string, WorkspaceTerminals> = {};
@@ -536,8 +538,8 @@ export async function syncCloudTerminals(
     });
     for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(named(fromInfo(workspace, info), terminals));
     const selected = current.selected && terminals.some((terminal) => terminal.id === current.selected) ? current.selected : (terminals[0]?.id ?? null);
-    if (selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
-    return { ...current, terminals, selected };
+    if (current.listed && selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
+    return { ...current, terminals, selected, listed: true };
   });
   const live = cloudTerminalsOf(workspace).terminals.filter((terminal) => !terminal.gone);
   await Promise.all(live.map((terminal) => attach(workspace, client, terminal, create).catch(() => undefined)));

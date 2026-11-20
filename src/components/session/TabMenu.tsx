@@ -38,6 +38,7 @@ import {
 import { confirmInApp } from "@/lib/confirm";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { AgentMark } from "@/components/AgentMark";
+import { cloudAgentLabel } from "@/lib/cloudAgentLabel";
 import { ContextMenuItem, ContextMenuLabel, ContextMenuSeparator, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, MenuShortcut } from "@/components/ui/menu";
 import { isCompactWindow } from "@/lib/appWindow";
 import { confirmDeleteSession } from "@/lib/deleteSessionFlow";
@@ -54,7 +55,7 @@ import { getPrefs } from "@/lib/prefs";
 import { isQuickChat } from "@/lib/quickChats";
 import { archiveSession, forkSession, getSessionStore, openSkills, removeTab, selectSession, useSessionStore } from "@/lib/sessions";
 import { useTabRow, activatePeer, closePeer, hasOwnTitle, isShellPeer, peerAgent, peerIsLive, peerLabel, peerShell, peerStatus, sessionOfPeer, type PeerTab, type TabRow } from "@/lib/sessionTabs";
-import { BULK_CLOSE_LABEL, canMoveTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
+import { BULK_CLOSE_LABEL, canMoveTab, closeRemoteTab, canReopenTab, canRestartAgent, duplicateTab, moveTabBy, newTab, moveTabToPane, otherPane, planBulkClose, renamePeer, reopenClosedTab, restartTab, setTabMuted, setTabPinned, type BulkClose, type NewTabKind, type TabMove } from "@/lib/tabActions";
 import { tabPaneId, tabViewIn } from "@/lib/tabFront";
 import { panesOf, useTabState } from "@/lib/tabLayouts";
 import { subscribeTabPty, toggleTabView, useTabViews } from "@/lib/tabViews";
@@ -214,6 +215,28 @@ export async function closeTabTelling(sessionId: string, tab: PeerTab, tabs: Pee
       // Try again alone, on one row (03.29): the sentence says all there is to copy.
       copy: false,
       actions: [{ label: "Try again", icon: "retry", run: () => closeTabTelling(sessionId, tab, tabs, getTerminalState().selected[sessionId] ?? null, label) }],
+    });
+    return false;
+  }
+  dismissErrorKey(key);
+  return true;
+}
+
+/**
+ * Close a tab of `row` and say so when it would not close: through the
+ * runtime for a remote row (#1325), else as `closeTabTelling` does.
+ */
+export async function closeRowTabTelling(row: TabRow, tab: PeerTab, selected: SelectedSessionTab | null | undefined, label: string): Promise<boolean> {
+  if (!row.remote) return closeTabTelling(row.session.id, tab, row.tabs, selected, label);
+  const key = `close:${tab.key}`;
+  try {
+    await closeRemoteTab(row, tab, selected ?? null);
+  } catch (error) {
+    showError(`“${label}” is still open`, errorMessage(error), {
+      title: tab.kind === "agent" ? "Couldn't close the chat. Try again." : "Couldn't close the tab. Try again.",
+      key,
+      copy: false,
+      actions: [{ label: "Try again", icon: "retry", run: () => closeRowTabTelling(row, tab, getTerminalState().selected[row.session.id] ?? null, label) }],
     });
     return false;
   }
@@ -579,6 +602,71 @@ export function TabMenuItems({
           <span aria-hidden className="size-4 shrink-0" /> {BULK_CLOSE_LABEL.others}
         </ContextMenuItem>
       ) : null}
+    </>
+  );
+}
+
+/**
+ * The right-click menu of a remote session's tab (#1325). Its tabs are the
+ * runtime's, so the menu holds what is this viewer's (a pin, its place in the
+ * row, which pane it is in), its terminal view where the runtime serves one,
+ * and closing it, which closes it for everyone in the workspace. What the
+ * runtime cannot do for a tab yet (rename, fork, mute, restart) is left out.
+ */
+export function RemoteTabMenuItems({ row, tab, selected, readOnlyReason }: { row: TabRow; tab: PeerTab; selected: SelectedSessionTab | null; readOnlyReason?: string | null }) {
+  const keys = useShortcutKeycaps();
+  const tabViews = useTabViews();
+  const whole = row.remote!.current();
+  const panes = panesOf(whole.layout, whole.tabs.map((peer) => peer.key));
+  const shown = tab.kind === selected?.kind && tab.id === selected.id;
+  const shortcut = (action: ShortcutId) => (shown && keys(action).length ? <MenuShortcut keys={keys(action)} /> : null);
+  const off = !!readOnlyReason;
+  const toPane = otherPane(whole, tab);
+  const canSplit = !(panes.length === 1 && whole.tabs.length < 2);
+  const toggleView = tab.kind === "agent" ? row.remote!.terminalView(tab.tab) : null;
+  const inTerminalView = tab.kind === "agent" && tabViewIn(tabViews.views, tab.tab) === "terminal";
+  const label = peerLabel(tab, row.layout, cloudAgentLabel);
+  const move = (how: TabMove, text: string, icon: ReactNode, action?: ShortcutId) => (
+    <ContextMenuItem disabled={!canMoveTab(row, tab, how)} onSelect={() => moveTabBy(row, tab, how)}>
+      {icon} {text}
+      {action ? shortcut(action) : null}
+    </ContextMenuItem>
+  );
+  return (
+    <>
+      <ContextMenuItem onSelect={() => setTabPinned(whole, tab, !tab.pinned)}>
+        {tab.pinned ? <PinOff /> : <Pin />} {tab.pinned ? "Unpin tab" : "Pin tab"}
+      </ContextMenuItem>
+      {!isCompactWindow() ? (
+        <ContextMenuItem disabled={!canSplit} onSelect={() => moveTabToPane(whole, tab, toPane, selected)}>
+          <Columns2 /> {toPane === "right" ? "Move to the right pane" : "Move to the left pane"}
+          {shortcut("session.moveTabToOtherPane")}
+        </ContextMenuItem>
+      ) : null}
+      {toggleView && tab.kind === "agent" ? (
+        <ContextMenuItem disabled={!!tabViews.switching[tab.id]} onSelect={toggleView}>
+          {inTerminalView ? <MessageSquare /> : <SquareTerminal />} {inTerminalView ? "Switch to chat view" : "Switch to terminal view"}
+          {shortcut("session.toggleTerminalView")}
+        </ContextMenuItem>
+      ) : null}
+      <ContextMenuSub>
+        <ContextMenuSubTrigger>
+          <MoveHorizontal /> Move tab
+        </ContextMenuSubTrigger>
+        <ContextMenuSubContent>
+          {move("left", "Move tab left", <ArrowLeft />, "session.moveTabLeft")}
+          {move("right", "Move tab right", <ArrowRight />, "session.moveTabRight")}
+          {move("start", "Move to start", <ArrowLeftToLine />)}
+          {move("end", "Move to end", <ArrowRightToLine />)}
+        </ContextMenuSubContent>
+      </ContextMenuSub>
+      <ContextMenuSeparator />
+      {readOnlyReason ? <ContextMenuLabel className="max-w-64 whitespace-normal normal-case tracking-normal text-muted-foreground">{readOnlyReason}</ContextMenuLabel> : null}
+      {/* Closing a runtime tab closes it for everyone in the workspace; an agent tab's process stops with it. */}
+      <ContextMenuItem disabled={off} onSelect={() => void closeRowTabTelling(row, tab, selected, label)}>
+        <X /> Close tab
+        {shortcut("session.closeTab")}
+      </ContextMenuItem>
     </>
   );
 }

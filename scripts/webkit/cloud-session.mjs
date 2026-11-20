@@ -476,6 +476,8 @@ const headerLayout = (page) =>
       crumb: round(crumb.getBoundingClientRect()),
       right: round(crumb.nextElementSibling.getBoundingClientRect()),
       title: { text: title.textContent, shown: Math.round(title.getBoundingClientRect().width), needed: Math.round(needed), ...round(title.getBoundingClientRect()) },
+      // With the row of tabs (#1325), the switch is at the right end of the pane's strip (PRO-381), not in the header.
+      stripSwitch: [...document.querySelectorAll('main [data-testid="strip-terminal-view"]')].filter(shown).map((button) => ({ label: button.getAttribute("aria-label"), ...round(button.getBoundingClientRect()) }))[0] ?? null,
       project: shown(header.querySelector('[data-testid="session-project"]')) ? Math.round(header.querySelector('[data-testid="session-project"]').getBoundingClientRect().width) : null,
       chips,
       status,
@@ -492,12 +494,18 @@ function headerChecks(measured, { collapsed, terminalSwitch = false }) {
     }
   }
   measured.overlapping = overlapping;
+  const switchShown = measured.parts.some((part) => part.name === "Show terminal view") || measured.stripSwitch?.label === "Show terminal view";
   const checks = {
+    // The switch is drawn exactly where the session offers it: once, in the header or at the strip's end, and never without a terminal to show.
+    [terminalSwitch ? "the terminal switch is shown once, in the header or at the end of the tab strip, inside the window" : "no terminal switch is shown without the agent's terminal"]: terminalSwitch
+      ? switchShown && !(measured.stripSwitch && measured.parts.some((part) => part.name === "Show terminal view")) && (!measured.stripSwitch || (measured.stripSwitch.width >= 20 && measured.stripSwitch.right <= measured.viewport + SLACK))
+      : !switchShown,
     "the session title shows at least its first 12 characters": measured.title.text.length >= 12 && measured.title.shown >= measured.title.needed,
     "the title is inside the breadcrumb, which stops before the buttons on the right": measured.title.right <= measured.crumb.right + SLACK && measured.crumb.right <= measured.right.left + SLACK,
-    // A working terminal-view switch takes the location chip's place in a header this narrow.
-    [terminalSwitch && collapsed ? "the terminal switch is there, and every chip shown keeps its icon and tooltip, wide enough to press" : "the location chip is there, and every chip shown keeps its icon and tooltip, wide enough to press"]:
-      (terminalSwitch && collapsed ? measured.parts.some((part) => part.name === "Show terminal view") : measured.chips.some((chip) => chip.id === "session-location")) &&
+    // A working terminal-view switch in the header takes the location chip's place in a header this narrow. With the
+    // row of tabs (#1325) it is at the end of the pane's strip instead, so the header keeps the location chip.
+    [terminalSwitch && collapsed && !measured.stripSwitch ? "the terminal switch is there, and every chip shown keeps its icon and tooltip, wide enough to press" : "the location chip is there, and every chip shown keeps its icon and tooltip, wide enough to press"]:
+      (terminalSwitch && collapsed && !measured.stripSwitch ? measured.parts.some((part) => part.name === "Show terminal view") : measured.chips.some((chip) => chip.id === "session-location")) &&
       measured.chips.every((chip) => chip.tooltip && chip.iconInside && chip.width >= 20),
     "the connection and role chips are whole: Live and Driver, inside the breadcrumb": measured.status.map((chip) => chip.text).join(",") === "Live,Driver" && measured.status.every((chip) => chip.width > 20 && chip.right <= measured.crumb.right + SLACK),
     "nothing in the header overlaps": overlapping.length === 0,
