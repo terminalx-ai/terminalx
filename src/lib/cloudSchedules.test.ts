@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudScheduleEstimate } from "@/lib/api";
+import type { CloudScheduleEstimate, CloudSelectedRepository } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({ cloudSchedules: vi.fn(), cloudScheduleEstimate: vi.fn() }));
 vi.mock("@/lib/api", () => ({ api: { cloudSchedules: mocks.cloudSchedules, cloudScheduleEstimate: mocks.cloudScheduleEstimate } }));
@@ -7,6 +7,11 @@ vi.mock("@/lib/api", () => ({ api: { cloudSchedules: mocks.cloudSchedules, cloud
 import { PERMISSION_MODES } from "@/lib/models";
 import {
   SCHEDULE_MODES,
+  blankAutomationForm,
+  automationInput,
+  automationEstimateInput,
+  automationCostLines,
+  type AutomationForm,
   blankScheduleForm,
   costLines,
   describeTiming,
@@ -213,5 +218,74 @@ describe("scheduled tasks: whether they are offered", () => {
     mocks.cloudSchedules.mockResolvedValue({ schedules: [] });
     await probeSchedules("org-1", 1_000 + 11 * 60_000);
     expect(schedulesOffer("org-1")).toBe("offered");
+  });
+});
+
+// These exercise the exact accepted payload independently of React. Rendered
+// payload/state regressions live in the dialog and GitHub editor suites.
+describe("accepted automation inputs and cost projection", () => {
+  const repositories: CloudSelectedRepository[] = [{ id: "selected-row", fullName: "org/repo", cloneUrl: "https://github.com/org/repo.git", defaultBranch: "main", private: true, state: "accessible", reason: null }];
+  const form = (): AutomationForm => ({ ...blankAutomationForm(), name: " Review ", prompt: "Review changes.", timezone: "UTC", triggerKind: "github", githubTrigger: { repositoryId: "selected-row", event: "opened", filters: [{ field: "baseBranch", operator: "is-not", value: " main " }] } });
+
+  it("uses the selected row ID, trims filter values and sends the false fork default explicitly", () => {
+    expect(automationEstimateInput(form(), "template", repositories)).toEqual({ workspaceId: "template", completionPolicy: "suspend", maxRunMinutes: 60, githubTrigger: { repositoryId: "selected-row", event: "opened", filters: [{ field: "baseBranch", operator: "is-not", value: "main" }], allowForkPullRequests: false } });
+    const input = automationInput(form(), "template", repositories)!;
+    expect(input).toEqual({ ...automationEstimateInput(form(), "template", repositories), workspaceMode: "existing", name: "Review", prompt: "Review changes.", mode: "acceptEdits", agent: "claude", missedRunPolicy: "skip" });
+    expect(input).not.toHaveProperty("schedule");
+    expect(input).not.toHaveProperty("archiveAfterDays");
+  });
+
+  it("requires an accessible selected row ID instead of a name, clone URL or numeric GitHub ID", () => {
+    for (const repositoryId of ["org/repo", "https://github.com/org/repo.git", "123456", "", "selected-row\u0000"]) {
+      const input = form(); input.githubTrigger.repositoryId = repositoryId;
+      expect(automationEstimateInput(input, "template", repositories)).toBeNull();
+    }
+    expect(automationInput(form(), "template", [{ ...repositories[0], id: null }])).toBeNull();
+    expect(automationInput(form(), "template", [{ ...repositories[0], state: "missing" }])).toBeNull();
+  });
+
+  it("enforces five filters, all ASCII controls, and the UTF-16 boundary", () => {
+    const input = form();
+    input.githubTrigger.filters = Array.from({ length: 6 }, () => ({ field: "label", operator: "is", value: "ok" }));
+    expect(automationInput(input, "template", repositories)).toBeNull();
+    input.githubTrigger.filters = input.githubTrigger.filters.slice(0, 5);
+    expect(automationInput(input, "template", repositories)).not.toBeNull();
+    for (let code = 0; code <= 127; code += 1) {
+      if (code >= 32 && code !== 127) continue;
+      input.githubTrigger.filters[0].value = `x${String.fromCharCode(code)}y`;
+      expect(automationInput(input, "template", repositories)).toBeNull();
+    }
+    input.githubTrigger.filters[0].value = "😀".repeat(127) + "x";
+    expect(automationInput(input, "template", repositories)).not.toBeNull();
+    input.githubTrigger.filters[0].value += "x";
+    expect(automationInput(input, "template", repositories)).toBeNull();
+  });
+
+  it.each(["0", "366", "1.5", "-1", "1e2", "NaN"])("rejects cleanup day input %s", (archiveAfterDays) => {
+    expect(automationInput({ ...form(), workspaceMode: "fresh", archiveAfterDays }, "template", repositories)).toBeNull();
+  });
+
+  it("keeps cleanup on create only, accepts 1..365 and PR cleanup for fresh timers", () => {
+    for (const archiveAfterDays of ["1", "365"]) {
+      const input: AutomationForm = { ...form(), triggerKind: "timer", workspaceMode: "fresh", archiveAfterDays, archiveOnPrMerge: true };
+      const quote = automationEstimateInput(input, "template", repositories);
+      expect(quote).toEqual({ workspaceId: "template", workspaceMode: "fresh", completionPolicy: "suspend", maxRunMinutes: 60, schedule: { preset: "daily", hour: 9, minute: 0, weekdays: [], timezone: "UTC" } });
+      expect(quote).not.toHaveProperty("prompt");
+      expect(quote).not.toHaveProperty("archiveAfterDays");
+      expect(quote).not.toHaveProperty("archiveOnPrMerge");
+      expect(automationInput(input, "template", repositories)).toMatchObject({ workspaceMode: "fresh", archiveAfterDays: Number(archiveAfterDays), archiveOnPrMerge: true });
+    }
+  });
+
+  it("does not invent a one-machine-month ceiling or add creation a second time", () => {
+    const lines = automationCostLines(estimate({ createPerRunMinutes: 20, perRunMaxMinutes: 105, monthlyRuns: 720, monthlyMaxMicros: 62_208_000_000, keepsMachineRunning: true }), 60, true, true).join(" ");
+    expect(lines).toContain("105 minutes, including 20 minutes");
+    expect(lines).toContain("already included");
+    expect(lines).toContain("$62,208.00");
+    expect(lines).toContain("machine-month for every fresh run");
+    expect(lines).toContain("24 runs/day and 720/month, not a delivery forecast");
+    expect(lines).toContain("storage and model tokens are excluded");
+    expect(lines).not.toContain("wakes this workspace");
+    expect(runText({ state: "creating-workspace" })).toBe("Creating workspace");
   });
 });

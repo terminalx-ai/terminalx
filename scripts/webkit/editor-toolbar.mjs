@@ -21,11 +21,16 @@ import { CloudSchedulesDialog } from '/src/components/cloud/CloudSchedulesDialog
 import { CloudWorkspaceLifecycleDialog } from '/src/components/cloud/CloudWorkspaceLifecycle.tsx';
 import { TooltipProvider } from '/src/components/ui/tooltip.tsx';
 import { api } from '/src/lib/api.ts';
+import { bootAccount } from '/src/lib/account.ts';
+import { refreshDataPrivacy } from '/src/lib/dataPrivacy.ts';
 const noop = () => {};
 // Read-only service replies; render the real callers without a running workspace.
 api.cloudProviders = async () => ({ providers: [] });
 api.cloudWorkspaceRepositories = async () => ({ configured: true, repositories: [] });
 api.cloudSchedules = async () => ({ schedules: [] });
+api.cloudAutomations = async () => ({ schedules: [] });
+api.phase2DesktopContractsAvailable = async () => false;
+api.accountStatus = async () => ({state:'signed-in',identity:{email:'toolbar@example.test',name:'Toolbar',organization:'Layout lab',organizationId:'org-1'},context:{account:'toolbar',scope:'profile',revision:'r1'},organizations:[{id:'org-1',name:'Layout lab',role:'owner',isPersonal:false}],expiresAt:null,lastError:null});
 api.cloudWorkspaceDisposition = async () => { throw new Error('offline'); };
 const client = { call: async method => {
   if (method === 'git.repositories') return { repositories: [{ repo: 'app', branch: 'main', head: 'abc', remote: null, defaultBranch: 'main' }] };
@@ -74,6 +79,8 @@ function App() {
   </div>)}</div></>;
 }
 window.actions = [];
+await refreshDataPrivacy();
+await bootAccount();
 createRoot(document.getElementById('root')).render(<App/>);
 `;
 const server = await createServer({

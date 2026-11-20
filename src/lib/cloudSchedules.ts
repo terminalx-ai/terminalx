@@ -1,5 +1,5 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { api, type CloudSchedule, type CloudScheduleCreateInput, type CloudScheduleEstimate, type CloudScheduleRun, type CloudScheduleTiming } from "@/lib/api";
+import { api, type CloudSchedule, type CloudScheduleCreateInput, type CloudScheduleEstimate, type CloudScheduleRun, type CloudScheduleTiming, type CloudAutomationCreateInput, type CloudAutomationEstimateInput, type CloudScheduleGithubTrigger, type CloudSelectedRepository } from "@/lib/api";
 
 /**
  * Scheduled tasks of a cloud workspace (PRO-37, saas contract §24): what the
@@ -164,6 +164,7 @@ export function pausedText(schedule: Pick<CloudSchedule, "state" | "pausedReason
 
 const RUN_STATE: Record<string, string> = {
   queued: "Waiting to start",
+  "creating-workspace": "Creating workspace",
   provisioning: "Starting the workspace",
   working: "Running",
   completed: "Completed",
@@ -422,4 +423,71 @@ export function useSchedulesOffer(orgId: string, enabled = true, privateWorkspac
     if (privateWorkspaceId && organization === "offered") void probeWorkspaceSchedules(orgId, privateWorkspaceId);
   }, [orgId, enabled, privateWorkspaceId, organization]);
   return organization === "offered" ? workspace : organization;
+}
+
+
+export const AUTOMATION_HOLD = "Fresh-workspace and GitHub automations are not enabled yet. Existing automations can still be read, paused and deleted.";
+export interface AutomationForm extends ScheduleForm {
+  triggerKind: "timer" | "github";
+  workspaceMode: "existing" | "fresh";
+  archiveAfterDays: string;
+  archiveOnPrMerge: boolean;
+  githubTrigger: CloudScheduleGithubTrigger;
+}
+export function blankAutomationForm(): AutomationForm {
+  return { ...blankScheduleForm(), triggerKind: "timer", workspaceMode: "existing", archiveAfterDays: "", archiveOnPrMerge: false,
+    githubTrigger: { repositoryId: "", event: "opened", filters: [], allowForkPullRequests: false } };
+}
+export function validGithubValue(value: string): boolean {
+  return value.trim().length > 0 && value.length <= 255 && !/[\x00-\x1f\x7f]/.test(value);
+}
+export function githubTriggerError(trigger: CloudScheduleGithubTrigger, repositories: CloudSelectedRepository[]): string | null {
+  if (!validGithubValue(trigger.repositoryId) || !repositories.some((repo) => repo.state === "accessible" && repo.id === trigger.repositoryId)) return "Choose an accessible repository with a repository ID.";
+  if (!["opened", "pushed", "merged"].includes(trigger.event)) return "Choose one GitHub event.";
+  if (trigger.filters.length > 5) return "At most five filters are allowed.";
+  if (trigger.filters.some((filter) => !["label", "author", "baseBranch"].includes(filter.field) || !["is", "is-not"].includes(filter.operator) || !validGithubValue(filter.value))) return "Each filter needs a nonblank value of at most 255 UTF-16 units without control characters.";
+  return null;
+}
+export function automationFormErrors(form: AutomationForm, repositories: CloudSelectedRepository[]) {
+  const errors: Record<string, string> = { ...scheduleFormErrors(form) };
+  if (form.triggerKind === "github") {
+    delete errors.time; delete errors.weekdays;
+    const error = githubTriggerError(form.githubTrigger, repositories);
+    if (error) errors.githubTrigger = error;
+  }
+  if (form.workspaceMode === "fresh" && form.archiveAfterDays !== "" && (!/^\d+$/.test(form.archiveAfterDays) || !Number.isInteger(Number(form.archiveAfterDays)) || Number(form.archiveAfterDays) < 1 || Number(form.archiveAfterDays) > 365)) errors.cleanup = "Archive after must be a whole number from 1 to 365 days.";
+  return errors;
+}
+/** Quote payload deliberately excludes prompt, identity, and create-only cleanup. */
+export function automationEstimateInput(form: AutomationForm, workspaceId: string, repositories: CloudSelectedRepository[]): CloudAutomationEstimateInput | null {
+  if (!validRunMinutes(form.maxRunMinutes)) return null;
+  const base = { workspaceId, completionPolicy: form.completionPolicy, maxRunMinutes: form.maxRunMinutes,
+    ...(form.workspaceMode === "fresh" ? { workspaceMode: "fresh" as const } : {}) };
+  if (form.triggerKind === "github") {
+    if (githubTriggerError(form.githubTrigger, repositories)) return null;
+    return { ...base, githubTrigger: { repositoryId: form.githubTrigger.repositoryId, event: form.githubTrigger.event,
+      filters: form.githubTrigger.filters.map((filter) => ({ field: filter.field, operator: filter.operator, value: filter.value.trim() })),
+      allowForkPullRequests: form.githubTrigger.allowForkPullRequests ?? false } };
+  }
+  const schedule = timingOf(form);
+  return schedule ? { ...base, schedule } : null;
+}
+export function automationInput(form: AutomationForm, workspaceId: string, repositories: CloudSelectedRepository[]): CloudAutomationCreateInput | null {
+  const estimate = automationEstimateInput(form, workspaceId, repositories);
+  if (!estimate || Object.keys(automationFormErrors(form, repositories)).length) return null;
+  const workspace = form.workspaceMode === "fresh"
+    ? { workspaceMode: "fresh" as const, ...(form.archiveAfterDays !== "" ? { archiveAfterDays: Number(form.archiveAfterDays) } : {}), archiveOnPrMerge: form.archiveOnPrMerge }
+    : { workspaceMode: "existing" as const };
+  return { ...estimate, ...workspace, name: form.name.trim(), prompt: form.prompt, agent: form.agent, mode: form.mode,
+    ...(form.model ? { model: form.model } : {}), ...(form.effort ? { effort: form.effort } : {}), missedRunPolicy: form.missedRunPolicy };
+}
+export function automationCostLines(estimate: CloudScheduleEstimate, maxRunMinutes: number, fresh: boolean, github: boolean): string[] {
+  const lines = costLines(estimate, maxRunMinutes);
+  if (fresh) {
+    lines[0] = `Each run creates a fresh workspace. The quoted total is ${estimate.perRunMaxMinutes ?? "unknown"} minutes, including ${estimate.createPerRunMinutes ?? "an unspecified number of"} minutes for creation, starting, the ${maxRunMinutes}-minute run limit and reporting grace: ${formatMicros(estimate.perRunMaxMicros, estimate.currency)} per run. Creation is already included in that total.`;
+    lines[1] = `${estimate.monthlyRuns} assumed runs a month: ${formatMicros(estimate.monthlyMaxMicros, estimate.currency)} a month.${estimate.keepsMachineRunning ? " Includes a machine-month for every fresh run left running." : ""}`;
+  }
+  if (github) lines.push("GitHub estimate assumption: 24 runs/day and 720/month, not a delivery forecast. There is no scheduled next run.");
+  lines.push("Active compute only; storage and model tokens are excluded.");
+  return lines;
 }

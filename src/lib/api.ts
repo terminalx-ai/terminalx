@@ -1910,6 +1910,8 @@ export interface CloudWorkspacePreflight {
 }
 
 export interface CloudSelectedRepository {
+  /** Selected organization repository row ID, when returned by the server. */
+  id?: string | null;
   fullName: string;
   cloneUrl: string | null;
   defaultBranch: string | null;
