@@ -1784,7 +1784,7 @@ impl WorkspaceRpc {
             "pipeline.noteTracker" => self.pipeline_note_tracker(params),
             git if git.starts_with("git.") => project()?
                 .git
-                .handle(git, &params)
+                .handle_negotiated(git, &params, peer.granted(protocol::GIT_PR_TARGET))
                 .unwrap_or_else(|| Err(RpcError::new("method_not_found", format!("{git} is not a workspace method")))),
             "session.list" => self.session_list(peer),
             "session.get" => self.session_get(peer, params),

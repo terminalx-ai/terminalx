@@ -382,13 +382,16 @@ const OUTPUT_BATCH_TIME: std::time::Duration = std::time::Duration::from_millis(
 
 /// Check a request's connection, then answer it. Off the serve loop, so the
 /// loop keeps the phone's queue draining while a slow request runs (#1282).
-async fn answer<F, R>(host: &Arc<PhoneHost>, connection: &Arc<rpc::MobileConnection>, respond: &F, request: serde_json::Value) -> Result<serde_json::Value>
+async fn answer<F, R>(host: &Arc<PhoneHost>, connection: &Arc<rpc::MobileConnection>, respond: &F, request: serde_json::Value) -> Result<(String, serde_json::Value)>
 where
     F: Fn(serde_json::Value) -> R,
     R: std::future::Future<Output = serde_json::Value>,
 {
+    // Before the request runs: a stream it opens waits for its reply (#1333).
+    let id = request_id(&request);
+    connection.opening(&id);
     connection.check_off_runtime(host).await?;
-    Ok(respond(request).await)
+    Ok((id, respond(request).await))
 }
 
 /// A host signal not yet read: `Some(None)` when the host dropped the
@@ -423,7 +426,9 @@ where
 /// answers one request at a time, in the order they came; while it runs the
 /// loop still sends what is queued and reads what the phone sends. Every
 /// reply is checked again after it, so a reply queued meanwhile never
-/// discloses session data after a revocation.
+/// discloses session data after a revocation. A stream the request opens is
+/// held until its reply is sent, so its opening result (a terminal's
+/// snapshot) always comes before its first item (#1333).
 ///
 /// A host signal fences the connection as soon as it is seen, in flight
 /// request or not (#1332): nothing queued, no invalidation and no reply goes
@@ -479,7 +484,7 @@ where
             }
             answered = async { answering.as_mut().expect("guarded").await }, if answering.is_some() => {
                 answering = None;
-                let response = answered?;
+                let (id, response) = answered?;
                 // Revalidate after asynchronous work: queued replies must not
                 // disclose session data after revocation or account replacement.
                 // Successful self-unpairing deliberately revokes this connection;
@@ -494,6 +499,8 @@ where
                         send_with_grant(host, connection, send_message(socket, session, &response, connection.wire())).await?;
                     }
                 }
+                // Only now may the stream it opened follow it (#1333).
+                connection.opened(&id);
             }
             _ = connection.invalidations().raised(), if ending.is_none() => {
                 let pending = connection.invalidations().take();

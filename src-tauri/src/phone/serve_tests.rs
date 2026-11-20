@@ -15,14 +15,25 @@ use crate::relay_e2ee::{begin_e2ee_session, E2eeClientHandshake, E2eeHello, Host
 
 struct StandInOwner {
     build: Build,
+    /// Whether the terminal's one delta was handed out.
+    delta: std::sync::atomic::AtomicBool,
 }
 
 impl Owner for StandInOwner {
     fn attachment(&self) -> Result<AttachmentIdentity> {
         Ok(AttachmentIdentity { epoch: "epoch".into(), lease: "lease".into() })
     }
-    fn mobile(&self, _: &Actor, _: &str, _: serde_json::Value) -> Result<serde_json::Value> {
-        Ok(json!({}))
+    fn mobile(&self, _: &Actor, method: &str, _: serde_json::Value) -> Result<serde_json::Value> {
+        Ok(match method {
+            // A terminal subscription opens with its scrollback snapshot …
+            "observe" => json!({ "subscriptionId": "terminal", "snapshot": "scrollback" }),
+            // … and its first poll already has a delta for it.
+            "output" if !self.delta.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                json!([{ "subscriptionId": "terminal", "text": "delta" }])
+            }
+            "output" => json!([]),
+            _ => json!({}),
+        })
     }
     fn build(&self) -> &Build {
         &self.build
@@ -60,7 +71,7 @@ struct Phone {
 
 impl Phone {
     async fn request(&mut self, id: &str, method: &str) {
-        self.request_with(id, method, json!({})).await
+        self.request_with(id, method, json!({})).await;
     }
 
     async fn request_with(&mut self, id: &str, method: &str, params: Value) {
@@ -111,7 +122,7 @@ async fn served(slow: Duration) -> Served {
     let host = Arc::new(PhoneHost::new(|| 0));
     let sink = Arc::new(crate::sink::BroadcastSink::new(64));
     host.configure(sink.clone()).unwrap();
-    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default() })));
+    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default(), delta: Default::default() })));
 
     let keypair = HostKeypair::from_secret([3; 32]);
     let handshake = E2eeClientHandshake::with_secret([4; 32], &keypair.public_key_b64(), "direct", None).unwrap();
@@ -131,7 +142,22 @@ async fn served(slow: Duration) -> Served {
         tokio::spawn(async move {
             serve_connection(&mut socket, &mut session, &host, &connection, inbound, signals, |request| {
                 let (signals_tx, held) = (signals_tx.clone(), held.clone());
+                let (host, connection) = (host.clone(), connection.clone());
                 async move {
+                    if request["method"] == "terminal.subscribe" {
+                        let response = rpc::off_runtime(move || {
+                            let id = request["id"].as_str().unwrap_or_default().to_string();
+                            Ok(match rpc::dispatch(&host, &connection, &request, &device()).expect("a phone method") {
+                                Ok(result) => rpc::success_response(&id, result),
+                                Err(error) => error_response(&id, &error),
+                            })
+                        })
+                        .await
+                        .unwrap();
+                        // Its first poll ran meanwhile: the delta was queued before this reply.
+                        tokio::time::sleep(slow).await;
+                        return response;
+                    }
                     if request["method"] == "slow" {
                         tokio::time::sleep(slow).await;
                     }
@@ -312,6 +338,31 @@ async fn a_forget_in_flight_is_acknowledged_but_nothing_else_after_a_disconnect(
         let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
         assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
     }
+}
+
+/// #1333: a terminal subscription's first poll can find a delta before its
+/// reply, with the scrollback snapshot, is sent. The phone resets its screen
+/// to the snapshot, so a delta ahead of it would be lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscription_reply_comes_before_its_first_stream_item() {
+    let Served { mut phone, server, _home, .. } = served(Duration::from_millis(600)).await;
+    let params = json!({ "worktreeId": "session", "tabId": "tab", "attachMode": "observe", "client": {}, "capabilities": {} });
+    phone.request_with("subscribe", "terminal.subscribe", params).await;
+    let mut order = Vec::new();
+    while order.len() < 2 {
+        let message = phone.read().await.expect("still connected");
+        if message["id"] == "subscribe" {
+            assert_eq!(message["ok"], true, "{message}");
+            order.push(match message["result"]["type"].as_str() { Some(kind) => kind.to_string(), None => "reply".into() });
+        }
+    }
+    assert_eq!(order, ["reply", "data"]);
+    // Live traffic was not held behind it: the connection still answers.
+    phone.request("after", "status.get").await;
+    while phone.read().await.expect("still connected")["id"] != "after" {}
+    drop(phone);
+    let ended = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap().unwrap();
+    assert_eq!(ended.reason, EndReason::StreamEnded);
 }
 
 #[test]

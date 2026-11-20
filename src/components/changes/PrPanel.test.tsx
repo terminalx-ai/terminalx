@@ -614,7 +614,7 @@ it.each([true, false])("shows a linked machine PR without offering a desktop unl
   expect(mocks.invoke.mock.calls.some(([method]) => method === "pr_unlink")).toBe(false);
 });
 
-it("links a legacy PR by an explicitly entered URL and ignores a pre-upgrade withdrawn cache entry", async () => {
+it.each([false, true])("links an existing Enterprise PR and ignores a withdrawn cache entry (URL capability: %s)", async (urlCapability) => {
   const workspaceKey = "machine:mini:project";
   const sessionId = `${workspaceKey}:author`;
   const legacy = { ...followup, head: "feature", isDraft: true, url: `https://github.enterprise.test/acme/widgets/pull/${followup.number}` };
@@ -644,7 +644,8 @@ it("links a legacy PR by an explicitly entered URL and ignores a pre-upgrade wit
     if (method === "git.prUnlink") { saved = false; return {}; }
     throw Error(method);
   });
-  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "feature-tree"), canWrite: true, author: async () => null, sessionCheckout: true });
+  const client = { call, mutate, hasCapability: (capability: string) => urlCapability && capability === "git-pr-target/1" } as unknown as WorkspaceRpcClient;
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit(client, "feature-tree"), canWrite: true, author: async () => null, sessionCheckout: true });
   const panel = <PrPanel source={source} sessionId={sessionId} branch={legacy.head} active busy={false} inline />;
   const view = render(panel);
   fireEvent.click(await screen.findByRole("button", { name: "Link existing branch PR" }));
@@ -663,7 +664,7 @@ it("links a legacy PR by an explicitly entered URL and ignores a pre-upgrade wit
   render(panel);
   fireEvent.click(await screen.findByRole("button", { name: "Mark ready" }));
   await waitFor(() => expect(mutate).toHaveBeenLastCalledWith("git.prReady", {
-    repo: "feature-tree", number: legacy.number, url: legacy.url,
+    repo: "feature-tree", url: legacy.url, ...(urlCapability ? {} : { number: legacy.number }),
   }));
   const unlink = await screen.findByRole("button", { name: `Unlink #${legacy.number}` });
   await waitFor(() => expect((unlink as HTMLButtonElement).disabled).toBe(false));
