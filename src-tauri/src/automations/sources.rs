@@ -13,11 +13,20 @@
 //! says so, and the next poll tries again. Later polls read by most recent
 //! activity and page until a page holds nothing newer than the last read.
 //!
-//! One event wakes one run: the run row is written, then the record, then
-//! the run starts, so a restart never starts the same event again. A pull
-//! request's head left by one of the automation's own runs does not wake it
-//! again, and one pull request wakes at most [`STREAK_CAP`] runs in a row
-//! without a push from anyone else in between.
+//! One event wakes one run, once ever: an issue labelled, unlabelled and
+//! labelled again does not wake a second time. The run row is written, then
+//! the record, then the run starts, so a restart never starts the same event
+//! again. With a first check (PRO-484) the check runs once per read that has
+//! something to wake, before anything is recorded; a quiet or failing check
+//! leaves it all unseen.
+//!
+//! A pull request's head that one of the automation's runs left (its
+//! worktree's HEAD when it ended) does not wake it again. What happens to a
+//! pull request while a run on it is going waits for that run. And one pull
+//! request wakes at most [`WAKES_PER_HOUR`] runs an hour and
+//! [`WAKES_PER_DAY`] a day: past that its events stay unseen, the status
+//! says when it resumes, and they wake then (pushes and failed checks on
+//! the newest head only).
 //!
 //! [`AutomationEventSource`] is tagged by `kind`, so more sources (another
 //! bot's event, a watched URL or file, a webhook) can join it later. A kind
@@ -321,12 +330,12 @@ pub struct SourceSeen {
     /// A print of the Linear key the last read used: another key retries at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
-    /// Runs woken in a row on one pull request with no push from anyone else between them.
+    /// When each pull request woke a run, over the last day, for the rate limit.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub streaks: BTreeMap<String, u32>,
-    /// Pull requests a run was woken on since their head last changed.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub ran_since_head: BTreeSet<String>,
+    pub pr_wakes: BTreeMap<String, Vec<String>>,
+    /// Pull requests held back by the rate limit, and when each resumes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub held: BTreeMap<String, String>,
 }
 
 fn seen_path(automation_id: &str) -> Result<PathBuf> {
@@ -594,7 +603,8 @@ pub(crate) fn parse_pull_requests(value: &Value) -> Vec<PullRequest> {
                         author: item["author"]["login"].as_str().unwrap_or_default().into(),
                         labels: names(&item["labels"], "name"),
                         draft: item["isDraft"].as_bool().unwrap_or(false),
-                        from_fork: item["isCrossRepository"].as_bool().unwrap_or(false),
+                        // Unknown counts as a fork: the safe side of the fork filter.
+                        from_fork: item["isCrossRepository"].as_bool().unwrap_or(true),
                         updated_at: item["updatedAt"].as_str().unwrap_or_default().into(),
                         review_requests: names(&item["reviewRequests"], "login"),
                         check_failed: checks.iter().any(|check| {
@@ -628,7 +638,13 @@ fn gh_list_args(source: &PullRequestSource, limit: usize) -> Vec<String> {
     if source.wants(&PullRequestEvent::CheckFailed) {
         fields.push_str(",statusCheckRollup");
     }
-    let mut args: Vec<String> = ["pr", "list", "--repo", source.repo.trim(), "--state", "open", "--search", "sort:updated-desc", "--json"].map(String::from).into();
+    // The draft filter goes into the search, so a full page counts only pull requests that can match.
+    let search = match source.draft {
+        Some(true) => "sort:updated-desc draft:true",
+        Some(false) => "sort:updated-desc draft:false",
+        None => "sort:updated-desc",
+    };
+    let mut args: Vec<String> = ["pr", "list", "--repo", source.repo.trim(), "--state", "open", "--search", search, "--json"].map(String::from).into();
     args.extend([fields, "--limit".into(), limit.to_string()]);
     if let Some(base) = filled(&source.base) {
         args.extend(["--base".into(), base.into()]);
@@ -707,12 +723,14 @@ pub struct Wake {
 }
 
 /// What `plan` needs besides the record: subjects with a run going, heads
-/// the automation's own runs left (`<number>@<sha>`), and the per-tick cap.
+/// the automation's own runs left (`<number>@<sha>`), the per-tick cap, and
+/// the time, for the rate limit.
 #[derive(Debug, Default)]
 pub struct PlanContext {
     pub active: BTreeSet<String>,
     pub own_heads: BTreeSet<String>,
     pub cap: usize,
+    pub now: DateTime<Utc>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -722,15 +740,32 @@ pub struct Plan {
     pub record: Vec<(String, String)>,
     /// Entries to drop so the event can happen again (a review asked for anew).
     pub forget: Vec<String>,
-    /// Pull requests whose head moved since the last read, and those of them moved by someone else.
-    pub heads_moved: Vec<String>,
-    pub streak_reset: Vec<String>,
-    /// Pull requests not woken on because they reached [`STREAK_CAP`].
-    pub capped: Vec<i64>,
+    /// When each match left unseen for a later tick last changed (the per-tick
+    /// cap, a run going, the rate limit): the next read pages back to them.
+    pub pending: Vec<String>,
+    /// Pull requests the rate limit holds back, and when each resumes.
+    pub held: Vec<(i64, DateTime<Utc>)>,
 }
 
-/// Runs in a row on one pull request with no push from anyone else between them.
-pub const STREAK_CAP: u32 = 3;
+/// Runs one pull request may wake for one automation in any hour, and in any day.
+pub const WAKES_PER_HOUR: usize = 4;
+pub const WAKES_PER_DAY: usize = 12;
+
+/// When a pull request that woke runs at `wakes` may wake another, if not now.
+fn resumes_at(wakes: &[String], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let mut times: Vec<DateTime<Utc>> = wakes.iter().filter_map(|at| parse(Some(at))).filter(|at| now - *at < chrono::TimeDelta::days(1)).collect();
+    times.sort();
+    let in_hour: Vec<_> = times.iter().copied().filter(|at| now - *at < chrono::TimeDelta::hours(1)).collect();
+    let mut resume = None;
+    // The window opens when enough of the wakes in it have aged out of it.
+    if in_hour.len() >= WAKES_PER_HOUR {
+        resume = Some(in_hour[in_hour.len() - WAKES_PER_HOUR] + chrono::TimeDelta::hours(1));
+    }
+    if times.len() >= WAKES_PER_DAY {
+        resume = resume.max(Some(times[times.len() - WAKES_PER_DAY] + chrono::TimeDelta::days(1)));
+    }
+    resume
+}
 
 fn pr_subject(number: i64) -> String {
     format!("pr:{number}")
@@ -760,7 +795,9 @@ fn observed(pr: &PullRequest, viewer: Option<&str>) -> Vec<(PullRequestEvent, St
 /// event waits while a run for the same pull request is going, and the rest
 /// wait for a later tick past the cap). A pull request newly seen counts as
 /// opened, or as its first push for an automation that asked only for pushes.
-/// A head one of the automation's own runs left does not wake it.
+/// A head one of the automation's own runs left does not wake it. Nothing
+/// about a pull request changes while a run on it is going, and one past the
+/// rate limit is held with its events unseen.
 pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceSeen, context: &PlanContext) -> Plan {
     let mut out = Plan::default();
     let is_new = |key: &str, value: &str| state.events.get(key).is_none_or(|seen| seen.value != value);
@@ -768,13 +805,15 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
         (AutomationEventSource::LinearIssue(_), Snapshot::Linear(issues)) => {
             for issue in issues {
                 let key = format!("linear:{}", issue.id);
-                if !is_new(&key, "") || context.active.contains(&key) {
+                if !is_new(&key, "") {
                     continue;
                 }
                 if !state.initialized {
                     out.record.push((key, String::new()));
-                } else if out.wakes.len() < context.cap {
+                } else if out.wakes.len() < context.cap && !context.active.contains(&key) {
                     out.wakes.push(Wake { subject: key.clone(), record: vec![(key, String::new())], what: WakeSubject::Linear(Box::new(issue.clone())) });
+                } else {
+                    out.pending.push(issue.updated_at.clone());
                 }
             }
         }
@@ -783,25 +822,24 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                 let subject = pr_subject(pr.number);
                 let events = observed(pr, viewer.as_deref());
                 let review_key = format!("{subject}:review");
-                if state.events.contains_key(&review_key) && !events.iter().any(|(_, key, _)| *key == review_key) {
-                    out.forget.push(review_key);
-                }
+                let dropped_review = state.events.contains_key(&review_key) && !events.iter().any(|(_, key, _)| *key == review_key);
                 let fresh: Vec<_> = events.into_iter().filter(|(_, key, value)| is_new(key, value)).collect();
                 if !state.initialized {
                     out.record.extend(fresh.into_iter().map(|(_, key, value)| (key, value)));
                     continue;
                 }
+                if context.active.contains(&subject) {
+                    // A run on it is going: whatever changed waits for that run to end, untouched.
+                    if !fresh.is_empty() || dropped_review {
+                        out.pending.push(pr.updated_at.clone());
+                    }
+                    continue;
+                }
+                if dropped_review {
+                    out.forget.push(review_key);
+                }
                 let opened = fresh.iter().any(|(event, ..)| *event == PullRequestEvent::Opened);
                 let own_head = context.own_heads.contains(&format!("{}@{}", pr.number, pr.head_sha));
-                let mut reset = false;
-                if !opened && fresh.iter().any(|(event, ..)| *event == PullRequestEvent::Pushed) {
-                    out.heads_moved.push(subject.clone());
-                    // Someone else pushed when no run of ours went on since the last head.
-                    if !own_head && !state.ran_since_head.contains(&subject) {
-                        out.streak_reset.push(subject.clone());
-                        reset = true;
-                    }
-                }
                 // A new pull request's first head is part of its opening, not a push of its own;
                 // a head one of our runs left is not a push to wake on.
                 let quiet = |event: &PullRequestEvent| {
@@ -815,16 +853,23 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                         out.record.push((key, value));
                     }
                 }
-                if waiting.is_empty() || context.active.contains(&subject) || out.wakes.len() >= context.cap {
+                if waiting.is_empty() {
                     continue;
                 }
-                if !reset && state.streaks.get(&subject).copied().unwrap_or(0) >= STREAK_CAP {
-                    // Stopped: recorded without a run until someone else pushes.
-                    out.record.extend(waiting.into_iter().map(|(_, key, value)| (key, value)));
-                    out.capped.push(pr.number);
+                if out.wakes.len() >= context.cap {
+                    out.pending.push(pr.updated_at.clone());
+                    continue;
+                }
+                if let Some(resume) = resumes_at(state.pr_wakes.get(&subject).map_or(&[][..], Vec::as_slice), context.now) {
+                    // Held, unseen: it wakes when the window opens, on what it shows then.
+                    out.held.push((pr.number, resume));
+                    out.pending.push(pr.updated_at.clone());
                     continue;
                 }
                 let (event, key, value) = waiting.remove(0);
+                if !waiting.is_empty() {
+                    out.pending.push(pr.updated_at.clone());
+                }
                 out.wakes.push(Wake { subject, record: vec![(key, value)], what: WakeSubject::PullRequest(Box::new(pr.clone()), event) });
             }
         }
@@ -871,8 +916,8 @@ const PULL_REQUEST: &str = "pullRequest";
 const LEFT_HEADS: &str = "leftHeads";
 
 /// The subjects with a run still going, and the heads the automation's runs left.
-fn context(automation_id: &str, cap: usize) -> Result<PlanContext> {
-    let mut context = PlanContext { cap, ..PlanContext::default() };
+fn context(automation_id: &str, cap: usize, now: DateTime<Utc>) -> Result<PlanContext> {
+    let mut context = PlanContext { cap, now, ..PlanContext::default() };
     for run in automation_store::list_runs(automation_id)? {
         if !run.status.is_terminal() {
             if let Some(subject) = run.unknown.get(SUBJECT).and_then(Value::as_str) {
@@ -903,7 +948,28 @@ pub(super) fn due(automation: &Automation, now: DateTime<Utc>) -> bool {
 }
 
 pub(super) fn evaluate(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
-    poll(app, automation, now, read, |wake| insert_run(automation, wake), |wake, run| start(app, automation, wake, run))
+    let trigger = run_trigger(&automation.event_trigger.as_ref().context("event trigger missing")?.source);
+    poll(app, automation, now, read, || super::precheck::gate_wakes(app, automation, trigger), |wake| insert_run(automation, wake), |wake, run| start(app, automation, wake, run))
+}
+
+/// Whether the automation still has this trigger, on and reading the same source:
+/// a read that took a while does not write its record over a trigger changed meanwhile.
+fn still_current(automation: &Automation) -> bool {
+    let print = |automation: &Automation| automation.event_trigger.as_ref().map(|trigger| fingerprint(&trigger.source));
+    automation_store::get(&automation.id).is_ok_and(|stored| stored.enabled && print(&stored) == print(automation))
+}
+
+fn held_notice(held: &BTreeMap<String, String>) -> Option<String> {
+    let list = held
+        .iter()
+        .map(|(subject, resume)| {
+            let when = parse(Some(resume)).map_or_else(|| resume.clone(), |at| at.format("%Y-%m-%d %H:%M UTC").to_string());
+            format!("#{} until {when}", subject.trim_start_matches("pr:"))
+        })
+        .collect::<Vec<_>>();
+    (!list.is_empty()).then(|| {
+        format!("Holding pull request {} (more than {WAKES_PER_HOUR} runs in an hour or {WAKES_PER_DAY} in a day); its events wake then.", list.join(", "))
+    })
 }
 
 /// Pages back this far before the last read, for clocks that disagree.
@@ -915,6 +981,7 @@ fn poll(
     automation: &Automation,
     now: DateTime<Utc>,
     read: impl FnOnce(&Automation, &AutomationEventSource, &SourceSeen, Option<DateTime<Utc>>) -> Result<Read, SourceError>,
+    gate: impl FnOnce() -> Result<bool>,
     mut insert: impl FnMut(&Wake) -> Result<AutomationRun>,
     mut start: impl FnMut(&Wake, AutomationRun) -> Result<AutomationRun>,
 ) -> Result<()> {
@@ -925,7 +992,7 @@ fn poll(
     let (stored, damaged) = load_or_restart(&automation.id)?;
     let mut state = record_for(stored.clone(), &trigger.source);
     if damaged.is_some() {
-        state.notice = damaged;
+        state.notice = damaged.clone();
     }
     if !automation.enabled {
         // Switched off: switching it back on starts from then, not from here, and checks at once.
@@ -975,8 +1042,14 @@ fn poll(
     state.failures = 0;
     state.retry_after = None;
     state.last_poll_error = None;
+    if !still_current(automation) {
+        return Ok(());
+    }
     if let (false, Some(bound)) = (state.initialized, bound) {
         // A baseline that cannot be read completely wakes nothing: what it left out would look new.
+        // It is tried again, less often each time, up to once an hour.
+        state.failures = state.failures.saturating_add(1);
+        state.retry_after = Some(stamp(now + backoff(trigger.poll_interval_minutes, state.failures, false)));
         state.last_poll_error = Some(format!(
             "More than {bound} match this trigger now, more than one check can read. Nothing will start until it can read them all: narrow the filter."
         ));
@@ -984,37 +1057,62 @@ fn poll(
         emit_state(app, &automation.id, &state);
         return Ok(());
     }
-    state.notice = bound.map(|bound| format!("More than {bound} changed since the last check; the ones past that were not looked at."));
     if let Snapshot::PullRequests { viewer: Some(viewer), .. } = &snapshot {
         state.viewer = Some(viewer.clone());
     }
-    let plan = plan(&trigger.source, &snapshot, &state, &context(&automation.id, trigger.max_runs_per_tick as usize)?);
+    let plan = plan(&trigger.source, &snapshot, &state, &context(&automation.id, trigger.max_runs_per_tick as usize, now)?);
+    // The rate limit's holds: those read now as planned, the others kept until they resume.
+    if let Snapshot::PullRequests { pulls, .. } = &snapshot {
+        let read_now: BTreeSet<String> = pulls.iter().map(|pr| pr_subject(pr.number)).collect();
+        state.held.retain(|subject, resume| !read_now.contains(subject) && parse(Some(resume)).is_some_and(|resume| resume > now));
+        for (number, resume) in &plan.held {
+            state.held.insert(pr_subject(*number), stamp(*resume));
+        }
+    }
+    let notices: Vec<String> = [
+        damaged,
+        bound.map(|bound| format!("More than {bound} changed since the last check; the ones past that were not looked at.")),
+        held_notice(&state.held),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    state.notice = (!notices.is_empty()).then(|| notices.join(" "));
+    if !plan.wakes.is_empty() && !gate()? {
+        // A first check found nothing new, or failed: it wrote its one history
+        // row; everything read stays unseen for the next read to find again.
+        save_seen(&automation.id, &state)?;
+        emit_state(app, &automation.id, &state);
+        return Ok(());
+    }
     for key in &plan.forget {
         state.events.remove(key);
     }
-    for subject in &plan.heads_moved {
-        state.ran_since_head.remove(subject);
-    }
-    for subject in &plan.streak_reset {
-        state.streaks.remove(subject);
-    }
-    if !plan.capped.is_empty() {
-        let numbers = plan.capped.iter().map(|number| format!("#{number}")).collect::<Vec<_>>().join(", ");
-        state.notice = Some(format!("Stopped waking on pull request {numbers} after {STREAK_CAP} runs in a row with no push from anyone else."));
-    }
     write(&mut state, &plan.record, &at, None);
     state.initialized = true;
-    state.last_read_at = Some(at.clone());
+    // The next read pages back to the oldest match left for later, so none is starved.
+    let oldest_pending = plan.pending.iter().filter_map(|at| parse(Some(at))).min();
+    state.last_read_at = Some(match oldest_pending {
+        Some(oldest) if oldest < now => stamp(oldest - chrono::TimeDelta::seconds(1)),
+        _ => at.clone(),
+    });
+    let day_ago = now - chrono::TimeDelta::days(1);
+    state.pr_wakes.retain(|_, wakes| {
+        wakes.retain(|at| parse(Some(at)).is_some_and(|at| at > day_ago));
+        !wakes.is_empty()
+    });
     save_seen(&automation.id, &state)?;
     for wake in &plan.wakes {
+        if !still_current(automation) {
+            break;
+        }
         // The run row first, then the record: a crash between them leaves a
         // run to inspect, never an event recorded with no run behind it, and
         // a restart does not start the same event again.
         let run = insert(wake)?;
         write(&mut state, &wake.record, &at, Some(&run.run_id));
         if let WakeSubject::PullRequest(..) = wake.what {
-            *state.streaks.entry(wake.subject.clone()).or_default() += 1;
-            state.ran_since_head.insert(wake.subject.clone());
+            state.pr_wakes.entry(wake.subject.clone()).or_default().push(at.clone());
         }
         save_seen(&automation.id, &state)?;
         start(wake, run)?;
@@ -1130,11 +1228,9 @@ fn start(app: &impl AutomationHost, automation: &Automation, wake: &Wake, run: A
 
 // ------------------------------------------------------------------ a run's end
 
-/// When a pull request run ends: keep the head it left, so that head does not
-/// wake the automation again. That is the run worktree's HEAD, and the pull
-/// request's head when its last commit is by the login `gh` is signed in as
-/// (the run pushed from somewhere else); the second needs `gh`, so it is
-/// looked up off the calling thread.
+/// When a pull request run ends: keep the head it left, its worktree's HEAD,
+/// so that head does not wake the automation again. Nothing else counts as
+/// the run's: a push by the same login from elsewhere (the owner's own) wakes.
 pub(super) fn run_ended(automation_id: &str, run_id: &str, cwd: &Path) {
     let Some(run) = automation_store::list_runs(automation_id).ok().and_then(|runs| runs.into_iter().find(|run| run.run_id == run_id)) else {
         return;
@@ -1145,29 +1241,6 @@ pub(super) fn run_ended(automation_id: &str, run_id: &str, cwd: &Path) {
     if let Ok(head) = crate::git::run(cwd, &["rev-parse", "HEAD"]) {
         add_left_head(automation_id, run_id, &format!("{number}@{}", head.trim()));
     }
-    let Ok(automation) = automation_store::get(automation_id) else { return };
-    let Some(AutomationEventSource::GithubPullRequest(source)) = automation.event_trigger.map(|trigger| trigger.source) else {
-        return;
-    };
-    let (automation_id, run_id, project) = (automation_id.to_string(), run_id.to_string(), automation.project_path);
-    let _ = std::thread::Builder::new().name("automation-pr-head".into()).spawn(crate::github_process::queued(move || {
-        let cwd = Path::new(&project);
-        let _request = crate::github_process::scope();
-        let number_text = number.to_string();
-        let Ok(out) = crate::issues::run_gh(cwd, &["pr", "view", &number_text, "--repo", source.repo.trim(), "--json", "headRefOid,commits"]) else { return };
-        let Ok(value) = serde_json::from_str::<Value>(&out) else { return };
-        let Ok(viewer) = read_viewer(cwd) else { return };
-        if let Some(head) = pushed_by(&value, &viewer) {
-            add_left_head(&automation_id, &run_id, &format!("{number}@{head}"));
-        }
-    }));
-}
-
-/// The pull request's head (`gh pr view --json headRefOid,commits`) when its last commit is by `viewer`.
-pub(crate) fn pushed_by(view: &Value, viewer: &str) -> Option<String> {
-    let last = view["commits"].as_array()?.last()?;
-    let by_viewer = last["authors"].as_array()?.iter().any(|author| author["login"].as_str().is_some_and(|login| login.eq_ignore_ascii_case(viewer)));
-    by_viewer.then(|| view["headRefOid"].as_str().map(String::from)).flatten()
 }
 
 fn add_left_head(automation_id: &str, run_id: &str, head: &str) {
@@ -1212,6 +1285,11 @@ fn report(app: &impl AutomationHost, automation_id: &str, run_id: &str, failed: 
     };
     let run = automation_store::list_runs(automation_id)?.into_iter().find(|value| value.run_id == run_id).context("automation run missing")?;
     if run.reported.is_some() {
+        return Ok(());
+    }
+    if failed && run.session_id.is_none() {
+        // No session: the run never started (the app stopped between its row
+        // and its start, or the start itself failed). Nothing ran to report on the issue.
         return Ok(());
     }
     let issue = run.issue.as_ref().filter(|issue| issue.provider == "linear").context("Linear issue reference missing")?;

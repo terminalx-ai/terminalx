@@ -148,7 +148,8 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
       </label>
       <div className={WARNING_NOTE}>
         {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above.
-        <div className="mt-1">What matches when the trigger starts is the baseline; anything that comes to match later starts one run.</div>
+        <div className="mt-1">What matches when the trigger starts is the baseline; anything that comes to match later starts one run, once ever.</div>
+        {source.kind === "githubPullRequest" && <div className="mt-1">One pull request starts at most 4 runs an hour and 12 a day; past that its events wait their turn.</div>}
       </div>
       <div className="col-span-2 rounded-lg bg-well p-2" aria-label="Matching now">
         <div className="flex items-center justify-between gap-2 px-1 pb-1.5 text-[11px] text-muted-foreground">

@@ -18,25 +18,42 @@ pull request opened long ago that is marked ready now.
   and records it as seen without waking anything. The bound is 20 Linear pages
   of 100, or 1000 pull requests.
 - **An incomplete baseline wakes nothing.** If the baseline cannot be read
-  completely, the status says so ("narrow the filter") and the next poll tries
-  again. There is no back-off. Whatever the read left out would otherwise look
-  new later.
+  completely, the status says so ("narrow the filter") and it is tried again,
+  backing off to once an hour. Whatever the read left out would otherwise look
+  new later. A draft filter is part of the pull request search, so only pull
+  requests that can match count toward the bound; the fork filter cannot be
+  searched for, so forks still count.
 - **Later reads go by recent activity.** They read by most recent activity, and
   for Linear they page until a page holds nothing newer than the last read
   (with 5 minutes of overlap), up to 5 pages of 100. Pull requests are read in
   one `gh pr list --search sort:updated-desc` call of up to 250. If a read hits
   its bound, it still wakes on what it read, and a notice says that the rest
   were not looked at.
+- **A read that finishes after its trigger changed** writes nothing back.
 - **Saving the trigger.** If a save adds the trigger, removes it, or changes
   what it reads, the record (`automations/<id>/source-seen.json`) is deleted.
   Editing only the Linear report settings keeps the record.
 
 ## One event, one run
 
+An item wakes once ever. An issue that is labelled, unlabelled and labelled
+again does not wake a second time.
+
 For each wake, the run row is written first, then the seen record (which names
 the run), and then the run starts. A crash between those steps leaves a run to
-inspect. It never leaves an event recorded with no run behind it, and a restart
-does not start the same event again.
+inspect; it never leaves an event recorded with no run behind it. A run that
+never started (no session) posts no failure comment on its issue.
+
+**First check (PRO-484).** With a first check, the check runs once per read
+that has something to wake, before anything is recorded or inserted:
+
+- nothing new, or a failed check: one history row (folded with the last
+  identical one), nothing reported on any issue, everything read stays unseen;
+- something new: the runs start, and each run's gate reuses that result.
+
+**Reads that leave work for later.** When the per-tick cap, a run in progress
+or the rate limit leaves a match unseen, the next read pages back to just
+before the oldest one left, so a backlog is never starved.
 
 Pull requests:
 
@@ -44,16 +61,21 @@ Pull requests:
   *push* for an automation that asked only for pushes. A head commit wakes
   *pushed* once. A failed check wakes once per head. A review request from the
   signed-in login wakes again only after it was dropped and made again.
-- **A run's own push doesn't wake it.** When a run ends, the head it left is
-  kept on the run (`leftHeads`): its worktree's HEAD, plus the pull request's
-  head if that head's last commit is by the `gh` login. That head is recorded
-  without waking.
-- **At most 3 runs in a row.** One pull request wakes at most 3 runs in a row
-  without a push from someone else in between. After that it is recorded
-  without waking, and a notice names the pull request.
-- **Forks are off by default.** Pull requests from forks are ignored unless the
-  trigger allows them. Branches of the repository itself can be pushed by bots
-  such as Dependabot and Renovate; use the author filter to leave them out.
+- **While a run is going.** Anything that happens to a pull request while a run
+  on it is going waits for that run to end, with no other change to the record.
+- **A run's own push doesn't wake it.** When a run ends, its worktree's HEAD is
+  kept on the run (`leftHeads`). That head is recorded without waking. Nothing
+  else counts as the run's own: a push by the same GitHub login from elsewhere
+  (the owner's own) wakes once the run has ended.
+- **Rate limit.** One pull request wakes at most 4 runs an hour and 12 a day
+  for one automation, counting every event kind. Past that its events stay
+  unseen; the automation's status names the pull request and when it resumes,
+  and keeps saying so until then. When the window opens they wake, pushes and
+  failed checks on the newest head only.
+- **Forks are off by default.** Pull requests from forks, or with no fork
+  information, are ignored unless the trigger allows them. Branches of the
+  repository itself can be pushed by bots such as Dependabot and Renovate; use
+  the author filter to leave them out.
 - **The prompt treats pull request details as untrusted.** It quotes the title,
   branch names, author and URL as untrusted data on single lines. It tells the
   run to use `gh pr checkout N --repo owner/name --detach`.

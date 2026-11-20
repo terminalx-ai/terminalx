@@ -84,7 +84,7 @@ fn complete(snapshot: Snapshot) -> Read {
 /// One tick with `read` as the source's answer; returns what woke.
 fn tick_read(automation: &Automation, minute: i64, read: Read) -> Vec<WakeSubject> {
     let mut woken = Vec::new();
-    poll(&host(), automation, at(minute), |_, _, _, _| Ok(read), |wake| insert_run(automation, wake), |wake, run| {
+    poll(&host(), automation, at(minute), |_, _, _, _| Ok(read), || Ok(true), |wake| insert_run(automation, wake), |wake, run| {
         woken.push(wake.what.clone());
         Ok(run)
     })
@@ -106,6 +106,11 @@ fn finish_runs(automation: &Automation) {
     }
 }
 
+/// Store an edit, as saving the automation does.
+fn resave(automation: &Automation) {
+    automation_store::save(std::slice::from_ref(automation)).unwrap();
+}
+
 fn seen(automation: &Automation) -> SourceSeen {
     load_seen(&automation.id).unwrap().unwrap()
 }
@@ -123,7 +128,7 @@ fn a_new_linear_issue_wakes_exactly_one_run_and_what_matched_at_the_start_wakes_
     assert!(tick(&automation, 0, Snapshot::Linear(vec![issue("1"), issue("2")])).is_empty(), "switching on starts from now");
     // Inside the interval nothing is read.
     let read = Cell::new(false);
-    poll(&host(), &automation, at(2), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(Vec::new()))) }, |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(2), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(Vec::new()))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(!read.get(), "one request per interval");
 
     let woken = tick(&automation, 5, Snapshot::Linear(vec![issue("3"), issue("1"), issue("2")]));
@@ -159,7 +164,7 @@ fn a_baseline_that_cannot_be_read_completely_wakes_nothing_and_tries_again() {
     let state = seen(&automation);
     assert!(!state.initialized && state.events.is_empty(), "nothing is recorded from a part of the baseline");
     assert!(state.last_poll_error.as_deref().is_some_and(|error| error.contains("More than 2000") && error.contains("narrow the filter")));
-    assert!(state.retry_after.is_none(), "no back-off: the next poll tries again");
+    assert_eq!(state.retry_after.as_deref(), Some(stamp(at(5)).as_str()), "tried again after the interval, then less often");
     assert!(public_state(&automation).last_poll_error.is_some());
 
     // The next poll still reads a baseline: what it lists does not wake.
@@ -167,7 +172,7 @@ fn a_baseline_that_cannot_be_read_completely_wakes_nothing_and_tries_again() {
     poll(&host(), &automation, at(5), |_, _, state, since| {
         read_as.set(Some((state.initialized, since)));
         Ok(complete(Snapshot::Linear(vec![issue("1"), issue("2")])))
-    }, |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(read_as.get(), Some((false, None)), "a baseline reads everything, not back to a time");
     assert_eq!(seen(&automation).last_poll_error, None);
     assert_eq!(tick(&automation, 10, Snapshot::Linear(vec![issue("3"), issue("2")])).len(), 1);
@@ -179,7 +184,7 @@ fn later_reads_page_back_to_the_last_read_and_say_when_they_could_not() {
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     let since = Cell::new(None);
-    poll(&host(), &automation, at(5), |_, _, _, value| { since.set(value); Ok(complete(Snapshot::Linear(Vec::new()))) }, |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, value| { since.set(value); Ok(complete(Snapshot::Linear(Vec::new()))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(since.get(), Some(at(0) - READ_OVERLAP), "back to the last read, with an overlap for clocks");
 
     // A read that hit its bound still wakes on what it read, and says so.
@@ -254,7 +259,7 @@ fn removing_and_restoring_a_trigger_starts_it_from_now_again() {
     assert!(tick(&automation, 60 * 24 * 30, Snapshot::Linear(vec![issue("2"), issue("3"), issue("1")])).is_empty(), "the month in between does not replay");
 
     // Saving the same source keeps the record and retries a failing read at once.
-    poll(&host(), &automation, at(60 * 24 * 31), |_, _, _, _| Err(SourceError::plain("boom")), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(60 * 24 * 31), |_, _, _, _| Err(SourceError::plain("boom")), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(seen(&automation).retry_after.is_some());
     saved(&automation.id, Some(&trigger), Some(&trigger)).unwrap();
     let state = seen(&automation);
@@ -274,8 +279,9 @@ fn switching_off_and_on_or_changing_the_source_starts_from_now() {
     let mut automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     automation.enabled = false;
-    poll(&host(), &automation, at(5), |_, _, _, _| unreachable!(), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     automation.enabled = true;
+    resave(&automation);
     assert!(tick(&automation, 10, Snapshot::Linear(vec![issue("4")])).is_empty(), "made while it was off");
     assert_eq!(tick(&automation, 15, Snapshot::Linear(vec![issue("4"), issue("5")])).len(), 1);
 
@@ -284,12 +290,14 @@ fn switching_off_and_on_or_changing_the_source_starts_from_now() {
         source.labels = vec!["other".into()];
     }
     automation.event_trigger.as_mut().unwrap().source = changed;
+    resave(&automation);
     assert!(tick(&automation, 20, Snapshot::Linear(vec![issue("6")])).is_empty(), "another filter starts afresh");
 
     // Editing only the report keeps the record.
     if let AutomationEventSource::LinearIssue(source) = &mut automation.event_trigger.as_mut().unwrap().source {
         source.report.comment = false;
     }
+    resave(&automation);
     assert_eq!(tick(&automation, 25, Snapshot::Linear(vec![issue("7"), issue("6")])).len(), 1);
 }
 
@@ -303,7 +311,7 @@ fn a_first_check_on_its_own_thread_still_knows_when_a_source_is_due() {
     assert!(due(&automation, at(5)));
     automation.enabled = false;
     assert!(due(&automation, at(2)), "switched off: its record is reset");
-    poll(&host(), &automation, at(2), |_, _, _, _| unreachable!(), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(2), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(!due(&automation, at(3)));
 }
 
@@ -311,10 +319,10 @@ fn a_first_check_on_its_own_thread_still_knows_when_a_source_is_due() {
 fn switching_off_clears_a_back_off_so_switching_on_reads_at_once() {
     let _home = crate::store::temp_home();
     let mut automation = stored(linear_source());
-    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(seen(&automation).retry_after.is_some());
     automation.enabled = false;
-    poll(&host(), &automation, at(1), |_, _, _, _| unreachable!(), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(1), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     let state = seen(&automation);
     assert_eq!((state.retry_after, state.last_poll_error), (None, None));
 }
@@ -327,7 +335,7 @@ fn the_run_row_is_written_before_the_record_and_a_restart_does_not_start_it_agai
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     // The start fails after the run row and the record were written, as a crash would leave them.
-    let result = poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), |wake| {
+    let result = poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), || Ok(true), |wake| {
         assert!(!seen(&automation).events.contains_key("linear:9"), "no record before the run row");
         insert_run(&automation, wake)
     }, |_, _| bail!("the app quit"));
@@ -393,32 +401,93 @@ fn a_head_a_run_left_does_not_wake_the_automation_again() {
     assert_eq!(seen(&automation).events["pr:2:head"].value, "bbb", "recorded, so it is not new later either");
     // Someone else pushes on top: that wakes.
     assert_eq!(tick(&automation, 15, pulls(vec![pr(2, "ccc")])), woke_pr(pr(2, "ccc"), PullRequestEvent::Pushed));
+}
 
-    // A run that pushed from elsewhere: the pull request's head is by the signed-in login.
-    let view = json!({"headRefOid": "fff", "commits": [{"oid": "eee", "authors": [{"login": "octo"}]}, {"oid": "fff", "authors": [{"login": "Me"}]}]});
-    assert_eq!(pushed_by(&view, "me").as_deref(), Some("fff"));
-    assert_eq!(pushed_by(&view, "octo"), None, "only the last commit counts");
+fn pushes(automation: &Automation, minute: i64, number: i64, head: &str) -> Vec<WakeSubject> {
+    tick(automation, minute, pulls(vec![pr(number, head)]))
 }
 
 #[test]
-fn one_pull_request_wakes_at_most_three_runs_in_a_row_without_a_push_from_anyone_else() {
+fn a_reviewer_automation_wakes_four_times_an_hour_and_the_fifth_push_waits_its_turn() {
     let _home = crate::store::temp_home();
     let automation = stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
     tick(&automation, 0, pulls(Vec::new()));
-    // Each run pushes, and its push is not recognised as its own.
-    assert_eq!(tick(&automation, 5, pulls(vec![pr(2, "h1")])).len(), 1);
-    for (minute, head) in [(10, "h2"), (15, "h3")] {
+    // A person opens the pull request, then pushes four times inside the hour; the runs only review.
+    assert_eq!(pushes(&automation, 5, 2, "h1").len(), 1, "opened");
+    for (minute, head) in [(10, "h2"), (15, "h3"), (20, "h4")] {
         finish_runs(&automation);
-        assert_eq!(tick(&automation, minute, pulls(vec![pr(2, head)])).len(), 1, "{head}");
+        assert_eq!(pushes(&automation, minute, 2, head).len(), 1, "{head}");
     }
     finish_runs(&automation);
-    assert!(tick(&automation, 20, pulls(vec![pr(2, "h4")])).is_empty(), "the fourth in a row stops");
-    let notice = seen(&automation).notice.unwrap();
-    assert!(notice.contains("#2") && notice.contains("3 runs in a row"), "{notice}");
-    assert!(tick(&automation, 25, pulls(vec![pr(2, "h4")])).is_empty(), "and stays stopped");
-    // Someone else pushes, with no run of ours since the last head: it wakes again.
-    assert_eq!(tick(&automation, 30, pulls(vec![pr(2, "h5")])), woke_pr(pr(2, "h5"), PullRequestEvent::Pushed));
-    assert_eq!(seen(&automation).streaks["pr:2"], 1);
+    assert!(pushes(&automation, 25, 2, "h5").is_empty(), "the fifth in an hour waits");
+    let state = seen(&automation);
+    assert_eq!(state.events["pr:2:head"].value, "h4", "and stays unseen");
+    let notice = state.notice.unwrap();
+    assert!(notice.contains("#2 until 2026-11-20 10:05 UTC"), "{notice}");
+    // Ordinary polls keep the status while it is held; a newer head replaces the one waiting.
+    assert!(pushes(&automation, 30, 2, "h6").is_empty());
+    assert!(seen(&automation).notice.unwrap().contains("#2 until"), "not overwritten");
+    assert!(tick(&automation, 35, pulls(Vec::new())).is_empty());
+    assert!(public_state(&automation).notice.unwrap().contains("#2 until"), "kept while it is not read");
+    // The window opens: the newest head wakes, once.
+    assert_eq!(pushes(&automation, 65, 2, "h6"), woke_pr(pr(2, "h6"), PullRequestEvent::Pushed));
+    assert_eq!(seen(&automation).notice, None, "the status clears with the limit");
+}
+
+#[test]
+fn a_loop_the_own_head_guard_misses_is_held_to_the_limit() {
+    let _home = crate::store::temp_home();
+    let automation = stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
+    tick(&automation, 0, pulls(Vec::new()));
+    // Every run pushes a head that is not recognised as its own.
+    let mut woken = Vec::new();
+    for step in 1..=24 {
+        finish_runs(&automation);
+        if !pushes(&automation, step * 5, 2, &format!("h{step}")).is_empty() {
+            woken.push(step * 5);
+        }
+    }
+    assert_eq!(woken, vec![5, 10, 15, 20, 65, 70, 75, 80], "four an hour");
+    // Over a day it stops at twelve.
+    let mut count = woken.len();
+    for step in 25..=24 * 12 {
+        finish_runs(&automation);
+        count += pushes(&automation, step * 5, 2, &format!("h{step}")).len();
+    }
+    assert_eq!(count, 12);
+}
+
+#[test]
+fn a_run_that_pushes_and_keeps_working_across_a_poll_does_not_wake_itself() {
+    let _home = crate::store::temp_home();
+    let automation = stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
+    tick(&automation, 0, pulls(Vec::new()));
+    assert_eq!(pushes(&automation, 5, 2, "h1").len(), 1);
+    let before = seen(&automation);
+    // The run pushed h2 and is still going: the read changes nothing.
+    assert!(pushes(&automation, 10, 2, "h2").is_empty());
+    let after = seen(&automation);
+    assert_eq!((&after.events, &after.pr_wakes), (&before.events, &before.pr_wakes), "deferred with no other state change");
+    // It ends with h2 checked out in its worktree.
+    let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+    add_left_head(&automation.id, &run.run_id, "2@h2");
+    finish_runs(&automation);
+    assert!(pushes(&automation, 15, 2, "h2").is_empty(), "its own head");
+    assert_eq!(seen(&automation).events["pr:2:head"].value, "h2");
+}
+
+#[test]
+fn the_owner_pushing_while_a_run_works_wakes_once_the_run_ends() {
+    let _home = crate::store::temp_home();
+    let automation = stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
+    tick(&automation, 0, pulls(Vec::new()));
+    assert_eq!(pushes(&automation, 5, 2, "h1").len(), 1);
+    // The owner pushes h2 by hand, as the same GitHub login, while the run works on h1.
+    assert!(pushes(&automation, 10, 2, "h2").is_empty(), "waits for the run");
+    let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+    add_left_head(&automation.id, &run.run_id, "2@h1");
+    finish_runs(&automation);
+    assert_eq!(pushes(&automation, 15, 2, "h2"), woke_pr(pr(2, "h2"), PullRequestEvent::Pushed));
 }
 
 #[test]
@@ -460,15 +529,15 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     let AutomationEventSource::LinearIssue(source) = linear_source() else { unreachable!() };
     assert_eq!(read_linear(&source, None, 1).err().unwrap().message, NO_LINEAR_KEY);
 
-    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(public_state(&automation).last_poll_error.as_deref(), Some(NO_LINEAR_KEY));
     let runs = automation_store::list_runs(&automation.id).unwrap();
     assert_eq!((runs.len(), runs[0].status, runs[0].trigger), (1, AutomationRunStatus::SkippedUnavailable, AutomationTrigger::LinearIssue));
 
     // The second failure doubles the wait.
-    poll(&host(), &automation, at(5), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(15)).as_str()));
-    poll(&host(), &automation, at(12), |_, _, _, _| unreachable!("backing off"), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(12), |_, _, _, _| unreachable!("backing off"), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].repeat_count, 2, "the same error is one row");
 
     // A Linear key put in Settings is read at once, back-off or not.
@@ -476,7 +545,7 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     settings.linear_api_key = Some("new-key".into());
     crate::store::settings::save(&settings).unwrap();
     let read = Cell::new(false);
-    poll(&host(), &automation, at(13), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(vec![issue("1")]))) }, |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(13), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(vec![issue("1")]))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(read.get(), "another key retries now");
     let state = seen(&automation);
     assert_eq!((state.last_poll_error, state.failures, state.retry_after), (None, 0, None));
@@ -489,7 +558,7 @@ fn a_signed_out_gh_forgets_the_login_it_read() {
     let automation = stored(pr_source(&[PullRequestEvent::ReviewRequested]));
     tick(&automation, 0, pulls(Vec::new()));
     assert_eq!(seen(&automation).viewer.as_deref(), Some("me"));
-    poll(&host(), &automation, at(5), |_, _, _, _| Err(gh_error(&anyhow::anyhow!("To get started with GitHub CLI, please run:  gh auth login"))), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| Err(gh_error(&anyhow::anyhow!("To get started with GitHub CLI, please run:  gh auth login"))), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     let state = seen(&automation);
     assert_eq!((state.viewer, state.last_poll_error.as_deref()), (None, Some(GH_SIGNED_OUT)));
 }
@@ -501,6 +570,7 @@ fn a_damaged_record_starts_the_trigger_from_now_and_breaks_no_status() {
     std::fs::write(seen_path(&automation.id).unwrap(), "{ not json").unwrap();
     assert!(public_state(&automation).last_poll_error.is_some(), "the list still answers");
     assert!(tick(&automation, 0, Snapshot::Linear(vec![issue("1")])).is_empty(), "a fresh baseline, not a replay");
+    assert!(seen(&automation).notice.unwrap().contains("started again from now"), "said in the same poll");
     assert!(seen(&automation).initialized);
     assert!(seen_path(&automation.id).unwrap().with_extension("json.damaged").exists(), "the damaged file is kept aside");
 }
@@ -607,6 +677,7 @@ fn gh_pull_requests_parse_with_review_requests_and_failed_checks() {
     assert!(parsed[0].check_failed && parsed[0].draft && parsed[0].from_fork);
     assert_eq!((parsed[0].labels.clone(), parsed[0].updated_at.as_str()), (vec!["bot".to_string()], "2026-11-20T10:00:00Z"));
     assert!(!parsed[1].check_failed, "running and cancelled checks are not failures");
+    assert!(parsed[1].from_fork, "no isCrossRepository counts as a fork");
 }
 
 // ------------------------------------------------------------------ the run
@@ -641,6 +712,10 @@ fn a_run_is_reported_by_the_issue_it_worked_on_not_the_trigger_now() {
     let github = automation_store::insert_run(github).unwrap();
     assert!(is_linear_run(&automation.id, &linear.run_id));
     assert!(!is_linear_run(&automation.id, &github.run_id), "a GitHub issue run keeps the GitHub report");
+}
+
+fn asked_len(asked: &Arc<Mutex<Vec<Value>>>) -> usize {
+    asked.lock().unwrap().len()
 }
 
 /// A stand-in for Linear's API that answers comments and state moves, and keeps what it was asked.
@@ -695,6 +770,7 @@ fn a_finished_linear_run_comments_and_moves_its_issue_once_and_a_failed_one_says
         run.issue = Some(linear_ref(&issue("1")));
         run.final_message = Some("Fixed the login timeout.".into());
         run.error = (status == AutomationRunStatus::Failed).then(|| "The agent stopped.".into());
+        run.session_id = Some("session-1".into());
         automation_store::insert_run(run).unwrap()
     };
     let (url, asked) = linear_server();
@@ -716,9 +792,19 @@ fn a_finished_linear_run_comments_and_moves_its_issue_once_and_a_failed_one_says
 
         let failed = run_for(AutomationRunStatus::Failed);
         report(&host(), &automation.id, &failed.run_id, true).unwrap();
-        let asked = asked.lock().unwrap();
-        assert_eq!(asked.len(), 3, "a failure comments and does not move the issue");
-        assert_eq!(asked[2]["variables"]["input"]["body"], "Automation run failed: The agent stopped.");
+        {
+            let log = asked.lock().unwrap();
+            assert_eq!(log.len(), 3, "a failure comments and does not move the issue");
+            assert_eq!(log[2]["variables"]["input"]["body"], "Automation run failed: The agent stopped.");
+        }
+
+        // A run the app stopped before it started (its row, no session) reports nothing.
+        let mut never = new_run(&automation.id, AutomationTrigger::LinearIssue, None, AutomationRunStatus::Failed);
+        never.issue = Some(linear_ref(&issue("1")));
+        never.error = Some("The app closed before this automation run finished.".into());
+        let never = automation_store::insert_run(never).unwrap();
+        report(&host(), &automation.id, &never.run_id, true).unwrap();
+        assert_eq!(asked_len(&asked), 3, "no comment for a run that never started");
     });
 }
 
@@ -781,7 +867,7 @@ fn a_kind_or_event_this_build_does_not_know_is_kept_as_written_and_never_polled(
     // The file round-trips through the store and is still read whole.
     let listed = automation_store::list().unwrap();
     assert_eq!(serde_json::to_value(&listed[0].event_trigger.as_ref().unwrap().source).unwrap(), webhook);
-    poll(&host(), &automation, at(0), |_, _, _, _| unreachable!(), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(public_state(&automation).notice.as_deref(), Some(NEEDS_NEWER));
     assert!(preview(Path::new("/project"), &automation.event_trigger.as_ref().unwrap().source).is_err());
 
@@ -799,4 +885,106 @@ fn a_kind_or_event_this_build_does_not_know_is_kept_as_written_and_never_polled(
     let automation: Automation = serde_json::from_value(old).unwrap();
     assert!(automation.event_trigger.is_none());
     assert!(serde_json::to_value(&automation).unwrap().get("eventTrigger").is_none());
+}
+
+// ------------------------------------------------------------------ a first check, and reads that leave work for later
+
+/// A Linear automation with a first check, in a real folder for the check to run in.
+fn checked(command: &str, project: &Path) -> Automation {
+    let mut automation = stored(linear_source());
+    automation.project_path = project.to_string_lossy().into_owned();
+    automation.precheck = Some(crate::automations::AutomationPrecheck { command: command.into(), timeout_seconds: 10 });
+    automation_store::save(std::slice::from_ref(&automation)).unwrap();
+    automation
+}
+
+/// One tick through the real first check; returns what woke.
+fn checked_tick(automation: &Automation, minute: i64, issues: Vec<crate::issues::Issue>) -> Vec<WakeSubject> {
+    let app = host();
+    let mut woken = Vec::new();
+    poll(&app, automation, at(minute), |_, _, _, _| Ok(complete(Snapshot::Linear(issues))),
+        || crate::automations::precheck::gate_wakes(&app, automation, AutomationTrigger::LinearIssue),
+        |wake| insert_run(automation, wake), |wake, run| { woken.push(wake.what.clone()); Ok(run) }).unwrap();
+    woken
+}
+
+#[test]
+fn a_quiet_first_check_starts_nothing_and_leaves_the_event_unseen() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = checked("true", project.path());
+    assert!(checked_tick(&automation, 0, vec![issue("1")]).is_empty(), "the baseline asks no check");
+    assert!(automation_store::list_runs(&automation.id).unwrap().is_empty());
+    assert!(checked_tick(&automation, 5, vec![issue("2"), issue("1")]).is_empty());
+    assert!(checked_tick(&automation, 10, vec![issue("2"), issue("1")]).is_empty());
+    let runs = automation_store::list_runs(&automation.id).unwrap();
+    assert_eq!(runs.len(), 1, "one history row");
+    assert_eq!((runs[0].status, runs[0].repeat_count, runs[0].issue.is_none()), (AutomationRunStatus::SkippedPrecheck, 2, true), "folded, and on no issue");
+    assert!(!seen(&automation).events.contains_key("linear:2"), "left unseen");
+}
+
+#[test]
+fn a_failing_first_check_records_one_failure_reports_nothing_and_leaves_the_event_unseen() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = checked("exit 3", project.path());
+    checked_tick(&automation, 0, Vec::new());
+    assert!(checked_tick(&automation, 5, vec![issue("2")]).is_empty());
+    let runs = automation_store::list_runs(&automation.id).unwrap();
+    assert_eq!((runs.len(), runs[0].status), (1, AutomationRunStatus::Failed));
+    assert!(runs[0].issue.is_none(), "not a run on the issue, so nothing is posted on it");
+    assert!(!seen(&automation).events.contains_key("linear:2"));
+}
+
+#[test]
+fn a_first_check_with_something_new_wakes_and_marks_it_seen() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = checked("echo two new", project.path());
+    checked_tick(&automation, 0, Vec::new());
+    assert_eq!(checked_tick(&automation, 5, vec![issue("2"), issue("3")]).len(), 2, "one check for the whole read");
+    let runs = automation_store::list_runs(&automation.id).unwrap();
+    assert!(runs.iter().all(|run| run.precheck.is_none() && run.status == AutomationRunStatus::Pending), "no check row: the runs go ahead");
+    assert!(seen(&automation).events.contains_key("linear:2"));
+}
+
+#[test]
+fn a_linear_backlog_past_the_cap_is_read_again_until_it_is_through() {
+    let _home = crate::store::temp_home();
+    let automation = stored(linear_source());
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    let aged = |id: &str, minute: u32| {
+        let mut value = issue(id);
+        value.updated_at = format!("2026-11-20T09:{minute:02}:00Z");
+        value
+    };
+    let five = vec![aged("5", 4), aged("4", 3), aged("3", 2), aged("2", 1), aged("1", 1)];
+    assert_eq!(tick(&automation, 5, Snapshot::Linear(five.clone())).len(), 3);
+    assert_eq!(seen(&automation).last_read_at.as_deref(), Some("2026-11-20T09:00:59.000Z"), "back to just before the oldest left");
+    assert_eq!(tick(&automation, 10, Snapshot::Linear(five)).len(), 2);
+    assert_eq!(seen(&automation).last_read_at.as_deref(), Some(stamp(at(10)).as_str()), "through: it moves on");
+}
+
+#[test]
+fn a_read_that_finishes_after_its_trigger_was_removed_writes_nothing_back() {
+    let _home = crate::store::temp_home();
+    let automation = stored(linear_source());
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    poll(&host(), &automation, at(5), |current, _, _, _| {
+        // Meanwhile the trigger is changed to a schedule.
+        let mut changed = current.clone();
+        changed.event_trigger = None;
+        automation_store::save(std::slice::from_ref(&changed)).unwrap();
+        saved(&current.id, current.event_trigger.as_ref(), None).unwrap();
+        Ok(complete(Snapshot::Linear(vec![issue("9")])))
+    }, || Ok(true), |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
+    assert!(load_seen(&automation.id).unwrap().is_none(), "the old record is not written back");
+}
+
+#[test]
+fn a_draft_filter_is_part_of_the_search_so_a_full_page_counts_only_what_can_match() {
+    let mut source = PullRequestSource { repo: "acme/widgets".into(), events: vec![PullRequestEvent::Opened], draft: Some(false), ..Default::default() };
+    assert!(gh_list_args(&source, 250).windows(2).any(|pair| pair == ["--search", "sort:updated-desc draft:false"]));
+    source.draft = Some(true);
+    assert!(gh_list_args(&source, 250).windows(2).any(|pair| pair == ["--search", "sort:updated-desc draft:true"]));
 }

@@ -687,6 +687,42 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
 /// no issue) says what happened. Output lets every candidate go ahead with
 /// it. `None` when the automation was changed, turned off or deleted while
 /// the check ran: the poll then leaves everything as it is.
+/// An event automation's check gates its read (PRO-485), as an issue
+/// poll's does: run once, only when the read found something to wake. True
+/// to go ahead, with the result handed to each run's gate. False after a
+/// quiet or failing check, which writes its one (folded) history row; the
+/// caller then marks nothing seen. False, with nothing written, when the
+/// automation changed while its check ran.
+pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger) -> Result<bool> {
+    let Some(precheck) = configured(automation.precheck.as_ref()) else {
+        return Ok(true);
+    };
+    if !agent_available(automation) {
+        return Ok(true);
+    }
+    let trial = check(automation, precheck);
+    let Ok(current) = automation_store::get(&automation.id) else {
+        return Ok(false);
+    };
+    if !current.enabled || current.event_trigger != automation.event_trigger || current.precheck != automation.precheck {
+        return Ok(false);
+    }
+    match trial.outcome {
+        PrecheckOutcome::Proceed => {
+            POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial }));
+            Ok(true)
+        }
+        PrecheckOutcome::NothingNew => {
+            record_ending(app, automation, None, trigger, AutomationRunStatus::SkippedPrecheck, None, trial.result)?;
+            Ok(false)
+        }
+        PrecheckOutcome::Failed => {
+            record_ending(app, automation, None, trigger, AutomationRunStatus::Failed, trial.reason, trial.result)?;
+            Ok(false)
+        }
+    }
+}
+
 pub(super) fn gate_poll(app: &impl AutomationHost, automation: &Automation, candidates: Vec<crate::issues::Issue>) -> Result<Option<Vec<crate::issues::Issue>>> {
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
         return Ok(Some(candidates));
