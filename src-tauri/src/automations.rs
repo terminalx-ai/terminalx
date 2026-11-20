@@ -277,8 +277,10 @@ pub struct AutomationInput {
     pub run_timeout_minutes: Option<u32>,
     #[serde(default)]
     pub issue_trigger: Option<AutomationIssueTrigger>,
-    #[serde(default)]
-    pub event_trigger: Option<AutomationEventTrigger>,
+    /// Absent (a client that does not know event triggers) keeps the stored
+    /// one; `null` removes it.
+    #[serde(default, deserialize_with = "sources::present", skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<Option<AutomationEventTrigger>>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
 }
@@ -347,13 +349,14 @@ pub fn definition_from_input(
             bail!("Issue automations need a new worktree per run.");
         }
     }
-    if let Some(trigger) = input.event_trigger.as_ref() {
+    let event_trigger = sources::trigger_after_save(input.event_trigger.clone(), existing, input.issue_trigger.is_some());
+    if let Some(trigger) = event_trigger.as_ref() {
         sources::validate(trigger, input.issue_trigger.is_some(), input.workspace)?;
     }
     let next = if let Some(trigger) = input.issue_trigger.as_ref() {
         now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
-    } else if let Some(trigger) = input.event_trigger.as_ref() {
-        now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
+    } else if event_trigger.is_some() {
+        sources::never()
     } else {
         next_run_after(&input.schedule, now)?
     };
@@ -385,7 +388,7 @@ pub fn definition_from_input(
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
         issue_trigger: input.issue_trigger,
-        event_trigger: input.event_trigger,
+        event_trigger,
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -751,6 +754,7 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
     });
     let automation = if existing.is_some() { automation_store::replace(automation)? } else { automation_store::insert(automation)? };
     if reset_seen { automation_store::clear_seen(&automation.id)?; }
+    sources::saved(&automation.id, existing.as_ref().and_then(|value| value.event_trigger.as_ref()), automation.event_trigger.as_ref())?;
     emit_definitions(app);
     Ok(automation)
 }
@@ -1423,6 +1427,7 @@ fn finish_from_hook(
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
         archive_finished_run(app, &run);
+        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
         }
@@ -1532,6 +1537,7 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
+        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, true);
         }
@@ -1583,6 +1589,9 @@ pub struct AutomationIssueState {
     pub last_polled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    /// Something to know about the trigger that is not a failure to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 fn public_issue_state(
@@ -1593,6 +1602,7 @@ fn public_issue_state(
         automation_id: automation_id.into(),
         last_polled_at: state.last_polled_at.clone(),
         last_poll_error: state.last_poll_error.clone(),
+        notice: None,
     }
 }
 
@@ -1609,10 +1619,13 @@ pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
         .filter(|automation| automation.issue_trigger.is_some() || automation.event_trigger.is_some())
         .map(|automation| {
             if automation.event_trigger.is_some() {
-                return sources::public_state(&automation.id);
+                return Ok(sources::public_state(&automation));
             }
-            let state = automation_store::load_seen(&automation.id)?.unwrap_or_default();
-            Ok(public_issue_state(&automation.id, &state))
+            // One automation's unreadable record does not take the others' states with it.
+            Ok(match automation_store::load_seen(&automation.id) {
+                Ok(state) => public_issue_state(&automation.id, &state.unwrap_or_default()),
+                Err(error) => AutomationIssueState { automation_id: automation.id.clone(), last_polled_at: None, last_poll_error: Some(format!("{error:#}")), notice: None },
+            })
         })
         .collect()
 }

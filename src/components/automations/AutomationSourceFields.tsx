@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Switch } from "@/components/ui/controls";
 import { automationsApi, errorMessage, issues as issuesApi, type IssueTeam } from "@/lib/api";
 import { issueOps, type IssueUser, type WorkflowState } from "@/lib/issueOps";
@@ -58,9 +58,17 @@ export function defaultPullRequestTrigger(repo = ""): AutomationEventTrigger {
   };
 }
 
+/** Whether this version knows the trigger's kind; a newer TerminalX may have written another. */
+export function eventTriggerKnown(trigger: AutomationEventTrigger): boolean {
+  return (trigger.source.kind as string) === "linearIssue" || (trigger.source.kind as string) === "githubPullRequest";
+}
+
+export const NEEDS_NEWER = "This trigger needs a newer TerminalX: it is kept as it is and not checked.";
+
 /** Whether the trigger has what saving it needs. */
 export function eventTriggerReady(trigger: AutomationEventTrigger): boolean {
   const source = trigger.source;
+  if (!eventTriggerKnown(trigger)) return true;
   return source.kind === "linearIssue" ? !!source.teamId.trim() : !!source.repo.trim() && source.events.length > 0;
 }
 
@@ -68,6 +76,7 @@ export function eventTriggerReady(trigger: AutomationEventTrigger): boolean {
 export function eventTriggerSentence(trigger: AutomationEventTrigger): string {
   const source = trigger.source;
   const every = `checked every ${trigger.pollIntervalMinutes} min`;
+  if (!eventTriggerKnown(trigger)) return `A ${String(source.kind)} trigger this version does not know`;
   if (source.kind === "linearIssue") {
     const labels = source.labels.length ? ` labelled ${source.labels.join(" or ")}` : "";
     return `Linear: new ${source.teamName ?? "team"} issues${labels}, ${every}`;
@@ -76,6 +85,9 @@ export function eventTriggerSentence(trigger: AutomationEventTrigger): string {
   return `GitHub pull requests in ${source.repo}: ${events}, ${every}`;
 }
 
+/** A change to a source: the fields, or, for a value filled in after a request, what to change given the source as it is then. */
+type SourceChange<S> = Partial<S> | ((current: S) => Partial<S>);
+
 /** The fields of a Linear issue or pull request trigger, with what it would match now. */
 export function AutomationSourceFields({ projectPath, trigger, onChange }: { projectPath: string; trigger: AutomationEventTrigger; onChange: (next: AutomationEventTrigger) => void }) {
   const [preview, setPreview] = useState<SourceMatch[]>([]);
@@ -83,9 +95,16 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
   const [previewError, setPreviewError] = useState<string | null>(null);
   const source = trigger.source;
   const sourceKey = JSON.stringify({ ...source, report: undefined });
+  // A field filled in after a request (the team, the repository) merges into the trigger as it is then, not as it was when asked.
+  const latest = useRef(trigger);
+  latest.current = trigger;
+  const merge = <S extends AutomationEventTrigger["source"]>(next: SourceChange<S>) => {
+    const current = latest.current.source as S;
+    onChange({ ...latest.current, source: { ...current, ...(typeof next === "function" ? next(current) : next) } });
+  };
 
   useEffect(() => {
-    if (!projectPath || !eventTriggerReady(trigger)) {
+    if (!projectPath || !eventTriggerKnown(trigger) || !eventTriggerReady(trigger)) {
       setPreview([]);
       setPreviewError(null);
       return;
@@ -113,11 +132,12 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
   }, [projectPath, sourceKey]);
 
   const noun = source.kind === "linearIssue" ? "issue" : "pull request";
+  if (!eventTriggerKnown(trigger)) return <div role="note" className={WARNING_NOTE}>{NEEDS_NEWER}</div>;
   return (
     <>
       {source.kind === "linearIssue"
-        ? <LinearFields projectPath={projectPath} source={source} onChange={(next) => onChange({ ...trigger, source: { ...source, ...next } })} />
-        : <PullRequestFields projectPath={projectPath} source={source} onChange={(next) => onChange({ ...trigger, source: { ...source, ...next } })} />}
+        ? <LinearFields projectPath={projectPath} source={source} onChange={merge} />
+        : <PullRequestFields projectPath={projectPath} source={source} onChange={merge} />}
       <label className={LABEL}>
         Check every (minutes)
         <input type="number" min={1} value={trigger.pollIntervalMinutes} onChange={(event) => onChange({ ...trigger, pollIntervalMinutes: Math.max(1, Number(event.target.value)) })} className={INPUT} />
@@ -127,7 +147,8 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
         <input type="number" min={1} max={50} value={trigger.maxRunsPerTick} onChange={(event) => onChange({ ...trigger, maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
       </label>
       <div className={WARNING_NOTE}>
-        {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above. Only what is new after the trigger is switched on starts a run.
+        {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above.
+        <div className="mt-1">What matches when the trigger starts is the baseline; anything that comes to match later starts one run.</div>
       </div>
       <div className="col-span-2 rounded-lg bg-well p-2" aria-label="Matching now">
         <div className="flex items-center justify-between gap-2 px-1 pb-1.5 text-[11px] text-muted-foreground">
@@ -150,7 +171,7 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
   );
 }
 
-function LinearFields({ projectPath, source, onChange }: { projectPath: string; source: LinearIssueSource; onChange: (next: Partial<LinearIssueSource>) => void }) {
+function LinearFields({ projectPath, source, onChange }: { projectPath: string; source: LinearIssueSource; onChange: (next: SourceChange<LinearIssueSource>) => void }) {
   const [teams, setTeams] = useState<IssueTeam[]>([]);
   const [teamsError, setTeamsError] = useState<string | null>(null);
   const [states, setStates] = useState<WorkflowState[]>([]);
@@ -162,7 +183,7 @@ function LinearFields({ projectPath, source, onChange }: { projectPath: string; 
       .then((values) => {
         if (!live) return;
         setTeams(values);
-        if (!source.teamId && values[0]) onChange({ teamId: values[0].id, teamName: values[0].name });
+        if (values[0]) onChange((current) => (current.teamId ? {} : { teamId: values[0].id, teamName: values[0].name }));
       })
       .catch((cause) => live && setTeamsError(errorMessage(cause)));
     return () => {
@@ -235,13 +256,13 @@ function LinearFields({ projectPath, source, onChange }: { projectPath: string; 
   );
 }
 
-function PullRequestFields({ projectPath, source, onChange }: { projectPath: string; source: PullRequestSource; onChange: (next: Partial<PullRequestSource>) => void }) {
+function PullRequestFields({ projectPath, source, onChange }: { projectPath: string; source: PullRequestSource; onChange: (next: SourceChange<PullRequestSource>) => void }) {
   useEffect(() => {
     if (source.repo || !projectPath) return;
     let live = true;
     issuesApi.githubRepo(projectPath)
       .then((repo) => {
-        if (live && repo) onChange({ repo });
+        if (live && repo) onChange((current) => (current.repo ? {} : { repo }));
       })
       .catch(() => {});
     return () => {
@@ -286,7 +307,7 @@ function PullRequestFields({ projectPath, source, onChange }: { projectPath: str
       <label className="col-span-2 flex items-center justify-between gap-3 rounded-lg bg-well px-3 py-2.5 text-xs">
         <span>
           <span className="block font-medium">Also wake on pull requests from forks</span>
-          <span className="text-faint">Anyone can open one, and the run works on their code in the Permissions mode chosen above. Off by default: only branches of this repository, pushed by people with write access, wake a run.</span>
+          <span className="text-faint">Anyone can open one, and the run works on their code in the Permissions mode chosen above. Off by default: only branches of this repository wake a run. Those are pushed by people with write access, or by bots such as Dependabot and Renovate; filter by author to leave bots out.</span>
         </span>
         <Switch aria-label="Also wake on pull requests from forks" checked={!!source.fromForks} onCheckedChange={(fromForks) => onChange({ fromForks })} />
       </label>

@@ -219,6 +219,8 @@ export interface AutomationIssueState {
   automationId: string;
   lastPolledAt?: string | null;
   lastPollError?: string | null;
+  /** Something to know that is not a failure to read. */
+  notice?: string | null;
 }
 
 export interface AutomationRef {

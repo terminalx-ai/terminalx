@@ -148,6 +148,7 @@ function run(overrides: Partial<AutomationRun> = {}): AutomationRun {
 }
 
 beforeEach(() => {
+  automationStore.issueStates = {};
   catalog.models = structuredClone(initialModels);
   discovery.harnesses = structuredClone(initialHarnesses);
   automationStore.automations = [
@@ -617,6 +618,17 @@ describe("event trigger sources", () => {
       eventTrigger: expect.objectContaining({ source: expect.objectContaining({ kind: "githubPullRequest", repo: "acme/widgets", events: ["opened", "pushed"] }) }),
     }));
     expect(screen.getByText("GitHub pull requests in acme/widgets: opened, new commits pushed, checked every 5 min")).toBeTruthy();
+  });
+
+  it("keeps the event trigger when the automation is switched off, and shows the trigger's notice", async () => {
+    const eventTrigger = { source: { kind: "githubPullRequest" as const, repo: "acme/widgets", events: ["pushed" as const], base: null, author: null, labels: [], draft: null, fromForks: false }, pollIntervalMinutes: 5, maxRunsPerTick: 3 };
+    automationStore.automations = automationStore.automations.map((value) => value.id === "automation-1" ? { ...value, workspace: "newWorktree", eventTrigger } : value);
+    automationStore.issueStates = { "automation-1": { automationId: "automation-1", notice: "Stopped waking on pull request #2 after 3 runs in a row with no push from anyone else." } };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText(/Stopped waking on pull request #2/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "Disable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, eventTrigger })));
   });
 
   it("links a pull request run to its pull request", async () => {
