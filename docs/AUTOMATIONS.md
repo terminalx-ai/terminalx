@@ -21,12 +21,17 @@ anything):
   for a "new worktree per run" automation (never the run's new worktree, which
   does not exist yet), the chosen session's folder for an "existing session"
   one;
-- with the environment overrides an automation session gets (Settings →
-  Environment); when they are unavailable the run fails, as an agent run
+- with an agent session's login-shell `PATH` and the environment overrides an
+  automation session gets (Settings → Environment); when they are unavailable the run fails, as an agent run
   would, rather than running with a different set of variables;
 - with no input, and its own process group: whatever it starts in the
   background ends with it;
 - within its timeout: 60 seconds by default, at most 300.
+
+The scheduler evaluates an automation that has a check on a thread of its
+own, so a slow check never delays the other automations; while one is still
+going, that automation's next tick is skipped. An issue poll runs the check
+once and reuses the result for every issue it starts a run for.
 
 What happens next depends only on its exit status and standard output:
 

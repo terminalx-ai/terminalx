@@ -142,7 +142,28 @@ fn take(captured: &Arc<Mutex<Captured>>) -> (String, bool) {
     (String::from_utf8_lossy(&captured.bytes).into_owned(), captured.truncated)
 }
 
-/// End the check and anything it started in the background.
+/// Whether the check's shell has exited, without reaping it.
+#[cfg(unix)]
+fn exited(child: &mut std::process::Child) -> std::io::Result<bool> {
+    let pid = libc::id_t::from(child.id());
+    // SAFETY: a zeroed siginfo_t is a valid out-parameter for waitid(2).
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: WNOWAIT leaves the child waitable; WNOHANG returns at once.
+    let result = unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // With WNOHANG and no change, nothing is filled in: si_signo stays 0.
+    Ok(info.si_signo != 0)
+}
+
+#[cfg(not(unix))]
+fn exited(child: &mut std::process::Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
+}
+
+/// End the check and anything it started in the background. Called while
+/// the shell is still unreaped.
 fn stop(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
@@ -166,6 +187,9 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, env: &BTreeMap<Stri
         .arg("-c")
         .arg(command)
         .current_dir(dir)
+        // An agent session's PATH: an app opened from the Finder inherits
+        // launchd's, where `gh` and friends are not found. Overrides win.
+        .env("PATH", crate::binpath::login_path())
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -196,16 +220,23 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, env: &BTreeMap<Stri
     let (stderr, stderr_done) = capture(child.stderr.take(), STDERR_CAP);
     let deadline = started + timeout;
     let mut timed_out = false;
+    // The shell is reaped only after its process group has been signalled:
+    // until then its pid, and so the group's id, cannot belong to anyone else.
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
+        match exited(&mut child) {
+            Ok(true) => {
+                // A process the check left running in the background would
+                // hold its output open (and outlive the check); end it too.
+                stop(&mut child);
+                break child.wait().ok();
+            }
+            Ok(false) if Instant::now() >= deadline => {
                 timed_out = true;
                 stop(&mut child);
                 let _ = child.wait();
                 break None;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(false) => std::thread::sleep(Duration::from_millis(20)),
             Err(_) => {
                 stop(&mut child);
                 let _ = child.wait();
@@ -213,9 +244,6 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, env: &BTreeMap<Stri
             }
         }
     };
-    // A process the check left running in the background would hold its
-    // output open (and outlive the check); end it with the check.
-    stop(&mut child);
     let drain_until = Instant::now() + DRAIN_GRACE;
     for finished in [&stdout_done, &stderr_done] {
         let _ = finished.recv_timeout(drain_until.saturating_duration_since(Instant::now()));
@@ -298,15 +326,10 @@ pub fn prompt_with_output(prompt: &str, command: &str, output: &str, truncated: 
     )
 }
 
-/// Run the automation's check, if it has one, for `run` (already pending).
-/// Returns the prompt to send, with the check's output added, or `None` when
-/// the run has ended here: "nothing new", or failed. Either way no session
-/// is created and no model is called.
-pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut AutomationRun, prompt: String) -> Result<Option<String>> {
-    let Some(precheck) = configured(automation.precheck.as_ref()) else {
-        return Ok(Some(prompt));
-    };
-    let trial = run_in(&automation.project_path, automation.workspace, automation.session_id.as_deref(), precheck)
+/// Run `precheck` for `automation` as a run would. A check that cannot be
+/// run at all (no folder, no environment) is a failed check.
+fn check(automation: &Automation, precheck: &AutomationPrecheck) -> PrecheckTrial {
+    run_in(&automation.project_path, automation.workspace, automation.session_id.as_deref(), precheck)
         .unwrap_or_else(|error| PrecheckTrial {
             outcome: PrecheckOutcome::Failed,
             reason: Some(format!("The first check could not run: {error:#}")),
@@ -318,7 +341,68 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
                 timed_out: false,
                 duration_ms: 0,
             },
-        });
+        })
+}
+
+/// One issue poll runs its automation's check once, for all the issues it
+/// starts runs for: the first run's check is reused by the rest.
+struct PollMemo {
+    automation_id: String,
+    trial: Option<PrecheckTrial>,
+}
+
+thread_local! {
+    static POLL: std::cell::RefCell<Option<PollMemo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The automations being evaluated on threads of their own.
+static APART: Mutex<std::collections::BTreeSet<String>> = Mutex::new(std::collections::BTreeSet::new());
+
+/// Evaluate an automation that has a first check on a thread of its own, so
+/// a slow check never holds up the scheduler or the other automations; its
+/// next tick is skipped while one is still going. False, and nothing done,
+/// for an automation without a check: the scheduler evaluates it in turn.
+pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if configured(automation.precheck.as_ref()).is_none() {
+        return false;
+    }
+    if !APART.lock().unwrap_or_else(|error| error.into_inner()).insert(automation.id.clone()) {
+        return true;
+    }
+    let app = app.clone();
+    let automation = automation.clone();
+    let id = automation.id.clone();
+    let spawned = std::thread::Builder::new().name("automation-precheck-run".into()).spawn(move || {
+        if automation.issue_trigger.is_some() {
+            POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial: None }));
+        }
+        if let Err(error) = super::evaluate_automation(&app, &automation, now) {
+            log::warn!("automation {}: {error:#}", automation.id);
+        }
+        POLL.with(|poll| *poll.borrow_mut() = None);
+        APART.lock().unwrap_or_else(|error| error.into_inner()).remove(&automation.id);
+    });
+    if let Err(error) = spawned {
+        log::warn!("automation {id}: could not start its evaluation: {error}");
+        APART.lock().unwrap_or_else(|error| error.into_inner()).remove(&id);
+    }
+    true
+}
+
+/// Run the automation's check, if it has one, for `run` (already pending).
+/// Returns the prompt to send, with the check's output added, or `None` when
+/// the run has ended here: "nothing new", or failed. Either way no session
+/// is created and no model is called.
+pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut AutomationRun, prompt: String) -> Result<Option<String>> {
+    let Some(precheck) = configured(automation.precheck.as_ref()) else {
+        return Ok(Some(prompt));
+    };
+    let trial = POLL.with(|poll| match &mut *poll.borrow_mut() {
+        Some(PollMemo { automation_id, trial }) if *automation_id == automation.id => {
+            trial.get_or_insert_with(|| check(automation, precheck)).clone()
+        }
+        _ => check(automation, precheck),
+    });
     let next = match trial.outcome {
         PrecheckOutcome::Proceed => Some(prompt_with_output(&prompt, &precheck.command, &trial.result.stdout_tail, trial.result.truncated)),
         PrecheckOutcome::NothingNew | PrecheckOutcome::Failed => None,
@@ -467,6 +551,15 @@ mod tests {
         runs.remove(0)
     }
 
+    /// Wait for automations evaluated on threads of their own.
+    fn settle() {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !APART.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "an automation's evaluation did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn no_sessions() -> bool {
         index::load().unwrap().is_empty()
     }
@@ -546,6 +639,7 @@ mod tests {
         let due = (chrono::Utc::now() - chrono::TimeDelta::minutes(1)).to_rfc3339();
         let automation = saved(project.path(), Some("true"), 30, &due);
         evaluate(&host()).unwrap();
+        settle();
         let run = only_run(&automation);
         assert_eq!(run.status, AutomationRunStatus::SkippedPrecheck);
         assert_eq!(run.trigger, AutomationTrigger::Scheduled);
@@ -561,6 +655,7 @@ mod tests {
         let missed = (chrono::Utc::now() - chrono::TimeDelta::days(2)).to_rfc3339();
         let automation = saved(project.path(), Some("touch ran"), 30, &missed);
         evaluate(&host()).unwrap();
+        settle();
         let run = only_run(&automation);
         assert_eq!(run.status, AutomationRunStatus::SkippedMissed);
         assert!(run.precheck.is_none());
@@ -584,6 +679,59 @@ mod tests {
         assert!(run.issue.is_some() && run.session_id.is_none() && run.reported.is_none());
         assert_eq!(seen.issues.len(), 1);
         assert!(no_sessions());
+    }
+
+    #[test]
+    fn a_slow_check_does_not_hold_up_the_scheduler_or_start_twice() {
+        let _home = crate::store::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let due = (chrono::Utc::now() - chrono::TimeDelta::minutes(1)).to_rfc3339();
+        let automation = saved(project.path(), Some("sleep 2"), 30, &due);
+        let started = Instant::now();
+        evaluate(&host()).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Due again while its check is still going: no second run.
+        automation_store::update(&automation.id, |value| {
+            value.next_run_at = due.clone();
+            Ok(())
+        })
+        .unwrap();
+        evaluate(&host()).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        settle();
+        assert_eq!(only_run(&automation).status, AutomationRunStatus::SkippedPrecheck);
+    }
+
+    #[test]
+    fn an_issue_poll_runs_the_check_once_for_all_its_issues() {
+        let _home = crate::store::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let mut automation = saved(project.path(), Some("echo ran >> checks"), 30, "2099-01-01T00:00:00Z");
+        automation.issue_trigger = Some(serde_json::from_value(serde_json::json!({
+            "provider": "github", "repo": "acme/widgets", "query": "label:raccoon",
+        })).unwrap());
+        automation_store::save(std::slice::from_ref(&automation)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(include_str!("../fixtures/github_issue_list.json")).unwrap();
+        let issues = crate::issues::parse_github_issues(&value);
+        assert!(issues.len() >= 2);
+        let mut seen = automation_store::SeenState::default();
+        POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial: None }));
+        for issue in &issues[..2] {
+            let run = dispatch_issue(&host(), &automation, issue, &mut seen).unwrap();
+            assert_eq!(run.status, AutomationRunStatus::SkippedPrecheck);
+        }
+        POLL.with(|poll| *poll.borrow_mut() = None);
+        assert_eq!(std::fs::read_to_string(project.path().join("checks")).unwrap(), "ran\n");
+    }
+
+    #[test]
+    fn the_check_gets_the_login_path_and_overrides_still_win() {
+        let trial = run("printf %s \"$PATH\"", 10);
+        assert_eq!(trial.result.stdout_tail, crate::binpath::login_path());
+        let dir = tempfile::tempdir().unwrap();
+        let env = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+        let trial = execute("printf %s \"$PATH\"", Duration::from_secs(5), dir.path(), &env);
+        assert_eq!(trial.result.stdout_tail, "/usr/bin:/bin");
     }
 
     #[test]

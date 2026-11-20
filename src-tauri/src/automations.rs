@@ -1735,35 +1735,45 @@ fn evaluate(app: &impl AutomationHost) -> Result<()> {
     let _guard = EvaluationGuard;
     let now = Utc::now();
     for automation in automation_store::list()? {
-        if automation.issue_trigger.is_some() {
-            if let Err(error) = evaluate_issue(app, &automation, now) {
-                log::warn!("issue automation {}: {error:#}", automation.id);
-            }
+        // One with a first check is evaluated on a thread of its own, so its
+        // check never holds up the others (PRO-484).
+        if precheck::evaluate_apart(app, &automation, now) {
             continue;
         }
-        let Some(action) = due_action(&automation, now)? else {
-            continue;
-        };
-        let next = next_run_after(&automation.schedule, now)?
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        automation_store::update(&automation.id, |value| {
-            value.next_run_at = next;
-            value.modified = index::now();
-            Ok(())
-        })?;
-        emit_definitions(app);
-        match action {
-            DueAction::Dispatch { scheduled_for } => {
-                dispatch(
-                    app,
-                    &automation.id,
-                    AutomationTrigger::Scheduled,
-                    Some(scheduled_for),
-                )?;
-            }
-            DueAction::SkipMissed { scheduled_for } => {
-                record_missed(app, &automation, scheduled_for)?
-            }
+        evaluate_automation(app, &automation, now)?;
+    }
+    Ok(())
+}
+
+fn evaluate_automation(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
+    if automation.issue_trigger.is_some() {
+        if let Err(error) = evaluate_issue(app, automation, now) {
+            log::warn!("issue automation {}: {error:#}", automation.id);
+        }
+        return Ok(());
+    }
+    let Some(action) = due_action(automation, now)? else {
+        return Ok(());
+    };
+    let next = next_run_after(&automation.schedule, now)?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    automation_store::update(&automation.id, |value| {
+        value.next_run_at = next;
+        value.modified = index::now();
+        Ok(())
+    })?;
+    emit_definitions(app);
+    match action {
+        DueAction::Dispatch { scheduled_for } => {
+            dispatch(
+                app,
+                &automation.id,
+                AutomationTrigger::Scheduled,
+                Some(scheduled_for),
+            )?;
+        }
+        DueAction::SkipMissed { scheduled_for } => {
+            record_missed(app, automation, scheduled_for)?
         }
     }
     Ok(())
