@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
-import { botChats, openHomeChat, spentInChats, startBotChat } from "@/lib/botChats";
+import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -70,16 +70,33 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
 
   // The home chat is made at hire; a bot hired before, or whose home chat was archived, gets one when it is opened.
   const hasHome = chats.some((chat) => chat.bot?.home);
+  const [homeFailed, setHomeFailed] = useState(false);
+  useEffect(() => setHomeFailed(false), [botId]);
   const botKnown = !!bot;
   useEffect(() => {
     if (!botKnown || hasHome) return;
     let live = true;
     openHomeChat(botId).then(
       (chat) => { if (live) upsertSession(chat); },
-      (cause) => { if (live) setError(errorMessage(cause)); },
+      (cause) => { if (live) { setError(errorMessage(cause)); setHomeFailed(true); } },
     );
     return () => { live = false; };
   }, [botId, botKnown, hasHome]);
+
+  // The day's spend, read again whenever one of its sessions records usage, and when the day changes.
+  const [spent, setSpent] = useState<{ usd: number; day: string } | null>(null);
+  const spentKey = useMemo(() => usageKey([...chats, ...startedBy]), [chats, startedBy]);
+  const [day, setDay] = useState(() => new Date().toDateString());
+  useEffect(() => {
+    const timer = window.setInterval(() => setDay(new Date().toDateString()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (!botKnown) return;
+    let live = true;
+    botSpentToday(botId).then((value) => { if (live) setSpent(value); }, () => { if (live) setSpent(null); });
+    return () => { live = false; };
+  }, [botId, botKnown, spentKey, day]);
 
   const open = startedBy.find((chat) => chat.id === startedId) ?? chats.find((chat) => chat.id === chatId) ?? chats[0] ?? null;
   const select = (chat: SessionEntry) => {
@@ -111,7 +128,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat" aria-label={`${bot.name}, ${bot.roleTitle}`}>
       <TitleStrip sidebarOpen={sidebarOpen} onToggleSidebar={onToggleSidebar} inset={titlebarInset} />
-      <BotHeader bot={bot} spent={spentInChats(chats)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
+      <BotHeader bot={bot} spent={spentTodayLabel(spent?.usd ?? null)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
       <div role="tablist" aria-label={`${bot.name}'s view`} className="flex shrink-0 items-center gap-1 border-b border-hairline px-5">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
@@ -139,7 +156,11 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
                 <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
               </ErrorBoundary>
             ) : (
-              <p className="flex items-center gap-2 px-6 py-8 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Opening the home chat…</p>
+              homeFailed ? (
+                <p className="px-6 py-8 text-sm text-muted-foreground">The home chat could not be opened. Start a new chat, or open the bot again.</p>
+              ) : (
+                <p className="flex items-center gap-2 px-6 py-8 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Opening the home chat…</p>
+              )
             )}
           </section>
         </div>
@@ -182,7 +203,7 @@ function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: 
         <Chip title="Agent and model"><Sparkles className="size-3" /> {harnessName}{bot.model ? ` · ${bot.model}` : ""}</Chip>
         <Chip title="Where it runs"><Laptop className="size-3" /> {runsOnLabel(bot)}</Chip>
         <Chip title="What it may do without asking" className={cn(full && "text-warning")}><ShieldOff className="size-3" /> {accessLabel(bot)}</Chip>
-        <Chip title="What its chats have spent in all, as their usage reads it, for information: bots have no budget">{spent}</Chip>
+        <Chip title="What its sessions spent today, at Stats' prices, for information: bots have no budget">{spent}</Chip>
         {bot.paused ? (
           <Button size="xs" variant="outline" disabled={busy} onClick={onResume}><Play /> Resume</Button>
         ) : (

@@ -1510,6 +1510,8 @@ pub struct SessionManager {
     /// Explicit command grants for this tab's conversation. Kept across
     /// turns and CLI restarts; forgotten when the owner runtime exits.
     session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
+    /// Tabs launched for a bot, by `key_of`, with their pane (PRO-468): see [`Self::bot_working`].
+    bot_tabs: Arc<Mutex<HashMap<String, String>>>,
     /// One writer per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter, nor overtake one another.
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
@@ -1822,6 +1824,14 @@ const STOP_CONFIRM_WAIT: Duration = Duration::from_secs(recovery::CLOSE_WAIT_SEC
 /// resizes it from here.
 pub const CLI_PANE_SIZE: (u16, u16) = (120, 30);
 
+/// Where a process runs among the runtime's panes (PRO-468): a session and
+/// its tab, a session with no tab, or a TerminalX pane of no session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub session: Option<String>,
+    pub tab: Option<String>,
+}
+
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
@@ -2024,6 +2034,7 @@ impl SessionManager {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             provider_states: Arc::default(),
             session_commands: Arc::default(),
+            bot_tabs: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3183,37 +3194,26 @@ impl SessionManager {
         self.runtime(session_id, tab_id).unwrap().lock().unwrap().status
     }
 
-    /// The session and tab whose agent or terminal started process `pid`, or
-    /// is it (PRO-468), placed as `serve_cli::consent::judge` places a
-    /// runtime's own: up its ancestry to a pane's process or a native agent's
-    /// child; else by its session's leader, which a process reparented to
-    /// launchd still keeps; else by its controlling terminal, a pane's pty. A
-    /// process that made itself a new session with a terminal of its own
-    /// (`script`, an existing tmux server) is no one's.
+    /// Where process `pid` runs among this runtime's panes and agents
+    /// (PRO-468), placed as `serve_cli::consent::judge` places a runtime's
+    /// own: up its ancestry to a pane's process or a native agent's child;
+    /// else by its session's leader, which a process reparented to launchd
+    /// still keeps; else by its controlling terminal, when exactly one pane
+    /// has it. Matched in memory: the index is read only to name the session
+    /// of a pane that matched. A tab whose runtime is busy or poisoned is
+    /// skipped, never waited for. A process that made itself a new session
+    /// with a terminal of its own (`script`, an existing tmux server) is no one's.
     #[cfg(unix)]
-    pub(crate) fn session_of_process(&self, pid: i32) -> Option<(String, String)> {
-        let mut roots: HashMap<i32, (String, String)> = HashMap::new();
-        let panes: Vec<_> = self.terminals.panes().into_iter().filter_map(|pane| Some((pane.pid? as i32, pane.id))).collect();
-        if !panes.is_empty() {
-            if let Ok(sessions) = index::load() {
-                // A tab's own pane, or another terminal of its session (`<session>:…`).
-                let owner = |pane: &str| sessions.iter().find_map(|session| {
-                    let tab = session.tabs.iter().find(|tab| tab.pane_id() == pane)
-                        .or_else(|| pane.starts_with(&format!("{}:", session.id)).then(|| session.tabs.first()).flatten())?;
-                    Some((session.id.clone(), tab.id.clone()))
-                });
-                for (root, pane) in panes {
-                    if let Some(found) = owner(&pane) {
-                        roots.insert(root, found);
-                    }
-                }
-            }
-        }
-        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+    pub(crate) fn session_of_process(&self, pid: i32) -> Option<Placed> {
+        #[derive(Clone)]
+        enum Root { Pane(String), Tab(String, String) }
+        let mut roots: HashMap<i32, Root> = self.terminals.panes().into_iter()
+            .filter_map(|pane| Some((pane.pid? as i32, Root::Pane(pane.id)))).collect();
+        let runtimes: Vec<_> = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
         for runtime in runtimes {
-            let rt = runtime.lock().unwrap();
+            let Ok(rt) = runtime.try_lock() else { continue };
             if let Some(child) = rt.child_pid {
-                roots.insert(child as i32, (rt.session_id.clone(), rt.tab_id.clone()));
+                roots.insert(child as i32, Root::Tab(rt.session_id.clone(), rt.tab_id.clone()));
             }
         }
         use crate::serve_cli::consent;
@@ -3230,14 +3230,78 @@ impl SessionManager {
             }
             None
         };
-        if let Some(found) = up(pid) {
-            return Some(found);
+        let found = up(pid)
+            .or_else(|| consent::session_of(pid).filter(|leader| *leader != pid && *leader > 1).and_then(up))
+            .or_else(|| {
+                let tty = consent::controlling_terminal(pid)?;
+                let mut sharing = roots.iter().filter(|(root, _)| consent::controlling_terminal(**root) == Some(tty));
+                // Several panes on one terminal say nothing about which: not placed by it.
+                match (sharing.next(), sharing.next()) {
+                    (Some((_, found)), None) => Some(found.clone()),
+                    _ => None,
+                }
+            })?;
+        Some(match found {
+            Root::Tab(session, tab) => Placed { session: Some(session), tab: Some(tab) },
+            Root::Pane(pane) => Self::place_pane(&pane),
+        })
+    }
+
+    /// The session and tab pane `pane` belongs to: a tab's own, or another
+    /// terminal of its session (`<session>:…`, a workspace setup's included),
+    /// in a session with tabs or none. A pane of no session (an agent's
+    /// setup) is still a TerminalX pane: placed, in no session.
+    #[cfg(unix)]
+    fn place_pane(pane: &str) -> Placed {
+        let sessions = index::load().unwrap_or_else(|error| {
+            log::warn!("read the sessions to place a process in pane {pane}: {error:#}");
+            Vec::new()
+        });
+        sessions.iter().find_map(|session| {
+            if let Some(tab) = session.tabs.iter().find(|tab| tab.pane_id() == pane) {
+                return Some(Placed { session: Some(session.id.clone()), tab: Some(tab.id.clone()) });
+            }
+            pane.starts_with(&format!("{}:", session.id))
+                .then(|| Placed { session: Some(session.id.clone()), tab: session.tabs.first().map(|tab| tab.id.clone()) })
+        }).unwrap_or(Placed { session: None, tab: None })
+    }
+
+    /// Note that tab `tab_id` of `session_id` launches for a bot (PRO-468),
+    /// so the runtime's own calls look for bots' processes while it runs.
+    pub(crate) fn note_bot_tab(&self, session_id: &str, tab_id: &str, pane: &str) {
+        self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner()).insert(key_of(session_id, tab_id), pane.to_owned());
+    }
+
+    /// Whether any tab launched for a bot still runs, from memory alone: no
+    /// index read and no wait on a busy tab (a busy one counts as running).
+    /// Tabs that stopped are forgotten; a launch notes them again.
+    pub(crate) fn bot_working(&self) -> bool {
+        let noted: Vec<(String, String)> = self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(key, pane)| (key.clone(), pane.clone())).collect();
+        if noted.is_empty() {
+            return false;
         }
-        if let Some(found) = consent::session_of(pid).filter(|leader| *leader != pid && *leader > 1).and_then(up) {
-            return Some(found);
+        let mut stopped = Vec::new();
+        let mut working = false;
+        for (key, pane) in noted {
+            let runtime = self.tabs.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned();
+            let child = runtime.map(|runtime| match runtime.try_lock() {
+                Ok(rt) => rt.child.is_some(),
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                Err(std::sync::TryLockError::Poisoned(_)) => false,
+            }).unwrap_or_default();
+            if child || self.terminals.is_running(&pane) {
+                working = true;
+            } else {
+                stopped.push(key);
+            }
         }
-        let tty = consent::controlling_terminal(pid)?;
-        roots.iter().find(|(root, _)| consent::controlling_terminal(**root) == Some(tty)).map(|(_, found)| found.clone())
+        if !stopped.is_empty() {
+            let mut noted = self.bot_tabs.lock().unwrap_or_else(|e| e.into_inner());
+            for key in stopped {
+                noted.remove(&key);
+            }
+        }
+        working
     }
 
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
@@ -5586,6 +5650,10 @@ impl SessionManager {
     /// Bring the tab's mode, and one waiting for the next launch, within
     /// the limit of the bot `entry` works for, if it works for one.
     pub(crate) fn hold_to_bot(&self, rt: &mut TabRuntime, entry: &index::SessionEntry) -> Result<()> {
+        if crate::bots::chat::acting_bot(entry).is_some() {
+            let pane = entry.tab(&rt.tab_id).map(TabEntry::pane_id).unwrap_or_else(|| Self::pane_id(&rt.tab_id));
+            self.note_bot_tab(&rt.session_id, &rt.tab_id, &pane);
+        }
         let Some(limit) = entry.tab(&rt.tab_id).and_then(|tab| crate::bots::chat::tab_limit(entry, tab)) else { return Ok(()) };
         self.update_settings(rt, |s| {
             s.permission_mode = limit.clamp(&s.permission_mode);

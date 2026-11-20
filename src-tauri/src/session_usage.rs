@@ -226,6 +226,38 @@ pub fn read_tab(cwd: &str, tab: &TabEntry, homes: &dyn Transcripts) -> Option<Ta
     readable.then(|| TabUsage { models: merge(models.values()), updated: index::now() })
 }
 
+/// What a tab's conversations spent on local `day`, at Stats' prices
+/// (PRO-468: a bot's spend today). Read from the same files as [`read_tab`].
+pub fn spent_on_day(cwd: &str, tab: &TabEntry, homes: &dyn Transcripts, day: &str) -> f64 {
+    let mut spent = 0.0;
+    for (harness, id, _) in tab.conversations() {
+        match harness {
+            "claude" => {
+                let Some(transcript) = homes.claude(cwd, id) else { continue };
+                let skip = match (tab.provider_session_id.as_deref() == Some(id), tab.fork_from.as_deref()) {
+                    (true, Some(parent)) => homes.claude(cwd, parent).and_then(|path| stats::claude_uuids(&path).ok()).unwrap_or_default(),
+                    _ => HashSet::new(),
+                };
+                for file in claude_files(&transcript) {
+                    match stats::claude_cost_on(&file, &skip, day) {
+                        Ok(cost) => spent += cost,
+                        Err(error) => log::warn!("spend on {day}: read {}: {error:#}", file.display()),
+                    }
+                }
+            }
+            "codex" => {
+                let Some(rollout) = homes.codex(id) else { continue };
+                match stats::codex_cost_on(&rollout, day) {
+                    Ok(cost) => spent += cost,
+                    Err(error) => log::warn!("spend on {day}: read {}: {error:#}", rollout.display()),
+                }
+            }
+            _ => {}
+        }
+    }
+    spent
+}
+
 /// Read a tab's usage again and keep it on its entry. Returns the session as
 /// it is now when the totals changed, for the windows to be told.
 pub fn refresh_tab(session_id: &str, tab_id: &str) -> anyhow::Result<Option<SessionEntry>> {

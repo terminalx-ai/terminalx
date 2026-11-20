@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   homeChat: vi.fn(),
   newChat: vi.fn(),
   dismissResume: vi.fn(async () => undefined),
+  spentToday: vi.fn(async () => ({ usd: 3.5, day: "2026-11-20" })),
 }));
 
 vi.mock("@/lib/bots", () => ({ useBotStore: () => mocks.bots, pauseBot: mocks.pauseBot, resumeBot: mocks.resumeBot }));
@@ -23,7 +24,7 @@ vi.mock("@/lib/sessions", () => ({
   upsertSession: mocks.upsertSession,
   conversationTitle: (session: SessionEntry) => session.title,
 }));
-vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume }, errorMessage: (error: unknown) => String(error) }));
+vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume, spentToday: mocks.spentToday }, errorMessage: (error: unknown) => String(error) }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
@@ -51,11 +52,13 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("a bot's view (PRO-468)", () => {
-  it("has the bot's header and its five tabs, with only Chat filled", () => {
+  it("has the bot's header and its five tabs, with only Chat filled", async () => {
     view();
     expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
     expect(screen.getByText("CTO")).toBeTruthy();
-    for (const chip of ["Claude Code", "This Mac", "Full access", "$0.00 spent"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
+    for (const chip of ["Claude Code", "This Mac", "Full access"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
+    expect(await screen.findByText("$3.50 today")).toBeTruthy();
+    expect(mocks.spentToday).toHaveBeenCalledWith("b1");
     expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();
     const tabs = within(screen.getByRole("tablist")).getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Home", "Chat", "Duties", "Role and memory", "Settings"]);
@@ -92,6 +95,15 @@ describe("a bot's view (PRO-468)", () => {
     expect(screen.getByText(/Opening the home chat/)).toBeTruthy();
     await waitFor(() => expect(mocks.upsertSession).toHaveBeenCalledWith(home));
     expect(mocks.homeChat).toHaveBeenCalledWith("b1");
+  });
+
+  it("says so, and stops waiting, when the home chat cannot be opened", async () => {
+    mocks.sessions = { ...mocks.sessions, sessions: [] };
+    mocks.homeChat.mockRejectedValue("The bot's home folder cannot be read.");
+    view();
+    expect(await screen.findByText(/home folder cannot be read/)).toBeTruthy();
+    expect(screen.getByText(/The home chat could not be opened/)).toBeTruthy();
+    expect(screen.queryByText(/Opening the home chat/)).toBeNull();
   });
 
   it("starts another chat and selects it", async () => {

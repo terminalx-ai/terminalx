@@ -80,6 +80,8 @@ struct Service {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
     calls: AtomicUsize,
+    /// The process that registered, as the kernel says: the window (PRO-468).
+    pid: Option<i32>,
 }
 
 #[derive(Default)]
@@ -114,9 +116,14 @@ impl Registry {
         }
         let registered = attachment.enter().map_err(|_| unavailable("The desktop detached during registration."))?;
         *current = Some(Arc::new(Service { attachment: attachment.clone(), epoch: registration.epoch, lease: registration.lease, socket: registration.socket,
-            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0) }));
+            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0), pid: crate::hooks::caller_pid() }));
         drop(registered);
         Ok(json!({"registered":true}))
+    }
+
+    /// The process of the window attached now, when the kernel named it (PRO-468).
+    pub(crate) fn window_pid(&self) -> Option<i32> {
+        self.0.lock().unwrap().as_ref().filter(|service| service.attachment.valid()).and_then(|service| service.pid)
     }
 
     pub(crate) fn available(&self) -> bool {

@@ -359,6 +359,22 @@ pub fn get(id: &str) -> Result<Bot> {
     Ok(bot)
 }
 
+/// What the sessions working for bot `id` (its chats, and what they
+/// started) spent today, at Stats' prices: shown, never a cap (PRO-459).
+pub fn spent_today(id: &str) -> Result<f64> {
+    require_enabled()?;
+    get(id)?;
+    let day = crate::stats::today();
+    let sessions = crate::store::index::load()?;
+    Ok(sessions
+        .iter()
+        .filter(|entry| chat::acting_bot(entry).as_deref() == Some(id))
+        .flat_map(|entry| entry.tabs.iter().map(move |tab| (entry, tab)))
+        .filter(|(_, tab)| !tab.is_terminal())
+        .map(|(entry, tab)| crate::session_usage::spent_on_day(&entry.cwd, tab, &crate::session_usage::AgentHomes(tab), &day))
+        .sum())
+}
+
 /// How long a resume asked for from the CLI waits for the owner's answer.
 pub const RESUME_REQUEST_LASTS: chrono::Duration = chrono::Duration::hours(24);
 
@@ -729,6 +745,7 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
         "dismissResume" => serde_json::to_value(dismiss_resume(sink, string("id")?)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
+        "spentToday" => json!({"usd": spent_today(string("id")?)?, "day": crate::stats::today()}),
         "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
         other => return Err(refused(format!("Unknown bots operation {other}"))),
     })

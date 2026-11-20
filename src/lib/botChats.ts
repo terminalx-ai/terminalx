@@ -14,12 +14,18 @@ export function botOf(session: Pick<SessionEntry, "bot">): string | null {
   return session.bot && typeof session.bot.id === "string" ? session.bot.id : null;
 }
 
+/** The bot `session` works for, by id: the bot it is a chat of, or whose chat started it, however far back. */
+export function actingBotOf(session: Pick<SessionEntry, "bot" | "botStarted">): string | null {
+  return botOf(session) ?? (session.botStarted && typeof session.botStarted.id === "string" ? session.botStarted.id : null);
+}
+
 /**
- * Whether the sidebar leaves `session` to its bot's view: only while Bots is on and the bot is listed, so a
- * chat whose bot is gone, or cannot be read, stays where it can still be found.
+ * Whether the sidebar leaves `session` to its bot's view: a bot's chats and the sessions working for it that they
+ * started, only while Bots is on and the bot is listed, so a session whose bot is gone, or cannot be read, stays
+ * where it can still be found.
  */
-export function listedUnderBot(session: Pick<SessionEntry, "bot">, bots: readonly Pick<Bot, "id">[]): boolean {
-  const id = botOf(session);
+export function listedUnderBot(session: Pick<SessionEntry, "bot" | "botStarted">, bots: readonly Pick<Bot, "id">[]): boolean {
+  const id = actingBotOf(session);
   return !!id && bots.some((bot) => bot.id === id);
 }
 
@@ -34,14 +40,18 @@ export function botViewFor(
   view: { view: string; selectedBotId: string | null },
 ): { botId: string; chatId: string | null } | null {
   if (!botsOn) return null;
-  if (selected) return listedUnderBot(selected, bots) ? { botId: botOf(selected)!, chatId: selected.id } : null;
+  if (selected) {
+    const id = botOf(selected);
+    // A chat opens in its bot's view; a session the bot started opens as itself, from wherever it was selected.
+    return id && listedUnderBot(selected, bots) ? { botId: id, chatId: selected.id } : null;
+  }
   return view.view === "bot" && view.selectedBotId ? { botId: view.selectedBotId, chatId: null } : null;
 }
 
 export interface BotChats {
   /** The home chat first (the newest made, if there are two), then the others, last written in first. */
   chats: SessionEntry[];
-  /** Sessions a chat of this bot started, newest first. */
+  /** Sessions that work for this bot without being its chats (started by a chat, or by what one started), newest first. */
   startedBy: SessionEntry[];
 }
 
@@ -54,7 +64,10 @@ export function botChats(sessions: readonly SessionEntry[], botId: string): BotC
   const ids = new Set(own.map((session) => session.id));
   const home = own.filter((session) => session.bot?.home).sort(newestMade);
   const others = own.filter((session) => !session.bot?.home).sort(newest);
-  const startedBy = sessions.filter((session) => !session.archived && !ids.has(session.id) && !!session.parent && ids.has(session.parent.sessionId)).sort(newest);
+  // Marked by the app as working for the bot (`botStarted`), or, from before the mark, started by one of its chats.
+  const startedBy = sessions
+    .filter((session) => !session.archived && !ids.has(session.id) && (actingBotOf(session) === botId || (!!session.parent && ids.has(session.parent.sessionId))))
+    .sort(newest);
   return { chats: [...home, ...others], startedBy };
 }
 
@@ -69,16 +82,25 @@ export function startBotChat(botId: string): Promise<SessionEntry> {
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+/** What the bot's sessions spent today, at Stats' prices (`bots::spent_today`); a dash until it is read. */
+export function spentTodayLabel(spent: number | null): string {
+  return `${spent === null ? "—" : usd.format(spent)} today`;
+}
+
+export function botSpentToday(botId: string): Promise<{ usd: number; day: string }> {
+  return botsApi.spentToday(botId);
+}
+
 /**
- * What the bot's own chats have spent in all, as their tabs' usage reads it: a tab's usage is its whole
- * conversation's, so there is no day's share of it to show. For information only: bots have no budget or cap (PRO-459).
+ * A key that moves whenever any of `sessions` records new usage, for reading the day's spend again then. The
+ * usage on an entry is its whole conversation's, so it only tells when to read, never what today cost.
  */
-export function spentInChats(chats: readonly SessionEntry[]): string {
+export function usageKey(sessions: readonly SessionEntry[]): string {
   let total = 0;
-  for (const session of chats) {
+  for (const session of sessions) {
     for (const tab of session.tabs) {
       for (const model of tab.usage?.models ?? []) total += model.costUsd ?? 0;
     }
   }
-  return `${usd.format(total)} spent`;
+  return total.toFixed(6);
 }

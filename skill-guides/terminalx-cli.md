@@ -1944,8 +1944,12 @@ terminalx bots delete <bot> --json
   that tab's: `RACCOON_SESSION_ID` is not read. A session that works for a bot is refused
   `create`, `delete`, `resume` and `resume-all` with `forbidden`, for any bot. Its `pause` is
   recorded as that bot (its id in `by`). A command no tab holds is the owner's only from a
-  terminal of the person's own: with no terminal it is refused those four with
-  `person_required`, and while any bot is paused it starts no session or run (`bot_paused`).
+  terminal of the person's own, or a TerminalX pane: with neither it is refused those four with
+  `person_required`, and while any bot is paused it starts no work (`bot_paused`; reads such as
+  `machine list` still answer). A command whose process exits before the app looks at it is
+  refused with `person_required`: let `terminalx` wait for its answer. Known gap (PRO-489): a
+  process that detaches with no terminal and calls the runtime's own socket directly is not yet
+  told from the window; the fix is a credential only the window holds.
   Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
   person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
   `resume` says so with `person_required` rather than waiting.

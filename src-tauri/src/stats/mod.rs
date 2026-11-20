@@ -419,6 +419,27 @@ fn parse_file(path: &Path, provider: Provider) -> Result<Vec<UsageEvent>> {
     }
 }
 
+/// What the requests of one Claude transcript (records in `skip` left to the
+/// conversation they were forked from) cost on local `day` (`%Y-%m-%d`), at
+/// Stats' prices (PRO-468: a bot's spend today). Unpriced requests count nothing.
+pub(crate) fn claude_cost_on(path: &Path, skip: &HashSet<String>, day: &str) -> Result<f64> {
+    Ok(cost_on(parse_claude(path, skip)?, day))
+}
+
+/// [`claude_cost_on`] for a Codex rollout.
+pub(crate) fn codex_cost_on(path: &Path, day: &str) -> Result<f64> {
+    Ok(cost_on(parse_codex(path)?, day))
+}
+
+fn cost_on(events: Vec<UsageEvent>, day: &str) -> f64 {
+    events.iter().filter(|event| event.day == day).filter_map(event_cost).sum()
+}
+
+/// Today, as Stats names a day: the local date.
+pub(crate) fn today() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
 /// What one request cost at API list prices, by the same table and rules for
 /// Stats and for a session's own totals. `None` when its model or service
 /// tier has no price: never zero.
@@ -1393,6 +1414,17 @@ mod tests {
             "a retained blank tab is not a live work start"
         );
         assert_eq!(stats.tracking_since, None);
+    }
+
+    /// A bot's spend today counts only that day's requests, at Stats' prices (PRO-468).
+    #[test]
+    fn cost_on_counts_only_that_day() {
+        let today = test_event(Provider::Codex, "s", "2026-11-20", "/repo", 1_000_000);
+        let price = event_cost(&today).expect("priced");
+        assert!(price > 0.0);
+        let events = vec![today.clone(), today, test_event(Provider::Codex, "s", "2026-11-19", "/repo", 5_000_000)];
+        assert!((cost_on(events.clone(), "2026-11-20") - 2.0 * price).abs() < 1e-9);
+        assert_eq!(cost_on(events, "2026-11-18"), 0.0);
     }
 
     fn test_event(

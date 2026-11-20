@@ -565,6 +565,19 @@ pub fn descends_from(pid: libc::pid_t, ancestor: libc::pid_t) -> bool {
     false
 }
 
+/// Whether `pid` still runs: not gone, and not a zombie waiting to be reaped.
+pub fn alive(pid: libc::pid_t) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SZOMB, from <sys/proc.h>.
+        bsd_info(pid).is_some_and(|info| info.pbi_status != 5)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stat_field(pid, 0).is_some_and(|state| !matches!(state.as_str(), "Z" | "X" | "x"))
+    }
+}
+
 /// The session `pid` is in: the pid of its leader.
 pub fn session_of(pid: libc::pid_t) -> Option<libc::pid_t> {
     // SAFETY: getsid has no preconditions; it fails for a pid it cannot see.

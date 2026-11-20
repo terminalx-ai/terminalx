@@ -3,7 +3,7 @@ import type { SessionEntry } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
 
-const { botChats, botOf, botViewFor, listedUnderBot, spentInChats } = await import("./botChats");
+const { actingBotOf, botChats, botOf, botViewFor, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
 
 const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
   id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
@@ -45,15 +45,29 @@ describe("a bot's chats (PRO-468)", () => {
     expect(botViewFor(false, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toBeNull();
   });
 
-  it("count what their chats spent in all, never calling it a day's", () => {
-    const usage = (updated: string, costUsd: number | null) => ({ models: [{ model: "m", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd }], updated });
-    const tab = (id: string, value?: ReturnType<typeof usage>) => ({ id, harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "", usage: value });
-    const chats = [
-      session("a", { tabs: [tab("t1", usage("2026-11-20T10:00:00Z", 1.5)), tab("t2", usage("2026-11-19T10:00:00Z", 9))] as never }),
-      session("b", { tabs: [tab("t3", usage("2026-11-20T11:00:00Z", 0.7)), tab("t4", usage("2026-11-20T11:00:00Z", null)), tab("t5")] as never }),
-    ];
-    expect(spentInChats(chats)).toBe("$11.20 spent");
-    expect(spentInChats([])).toBe("$0.00 spent");
+  it("show what the bot spent today, read again whenever its sessions record usage", () => {
+    expect(spentTodayLabel(null)).toBe("— today");
+    expect(spentTodayLabel(0)).toBe("$0.00 today");
+    expect(spentTodayLabel(11.2)).toBe("$11.20 today");
+    const usage = (costUsd: number | null) => ({ models: [{ model: "m", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd }], updated: "" });
+    const tab = (id: string, value?: ReturnType<typeof usage>) => ({ id, harness: "claude", model: "", permissionMode: "plan", status: "idle", created: "", modified: "", usage: value });
+    const before = [session("a", { tabs: [tab("t1", usage(1.5)), tab("t2")] as never })];
+    const after = [session("a", { tabs: [tab("t1", usage(1.75)), tab("t2")] as never })];
+    expect(usageKey(before)).not.toBe(usageKey(after));
+    expect(usageKey(before)).toBe(usageKey([...before]));
+  });
+
+  it("list every session that works for the bot under it, however far from its chat, and keep them out of the project lists", () => {
+    const chat = session("chat", { bot: { id: "b1" } });
+    const child = session("child", { kind: undefined, projectPath: "/repo", parent: { sessionId: "chat" }, botStarted: { id: "b1" } });
+    const grandchild = session("grandchild", { kind: undefined, projectPath: "/repo", parent: { sessionId: "child" }, botStarted: { id: "b1" }, modified: "2026-11-20T10:00:00Z" });
+    const other = session("other", { kind: undefined, projectPath: "/repo", botStarted: { id: "b2" } });
+    expect(botChats([chat, child, grandchild, other], "b1").startedBy.map((entry) => entry.id)).toEqual(["grandchild", "child"]);
+    expect(actingBotOf(grandchild)).toBe("b1");
+    expect(listedUnderBot(grandchild, [{ id: "b1" }])).toBe(true);
+    expect(listedUnderBot(grandchild, [])).toBe(false);
+    // A session the bot started opens as itself, not in the bot's view.
+    expect(botViewFor(true, [{ id: "b1" }], grandchild, { view: "welcome", selectedBotId: null })).toBeNull();
   });
 
   it("put the newest made home chat first, as the app answers", () => {

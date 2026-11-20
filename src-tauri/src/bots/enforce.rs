@@ -109,12 +109,25 @@ fn hold(manager: &SessionManager, entry: &SessionEntry, tab: &TabEntry, limit: &
 /// A tab an earlier limit narrowed gets back as much of its own mode as
 /// `limit` allows now. An agent not in a turn is stopped, so its next start
 /// has the mode and the bot's rules as they are now; one in a turn is asked
-/// for the mode, which it takes when the turn ends, and keeps remembering
-/// its own until it has all of it.
+/// for the mode, which it takes when the turn ends. The mode it had is
+/// remembered only while it has less of it: once all of it is given or asked
+/// for, it is forgotten, so a later reconcile (a rename) neither stops the
+/// agent again nor lifts a mode the owner narrowed since.
 fn give_back(manager: &SessionManager, entry: &SessionEntry, tab: &TabEntry, limit: &chat::ModeLimit) {
     let Some(original) = held_from(tab) else { return };
     let mode = limit.clamp(&original).to_owned();
-    if mode == tab.permission_mode && mode != original {
+    let all = mode == original;
+    // Already has it, or has asked for it: nothing to give, nothing to stop.
+    let has = match tab.requested_permission_mode.as_deref() {
+        Some(pending) => pending == mode,
+        None => tab.permission_mode == mode,
+    };
+    if has {
+        if all {
+            write(manager, entry, tab, |stored| {
+                stored.unknown.remove(chat::HELD_FROM_KEY);
+            });
+        }
         return;
     }
     let busy = in_turn(tab) && manager.is_running(&entry.id, &tab.id);
@@ -133,8 +146,7 @@ fn give_back(manager: &SessionManager, entry: &SessionEntry, tab: &TabEntry, lim
         } else {
             stored.permission_mode = mode.clone();
         }
-        // Remembered until it has all of it, and is not in a turn that could report another.
-        if mode == original && !busy {
+        if all {
             stored.unknown.remove(chat::HELD_FROM_KEY);
         } else {
             stored.unknown.insert(chat::HELD_FROM_KEY.into(), serde_json::Value::String(original.clone()));

@@ -178,7 +178,8 @@ fn set_status(entry: &SessionEntry, status: TabStatus) {
 
 /// M1 (review 3): a resume gives the mode back to a tab whatever its idle
 /// status (one that finished unread included) and starts its agent again;
-/// one in a turn is asked for the mode after its turn, and keeps it remembered.
+/// one in a turn is asked for the mode after its turn. L-b (review 4): once
+/// all of it is asked for it is forgotten, so a rename after the turn stops nothing.
 #[test]
 fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
     let _home = bots_on();
@@ -205,7 +206,12 @@ fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
     let tab = index::get(&busy.id).unwrap().tabs[0].clone();
     assert!(manager.is_running(&busy.id, &tab.id), "a turn is not cut short");
     assert_eq!(tab.requested_permission_mode.as_deref(), Some("bypassPermissions"), "asked for after the turn");
-    assert_eq!(tab.unknown[chat::HELD_FROM_KEY], "bypassPermissions", "still remembered");
+    assert!(!tab.unknown.contains_key(chat::HELD_FROM_KEY), "all of it is asked for: nothing left to give back");
+
+    // The turn ends; a rename reconciles and stops nothing.
+    set_status(&busy, TabStatus::Completed);
+    call(&manager, "update", &serde_json::json!({"id": bot.id, "patch": {"name": "Atlas II"}})).unwrap();
+    assert!(manager.is_running(&busy.id, &tab.id), "a rename after the turn stops no agent");
 }
 
 /// L1 and L3: a mode set by hand is the tab's own, so no later reconcile

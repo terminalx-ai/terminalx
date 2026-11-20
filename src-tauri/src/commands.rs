@@ -6277,6 +6277,12 @@ pub async fn bot_dismiss_resume(state: State<'_, AppState>, id: String) -> CmdRe
     bots_call(state, "dismissResume", serde_json::json!({"id": id})).await
 }
 
+/// What a bot's sessions spent today, at Stats' prices (PRO-468).
+#[tauri::command]
+pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "spentToday", serde_json::json!({"id": id})).await
+}
+
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
 
 /// Settings → Orchestrator: the app-wide values and each project's own.

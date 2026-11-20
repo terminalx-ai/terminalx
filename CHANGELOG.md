@@ -25,11 +25,14 @@
   for the owner to confirm it in the app (shown on the team page and the
   sidebar for a day), and a bot's own sessions cannot hire, delete or resume
   bots, start cloud, pipeline or other-computer work, approve permissions, or
-  change sessions through the runtime directly. The app places a command in
-  the tab that started it where it can (by its process, its session and its
-  terminal) and then ignores the session it names; a command it cannot place
-  counts as the owner's only from a terminal of the person's own, and one
-  that has made itself a terminal of its own (`script`, tmux) is not placed.
+  change sessions through the runtime's calls while they run in its tabs. The
+  app places a command in the pane that started it where it can (by its
+  process, its session and its terminal) and then ignores the session it
+  names; a command it cannot place counts as the owner's only from a terminal
+  of the person's own, one whose process has already exited is refused, and
+  one that has made itself a terminal of its own (`script`, tmux) is not
+  placed. A process that detaches with no terminal and calls the runtime
+  directly is not yet told apart from the window (PRO-489).
   Hiring, resuming, deleting and raising access are confirmed by the
   TerminalX window on a Mac, which restarts its runtime to do so when needed,
   as pairing does. A resume or more access gives each tab back its own mode,

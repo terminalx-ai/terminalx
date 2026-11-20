@@ -2162,6 +2162,7 @@ export const botsApi = {
   newChat: (id: string) => invoke<SessionEntry>("bot_new_chat", { id }),
   /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
   dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
+  spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
 };
 
 export function errorMessage(e: unknown): string {
