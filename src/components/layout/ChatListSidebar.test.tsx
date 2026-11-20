@@ -16,6 +16,7 @@ const { ProjectRail } = await import("./ProjectRail");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const selection = await import("@/lib/rowSelection");
+const botStore = await import("@/lib/bots");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git", color: "blue" }];
@@ -205,6 +206,28 @@ describe("the archive in the chat list (#718)", () => {
   });
 });
 
+
+describe("a bot's chats (PRO-468)", () => {
+  afterEach(() => botStore.resetBotsForTests());
+
+  it("are under their bot, not in the list or the status layout, while the bot is listed", async () => {
+    const bot = { id: "b1", slug: "atlas", name: "Atlas", roleTitle: "CTO", roleTemplateId: "cto", harness: "claude", model: "", access: "full", runsOn: "thisMac", reportsTo: "owner", worksIn: ["personal"], created: at(1), modified: at(1) };
+    const listing = { revision: 1, bots: [bot], unreadable: 0 };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => (command === "bot_list" ? listing : answer(command, args)));
+    await boot([session("plain", chatsPath, at(2)), session("home", chatsPath, at(3), { bot: { id: "b1", home: true } }), session("orphan", chatsPath, at(1), { bot: { id: "gone" } })]);
+    await act(async () => botStore.bootBots());
+    for (const layout of ["list", "status"] as const) {
+      prefs.setPrefs({ sidebarLayout: layout });
+      mount();
+      const titles = [...document.querySelectorAll("[data-row-title]")].map((title) => title.textContent);
+      expect(titles, layout).toContain("Talk plain");
+      expect(titles, "a chat whose bot is gone stays where it can be found").toContain("Talk orphan");
+      expect(titles, layout).not.toContain("Talk home");
+      cleanup();
+    }
+  });
+});
 
 describe("status grouping and view controls (PRO-164)", () => {
   it("groups each session independently, updates counts and remembers collapsed headers", async () => {

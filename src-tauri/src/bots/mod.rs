@@ -8,6 +8,7 @@
 //! every operation here refuses, and nothing about the app changes.
 
 pub mod chat;
+pub mod enforce;
 pub mod templates;
 
 use std::collections::BTreeMap;
@@ -457,6 +458,7 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
         }
         if let Some(harness) = &patch.harness {
             refuse_unless!(crate::harness::binary_of(harness).is_some(), "Unknown agent {harness}.");
+            refuse_unless!(chat::takes_bot_instructions(harness), "A bot runs on Claude Code or Codex for now: {harness} cannot be given its role and memory.");
             if *harness != bot.harness {
                 // A model and an effort belong to the agent they were chosen for.
                 bot.model = String::new();
@@ -549,10 +551,38 @@ fn set_paused(bot: &mut Bot, pause: Option<&BotPause>) -> bool {
         }
         (true, None) => {
             bot.paused = None;
+            bot.unknown.remove(RESUME_REQUEST_KEY);
             bot.modified = crate::store::index::now();
             true
         }
     }
+}
+
+/// A resume asked for from the `terminalx` CLI, which waits on the owner's
+/// answer in the app (PRO-468): `{"at", "by"}` on the bot, where `by` is who
+/// the request claims to come from. Only the window's own Resume applies it.
+pub const RESUME_REQUEST_KEY: &str = "resumeRequest";
+
+/// Ask the owner to resume `id`. A bot that is not paused has nothing to ask.
+pub fn request_resume(sink: &dyn EventSink, id: &str, by: &str) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        if bot.paused.is_some() {
+            bot.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": crate::store::index::now(), "by": by}));
+        }
+        Ok(bot.clone())
+    })
+}
+
+/// The owner said no to a resume the CLI asked for: the bot stays paused.
+pub fn dismiss_resume(sink: &dyn EventSink, id: &str) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        bot.unknown.remove(RESUME_REQUEST_KEY);
+        Ok(bot.clone())
+    })
 }
 
 fn pause_one(sink: &dyn EventSink, id: &str, pause: Option<BotPause>) -> Result<Bot> {
@@ -645,6 +675,7 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "resume" => serde_json::to_value(resume(sink, string("id")?)?)?,
         "pauseAll" => serde_json::to_value(pause_all(sink, OWNER)?)?,
         "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
+        "dismissResume" => serde_json::to_value(dismiss_resume(sink, string("id")?)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
         "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
         other => return Err(refused(format!("Unknown bots operation {other}"))),

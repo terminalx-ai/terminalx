@@ -6133,7 +6133,8 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(
+pub async fn set_experimental_settings(
+    state: State<'_, AppState>,
     native_codex: Option<bool>,
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
@@ -6161,6 +6162,12 @@ pub fn set_experimental_settings(
         settings.experimental.local_vm_tasks = on;
     }
     store::settings::save(&settings).map_err(err)?;
+    // Bots switched off: the runtime stops the bots' running chats (PRO-468).
+    if bots == Some(false) {
+        if let Err(error) = bots_call::<serde_json::Value>(state, "reconcile", serde_json::json!({})).await {
+            log::warn!("stop the bots' chats after Bots was switched off: {error}");
+        }
+    }
     Ok(settings.experimental)
 }
 
@@ -6250,6 +6257,12 @@ pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<
 #[tauri::command]
 pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
     bots_call(state, "newChat", serde_json::json!({"id": id})).await
+}
+
+/// The owner said no to a resume asked for from the `terminalx` CLI (PRO-468).
+#[tauri::command]
+pub async fn bot_dismiss_resume(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "dismissResume", serde_json::json!({"id": id})).await
 }
 
 // ---------------------------------------------------------------- orchestration runs (PRO-274)

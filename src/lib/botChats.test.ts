@@ -3,7 +3,7 @@ import type { SessionEntry } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
 
-const { botChats, botOf, botViewFor, listedUnderBot, spentToday } = await import("./botChats");
+const { botChats, botOf, botViewFor, listedUnderBot, spentInChats } = await import("./botChats");
 
 const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
   id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
@@ -45,15 +45,20 @@ describe("a bot's chats (PRO-468)", () => {
     expect(botViewFor(false, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toBeNull();
   });
 
-  it("count what was spent today", () => {
-    const now = new Date("2026-11-20T15:00:00");
+  it("count what their chats spent in all, never calling it a day's", () => {
     const usage = (updated: string, costUsd: number | null) => ({ models: [{ model: "m", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd }], updated });
-    const tab = (id: string, value: ReturnType<typeof usage>) => ({ id, harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "", usage: value });
+    const tab = (id: string, value?: ReturnType<typeof usage>) => ({ id, harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "", usage: value });
     const chats = [
-      session("a", { tabs: [tab("t1", usage(new Date("2026-11-20T10:00:00").toISOString(), 1.5)), tab("t2", usage(new Date("2026-11-19T10:00:00").toISOString(), 9))] as never }),
-      session("b", { tabs: [tab("t3", usage(new Date("2026-11-20T11:00:00").toISOString(), 0.7)), tab("t4", usage(new Date("2026-11-20T11:00:00").toISOString(), null))] as never }),
+      session("a", { tabs: [tab("t1", usage("2026-11-20T10:00:00Z", 1.5)), tab("t2", usage("2026-11-19T10:00:00Z", 9))] as never }),
+      session("b", { tabs: [tab("t3", usage("2026-11-20T11:00:00Z", 0.7)), tab("t4", usage("2026-11-20T11:00:00Z", null)), tab("t5")] as never }),
     ];
-    expect(spentToday(chats, now)).toBe("$2.20 today");
-    expect(spentToday([], now)).toBe("$0.00 today");
+    expect(spentInChats(chats)).toBe("$11.20 spent");
+    expect(spentInChats([])).toBe("$0.00 spent");
+  });
+
+  it("put the newest made home chat first, as the app answers", () => {
+    const older = session("older", { bot: { id: "b1", home: true }, created: "2026-11-01T00:00:00Z", modified: "2026-11-20T12:00:00Z" });
+    const newer = session("newer", { bot: { id: "b1", home: true }, created: "2026-11-10T00:00:00Z", modified: "2026-11-10T00:00:00Z" });
+    expect(botChats([older, newer], "b1").chats.map((chat) => chat.id)).toEqual(["newer", "older"]);
   });
 });

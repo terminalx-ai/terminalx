@@ -5,8 +5,8 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { errorMessage } from "@/lib/api";
-import { botChats, openHomeChat, spentToday, startBotChat } from "@/lib/botChats";
+import { botsApi, errorMessage } from "@/lib/api";
+import { botChats, openHomeChat, spentInChats, startBotChat } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -110,7 +110,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat" aria-label={`${bot.name}, ${bot.roleTitle}`}>
       <TitleStrip sidebarOpen={sidebarOpen} onToggleSidebar={onToggleSidebar} inset={titlebarInset} />
-      <BotHeader bot={bot} spent={spentToday(chats)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
+      <BotHeader bot={bot} spent={spentInChats(chats)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
       <div role="tablist" aria-label={`${bot.name}'s view`} className="flex shrink-0 items-center gap-1 border-b border-hairline px-5">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
@@ -130,7 +130,9 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
           <ChatList bot={bot} chats={chats} startedBy={startedBy} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {bot.paused && <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} />}
+            {bot.paused && (
+              <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
+            )}
             {open ? (
               <ErrorBoundary key={open.id} label="the chat">
                 <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
@@ -179,7 +181,7 @@ function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: 
         <Chip title="Agent and model"><Sparkles className="size-3" /> {harnessName}{bot.model ? ` · ${bot.model}` : ""}</Chip>
         <Chip title="Where it runs"><Laptop className="size-3" /> {runsOnLabel(bot)}</Chip>
         <Chip title="What it may do without asking" className={cn(full && "text-warning")}><ShieldOff className="size-3" /> {accessLabel(bot)}</Chip>
-        <Chip title="What its chats spent today, for information: bots have no budget">{spent}</Chip>
+        <Chip title="What its chats have spent in all, as their usage reads it, for information: bots have no budget">{spent}</Chip>
         {bot.paused ? (
           <Button size="xs" variant="outline" disabled={busy} onClick={onResume}><Play /> Resume</Button>
         ) : (
@@ -190,14 +192,28 @@ function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: 
   );
 }
 
-/** A paused bot still answers a direct message (23.12); the reply view says it is paused. */
-function PausedBanner({ bot, busy, onResume }: { bot: Bot; busy: boolean; onResume: () => void }) {
+/**
+ * A paused bot still answers a direct message (23.12), in plan mode, and the reply view says so. A resume asked for
+ * from the `terminalx` CLI waits here for the owner: only this Resume applies it (PRO-468).
+ */
+function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: boolean; onResume: () => void; onDismiss: () => void }) {
+  const asked = !!bot.resumeRequest;
   return (
     <div role="status" className="mx-4 mt-3 flex shrink-0 items-center gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
       <Pause className="size-4 shrink-0 text-warning" />
       <p className="min-w-0 flex-1 text-[12.5px] text-foreground">
-        <span className="font-medium">Paused.</span> {bot.name} still answers you here, and starts no work of its own until you resume it.
+        {asked ? (
+          <>
+            <span className="font-medium">Resume {bot.name}?</span> The terminalx command line asked to resume it. Only you can, here.
+          </>
+        ) : (
+          <>
+            <span className="font-medium">Paused.</span> {bot.name} still answers you here, in plan mode: it changes nothing and starts no sessions or runs
+            until you resume it.
+          </>
+        )}
       </p>
+      {asked && <Button size="xs" variant="ghost" disabled={busy} onClick={onDismiss}>Not now</Button>}
       <Button size="xs" variant="outline" disabled={busy} onClick={onResume}><Play /> Resume</Button>
     </div>
   );

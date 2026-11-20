@@ -165,7 +165,7 @@ pub fn call(
         })?;
     // The tab's own secret, for commands whose answer depends on which agent tab asks: the
     // session and tab a caller names are only claims.
-    if matches!(command, "review.comment" | "runs.takeOver") {
+    if matches!(command, "review.comment" | "runs.takeOver") || command.starts_with("bots.") {
         params["hookToken"] = json!(std::env::var(crate::hooks::TOKEN_ENV).unwrap_or_default());
     }
     let request = ControlRequest {
@@ -950,10 +950,11 @@ impl ControlService {
     /// Bots (`bots`, PRO-466): hire, list, rename, pause and delete them. With
     /// Settings → Experimental → Bots off every one answers `bots_off`.
     ///
-    /// A pause from a bot's own chat (PRO-468) is recorded as that bot's, and
-    /// a bot's chat may not resume that bot, nor every bot at once: a paused
-    /// bot never resumes itself. Any other caller is the owner. Like every
-    /// caller here, the session is what the command says it runs in.
+    /// PRO-468: anyone may pause. A resume, or every bot's, is never applied
+    /// from here: it is recorded on the bot and the owner answers it in the
+    /// app (the window's own Resume needs no confirmation). A session that
+    /// works for a bot (`Caller`) is refused hiring, deleting and resuming;
+    /// its pause is recorded as the bot's when its launch secret proves it.
     fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
@@ -976,34 +977,70 @@ impl ControlService {
             }
         };
         let shown = |bot: &bots::Bot| json!({"bot": bot, "home": bots::home(bot)});
-        let calling_bot = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()).and_then(|session| bots::chat::session_bot(&session)).map(|bot| bot.id);
-        let by = calling_bot.clone().unwrap_or_else(|| bots::OWNER.into());
-        let no_self_resume = || ControlError::new("forbidden", "A bot does not resume itself. Only your owner resumes you.", None::<String>);
-        match command {
-            "bots.list" => Ok(json!(bots::listing().map_err(failed)?)),
-            "bots.show" => Ok(shown(&named()?)),
-            "bots.create" => Ok(shown(&bots::chat::hire(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)),
+        // The bot the caller's session works for, by its own claim (a session
+        // id in its environment), which only ever takes rights away. A pause
+        // is recorded as the bot's only when the tab's launch secret proves it.
+        let caller = Caller::of(&self.manager, &params);
+        let by = caller.verified_bot().unwrap_or_else(|| bots::OWNER.into());
+        let from_bot = |what: &str| ControlError::new(
+            "forbidden",
+            format!("A bot, and a session a bot started, does not {what}. Only your owner does, in TerminalX."),
+            Some("Tell your owner what you need and why; do not try another way.".into()),
+        );
+        let waiting = "Waiting for you to confirm in TerminalX: a resume asked for from the command line is applied only when you press Resume in the app.";
+        let answer = match command {
+            "bots.list" => json!(bots::listing().map_err(failed)?),
+            "bots.show" => shown(&named()?),
+            "bots.create" => {
+                if caller.bot.is_some() {
+                    return Err(from_bot("hire bots"));
+                }
+                shown(&bots::chat::hire(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)
+            }
             "bots.rename" => {
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
-                Ok(json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?}))
+                json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?})
             }
-            "bots.pause" => Ok(json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?})),
+            "bots.pause" => json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?}),
+            // Never applied from here: the owner answers in the app.
             "bots.resume" => {
-                let bot = named()?;
-                if calling_bot.as_deref() == Some(bot.id.as_str()) {
-                    return Err(no_self_resume());
+                if caller.bot.is_some() {
+                    return Err(from_bot("resume bots"));
                 }
-                Ok(json!({"bot": bots::resume(sink, &bot.id).map_err(failed)?}))
+                let bot = bots::request_resume(sink, &named()?.id, "cli").map_err(failed)?;
+                let asked = bot.paused.is_some();
+                json!({"bot": bot, "waiting": asked, "message": if asked { waiting } else { "Not paused: nothing to resume." }})
             }
             "bots.delete" => {
+                if caller.bot.is_some() {
+                    return Err(from_bot("delete bots"));
+                }
                 let bot = named()?;
+                bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
-                Ok(json!({"deleted": bot.id, "name": bot.name}))
+                bots::enforce::after_delete(sink, &bot.id);
+                json!({"deleted": bot.id, "name": bot.name})
             }
-            "bots.pauseAll" => Ok(json!(bots::pause_all(sink, &by).map_err(failed)?)),
-            _ if calling_bot.is_some() => Err(no_self_resume()),
-            _ => Ok(json!(bots::resume_all(sink).map_err(failed)?)),
+            "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
+            _ => {
+                if caller.bot.is_some() {
+                    return Err(from_bot("resume bots"));
+                }
+                let paused: Vec<String> = bots::listing().map_err(failed)?.bots.into_iter().filter(|bot| bot.paused.is_some()).map(|bot| bot.id).collect();
+                for id in &paused {
+                    bots::request_resume(sink, id, "cli").map_err(failed)?;
+                }
+                let mut listing = json!(bots::listing().map_err(failed)?);
+                listing["waiting"] = json!(!paused.is_empty());
+                listing["message"] = json!(if paused.is_empty() { "No bot is paused." } else { waiting });
+                listing
+            }
+        };
+        // A pause or a delete reaches the bot's running sessions now.
+        if matches!(command, "bots.pause" | "bots.pauseAll" | "bots.delete") {
+            bots::enforce::reconcile(&self.manager);
         }
+        Ok(answer)
     }
 
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
@@ -1017,6 +1054,9 @@ impl ControlService {
         // A run's worker leads no run and steers none, its own lead's included: it may read them.
         if matches!(command, "runs.create" | "runs.start" | "runs.stop" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup") && caller.as_ref().is_some_and(crate::orchestration::guard::limited) {
             return Err(ControlError::new("forbidden", "A worker of an orchestration run does not create, start, stop, merge, steer or clean up a run. Report what is ready; the lead decides what happens next.", None::<String>));
+        }
+        if matches!(command, "runs.create" | "runs.start") {
+            Caller::of(&self.manager, &params).refuse_while_paused("start runs")?;
         }
         if command == "runs.create" {
             let lead = match optional_string(&params, "lead") {
@@ -1443,6 +1483,16 @@ impl ControlService {
             validate_control_session_target(p.use_worktree, p.on_main)?;
             if p.name.is_some() && p.on_main {
                 return Err(ControlError::invalid("--name requires a new worktree and cannot be used with --on-main."));
+            }
+        }
+        // A session that works for a bot starts sessions that work for it too
+        // (PRO-468): recorded as its own, under its access, and none while paused.
+        let bot_caller = Caller::of(&self.manager, &json!({"caller": p.caller.clone()}));
+        if bot_caller.bot.is_some() {
+            bot_caller.refuse_while_paused("start sessions")?;
+            let own = p.parent.as_deref().map(str::trim).is_none_or(|parent| p.caller["session"].as_str() == Some(parent));
+            if p.no_parent || !own {
+                return Err(ControlError::new("forbidden", "A session that works for a bot records itself as the one that started a new session: drop --parent and --no-parent.", None::<String>));
             }
         }
         // Settled before anything is created: a parent nobody knows must not
@@ -2560,6 +2610,52 @@ pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, Con
 /// that is only what the command's environment says, which is enough for a
 /// record that grants nothing, and a session the app does not know (the
 /// environment of one since deleted) is simply not recorded.
+/// Who a `terminalx` command says it runs for (PRO-468): the bot the
+/// session it names works for, and whether the tab's own launch secret
+/// proves the claim. The claim alone may take rights away, never give them.
+struct Caller {
+    /// The bot's id, its name when it can be read, and whether it is paused
+    /// (a bot that cannot be read now counts as paused).
+    bot: Option<String>,
+    name: String,
+    paused: bool,
+    verified: bool,
+}
+
+impl Caller {
+    fn of(manager: &SessionManager, params: &Value) -> Self {
+        let session = params["caller"]["session"].as_str().and_then(|id| index::get(id).ok());
+        let Some(id) = session.as_ref().and_then(crate::bots::chat::acting_bot) else {
+            return Self { bot: None, name: String::new(), paused: false, verified: false };
+        };
+        let (name, paused) = match crate::store::bots::get(&id) {
+            Ok(Some(bot)) => (bot.name, bot.paused.is_some()),
+            _ => ("Its bot".to_owned(), true),
+        };
+        let verified = match (session.as_ref(), params["caller"]["tab"].as_str()) {
+            (Some(session), Some(tab)) => manager.authenticates_cli(&session.id, tab, params["hookToken"].as_str().unwrap_or_default()),
+            _ => false,
+        };
+        Self { bot: Some(id), name, paused, verified }
+    }
+
+    fn verified_bot(&self) -> Option<String> {
+        self.bot.clone().filter(|_| self.verified)
+    }
+
+    /// Refused while the bot it works for is paused: a paused bot starts no work of its own.
+    fn refuse_while_paused(&self, what: &str) -> Result<(), ControlError> {
+        if self.bot.is_none() || !self.paused {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            "bot_paused",
+            format!("{} is paused, so a session that works for it does not {what} until its owner resumes it.", self.name),
+            Some("Answer in this conversation, and tell your owner what you would start once resumed.".into()),
+        ))
+    }
+}
+
 fn parent_of_new_session(parent: Option<&str>, no_parent: bool, caller: &Value) -> Result<Option<index::ParentRef>, ControlError> {
     if no_parent {
         return match parent {
@@ -3085,17 +3181,79 @@ mod tests {
         let (service, _sink) = headless_service();
         let ask = |command: &str, params: Value| service.execute(command, params, "r");
         let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let other = ask("bots.create", json!({"role": "watcher", "name": "Argus"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
         let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id && bot.home)).expect("a hire makes the home chat");
         let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        service.manager.install_review_test_cli(&chat.id, &chat.tabs[0].id, "launch-secret");
 
-        assert_eq!(ask("bots.pause", json!({"bot": "atlas", "caller": caller})).unwrap()["bot"]["paused"]["by"], id);
-        for (command, params) in [("bots.resume", json!({"bot": "atlas", "caller": caller})), ("bots.resumeAll", json!({"caller": caller}))] {
-            let refused = ask(command, params).unwrap_err();
-            assert_eq!(refused.code, "forbidden", "{command}");
+        // A claim without the tab's secret, or with another, is no proof: the pause stands, as nobody's bot.
+        for token in [None, Some("forged")] {
+            let mut params = json!({"bot": "argus", "caller": caller});
+            if let Some(token) = token {
+                params["hookToken"] = json!(token);
+            }
+            assert_eq!(ask("bots.pause", params).unwrap()["bot"]["paused"]["by"], crate::bots::OWNER, "{token:?}");
+            crate::bots::resume(service.sink.as_ref(), &other).unwrap();
         }
+        // Proved by the secret its launch was given, the pause is the bot's.
+        assert_eq!(ask("bots.pause", json!({"bot": "atlas", "caller": caller, "hookToken": "launch-secret"})).unwrap()["bot"]["paused"]["by"], id);
+        ask("bots.pause", json!({"bot": "argus"})).unwrap();
+        // Its chat, proved or not, resumes no bot (itself or another), hires none and deletes none.
+        for (command, params) in [
+            ("bots.resume", json!({"bot": "atlas", "caller": caller, "hookToken": "launch-secret"})),
+            ("bots.resume", json!({"bot": "argus", "caller": caller})),
+            ("bots.resumeAll", json!({"caller": caller})),
+            ("bots.create", json!({"role": "cto", "name": "Echo", "caller": caller})),
+            ("bots.delete", json!({"bot": "argus", "caller": caller})),
+        ] {
+            assert_eq!(ask(command, params).unwrap_err().code, "forbidden", "{command}");
+        }
+        // Paused, it starts no session and no run.
+        let refused = ask("sessions.create", json!({"quick": true, "agent": "claude", "prompt": "go", "caller": caller})).unwrap_err();
+        assert_eq!(refused.code, "bot_paused", "{}", refused.message);
+        assert_eq!(ask("runs.create", json!({"plan": {}, "caller": caller})).unwrap_err().code, "bot_paused");
         assert_eq!(crate::bots::get(&id).unwrap().paused.unwrap().by, id);
-        assert_eq!(ask("bots.pauseAll", json!({"caller": caller})).unwrap()["bots"][0]["paused"]["by"], id, "already paused: who paused it first stands");
-        assert!(ask("bots.resume", json!({"bot": "atlas"})).unwrap()["bot"].get("paused").is_none());
+        assert_eq!(ask("bots.pauseAll", json!({"caller": caller, "hookToken": "launch-secret"})).unwrap()["bots"][0]["paused"]["by"], id, "already paused: who paused it first stands");
+        // Without a caller it is the owner's terminal, and still only asks.
+        assert_eq!(ask("bots.resume", json!({"bot": "atlas"})).unwrap()["waiting"], true);
+        assert!(crate::bots::get(&id).unwrap().paused.is_some());
+        assert!(crate::bots::dismiss_resume(service.sink.as_ref(), &id).unwrap().unknown.get(crate::bots::RESUME_REQUEST_KEY).is_none());
+    }
+
+    /// A session a bot's chat starts through the CLI works for the bot: it
+    /// records the chat as its parent, and starts within the bot's access.
+    #[test]
+    fn what_a_bot_starts_works_for_it_under_its_access() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        crate::bots::update(service.sink.as_ref(), &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), ..Default::default() }).unwrap();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        for escape in [json!({"noParent": true}), json!({"parent": "elsewhere"})] {
+            let mut params = json!({"quick": true, "agent": "claude", "prompt": "go", "mode": "bypassPermissions", "caller": caller});
+            params.as_object_mut().unwrap().extend(escape.as_object().unwrap().clone());
+            assert_eq!(ask("sessions.create", params).unwrap_err().code, "forbidden", "{escape}");
+        }
+        // What `session_ops` does to the session it makes for that caller, its parent.
+        let mut session = chat.clone();
+        session.id = "started".into();
+        session.unknown.clear();
+        session.parent = Some(index::ParentRef { session_id: chat.id.clone(), tab_id: None });
+        session.tabs[0].permission_mode = "bypassPermissions".into();
+        crate::bots::chat::inherit(&mut session);
+        assert_eq!(crate::bots::chat::acting_bot(&session), Some(id.clone()));
+        assert!(crate::bots::chat::session_bot(&session).is_none(), "it is not one of the bot's chats");
+        assert_eq!(session.tabs[0].permission_mode, "manual", "capped at the bot's access");
+        // A fork of it still works for the bot.
+        let mut fork = session.clone();
+        fork.unknown.clear();
+        crate::bots::chat::keep_on_fork(&session, &mut fork);
+        assert_eq!(crate::bots::chat::acting_bot(&fork), Some(id));
     }
 
     /// `terminalx bots …` (PRO-466): refused while the experimental switch
@@ -3137,18 +3295,27 @@ mod tests {
         let renamed = ask("bots.rename", json!({"bot": "atlas", "name": "Kestrel"})).unwrap();
         assert_eq!((renamed["bot"]["id"].as_str(), renamed["bot"]["name"].as_str(), renamed["bot"]["slug"].as_str()), (Some(id.as_str()), Some("Kestrel"), Some("kestrel")));
         assert_eq!(ask("bots.pause", json!({"bot": "kestrel"})).unwrap()["bot"]["paused"]["by"], "owner");
-        assert!(ask("bots.resume", json!({"bot": "kestrel"})).unwrap()["bot"].get("paused").is_none());
+        // A resume from the command line waits for the owner in the app (PRO-468).
+        let asked = ask("bots.resume", json!({"bot": "kestrel"})).unwrap();
+        assert_eq!(asked["waiting"], true);
+        assert!(asked["message"].as_str().unwrap().contains("Waiting for you to confirm in TerminalX"));
+        assert!(asked["bot"]["paused"].is_object() && asked["bot"][crate::bots::RESUME_REQUEST_KEY]["by"] == "cli");
+        let back = crate::bots::resume(service.sink.as_ref(), &id).unwrap();
+        assert!(back.paused.is_none() && !back.unknown.contains_key(crate::bots::RESUME_REQUEST_KEY), "the window's Resume applies it");
         let paused = ask("bots.pauseAll", json!({})).unwrap();
         assert!(paused["bots"].as_array().unwrap().iter().all(|bot| bot["paused"]["by"] == "owner"));
         // What the next start of the app reads: the file holds both, paused.
         let stored: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("bots.json")).unwrap()).unwrap();
         assert_eq!(stored["bots"], paused["bots"]);
-        assert!(ask("bots.resumeAll", json!({})).unwrap()["bots"].as_array().unwrap().iter().all(|bot| bot.get("paused").is_none()));
+        let asked = ask("bots.resumeAll", json!({})).unwrap();
+        assert_eq!(asked["waiting"], true);
+        assert!(asked["bots"].as_array().unwrap().iter().all(|bot| bot["paused"].is_object() && bot[crate::bots::RESUME_REQUEST_KEY].is_object()));
+        assert!(crate::bots::resume_all(service.sink.as_ref()).unwrap().bots.iter().all(|bot| bot.paused.is_none()));
 
         assert_eq!(ask("bots.delete", json!({"bot": "kestrel"})).unwrap(), json!({"deleted": id, "name": "Kestrel"}));
         assert!(!home.exists() && crate::store::root().unwrap().join("trash").join("bots").join(&id).join("ROLE.md").is_file());
         assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 1);
-        assert_eq!(changes(&mut heard), 8);
+        assert_eq!(changes(&mut heard), 11);
 
         // Refusals name what was wrong.
         assert_eq!(ask("bots.show", json!({"bot": "kestrel"})).unwrap_err().code, "not_found");

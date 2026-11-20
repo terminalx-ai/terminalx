@@ -89,7 +89,7 @@ fn computer_launch(
 /// The one appended prompt a terminal launch of `tab` gives its agent: the
 /// workspace's prompts, the desktop tools' note, a sparse checkout's folders
 /// and, in a bot's chat, the bot's rules, role and memory as they are now.
-pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> String {
+pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> crate::cloud_config::AppendedPrompt {
     let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
     let bot = crate::bots::chat::launch_note(entry, tab);
     crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()])
@@ -2663,7 +2663,11 @@ impl SessionManager {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {
             let rt = runtime.lock().unwrap();
-            matches!(&rt.engine, Engine::Cli(cli) if crate::hooks::token_matches(&cli.origin.token, token))
+            match &rt.engine {
+                Engine::Cli(cli) => crate::hooks::token_matches(&cli.origin.token, token),
+                Engine::CodexStdio(engine) => crate::hooks::token_matches(&engine.hook_token, token),
+                _ => false,
+            }
         })
     }
 
@@ -5522,6 +5526,19 @@ impl SessionManager {
     /// is running changed, and the session itself — which the sidebar, the
     /// header, the dashboard and a paired device all draw from — whenever
     /// anything did, a request that is still waiting included.
+    /// Bring the tab's mode, and one waiting for the next launch, within
+    /// the limit of the bot `entry` works for, if it works for one.
+    pub(crate) fn hold_to_bot(&self, rt: &mut TabRuntime, entry: &index::SessionEntry) -> Result<()> {
+        let Some(limit) = crate::bots::chat::mode_limit(entry) else { return Ok(()) };
+        self.update_settings(rt, |s| {
+            s.permission_mode = limit.clamp(&s.permission_mode);
+            if let Some(mode) = s.requested_permission_mode.as_mut() {
+                *mode = limit.clamp(mode);
+            }
+        })?;
+        Ok(())
+    }
+
     fn update_settings(&self, rt: &mut TabRuntime, mut change: impl FnMut(&mut Settings)) -> Result<(Settings, Settings)> {
         rt.last_settings_report = None;
         // Tried on a copy first: most of what a provider reports changes
@@ -5632,10 +5649,13 @@ impl SessionManager {
                 // A mode a share refuses is held back rather than stored:
                 // `judge_reported_mode` says what becomes of it.
                 let mut held = None;
+                // So may one wider than the bot it works for allows (PRO-468),
+                // as when a plan is approved into another mode in the terminal.
+                let bot_limit = index::get(&rt.session_id).ok().and_then(|entry| crate::bots::chat::mode_limit(&entry));
                 let result = self.update_settings(rt, |s| {
                     held = None;
                     let mode = stance.mode(&s.permission_mode);
-                    if mode != s.permission_mode && !settings::allowed_while_shared(&mode) {
+                    if mode != s.permission_mode && (!settings::allowed_while_shared(&mode) || bot_limit.as_ref().is_some_and(|limit| !limit.allows(&mode))) {
                         held = Some(mode);
                     } else {
                         s.reported_mode(&mode);
@@ -5690,21 +5710,24 @@ impl SessionManager {
         // A CLI started by hand is not the app's to restart, and takes no
         // guest's prompt (`send_impl`): its mode is simply what it says.
         let by_hand = matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some());
-        if by_hand || !sharing.sessions.contains_key(&rt.session_id) {
+        let entry = index::get(&rt.session_id).ok();
+        let bot_refusal = entry.as_ref().and_then(|entry| crate::bots::chat::refuses_mode(entry, &mode));
+        let shared = sharing.sessions.contains_key(&rt.session_id) && !settings::allowed_while_shared(&mode);
+        if by_hand || (!shared && bot_refusal.is_none()) {
             if let Err(error) = self.update_settings(&mut rt, |s| s.reported_mode(&mode)) {
                 log::warn!("mode reported by {}/{}: {error:#}", rt.session_id, rt.tab_id);
             }
             return false;
         }
         let agent = agent_name(&rt.harness);
-        let kept = index::get(&rt.session_id).ok().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| tab.permission_mode.clone())).unwrap_or_default();
+        let kept = entry.as_ref().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| tab.permission_mode.clone())).unwrap_or_default();
         let (reported, kept) = (settings::mode_label(&mode), settings::mode_label(&kept));
-        log::warn!("{}/{} reported {mode} while shared: restarting it in {kept}", rt.session_id, rt.tab_id);
-        self.publish(
-            &mut rt,
-            Payload::Status { text: format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}.") },
-            None,
-        );
+        log::warn!("{}/{} reported {mode}, which it may not be in: restarting it in {kept}", rt.session_id, rt.tab_id);
+        let text = match &bot_refusal {
+            Some(why) if !shared => format!("{agent} was switched to {reported} in the terminal. {why} So {agent} was restarted in {kept}."),
+            _ => format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}."),
+        };
+        self.publish(&mut rt, Payload::Status { text }, None);
         // Whatever it was doing, it was doing in a mode the share forbids.
         self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
         let current_tail = match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => return false };
@@ -5803,6 +5826,10 @@ impl SessionManager {
     }
 
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
+        // No mode wider than a bot's access, from the picker, the CLI or a phone (PRO-468).
+        if let Some(refusal) = crate::bots::chat::refuses_mode(&index::get(session_id)?, mode) {
+            bail!(refusal);
+        }
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_configuration()?; }
@@ -6217,6 +6244,9 @@ impl SessionManager {
         if tab.permission_mode == follow::MODE_SET_IN_TERMINAL {
             self.update_settings(rt, |s| s.permission_mode = follow::MODE_WHEN_RESUMED.into())?;
         }
+        // A session that works for a bot launches in no wider a mode than
+        // the bot's access allows now, whatever the tab was left in (PRO-468).
+        self.hold_to_bot(rt, entry)?;
         let tab = &index::get(&rt.session_id)?.tab(&rt.tab_id).cloned().unwrap_or_else(|| tab.clone());
         // A model, effort or mode that was waiting for the process to be
         // replaced rides with this launch, and is what the tab runs from
@@ -6324,8 +6354,14 @@ impl SessionManager {
         // checkout has (`sparse_checkout.rs`), and a bot's role and memory
         // (`bots::chat`). A second `--append-system-prompt` or
         // `developer_instructions` would replace the first.
+        // The text itself travels in a variable the shell expands as one
+        // word, never on its command line, and the agent is not left with it.
         let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note);
-        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset, &after_profile);
+        if let Some(value) = prompt.value {
+            env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));
+            unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());
+        }
+        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt.args), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
@@ -9240,9 +9276,9 @@ mod tests {
         })).unwrap();
         assert!(env.is_empty());
         assert!(computer.args.contains("cua-driver") && !computer.args.contains("--append-system-prompt"));
-        let prompt = crate::cloud_config::prompt_args("claude", &[Some("workspace"), computer.note]);
-        assert_eq!(prompt.matches("--append-system-prompt").count(), 1);
-        assert!(prompt.contains("workspace") && prompt.contains("host.docker.internal"));
+        let prompt = crate::cloud_config::prompt_argv("claude", &[Some("workspace"), computer.note]);
+        assert_eq!(prompt.iter().filter(|word| *word == "--append-system-prompt").count(), 1);
+        assert!(prompt[1].contains("workspace") && prompt[1].contains("host.docker.internal"));
     }
 
     #[test]

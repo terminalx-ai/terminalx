@@ -39,18 +39,20 @@ export function botViewFor(
 }
 
 export interface BotChats {
-  /** The home chat first, then the others, newest first. */
+  /** The home chat first (the newest made, if there are two), then the others, last written in first. */
   chats: SessionEntry[];
   /** Sessions a chat of this bot started, newest first. */
   startedBy: SessionEntry[];
 }
 
 const newest = (a: SessionEntry, b: SessionEntry) => (b.modified || b.created).localeCompare(a.modified || a.created);
+/** The home chat the app answers with is the newest made (`bots::chat::home_chat`), so the list goes by that too. */
+const newestMade = (a: SessionEntry, b: SessionEntry) => b.created.localeCompare(a.created);
 
 export function botChats(sessions: readonly SessionEntry[], botId: string): BotChats {
   const own = sessions.filter((session) => botOf(session) === botId && !session.archived);
   const ids = new Set(own.map((session) => session.id));
-  const home = own.filter((session) => session.bot?.home).sort(newest);
+  const home = own.filter((session) => session.bot?.home).sort(newestMade);
   const others = own.filter((session) => !session.bot?.home).sort(newest);
   const startedBy = sessions.filter((session) => !session.archived && !ids.has(session.id) && !!session.parent && ids.has(session.parent.sessionId)).sort(newest);
   return { chats: [...home, ...others], startedBy };
@@ -68,17 +70,15 @@ export function startBotChat(botId: string): Promise<SessionEntry> {
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /**
- * What the bot's own chats have spent, as their tabs' usage reads it, counting the tabs whose usage was last read
- * today. For information only: bots have no budget or cap (PRO-459).
+ * What the bot's own chats have spent in all, as their tabs' usage reads it: a tab's usage is its whole
+ * conversation's, so there is no day's share of it to show. For information only: bots have no budget or cap (PRO-459).
  */
-export function spentToday(chats: readonly SessionEntry[], now = new Date()): string {
-  const today = now.toDateString();
+export function spentInChats(chats: readonly SessionEntry[]): string {
   let total = 0;
   for (const session of chats) {
     for (const tab of session.tabs) {
-      if (!tab.usage || new Date(tab.usage.updated).toDateString() !== today) continue;
-      for (const model of tab.usage.models) total += model.costUsd ?? 0;
+      for (const model of tab.usage?.models ?? []) total += model.costUsd ?? 0;
     }
   }
-  return `${usd.format(total)} today`;
+  return `${usd.format(total)} spent`;
 }

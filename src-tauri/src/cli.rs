@@ -1590,7 +1590,10 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
             _ => Err(invalid(format!("bots {command} needs {option} {what}."))),
         }
     };
-    // A pause or resume says which session it runs in: one from a bot's own chat is that bot's (PRO-468).
+    // Every bots command says which session it runs in (PRO-468): one that
+    // works for a bot may pause but not hire, delete or resume, and the app
+    // checks the claim against the tab's own secret before it records a
+    // pause as the bot's.
     let from_caller = |mut params: Value| {
         if let Some(caller) = calling_session() {
             params["caller"] = caller;
@@ -1604,12 +1607,12 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "create" => {
             let role = said(tokens, "--role", "ROLE (cto, chief-of-staff, ux-designer, qa-engineer, release-manager, docs-writer, security-auditor or watcher)")?;
             let name = said(tokens, "--name", "NAME")?;
-            rpc("bots.create", json!({"role": role, "name": name}), tokens)
+            rpc("bots.create", from_caller(json!({"role": role, "name": name})), tokens)
         }
         "rename" => {
             let name = said(tokens, "--name", "NAME")?;
             let bot = tokens.required_front("bot")?;
-            rpc("bots.rename", json!({"bot": bot, "name": name}), tokens)
+            rpc("bots.rename", from_caller(json!({"bot": bot, "name": name})), tokens)
         }
         "pause" | "resume" => {
             let bot = tokens.required_front("bot")?;
@@ -1617,7 +1620,7 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
         }
         "show" | "delete" => {
             let bot = tokens.required_front("bot")?;
-            rpc(&format!("bots.{command}"), json!({"bot": bot}), tokens)
+            rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
         }
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }

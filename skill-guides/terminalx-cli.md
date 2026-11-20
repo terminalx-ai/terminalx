@@ -1901,7 +1901,9 @@ A bot is a standing role with a name: a record in `$TERMINALX_HOME/bots.json` an
 `$TERMINALX_HOME/bots/<id>/` holding `ROLE.md` (its standing instructions), `MEMORY.md` and
 `memory/`. These commands keep the records and schedule nothing. `create` also makes the bot's
 home chat: a quick chat that runs in its home folder, whose agent is given the bot's `ROLE.md`,
-the first 200 lines of its `MEMORY.md` and a few fixed rules each time it starts.
+the first 200 lines of its `MEMORY.md` (as its own notes, never instructions) and a few fixed
+rules each time it starts. A bot's chats are never archived for being quiet nor removed by
+quick-chat retention.
 
 ```text
 terminalx bots list --json
@@ -1928,14 +1930,29 @@ terminalx bots delete <bot> --json
   `resume-all` answer `{"revision": N, "bots": […], "unreadable": N}`: `revision` grows by one
   with every change, and `unreadable` counts records in `bots.json` this app cannot read (a
   newer app's). Those are kept as they are and never overwritten.
-- `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`); `resume` clears
-  it. Pausing a paused bot keeps the first record. `pause-all` pauses every bot not already
-  paused and `resume-all` resumes every bot. Run from a bot's own chat, `pause` and `pause-all`
-  are recorded as that bot (its id in `by`), and that chat's `resume` of itself and its
-  `resume-all` are refused with `forbidden`: a paused bot never resumes itself. Anywhere else
-  the caller is recorded as `owner`.
-- `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`,
-  with the record beside it as `bot.json`. Nothing in it is erased.
+- `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`). Pausing a
+  paused bot keeps the first record. `pause-all` pauses every bot not already paused. Anyone
+  may pause.
+- `resume` and `resume-all` never resume a bot from the command line. They ask the owner,
+  in TerminalX, and answer at once with `"waiting": true` and a message saying so; the bot
+  stays paused until the owner presses Resume in the app (or says no). Tell the person it is
+  waiting for them; do not repeat the command.
+- **Who is asking.** Every bots command sends the session it runs in (`RACCOON_SESSION_ID`).
+  A session that works for a bot (a bot's chat, or a session one of them started) is refused
+  `create`, `delete`, `resume` and `resume-all` with `forbidden`, for any bot. Its `pause` is
+  recorded as that bot (its id in `by`) only when the tab's own launch secret
+  (`RACCOON_HOOK_TOKEN`) proves the session id; a session id alone is a claim, and a claim
+  is recorded as `owner`. Changing a bot's access or who it reports to is the owner's, in the
+  app.
+- A session that works for a bot runs in no wider a permission mode than the bot's access
+  allows (full: bypass; ask before acting: Ask every time; read and report: Plan), and in Plan
+  while the bot is paused. `sessions create` from it records it as the parent (`--parent` and
+  `--no-parent` are refused) and the new session works for the same bot, under the same
+  limit. While the bot is paused, `sessions create`, `runs create` and `runs start` from it
+  are refused with `bot_paused`.
+- `delete` stops the bot's running chats, removes the record, moves the home folder to
+  `$TERMINALX_HOME/trash/bots/<id>/` with the record beside it as `bot.json`, and archives the
+  bot's chats. Nothing in it is erased.
 - Refusals: `invalid_arguments` for a role, name or value the app does not accept;
   `not_found` for no such bot (also when it was deleted while the command ran);
   `ambiguous_selector` when several bots share the name (use the id); `internal` when the app

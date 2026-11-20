@@ -267,20 +267,56 @@ pub struct LaunchConfig {
     pub prompt: Option<String>,
 }
 
-/// The one argument that appends `texts` (empty ones skipped), joined by a
-/// blank line, to an agent's instructions: `--append-system-prompt` for
-/// Claude Code, which honours only one, and `-c developer_instructions=…`
-/// for Codex, where a later override of the key replaces an earlier one.
-/// Shell-quoted with a leading space; empty when nothing is to be appended
-/// or the harness takes no prompt.
-pub fn prompt_args(harness: &str, texts: &[Option<&str>]) -> String {
+/// The variable an appended prompt travels in to a launch through a login
+/// shell. Text the agent is told (a bot's memory among it, written by the
+/// agent itself) never stands on the shell's command line, where a shell
+/// with other quoting rules (fish, csh) could read part of it as a command.
+pub const APPENDED_PROMPT_ENV: &str = "TERMINALX_APPENDED_PROMPT";
+
+/// `texts` (empty ones skipped), joined by a blank line: the one prompt an
+/// agent is told besides its own.
+fn appended_prompt(texts: &[Option<&str>]) -> Option<String> {
     let prompt = texts.iter().flatten().map(|text| text.trim()).filter(|text| !text.is_empty()).collect::<Vec<_>>().join("\n\n");
-    if prompt.is_empty() { return String::new(); }
+    (!prompt.is_empty()).then_some(prompt)
+}
+
+/// The flag and the value that append `texts` to an agent's instructions:
+/// `--append-system-prompt` for Claude Code, which honours only one, and
+/// `-c developer_instructions=…` for Codex, where a later override of the
+/// key replaces an earlier one. The value as the agent reads it (TOML for
+/// Codex); `None` when nothing is to be appended or the harness takes no prompt.
+fn prompt_flag(harness: &str, texts: &[Option<&str>]) -> Option<(&'static str, String)> {
+    let prompt = appended_prompt(texts)?;
     match harness {
-        "claude" => format!(" --append-system-prompt {}", quote(&prompt)),
-        "codex" => format!(" -c {}", quote(&format!("developer_instructions={}", toml::Value::String(prompt)))),
-        _ => String::new(),
+        "claude" => Some(("--append-system-prompt", prompt)),
+        "codex" => Some(("-c", format!("developer_instructions={}", toml::Value::String(prompt)))),
+        _ => None,
     }
+}
+
+/// [`prompt_flag`] as the words of a launch that starts the agent itself, with no shell in between.
+pub fn prompt_argv(harness: &str, texts: &[Option<&str>]) -> Vec<String> {
+    prompt_flag(harness, texts).map(|(flag, value)| vec![flag.to_string(), value]).unwrap_or_default()
+}
+
+/// [`prompt_flag`] for a launch through a shell: the arguments, with a
+/// leading space, name [`APPENDED_PROMPT_ENV`] in double quotes, and `value`
+/// is what the launch puts in that variable. A quoted variable is expanded
+/// as one word by sh, bash, zsh and fish alike, whatever it holds.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AppendedPrompt {
+    pub args: String,
+    pub value: Option<String>,
+}
+
+pub fn prompt_args(harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
+    let Some((flag, value)) = prompt_flag(harness, texts) else { return AppendedPrompt::default() };
+    let args = match harness {
+        "codex" => format!(" {flag} \"developer_instructions=${APPENDED_PROMPT_ENV}\""),
+        _ => format!(" {flag} \"${APPENDED_PROMPT_ENV}\""),
+    };
+    let value = value.strip_prefix("developer_instructions=").map(str::to_owned).unwrap_or(value);
+    AppendedPrompt { args, value: Some(value) }
 }
 
 impl std::fmt::Debug for LaunchConfig {
@@ -878,7 +914,7 @@ mod tests {
         let config = store.launch_config("claude", "pane-1", Instant::now());
         assert_eq!(config.prompt.as_deref(), Some("Org rules.\n\nUse pnpm."));
         assert!(!config.args.contains("--append-system-prompt"), "the launch appends the prompt, once, with its other notes");
-        assert_eq!(prompt_args("claude", &[config.prompt.as_deref()]), " --append-system-prompt 'Org rules.\n\nUse pnpm.'");
+        assert_eq!(prompt_argv("claude", &[config.prompt.as_deref()]), ["--append-system-prompt", "Org rules.\n\nUse pnpm."]);
         assert!(!config.args.contains(SECRET) && !config.args.contains(OTHER_SECRET));
         let path = store.state().files.get("pane-1").cloned().unwrap();
         assert!(config.args.contains(&format!("--mcp-config '{}'", path.display())));
@@ -937,12 +973,44 @@ mod tests {
         assert!(config.env.contains(&("MCP_HEADER_SECRET_2".into(), OTHER_SECRET.into())));
     }
 
+    /// Text the agent is told reaches it word for word through every login
+    /// shell the launch uses, and none of it runs: quotes, a backslash before
+    /// a quote, `$()`, backticks and newlines included (a bot writes its own memory).
+    #[cfg(unix)]
+    #[test]
+    fn an_appended_prompt_reaches_the_agent_whole_and_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("ran");
+        let m = mark.display();
+        let hostile = format!("it's \"quoted\" \\' and \\\"; $(touch {m}) `touch {m}` ${{HOME}}\nline two; exit 3 &\n'; touch {m}; echo '\n\\");
+        for harness in ["claude", "codex"] {
+            let prompt = prompt_args(harness, &[Some(&hostile)]);
+            assert!(!prompt.args.contains("touch"), "the text is not on the command line: {}", prompt.args);
+            for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"].into_iter().filter(|shell| std::path::Path::new(shell).exists()) {
+                let out = std::process::Command::new(shell)
+                    .arg("-c")
+                    .arg(format!("exec /usr/bin/printf '%s\\0' {}", prompt.args))
+                    .env(APPENDED_PROMPT_ENV, prompt.value.as_deref().unwrap())
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{shell}: {}", String::from_utf8_lossy(&out.stderr));
+                let words: Vec<String> = String::from_utf8(out.stdout).unwrap().split_terminator('\0').map(str::to_owned).collect();
+                assert_eq!(words, prompt_argv(harness, &[Some(&hostile)]), "{shell} {harness}");
+                assert!(!mark.exists(), "{shell} ran part of the prompt");
+            }
+        }
+        let codex = prompt_argv("codex", &[Some(&hostile)]);
+        let table: toml::Table = toml::from_str(&codex[1]).unwrap();
+        assert_eq!(table["developer_instructions"].as_str().unwrap(), hostile.trim());
+        assert_eq!(prompt_args("claude", &[None, Some(" ")]), AppendedPrompt::default());
+    }
+
     #[test]
     fn codex_names_secrets_by_variable_only() {
         let store = synced("ws-codex", json!({}), Some(json!({ "NPM_TOKEN": SECRET, "SEARCH_TOKEN": OTHER_SECRET })), None);
         let config = store.launch_config("codex", "pane", Instant::now());
         assert!(config.prompt.is_some() && !config.args.contains("developer_instructions="));
-        assert!(prompt_args("codex", &[config.prompt.as_deref()]).starts_with(" -c 'developer_instructions=\""));
+        assert!(prompt_argv("codex", &[config.prompt.as_deref()])[1].starts_with("developer_instructions=\""));
         assert!(config.args.contains("mcp_servers.docs="));
         assert!(config.args.contains("env_vars = [\"DOCS_KEY\"]"));
         assert!(config.args.contains("env_http_headers = { Authorization = \"MCP_HEADER_SECRET_1\" }"));

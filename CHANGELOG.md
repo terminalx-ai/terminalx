@@ -14,9 +14,14 @@
   memory and a few fixed rules each time it starts, so an edited `ROLE.md`
   reaches the next conversation. A bot's view has its header and tabs, with
   Chat filled: its chats and the sessions they started beside the transcript.
-  Its chats leave the sidebar's lists. A paused bot still answers and says it
-  is paused; a pause from a bot's own chat is recorded as that bot's, and it
-  cannot resume itself (PRO-468).
+  Its chats leave the sidebar's lists, and are never archived for being quiet
+  or removed by retention. A bot's sessions, and what they start, run in no
+  wider a permission mode than its access allows, and in plan mode while it is
+  paused; a paused bot still answers. A resume from the `terminalx` CLI waits
+  for the owner to confirm it in the app, and a bot's own sessions cannot hire,
+  delete or resume bots. Deleting a bot stops and archives its chats; turning
+  Bots off stops them. A bot's memory reaches its agent as its own notes, read
+  safely and capped (PRO-468).
 
 ## 0.2.37
 

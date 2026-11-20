@@ -2159,6 +2159,8 @@ export const botsApi = {
   homeChat: (id: string) => invoke<SessionEntry>("bot_home_chat", { id }),
   /** Another conversation with the bot, in its home folder. */
   newChat: (id: string) => invoke<SessionEntry>("bot_new_chat", { id }),
+  /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
+  dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
 };
 
 export function errorMessage(e: unknown): string {

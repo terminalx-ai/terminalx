@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   resumeBot: vi.fn(async () => undefined),
   homeChat: vi.fn(),
   newChat: vi.fn(),
+  dismissResume: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/bots", () => ({ useBotStore: () => mocks.bots, pauseBot: mocks.pauseBot, resumeBot: mocks.resumeBot }));
@@ -22,7 +23,7 @@ vi.mock("@/lib/sessions", () => ({
   upsertSession: mocks.upsertSession,
   conversationTitle: (session: SessionEntry) => session.title,
 }));
-vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat }, errorMessage: (error: unknown) => String(error) }));
+vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume }, errorMessage: (error: unknown) => String(error) }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
@@ -45,7 +46,7 @@ const view = (chatId: string | null = null) => render(<BotView botId="b1" chatId
 beforeEach(() => {
   mocks.bots = { loaded: true, bots: [atlas], revision: 1, unreadable: 0, error: null, templates: null };
   mocks.sessions = { sessions: [home, other, started], harnesses: [{ id: "claude", name: "Claude Code" }] };
-  for (const mock of [mocks.selectSession, mocks.upsertSession, mocks.pauseBot, mocks.resumeBot, mocks.homeChat, mocks.newChat]) mock.mockClear();
+  for (const mock of [mocks.selectSession, mocks.upsertSession, mocks.pauseBot, mocks.resumeBot, mocks.homeChat, mocks.newChat, mocks.dismissResume]) mock.mockClear();
 });
 afterEach(cleanup);
 
@@ -54,7 +55,7 @@ describe("a bot's view (PRO-468)", () => {
     view();
     expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
     expect(screen.getByText("CTO")).toBeTruthy();
-    for (const chip of ["Claude Code", "This Mac", "Full access", "$0.00 today"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
+    for (const chip of ["Claude Code", "This Mac", "Full access", "$0.00 spent"]) expect(screen.getByText(chip, { exact: false })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy();
     const tabs = within(screen.getByRole("tablist")).getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Home", "Chat", "Duties", "Role and memory", "Settings"]);
@@ -105,11 +106,23 @@ describe("a bot's view (PRO-468)", () => {
     mocks.bots = { ...mocks.bots, bots: [{ ...atlas, paused: { at: new Date().toISOString(), by: "owner" } }] };
     view();
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Paused. Atlas still answers you here");
+    expect(banner.textContent).toContain("Paused. Atlas still answers you here, in plan mode: it changes nothing and starts no sessions or runs");
     expect(screen.getByTestId("session-view").textContent).toContain("home");
     fireEvent.click(within(banner).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(mocks.resumeBot).toHaveBeenCalledWith("b1"));
     expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
+  it("asks the owner about a resume the command line asked for, and only Resume here applies it", async () => {
+    mocks.bots = { ...mocks.bots, bots: [{ ...atlas, paused: { at: new Date().toISOString(), by: "owner" }, resumeRequest: { at: new Date().toISOString(), by: "cli" } }] };
+    view();
+    const banner = screen.getByRole("status");
+    expect(banner.textContent).toContain("Resume Atlas? The terminalx command line asked to resume it. Only you can, here.");
+    fireEvent.click(within(banner).getByRole("button", { name: "Not now" }));
+    await waitFor(() => expect(mocks.dismissResume).toHaveBeenCalledWith("b1"));
+    expect(mocks.resumeBot).not.toHaveBeenCalled();
+    fireEvent.click(within(banner).getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(mocks.resumeBot).toHaveBeenCalledWith("b1"));
   });
 
   it("pauses from the header", async () => {

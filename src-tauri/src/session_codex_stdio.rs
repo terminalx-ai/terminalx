@@ -128,7 +128,7 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
     let mut args = route.map(|route| shell_words(&route.codex_args)).unwrap_or_default();
     args.extend(shell_words(&config.args));
     args.extend(shell_words(&computer.args));
-    args.extend(shell_words(&crate::cloud_config::prompt_args("codex", &[config.prompt.as_deref(), computer.note, note])));
+    args.extend(crate::cloud_config::prompt_argv("codex", &[config.prompt.as_deref(), computer.note, note]));
     args.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
     let mut env = config.env.clone();
     let mut unset = Vec::new();
@@ -463,7 +463,10 @@ impl SessionManager {
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
         self.accepting_work()?;
-        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone(), tab.provider_session_id.clone());
+        // Held to the bot the session works for, as a terminal launch is (PRO-468).
+        self.hold_to_bot(rt, entry)?;
+        let mode = index::get(&rt.session_id)?.tab(&rt.tab_id).map(|held| held.permission_mode.clone()).unwrap_or_else(|| tab.permission_mode.clone());
+        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), mode, tab.provider_session_id.clone());
         let launch = engine.launch.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         rt.stdio_launch_permit = collaboration_v2::current();
@@ -536,9 +539,17 @@ impl SessionManager {
         current()?;
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
+        // Kept by the engine, so a `terminalx` call from this tab can be told
+        // from one that only names it (`SessionManager::authenticates_cli`).
+        let token = crate::hooks::mint_token();
+        if let Engine::CodexStdio(engine) = &mut rt_arc.lock().unwrap().engine {
+            if Arc::ptr_eq(&engine.launch, launch) {
+                engine.hook_token = token.clone();
+            }
+        }
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
-            ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
+            ("RACCOON_HOOK_TOKEN".into(), token),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ]);
