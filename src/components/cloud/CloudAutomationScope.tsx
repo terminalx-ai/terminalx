@@ -6,6 +6,8 @@ import { getDataPrivacy, subscribeDataPrivacy } from "@/lib/dataPrivacy";
 // Ignore unrelated account busy/refresh notifications so a pending refresh
 // does not discard a draft when its authority has stayed the same.
 let generation = 0;
+// Retire old callbacks immediately, even before React commits a batched target switch.
+export function retireAutomationTargetScope() { generation += 1; }
 function fingerprint(): string {
   const { status } = getAccount();
   return JSON.stringify([status.state, status.context, status.identity, status.organizations, status.multiOrg, getDataPrivacy()]);

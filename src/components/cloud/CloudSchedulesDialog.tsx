@@ -26,7 +26,7 @@ import {
   type AutomationForm,
 } from "@/lib/cloudSchedules";
 import { GithubTriggerEditor } from "./GithubTriggerEditor";
-import { useAutomationFence, useAutomationScope } from "./CloudAutomationScope";
+import { retireAutomationTargetScope, useAutomationFence, useAutomationScope } from "./CloudAutomationScope";
 import { openCloudSession } from "@/lib/cloudDashboard";
 import { cloudSessionKey, cloudWorkspaceKey } from "@/types/target";
 import { errorCode } from "@/lib/cloudTerminals";
@@ -679,7 +679,11 @@ let schedulesTarget: SchedulesTarget | null = null;
 const schedulesListeners = new Set<() => void>();
 
 export function openSchedulesDialog(target: SchedulesTarget | null) {
-  schedulesTarget = target;
+  if (schedulesTarget?.orgId !== target?.orgId || schedulesTarget?.workspaceId !== target?.workspaceId) {
+    retireAutomationTargetScope();
+  }
+  // A reused A object after batched A -> B -> A still needs a new store snapshot.
+  schedulesTarget = target ? { ...target } : null;
   for (const listener of [...schedulesListeners]) listener();
 }
 

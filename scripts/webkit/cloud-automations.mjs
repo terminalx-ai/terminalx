@@ -20,7 +20,7 @@ const schedule = {id:'a1',workspaceId:'w1',name:'PR triage',createdBy:'u1',agent
 api.accountStatus = async () => ({state:'signed-in',identity:{email:'fixture@example.test',name:'Fixture',organization:'Automation lab',organizationId:'o1'},context:{account:'fixture',scope:'profile',revision:'r1'},organizations:[{id:'o1',name:'Automation lab',role:'owner',isPersonal:false}],expiresAt:null,lastError:null});
 api.phase2DesktopContractsAvailable = async () => !held;
 api.cloudAutomations = async () => ({schedules:[schedule]});
-api.cloudAutomation = async () => {calls.push({kind:'detail'});return ({schedule,runs:[{id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},{id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},{id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:null,archivedAt:4}]});};
+api.cloudAutomation = async () => {calls.push({kind:'detail'});return ({schedule,runs:[{id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},{id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},{id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:'run-archived',archivedAt:4}]});};
 api.cloudWorkspaceRepositories = async () => ({configured:true,repositories:[{id:'row1',fullName:'acme/repo',state:'accessible'},{fullName:'acme/no-id',state:'accessible'}]});
 api.cloudAutomationEstimate = async (input) => {calls.push({kind:'estimate',input});return {estimate,supported:true,nextRunAt:null};};
 api.cloudAutomationCreate = async (input) => {calls.push({kind:'create',input});return schedule;};
@@ -49,9 +49,10 @@ try {
   assert.equal(await dialog.getByText(/Next run/).count(),0,'GitHub has no fabricated timer');
   await dialog.getByRole('button',{name:'Show runs',exact:true}).click();
   await dialog.getByText('Run workspace not allocated.',{exact:true}).first().waitFor();
-  assert.equal(await dialog.getByRole('button',{name:'Open run workspace',exact:true}).count(),1,'only own allocated workspace enables navigation');
+  assert.equal(await dialog.getByRole('button',{name:'Open run workspace',exact:true}).count(),2,'both allocated run workspaces, including archived, enable navigation');
   await dialog.getByText(/archival not observed/).waitFor();
   await dialog.getByTestId('automation-run-archived').getByText(/^Archived /).waitFor();
+  assert.equal(await dialog.getByTestId('automation-run-archived').getByRole('button',{name:'Open run workspace',exact:true}).count(),1,'observed archival retains its own workspace link');
   await dialog.getByRole('button',{name:'New scheduled task',exact:true}).click();
   await dialog.getByLabel('Name',{exact:true}).fill('PR report');await dialog.getByLabel('Prompt',{exact:true}).fill('Review the change.');
   await dialog.getByLabel('Trigger',{exact:true}).selectOption('github');

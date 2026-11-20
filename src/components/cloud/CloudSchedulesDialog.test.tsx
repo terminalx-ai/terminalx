@@ -106,7 +106,7 @@ beforeEach(() => {
   });
   mocks.pauseAll.mockResolvedValue({ paused: 3 });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); openSchedulesDialog(null); });
 
 describe("a workspace's scheduled tasks", () => {
   it("lists a task with when it runs, how its last run went and what it costs", async () => {
@@ -401,6 +401,63 @@ describe("the scheduled tasks dialog host", () => {
     expect((await screen.findByTestId("cloud-schedules-dialog")).textContent).toContain("Scheduled tasks for Docs site");
     act(() => openSchedulesDialog(null));
     expect(screen.queryByTestId("cloud-schedules-dialog")).toBeNull();
+  });
+});
+
+
+describe("batched hosted automation target transitions", () => {
+  const a = { orgId: "org-1", workspaceId: "ws-1", name: "Docs site" };
+  const b = { orgId: "org-1", workspaceId: "ws-2", name: "Other workspace" };
+  const openHost = async () => {
+    render(<CloudSchedulesDialogHost />);
+    act(() => openSchedulesDialog(a));
+    await screen.findByRole("button", { name: /New scheduled task/ });
+  };
+  it("retires an agreed quote across a batched A-B-A switch even when A is the same object", async () => {
+    await openHost(); await fillForm(); agreeToCost();
+    expect(createButton().disabled).toBe(false);
+    act(() => { openSchedulesDialog(b); openSchedulesDialog(a); });
+    expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
+    await fillForm();
+    expect((screen.getByRole("checkbox", { name: /starts the workspace and billed compute/ }) as HTMLInputElement).checked).toBe(false);
+    expect(createButton().disabled).toBe(true);
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+  it("discards a pending quote from before a batched A-B-A switch", async () => {
+    const old = deferred<CloudScheduleQuote>();
+    mocks.estimate.mockReturnValueOnce(old.promise).mockResolvedValue(quote({ estimate: { ...quote().estimate, monthlyMaxMicros: 9_000_000 } }));
+    await openHost();
+    fireEvent.click(screen.getByRole("button", { name: /New scheduled task/ }));
+    await waitFor(() => expect(mocks.estimate).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    await act(async () => { openSchedulesDialog(b); openSchedulesDialog(a); old.resolve(quote()); await Promise.resolve(); });
+    expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    expect(screen.getByTestId("cloud-schedule-cost").textContent).not.toContain("$5.10");
+    expect(createButton().disabled).toBe(true);
+    await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("$9.00"), { timeout: 3000 });
+  });
+  it.each(["create", "resume"])("does not refresh from old %s completion during a batched target A-B-A switch", async (operation) => {
+    const old = deferred<CloudAutomationDto>();
+    if (operation === "resume") listed = [schedule({ state: "paused" })];
+    await openHost();
+    if (operation === "create") {
+      mocks.create.mockReturnValue(old.promise);
+      await fillForm(); agreeToCost(); fireEvent.click(createButton());
+      await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
+    } else {
+      mocks.setActive.mockReturnValue(old.promise);
+      fireEvent.click(within(await row()).getByRole("button", { name: /Resume…/ }));
+      fireEvent.click(within(screen.getByTestId("cloud-schedule-resume-confirm")).getByRole("button", { name: "Resume" }));
+      await waitFor(() => expect(mocks.setActive).toHaveBeenCalledTimes(1));
+    }
+    await act(async () => {
+      openSchedulesDialog(b); openSchedulesDialog(a); old.resolve(schedule());
+      // Let old continuations run while the target transitions are still batched.
+      await Promise.resolve(); await Promise.resolve();
+    });
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
+    expect(mocks.list.mock.calls.every(([workspace]) => workspace === "ws-1")).toBe(true);
   });
 });
 
