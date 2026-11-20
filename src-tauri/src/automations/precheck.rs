@@ -525,6 +525,15 @@ pub(super) fn batch_goes_on(automation: &Automation) -> bool {
 /// check, Run now is what it always was.
 pub fn run_now(app: &impl AutomationHost, automation_id: &str) -> Result<AutomationRun> {
     let automation = automation_store::get(automation_id)?;
+    // A bot's duty runs from its bot's Duties tab, only while its bot may work (PRO-471).
+    anyhow::ensure!(!crate::bots::duties::is_duty(&automation), "{}", crate::bots::duties::ELSEWHERE);
+    run_now_of(app, automation)
+}
+
+/// [`run_now`] for an automation already read, with no question of whose it is.
+pub(crate) fn run_now_of(app: &impl AutomationHost, automation: Automation) -> Result<AutomationRun> {
+    let id = automation.id.clone();
+    let automation_id = id.as_str();
     if configured(automation.precheck.as_ref()).is_none() {
         return super::dispatch(app, automation_id, AutomationTrigger::Manual, None);
     }

@@ -85,7 +85,7 @@ pub fn guards(command: &str) -> bool {
 /// witnessed always; the runtime asks for the proof only when it raises
 /// access or changes the reporting line (`bots::enforce::needs_person`).
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update"];
+pub const GUARDED_BOTS: [&str; 12] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "quietHours"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -108,6 +108,8 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
             let widens = ["access", "reportsTo"].iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null()));
             widens && params[GIVES_MORE].as_bool() != Some(false)
         }
+        // Switching a duty off gives its bot nothing (PRO-471).
+        Some("dutySwitch") => params["params"]["on"].as_bool() != Some(false),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }

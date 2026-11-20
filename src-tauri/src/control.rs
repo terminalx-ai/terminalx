@@ -475,6 +475,12 @@ impl ControlService {
         None
     }
 
+    /// A request as the control socket hands it on, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn execute_for_tests(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        self.execute(command, params, "test")
+    }
+
     pub(crate) fn with_local_lifetime(mut self, lifetime: Arc<crate::local_runtime::Lifetime>) -> Self {
         self.local_lifetime = Some(lifetime);
         self

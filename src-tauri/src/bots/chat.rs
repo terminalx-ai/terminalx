@@ -275,6 +275,10 @@ pub fn hire(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Result<
     if let Err(error) = home_chat(sink, &bot.id) {
         log::warn!("bot {} was hired without its home chat: {error:#}", bot.id);
     }
+    // Its role's scheduled duties, each switched off until a person turns it on (PRO-471).
+    if let Err(error) = super::duties::from_template(sink, &bot) {
+        log::warn!("bot {} was hired without its role's duties: {error:#}", bot.id);
+    }
     Ok(bot)
 }
 
@@ -360,7 +364,7 @@ fn memory_head(memory: &str) -> (String, usize) {
 
 /// `text` inside `<tag>…</tag>`, with any closing tag in it broken, so nothing
 /// in the text ends the block early.
-fn fenced(tag: &str, text: &str) -> String {
+pub(super) fn fenced(tag: &str, text: &str) -> String {
     // Any letter case: `</MEMORY>` must not end the block either.
     let close = format!("</{tag}");
     let lower = text.to_ascii_lowercase();

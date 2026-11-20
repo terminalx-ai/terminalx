@@ -8,6 +8,7 @@
 //! every operation here refuses, and nothing about the app changes.
 
 pub mod chat;
+pub mod duties;
 pub mod enforce;
 pub mod templates;
 
