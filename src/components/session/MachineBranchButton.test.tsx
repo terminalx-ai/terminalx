@@ -45,6 +45,11 @@ function makeSource(): GitSource {
     push: vi.fn(async () => { status = { ...status, ahead: 0, upstream: "origin/feature" }; return null; }),
     pull: vi.fn(async () => null),
     createPr: vi.fn(async () => { prs = [pr()]; return null; }),
+    createPrWithPush: vi.fn(async () => {
+      status = { ...status, ahead: 0, upstream: "origin/feature" };
+      prs = [pr()];
+      return null;
+    }),
     readyPr: vi.fn(async () => undefined),
     mergePr: vi.fn(async () => { prs = [pr({ state: "MERGED" })]; }),
     conversation: vi.fn(() => ({ read: async () => ({ mergeMethods: { default: "REBASE", merge: true, squash: true, rebase: true } }) })),
@@ -171,6 +176,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("The branch changed");
     expect(git.push).not.toHaveBeenCalled();
     expect(git.createPr).not.toHaveBeenCalled();
+    expect(git.createPrWithPush).not.toHaveBeenCalled();
   });
 
   it("shows a diff-specific update indication for an older machine", async () => {
@@ -182,7 +188,7 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     expect(screen.getByRole("button", { name: "Create PR" })).toBeTruthy();
   });
 
-  it("pushes a branch the machine never pushed before opening its pull request", async () => {
+  it("uses verified publishing for a branch the machine never pushed", async () => {
     render();
     // Never pushed: Push leads, Create PR is in the menu.
     expect((await screen.findByRole("button", { name: "Push" })).hasAttribute("disabled")).toBe(false);
@@ -190,9 +196,11 @@ describe("machine session header Git step (PRO-404, 21.08)", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: /Create PR/ }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Create PR" }));
-    await waitFor(() => expect(git.createPr).toHaveBeenCalled());
-    expect(git.push).toHaveBeenCalledWith("feature", HEAD);
-    expect(git.push.mock.invocationCallOrder[0]).toBeLessThan(git.createPr.mock.invocationCallOrder[0]);
+    await waitFor(() => expect(git.createPrWithPush).toHaveBeenCalledExactlyOnceWith({
+      title: "Add read markers to the catalog feed", body: "", base: "main", draft: false, sessionId: "machine:m1:p1:s1", branch: "feature",
+    }, HEAD));
+    expect(git.push).not.toHaveBeenCalled();
+    expect(git.createPr).not.toHaveBeenCalled();
   });
 
   it("commits and pushes on the machine with the message given", async () => {
