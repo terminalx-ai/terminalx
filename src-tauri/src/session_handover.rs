@@ -657,7 +657,7 @@ impl SessionManager {
                 lineage: tui::Lineage { uuid: prompt.uuid, parent: prompt.parent }, seq: prompt.seq, text: prompt.text, worked_on: prompt.worked_on,
             }).collect()),
             input: InputBox { waiting: cli.input.waiting, marks: cli.input.marks, made_waiting: cli.input.made_waiting, stops: cli.input.stops, choice: cli.input.choice, prompt: ScreenPromptState {
-                shown: cli.input.screen_prompt, was: cli.input.screen_prompt_was, box_seen: cli.input.box_seen, unread_passes: 0,
+                shown: cli.input.screen_prompt, was: cli.input.screen_prompt_was, box_seen: cli.input.box_seen, unread_passes: 0, candidate: None,
             } },
             resend_after_abort: cli.resend_after_abort,
             codex_interrupt_hooks_owed: cli.codex_interrupt_hooks_owed,
