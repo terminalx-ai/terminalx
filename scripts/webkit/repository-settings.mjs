@@ -31,6 +31,7 @@ try {
           })();`,
       });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("button", { name: /^Projects \d+$/ }).click();
       const repositories = page.getByRole("group", { name: "Projects", exact: true });
       await repositories.waitFor();
       await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
