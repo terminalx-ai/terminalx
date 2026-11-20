@@ -87,9 +87,30 @@ pub fn guards(command: &str) -> bool {
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
 pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update"];
 
-/// Whether this request needs a person's consent: a guarded command, or a guarded bots operation.
+/// The field of a bots request where the window says an `update` gives the
+/// bot nothing more (less access, the same reporting line), so it sends no
+/// proof. The runtime judges that again itself (`bots::update_as`).
+pub const GIVES_MORE: &str = "givesMore";
+
+/// Whether this request needs a person's consent: a guarded command, or a
+/// guarded bots operation; an `update` only when it sets access or the
+/// reporting line, and the window did not find it gives nothing more.
 pub fn guards_request(command: &str, params: &Value) -> bool {
-    guards(command) || (command == BOTS_COMMAND && params["operation"].as_str().is_some_and(|operation| GUARDED_BOTS.contains(&operation)))
+    if guards(command) {
+        return true;
+    }
+    if command != BOTS_COMMAND {
+        return false;
+    }
+    match params["operation"].as_str() {
+        Some("update") => {
+            let patch = &params["params"]["patch"];
+            let widens = ["access", "reportsTo"].iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null()));
+            widens && params[GIVES_MORE].as_bool() != Some(false)
+        }
+        Some(operation) => GUARDED_BOTS.contains(&operation),
+        None => false,
+    }
 }
 
 /// Why a process that asks may not: it is this runtime, descends from it, or

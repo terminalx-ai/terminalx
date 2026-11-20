@@ -24,11 +24,18 @@
   paused; a paused bot still answers. A resume from the `terminalx` CLI waits
   for the owner to confirm it in the app (shown on the team page and the
   sidebar for a day), and a bot's own sessions cannot hire, delete or resume
-  bots, start cloud, pipeline or other-computer work, or approve permissions:
-  the app works out who asks from the calling process, not from what it
-  claims. A resume or more access gives each tab back its own mode, within the
-  bot's limit. Deleting a bot stops and archives its chats; turning Bots off
-  stops them. A bot's memory reaches its agent as its own notes, read safely
+  bots, start cloud, pipeline or other-computer work, approve permissions, or
+  change sessions through the runtime directly. The app places a command in
+  the tab that started it where it can (by its process, its session and its
+  terminal) and then ignores the session it names; a command it cannot place
+  counts as the owner's only from a terminal of the person's own, and one
+  that has made itself a terminal of its own (`script`, tmux) is not placed.
+  Hiring, resuming, deleting and raising access are confirmed by the
+  TerminalX window on a Mac, which restarts its runtime to do so when needed,
+  as pairing does. A resume or more access gives each tab back its own mode,
+  within the bot's limit, unless it was set by hand since. Deleting a bot
+  stops every session that works for it and archives its chats; turning Bots
+  off stops them. A bot's memory reaches its agent as its own notes, read safely
   and capped (PRO-468).
 
 ## 0.2.37

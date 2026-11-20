@@ -278,6 +278,19 @@ describe("Bots: hiring (23.03)", () => {
     expect(main().getByTestId("bots-hire-page")).toBeTruthy();
   });
 
+  it("offers Restart runtime when the runtime cannot confirm a hire, as pairing does", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restarting stops what it runs: Atlas's chat.");
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    const alert = await main().findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot confirm that you asked/);
+    expect(alert.textContent).not.toMatch(/runtime_restart_required/);
+    expect(main().getByRole("button", { name: /Restart runtime/ })).toBeTruthy();
+  });
+
   it("starts with the defaults the new bot really gets, focuses the name and keeps it when the role changes", async () => {
     await boot(listOf(0, []));
     act(() => showHireBot("watcher"));

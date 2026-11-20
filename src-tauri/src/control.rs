@@ -574,12 +574,7 @@ impl ControlService {
                     // A process in a bot's session reads here and changes nothing:
                     // its writes go through the commands that hold it to its bot (PRO-468).
                     // The window is in no session.
-                    if !runtime_read(command, &params) {
-                        let caller = Caller::of_process(&self.manager, &json!({}), crate::hooks::caller_pid());
-                        if caller.bot.is_some() {
-                            return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
-                        }
-                    }
+                    refuse_bot_runtime_call(&self.manager, command, &params)?;
                     // Bots (PRO-468): what gives a bot more than it has comes from the window, a person, only.
                     #[cfg(unix)]
                     let params = {
@@ -2648,6 +2643,19 @@ pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, Con
 /// that is only what the command's environment says, which is enough for a
 /// record that grants nothing, and a session the app does not know (the
 /// environment of one since deleted) is simply not recorded.
+/// Refused when the caller is placed in a bot's session and the call is not
+/// a read ([`runtime_read`]); the window is in no session.
+fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Value) -> Result<(), ControlError> {
+    if runtime_read(command, params) {
+        return Ok(());
+    }
+    let caller = Caller::of_process(manager, &json!({}), crate::hooks::caller_pid());
+    match caller.bot {
+        Some(_) => Err(caller.forbidden("change sessions or terminals through the runtime directly")),
+        None => Ok(()),
+    }
+}
+
 /// The `runtime.session.*` and `runtime.pty.*` calls that only read, which
 /// a process in a bot's session may make (PRO-468).
 fn runtime_read(command: &str, params: &Value) -> bool {
@@ -3299,7 +3307,8 @@ mod tests {
     }
 
     pub(super) fn headless_service() -> (ControlService, Arc<crate::sink::BroadcastSink>) {
-        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        // Room for every event a test reads back: a subscriber that lags reads none.
+        let sink = Arc::new(crate::sink::BroadcastSink::new(256));
         let endpoint = crate::hooks::prepare_control().unwrap();
         let manager = SessionManager::new(
             sink.clone(), Arc::new(crate::sink::NoObserver),
@@ -3540,6 +3549,7 @@ mod tests {
         let sink = crate::sink::BroadcastSink::new(8);
         let id = crate::bots::create(&sink, "cto", "Atlas").unwrap().id;
         crate::bots::update(&sink, &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), ..Default::default() }).unwrap();
+        let other = crate::bots::create(&sink, "watcher", "Argus").unwrap().id;
         let run = tempfile::Builder::new().prefix("tx").tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(run.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let guarded = [
@@ -3548,9 +3558,11 @@ mod tests {
             ("dismissResume", json!({"id": id})),
             ("create", json!({"roleTemplateId": "cto", "name": "Echo"})),
             ("delete", json!({"id": id})),
-            ("update", json!({"id": id, "patch": {"access": "full"}})),
-            ("update", json!({"id": id, "patch": {"reportsTo": "someone"}})),
-            ("update", json!({"id": id, "patch": {"access": "somethingNew"}})),
+        ];
+        let raises = [
+            json!({"id": id, "patch": {"access": "full"}}),
+            json!({"id": id, "patch": {"reportsTo": other}, "byPerson": true}),
+            json!({"id": id, "patch": {"access": "somethingNew"}}),
         ];
         let windows = [crate::serve_cli::consent::Window::Headless, crate::serve_cli::consent::Window::Keyed([7; 32])];
         for window in &windows {
@@ -3560,18 +3572,42 @@ mod tests {
                 let mut request = json!({"operation": operation, "params": params});
                 let refused = bots_from_a_person(run.path(), &mut request, window).unwrap_err();
                 assert_eq!(refused.code, "person_required", "{operation} {params}");
+                // Said as the Bots action it is, with what to do.
+                let said = if cfg!(target_os = "macos") && matches!(window, crate::serve_cli::consent::Window::Keyed(_)) { "Only you may" } else { "needs the TerminalX window on a Mac" };
+                assert!(refused.message.contains(said) && !refused.message.contains("pairing"), "{}", refused.message);
                 // A witness, but one held by the runtime itself, with no window's signature.
                 let mut request = json!({"operation": operation, "params": params});
                 let witness = crate::serve_cli::consent::witness_for("runtime.session.bots", run.path(), &mut request).unwrap().expect("a witness");
                 assert_eq!(bots_from_a_person(run.path(), &mut request, window).unwrap_err().code, "person_required", "{operation}");
                 drop(witness);
             }
+            for params in &raises {
+                assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "update", "params": params})), "the window witnesses {params}");
+                // The control token alone: told no person asked (whatever it says), and refused under the store's lock.
+                let mut request = json!({"operation": "update", "params": params});
+                bots_from_a_person(run.path(), &mut request, window).unwrap();
+                assert_eq!(request["params"][crate::bots::BY_PERSON], false, "{params}");
+                let refused = crate::bots::call(&sink, "update", &request["params"]).unwrap_err().to_string();
+                assert!(refused.contains(crate::bots::PERSON_REQUIRED), "{refused}");
+                // A witness that does not hold is refused at once, so the window can repair it.
+                let mut request = json!({"operation": "update", "params": params});
+                let witness = crate::serve_cli::consent::witness_for("runtime.session.bots", run.path(), &mut request).unwrap().expect("a witness");
+                assert_eq!(bots_from_a_person(run.path(), &mut request, window).unwrap_err().code, "person_required", "{params}");
+                drop(witness);
+            }
         }
+        assert_eq!(crate::bots::get(&id).unwrap().access, crate::bots::BotAccess::AskOutward, "never raised");
+        // A rename, or less access, asks for no proof, and is applied with none.
+        for patch in [json!({"name": "Atlas II"}), json!({"access": "readReport"})] {
+            let mut request = json!({"operation": "update", "params": {"id": id, "patch": patch}, crate::serve_cli::consent::GIVES_MORE: false});
+            assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &request), "{patch}");
+            bots_from_a_person(run.path(), &mut request, &windows[1]).unwrap();
+            crate::bots::call(&sink, "update", &request["params"]).unwrap();
+        }
+        assert_eq!(crate::bots::get(&id).unwrap().access, crate::bots::BotAccess::ReadReport);
         for (operation, params) in [
             ("pause", json!({"id": id})),
             ("pauseAll", json!({})),
-            ("update", json!({"id": id, "patch": {"access": "readReport"}})),
-            ("update", json!({"id": id, "patch": {"access": "askOutward", "name": "Atlas II"}})),
             ("list", json!({})),
             ("get", json!({"id": id})),
             ("roleRead", json!({"id": id})),
@@ -3631,8 +3667,8 @@ mod tests {
                 assert_eq!(caller.gate(command, claim).unwrap_err().code, "forbidden", "{command}");
             }
             assert!(caller.gate("machine.list", claim).is_ok() && caller.gate("permissions.deny", claim).is_ok());
-            assert_eq!(caller.gate("runs.start", &json!({"lead": "someone-else"})).unwrap_err().code, "forbidden", "--lead names another session");
-            assert!(caller.gate("runs.start", &json!({"lead": chat.id})).is_ok(), "its own session may lead");
+            assert_eq!(caller.gate("runs.create", &json!({"lead": "someone-else"})).unwrap_err().code, "forbidden", "--lead names another session");
+            assert!(caller.gate("runs.create", &json!({"lead": chat.id})).is_ok(), "its own session may lead");
             assert!(caller.gate("sessions.create", claim).is_ok());
         }
         // Paused: it starts nothing, and prompts nothing.
@@ -3657,6 +3693,132 @@ mod tests {
         crate::bots::delete(sink.as_ref(), &id).unwrap();
         assert!(Caller::of_process(&service.manager, &json!({}), Some(child)).bot.is_none());
         service.manager.terminals().kill(&pane);
+    }
+
+    /// A bot with its home chat, an ordinary session of the owner's, and a
+    /// process `script` started in the chat's terminal, found by `marker`.
+    #[cfg(unix)]
+    fn bot_with_a_process(script: &str, marker: &str) -> (crate::store::TempHome, ControlService, Arc<crate::sink::BroadcastSink>, String, SessionEntry, SessionEntry, i32) {
+        let home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, sink) = headless_service();
+        let id = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        let owners: SessionEntry = serde_json::from_value(json!({
+            "id":"owners-session", "projectPath":"/fixture", "cwd":"/fixture", "title":"Owner's", "created":"now", "modified":"now",
+            "tabs":[{"id":"owners-tab","harness":"claude","created":"now"}]
+        })).unwrap();
+        index::update(|entries| { entries.push(owners.clone()); Ok(()) }).unwrap();
+        let spec = crate::pty::PaneSpec { cwd: &chat.cwd, cols: 80, rows: 24, command: Some(script), env: &[] };
+        service.manager.terminals().spawn(sink.clone(), &chat.tabs[0].pane_id(), spec).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            let out = std::process::Command::new("pgrep").args(["-f", &format!("^sleep {marker}$")]).output().unwrap();
+            if let Some(pid) = String::from_utf8_lossy(&out.stdout).lines().next().and_then(|line| line.trim().parse::<i32>().ok()) {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < deadline, "the pane started {marker}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        (home, service, sink, id, chat, owners, pid)
+    }
+
+    /// H1 (PRO-468 review 3): a process that left its tab behind, reparented
+    /// to launchd, is still placed by its session's leader. One no tab holds
+    /// and with no terminal of its own does nothing only a person does, and
+    /// starts nothing while a bot is paused.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_left_its_tab_is_placed_or_refused() {
+        let marker = format!("61.{}", std::process::id());
+        let script = format!("/bin/sh -c '( sleep {marker} & ) ; sleep 60'");
+        let (_home, service, sink, id, chat, _owners, orphan) = bot_with_a_process(&script, &marker);
+        assert_eq!(crate::serve_cli::consent::parent_of(orphan), Some(1), "the subshell left it to launchd");
+        assert_eq!(service.manager.session_of_process(orphan).map(|(session, _)| session), Some(chat.id.clone()), "placed by its session's leader");
+        let caller = Caller::of_process(&service.manager, &json!({}), Some(orphan));
+        assert_eq!(caller.bot.as_deref(), Some(id.as_str()));
+
+        // No tab holds this one, and it has no terminal (it is the test's child, as an agent is the runtime's).
+        let mut stray = std::process::Command::new("sleep").arg("60").stdin(std::process::Stdio::null()).spawn().unwrap();
+        let pid = stray.id() as i32;
+        assert_eq!(Caller::of_process(&service.manager, &json!({}), Some(pid)).unplaced_terminal, Some(false));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        for (command, params) in [
+            ("bots.create", json!({"role": "cto", "name": "Echo"})),
+            ("bots.delete", json!({"bot": id})),
+            ("bots.resume", json!({"bot": id})),
+            ("bots.resumeAll", json!({})),
+        ] {
+            assert_eq!(ask(command, params).unwrap_err().code, "person_required", "{command}");
+        }
+        assert!(crate::bots::get(&id).is_ok(), "nothing was deleted");
+        // No bot paused: it starts work as before. One paused: it starts nothing.
+        let quick = json!({"quick": true, "agent": "claude", "prompt": "go"});
+        assert_ne!(ask("sessions.create", quick.clone()).err().map(|error| error.code), Some("bot_paused".into()));
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+        assert_eq!(ask("sessions.create", quick).unwrap_err().code, "bot_paused");
+        assert_eq!(ask("runs.create", json!({"plan": {}})).unwrap_err().code, "bot_paused");
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        let _ = stray.kill();
+        let _ = stray.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+    }
+
+    /// H2: a caller placed in a bot's session is that session, whatever it
+    /// names: its runs are led there, and it steers no run another session leads.
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_session_leads_and_steers_only_its_own_runs() {
+        let marker = format!("62.{}", std::process::id());
+        let script = format!("/bin/sh -c 'sleep {marker}; true'");
+        let (_home, service, sink, id, chat, owners, pid) = bot_with_a_process(&script, &marker);
+        let claim = json!({"caller": {"session": owners.id, "tab": "owners-tab"}});
+        let caller = Caller::of_process(&service.manager, &claim, Some(pid));
+        assert_eq!(caller.session(&claim).map(|session| session.id), Some(chat.id.clone()), "the claim is not read");
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "run-of-the-owner", "lead": {"sessionId": owners.id, "tabId": "owners-tab"}, "projectPath": "/fixture", "goal": "Something",
+            "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
+        })).unwrap();
+        crate::orchestration::store::insert(&run).unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        assert_eq!(ask("runs.create", json!({"plan": {}, "lead": owners.id, "caller": claim["caller"]})).unwrap_err().code, "forbidden");
+        for command in ["runs.start", "runs.note", "runs.sendBack", "runs.widen", "runs.takeOver", "runs.merge"] {
+            let refused = ask(command, json!({"run": run.id, "piece": "p", "text": "x", "files": ["a"]})).unwrap_err();
+            assert_eq!(refused.code, "forbidden", "{command}: {}", refused.message);
+        }
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+        for command in ["runs.sendBack", "runs.widen", "runs.checkFailed", "runs.takeOver"] {
+            assert_eq!(ask(command, json!({"run": run.id, "piece": "p"})).unwrap_err().code, "bot_paused", "{command}");
+        }
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// H3: a process in a bot's session reads through the runtime's own calls
+    /// and changes nothing there. A caller in no session (the window) is not refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_session_only_reads_through_the_runtimes_own_calls() {
+        let marker = format!("63.{}", std::process::id());
+        let script = format!("/bin/sh -c 'sleep {marker}; true'");
+        let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&script, &marker);
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        for command in ["runtime.session.permission", "runtime.session.send", "runtime.session.create", "runtime.session.automationSave", "runtime.session.automationRun", "runtime.pty.write"] {
+            assert_eq!(refuse_bot_runtime_call(&service.manager, command, &json!({})).unwrap_err().code, "forbidden", "{command}");
+        }
+        assert_eq!(refuse_bot_runtime_call(&service.manager, "runtime.session.bots", &json!({"operation": "pause"})).unwrap_err().code, "forbidden");
+        for (command, params) in [("runtime.session.list", json!({})), ("runtime.session.bots", json!({"operation": "list"})), ("runtime.pty.shells", json!({}))] {
+            refuse_bot_runtime_call(&service.manager, command, &params).unwrap_or_else(|error| panic!("{command}: {error:?}"));
+        }
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(std::process::id() as i32)));
+        refuse_bot_runtime_call(&service.manager, "runtime.session.permission", &json!({})).unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 
     /// A session a bot's chat starts through the CLI works for the bot: it

@@ -221,6 +221,10 @@ fn a_bots_access_limits_its_sessions_modes() {
     assert_eq!(tab_limit(&chat, &native).unwrap().mode, "plan");
     assert!(refuses_mode(&chat, Some(&native), "manual").unwrap().contains("native Codex cannot ask"));
     assert_eq!(tab_limit(&chat, &chat.tabs[0]).unwrap().mode, "manual", "a terminal tab can");
+    // Held to plan there, it is told it cannot write its memory either (L5); a terminal tab may.
+    let note = launch_note(&chat, &native).unwrap();
+    assert!(note.contains("cannot write any file, your memory included"), "{note}");
+    assert!(!launch_note(&chat, &chat.tabs[0]).unwrap().contains("cannot write any file"));
 
     let mut started = chat.clone();
     started.id = "started".into();

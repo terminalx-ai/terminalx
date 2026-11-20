@@ -167,3 +167,104 @@ fn a_running_tab_the_limit_cannot_reach_is_stopped_and_held() {
     until("the tab the limit could not reach is stopped", || !manager.is_running(&home.id, &home.tabs[0].id) || !terminals.is_running(&pane));
     assert_eq!(index::get(&home.id).unwrap().tabs[0].permission_mode, "plan", "native Codex under ask-before-acting is plan");
 }
+
+fn set_status(entry: &SessionEntry, status: TabStatus) {
+    index::update_tab(&entry.id, &entry.tabs[0].id, |tab| {
+        tab.status = status;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// M1 (review 3): a resume gives the mode back to a tab whatever its idle
+/// status (one that finished unread included) and starts its agent again;
+/// one in a turn is asked for the mode after its turn, and keeps it remembered.
+#[test]
+fn a_resume_reaches_a_finished_tab_and_one_in_a_turn() {
+    let _home = bots_on();
+    let (manager, terminals, sink) = manager();
+    let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let finished = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
+    let busy = chat::new_chat(sink.as_ref(), &bot.id).unwrap();
+    call(&manager, "pause", &serde_json::json!({"id": bot.id})).unwrap();
+
+    set_status(&finished, TabStatus::Completed);
+    let finished = index::get(&finished.id).unwrap();
+    let pane = running(&manager, &terminals, &sink, &finished);
+    set_status(&busy, TabStatus::InProgress);
+    let busy = index::get(&busy.id).unwrap();
+    running(&manager, &terminals, &sink, &busy);
+    manager.open_turn_for_test(&busy.id, &busy.tabs[0].id);
+
+    call(&manager, "resume", &serde_json::json!({"id": bot.id})).unwrap();
+    until("the finished tab's agent starts again with its mode back", || !terminals.is_running(&pane));
+    let tab = index::get(&finished.id).unwrap().tabs[0].clone();
+    assert_eq!(tab.permission_mode, "bypassPermissions");
+    assert!(!tab.unknown.contains_key(chat::HELD_FROM_KEY));
+
+    let tab = index::get(&busy.id).unwrap().tabs[0].clone();
+    assert!(manager.is_running(&busy.id, &tab.id), "a turn is not cut short");
+    assert_eq!(tab.requested_permission_mode.as_deref(), Some("bypassPermissions"), "asked for after the turn");
+    assert_eq!(tab.unknown[chat::HELD_FROM_KEY], "bypassPermissions", "still remembered");
+}
+
+/// L1 and L3: a mode set by hand is the tab's own, so no later reconcile
+/// lifts it; and only a change to what a bot is told restarts its agents.
+#[test]
+fn a_mode_set_by_hand_stays_and_a_rename_restarts_nothing() {
+    let _home = bots_on();
+    let (manager, terminals, sink) = manager();
+    let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let home = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
+    let mut events = sink.subscribe();
+    call(&manager, "update", &serde_json::json!({"id": bot.id, "patch": {"access": "askOutward"}})).unwrap();
+    assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|published| &*published.event == "session_updated"), "the picker is told");
+    let home = index::get(&home.id).unwrap();
+    assert_eq!(home.tabs[0].unknown[chat::HELD_FROM_KEY], "bypassPermissions");
+
+    // The owner picks Plan by hand while it is held: that is the tab's mode from now on.
+    let pane = running(&manager, &terminals, &sink, &home);
+    manager.open_turn_for_test(&home.id, &home.tabs[0].id);
+    manager.set_permission_mode(&home.id, &home.tabs[0].id, "plan").unwrap();
+    assert!(!index::get(&home.id).unwrap().tabs[0].unknown.contains_key(chat::HELD_FROM_KEY));
+
+    // A rename reconciles, gives nothing back and stops nothing.
+    call(&manager, "update", &serde_json::json!({"id": bot.id, "patch": {"name": "Atlas II"}})).unwrap();
+    assert!(terminals.is_running(&pane), "a rename restarts no agent");
+    call(&manager, "update", &serde_json::json!({"id": bot.id, "patch": {"access": "full"}})).unwrap();
+    let tab = index::get(&home.id).unwrap().tabs[0].clone();
+    assert_ne!(tab.permission_mode, "bypassPermissions", "what the owner chose is not lifted");
+    assert!(!tab.unknown.contains_key(chat::HELD_FROM_KEY));
+}
+
+/// H1: deleting a bot stops every session that works for it, a session it
+/// started included, and gives none of them a wider mode back.
+#[test]
+fn a_delete_stops_the_bots_sessions_and_gives_back_nothing() {
+    let _home = bots_on();
+    let (manager, terminals, sink) = manager();
+    let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let home = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
+    let mut started = home.clone();
+    started.id = "started-by-atlas".into();
+    started.unknown.clear();
+    started.unknown.insert(chat::STARTED_KEY.into(), serde_json::json!({"id": bot.id}));
+    started.tabs[0].permission_mode = "bypassPermissions".into();
+    index::update(|entries| {
+        entries.push(started.clone());
+        Ok(())
+    })
+    .unwrap();
+    call(&manager, "pause", &serde_json::json!({"id": bot.id})).unwrap();
+    let started = index::get(&started.id).unwrap();
+    assert_eq!(started.tabs[0].permission_mode, "plan");
+    let pane = running(&manager, &terminals, &sink, &started);
+
+    call(&manager, "delete", &serde_json::json!({"id": bot.id})).unwrap();
+    assert!(!terminals.is_running(&pane), "its agent is stopped before it becomes an ordinary session");
+    for id in [&home.id, &started.id] {
+        let tab = index::get(id).unwrap().tabs[0].clone();
+        assert_eq!(tab.permission_mode, "plan", "{id} keeps the mode it was held to");
+        assert!(!tab.unknown.contains_key(chat::HELD_FROM_KEY), "{id}");
+    }
+}

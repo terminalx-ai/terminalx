@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -125,7 +126,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
           </button>
         ))}
       </div>
-      {error && <p role="alert" className="shrink-0 px-5 py-2 text-xs text-destructive">{error}</p>}
+      {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
           <ChatList bot={bot} chats={chats} startedBy={startedBy} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />

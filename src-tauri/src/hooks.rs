@@ -442,10 +442,20 @@ thread_local! {
     static CALLER: std::cell::RefCell<Option<std::sync::Arc<std::os::unix::net::UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The caller a test's in-process control request stands for.
+    pub(crate) static TEST_CALLER_PID: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 /// The process at the other end of the frame being answered on this thread,
 /// as the kernel says (PRO-468): who sent a control request, whatever it
 /// claims. `None` off unix, for an in-process call, or when it cannot be told.
 pub(crate) fn caller_pid() -> Option<i32> {
+    #[cfg(test)]
+    if let Some(pid) = TEST_CALLER_PID.with(std::cell::Cell::get) {
+        return Some(pid);
+    }
     #[cfg(unix)]
     {
         let stream = CALLER.with(|caller| caller.borrow().clone())?;

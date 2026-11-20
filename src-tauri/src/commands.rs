@@ -6186,8 +6186,11 @@ pub async fn set_experimental_settings(
 // With Settings → Experimental → Bots off it refuses every one of these.
 
 async fn bots_call<T: serde::de::DeserializeOwned + Send + 'static>(state: State<'_, AppState>, operation: &'static str, params: serde_json::Value) -> CmdResult<T> {
-    let sessions = state.sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.bots(operation, params).map_err(err)).await.map_err(err)?
+    // Through the window's own path: what gives a bot more carries its proof (PRO-468).
+    let Some(runtime) = state.runtime() else {
+        return Err(err(state.sessions().err().unwrap_or_else(|| anyhow::anyhow!("The runtime is not attached."))));
+    };
+    tauri::async_runtime::spawn_blocking(move || runtime.bots(operation, params).and_then(|value| Ok(serde_json::from_value(value)?)).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
