@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent, Payload } from "./events";
 import { foldShellOutput, SHELL_FOLD_LINES, shellRecord } from "./harnessText";
+import cases from "./shellRecordCases.json";
 import { buildTranscript, TranscriptReducer, type WorkItem } from "./transcript";
 
 // The records Claude Code writes for `! git status` (2.1.295–2.1.328 on record).
@@ -15,6 +16,12 @@ const done = (seq: number) => event(seq, { type: "turn_completed", status: "ok",
 const shells = (events: AgentEvent[]) => buildTranscript(events, false).turns.flatMap((turn) => turn.work.filter((item): item is Extract<WorkItem, { kind: "shell" }> => item.kind === "shell"));
 
 describe("shellRecord", () => {
+  // The native runtime reads the same cases (harness/claude/transcript.rs, #1346):
+  // what the chat draws as a shell block is what opens no turn there.
+  it.each(cases)("$name", ({ text, record }) => {
+    expect(shellRecord(text)).toEqual(record);
+  });
+
   it("reads the input and the output records, and both in one", () => {
     expect(shellRecord(INPUT)).toEqual({ command: "git status" });
     expect(shellRecord(OUTPUT)).toEqual({ stdout: "On branch main\nnothing to commit", stderr: "" });

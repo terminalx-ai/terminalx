@@ -3797,6 +3797,26 @@ fn a_shell_command_typed_in_the_terminal_opens_no_turn() {
     assert_eq!(user_texts(&rig), [SHELL_INPUT, SHELL_OUTPUT]);
 }
 
+/// #1346: a prompt typed in the terminal that is shaped like a shell record
+/// but is not one (the reader's words between the tags, the parts out of
+/// order, a tag closed as another) is a prompt: the chat draws it as one, and
+/// it opens a turn and puts the tab to work like any other.
+#[test]
+fn a_prompt_shaped_like_a_shell_record_is_a_prompt() {
+    for prompt in [
+        "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+        "<bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+        "<bash-input>ls</bash-stdout>",
+    ] {
+        let rig = Rig::new();
+        rig.append(&shell_record("not-shell", prompt));
+        assert!(rig.turn_open(), "{prompt}");
+        assert_eq!(rig.status(), TabStatus::InProgress, "{prompt}");
+        assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Opened), "{prompt}");
+        assert_eq!(user_texts(&rig), [prompt]);
+    }
+}
+
 /// #1294: a `!command` sent from the composer opens a turn as it goes, and
 /// its output settles it, whether the CLI records the output apart or in the
 /// command's own record. The output is drawn either way; the command's

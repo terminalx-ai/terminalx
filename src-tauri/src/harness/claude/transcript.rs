@@ -223,14 +223,54 @@ pub struct ShellRecord {
     pub output: bool,
 }
 
+/// The record is a shell record only when it is nothing else: the grammar of
+/// `shellRecord` in packages/portable/src/harnessText.ts, which draws the
+/// chat's shell block, so a prompt the chat shows as a prompt is one here too
+/// (#1346). Both read `shellRecordCases.json`.
+///
+/// Parts come in the CLI's order, each at most once, with only whitespace
+/// between them. Output that itself holds its closing tag is kept whole, as
+/// stdout and stderr end at the last closing tag of their kind. A linear scan:
+/// output can be megabytes.
 pub fn shell_record(text: &str) -> Option<ShellRecord> {
-    let text = text.trim();
-    let opens = ["<bash-input>", "<bash-stdout>", "<bash-stderr>", "<bash-exit-code>"].iter().any(|tag| text.starts_with(tag));
-    let closes = ["</bash-input>", "</bash-stdout>", "</bash-stderr>", "</bash-exit-code>"].iter().any(|tag| text.ends_with(tag));
-    (opens && closes).then(|| ShellRecord {
-        input: text.starts_with("<bash-input>"),
-        output: ["<bash-stdout>", "<bash-stderr>", "<bash-exit-code>"].iter().any(|tag| text.contains(tag)),
-    })
+    if !text.contains("<bash-") {
+        return None;
+    }
+    let mut at = skip_space(text, 0);
+    let mut found = [false; 4];
+    for (part, (tag, last)) in [("input", false), ("stdout", true), ("stderr", true), ("exit-code", false)].into_iter().enumerate() {
+        let open = format!("<bash-{tag}>");
+        if !text[at..].starts_with(&open) {
+            continue;
+        }
+        let close = format!("</bash-{tag}>");
+        let from = at + open.len();
+        let end = if last { text.rfind(&close).filter(|&end| end >= from)? } else { from + text[from..].find(&close)? };
+        if tag == "exit-code" && !exit_code(&text[from..end]) {
+            return None;
+        }
+        found[part] = true;
+        at = skip_space(text, end + close.len());
+    }
+    let [input, stdout, stderr, exit] = found;
+    (at == text.len() && found.contains(&true)).then_some(ShellRecord { input, output: stdout || stderr || exit })
+}
+
+/// `/^-?\d+$/` after JavaScript's `trim`, as the chat reads an exit code.
+fn exit_code(text: &str) -> bool {
+    let digits = text.trim_matches(js_space);
+    let digits = digits.strip_prefix('-').unwrap_or(digits);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn skip_space(text: &str, from: usize) -> usize {
+    text.len() - text[from..].trim_start_matches(js_space).len()
+}
+
+/// JavaScript's `\s`, which the chat's parser skips: Rust's `char::is_whitespace`
+/// differs at U+0085 and U+FEFF.
+fn js_space(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 /// What a local slash command prints (`/model`'s "Set model to …") and the
@@ -923,6 +963,44 @@ mod tests {
         assert_eq!(shell_record("<bash-input>ls</bash-input>"), Some(ShellRecord { input: true, output: false }));
         assert_eq!(shell_record("<bash-stdout></bash-stdout><bash-stderr>x</bash-stderr>"), Some(ShellRecord { input: false, output: true }));
         assert_eq!(shell_record("<bash-input>ls</bash-input> please"), None);
+    }
+
+    /// #1346. The chat draws a shell block for exactly the records that open
+    /// no turn here: both read the portable parser's cases.
+    #[test]
+    fn shell_records_agree_with_every_portable_case() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../../../packages/portable/src/shellRecordCases.json")).unwrap();
+        assert!(cases.len() > 20);
+        for case in cases {
+            let record = &case["record"];
+            let expected = (!record.is_null()).then(|| ShellRecord {
+                input: !record["command"].is_null(),
+                output: ["stdout", "stderr", "exitCode"].iter().any(|part| !record[*part].is_null()),
+            });
+            assert_eq!(shell_record(case["text"].as_str().unwrap()), expected, "{}", case["name"]);
+        }
+    }
+
+    /// #1346. A prompt shaped like a shell record but holding the reader's
+    /// words is the reader's prompt: it opens a turn.
+    #[test]
+    fn a_prompt_shaped_like_a_shell_record_opens_a_turn() {
+        let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
+        for content in [
+            "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+            "<bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+            "<bash-input>ls</bash-stdout>",
+        ] {
+            assert_eq!(turn_mark(&record(content)), Some(TurnMark::Opened), "{content}");
+        }
+    }
+
+    #[test]
+    fn a_huge_shell_shaped_record_is_read_in_linear_time() {
+        let started = std::time::Instant::now();
+        assert_eq!(shell_record(&format!("<bash-stdout>{}x", "</bash-stdout>".repeat(200_000))), None);
+        assert_eq!(shell_record(&format!("<bash-input>{}", "</bash-input><bash-stdout>".repeat(100_000))), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// #540. A scheduled turn is written as a meta prompt, which was dropped
