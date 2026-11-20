@@ -170,7 +170,7 @@ describe("merged workspace action", () => {
     render(panel());
     fireEvent.click(await screen.findByRole("button", { name: "Verify acme/app/pull/77" }));
     await waitFor(() => expect(screen.queryByTestId("pr-pending-creation")).toBeNull());
-    expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prReconcileCreation", { url: pendingUrl, clientRequestId: expect.any(String) });
+    expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prReconcileCreation", { url: pendingUrl });
     await screen.findByRole("button", { name: "Delete workspace" });
     expect(workspace.host.disposition).toHaveBeenCalled();
   });

@@ -807,6 +807,7 @@ the pull request that adds it.
 | `git.pull` | `git/1` | Needs a project | With the machine's git sign-in |
 | `git.prCreate` | `git/1` | Needs a project | With the machine's `gh`. Older requests can add an open PR as a removable link and respect prior withdrawals. Set `associateExisting: false` to leave existing PRs for explicit linking. |
 | `git.prCreateForSession` | `git/1` | Needs a project | Verifies the session checkout, optionally publishes the confirmed commit, and opens the PR with the machine's `gh` |
+| `git.prReconcileCreation` | `git/1` | Needs a project | Clears a pending create's cleanup guard by PR URL once the machine's `gh` shows it merged or closed; the record must belong to one of the project's checkouts and the URL to its origin repository. Open or unreachable PRs stay protected |
 | `git.prLinkBranch` | `git/1` | Needs a project | Verifies a manager-supplied PR URL against the session's checkout and saves a removable link |
 | `git.prUnlink` | `git/1` | Needs a project | Removes a manually added PR link using the machine's registry |
 | `git.prReady` | `git/1` | Needs a project | With the machine's `gh` |
