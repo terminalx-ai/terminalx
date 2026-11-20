@@ -533,11 +533,16 @@ describe("the Run view shortcut (PRO-362)", () => {
     expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
   });
 
-  it("does nothing for a session that leads no run, or while runs are off", () => {
+  it("opens the page that says how to start a run on a session that leads none (#1404)", () => {
     show("lead", true, null);
+    expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
+  });
+
+  it("does nothing while runs are off", () => {
+    show("lead", false, { id: "run-1", state: "running" });
     expect(runShortcut.showRunView).not.toHaveBeenCalled();
     cleanup();
-    show("lead", false, { id: "run-1", state: "running" });
+    show("lead", false, null);
     expect(runShortcut.showRunView).not.toHaveBeenCalled();
   });
 });
