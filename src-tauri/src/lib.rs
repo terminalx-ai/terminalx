@@ -619,6 +619,7 @@ pub fn run() {
             local_runtime::ui::local_runtime_log,
             local_runtime::ui::local_runtime_reconnect,
             local_runtime::ui::local_runtime_restart,
+            #[cfg(unix)]
             local_runtime::window_consent::local_runtime_restart_for_window,
             local_runtime::ui::local_runtime_replace,
             local_runtime::ui::local_runtime_work,

@@ -694,11 +694,25 @@ impl PairingManager {
 
     /// The window's signing key for runtime consent. Reading it can block
     /// on the Keychain. A runtime launch may create it if absent.
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(target_os = "macos")]
     pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
         self.secrets.window_consent_key(create)
             .map_err(|_| anyhow!(crate::serve_cli::consent::KEYCHAIN_DENIED))?
             .ok_or_else(|| anyhow::Error::new(crate::serve_cli::consent::WindowKeyMissing))
+    }
+
+    /// Windows' consent (`consent_windows.rs`) has no `WindowKeyMissing` or
+    /// `KEYCHAIN_DENIED`: those belong to the macOS relaunch repair
+    /// (`local_runtime::window_consent`, PRO-486), which Windows lacks.
+    #[cfg(windows)]
+    pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
+        self.secrets.window_consent_key(create)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+            })
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {

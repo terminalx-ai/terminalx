@@ -4906,7 +4906,7 @@ impl WorkspaceRpc {
             Scope::Machine { projects, .. } => projects.get(&machine::project_id(&session.project_path))?,
             Scope::Workspace { project, .. } => project.clone(),
         };
-        let dir = std::fs::canonicalize(&session.cwd)
+        let dir = crate::paths::canonicalize(&session.cwd)
             .ok()
             .filter(|cwd| project.files.contains(cwd) && cwd.is_dir())
             .unwrap_or_else(|| project.root.clone());
