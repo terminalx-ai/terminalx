@@ -300,31 +300,78 @@ pub fn prompt_argv(harness: &str, texts: &[Option<&str>]) -> Vec<String> {
 }
 
 /// [`prompt_flag`] for a launch through a shell: the arguments, with a
-/// leading space, name [`APPENDED_PROMPT_ENV`] in double quotes, and `value`
-/// is what the launch puts in that variable. A quoted variable is expanded
-/// as one word by sh, bash, zsh and fish alike, whatever it holds.
+/// leading space, name [`APPENDED_PROMPT_ENV`] the way the login shell
+/// expands it as one word whatever it holds (`"$VAR"` in sh, bash, zsh and
+/// fish, `$VAR:q` in csh and tcsh), and `value` is what the launch puts in
+/// that variable.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AppendedPrompt {
     pub args: String,
     pub value: Option<String>,
 }
 
+/// The longest string a launch hands the kernel for its appended prompt:
+/// Linux takes no argument or variable of 128 KB or more (`MAX_ARG_STRLEN`,
+/// with its NUL), and the variable carries its name too. A little is kept
+/// spare; macOS's one limit, on all of them together, is far above it.
+pub const APPENDED_PROMPT_LIMIT: usize = 127 * 1024;
+
+impl AppendedPrompt {
+    /// Refused when the prompt is longer than [`APPENDED_PROMPT_LIMIT`]: the
+    /// launch would fail with no word of why (`E2BIG`) on Linux, so it is
+    /// not made, and the reader is told what to shorten.
+    pub fn fits(&self) -> Result<()> {
+        let longest = self.value.as_ref().map_or(0, |value| APPENDED_PROMPT_ENV.len() + 1 + value.len()).max(self.args.len());
+        anyhow::ensure!(
+            longest <= APPENDED_PROMPT_LIMIT,
+            "What this agent is told besides your messages comes to {} KB, more than the {} KB one launch can carry. Shorten the workspace's prompts, or the bot's ROLE.md or MEMORY.md.",
+            longest.div_ceil(1024),
+            APPENDED_PROMPT_LIMIT / 1024
+        );
+        Ok(())
+    }
+}
+
 pub fn prompt_args(harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
-    prompt_args_for(cfg!(unix), harness, texts)
+    prompt_args_for(LaunchShell::of(&crate::pty::shell()), harness, texts)
+}
+
+/// The kind of login shell a pane's launch goes through, as far as naming
+/// [`APPENDED_PROMPT_ENV`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchShell {
+    /// sh, bash, zsh, fish and the like: `"$VAR"` is one word, newlines and all.
+    Posix,
+    /// csh and tcsh refuse a double-quoted variable that holds a newline
+    /// (`Unmatched '"'`); `$VAR:q` is the value as one word, quoted, there.
+    Csh,
+    /// The PowerShell a Windows launch goes through.
+    Windows,
+}
+
+impl LaunchShell {
+    fn of(shell: &str) -> Self {
+        if cfg!(not(unix)) {
+            return Self::Windows;
+        }
+        match std::path::Path::new(shell).file_name().and_then(|name| name.to_str()) {
+            Some("csh" | "tcsh") => Self::Csh,
+            _ => Self::Posix,
+        }
+    }
 }
 
 /// [`prompt_args`] for a unix shell, or for the PowerShell a Windows launch
 /// goes through: there `"$VAR"` is not a variable and a launch sets no
 /// variable before the command, so the text stays quoted on the command
 /// line, literally, as it was before.
-fn prompt_args_for(unix: bool, harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
+fn prompt_args_for(shell: LaunchShell, harness: &str, texts: &[Option<&str>]) -> AppendedPrompt {
     let Some((flag, value)) = prompt_flag(harness, texts) else { return AppendedPrompt::default() };
-    if !unix {
-        return AppendedPrompt { args: format!(" {flag} {}", quote(&value)), value: None };
-    }
-    let args = match harness {
-        "codex" => format!(" {flag} \"developer_instructions=${APPENDED_PROMPT_ENV}\""),
-        _ => format!(" {flag} \"${APPENDED_PROMPT_ENV}\""),
+    let key = if harness == "codex" { "developer_instructions=" } else { "" };
+    let args = match shell {
+        LaunchShell::Windows => return AppendedPrompt { args: format!(" {flag} {}", quote(&value)), value: None },
+        LaunchShell::Posix => format!(" {flag} \"{key}${APPENDED_PROMPT_ENV}\""),
+        LaunchShell::Csh => format!(" {flag} {key}${APPENDED_PROMPT_ENV}:q"),
     };
     let value = value.strip_prefix("developer_instructions=").map(str::to_owned).unwrap_or(value);
     AppendedPrompt { args, value: Some(value) }
@@ -988,12 +1035,40 @@ mod tests {
     /// `"$VAR"`: the prompt is quoted on the command line itself, as before.
     #[test]
     fn off_unix_an_appended_prompt_is_quoted_on_the_command_line() {
-        let prompt = prompt_args_for(false, "claude", &[Some("Remember: it's done.")]);
+        let prompt = prompt_args_for(LaunchShell::Windows, "claude", &[Some("Remember: it's done.")]);
         assert_eq!(prompt, AppendedPrompt { args: " --append-system-prompt 'Remember: it'\\''s done.'".into(), value: None });
-        let prompt = prompt_args_for(false, "codex", &[Some("Be brief.")]);
+        let prompt = prompt_args_for(LaunchShell::Windows, "codex", &[Some("Be brief.")]);
         assert_eq!(prompt.args, " -c 'developer_instructions=\"Be brief.\"'");
         assert!(prompt.value.is_none() && !prompt.args.contains(APPENDED_PROMPT_ENV));
-        assert_eq!(prompt_args_for(true, "claude", &[Some("x")]).args, format!(" --append-system-prompt \"${APPENDED_PROMPT_ENV}\""));
+        assert_eq!(prompt_args_for(LaunchShell::Posix, "claude", &[Some("x")]).args, format!(" --append-system-prompt \"${APPENDED_PROMPT_ENV}\""));
+    }
+
+    /// Which form a launch names the prompt's variable in follows the login shell's name.
+    #[cfg(unix)]
+    #[test]
+    fn the_prompt_variable_is_named_as_the_login_shell_reads_it() {
+        for (shell, expected) in [("/bin/zsh", LaunchShell::Posix), ("/usr/local/bin/fish", LaunchShell::Posix), ("/bin/bash", LaunchShell::Posix), ("/bin/tcsh", LaunchShell::Csh), ("/usr/bin/csh", LaunchShell::Csh), ("/opt/tcshell", LaunchShell::Posix)] {
+            assert_eq!(LaunchShell::of(shell), expected, "{shell}");
+        }
+        assert_eq!(prompt_args_for(LaunchShell::Csh, "claude", &[Some("x\ny")]).args, format!(" --append-system-prompt ${APPENDED_PROMPT_ENV}:q"));
+        assert_eq!(prompt_args_for(LaunchShell::Csh, "codex", &[Some("x")]).args, format!(" -c developer_instructions=${APPENDED_PROMPT_ENV}:q"));
+    }
+
+    /// A prompt longer than one argument may be is refused before the launch, not by the kernel (PRO-489).
+    #[test]
+    fn a_prompt_past_the_argument_limit_is_refused() {
+        let room = APPENDED_PROMPT_LIMIT - APPENDED_PROMPT_ENV.len() - 1;
+        for shell in [LaunchShell::Posix, LaunchShell::Csh] {
+            assert!(prompt_args_for(shell, "claude", &[Some(&"x".repeat(room))]).fits().is_ok());
+            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits().unwrap_err().to_string();
+            assert!(error.contains("ROLE.md or MEMORY.md") && error.contains("127 KB"), "{error}");
+        }
+        // Codex's value is TOML, and it is that length which counts: a control character is always escaped (`\u0001`).
+        let escaped = "\u{1}".repeat(room / 4);
+        let codex = prompt_args_for(LaunchShell::Posix, "codex", &[Some(&escaped)]);
+        assert!(codex.value.as_ref().unwrap().len() > room && codex.fits().is_err());
+        assert!(prompt_args_for(LaunchShell::Windows, "claude", &[Some(&"x".repeat(APPENDED_PROMPT_LIMIT))]).fits().is_err());
+        assert!(AppendedPrompt::default().fits().is_ok());
     }
 
     /// Text the agent is told reaches it word for word through every login
@@ -1007,9 +1082,10 @@ mod tests {
         let m = mark.display();
         let hostile = format!("it's \"quoted\" \\' and \\\"; $(touch {m}) `touch {m}` ${{HOME}}\nline two; exit 3 &\n'; touch {m}; echo '\n\\");
         for harness in ["claude", "codex"] {
-            let prompt = prompt_args(harness, &[Some(&hostile)]);
-            assert!(!prompt.args.contains("touch"), "the text is not on the command line: {}", prompt.args);
-            for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"].into_iter().filter(|shell| std::path::Path::new(shell).exists()) {
+            // csh and tcsh as well (PRO-489): a login shell of either refused a multi-line prompt.
+            for shell in ["/bin/sh", "/bin/bash", "/bin/zsh", "/bin/csh", "/bin/tcsh"].into_iter().filter(|shell| std::path::Path::new(shell).exists()) {
+                let prompt = prompt_args_for(LaunchShell::of(shell), harness, &[Some(&hostile)]);
+                assert!(!prompt.args.contains("touch"), "the text is not on the command line: {}", prompt.args);
                 let out = std::process::Command::new(shell)
                     .arg("-c")
                     .arg(format!("exec /usr/bin/printf '%s\\0' {}", prompt.args))

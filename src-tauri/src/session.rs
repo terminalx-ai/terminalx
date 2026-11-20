@@ -89,10 +89,13 @@ fn computer_launch(
 /// The one appended prompt a terminal launch of `tab` gives its agent: the
 /// workspace's prompts, the desktop tools' note, a sparse checkout's folders
 /// and, in a bot's chat, the bot's rules, role and memory as they are now.
-pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> crate::cloud_config::AppendedPrompt {
+/// Refused when it is longer than one launch can carry (`AppendedPrompt::fits`).
+pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> Result<crate::cloud_config::AppendedPrompt> {
     let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
     let bot = crate::bots::chat::launch_note(entry, tab);
-    crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()])
+    let prompt = crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()]);
+    prompt.fits()?;
+    Ok(prompt)
 }
 
 #[derive(Clone)]
@@ -3188,6 +3191,23 @@ impl SessionManager {
         let runtime = self.runtime(session_id, tab_id).unwrap();
         let mut rt = runtime.lock().unwrap();
         self.set_status(&mut rt, status);
+    }
+
+    /// Runs `f` while another thread holds the tab's lock, as a tab mid-launch or wedged would.
+    #[cfg(test)]
+    pub(crate) fn while_tab_locked_for_test<T>(&self, session_id: &str, tab_id: &str, f: impl FnOnce() -> T) -> T {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let (held, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
+        let holder = std::thread::spawn(move || {
+            let _rt = runtime.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = release.1.recv();
+        });
+        held.1.recv().unwrap();
+        let out = f();
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
+        out
     }
 
     #[cfg(test)]
@@ -6462,7 +6482,7 @@ impl SessionManager {
         // `developer_instructions` would replace the first.
         // The text itself travels in a variable the shell expands as one
         // word, never on its command line, and the agent is not left with it.
-        let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note);
+        let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note)?;
         if let Some(value) = prompt.value {
             env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));
             unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());

@@ -35,11 +35,17 @@ pub const SESSION_KEY: &str = "bot";
 pub const STARTED_KEY: &str = "botStarted";
 /// How much of `MEMORY.md` a conversation is given.
 pub const MEMORY_LINES: usize = 200;
-/// The most of `MEMORY.md` read at a launch, of `ROLE.md`, and the longest
-/// line kept. Together, with the rules, well under the 128 KB Linux allows
-/// one argument or variable.
-pub const READ_LIMIT: u64 = 64 * 1024;
-pub const ROLE_READ_LIMIT: u64 = 32 * 1024;
+/// The most of `MEMORY.md` a launch reads, and of `ROLE.md`, as text: what
+/// a lenient decoding of the bytes read gives is cut to it again, at a line,
+/// so bytes that are not UTF-8 (three for one) cannot outgrow it.
+pub const READ_LIMIT: u64 = 32 * 1024;
+pub const ROLE_READ_LIMIT: u64 = 16 * 1024;
+/// The most [`instructions`] comes to: role, memory and rules, fenced and
+/// whatever their names (PRO-489). Under half of the 128 KB Linux allows one
+/// argument or variable (`MAX_ARG_STRLEN`), so Codex's TOML escaping, which
+/// at most doubles it, and a workspace's prompts still fit
+/// (`cloud_config::APPENDED_PROMPT_LIMIT` refuses a launch that would not).
+pub const INSTRUCTIONS_LIMIT: usize = 60 * 1024;
 /// Where a tab keeps the mode it had before a bot's limit narrowed it, so
 /// a resume or a wider access gives it back (`enforce`).
 pub const HELD_FROM_KEY: &str = "botHeldFrom";
@@ -301,7 +307,8 @@ pub enum Read {
 
 /// `path` as a launch may read it: a regular file only (not a link, a FIFO
 /// or a device, which could block the launch), at most [`READ_LIMIT`] bytes,
-/// decoded leniently, without NUL bytes and with no line over [`LINE_LIMIT`].
+/// decoded leniently, without control characters but newlines and tabs, and
+/// with no line over [`LINE_LIMIT`]; the text no longer than the bytes read.
 #[cfg(test)]
 pub fn read_capped(path: &std::path::Path) -> Read {
     read_capped_to(path, READ_LIMIT)
@@ -332,15 +339,28 @@ pub fn read_capped_to(path: &std::path::Path, limit: u64) -> Read {
     if let Err(error) = file.take(limit + 1).read_to_end(&mut bytes) {
         return Read::Unreadable(format!("{error}"));
     }
-    let cut = bytes.len() as u64 > limit;
+    let mut cut = bytes.len() as u64 > limit;
     bytes.truncate(limit as usize);
-    let text = String::from_utf8_lossy(&bytes).replace('\0', "");
-    let text = text
-        .lines()
-        .map(|line| if line.chars().count() > LINE_LIMIT { format!("{}…", line.chars().take(LINE_LIMIT).collect::<String>()) } else { line.to_owned() })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Read::Text(text, cut)
+    // Escape characters and the like are no use to an agent, and each is six bytes in TOML (`\u001B`).
+    let text: String = String::from_utf8_lossy(&bytes).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+    let mut kept = String::with_capacity(text.len().min(limit as usize));
+    for line in text.lines() {
+        let line = if line.chars().count() > LINE_LIMIT { format!("{}…", line.chars().take(LINE_LIMIT).collect::<String>()) } else { line.to_owned() };
+        let room = (limit as usize).saturating_sub(kept.len() + usize::from(!kept.is_empty()));
+        if line.len() > room {
+            // A line that fits nowhere whole is cut at a character, so a file of one line still says something.
+            if kept.is_empty() {
+                kept = line.char_indices().take_while(|(at, c)| at + c.len_utf8() <= room).map(|(_, c)| c).collect();
+            }
+            cut = true;
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push('\n');
+        }
+        kept.push_str(&line);
+    }
+    Read::Text(kept, cut)
 }
 
 fn read_home_file(id: &str, name: &str) -> Read {
@@ -433,6 +453,8 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: &Read, first_run
     if first_run {
         text.push_str("\n# First conversation\n\nThis is your first conversation with your owner. In your first reply, greet them in one sentence, ask at most one question, then do one small, real piece of work that fits your role and say what you did.\n");
     }
+    // Held by the read limits whatever the files hold; a launch past it is refused anyway (`AppendedPrompt::fits`).
+    debug_assert!(text.len() <= INSTRUCTIONS_LIMIT, "a bot's instructions came to {} bytes", text.len());
     text
 }
 

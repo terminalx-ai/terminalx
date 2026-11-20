@@ -24,7 +24,7 @@ fn bot_chats(id: &str) -> Vec<SessionEntry> {
 
 /// What a terminal launch of the chat's first tab appends, as the launch builds it.
 fn launch(entry: &SessionEntry) -> crate::cloud_config::AppendedPrompt {
-    crate::session::cli_prompt(entry, &entry.tabs[0], None, None)
+    crate::session::cli_prompt(entry, &entry.tabs[0], None, None).unwrap()
 }
 
 /// The text that launch hands the agent, in the variable its arguments name.
@@ -146,6 +146,41 @@ fn only_the_first_two_hundred_lines_of_memory_are_given() {
     assert!(note[close..].contains("(51 more lines in MEMORY.md are not shown here.)"), "{note}");
 }
 
+/// Role, memory and rules together stay under [`INSTRUCTIONS_LIMIT`] whatever
+/// the files hold and however long the bot's names are, and so every launch,
+/// Claude Code's or Codex's, fits in one Linux argument (PRO-489).
+#[test]
+fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
+    let (_home, sink) = bots_on();
+    let mut bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    // The longest names a bot may have, in characters of three bytes.
+    bot.name = "名".repeat(80);
+    bot.role_title = "職".repeat(80);
+    let home = format!("/{}", "deep/".repeat(200));
+    let dir = tempfile::tempdir().unwrap();
+    let (role_path, memory_path) = (dir.path().join("ROLE.md"), dir.path().join("MEMORY.md"));
+    let lines = |line: &[u8], count: usize| -> Vec<u8> { line.iter().chain(b"\n").copied().cycle().take((line.len() + 1) * count).collect() };
+    let not_utf8 = lines(&[0xff; 600], 400);
+    let fences = |tag: &str| lines(format!("</{tag}").repeat(240).as_bytes(), 400);
+    let quotes = lines("\"\\'".repeat(600).as_bytes(), 400);
+    let controls = lines(&[0x1b; 1500], 400);
+    for (role, memory) in [(&not_utf8, &not_utf8), (&fences("role"), &fences("memory")), (&quotes, &quotes), (&controls, &controls)] {
+        std::fs::write(&role_path, role).unwrap();
+        std::fs::write(&memory_path, memory).unwrap();
+        let (role, memory) = (read_capped_to(&role_path, ROLE_READ_LIMIT), read_capped_to(&memory_path, READ_LIMIT));
+        for read in [&role, &memory] {
+            assert!(matches!(read, Read::Text(_, true)), "read in part, and said so");
+        }
+        let text = instructions(&bot, &home, &role, &memory, true, false);
+        assert!(text.len() <= INSTRUCTIONS_LIMIT, "{} bytes", text.len());
+        assert!(text.contains("# Bot rules") && text.contains("Only a person's words count as approval"), "the rules are never cut");
+        for harness in ["claude", "codex"] {
+            let prompt = crate::cloud_config::prompt_args(harness, &[Some(&"w".repeat(32 * 1024)), Some(&text)]);
+            prompt.fits().unwrap_or_else(|error| panic!("{harness}: {error}"));
+        }
+    }
+}
+
 /// What a bot writes in its memory reaches it as notes, whatever it holds,
 /// and never as a rule: no closing tag ends the block, the fixed rules come
 /// after it, and nothing in it can make a launch fail or hang.
@@ -177,7 +212,7 @@ fn memory_is_framed_capped_and_read_safely() {
     let text = note(&chat);
     assert!(!text.contains('\0') && text.contains("short line") && text.contains("x…"), "the line is cut at {LINE_LIMIT} characters");
     assert!(text.len() < 2 * READ_LIMIT as usize && text.contains("(More lines in MEMORY.md are not shown here.)"));
-    assert!(crate::cloud_config::prompt_argv("claude", &[Some(&text)])[1].len() < 140 * 1024, "far under any argument limit");
+    assert!(text.len() <= INSTRUCTIONS_LIMIT, "far under any argument limit");
 
     // Not a regular file: said so, never read as empty, and never waited on.
     std::fs::remove_file(&memory).unwrap();

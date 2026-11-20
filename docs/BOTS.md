@@ -83,6 +83,48 @@ the first sub-issues.
   saved back exactly as it was. Unknown fields on a record, or on a pause,
   are kept too.
 
+## What holds a bot, and what does not
+
+The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
+
+- **macOS and Linux only.** The runtime works out who sent a `terminalx`
+  command from the process the kernel names, placed in the pane or agent it
+  runs under, and only a person's answer in the window counts as consent.
+  Windows has neither yet, so a bot's process that named no session would
+  pass as its owner. Off unix Bots stays off whatever the switch says
+  (`bots::SUPPORTED`), and every operation says why.
+- **Placing a caller takes no tab's lock.** The runtime keeps each agent's
+  process id in a map of its own as the agent starts and exits, so one tab
+  held mid-launch, or wedged, stalls no one else's command.
+- **Outward work needs full access.** Steering an issue pipeline
+  (`pipelines.autoMerge`, `pipelines.resolveConflicts`, `pipelines.act`) and
+  writing to an issue (`issues.comment`, `issues.create`, `issues.status`,
+  `issues.assign`, `issues.label`) act with the owner's own GitHub or Linear
+  sign-in. A session that works for a bot does them only when the bot has
+  full access and is not paused. Stopping a pipeline, or having it look at
+  its pull request again, is left to any session.
+- **What the agent is told fits one argument.** The role (16 KB read) and the
+  memory (32 KB read) are cut again after decoding, without control
+  characters, so role, memory and rules stay under 60 KB
+  (`chat::INSTRUCTIONS_LIMIT`) whatever the files hold. Twice that, Codex's
+  TOML escaping at most, is still under the 128 KB Linux allows one argument
+  or variable. A launch whose whole appended prompt, with a workspace's
+  prompts, would pass 127 KB is refused with what to shorten, not left to
+  fail in the kernel.
+- **Every login shell.** The prompt travels in a variable the login shell
+  expands as one word: `"$TERMINALX_APPENDED_PROMPT"` in sh, bash, zsh and
+  fish, `$TERMINALX_APPENDED_PROMPT:q` in csh and tcsh, which refuse a
+  double-quoted variable that holds a newline.
+- **Residual: a terminal of its own.** A process that leaves its pane for a
+  new session with a pseudo-terminal of its own (`script`, or a tmux server
+  that was already running) is placed in no pane and has a terminal that is
+  not the runtime's, so it passes as a person. What still holds is the
+  agent's permission mode: a bot that asks first must have its owner approve
+  the command that does this, and a paused or read-only bot runs in plan
+  mode and runs nothing. A full-access bot can do it, as it can run anything
+  its owner can. A resume, or more access, is still only ever given in the
+  window.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -95,7 +137,7 @@ issue.
 | PRO-466 | Store, home folder, role templates, CLI, experimental switch | n/a | Merged |
 | PRO-467 | Sidebar section, Bots page, first-bot page, hiring | 23.02, 23.03, 23.11 | Merged |
 | PRO-484 | Automations: first check before the model, in the editor | 23.10 | Merged |
-| PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | In review |
+| PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | Merged |
 | PRO-478 | Settings: runs on, access, works in, channels, who can ask | 23.07 | In review |
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
 | PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
@@ -112,7 +154,7 @@ issue.
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
-| PRO-489 | Hardening left over from reviews | n/a | Backlog |
+| PRO-489 | Hardening left over from reviews | n/a | In progress |
 
 ## Not in this epic
 

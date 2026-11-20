@@ -45,6 +45,16 @@
   stops every session that works for it and archives its chats; turning Bots
   off stops them. A bot's memory reaches its agent as its own notes, read safely
   and capped (PRO-468).
+- Bots (experimental): a bot's sessions merge, steer and write to issues
+  (`terminalx pipelines auto-merge|act|resolve-conflicts`, `terminalx issues
+  comment|create|…`) only when the bot has full access and is not paused; a bot
+  that asks first has its owner do them. Its role, memory and rules are capped
+  to fit one launch on Linux, a launch too long to make says what to shorten,
+  and a csh or tcsh login shell starts a bot's chat. Bots stay off on Windows,
+  where TerminalX cannot yet tell a bot's commands from yours (PRO-489).
+- Settings → Machines: Restart runtime is offered only for the runtime running
+  now, restarts only what the window showed, and a failure stays on screen
+  when a handover withdraws the offer (PRO-489).
 
 ## 0.2.37
 

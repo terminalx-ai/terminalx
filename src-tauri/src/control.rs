@@ -513,7 +513,11 @@ impl ControlService {
             refuse_limited_machine_caller(action, &params)?;
         }
         // A session working for a bot is held to it, whatever it says it is (PRO-468).
-        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume") || command.starts_with("machine.") {
+        // As is one that acts outward with the owner's sign-in (PRO-489).
+        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume")
+            || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label")
+            || command.starts_with("machine.")
+        {
             Caller::of(&self.manager, &params).gate(command, &params)?;
         }
         #[cfg(unix)]
@@ -993,14 +997,14 @@ impl ControlService {
     fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some(if bots::SUPPORTED { "Ask the person to turn Bots on; do not edit settings.json for them." } else { "Use TerminalX on a Mac or Linux for bots." }.into())));
         }
         let sink = self.sink.as_ref();
         // Only the caller's own mistakes are `invalid_arguments`: an unreadable store or a failed write is not.
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let named = || -> Result<bots::Bot, ControlError> {
@@ -2840,6 +2844,9 @@ struct Caller {
     bot: Option<String>,
     name: String,
     paused: bool,
+    /// What the bot's owner lets it do (`BotAccess::effective`); read and
+    /// report when the bot cannot be read.
+    access: crate::bots::BotAccess,
     verified: bool,
     /// The session that works for the bot the caller runs in.
     session: Option<String>,
@@ -2871,7 +2878,7 @@ impl Caller {
     fn of_process(manager: &SessionManager, params: &Value, peer: Option<i32>) -> Self {
         // With Bots off nothing is looked up: the command is what it says, as before.
         if !crate::bots::enabled() {
-            return Self { bot: None, name: String::new(), paused: false, verified: false, session: None, placed: None, peer: None, gone: false, incomplete: false };
+            return Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: None, gone: false, incomplete: false };
         }
         #[cfg(unix)]
         let (placing, gone) = (peer.map(|pid| manager.session_of_process(pid)).transpose(), peer.is_some_and(|pid| !crate::serve_cli::consent::alive(pid)));
@@ -2895,7 +2902,7 @@ impl Caller {
             },
             None => None,
         };
-        let nobody = Self { bot: None, name: String::new(), paused: false, verified: false, session: None, placed: placed.clone(), peer, gone, incomplete };
+        let nobody = Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: placed.clone(), peer, gone, incomplete };
         // A placed caller's claim is not read: it is where it is.
         let claimed = if placed.is_some() { None } else { params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()) };
         let proved = || match (claimed.as_ref(), params["caller"]["tab"].as_str()) {
@@ -2909,13 +2916,13 @@ impl Caller {
                 None => return nobody,
             },
         };
-        let (name, paused) = match crate::store::bots::get(&id) {
-            Ok(Some(bot)) => (bot.name, bot.paused.is_some()),
+        let (name, paused, access) = match crate::store::bots::get(&id) {
+            Ok(Some(bot)) => (bot.name, bot.paused.is_some(), bot.access.effective()),
             // A bot that is gone leaves an ordinary session behind.
             Ok(None) => return nobody,
-            Err(_) => ("Its bot".to_owned(), true),
+            Err(_) => ("Its bot".to_owned(), true, crate::bots::BotAccess::ReadReport),
         };
-        Self { bot: Some(id), name, paused, verified, session: Some(session), placed, peer, gone, incomplete }
+        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, peer, gone, incomplete }
     }
 
     /// The session the command runs in: where the kernel places it, else the one it names.
@@ -2996,6 +3003,25 @@ impl Caller {
         ))
     }
 
+    /// Refused unless the bot may act outward on its own: full access, and
+    /// not paused. What these do leaves this computer with the owner's own
+    /// GitHub or Linear sign-in (a push, a merge, a comment), and a bot that
+    /// asks first, or only reads and reports, has its owner do it (PRO-489).
+    fn refuse_outward(&self, what: &str) -> Result<(), ControlError> {
+        self.refuse_while_paused(what)?;
+        if self.access == crate::bots::BotAccess::Full {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            "forbidden",
+            match self.access {
+                crate::bots::BotAccess::AskOutward => format!("{} asks its owner before anything that leaves this computer, so a session that works for it does not {what}: that is done with the owner's own sign-in.", self.name),
+                _ => format!("{} only reads and reports, so a session that works for it does not {what}: that is done with the owner's own sign-in.", self.name),
+            },
+            Some("Tell your owner what you would do and why; they can do it in TerminalX, or give the bot full access.".into()),
+        ))
+    }
+
     fn forbidden(&self, what: &str) -> ControlError {
         ControlError::new(
             "forbidden",
@@ -3007,11 +3033,13 @@ impl Caller {
     /// What a session working for a bot may not do outside the bots
     /// commands (PRO-468): start work while the bot is paused, start work
     /// that could not be held to its access (another computer, a cloud
-    /// workspace, an issue pipeline), approve a permission, or prompt a
-    /// session that does not work for the same bot.
+    /// workspace, an issue pipeline), approve a permission, prompt a
+    /// session that does not work for the same bot, or, unless it has full
+    /// access, act outward with the owner's sign-in: steer or merge an issue
+    /// pipeline, or write to an issue (PRO-489).
     fn gate(&self, command: &str, params: &Value) -> Result<(), ControlError> {
         self.refuse_gone()?;
-        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command) };
+        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command, params) };
         match command {
             "sessions.create" => self.refuse_while_paused("start sessions"),
             "runs.create" => {
@@ -3025,6 +3053,11 @@ impl Caller {
             // Which run is settled in `runs`, where the run is found.
             "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" => self.refuse_while_paused("start or steer runs"),
             "pipelines.start" => Err(self.forbidden("start an issue pipeline: its sessions could not be held to the bot's access")),
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" => self.refuse_outward("change how an issue pipeline merges"),
+            // Stopping one, or looking at its pull request again, sends nothing anywhere.
+            "pipelines.act" if OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()) => Ok(()),
+            "pipelines.act" => self.refuse_outward("move an issue pipeline on: it pushes, reviews and merges"),
+            "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => self.refuse_outward("write to an issue"),
             "cloud.sessions.create" | "cloud.send" | "cloud.resume" => Err(self.forbidden("start work in a cloud workspace: it could not be held to the bot's access")),
             "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
             "send" => {
@@ -3048,9 +3081,12 @@ impl Caller {
     /// A caller no tab holds and with no terminal starts no work while any
     /// bot is paused: it may be a bot's process that left its tab behind.
     /// What only reads or steers is left to it.
-    fn gate_unplaced(&self, command: &str) -> Result<(), ControlError> {
+    fn gate_unplaced(&self, command: &str, params: &Value) -> Result<(), ControlError> {
         let starts_work = match command {
             "sessions.create" | "runs.create" | "runs.start" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume" => true,
+            // What acts outward with the owner's sign-in counts too (PRO-489).
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => true,
+            "pipelines.act" => !OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()),
             _ => command.strip_prefix("machine.").is_some_and(|action| !MACHINE_READS.contains(&action)),
         };
         if !crate::bots::enabled() || !starts_work || !self.unplaced_without_terminal() {
@@ -3087,6 +3123,10 @@ fn gone() -> ControlError {
         Some("Run the command again and let it wait for its answer.".into()),
     )
 }
+
+/// The `pipelines.act` actions that send nothing anywhere: a bot may stop a
+/// pipeline, or have it look at its pull request again, whatever its access.
+const OUTWARD_SAFE_ACTIONS: &[&str] = &["stop", "refresh"];
 
 /// What a `machine.*` command only reads on another computer.
 const MACHINE_READS: &[&str] = &["list", "status", "projects.list", "sessions.list", "tabs.list", "read", "wait", "permissions.list", "worktrees.list"];
@@ -3750,6 +3790,65 @@ mod tests {
         }
     }
 
+    /// A session that works for a bot moves no issue pipeline on and writes
+    /// to no issue, which is done with the owner's own sign-in, unless the
+    /// bot has full access and is not paused; stopping a pipeline or looking
+    /// again is left to any (PRO-489). Held from the runtime's dispatch, so a
+    /// refusal comes before the pipeline or the issue is even looked up.
+    #[test]
+    fn a_bot_acts_outward_with_the_owners_sign_in_only_with_full_access() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, sink) = headless_service();
+        let id = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        let outward = [
+            ("pipelines.autoMerge", json!({"pipeline": "none", "value": true})),
+            ("pipelines.resolveConflicts", json!({"pipeline": "none", "value": true})),
+            ("pipelines.act", json!({"pipeline": "none", "action": "merge"})),
+            ("pipelines.act", json!({"pipeline": "none", "action": "advance"})),
+            ("pipelines.act", json!({"pipeline": "none"})),
+            ("issues.comment", json!({"issue": "ENG-1", "body": "hi"})),
+            ("issues.create", json!({"title": "t"})),
+            ("issues.status", json!({"issue": "ENG-1", "status": "Done"})),
+            ("issues.assign", json!({"issue": "ENG-1"})),
+            ("issues.label", json!({"issue": "ENG-1", "label": "x"})),
+        ];
+        let ask = |command: &str, params: &Value| {
+            let mut params = params.clone();
+            params["caller"] = caller.clone();
+            service.execute(command, params, "r")
+        };
+        let set_access = |access: &str| { crate::bots::update(sink.as_ref(), &id, serde_json::from_value(json!({"access": access})).unwrap()).unwrap(); };
+        for access in ["askOutward", "readReport"] {
+            set_access(access);
+            for (command, params) in &outward {
+                let error = ask(command, params).unwrap_err();
+                assert_eq!(error.code, "forbidden", "{access} {command} {params}");
+                assert!(error.message.contains("owner's own sign-in"), "{}", error.message);
+            }
+            for action in OUTWARD_SAFE_ACTIONS {
+                assert_ne!(ask("pipelines.act", &json!({"pipeline": "none", "action": action})).unwrap_err().code, "forbidden", "{access} {action}: refused only for the pipeline that is not there");
+            }
+        }
+        // Full access: past the guard, to the pipeline or issue that is not there.
+        set_access("full");
+        for (command, params) in &outward {
+            assert!(!matches!(ask(command, params).map_err(|error| error.code).unwrap_err().as_str(), "forbidden" | "bot_paused"), "{command} {params}");
+        }
+        // Paused, even full access acts on nothing outward.
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+        for (command, params) in &outward {
+            assert_eq!(ask(command, params).unwrap_err().code, "bot_paused", "{command}");
+        }
+        // The owner's own sessions are held to none of it.
+        let owner = json!({"caller": {}});
+        assert_ne!(service.execute("issues.comment", json!({"issue": "ENG-1", "body": "hi", "caller": owner["caller"]}), "r").map_err(|error| error.code).unwrap_err(), "forbidden");
+    }
+
     /// N3 (PRO-468): who asks is worked out from the process that asked. A
     /// command run in a bot's chat, or by anything that terminal started, is
     /// held to the bot whatever it claims, or if it claims nothing at all.
@@ -3789,6 +3888,13 @@ mod tests {
         assert_ne!(child, shell, "a process the pane started, not the pane's own");
         assert_eq!(service.manager.session_of_process(child).unwrap().and_then(|placed| placed.session), Some(chat.id.clone()), "found up the child's ancestry");
         assert_eq!(service.manager.session_of_process(std::process::id() as i32).unwrap(), None, "the test's own process is no tab's");
+        // Placing takes no tab's lock (PRO-489): a tab held mid-launch, or wedged, stalls no one else's command.
+        let (placed, waited) = service.manager.while_tab_locked_for_test(&chat.id, &chat.tabs[0].id, || {
+            let started = std::time::Instant::now();
+            (service.manager.session_of_process(child).unwrap().and_then(|placed| placed.session), started.elapsed())
+        });
+        assert_eq!(placed, Some(chat.id.clone()));
+        assert!(waited < std::time::Duration::from_secs(2), "placed while the tab was locked, in {waited:?}");
 
         // Claiming nothing, or the owner's own session, changes nothing.
         let claims = [json!({}), json!({"caller": {"session": owners.id, "tab": "owners-tab"}})];
