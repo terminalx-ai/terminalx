@@ -105,12 +105,14 @@ const itemDisabled = (label: string) => [...container.querySelectorAll<HTMLButto
 const screens: [string, () => ReactNode][] = [["the device list", () => <MachinesScreen />], ["the sessions screen", () => <SessionsScreen />]];
 
 describe.each(screens)("the device menu on %s", (_where, screen) => {
+  // Sessions opens the machine in use's actions from "…" beside search, labelled "Machine options" (PRO-465).
+  const options = (name: string) => _where === "the sessions screen" ? "Machine options" : `Device options for ${name}`;
   it("shows the computer's real name, and opens from the options button and from a long press", async () => {
     await show(screen());
     expect(container.textContent).toContain("Paresh’s Mac mini");
     expect(container.textContent).not.toContain("Paired Mac");
     // The button is labelled for assistive technology with the name it acts on.
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     expect(menuOpen()).toBe(true);
     for (const action of ["Rename", "Reconnect", "Forget this machine"]) expect(button(action), action).toBeDefined();
     // 22.05: a sheet closed by a tap outside it, with no Cancel of its own.
@@ -127,21 +129,21 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     const modal = () => container.querySelector<HTMLElement>("[data-voiceover-modal]")!;
     const escape = async () => { await act(async () => { modal().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); }); };
     await show(screen());
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     // VoiceOver reads only inside the sheet: a way out is there, not just the backdrop behind it.
     expect(modal().querySelector("button[aria-label='Close']")).not.toBeNull();
     expect(modal().hasAttribute("data-escape")).toBe(true);
     await escape();
     expect(menuOpen()).toBe(false);
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await act(async () => { modal().querySelector<HTMLButtonElement>("button[aria-label='Close']")!.click(); });
     expect(menuOpen()).toBe(false);
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Rename");
     expect(modal().querySelector("button[aria-label='Close']")).not.toBeNull();
     await escape();
     expect(menuOpen()).toBe(false);
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Forget this machine");
     expect(modal().textContent).toContain("Cancel");
     await escape();
@@ -159,7 +161,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     for (const [facts, words] of states) {
       mocks.app = { ...mocks.app, connectionStage: "connected", connectionAttempt: 0, connectionWaiting: false, online: true, updating: false, ...facts };
       await show(screen());
-      await click("Device options for Paresh’s Mac mini");
+      await click(options("Paresh’s Mac mini"));
       const menu = container.querySelector("[data-modal]")!.textContent!;
       expect(menu, words).toContain(words);
       for (const old of ["attempt", "Can’t", "Reconnecting", "retrying"]) expect(menu).not.toContain(old);
@@ -171,7 +173,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
 
   it("renames on the phone, bounded, and can go back to the computer's own name", async () => {
     await show(screen());
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Rename");
     const input = container.querySelector("input[aria-label='Name for this machine']") as HTMLInputElement;
     expect(input.value).toBe("Paresh’s Mac mini");
@@ -189,7 +191,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     mocks.app = { ...mocks.app, hosts: [custom], activeHost: custom };
     await show(screen());
     expect(container.textContent).toContain("Studio");
-    await click("Device options for Studio");
+    await click(options("Studio"));
     await click("Rename");
     expect((container.querySelector("input[aria-label='Name for this machine']") as HTMLInputElement).value).toBe("Studio");
     await click("Use its own name (Paresh’s Mac mini)");
@@ -198,7 +200,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
 
   it("reconnects that computer", async () => {
     await show(screen());
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Reconnect");
     expect(mocks.app.reconnectHost).toHaveBeenCalledWith("host-aaaa1111");
     expect(menuOpen()).toBe(false);
@@ -206,7 +208,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
 
   it("forgets only after a confirmation that says what it does and does not change; Cancel changes nothing", async () => {
     await show(screen());
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Forget this machine");
     expect(mocks.app.forgetHost).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Forget Paresh’s Mac mini?");
@@ -217,7 +219,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
     expect(menuOpen()).toBe(false);
     expect(mocks.app.forgetHost).not.toHaveBeenCalled();
     expect(mocks.app.renameHost).not.toHaveBeenCalled();
-    await click("Device options for Paresh’s Mac mini");
+    await click(options("Paresh’s Mac mini"));
     await click("Forget this machine");
     await click("Forget");
     expect(mocks.app.forgetHost).toHaveBeenCalledWith("host-aaaa1111");
@@ -226,7 +228,7 @@ describe.each(screens)("the device menu on %s", (_where, screen) => {
 
 it("returns to the device list after forgetting from the sessions screen", async () => {
   await show(<SessionsScreen />);
-  await click("Device options for Paresh’s Mac mini");
+  await click("Machine options");
   await click("Forget this machine");
   await click("Forget");
   expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
@@ -394,7 +396,7 @@ describe("one list of machines (#987)", () => {
     await show(<MachinesScreen />);
     expect(button("Device options for Desk")).toBeDefined();
     await show(<SessionsScreen />);
-    expect(button("Device options for Desk")).toBeDefined();
+    expect(button("Switch machine, Desk")).toBeDefined();
     expect(container.textContent).not.toContain("Paresh’s Mac mini");
   });
 });
@@ -445,4 +447,87 @@ it.each([false, true])("does not open sessions when selection fails (signed in: 
   expect(mocks.app.connectHost).toHaveBeenCalledWith(mocks.app.hosts[0]);
   expect(mocks.dismissTo).not.toHaveBeenCalled();
   expect(mocks.navigate).not.toHaveBeenCalled();
+});
+
+// PRO-465, 22.08: the name at the top of Sessions switches machine; "…" beside search opens its actions.
+describe("switching machine from the sessions header", () => {
+  const switcher = () => container.querySelector("[data-modal]");
+  const choice = (id: string) => container.querySelector<HTMLButtonElement>(`[data-modal] button[aria-label^='${id}']`);
+  const twoMore = () => {
+    const live = account(20, { displayName: "Mac mini" });
+    const gone = account(21, { displayName: "Travel MacBook", reachability: "exited" });
+    const mini = host({ id: live.hostId, hostName: "Mac mini", publicKeyB64: live.hostPublicKeyB64 });
+    const travel = host({ id: gone.hostId, hostName: "Travel MacBook", publicKeyB64: gone.hostPublicKeyB64 });
+    mocks.app = { ...mocks.app, hosts: [host(), mini, travel], accountHosts: [live, gone], disconnectHost: vi.fn() };
+    return { mini, travel };
+  };
+
+  it("lists the paired machines with their state, the one in use checked, and connects to another", async () => {
+    const { mini } = twoMore();
+    await show(<SessionsScreen />);
+    // Tapping the name opens the dropdown, not the actions sheet.
+    await click("Switch machine, Paresh’s Mac mini");
+    expect(switcher()?.textContent).toContain("Switch machine");
+    expect(button("Rename")).toBeUndefined();
+    expect(choice("Paresh’s Mac mini")!.textContent).toContain("Connected");
+    expect(choice("Mac mini,")!.getAttribute("aria-label")).toBe("Mac mini, Online");
+    // Offline is dimmed and cannot be chosen.
+    expect(choice("Travel MacBook")!.getAttribute("aria-label")).toBe("Travel MacBook, Offline · last seen 2 days ago");
+    expect(choice("Travel MacBook")!.disabled).toBe(true);
+    // The machine in use: choosing it again changes nothing.
+    await act(async () => choice("Paresh’s Mac mini")!.click());
+    expect(switcher()).toBeNull();
+    expect(mocks.app.connectHost).not.toHaveBeenCalled();
+    await click("Switch machine, Paresh’s Mac mini");
+    await act(async () => choice("Mac mini,")!.click());
+    expect(mocks.app.connectHost).toHaveBeenCalledWith(mini);
+    expect(switcher()).toBeNull();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("opens with one machine too, and Add a machine opens pairing on Machines", async () => {
+    await show(<SessionsScreen />);
+    await click("Switch machine, Paresh’s Mac mini");
+    expect(menuItems()).toEqual(["Paresh’s Mac mini, Connected", "Add a machine"]);
+    await click("Add a machine");
+    expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
+    await show(<MachinesScreen />);
+    expect(container.querySelector("[data-pairing-scanner]")).not.toBeNull();
+  });
+
+  it("opens the actions from “…”, a long press on the name, and VoiceOver's options action", async () => {
+    await show(<SessionsScreen />);
+    const name = button("Switch machine, Paresh’s Mac mini")!;
+    expect(name.dataset.actions).toBe("options");
+    await act(async () => name.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    expect(menuItems()).toEqual(["Rename", "Reconnect", "Disconnect", "Pair again", "Forget this machine"]);
+    await click("Close");
+    await longPress("Paresh’s Mac mini");
+    expect(button("Disconnect")).toBeDefined();
+    await click("Close");
+    await click("Machine options");
+    expect(button("Disconnect")).toBeDefined();
+  });
+
+  it("disconnects and keeps the pairing; Pair again goes to pairing", async () => {
+    twoMore();
+    await show(<SessionsScreen />);
+    await click("Machine options");
+    expect(container.textContent).toContain("Stays paired. Connect again from Machines.");
+    await click("Disconnect");
+    expect(mocks.app.disconnectHost).toHaveBeenCalledTimes(1);
+    expect(mocks.app.forgetHost).not.toHaveBeenCalled();
+    expect(mocks.navigate).toHaveBeenCalledWith("/(tabs)");
+    await click("Machine options");
+    await click("Pair again");
+    await show(<MachinesScreen />);
+    expect(container.querySelector("[data-pairing-scanner]")).not.toBeNull();
+  });
+
+  it("leaves the Machines tab's menus as they were", async () => {
+    await show(<MachinesScreen />);
+    expect(container.querySelector("[data-pairing-scanner]")).toBeNull();
+    await click("Device options for Paresh’s Mac mini");
+    expect(button("Disconnect")).toBeUndefined();
+  });
 });
