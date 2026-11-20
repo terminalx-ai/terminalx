@@ -13,7 +13,7 @@ fn canonical(path: &str) -> String {
     // existing ancestors too (notably /var -> /private/var on macOS).
     let path = Path::new(path);
     for parent in path.ancestors() {
-        if let Ok(root) = std::fs::canonicalize(parent) {
+        if let Ok(root) = crate::paths::canonicalize(parent) {
             return root.join(path.strip_prefix(parent).unwrap()).to_string_lossy().into_owned();
         }
     }

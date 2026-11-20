@@ -979,6 +979,8 @@ pub(crate) fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         // `bootstrap-token` alone has the empty path as its parent.
@@ -1349,6 +1351,7 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200));
     }
 
+    #[cfg(unix)]
     #[test]
     fn one_runtime_per_state_directory() {
         let token = random_credential();

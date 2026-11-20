@@ -306,11 +306,13 @@ impl Ready {
 
     /// How long ago the CLI said it was up, if it has: what a handover
     /// carries (#765).
+    #[cfg(unix)]
     pub(crate) fn since(&self) -> Option<Duration> {
         self.at.lock().unwrap().map(|at| at.elapsed())
     }
 
     /// One a handed-over CLI said it was up on, `since` ago (#765).
+    #[cfg(unix)]
     pub(crate) fn restored(announces_start: bool, since: Option<Duration>) -> Self {
         let at = since.map(|since| std::time::Instant::now().checked_sub(since).unwrap_or_else(std::time::Instant::now));
         Self { at: Mutex::new(at), announces_start }
@@ -799,22 +801,26 @@ impl Tail {
     /// Where a handover leaves this tail (#765): the file, how far into it
     /// every complete record has been read (a record still being written is
     /// read again), where reading it began, and the records it drops.
+    #[cfg(unix)]
     pub(crate) fn position(&self) -> (PathBuf, u64, u64, HashSet<String>) {
         let path = self.path.lock().unwrap().clone();
         let stream = self.stream.lock().unwrap();
         (path, stream.offset - stream.partial.len() as u64, stream.began, stream.skip.clone())
     }
 
+    #[cfg(unix)]
     pub(crate) fn usage(&self) -> super::metrics::TurnUsage {
         self.stream.lock().unwrap().usage.clone()
     }
 
+    #[cfg(unix)]
     pub(crate) fn with_usage(mut self, usage: super::metrics::TurnUsage) -> Self {
         self.stream.get_mut().unwrap().usage = usage;
         self
     }
 
     /// Follow on from where a handover left a tail (`position`).
+    #[cfg(unix)]
     pub(crate) fn resumed(path: PathBuf, offset: u64, began: u64, decode: Decoder, skip: HashSet<String>) -> Self {
         let mut stream = Streamer::skipping(offset, decode, skip);
         stream.began = began;
@@ -986,10 +992,12 @@ impl Default for TurnTail {
 impl TurnTail {
     /// What a handover carries of it (#765): the reply said, the replies
     /// drawn ahead of their records, and whether the turn is closed.
+    #[cfg(unix)]
     pub(crate) fn parts(&self) -> (Option<String>, Vec<String>, bool) {
         (self.said.clone(), self.anticipated.iter().cloned().collect(), self.closed)
     }
 
+    #[cfg(unix)]
     pub(crate) fn from_parts(said: Option<String>, anticipated: Vec<String>, closed: bool) -> Self {
         Self { said, anticipated: anticipated.into(), closed }
     }

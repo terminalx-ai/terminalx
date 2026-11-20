@@ -180,12 +180,35 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Longest folder name the CLI writes whole; a longer one is cut here.
+const ENCODED_LIMIT: usize = 200;
+
 /// The folder name the CLI gives a working directory under `~/.claude/projects`.
-/// Every character outside `[A-Za-z0-9-]` becomes `-`, which is why a
-/// dot-folder yields a double dash. The encoding loses information: two
-/// different paths can share a name.
+/// Every UTF-16 unit outside `[A-Za-z0-9]` becomes `-`, which is why a
+/// dot-folder yields a double dash (and a character outside the BMP two). A
+/// name longer than 200 is cut there and given `-` and a base-36 hash of the
+/// whole path, as the CLI does: a deep Windows path is often that long. The
+/// encoding loses information: two different paths can share a name.
 pub fn encoded_cwd(cwd: &str) -> String {
-    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+    let name: String = cwd.encode_utf16().map(|unit| match char::from_u32(u32::from(unit)) {
+        Some(c) if c.is_ascii_alphanumeric() => c,
+        _ => '-',
+    }).collect();
+    if name.len() <= ENCODED_LIMIT {
+        return name;
+    }
+    // The CLI's string hash: `hash * 31 + unit` over UTF-16 units, in 32 bits.
+    let hash = cwd.encode_utf16().fold(0i32, |hash, unit| hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(i32::from(unit)));
+    let mut magnitude = hash.unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit(magnitude % 36, 36).unwrap_or('0'));
+        magnitude /= 36;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    format!("{}-{}", &name[..ENCODED_LIMIT], digits.iter().rev().collect::<String>())
 }
 
 /// Where the CLI files the transcript of a session started in `cwd`.
@@ -722,6 +745,17 @@ fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Values from the CLI's own encoder, run on the same paths.
+    #[test]
+    fn a_folder_name_is_the_one_the_cli_gives_including_a_long_one() {
+        assert_eq!(encoded_cwd("/Users/a/my.app"), "-Users-a-my-app");
+        assert_eq!(encoded_cwd("/home/a/\u{1F600}x"), "-home-a---x");
+        let long = format!("C:\\work\\{}app", "deeply-nested-folder\\".repeat(10));
+        let encoded = encoded_cwd(&long);
+        assert_eq!(encoded.len(), 207);
+        assert!(encoded.ends_with("-dee-9ryhmj"), "{encoded}");
+    }
 
     #[test]
     fn the_conversations_title_and_opening_prompt_are_read_from_its_file() {

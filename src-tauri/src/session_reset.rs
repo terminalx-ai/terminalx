@@ -432,7 +432,7 @@ mod tests {
         let _program = claude::pty::claude_program_for_tests(program);
         let cwd = store::root().unwrap().join("checkout");
         std::fs::create_dir(&cwd).unwrap();
-        let cwd = std::fs::canonicalize(&cwd).unwrap();
+        let cwd = crate::paths::canonicalize(&cwd).unwrap();
         for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "test@example.com"], &["config", "user.name", "Test"]] {
             crate::git::run(&cwd, args).unwrap();
         }

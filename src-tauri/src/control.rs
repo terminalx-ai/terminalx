@@ -293,7 +293,6 @@ impl WindowControl {
         Self { sink, computer, browser, pairing: None, questions: None, machines: None }
     }
 
-    #[cfg(unix)]
     pub(crate) fn serve(mut self, app: tauri::AppHandle, endpoint: ControlEndpoint, pairing: Arc<crate::pairing::PairingManager>, ask: crate::issue_control::Ask) -> anyhow::Result<()> {
         use tauri::Manager;
         self.pairing = Some(pairing);
@@ -333,7 +332,6 @@ impl WindowControl {
         Ok(())
     }
 
-    #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         if command == "environment.snapshot" {
             let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
@@ -512,7 +510,6 @@ impl ControlService {
         if let Some(action) = command.strip_prefix("machine.") {
             refuse_limited_machine_caller(action, &params)?;
         }
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == "runtime.window.register" { return lifetime.window.register(lifetime, params); }
             if crate::local_runtime::window::supported(command) { return lifetime.window.call(command, params); }
@@ -527,12 +524,15 @@ impl ControlService {
                     // Only a person makes a pairing code or lets a computer
                     // in: never an agent or terminal this runtime started
                     // (docs/MACHINES.md, "Who may answer"; `consent`).
-                    #[cfg(unix)]
                     let params = {
                         let mut params = params;
                         if crate::serve_cli::consent::guards(command) {
-                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                            crate::serve_cli::consent::verify(run, &mut params)?;
+                            #[cfg(unix)]
+                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?.to_owned();
+                            // A pipe has no directory: the witness belongs to this home's `run`.
+                            #[cfg(windows)]
+                            let run = crate::store::root().map_err(ControlError::internal)?.join("run");
+                            crate::serve_cli::consent::verify(&run, &mut params)?;
                         }
                         params
                     };
@@ -1107,7 +1107,6 @@ impl ControlService {
     /// from the webview when there is one and it answers in time.
     fn terminal_status(&self) -> Value {
         let mut terminals = json!({ "backend": self.manager.terminals().stats() });
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             terminals["webview"] = if lifetime.window.available() {
                 lifetime.window.call("window.terminalCounters", json!({})).unwrap_or(Value::Null)
@@ -1187,11 +1186,10 @@ impl ControlService {
 
     /// A window service from the control socket: the attached desktop's.
     fn window_call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             return lifetime.window.call(command, params);
         }
-        #[cfg(all(feature = "desktop", unix))]
+        #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             return desktop.execute(command, params, "");
         }
@@ -2069,7 +2067,7 @@ impl ControlService {
             return Err(refuse(&orphans, &[]));
         }
         if !force {
-            let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
             let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
             if !landed.safe {
                 let losses = if landed.losses.is_empty() { "It is not known to be clean and merged.".to_string() } else { landed.losses.join("\n") };
@@ -2103,7 +2101,7 @@ impl ControlService {
     /// What deleting `worktree` would do: the sessions it holds, with what
     /// each still runs, and its git state checked as the delete checks it.
     fn worktree_delete_preview(&self, project: &Project, worktree: crate::workspaces::Workspace, held: &[SessionEntry]) -> crate::worktree_control::DeletePreview {
-        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
         let terminals = self.manager.terminals();
         let sessions = held
@@ -2729,7 +2727,7 @@ fn optional_string(params: &Value, name: &str) -> Option<String> {
 }
 
 fn canonical_or_original(path: &str) -> String {
-    std::fs::canonicalize(path)
+    crate::paths::canonicalize(path)
         .unwrap_or_else(|_| PathBuf::from(path))
         .to_string_lossy()
         .into_owned()
@@ -3032,7 +3030,7 @@ mod tests {
         let add = |path: &Path| service.execute("projects.add", json!({"path": path, "refuseExisting": true}), "r");
 
         let added = add(&repository).unwrap();
-        let path = std::fs::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
+        let path = crate::paths::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
         assert_eq!((added["project"]["path"].as_str(), added["project"]["name"].as_str(), added["project"]["kind"].as_str()), (Some(path.as_str()), Some("api"), Some("git")));
         assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
         assert_eq!(add(&gateway).unwrap()["project"]["kind"], "folder");

@@ -128,8 +128,8 @@ pub(crate) fn real_child_dir(root: &Path, name: &str) -> Option<PathBuf> {
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return None;
     }
-    let resolved = std::fs::canonicalize(&path).ok()?;
-    (resolved.parent() == Some(root)).then_some(resolved)
+    let resolved = crate::paths::canonicalize(&path).ok()?;
+    resolved.parent().is_some_and(|parent| crate::paths::same(parent, root)).then_some(resolved)
 }
 
 /// Both CLIs name conversations with UUIDs. Anything else is not used to
@@ -243,7 +243,7 @@ pub(crate) fn remove_dir_counted(path: &Path) -> u64 {
 /// Remove what Claude Code kept for the deleted sessions under `root`
 /// (`~/.claude/projects`). Returns the bytes freed.
 pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
-    let Ok(root) = std::fs::canonicalize(root) else { return 0 };
+    let Ok(root) = crate::paths::canonicalize(root) else { return 0 };
     let has_transcript = |session: &SessionEntry, id: &str| {
         conversation_id(id).is_some()
             && session_dirs(session).iter().any(|dir| {
@@ -286,7 +286,7 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
 /// Remove the deleted sessions' Codex rollouts from the managed home.
 /// Returns the bytes freed.
 pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
-    let Ok(sessions) = std::fs::canonicalize(home.join("sessions")) else { return 0 };
+    let Ok(sessions) = crate::paths::canonicalize(home.join("sessions")) else { return 0 };
     // Codex forks are new threads over a copied log, so none waits on a parent's file.
     let kept_ids = needed_conversation_ids(remaining, "codex", &|_, _| true);
     let mut freed = 0;
@@ -314,7 +314,7 @@ pub(crate) fn referenced_conversations(sessions: &[SessionEntry]) -> HashSet<&st
 /// Whether a rollout's year, month and day folders are real ones inside the
 /// managed home's `sessions` (given resolved), not links leading out of it.
 pub(crate) fn rollout_inside(sessions: &Path, rollout: &Path) -> bool {
-    rollout.parent().and_then(|day| std::fs::canonicalize(day).ok()).is_some_and(|day| day.starts_with(sessions))
+    rollout.parent().and_then(|day| crate::paths::canonicalize(day).ok()).is_some_and(|day| day.starts_with(sessions))
 }
 
 /// Remove the agent CLIs' data for sessions that were just deleted.
@@ -409,11 +409,11 @@ mod tests {
             let root = dir.path().join("home/.claude/projects");
             std::fs::create_dir_all(&root).unwrap();
             std::fs::create_dir_all(dir.path().join("project")).unwrap();
-            Self { _home: home, root: std::fs::canonicalize(root).unwrap(), dir }
+            Self { _home: home, root: crate::paths::canonicalize(root).unwrap(), dir }
         }
 
         fn project(&self) -> PathBuf {
-            std::fs::canonicalize(self.dir.path().join("project")).unwrap()
+            crate::paths::canonicalize(self.dir.path().join("project")).unwrap()
         }
 
         fn worktree(&self, name: &str) -> PathBuf {

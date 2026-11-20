@@ -512,14 +512,14 @@ fn create_session_workspace(req: NewSession, name: Option<&str>, account: Option
 /// project. Resolve the checkout root before comparing: a cwd may be a
 /// subdirectory, and a worktree may live anywhere on disk.
 fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str) -> Result<bool> {
-    let Ok(cwd) = std::fs::canonicalize(cwd) else { return Ok(false) };
+    let Ok(cwd) = crate::paths::canonicalize(cwd) else { return Ok(false) };
     if cwd == project {
         entry.cwd = cwd.to_string_lossy().into_owned();
         entry.branch = git::current_branch(&cwd);
         return Ok(true);
     }
     let Some(top) = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
-        .and_then(|top| std::fs::canonicalize(top.trim()).ok()) else { return Ok(false) };
+        .and_then(|top| crate::paths::canonicalize(top.trim()).ok()) else { return Ok(false) };
     if !git::is_worktree_of(project, &top) {
         return Ok(false);
     }
@@ -574,6 +574,7 @@ fn quick_chat_folder(path: &str) -> Result<String> {
 
 /// Create a quick chat and tell listeners. Like any session, its index entry
 /// is written before an agent is started in it.
+#[cfg(unix)]
 pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
     create_quick_chat_blocking_on(sink, req, None)
 }
@@ -709,7 +710,7 @@ fn carry_conversations(entry: &SessionEntry, to: &str, preserve_source: bool) {
 /// when `cwd` is `None`. The folder is used as it is and is not registered as
 /// a project. `stop` ends what the session's tabs run: they start again, in
 /// the new directory, the next time they are opened.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     set_quick_chat_cwd_fallible(sink, session_id, cwd, &|entry| { stop(entry); Ok(()) })
 }
@@ -754,7 +755,7 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
 /// attached it yet. An empty scratch directory goes; one that holds files is
 /// kept until the session is deleted, since the conversation may refer to
 /// them.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     move_quick_chat_to_project_fallible(sink, session_id, project_path, &|entry| { stop(entry); Ok(()) })
 }
@@ -815,7 +816,7 @@ pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: i
 /// purpose) unless it was the idle sweep that archived it (#718), and so is
 /// one `busy` says is running. `stop` ends what an idle
 /// one still has open. Returns what was deleted.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
     sweep_idle_quick_chats_fallible(sink, days, busy, &|entry| { stop(entry); Ok(()) })
 }
@@ -878,7 +879,7 @@ pub struct WorkspaceRename {
 pub(crate) fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> std::result::Result<WorkspaceRename, WorkspaceError> {
     let _naming = WORKSPACE_NAMING.lock();
     let project = projects::canonical(project_path).map_err(err)?;
-    let target = std::fs::canonicalize(path).map_err(err)?;
+    let target = crate::paths::canonicalize(path).map_err(err)?;
     let old_name = target
         .file_name()
         .and_then(|part| part.to_str())
@@ -1003,7 +1004,7 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
 /// to, which keeps it from being removed until `git.prReconcileCreation` or a
 /// retried create settles it.
 pub(crate) fn pending_pr_creation_for(project: &Path, path: &Path) -> Result<Option<String>> {
-    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let project = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     crate::remote::git::pending_pr_creation_in(&checkout_root(&project, path)).map_err(|error| error.message)
 }
 
@@ -1022,14 +1023,14 @@ fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
         let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
         ancestor = parent;
     }
-    let normalized = std::fs::canonicalize(ancestor).ok()
+    let normalized = crate::paths::canonicalize(ancestor).ok()
         .and_then(|base| path.strip_prefix(ancestor).ok().map(|tail| base.join(tail)))
         .unwrap_or_else(|| path.to_path_buf());
-    let project_root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let project_root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let git_root = git::run(ancestor, &["rev-parse", "--show-toplevel"]).ok()
-        .and_then(|top| std::fs::canonicalize(top.trim()).ok());
+        .and_then(|top| crate::paths::canonicalize(top.trim()).ok());
     let resolved = git::list_worktrees(project).unwrap_or_default().into_iter()
-        .map(|(root, _)| { let root = PathBuf::from(root); std::fs::canonicalize(&root).unwrap_or(root) })
+        .map(|(root, _)| { let root = PathBuf::from(root); crate::paths::canonicalize(&root).unwrap_or(root) })
         .chain(git_root)
         .filter(|root| normalized.starts_with(root) && (path.exists() || *root == normalized))
         .max_by_key(|root| root.components().count());
@@ -1038,7 +1039,7 @@ fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
     // path for a retry; the ordinary direct-removal guard still checks it.
     if resolved.as_ref() == Some(&project_root) && normalized != project_root
         && index::load().unwrap_or_default().iter().any(|entry| entry.worktree_name.is_some() && !entry.worktree_removed
-            && std::fs::canonicalize(&entry.cwd).unwrap_or_else(|_| PathBuf::from(&entry.cwd)) == normalized) {
+            && crate::paths::canonicalize(&entry.cwd).unwrap_or_else(|_| PathBuf::from(&entry.cwd)) == normalized) {
         return normalized;
     }
     resolved.unwrap_or(normalized)
@@ -1049,7 +1050,7 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
     let project = Path::new(&session.project_path);
     if !cwd.exists() && !session.worktree_removed {
         if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| identity_path(cwd).starts_with(identity_path(root))) {
-            return std::fs::canonicalize(&root).unwrap_or(root);
+            return crate::paths::canonicalize(&root).unwrap_or(root);
         }
         // Older entries did not record the root. Their worktree name is the
         // checkout directory's name; use it only when it identifies one
@@ -1061,7 +1062,7 @@ fn session_checkout_root(session: &SessionEntry) -> PathBuf {
                 .filter(|root| cwd.strip_prefix(root).is_ok_and(|tail| !tail.components().any(|part| part.as_os_str() == name)))
                 .collect();
             if matches.len() == 1 {
-                return std::fs::canonicalize(&matches[0]).unwrap_or_else(|_| matches[0].clone());
+                return crate::paths::canonicalize(&matches[0]).unwrap_or_else(|_| matches[0].clone());
             }
         }
     }
@@ -1085,7 +1086,7 @@ fn identity_path(path: &Path) -> PathBuf {
         let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
         ancestor = parent;
     }
-    let mut result = std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+    let mut result = crate::paths::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
     if let Ok(tail) = path.strip_prefix(ancestor) {
         for component in tail.components() {
             match component {
@@ -1290,7 +1291,7 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
     let _github_request = crate::github_process::scope();
-    let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
+    let project = crate::paths::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
     let target = checkout_root(&project, Path::new(request.path));
     if target == project {
         return Err("A project's own checkout cannot be removed.".into());
@@ -1678,7 +1679,7 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     let root = session_checkout_root(&entry);
-    let project = std::fs::canonicalize(&entry.project_path).unwrap_or_else(|_| PathBuf::from(&entry.project_path));
+    let project = crate::paths::canonicalize(&entry.project_path).unwrap_or_else(|_| PathBuf::from(&entry.project_path));
     if root == project {
         return Ok(None);
     }
@@ -1687,6 +1688,8 @@ pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
+    use crate::paths::Canonical;
     #[test]
     fn pull_request_sessions_require_an_isolated_target() {
         let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
@@ -2028,7 +2031,7 @@ mod tests {
         assert_eq!(entry.title, "#203 fix");
         assert_eq!(entry.worktree_name.as_deref(), Some("fix-203"));
         assert_eq!(entry.branch.as_deref(), Some("raccoon/fix-203"));
-        assert_eq!(Path::new(&entry.cwd), git::worktree_path(dir.path(), "fix-203").canonicalize().unwrap());
+        assert_eq!(Path::new(&entry.cwd), git::worktree_path(dir.path(), "fix-203").canonical().unwrap());
         assert_eq!(index::get(&entry.id).unwrap(), entry);
 
         for expected in ["203-fix", "203-fix-2"] {
@@ -2387,7 +2390,7 @@ mod tests {
     }
 
     fn scratch_root() -> PathBuf {
-        store::quick::root().unwrap().canonicalize().unwrap()
+        store::quick::root().unwrap().canonical().unwrap()
     }
 
     #[test]
@@ -2429,7 +2432,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let folder = tempfile::tempdir().unwrap();
         let chat = quick_chat(Some(folder.path()));
-        assert_eq!(Path::new(&chat.cwd), folder.path().canonicalize().unwrap());
+        assert_eq!(Path::new(&chat.cwd), folder.path().canonical().unwrap());
         assert!(chat.is_quick() && chat.branch.is_none());
         // It still has a scratch directory to go back to, named for it.
         assert_eq!(Path::new(&chat.project_path), scratch_root().join(&chat.id));
@@ -2481,7 +2484,7 @@ mod tests {
         let chat = quick_chat(None);
         let began = claude_transcript(&chat, CONVERSATION);
         let folder = tempfile::tempdir().unwrap();
-        let target = folder.path().canonicalize().unwrap();
+        let target = folder.path().canonical().unwrap();
         let stopped = std::cell::Cell::new(0);
         let stop = |_: &SessionEntry| stopped.set(stopped.get() + 1);
         let sink = sink();
@@ -2547,7 +2550,7 @@ mod tests {
         let stopped = std::cell::Cell::new(0);
 
         let moved = move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| stopped.set(stopped.get() + 1)).unwrap();
-        let project_path = project.path().canonicalize().unwrap();
+        let project_path = project.path().canonical().unwrap();
         assert_eq!(stopped.get(), 1);
         assert_eq!(moved.kind, SessionKind::Project);
         assert_eq!(moved.project(), Some(project_path.to_str().unwrap()));
@@ -2599,7 +2602,7 @@ mod tests {
 
         for cwd in [PathBuf::from(&source.cwd), subdir] {
             let continued = session_in(project.path(), cwd.to_str().unwrap(), "Continuation");
-            assert_eq!(Path::new(&continued.cwd), cwd.canonicalize().unwrap());
+            assert_eq!(Path::new(&continued.cwd), cwd.canonical().unwrap());
             assert_eq!(continued.worktree_name, source.worktree_name);
             assert_eq!(continued.branch, branch);
             assert_eq!(continued.base_ref, source.base_ref);
@@ -2701,7 +2704,7 @@ mod tests {
         for cwd in [other.path(), foreign.as_path(), boundary.as_path()] {
             let chat = quick_chat(Some(cwd));
             let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
-            assert_eq!(Path::new(&moved.cwd), project.path().canonicalize().unwrap());
+            assert_eq!(Path::new(&moved.cwd), project.path().canonical().unwrap());
             assert_eq!(moved.branch.as_deref(), Some("main"));
             assert!(moved.worktree_name.is_none() && moved.base_ref.is_none() && moved.worktree_base.is_none());
             let explicit = session_in(project.path(), cwd.to_str().unwrap(), "Explicit unrelated cwd");

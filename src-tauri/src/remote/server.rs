@@ -546,7 +546,7 @@ impl WorkspaceRpc {
         terminals: Arc<Terminals>,
         sessions: Option<SessionManager>,
     ) -> anyhow::Result<Arc<Self>> {
-        let root = std::fs::canonicalize(root)?;
+        let root = crate::paths::canonicalize(root)?;
         let scope = Scope::Workspace { mirror: super::mirror::WorkspaceMirror::new(root.clone()), project: Arc::new(ServedProject::workspace(root)) };
         Ok(Self::serving(scope, generation, sink, terminals, sessions))
     }
@@ -2332,7 +2332,7 @@ impl WorkspaceRpc {
             (Some(relative), _) => project.files.existing_path(relative)?,
             // A session's terminal opens in its checkout (its worktree), when
             // that is inside the workspace; otherwise at the root.
-            (None, Some(session)) => std::fs::canonicalize(&session.cwd)
+            (None, Some(session)) => crate::paths::canonicalize(&session.cwd)
                 .ok()
                 .filter(|cwd| project.files.contains(cwd) && cwd.is_dir())
                 .unwrap_or_else(|| project.root.clone()),
@@ -2918,7 +2918,7 @@ impl WorkspaceRpc {
             {
                 return None;
             }
-            let cwd = std::fs::canonicalize(&session.cwd).ok().filter(|cwd| project.files.contains(cwd)).map(|cwd| project.files.relative(&cwd)).unwrap_or_else(|| ".".into());
+            let cwd = crate::paths::canonicalize(&session.cwd).ok().filter(|cwd| project.files.contains(cwd)).map(|cwd| project.files.relative(&cwd)).unwrap_or_else(|| ".".into());
             let (input, queue) = std::sync::mpsc::channel::<PtyInput>();
             let input_pending = Arc::new(AtomicUsize::new(0));
             let terminals = self.terminals.clone();
@@ -3956,7 +3956,7 @@ impl WorkspaceRpc {
 
     #[cfg(test)]
     pub(super) fn set_home_for_tests(&self, home: &Path) {
-        *self.home_for_tests.lock().unwrap() = Some(std::fs::canonicalize(home).unwrap());
+        *self.home_for_tests.lock().unwrap() = Some(crate::paths::canonicalize(home).unwrap());
     }
 
     /// `machine/7` (PRO-403): a session's Setup and Run on this machine. The
@@ -4014,7 +4014,7 @@ impl WorkspaceRpc {
     /// `machine.sessionActions`: what the Run menu, the Open button and the
     /// dock's Setup and Run tabs show for `session`, as this machine has it.
     fn machine_session_actions(&self, session: &SessionEntry) -> Result<Value, RpcError> {
-        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
         let wanted = canonical(&session.project_path);
         let project = machine::registered()?.into_iter().find(|project| canonical(&project.path) == wanted);
         let (actions, preview_urls) = project.map(|project| (project.actions, project.preview_urls)).unwrap_or_default();
@@ -4049,7 +4049,7 @@ impl WorkspaceRpc {
         crate::harness::setup::command_elsewhere(harness, step).map_err(|error| RpcError::invalid(error.to_string()))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn set_setup_command_for_tests(&self, command: &str) {
         *self.setup_command_for_tests.lock().unwrap() = Some(command.to_string());
     }

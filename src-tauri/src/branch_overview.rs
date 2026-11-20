@@ -142,8 +142,8 @@ pub fn overview(cwd: &Path, recorded: Option<&str>, local_only: bool) -> BranchO
     } else { recorded.or(default) };
     let on_base = status.branch.is_some() && (status.branch == base || (!local_only && status.branch == status.default_branch));
     let main_checkout = main_checkout(cwd);
-    let main_root = main_checkout.as_deref().and_then(|path| std::fs::canonicalize(path).ok());
-    let current_root = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|path| std::fs::canonicalize(path.strip_suffix('\n').unwrap_or(&path)).ok());
+    let main_root = main_checkout.as_deref().and_then(|path| crate::paths::canonicalize(path).ok());
+    let current_root = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|path| crate::paths::canonicalize(path.strip_suffix('\n').unwrap_or(&path)).ok());
     // An unverified path must not permit switching the agent's own checkout.
     let in_main_checkout = main_root.zip(current_root).is_none_or(|(main, current)| main == current);
     let comparison_ref = git::comparison_ref(cwd);
@@ -358,7 +358,7 @@ mod tests {
         commit(&worktree, "feature.txt", "feature", "Ann");
         let before = overview(&worktree, Some("upstream/develop"), true);
         assert_eq!(before.base.as_deref(), Some("develop"));
-        assert_eq!(before.main_checkout.as_deref().map(std::path::PathBuf::from), Some(std::fs::canonicalize(&main).unwrap()));
+        assert_eq!(before.main_checkout.as_deref().map(std::path::PathBuf::from), Some(crate::paths::canonicalize(&main).unwrap()));
         assert_eq!(before.ahead, 1);
         assert!(!before.on_base);
         assert!(!before.in_main_checkout);

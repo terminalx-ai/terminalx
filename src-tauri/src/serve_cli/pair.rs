@@ -82,7 +82,7 @@ fn pair(args: &[String]) -> Result<i32> {
     let runtime = Runtime::connect_or_start(&data)?;
     // The settings the runtime watches are in its data directory. Set before
     // any thread of this process reads the environment.
-    let canonical = std::fs::canonicalize(&data).with_context(|| format!("resolve {}", data.display()))?;
+    let canonical = crate::paths::canonicalize(&data).with_context(|| format!("resolve {}", data.display()))?;
     std::env::set_var("TERMINALX_HOME", &canonical);
 
     let deadline = Instant::now() + HOST_START_WAIT;
@@ -465,8 +465,130 @@ fn wait_phone(runtime: &Runtime, attachment: &Attachment, expires_at: i64) -> Re
     }
 }
 
+/// The person's console on Windows: what `terminal` is on Unix. Ctrl-C,
+/// Ctrl-Break and closing the window are caught so `pair` declines instead
+/// of leaving a computer waiting; input typed before a prompt is discarded.
+#[cfg(windows)]
+mod terminal {
+    use std::io::IsTerminal;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver, RecvTimeoutError};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use anyhow::Result;
+    use windows_sys::Win32::System::Console::{FlushConsoleInputBuffer, GetStdHandle, SetConsoleCtrlHandler, STD_INPUT_HANDLE};
+
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+    pub fn is_terminal(fd: i32) -> bool {
+        match fd {
+            0 => std::io::stdin().is_terminal(),
+            1 => std::io::stdout().is_terminal(),
+            _ => std::io::stderr().is_terminal(),
+        }
+    }
+
+    pub fn interrupted() -> bool {
+        INTERRUPTED.load(Ordering::Relaxed)
+    }
+
+    unsafe extern "system" fn on_event(event: u32) -> windows_sys::core::BOOL {
+        use windows_sys::Win32::System::Console::{CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT};
+        INTERRUPTED.store(true, Ordering::Relaxed);
+        // Ctrl-C and Ctrl-Break are handled: `pair` declines and exits. After
+        // a closed window, a logoff or a shutdown Windows ends the process
+        // once this returns, so it waits (Windows allows about 5 s) while
+        // `pair` declines; its exit ends the wait sooner.
+        if matches!(event, CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT) {
+            std::thread::sleep(Duration::from_secs(4));
+        }
+        1
+    }
+
+    pub struct Interrupts;
+
+    impl Interrupts {
+        pub fn catch() -> Self {
+            // SAFETY: the handler only stores to an atomic.
+            unsafe { SetConsoleCtrlHandler(Some(on_event), 1) };
+            Self
+        }
+    }
+
+    pub enum Answer {
+        Line(String),
+        Closed,
+        TimedOut,
+        Interrupted,
+    }
+
+    /// One thread reads the console a line at a time for the life of the
+    /// process; `ask` waits on what it reads with a deadline.
+    fn lines() -> &'static Mutex<Receiver<Option<String>>> {
+        static LINES: OnceLock<Mutex<Receiver<Option<String>>>> = OnceLock::new();
+        LINES.get_or_init(|| {
+            let (send, receive) = std::sync::mpsc::channel();
+            std::thread::spawn(move || loop {
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) | Err(_) => {
+                        let _ = send.send(None);
+                        return;
+                    }
+                    Ok(_) => {
+                        line.truncate(4096);
+                        if send.send(Some(line)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+            Mutex::new(receive)
+        })
+    }
+
+    pub fn ask(prompt: &str, deadline: Option<Instant>) -> Result<Answer> {
+        use std::io::Write;
+        let lines = lines().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Typed before the prompt: neither the lines already read nor what
+        // waits in the console counts.
+        while lines.try_recv().is_ok() {}
+        // SAFETY: the process's own standard input handle.
+        unsafe { FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE)) };
+        let mut out = std::io::stdout();
+        write!(out, "{prompt}")?;
+        out.flush()?;
+        loop {
+            if interrupted() {
+                return Ok(Answer::Interrupted);
+            }
+            let wait = match deadline {
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(Answer::TimedOut);
+                    }
+                    left.min(Duration::from_millis(200))
+                }
+                None => Duration::from_millis(200),
+            };
+            match lines.recv_timeout(wait) {
+                Ok(Some(line)) => return Ok(Answer::Line(line.trim_end_matches(['\r', '\n']).to_owned())),
+                // Ctrl-C ends a console read too; say which it was.
+                Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    return Ok(if interrupted() { Answer::Interrupted } else { Answer::Closed });
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+}
+
 /// The person's terminal: answers read with a deadline, and Ctrl-C caught
 /// so it declines instead of leaving a computer waiting.
+#[cfg(unix)]
 mod terminal {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;

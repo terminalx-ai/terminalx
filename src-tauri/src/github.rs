@@ -379,7 +379,7 @@ fn has_own_head(pr: &Value, ours: &[String]) -> bool {
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
@@ -2333,6 +2333,7 @@ mod tests {
         assert_eq!((out.status.code(), out.stdout.as_slice(), out.stderr.as_slice()), (Some(3), b"out".as_slice(), b"err".as_slice()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn privacy_blocks_and_drains_app_github_processes() {
         for managed in [false, true] {
@@ -2373,6 +2374,8 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
         let pid: i32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+        #[cfg(not(unix))]
+        let _ = pid;
         crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
         let started = Instant::now();
         assert!(crate::data_privacy::refresh().enabled);

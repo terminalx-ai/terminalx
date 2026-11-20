@@ -129,6 +129,9 @@ impl Input {
         }
     }
 
+    // The stall bookkeeping is for Unix's non-blocking master; a Windows
+    // pseudo-console's input blocks instead.
+    #[cfg_attr(not(unix), allow(unused_variables, unused_assignments, unused_mut))]
     fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut written = 0;
         let started = Instant::now();
@@ -250,6 +253,7 @@ struct Pane {
     created: String,
     /// What the pane's reader and waiter hold off on while it is handed to
     /// the runtime that replaces this one (#765).
+    #[cfg_attr(not(unix), allow(dead_code))]
     hold: Arc<Hold>,
 }
 
@@ -367,6 +371,7 @@ impl OwnedGroup {
         // by itself, and keeps going until none is left.
         #[cfg(target_os = "linux")]
         if let Some(owner) = self.owner() { owner.stop_within(if force { Duration::ZERO } else { TERMINATE_GRACE }); return; }
+        #[cfg_attr(windows, allow(unused_mut))]
         let mut owned = self.0.lock().unwrap();
         // macOS: main's signal, to the leader's process group only.
         #[cfg(target_os = "macos")]
@@ -395,8 +400,13 @@ impl OwnedGroup {
                 }
                 Err(error) => log::warn!("cannot inspect owned PTY session {pid}: {error:#}"),
             }
-            #[cfg(not(unix))]
-            { if force { crate::harness::host::kill_now(pid); } else { crate::harness::host::terminate(pid); } }
+            // Windows has no gentler request than ending the pane's job: it
+            // and everything it started, orphans too, end together.
+            #[cfg(windows)]
+            {
+                let _ = force;
+                if !pane_jobs::terminate(pid) { crate::harness::host::terminate(pid); }
+            }
         }
     }
     fn terminate(self: &Arc<Self>) {
@@ -415,8 +425,141 @@ fn group_alive(pid: u32) -> bool {
     #[cfg(unix)]
     // SAFETY: signal zero observes a known PTY process group.
     { (unsafe { libc::kill(-(pid as i32), 0) }) == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) }
-    #[cfg(not(unix))]
-    { crate::harness::host::is_alive(pid) }
+    #[cfg(windows)]
+    { pane_jobs::alive(pid).unwrap_or_else(|| crate::harness::host::is_alive(pid)) }
+}
+
+/// A pseudo-console made to keep the cursor (portable-pty asks for that)
+/// starts by asking its terminal where the cursor is (`ESC[6n`) and holds
+/// back all output until it is told. A pane is often read with no view to
+/// answer (a setup script, an agent before its tab is shown), so on Windows
+/// the reader answers that one request itself, from the top-left corner,
+/// and takes it out of the output: a view never sees it, so never answers a
+/// second time into the program's input.
+#[cfg(windows)]
+mod cursor_report {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    const REQUEST: &[u8] = b"\x1b[6n";
+    const ANSWER: &[u8] = b"\x1b[1;1R";
+
+    thread_local! {
+        static LOOKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Answer and remove the console's opening cursor request in `buf[..n]`;
+    /// returns the length left. Each pane's reader is a thread of its own,
+    /// so whether its first output has been looked at is tracked per thread.
+    pub(super) fn answer(buf: &mut [u8], n: usize, input: &Arc<Mutex<super::Input>>) -> usize {
+        let mut looked = LOOKED.with(|looked| looked.get());
+        let (left, found) = take_opening(buf, n, &mut looked);
+        LOOKED.with(|cell| cell.set(looked));
+        if found {
+            if let Ok(mut input) = input.lock() {
+                let _ = input.writer.write_all(ANSWER);
+                let _ = input.writer.flush();
+            }
+        }
+        left
+    }
+
+    /// Take the cursor request out of `buf[..n]` if this is the pane's first
+    /// output: `(length left, whether it was there)`. The console asks before
+    /// it writes anything else, so only that first output is looked at; a
+    /// request a program makes later (an editor, a fuzzy finder, the shell's
+    /// line editor) is passed on for the view to answer.
+    fn take_opening(buf: &mut [u8], n: usize, looked: &mut bool) -> (usize, bool) {
+        if *looked || n == 0 {
+            return (n, false);
+        }
+        *looked = true;
+        let Some(at) = buf[..n].windows(REQUEST.len()).position(|window| window == REQUEST) else { return (n, false) };
+        buf.copy_within(at + REQUEST.len()..n, at);
+        (n - REQUEST.len(), true)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_the_opening_request_is_taken() {
+            let mut looked = false;
+            let mut buf = *b"\x1b[6nhello";
+            assert_eq!(take_opening(&mut buf, 9, &mut looked), (5, true));
+            assert_eq!(&buf[..5], b"hello");
+            // A later request is the program's own, for the view to answer.
+            let mut later = *b"\x1b[6n";
+            assert_eq!(take_opening(&mut later, 4, &mut looked), (4, false));
+        }
+
+        #[test]
+        fn output_without_a_request_ends_the_looking() {
+            let mut looked = false;
+            let mut first = *b"prompt> ";
+            assert_eq!(take_opening(&mut first, 8, &mut looked), (8, false));
+            let mut later = *b"\x1b[6n";
+            assert_eq!(take_opening(&mut later, 4, &mut looked), (4, false));
+            assert_eq!(&later, b"\x1b[6n");
+        }
+    }
+}
+
+/// Each pane's processes on Windows, in a Job Object of their own: what the
+/// pane's session and process groups are on Unix. The job is made as the
+/// pane starts and kills what is in it when its last handle closes, so a
+/// pane's programs (and what they started, though their parent has exited)
+/// end with it, or with the runtime if that ends first, as a closed PTY
+/// hangs up its session on Unix.
+#[cfg(windows)]
+mod pane_jobs {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+
+    use crate::win::process::Job;
+
+    fn jobs() -> &'static Mutex<HashMap<u32, Job>> {
+        static JOBS: OnceLock<Mutex<HashMap<u32, Job>>> = OnceLock::new();
+        JOBS.get_or_init(Default::default)
+    }
+
+    /// Put the pane whose first process is `pid` in a job of its own.
+    pub(super) fn adopt(pid: u32) {
+        let job = match Job::new().and_then(|job| job.assign_pid(pid).map(|()| job)) {
+            Ok(job) => job,
+            Err(error) => {
+                log::warn!("pane process {pid} runs outside a job ({error}); stopping it ends only what still has a parent");
+                return;
+            }
+        };
+        jobs().lock().unwrap_or_else(PoisonError::into_inner).insert(pid, job);
+    }
+
+    /// Whether anything of the pane is still running; `None` for a pane with
+    /// no job. An empty job is let go.
+    pub(super) fn alive(pid: u32) -> Option<bool> {
+        let mut jobs = jobs().lock().unwrap_or_else(PoisonError::into_inner);
+        let running = jobs.get(&pid)?.active().map(|count| count > 0).unwrap_or(true);
+        if !running {
+            jobs.remove(&pid);
+        }
+        Some(running)
+    }
+
+    /// End everything in the pane's job; `false` for a pane with no job.
+    pub(super) fn terminate(pid: u32) -> bool {
+        let jobs = jobs().lock().unwrap_or_else(PoisonError::into_inner);
+        match jobs.get(&pid) {
+            Some(job) => {
+                if let Err(error) = job.terminate(1) {
+                    log::warn!("end pane job {pid}: {error}");
+                }
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// The census, taken again while one is indeterminate. Any process on the
@@ -883,6 +1026,147 @@ pub struct PaneSpec<'a> {
     pub env: &'a [(String, String)],
 }
 
+#[cfg(windows)]
+pub(crate) fn shell() -> String {
+    // A `SHELL` inherited from Git Bash or MSYS (`/usr/bin/bash`) names no
+    // Windows executable; only a real path to one is honoured.
+    if let Some(shell) = std::env::var_os("SHELL").map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))) {
+        return shell.to_string_lossy().into_owned();
+    }
+    ["pwsh.exe", "powershell.exe", "cmd.exe"].into_iter()
+        .find_map(crate::binpath::resolve)
+        .map_or_else(|| "powershell.exe".into(), |path| path.to_string_lossy().into_owned())
+}
+
+/// `command`'s words when it is a launch line the app built: a program named
+/// by absolute path, then its arguments, all in POSIX shell quoting (`'...'`
+/// with `'\''` for a quote). None for anything else, which is the reader's
+/// own command line for their shell. A batch file is run by cmd, which reads
+/// `&|<>^%!"` in its arguments again, so one with any of those is refused.
+#[cfg(windows)]
+pub(crate) fn direct_program(command: &str) -> Option<Vec<String>> {
+    let words = posix_words(command)?;
+    let program = std::path::Path::new(words.first()?);
+    if !program.is_absolute() || !program.is_file() {
+        return None;
+    }
+    let batch = program.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    if batch && words[1..].iter().any(|word| word.contains(['&', '|', '<', '>', '^', '%', '!', '"', '\n', '\r'])) {
+        return None;
+    }
+    Some(words)
+}
+
+/// Split `command` into words as a POSIX shell would, for quoting only:
+/// `'...'`, `"..."` with `\` escapes, and `\` outside quotes. None when it
+/// uses anything a shell would expand or run (`$`, `` ` ``, `;`, `|`, `&`,
+/// `<`, `>`, `(`, `)`, `*`, `?`, `~` at a word's start) outside single quotes,
+/// or a quote is left open.
+#[cfg(windows)]
+pub(crate) fn posix_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            '\'' => {
+                started = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => word.push(c),
+                    }
+                }
+            }
+            '"' => {
+                started = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            c @ ('"' | '\\' | '$' | '`') => word.push(c),
+                            c => {
+                                word.push('\\');
+                                word.push(c);
+                            }
+                        },
+                        '$' | '`' => return None,
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                started = true;
+                word.push(chars.next()?);
+            }
+            '$' | '`' | ';' | '|' | '&' | '<' | '>' | '(' | ')' | '*' | '?' | '\n' | '\r' => return None,
+            '~' if !started => return None,
+            c => {
+                started = true;
+                word.push(c);
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+#[cfg(all(test, windows))]
+mod direct_program_tests {
+    use super::{direct_program, posix_words};
+
+    #[test]
+    fn a_launch_line_splits_into_the_words_a_posix_shell_would_pass() {
+        let line = r#"'C:\Program Files\cli.exe' --settings '{"a":"it'\''s"}' -m "x y" plain\ word"#;
+        assert_eq!(posix_words(line).unwrap(), [r"C:\Program Files\cli.exe", "--settings", r#"{"a":"it's"}"#, "-m", "x y", "plain word"]);
+        assert_eq!(posix_words("'' a").unwrap(), ["", "a"]);
+    }
+
+    #[test]
+    fn anything_a_shell_would_expand_or_run_is_left_to_the_shell() {
+        for line in ["echo $HOME", "a; b", "a | b", "a && b", "a > out", "ls *.rs", "~/bin/x", "'open", "\"$(id)\"", "a `id`"] {
+            assert!(posix_words(line).is_none(), "{line}");
+        }
+    }
+
+    #[test]
+    fn only_an_existing_program_by_absolute_path_is_started_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cli.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let line = format!("'{}' --flag 'a b'", exe.display());
+        assert_eq!(direct_program(&line).unwrap(), [exe.to_string_lossy().as_ref(), "--flag", "a b"]);
+        assert!(direct_program("cli.exe --flag").is_none());
+        assert!(direct_program(&format!("'{}' --flag", dir.path().join("missing.exe").display())).is_none());
+        let batch = dir.path().join("cli.cmd");
+        std::fs::write(&batch, b"").unwrap();
+        assert!(direct_program(&format!("'{}' -m model", batch.display())).is_some());
+        assert!(direct_program(&format!("'{}' '{{\"a\":1}}'", batch.display())).is_none());
+    }
+}
+
+/// The arguments that make Windows shell `shell` run `command` and exit.
+#[cfg(windows)]
+pub(crate) fn windows_command_args(shell: &str, command: &str) -> Vec<String> {
+    let name = std::path::Path::new(shell).file_stem().map(|stem| stem.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match name.as_str() {
+        "cmd" => vec!["/D".into(), "/C".into(), command.into()],
+        "bash" | "sh" | "zsh" => vec!["-l".into(), "-c".into(), command.into()],
+        _ => vec!["-NoLogo".into(), "-Command".into(), command.into()],
+    }
+}
+
+#[cfg(unix)]
 pub(crate) fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| {
         if cfg!(target_os = "macos") {
@@ -1069,6 +1353,15 @@ impl Terminals {
                 cmd.arg("-c");
                 cmd.arg(format!("exec {c}"));
             }
+            #[cfg(windows)]
+            Some(c) => match direct_program(c) {
+                // An agent's launch line names its CLI by absolute path in
+                // POSIX quoting, which PowerShell and cmd do not read: the CLI
+                // is started itself, with those words as its arguments.
+                Some(argv) => cmd = CommandBuilder::from_argv(argv.into_iter().map(std::ffi::OsString::from).collect()),
+                None => for arg in windows_command_args(&sh, c) { cmd.arg(arg); },
+            },
+            #[cfg(unix)]
             Some(c) => {
                 cmd.arg("-c");
                 cmd.arg(c);
@@ -1214,6 +1507,8 @@ impl Terminals {
         let alive = Arc::new(Mutex::new(true));
         #[cfg(target_os = "linux")]
         let group = owned.unwrap_or_else(|| Arc::new(OwnedGroup::new(group)));
+        #[cfg(windows)]
+        if let Some(pid) = group { pane_jobs::adopt(pid); }
         #[cfg(not(target_os = "linux"))]
         let group = Arc::new(OwnedGroup::new(group));
         {
@@ -1233,6 +1528,12 @@ impl Terminals {
         let exited = Arc::new(AtomicBool::new(false));
         // Dropped by the emitter when it has sent the last of the output.
         let (emitting, emitted_all) = std::sync::mpsc::channel::<()>();
+        let input = Arc::new(Mutex::new(Input {
+            writer,
+            #[cfg(unix)]
+            room,
+            stalled: false,
+        }));
 
         {
             let sink = sink.clone();
@@ -1245,6 +1546,7 @@ impl Terminals {
             let emitted = self.emitted.clone();
             let tap = tap.clone();
             let exited = exited.clone();
+            #[cfg(unix)]
             let reading = hold.clone();
             let drawing = hold.clone();
             let sizes = output_size.clone();
@@ -1253,6 +1555,8 @@ impl Terminals {
             let gathered = output.clone();
             #[cfg(unix)]
             let reader = reader.clone();
+            #[cfg(windows)]
+            let answering = input.clone();
             // Reading blocks until the program writes again, so it gets a
             // thread of its own: the emitter below must be able to send what
             // it gathered when the window closes even if the program has
@@ -1292,8 +1596,10 @@ impl Terminals {
                     match read {
                         Ok(0) => break,
                         Ok(n) => {
+                            #[cfg(windows)]
+                            let n = cursor_report::answer(&mut buf, n, &answering);
                             #[cfg(not(unix))]
-                            if !chunks.send((buf[..n].to_vec(), size)) {
+                            if n > 0 && !chunks.send((buf[..n].to_vec(), size)) {
                                 break;
                             }
                             #[cfg(unix)]
@@ -1412,12 +1718,6 @@ impl Terminals {
                 while group.pid().is_some() { std::thread::sleep(Duration::from_millis(20)); }
             })?;
         }
-        let input = Arc::new(Mutex::new(Input {
-            writer,
-            #[cfg(unix)]
-            room,
-            stalled: false,
-        }));
         self.panes.lock().unwrap().insert(id.to_string(), Pane { master, input, pid, explicit_command, environment, alive, group, last_output, scrollback, printed: own, screen, output_size, output, cwd, created, hold,
             #[cfg(unix)] reader });
         self.keep_slot(id, &tap);
@@ -1972,9 +2272,21 @@ impl Terminals {
                 })
                 .collect()
         }
-        #[cfg(not(unix))]
+        // What a pseudo-console cannot say is read from the pane's processes
+        // (`foreground::windows`): a command its shell runs is in front, and
+        // is looked at as a full-screen program would be.
+        #[cfg(windows)]
         {
-            Vec::new()
+            let panes = self.panes.lock().unwrap();
+            panes
+                .iter()
+                .filter(|(_, pane)| *pane.alive.lock().unwrap())
+                .filter_map(|(id, pane)| {
+                    let pid = pane.pid?;
+                    let foreground = crate::foreground::windows::foreground(pid);
+                    Some(PaneFront { id: id.clone(), pid, foreground, raw: foreground != pid, tty: None })
+                })
+                .collect()
         }
     }
 
@@ -2741,6 +3053,7 @@ time.sleep(60)
         terminals.spawn(sink.clone(), id, spec).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tap_gets_what_was_printed_before_it_attached_and_everything_after_exactly_once() {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -2768,6 +3081,7 @@ time.sleep(60)
         assert!(terminals.taps.lock().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn output_batches_keep_their_read_size_across_later_resizes() {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -2883,6 +3197,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn two_windows_each_get_a_panes_output_and_one_leaving_does_not_cut_the_other_off() {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -2916,6 +3231,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_view_that_detaches_and_attaches_again_still_gets_the_panes_later_output() {
         let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
@@ -2979,6 +3295,7 @@ time.sleep(60)
     }
 
     /// A view that counts what it is sent, on a pane that prints 64 MB as fast as the PTY carries it.
+    #[cfg(unix)]
     fn flood(terminals: &Terminals, dir: &tempfile::TempDir) -> impl Fn() -> u64 {
         flood_of(terminals, dir, "head -c 67108864 /dev/zero | tr \"\\0\" x")
     }
@@ -3018,9 +3335,11 @@ time.sleep(60)
         last
     }
 
+    #[cfg(unix)]
     const TOTAL: u64 = 64 * 1024 * 1024;
     const WINDOW: u64 = (FLOW_HIGH + 16 * MAX_CHUNK) as u64;
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_far_ahead_of_its_view_is_not_read_until_the_view_catches_up() {
         let terminals = Terminals::new();
@@ -3045,6 +3364,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_view_that_goes_silent_never_hangs_the_program_and_is_under_control_again_when_it_speaks() {
         let terminals = Terminals::new();
@@ -3104,6 +3424,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn bytes_a_view_never_draws_do_not_hold_its_pane_back_for_good() {
         let terminals = Terminals::new();
@@ -3128,6 +3449,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_panes_exit_is_announced_after_its_last_output_even_when_it_was_being_held() {
         // Enough to be held for a view that draws nothing (more than FLOW_HIGH),
@@ -3266,6 +3588,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     /// A tab whose agent exits goes on as a shell in the same pane (#437).
     #[test]
     fn a_pane_opened_again_keeps_what_the_program_before_it_printed() {
@@ -3296,6 +3619,7 @@ time.sleep(60)
         terminals.kill_all();
     }
 
+    #[cfg(unix)]
     /// Why an agent's CLI exited is in what it printed, not in what the pane
     /// held before it (#663).
     #[test]

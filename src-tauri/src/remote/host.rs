@@ -426,10 +426,10 @@ fn forget_unanswered(forwarded: &mut Forwarded, now: Instant) {
 /// The relay's replies to them, each naming the request's `reqId`.
 const FORWARDED_REPLIES: &[&str] = &["invite-created", "device-revoked", "device-credential-installed", "device-credential-install-status-result", "device-resume-confirmed", "control-error"];
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct PhoneTestControl(mpsc::UnboundedReceiver<ControlCommand>);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl PhoneTestControl {
     pub(crate) fn take(&mut self) -> Option<(Value, std::sync::mpsc::Sender<Result<Value>>)> {
         match self.0.try_recv().ok()? {
@@ -578,7 +578,7 @@ impl RelayHost {
         self.routes.lock().unwrap().clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn phone_test_registration(rpc: Arc<WorkspaceRpc>, cell_url: String, secret: [u8; 32]) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
         struct Link([u8; 32]);
         impl RuntimeLink for Link {
@@ -622,7 +622,7 @@ impl RelayHost {
         (host, observed)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn phone_test_hold_control(&self) -> PhoneTestControl {
         let (commands, receive) = mpsc::unbounded_channel();
         let mut registered = self.registered.lock().unwrap();
@@ -632,14 +632,14 @@ impl RelayHost {
         PhoneTestControl(receive)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn phone_test_forward(&self, connection: crate::machine_wire::RelayConnection) {
         let live = self.registered.lock().unwrap().as_ref().unwrap().0.clone();
         let open = ConnectionOpen { conn_id:connection.conn_id, conn_ticket:connection.conn_ticket, kind:connection.kind, relay_device_id:connection.relay_device_id, attach_deadline_ms:connection.attach_deadline_ms };
         self.forward_phone(&self.routes().unwrap(), &live, &open);
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn phone_test_retire(&self) {
         *self.registered.lock().unwrap() = None;
         self.close_all_connections();

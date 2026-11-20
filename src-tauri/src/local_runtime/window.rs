@@ -1,8 +1,6 @@
 //! Fixed window-only services registered by an authenticated desktop attachment.
 //! The background owner never becomes a generic proxy for a guest-supplied RPC.
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,6 +80,30 @@ struct Service {
     calls: AtomicUsize,
 }
 
+/// The endpoint a desktop registers must be one of this runtime's own: a
+/// private socket in its `run` directory, or on Windows a pipe of its home
+/// (every dial to it then checks the pipe is this user's and served by one
+/// of this user's processes).
+fn private_endpoint(socket: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let run = crate::paths::canonicalize(crate::store::root()?.join("run"))?;
+        let parent = socket.parent().ok_or_else(|| anyhow::anyhow!("missing parent"))?;
+        if crate::paths::canonicalize(parent)? != run { anyhow::bail!("window endpoint must be in this runtime's private directory"); }
+        let metadata = std::fs::symlink_metadata(socket)?;
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            anyhow::bail!("window endpoint must be a private socket");
+        }
+    }
+    #[cfg(windows)]
+    if !crate::ipc::in_home(&crate::paths::canonicalize(crate::store::root()?)?, socket) {
+        anyhow::bail!("window endpoint must be one of this runtime's own pipes");
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub(crate) struct Registry(Mutex<Option<Arc<Service>>>);
 
@@ -90,14 +112,7 @@ impl Registry {
         let registration: Registration = serde_json::from_value(params).map_err(|_| unavailable("Invalid desktop registration."))?;
         let attachment = lifetime.attachment(&registration.epoch,&registration.lease).map_err(|_| unavailable("The desktop attachment is no longer current."))?;
         let checked = (|| -> anyhow::Result<()> {
-            let run = std::fs::canonicalize(crate::store::root()?.join("run"))?;
-            let parent = registration.socket.parent().ok_or_else(|| anyhow::anyhow!("missing parent"))?;
-            if std::fs::canonicalize(parent)? != run { anyhow::bail!("window endpoint must be in this runtime's private directory"); }
-            let metadata = std::fs::symlink_metadata(&registration.socket)?;
-            // SAFETY: geteuid has no preconditions.
-            if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                anyhow::bail!("window endpoint must be a private socket");
-            }
+            private_endpoint(&registration.socket)?;
             if !(32..=256).contains(&registration.token.len()) || !registration.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 anyhow::bail!("invalid window credential");
             }
@@ -123,6 +138,7 @@ impl Registry {
         self.0.lock().unwrap().as_ref().is_some_and(|service| service.attachment.valid())
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn environment_snapshot(&self, key: &str, revision: &str) -> anyhow::Result<crate::store::environment::Snapshot> {
         let value = self.dispatch("environment.snapshot", json!({ "key": key, "revision": revision }))
             .map_err(|_| anyhow::anyhow!("Environment overrides are unavailable."))?;
@@ -132,6 +148,7 @@ impl Registry {
     /// An agent's saved API key (PRO-306), from the desktop's Keychain, for
     /// this runtime's memory only. Like an environment snapshot it travels
     /// only in the private response, and no public command can ask for it.
+    #[cfg(any(unix, test))]
     pub(crate) fn agent_key_snapshot(&self, harness: &str, revision: &str) -> anyhow::Result<zeroize::Zeroizing<String>> {
         let mut value = self.dispatch("agentKey.snapshot", json!({ "harness": harness, "revision": revision }))
             .map_err(|_| anyhow::anyhow!("The agent's API key is unavailable."))?;
@@ -147,6 +164,7 @@ impl Registry {
     /// is about to expire (PRO-368). Nothing secret comes back: the window
     /// keeps the runtime's copy of the session (`machine_account`) itself,
     /// so one process alone rotates its refresh token.
+    #[cfg(unix)]
     pub(crate) fn refresh_account(&self) -> anyhow::Result<()> {
         self.dispatch("account.refresh", json!({}))
             .map(|_| ())
@@ -170,7 +188,7 @@ impl Registry {
         impl Drop for Call<'_> { fn drop(&mut self) { self.0.fetch_sub(1,Ordering::AcqRel); } }
         let _call = Call(&service.calls);
         let result = (|| -> anyhow::Result<ControlResponse> {
-            let mut socket = UnixStream::connect(&service.socket)?;
+            let mut socket = crate::ipc::connect(&service.socket)?;
             let timeout = command.strip_prefix("cloud.").map(|action| crate::cloud_control::timeout_for(action,&params)+Duration::from_secs(15))
                 .or_else(|| command.strip_prefix("machine.").map(|action| crate::machine_control::timeout_for(action,&params)+Duration::from_secs(15)))
                 .unwrap_or_else(|| if matches!(command, "environment.snapshot" | "agentKey.snapshot") { Duration::from_secs(10) } else if command == "account.refresh" { Duration::from_secs(45) } else if command == "window.terminalCounters" { crate::terminal_perf::COUNTERS_TIMEOUT + Duration::from_secs(1) } else { Duration::from_secs(360) });

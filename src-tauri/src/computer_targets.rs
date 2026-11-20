@@ -146,8 +146,10 @@ pub fn validate_attachment(target:&Target, session_id:&str, tab_id:&str, convers
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[cfg(unix)]
 struct SelectionRequest { session_id: String, tab_id: String, conversation: Option<String>, target: Option<Target> }
 
+#[cfg(unix)]
 pub fn request(manager: &crate::session::SessionManager, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     use serde_json::to_value;
     match method {

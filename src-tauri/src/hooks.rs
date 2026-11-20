@@ -15,6 +15,7 @@
 //! Local-owner deciding hooks instead return an explicit denial on failure; a
 //! lost owner must never authorize a tool through an empty hook response.
 
+use crate::paths::Canonical;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader};
@@ -133,8 +134,8 @@ impl ConversationFile {
         if named.file_name().and_then(|n| n.to_str()) != Some(self.name.as_str()) || !regular_file(named) {
             return false;
         }
-        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
-        let Ok(projects) = self.projects.canonicalize() else { return false };
+        let Some(folder) = named.parent().and_then(|f| f.canonical().ok()) else { return false };
+        let Ok(projects) = self.projects.canonical() else { return false };
         if folder.parent() != Some(projects.as_path()) {
             return false;
         }
@@ -155,7 +156,7 @@ impl ConversationFile {
         if self.adopt(named) {
             return true;
         }
-        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
+        let Some(folder) = named.parent().and_then(|f| f.canonical().ok()) else { return false };
         let Some(file) = named.file_name().and_then(|n| n.to_str()) else { return false };
         if !self.folders.contains(&folder) || named.is_symlink() || named.is_dir() {
             return false;
@@ -259,7 +260,7 @@ pub fn under_root(root: &Path, candidate: &Path) -> bool {
     if lexically_under(root, candidate) {
         return true;
     }
-    match (root.canonicalize(), resolve_existing(candidate)) {
+    match (root.canonical(), resolve_existing(candidate)) {
         (Ok(root), Some(candidate)) => lexically_under(&root, &candidate),
         _ => false,
     }
@@ -276,7 +277,7 @@ fn resolve_existing(path: &Path) -> Option<PathBuf> {
     let mut tail = Vec::new();
     let mut here = path;
     loop {
-        if let Ok(real) = here.canonicalize() {
+        if let Ok(real) = here.canonical() {
             return Some(tail.iter().rev().fold(real, |acc, part| acc.join(part)));
         }
         tail.push(here.file_name()?.to_owned());
@@ -575,7 +576,7 @@ where
 /// one. Nothing is published until the publisher is asked to look: `serve`
 /// asks once and then on a timer, and that timer is the only clock in any of
 /// this, so everything a look does can be had by asking for one.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn listen<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<Publisher>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
@@ -1006,6 +1007,7 @@ thread_local! {
 
 /// Do `then` once the reply to the frame this thread is answering has been
 /// written: at once, for a direct call that has no frame.
+#[cfg(unix)]
 pub(crate) fn after_reply(then: Box<dyn FnOnce() + Send>) {
     #[cfg(unix)]
     if FRAME.with(|frame| frame.borrow().is_some()) {
@@ -1058,11 +1060,13 @@ impl Drop for Resumable {
 
 /// The frame this thread is answering is the handover itself: a freeze does
 /// not wait for it, and it is answered while frozen (#765).
+#[cfg(unix)]
 pub(crate) struct Aside {
     #[cfg(unix)]
     gate: Option<std::sync::Arc<Gate>>,
 }
 
+#[cfg(unix)]
 pub(crate) fn step_aside() -> Aside {
     #[cfg(unix)]
     {

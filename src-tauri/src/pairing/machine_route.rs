@@ -15,20 +15,29 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
+#[cfg(any(unix, test))]
+use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
+#[cfg(any(unix, test))]
 use tokio::io::AsyncReadExt;
+#[cfg(unix)]
 use uuid::Uuid;
 
-use super::{pairing_websocket_config, ConnectionSignal, PairingConnectionContext, PairingManager};
+use super::{ConnectionSignal, PairingManager};
+#[cfg(unix)]
+use super::{pairing_websocket_config, PairingConnectionContext};
 use crate::local_runtime::desktop::Desktop;
-use crate::machine_wire::{self as wire, Forwarded, HostKeyState, Status};
+use crate::machine_wire::{self as wire, HostKeyState, Status};
+#[cfg(any(unix, test))]
+use crate::machine_wire::Forwarded;
 use super::model::PairingTransport;
 
 /// The phone route this window registered for one attachment. Dropping it
 /// stops taking phones and removes the socket.
 pub(super) struct PhoneRoute {
+    #[cfg_attr(not(unix), allow(dead_code))]
     lease: String,
     path: PathBuf,
     accept: tauri::async_runtime::JoinHandle<()>,
@@ -356,6 +365,7 @@ impl PairingManager {
 }
 
 /// Read the header line byte by byte, so nothing after it is consumed.
+#[cfg(any(unix, test))]
 async fn read_header<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
     let mut line = Vec::with_capacity(256);
     loop {

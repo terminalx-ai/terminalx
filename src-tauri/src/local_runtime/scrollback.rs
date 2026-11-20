@@ -50,6 +50,8 @@ pub(crate) fn save(root: &Path, terminals: &crate::pty::Terminals) -> Result<()>
     staged.write_all(&bytes)?;
     staged.as_file().sync_all()?;
     staged.persist(&path).map_err(|error| error.error)?;
+    // A directory cannot be opened to sync on Windows; NTFS journals the rename.
+    #[cfg(unix)]
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -72,22 +74,34 @@ fn validate(history: &[History]) -> Result<()> {
 /// Consume only a private regular snapshot. Removing it after import prevents
 /// a later owner crash from resurrecting terminal tabs explicitly closed since
 /// this snapshot. Crash recovery remains interruption, not false live output.
-#[cfg(unix)]
 pub(crate) fn restore(root: &Path, terminals: &crate::pty::Terminals) -> Result<()> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let path = path(root);
-    let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).context("open retained terminal history"),
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let file = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).context("open retained terminal history"),
+        };
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1 || metadata.len() > FILE_BYTES {
+            bail!("retained terminal history is not a private bounded file");
+        }
+        file
     };
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid has no preconditions.
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1 || metadata.len() > FILE_BYTES {
-        bail!("retained terminal history is not a private bounded file");
-    }
+    // A link, another account's file, one with two names: refused alike.
+    #[cfg(windows)]
+    let file = {
+        if !path.exists() && std::fs::symlink_metadata(&path).is_err() { return Ok(()); }
+        let file = crate::private_fs::open_file(&path, "retained terminal history")
+            .context("retained terminal history is not a private bounded file")?;
+        if file.metadata()?.len() > FILE_BYTES { bail!("retained terminal history is not a private bounded file"); }
+        file
+    };
     let mut bytes = Vec::new();
     file.take(FILE_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > FILE_BYTES { bail!("terminal history changed beyond its size limit"); }

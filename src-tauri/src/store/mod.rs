@@ -36,11 +36,38 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// `~/.raccoon`, created on first use with owner-only permissions so the
 /// transcripts and the orchestration socket in it are private to this user.
 pub fn root() -> Result<PathBuf> {
-    if let Some(p) = state_home_env() {
-        return ensure_dir(PathBuf::from(p));
+    let root = match state_home_env() {
+        Some(p) => PathBuf::from(p),
+        None => dirs::home_dir().context("no home directory")?.join(".raccoon"),
+    };
+    #[cfg(windows)]
+    harden_root(&root)?;
+    ensure_dir(root)
+}
+
+/// On Windows a new home is created owner-only, as `ensure_dir` makes one
+/// `0o700` on Unix. An existing home, which may be a folder the person chose,
+/// is only checked, never changed: one another account owns or can open is
+/// refused, with how to fix it, before anything is stored in it.
+#[cfg(windows)]
+fn harden_root(root: &Path) -> Result<()> {
+    static CHECKED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+    if checked.iter().any(|done| done == root) {
+        return Ok(());
     }
-    let home = dirs::home_dir().context("no home directory")?;
-    ensure_dir(home.join(".raccoon"))
+    if root.exists() {
+        if let Err(error) = crate::win::security::verify_private(root) {
+            anyhow::bail!(
+                "{} is not private to this Windows account ({error}). TerminalX keeps credentials and transcripts there, so it was left unchanged and not used. Make it private, for example with `icacls \"{}\" /inheritance:r /grant:r \"%USERNAME%\":(OI)(CI)F`, or choose another folder.",
+                root.display(), root.display()
+            );
+        }
+    } else {
+        crate::win::fs::create_private_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    }
+    checked.push(root.to_owned());
+    Ok(())
 }
 
 
@@ -143,7 +170,7 @@ fn create_private(path: &Path, keep: Option<u32>) -> std::io::Result<fs::File> {
 
 #[cfg(not(unix))]
 fn create_private(path: &Path, _keep: Option<u32>) -> std::io::Result<fs::File> {
-    fs::File::create(path)
+    crate::private_fs::create_file(path, true)
 }
 
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {

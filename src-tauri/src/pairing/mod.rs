@@ -682,19 +682,19 @@ impl PairingManager {
         Arc::new(manager)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
         self.phone.set_owner(Some(owner));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_phone_port_for_test(self: &mut Arc<Self>, port: u16) {
         Arc::get_mut(self).unwrap().direct_port = port;
     }
 
     /// The window's signing key for runtime consent. Reading it can block
     /// on the Keychain. A runtime launch may create it if absent.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
         self.secrets.window_consent_key(create)
             .map_err(|_| {
@@ -2036,6 +2036,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// Through the router a phone actually reaches, with a real local runtime
     /// as owner: a viewer may read the new-session choices and the settings but
     /// neither start a session nor change one, a driver may do all four, and a
@@ -2067,6 +2068,7 @@ mod tests {
         assert!(result.success(), "{}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn phone_router_child_fixture() {
         if std::env::var("TERMINALX_TEST_PHONE_ROUTER").as_deref() != Ok("1") { return; }

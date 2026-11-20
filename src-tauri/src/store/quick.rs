@@ -37,7 +37,7 @@ pub fn dir(session_id: &str) -> Result<PathBuf> {
 /// it is stored the way they will see it.
 pub fn create(session_id: &str) -> Result<String> {
     let dir = super::ensure_dir(dir(session_id)?)?;
-    let canonical = std::fs::canonicalize(&dir).with_context(|| format!("resolve {}", dir.display()))?;
+    let canonical = crate::paths::canonicalize(&dir).with_context(|| format!("resolve {}", dir.display()))?;
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -50,7 +50,7 @@ pub fn is_scratch(session_id: &str, path: &str) -> bool {
         return false;
     }
     let Some(parent) = path.parent() else { return false };
-    parent == root || std::fs::canonicalize(parent).ok().zip(std::fs::canonicalize(&root).ok()).is_some_and(|(parent, root)| parent == root)
+    parent == root || crate::paths::canonicalize(parent).ok().zip(crate::paths::canonicalize(&root).ok()).is_some_and(|(parent, root)| parent == root)
 }
 
 /// How many files a session's scratch directory holds, counted no further
@@ -115,14 +115,15 @@ pub fn orphans(known: &std::collections::HashSet<&str>) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
 
     #[test]
     fn a_scratch_directory_is_made_under_the_home_counted_and_removed() {
         let _home = crate::store::temp_home();
         let made = create("0198-session").unwrap();
-        assert_eq!(Path::new(&made), dir("0198-session").unwrap().canonicalize().unwrap());
-        assert!(Path::new(&made).starts_with(root().unwrap().canonicalize().unwrap()));
+        assert_eq!(Path::new(&made), dir("0198-session").unwrap().canonical().unwrap());
+        assert!(Path::new(&made).starts_with(root().unwrap().canonical().unwrap()));
         assert!(is_scratch("0198-session", &made));
         assert!(!is_scratch("0198-session", root().unwrap().to_str().unwrap()));
         assert_eq!(file_count("0198-session", 100), 0);
@@ -187,6 +188,6 @@ mod tests {
         let known = std::collections::HashSet::from(["kept"]);
         let found = orphans(&known);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].canonicalize().unwrap(), Path::new(&lost));
+        assert_eq!(found[0].canonical().unwrap(), Path::new(&lost));
     }
 }

@@ -650,6 +650,7 @@ async fn verify_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn delayed_sensitive_reply_is_not_sent_after_guest_removal() {
         use std::os::unix::process::CommandExt;

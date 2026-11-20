@@ -107,7 +107,7 @@ pub(crate) fn resolve_missing_path(path: &Path) -> Result<std::path::PathBuf, St
     }
     for ancestor in path.ancestors() {
         match std::fs::symlink_metadata(ancestor) {
-            Ok(_) => return Ok(std::fs::canonicalize(ancestor).map_err(err)?.join(path.strip_prefix(ancestor).map_err(err)?)),
+            Ok(_) => return Ok(crate::paths::canonicalize(ancestor).map_err(err)?.join(path.strip_prefix(ancestor).map_err(err)?)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(err(error)),
         }
@@ -152,12 +152,12 @@ pub(crate) fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut Ses
             Some(branch)
         } else { None };
         if !missing {
-            let source_cwd = std::fs::canonicalize(source_cwd).map_err(err)?;
+            let source_cwd = crate::paths::canonicalize(source_cwd).map_err(err)?;
             if project_repo.is_none() || git::common_dir(&source_cwd) != project_repo {
                 return Err("The source worktree belongs to a different repository.".into());
             }
             let source_root = git::run(&source_cwd, &["rev-parse", "--show-toplevel"]).map_err(err)?;
-            let source_root = std::fs::canonicalize(source_root.trim()).map_err(err)?;
+            let source_root = crate::paths::canonicalize(source_root.trim()).map_err(err)?;
             relative_cwd = Some(source_cwd.strip_prefix(source_root).map_err(err)?.to_path_buf());
         }
         let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
@@ -208,9 +208,9 @@ pub(crate) fn fork_workspace(src: &SessionEntry, tab: &TabEntry, entry: &mut Ses
         }
     } else { None };
     if let Some(relative) = relative_cwd.filter(|path| !path.as_os_str().is_empty()) {
-        let root = std::fs::canonicalize(&entry.cwd).map_err(err)?;
+        let root = crate::paths::canonicalize(&entry.cwd).map_err(err)?;
         let target = root.join(&relative);
-        match std::fs::canonicalize(&target) {
+        match crate::paths::canonicalize(&target) {
             Ok(path) if path.starts_with(&root) && path.is_dir() => entry.cwd = path.to_string_lossy().into_owned(),
             _ => {
                 let message = format!("The original working directory {} is unavailable in the new worktree; the fork starts at its root.", relative.display());
@@ -242,7 +242,7 @@ pub(crate) fn fork_session_contents(session_id: &str, tab_id: &str, at: Option<u
             let scratch = if src.is_quick() {
                 let path = store::quick::dir(&id).map_err(err)?;
                 allocation.directory(&path).map_err(err)?;
-                Some(std::fs::canonicalize(&path).map_err(err)?.to_string_lossy().into_owned())
+                Some(crate::paths::canonicalize(&path).map_err(err)?.to_string_lossy().into_owned())
             } else { None };
             let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
             let mut scratch_copy = None;

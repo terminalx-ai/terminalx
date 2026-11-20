@@ -212,7 +212,7 @@ pub struct Scope {
 pub type PullRequests<'a> = &'a dyn Fn(&Path, &[String]) -> anyhow::Result<HashMap<String, BranchPr>>;
 
 /// Everything one pass reads about its host.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub struct Sweep<'a> {
     pub host: &'a Host<'a>,
     pub sink: &'a dyn EventSink,
@@ -290,7 +290,7 @@ impl Ledger {
 /// admission fence (the sweep acquires those locks in the opposite order).
 fn recorded_archive_attempt(mut ledger: Ledger, project: &Path, path: &Path, script: &str) -> anyhow::Result<Option<ArchivePause>> {
     let Some(seen) = ledger.seen.remove(path.to_string_lossy().as_ref()) else { return Ok(None) };
-    if std::fs::canonicalize(&seen.project_path).ok().as_deref() != Some(project) { return Ok(None) }
+    if crate::paths::canonicalize(&seen.project_path).ok().as_deref() != Some(project) { return Ok(None) }
     let fingerprint = crate::archive_script::fingerprint(path, script)?;
     Ok(seen.archive_pause.filter(|pause| pause.fingerprint == fingerprint))
 }
@@ -726,7 +726,7 @@ fn delete_remote_branch(project: &Path, branch: &str, merged: &str) -> BranchFat
 /// One pass over the projects in `scope`: see what merged, keep what is not
 /// safe and say why, and remove what is safe and due. With no project in
 /// scope it removes nothing and forgets what it had seen.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn sweep(run: &Sweep<'_>, scope: &Scope) -> anyhow::Result<Swept> {
     sweep_fallible(&FallibleSweep { host: run.host, sink: run.sink,
         stop: &|entry| { (run.stop)(entry); Ok(()) }, pull_requests: run.pull_requests, now: run.now }, scope)

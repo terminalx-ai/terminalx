@@ -1,7 +1,9 @@
 //! `terminalx-serve service install|status|uninstall`: the runtime as a user
 //! service that starts at boot. On Linux a systemd user unit, which starts at
 //! boot only while the user lingers; on macOS a LaunchAgent in
-//! `~/Library/LaunchAgents`, loaded into `gui/<uid>`.
+//! `~/Library/LaunchAgents`, loaded into `gui/<uid>`; on Windows a Task
+//! Scheduler task of this user's that starts at their logon, registered
+//! without administrator rights from a definition kept beside the install.
 //!
 //! The service runs `<install root>/current/terminalx-serve --data-dir <data>
 //! --log-file <install root>/logs/runtime.log`, or the running executable when
@@ -24,6 +26,9 @@ pub const UNIT: &str = "terminalx.service";
 /// The LaunchAgent's label.
 pub const LABEL: &str = "ai.terminalx.serve";
 
+/// The Task Scheduler task's name, in a folder of its own.
+pub const TASK: &str = "\\TerminalX\\Runtime";
+
 const USAGE: &str = "\
 Usage: terminalx-serve service install|status|uninstall [--data-dir <dir>]
 
@@ -45,7 +50,7 @@ impl Plan {
     /// For an install under `root` (`~/.terminalx`): its `current` binary
     /// when there is one, else `running` (this executable).
     pub fn new(root: &Path, data: PathBuf, running: PathBuf) -> Self {
-        let current = root.join("current").join("terminalx-serve");
+        let current = root.join("current").join(if cfg!(windows) { "terminalx-serve.exe" } else { "terminalx-serve" });
         let executable = if root.join("current").exists() { current } else { running };
         Self { executable, data, log: root.join("logs").join("runtime.log") }
     }
@@ -133,8 +138,99 @@ pub fn launch_agent(plan: &Plan) -> String {
     )
 }
 
+/// The Task Scheduler definition for `plan`: started at this user's logon,
+/// as this user, with their own token (no password is stored), and again
+/// after a failure; never stopped for running long or on battery.
+pub fn scheduled_task(plan: &Plan, user: &str) -> String {
+    let mut arguments = plan.arguments();
+    let command = arguments.remove(0);
+    let arguments = arguments.iter().map(|argument| windows_quote(argument)).collect::<Vec<_>>().join(" ");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+         <!-- Written by `terminalx-serve service install`; removed by `terminalx-serve service uninstall`. -->\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         \t<RegistrationInfo>\n\t\t<Description>TerminalX runtime</Description>\n\t</RegistrationInfo>\n\
+         \t<Triggers>\n\t\t<LogonTrigger>\n\t\t\t<Enabled>true</Enabled>\n\t\t\t<UserId>{user}</UserId>\n\t\t</LogonTrigger>\n\t</Triggers>\n\
+         \t<Principals>\n\t\t<Principal id=\"Author\">\n\t\t\t<UserId>{user}</UserId>\n\t\t\t<LogonType>InteractiveToken</LogonType>\n\t\t\t<RunLevel>LeastPrivilege</RunLevel>\n\t\t</Principal>\n\t</Principals>\n\
+         \t<Settings>\n\
+         \t\t<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
+         \t\t<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
+         \t\t<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
+         \t\t<AllowHardTerminate>true</AllowHardTerminate>\n\
+         \t\t<StartWhenAvailable>true</StartWhenAvailable>\n\
+         \t\t<AllowStartOnDemand>true</AllowStartOnDemand>\n\
+         \t\t<Enabled>true</Enabled>\n\
+         \t\t<Hidden>false</Hidden>\n\
+         \t\t<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+         \t\t<Priority>7</Priority>\n\
+         \t\t<RestartOnFailure>\n\t\t\t<Interval>PT1M</Interval>\n\t\t\t<Count>999</Count>\n\t\t</RestartOnFailure>\n\
+         \t</Settings>\n\
+         \t<Actions Context=\"Author\">\n\t\t<Exec>\n\t\t\t<Command>{}</Command>\n\t\t\t<Arguments>{}</Arguments>\n\t\t</Exec>\n\t</Actions>\n\
+         </Task>\n",
+        xml_escape(&command),
+        xml_escape(&arguments),
+        user = xml_escape(user),
+    )
+}
+
+/// One argument of a Windows command line, quoted as `CommandLineToArgvW`
+/// (and so the runtime's own argument parsing) reads it back: spaces and
+/// quotes stay part of the argument.
+pub fn windows_quote(argument: &str) -> String {
+    if !argument.is_empty() && !argument.contains([' ', '\t', '"']) {
+        return argument.to_owned();
+    }
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for character in argument.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            other => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                quoted.push(other);
+                backslashes = 0;
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+/// The bytes a definition is kept in: UTF-16 with a byte order mark on
+/// Windows, which is what Task Scheduler reads a task's XML as.
+fn encode_definition(text: &str) -> Vec<u8> {
+    if cfg!(windows) {
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
+/// An installed definition, read back as [`encode_definition`] wrote it.
+fn read_definition(path: &Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    match bytes.strip_prefix(&[0xFF, 0xFE]) {
+        Some(wide) => {
+            let units: Vec<u16> = wide.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+            String::from_utf16(&units).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        }
+        None => String::from_utf8(bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    }
+}
+
 /// Where the service's definition lives under `home`.
 pub fn definition_path(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        return home.join(super::INSTALL_DIR).join("service").join("terminalx-runtime.task.xml");
+    }
     if cfg!(target_os = "macos") {
         home.join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
     } else {
@@ -145,6 +241,9 @@ pub fn definition_path(home: &Path) -> PathBuf {
 
 /// The definition of the service for `plan` on this system.
 pub fn definition(plan: &Plan) -> String {
+    if cfg!(windows) {
+        return scheduled_task(plan, &user_name().unwrap_or_default());
+    }
     if cfg!(target_os = "macos") {
         launch_agent(plan)
     } else {
@@ -155,6 +254,9 @@ pub fn definition(plan: &Plan) -> String {
 /// Whether `text`, an installed definition, runs the runtime of `data`.
 pub fn serves(text: &str, data: &Path) -> bool {
     let data = data.to_string_lossy();
+    if cfg!(windows) {
+        return text.contains(&format!("--data-dir {} ", xml_escape(&windows_quote(&data))));
+    }
     if cfg!(target_os = "macos") {
         text.contains(&format!("<string>--data-dir</string>\n\t\t<string>{}</string>", xml_escape(&data)))
     } else {
@@ -194,8 +296,8 @@ fn dispatch(args: &[String]) -> Result<i32> {
         eprintln!("terminalx-serve service: unknown action {action:?}\n\n{USAGE}");
         return Ok(2);
     }
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
-        bail!("a user service is set up on Linux (systemd) and macOS (launchd) only");
+    if !cfg!(any(target_os = "macos", target_os = "linux", windows)) {
+        bail!("a user service is set up on Linux (systemd), macOS (launchd) and Windows (Task Scheduler) only");
     }
     let data = super::resolve_data_dir(flag.as_deref())?;
     let home = dirs::home_dir().context("this user has no home directory")?;
@@ -208,22 +310,33 @@ fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 fn install(home: &Path, plan: &Plan) -> Result<i32> {
-    use std::os::unix::fs::PermissionsExt;
     if let Some(logs) = plan.log.parent() {
-        std::fs::create_dir_all(logs).with_context(|| format!("create {}", logs.display()))?;
-        std::fs::set_permissions(logs, std::fs::Permissions::from_mode(0o700))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(logs).with_context(|| format!("create {}", logs.display()))?;
+            std::fs::set_permissions(logs, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(windows)]
+        crate::win::fs::create_private_dir_all(logs).with_context(|| format!("create {}", logs.display()))?;
     }
     let path = definition_path(home);
     let text = definition(plan);
-    let changed = std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str());
+    let changed = read_definition(&path).ok().as_deref() != Some(text.as_str());
     if let Some(parent) = path.parent() {
+        #[cfg(unix)]
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        #[cfg(windows)]
+        crate::win::fs::create_private_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     if changed {
-        crate::store::write_atomic(&path, text.as_bytes()).with_context(|| format!("write {}", path.display()))?;
+        crate::store::write_atomic(&path, &encode_definition(&text)).with_context(|| format!("write {}", path.display()))?;
     }
     // A running service is never restarted here: that would end every agent
     // and terminal it runs. A changed definition applies at its next start.
+    #[cfg(windows)]
+    let deferred = task::install(&path, changed)?;
+    #[cfg(unix)]
     let deferred = if cfg!(target_os = "macos") { launchd::install(&path, changed)? } else { systemd::install(changed)? };
     println!("Installed the TerminalX runtime as a user service ({}).", path.display());
     println!("It starts at boot and runs: {}", plan.arguments().join(" "));
@@ -233,6 +346,7 @@ fn install(home: &Path, plan: &Plan) -> Result<i32> {
     // Installed again over a running runtime (the installer run a second
     // time): the running one is handed over to this version in place, as
     // `update` does, rather than restarted, which would end its agents.
+    #[cfg(unix)]
     match super::handover::hand_over(&plan.data, &plan.executable, env!("CARGO_PKG_VERSION")) {
         Ok(super::handover::Outcome::NotRunning | super::handover::Outcome::Current) => {}
         Ok(outcome) => {
@@ -246,7 +360,7 @@ fn install(home: &Path, plan: &Plan) -> Result<i32> {
 
 fn status(home: &Path, plan: &Plan) -> Result<i32> {
     let path = definition_path(home);
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(text) = read_definition(&path) else {
         println!("Service    not installed (`terminalx-serve service install` installs it)");
         return Ok(3);
     };
@@ -254,6 +368,9 @@ fn status(home: &Path, plan: &Plan) -> Result<i32> {
     if !serves(&text, &plan.data) {
         println!("           it runs another data directory than {}", plan.data.display());
     }
+    #[cfg(windows)]
+    let state = task::state();
+    #[cfg(unix)]
     let state = if cfg!(target_os = "macos") { launchd::state() } else { systemd::state() };
     println!("State      {}", state.describe());
     if let Some(boot) = state.boot.as_deref() {
@@ -276,12 +393,16 @@ fn uninstall(home: &Path, plan: &Plan) -> Result<i32> {
         println!("No TerminalX service is installed.");
         return Ok(0);
     }
+    #[cfg(windows)]
+    task::uninstall();
+    #[cfg(unix)]
     if cfg!(target_os = "macos") {
         launchd::uninstall();
     } else {
         systemd::uninstall();
     }
     std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    #[cfg(unix)]
     if !cfg!(target_os = "macos") {
         let _ = systemd::systemctl(&["daemon-reload"]);
     }
@@ -305,10 +426,13 @@ fn hosting(data: &Path) -> Option<bool> {
 pub fn start_for(data: &Path) -> Result<bool> {
     let Some(home) = dirs::home_dir() else { return Ok(false) };
     let path = definition_path(&home);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Ok(text) = read_definition(&path) else { return Ok(false) };
     if !serves(&text, data) {
         return Ok(false);
     }
+    #[cfg(windows)]
+    task::start()?;
+    #[cfg(unix)]
     if cfg!(target_os = "macos") {
         launchd::start(&path)?;
     } else {
@@ -325,10 +449,13 @@ pub fn start_for(data: &Path) -> Result<bool> {
 pub fn restart_for(data: &Path) -> Result<bool> {
     let Some(home) = dirs::home_dir() else { return Ok(false) };
     let path = definition_path(&home);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let Ok(text) = read_definition(&path) else { return Ok(false) };
     if !serves(&text, data) {
         return Ok(false);
     }
+    #[cfg(windows)]
+    task::restart()?;
+    #[cfg(unix)]
     if cfg!(target_os = "macos") {
         launchd::restart(&path)?;
     } else {
@@ -361,7 +488,18 @@ fn output(program: &str, args: &[&str]) -> Result<String> {
     Ok(text)
 }
 
+/// This user's account as Task Scheduler names it: `DOMAIN\\user`.
+#[cfg(windows)]
+fn user_name() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|name| !name.is_empty())?;
+    Some(match std::env::var("USERDOMAIN").ok().filter(|domain| !domain.is_empty()) {
+        Some(domain) => format!("{domain}\\{user}"),
+        None => user,
+    })
+}
+
 /// This user's login name.
+#[cfg(unix)]
 fn user_name() -> Option<String> {
     if let Some(name) = std::env::var("USER").ok().filter(|name| !name.is_empty()) {
         return Some(name);
@@ -377,6 +515,68 @@ fn user_name() -> Option<String> {
     }
 }
 
+/// The Task Scheduler task, through `schtasks`, which registers and runs
+/// tasks of the calling user's without administrator rights.
+#[cfg(windows)]
+mod task {
+    use super::*;
+
+    fn schtasks(args: &[&str]) -> Result<String> {
+        output("schtasks", args)
+    }
+
+    fn registered() -> Option<String> {
+        schtasks(&["/Query", "/TN", TASK, "/V", "/FO", "LIST"]).ok()
+    }
+
+    /// Whether a changed definition waits for the task's next start.
+    pub(super) fn install(path: &Path, changed: bool) -> Result<bool> {
+        let running = registered().is_some_and(|said| said.lines().any(|line| line.trim_start().starts_with("Status:") && line.contains("Running")));
+        if registered().is_none() || changed {
+            // /F replaces a registered definition; it does not stop what runs.
+            schtasks(&["/Create", "/TN", TASK, "/XML", &path.to_string_lossy(), "/F"])
+                .context("Task Scheduler would not register the service")?;
+        }
+        if !running {
+            schtasks(&["/Run", "/TN", TASK])?;
+        }
+        Ok(running && changed)
+    }
+
+    pub(super) fn start() -> Result<()> {
+        schtasks(&["/Run", "/TN", TASK]).map(drop)
+    }
+
+    /// End the running instance and start it again.
+    pub(super) fn restart() -> Result<()> {
+        let _ = schtasks(&["/End", "/TN", TASK]);
+        schtasks(&["/Run", "/TN", TASK]).map(drop)
+    }
+
+    pub(super) fn state() -> State {
+        match registered() {
+            Some(said) => {
+                let field = |name: &str| said.lines().find_map(|line| line.trim().strip_prefix(name).map(|rest| rest.trim().to_string()));
+                let status = field("Status:").unwrap_or_else(|| "state unknown".into());
+                State {
+                    running: status == "Running",
+                    said: format!("registered as {TASK}, {status}"),
+                    boot: Some("starts when this user logs on; a Windows service would be needed to start before anyone logs on".into()),
+                }
+            }
+            None => State { running: false, said: "not registered".into(), boot: None },
+        }
+    }
+
+    pub(super) fn uninstall() {
+        let _ = schtasks(&["/End", "/TN", TASK]);
+        if let Err(error) = schtasks(&["/Delete", "/TN", TASK, "/F"]) {
+            log::warn!("remove the service: {error:#}");
+        }
+    }
+}
+
+#[cfg(unix)]
 mod systemd {
     use super::*;
 
@@ -433,6 +633,7 @@ mod systemd {
     }
 }
 
+#[cfg(unix)]
 mod launchd {
     use super::*;
 
@@ -533,10 +734,14 @@ mod tests {
         assert_eq!(plan.executable, built, "a hand-built binary runs itself");
         assert_eq!(plan.log, root.path().join("logs/runtime.log"));
         std::fs::create_dir_all(root.path().join("versions/0.2.40")).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(root.path().join("versions/0.2.40"), root.path().join("current")).unwrap();
+        #[cfg(windows)]
+        std::fs::create_dir_all(root.path().join("current")).unwrap();
         let plan = Plan::new(root.path(), data.clone(), built);
-        assert_eq!(plan.executable, root.path().join("current/terminalx-serve"), "an install runs `current`, so an update swaps it");
-        assert_eq!(plan.arguments()[1..], ["--data-dir".to_string(), data.display().to_string(), "--log-file".into(), root.path().join("logs/runtime.log").display().to_string()]);
+        let name = if cfg!(windows) { "terminalx-serve.exe" } else { "terminalx-serve" };
+        assert_eq!(plan.executable, root.path().join("current").join(name), "an install runs `current`, so an update swaps it");
+        assert_eq!(plan.arguments()[1..], ["--data-dir".to_string(), data.display().to_string(), "--log-file".into(), root.path().join("logs").join("runtime.log").display().to_string()]);
     }
 
     #[test]
@@ -546,7 +751,7 @@ mod tests {
         assert!(unit.contains("Restart=on-failure\n"));
         assert!(unit.contains("WantedBy=default.target\n"));
         assert!(!unit.contains("allowOperating"), "installing never turns hosting on");
-        assert!(serves(&unit, Path::new("/home/sam/.terminalx/data")) || cfg!(target_os = "macos"));
+        assert!(serves(&unit, Path::new("/home/sam/.terminalx/data")) || !cfg!(target_os = "linux"), "a unit is what Linux reads");
         assert!(!serves(&unit, Path::new("/srv/other")));
     }
 
@@ -582,11 +787,43 @@ mod tests {
     #[test]
     fn the_definition_lives_where_the_service_manager_looks() {
         let path = definition_path(Path::new("/home/sam"));
-        if cfg!(target_os = "macos") {
+        if cfg!(windows) {
+            assert_eq!(path, Path::new("/home/sam").join(".terminalx").join("service").join("terminalx-runtime.task.xml"));
+        } else if cfg!(target_os = "macos") {
             assert_eq!(path, Path::new("/home/sam/Library/LaunchAgents/ai.terminalx.serve.plist"));
         } else if std::env::var_os("XDG_CONFIG_HOME").is_none() {
             assert_eq!(path, Path::new("/home/sam/.config/systemd/user/terminalx.service"));
         }
+    }
+
+    #[test]
+    fn the_scheduled_task_starts_at_logon_as_this_user_and_restarts_after_a_failure() {
+        let plan = Plan {
+            executable: PathBuf::from(r"C:\Users\Sam Q\.terminalx\current\terminalx-serve.exe"),
+            data: PathBuf::from(r"C:\Users\Sam Q\.terminalx\data"),
+            log: PathBuf::from(r"C:\Users\Sam Q\.terminalx\logs\runtime.log"),
+        };
+        let task = scheduled_task(&plan, r"HOST\sam");
+        assert!(task.contains("<LogonTrigger>\n\t\t\t<Enabled>true</Enabled>\n\t\t\t<UserId>HOST\\sam</UserId>"), "{task}");
+        assert!(task.contains("<LogonType>InteractiveToken</LogonType>"), "no password is stored");
+        assert!(task.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert!(task.contains("<RestartOnFailure>"));
+        assert!(task.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(task.contains(r"<Command>C:\Users\Sam Q\.terminalx\current\terminalx-serve.exe</Command>"));
+        assert!(task.contains(r#"<Arguments>--data-dir &quot;C:\Users\Sam Q\.terminalx\data&quot; --log-file &quot;C:\Users\Sam Q\.terminalx\logs\runtime.log&quot;</Arguments>"#), "{task}");
+        assert!(!task.contains("allowOperating"), "installing never turns hosting on");
+        if cfg!(windows) {
+            assert!(serves(&task, Path::new(r"C:\Users\Sam Q\.terminalx\data")));
+            assert!(!serves(&task, Path::new(r"C:\Users\Sam Q\.terminalx\dat")));
+        }
+    }
+
+    #[test]
+    fn windows_arguments_read_back_as_they_were() {
+        assert_eq!(windows_quote("plain"), "plain");
+        assert_eq!(windows_quote(""), "\"\"");
+        assert_eq!(windows_quote(r"C:\a b\"), r#""C:\a b\\""#);
+        assert_eq!(windows_quote(r#"say "hi""#), r#""say \"hi\"""#);
     }
 
     #[test]

@@ -402,7 +402,7 @@ fn discover_jsonl(
             } else if kind.is_file()
                 && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
             {
-                let identity = fs::canonicalize(&path)?;
+                let identity = crate::paths::canonicalize(&path)?;
                 if seen.insert(identity.clone()) {
                     out.push((identity, provider));
                 }
@@ -975,7 +975,7 @@ impl UsageScope {
             if raw.is_empty() {
                 continue;
             }
-            let canonical = fs::canonicalize(&path)
+            let canonical = crate::paths::canonicalize(&path)
                 .map(|path| normalize_path(&path.to_string_lossy()))
                 .unwrap_or_else(|_| raw.clone());
             roots.insert(raw, canonical.clone());
@@ -1604,8 +1604,8 @@ mod tests {
         File::create(&child).unwrap();
 
         let sources = discover_sources_at(root.path(), root.path(), None).unwrap();
-        assert_eq!(sources[0].0, fs::canonicalize(parent).unwrap());
-        assert_eq!(sources[1].0, fs::canonicalize(child).unwrap());
+        assert_eq!(sources[0].0, crate::paths::canonicalize(parent).unwrap());
+        assert_eq!(sources[1].0, crate::paths::canonicalize(child).unwrap());
     }
 
     #[test]

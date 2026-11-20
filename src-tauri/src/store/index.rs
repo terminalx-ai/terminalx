@@ -5,6 +5,7 @@
 //! sidebar draws and what resume reads, so it is written **before** any child
 //! is spawned — a session whose agent fails to start is still visible.
 
+use crate::paths::Canonical;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -874,7 +875,7 @@ fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]
 /// conversations, including archives and linked chats. Forget only vanished groups.
 fn sidebar_projects(sessions: &[SessionEntry], attached: &[super::projects::Project]) -> Result<Vec<String>> {
     let chats = super::root()?.join("Chats");
-    let chats = chats.canonicalize().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
+    let chats = chats.canonical().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
     let mut groups: BTreeMap<String, (bool, String, bool)> = attached.iter()
         .filter(|p| p.path.trim_end_matches('/') != chats)
         .map(|p| (p.path.trim_end_matches('/').to_string(), (p.pinned, p.last_opened.clone().unwrap_or_default(), false)))
@@ -1400,7 +1401,7 @@ mod tests {
         let real = crate::store::ensure_dir(root.join("chat-target")).unwrap();
         std::os::unix::fs::symlink(&real, root.join("Chats")).unwrap();
         let mut chat = entry("chat");
-        chat.project_path = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        chat.project_path = real.canonical().unwrap().to_string_lossy().into_owned();
         chat.link = Some(ChatLink { path: "/linked".into(), branch: None });
         save(&[chat]).unwrap();
         let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();

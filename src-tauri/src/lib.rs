@@ -81,6 +81,11 @@ mod cloud_control;
 mod machine_control;
 #[cfg(windows)]
 mod pipe_transport;
+#[cfg(windows)]
+mod win;
+mod ipc;
+mod paths;
+mod private_fs;
 #[cfg(feature = "desktop")]
 mod dictation;
 mod notification_permission;
@@ -158,6 +163,9 @@ mod container_vm;
 mod computer_targets;
 #[cfg(unix)]
 pub mod local_vm;
+#[cfg(windows)]
+#[path = "local_vm_windows.rs"]
+pub mod local_vm;
 mod machine_name;
 mod direct_endpoints;
 mod pairing_fingerprint;
@@ -168,7 +176,6 @@ mod names;
 #[cfg(feature = "desktop")]
 mod pairing;
 /// The phone protocol, which the window and the runtime both serve (PRO-359).
-#[cfg(unix)]
 mod phone;
 #[cfg(feature = "desktop")]
 mod machines;
@@ -347,7 +354,7 @@ fn tab_link_for(app: tauri::AppHandle, session_id: String, tab_id: String) -> Re
 #[cfg(all(feature = "desktop", unix))]
 static DESKTOP_LOG: std::sync::OnceLock<std::sync::Mutex<local_runtime::log_file::Log>> = std::sync::OnceLock::new();
 
-#[cfg(all(target_os = "macos", feature = "desktop"))]
+#[cfg(all(any(target_os = "macos", windows), feature = "desktop"))]
 fn install_window_pairing_consent(pairing: &std::sync::Arc<pairing::PairingManager>) {
     let keys = std::sync::Arc::downgrade(pairing);
     serve_cli::consent::speak_as_window(Box::new(move |create| {
@@ -360,6 +367,9 @@ fn install_window_pairing_consent(pairing: &std::sync::Arc<pairing::PairingManag
 #[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // What the app starts (git, scripts) must not each flash a console window.
+    #[cfg(windows)]
+    win::process::windowless_console();
     let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     #[cfg(unix)]
     logger.target(env_logger::Target::Pipe(Box::new(local_runtime::log_file::Tee::new(&DESKTOP_LOG))))
@@ -482,7 +492,7 @@ pub fn run() {
             pairing.configure(Arc::new(app.handle().clone()), app.path().app_log_dir().ok(), &app.config().identifier)?;
             // Pairing codes and approvals from this window prove it is the
             // window, which has no terminal (PRO-369).
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             install_window_pairing_consent(&pairing);
             machines.configure(Arc::new(app.handle().clone()), &app.config().identifier)?;
             machine_connections.watch(app.handle().clone());
@@ -938,6 +948,7 @@ pub fn run() {
             commands::list_slash_commands,
             commands::read_image_file,
             drag_text::dropped_text,
+            drag_text::terminal_quote_style,
             commands::invalidate_file_index,
             commands::git_commit,
             commands::git_stage_paths,

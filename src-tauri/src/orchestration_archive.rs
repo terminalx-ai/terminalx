@@ -428,9 +428,7 @@ if scanner.findings:
     print(json.dumps(scanner.findings), file=sys.stderr)
     sys.exit(1)
 "#;
-    let mut command = std::process::Command::new(
-        crate::binpath::resolve("python3").unwrap_or_else(|| "python3".into()),
-    );
+    let mut command = crate::binpath::python3();
     // Finder's PATH may locate Python but omit tools its credential loader
     // invokes, such as Homebrew's gh. Use the same login PATH as other children.
     command.env("PATH", crate::binpath::login_path());

@@ -1186,6 +1186,7 @@ impl MachineHost {
     }
 
     /// Note a phone passed to the window, unless the host is off.
+    #[cfg(unix)]
     pub(crate) fn track_phone(&self, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
@@ -1195,6 +1196,7 @@ impl MachineHost {
         })
     }
 
+    #[cfg(unix)]
     pub(crate) fn untrack_phone(&self, id: u64) {
         self.state.lock().unwrap().phones.remove(&id);
     }
@@ -1214,6 +1216,7 @@ impl MachineHost {
     }
 
     /// Where a phone goes: the window's route while its attachment is current.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn phone_route(&self) -> Option<PathBuf> {
         self.direct_phone_route().map(|(socket, _)| socket)
     }
@@ -1723,9 +1726,9 @@ fn private_socket(data_dir: &Path, socket: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        let run = std::fs::canonicalize(data_dir.join("run"))?;
+        let run = crate::paths::canonicalize(data_dir.join("run"))?;
         let parent = socket.parent().context("the phone route has no directory")?;
-        if std::fs::canonicalize(parent)? != run {
+        if crate::paths::canonicalize(parent)? != run {
             bail!("the phone route must be in this runtime's private directory");
         }
         let metadata = std::fs::symlink_metadata(socket)?;
@@ -1766,6 +1769,7 @@ impl crate::remote::host::MachineRoutes for MachineHost {
         self.untrack(computer_id, tracked);
     }
 
+    #[cfg_attr(not(unix), allow(unused_variables, unused_mut))]
     fn forward_phone(&self, forwarded: wire::Forwarded, mut relay_cancel: mpsc::UnboundedReceiver<()>) -> bool {
         // Route selection and the stop subscription share the takeover lock.
         // A window registered after this point invalidates the entire runtime
