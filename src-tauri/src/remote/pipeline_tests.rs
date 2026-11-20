@@ -440,6 +440,7 @@ async fn failed_start_cleanup_reports_storage_failure_without_losing_the_session
 /// `handoff/1` (#1327): a second opinion, Retry in a new chat or the agent
 /// handoff is one call that adds the tab and sends its first prompt. It uses
 /// this file's runtime, whose stand-in Claude is what a sent prompt launches.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_hands_on() {
     let f = fixture();
