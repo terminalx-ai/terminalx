@@ -25,7 +25,6 @@ describe("settings row search", () => {
     ["reorder", "general.customOrder"],
     ["tab bar", "general.tabBar"],
     ["sessions on a branch", "general.branchSessions"],
-    ["usage", "general.openUsage"],
     ["status bar", "general.statusBar"],
     ["usage", "general.usage"],
     ["resources", "general.resources"],
@@ -34,6 +33,21 @@ describe("settings row search", () => {
   ])("still finds %s in General after removing the old section alias (%s)", (query, id) => {
     expect(searchSettings(query)).toEqual(expect.arrayContaining([
       expect.objectContaining({ id, section: "general", sectionTitle: "General" }),
+    ]));
+  });
+
+  // PRO-463: Stats & usage is a page of Settings, found by its name and by each of its sections.
+  it.each([
+    ["stats", "stats.activity"],
+    ["agents spawned", "stats.activity"],
+    ["prs created", "stats.activity"],
+    ["usage limits", "stats.accountLimits"],
+    ["usage analytics", "stats.analytics"],
+    ["token mix", "stats.analytics"],
+    ["daily intensity", "stats.analytics"],
+  ])("finds %s on Stats & usage (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "stats", sectionTitle: "Stats & usage" }),
     ]));
   });
 

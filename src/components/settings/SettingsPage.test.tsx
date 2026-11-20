@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
-import { DEFAULT_SETTINGS_TAB, SETTING_HIGHLIGHT_FADE_MS, SETTING_HIGHLIGHT_HOLD_MS, SettingsPage } from "./SettingsPage";
+import { DEFAULT_SETTINGS_TAB, SETTING_HIGHLIGHT_FADE_MS, SETTING_HIGHLIGHT_HOLD_MS, SettingsPage, type SettingsTab } from "./SettingsPage";
 import { getPrefs, setPrefs } from "@/lib/prefs";
 import { bindingText, resetShortcut, saveShortcut } from "@/lib/shortcuts";
 import { setTheme } from "@/lib/theme";
@@ -13,6 +13,7 @@ import { movePaletteSelection } from "@/lib/commandPalette";
 import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSearchSummary } from "@/lib/settingsSearch";
 import { isMac } from "@/lib/hotkeys";
 import { api, experimental } from "@/lib/api";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const settingsFile = vi.hoisted(() => ({ error: null as string | null }));
 vi.mock("@/lib/settingsFile", () => ({
@@ -606,5 +607,32 @@ describe("light/dark shortcut hints", () => {
     expect(screen.queryByRole("button", { name: /^Switch light and dark: .*Change$/ })).toBeNull();
     act(() => { expect(resetShortcut("app.toggleMode")).toEqual({ ok: true }); });
     assertHint("mod+alt+shift+l");
+  });
+});
+
+// PRO-463, design 09.44: Stats & usage is a page of Settings, in Personal after Machines.
+describe("Settings · Stats & usage", () => {
+  it("is listed after Machines, draws its title and Refresh at the top, and is wider than the other pages", async () => {
+    const state = { scope: "test", generation: 1, snapshot: null, refreshing: false, error: null };
+    vi.spyOn(api, "statsUsageSnapshot").mockResolvedValue(state as never);
+    vi.spyOn(api, "statsUsageRefresh").mockResolvedValue(state as never);
+    render(<TooltipProvider><SettingsPage initialTab="stats" onBack={vi.fn()} /></TooltipProvider>);
+    const menu = screen.getByRole("group", { name: "Personal" });
+    const items = within(menu).getAllByRole("button").map((button) => button.textContent);
+    expect(items.indexOf("Stats & usage")).toBe(items.indexOf("Machines") + 1);
+    expect(screen.getByRole("heading", { level: 2, name: "Stats & usage" })).toBeTruthy();
+    expect(screen.getByText(SETTINGS_SECTIONS.stats.subtitle)).toBeTruthy();
+    const refresh = await screen.findByRole("button", { name: "Refresh local analytics" });
+    // Beside the title, not inside the page's content.
+    expect(refresh.closest("[data-setting-id]")).toBeNull();
+    expect(document.querySelector('[data-search-page="stats"]')!.className).toContain("max-w-[58rem]");
+    for (const id of ["stats.activity", "stats.accountLimits", "stats.analytics"]) expect(document.querySelector(`[data-setting-id="${id}"]`)).toBeTruthy();
+  });
+
+  it("opens from a link to General's old Usage row", () => {
+    vi.spyOn(api, "statsUsageSnapshot").mockReturnValue(new Promise(() => {}) as never);
+    vi.spyOn(api, "statsUsageRefresh").mockReturnValue(new Promise(() => {}) as never);
+    render(<TooltipProvider><SettingsPage initialTab={"general.openUsage" as SettingsTab} onBack={vi.fn()} /></TooltipProvider>);
+    expect(screen.getByRole("heading", { level: 2, name: "Stats & usage" })).toBeTruthy();
   });
 });

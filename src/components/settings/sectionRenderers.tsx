@@ -18,10 +18,10 @@ import { RegisteredSetting } from "./settingsRegistry";
 import { EnvironmentsTab } from "@/components/localVm/EnvironmentsTab";
 import { ProjectTemplatesSettings } from "./ProjectTemplatesSettings";
 import { MachinesSettings } from "@/components/machines/MachinesSettings";
+import { StatsUsageView } from "@/components/stats/StatsUsageView";
 
 interface SectionContext {
   onOpenSkills?: () => void;
-  onOpenUsage?: () => void;
   projectPath?: string;
   /** The project page open in the sidebar (PRO-387). */
   projectPage?: ProjectPage;
@@ -34,7 +34,8 @@ export const settingsSectionRenderers: Record<SettingsSection, (context: Section
   account: () => <AccountTab />,
   devices: () => <DevicesTab />,
   machines: () => <MachinesSettings showIntroduction={false} />,
-  general: ({ onOpenUsage }) => <GeneralTab onOpenUsage={onOpenUsage} />,
+  stats: () => <StatsUsageView />,
+  general: () => <GeneralTab />,
   appearance: () => <AppearanceTab />,
   organizations: ({ row, openRequest }) => <OrganizationsTab initialRow={row} openRequest={openRequest} />,
   agents: ({ onOpenSkills }) => <AgentsTab onOpenSkills={onOpenSkills} showIntroduction={false} />,

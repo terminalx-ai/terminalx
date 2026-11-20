@@ -159,6 +159,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   account: User,
   devices: Smartphone,
   machines: Laptop,
+  stats: BarChart3,
   general: Settings,
   appearance: Palette,
   agents: Bot,

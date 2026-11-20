@@ -28,6 +28,8 @@ export const SETTINGS_SECTIONS = {
   shortcuts: { title: "Keyboard shortcuts", group: "Personal", entry: "shortcuts.systemWide", subtitle: "Keys for every action. Change one by recording a new key." },
   devices: { title: "Devices", group: "Personal", entry: "devices.pairing", subtitle: "Phones paired with this Mac." },
   machines: { title: "Machines", group: "Personal", entry: "machines.allowOperating", subtitle: "Operate TerminalX on your other computers from this Mac, and let them operate it. Sessions, terminals and files stay on the machine that runs them." },
+  // PRO-463, design 09.44: reference information, looked at now and then, so a page of Settings rather than a view of the main window.
+  stats: { title: "Stats & usage", group: "Personal", entry: "stats.activity", subtitle: "TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here." },
   agents: { title: "Agents", group: "Agents & environment", entry: "agents.setup", subtitle: "The agent CLIs TerminalX runs on this Mac, their sign-ins, and how they work while you wait. Each keeps its own login; local work needs no TerminalX account." },
   orchestrator: { title: "Orchestrator", group: "Agents & environment", entry: "orchestrator.requireApproval", subtitle: "How a lead session splits a goal across workers." },
   environment: { title: "Environment", group: "Agents & environment", entry: "environment.variables", subtitle: "Variables for new agent and shell tabs, kept in the Keychain." },
@@ -306,12 +308,6 @@ export const SETTINGS_ROWS = [
     storage: { kind: "localStorage", location: "raccoon.prefs#colourLineCounts" },
   }),
   defineSetting({
-    id: "general.openUsage", section: "general", title: "Usage",
-    description: "Tokens, cost and rate limits across every agent, by day and by project.",
-    searchTerms: ["usage"], scope: "user",
-    storage: { kind: "action", location: "Usage page" },
-  }),
-  defineSetting({
     id: "general.statusBar", section: "general", title: "Status bar",
     description: "Show app-wide agent usage and the resources used by live tabs along the bottom edge.",
     searchTerms: ["status", "bar"], scope: "user",
@@ -370,6 +366,24 @@ export const SETTINGS_ROWS = [
     description: "Each has its own credential. Revoking one closes its connection at once.",
     searchTerms: ["machines", "computers", "revoke", "operate", "paired", "credential"], scope: "user",
     storage: { kind: "service", location: "TerminalX runtime: paired computers" }, layout: "content",
+  }),
+  defineSetting({
+    id: "stats.activity", section: "stats", title: "Activity",
+    description: "Agents spawned, time agents worked and pull requests created on this installation.",
+    searchTerms: ["stats", "statistics", "activity", "agents spawned", "time agents worked", "working time", "prs created", "pull requests", "lifetime", "tracking"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: activity totals" }, layout: "content",
+  }),
+  defineSetting({
+    id: "stats.accountLimits", section: "stats", title: "Usage limits by account",
+    description: "Each signed-in account’s current usage windows and when they reset, read with that account’s own login.",
+    searchTerms: ["usage", "limits", "rate limits", "account", "accounts", "window", "windows", "5-hour", "weekly", "reset", "subscription", "quota"], scope: "user",
+    storage: { kind: "service", location: "Agent providers (each account’s own login)" }, layout: "content",
+  }),
+  defineSetting({
+    id: "stats.analytics", section: "stats", title: "Usage analytics",
+    description: "Tokens, estimated cost, token mix, providers and daily intensity from local Claude and Codex transcripts.",
+    searchTerms: ["usage", "analytics", "usage overview", "tokens", "cost", "spend", "token mix", "cache", "providers", "daily intensity", "heatmap", "claude", "codex", "transcripts"], scope: "user",
+    storage: { kind: "service", location: "TerminalX runtime: local transcript scan" }, layout: "content",
   }),
   defineSetting({
     id: "devices.pairing", section: "devices", title: "Pair a phone",
@@ -1081,9 +1095,12 @@ const MOVED_ROWS: Readonly<Record<string, SettingId>> = {
   "general.dataPrivacy": "account.dataPrivacy",
   // PRO-377: Appearance keeps the design's rows; these moved to General.
   ...Object.fromEntries(
-    (["textSize", "transcriptLayout", "customOrder", "tabBar", "branchSessions", "openUsage", "statusBar", "usage", "resources", "usageDisplay", "usageRefresh"] as const)
+    (["textSize", "transcriptLayout", "customOrder", "tabBar", "branchSessions", "statusBar", "usage", "resources", "usageDisplay", "usageRefresh"] as const)
       .map((key) => [`appearance.${key}`, `general.${key}` satisfies SettingId]),
   ),
+  // PRO-463: the row that left Settings for the usage view; the usage is a page of Settings now.
+  "general.openUsage": "stats.activity",
+  "appearance.openUsage": "stats.activity",
 };
 export function settingById(id: string): SettingRegistration | undefined { return byId.get(id) ?? (Object.hasOwn(MOVED_ROWS, id) ? byId.get(MOVED_ROWS[id]) : undefined); }
 export function settingsInSection(section: SettingsSection): readonly SettingRegistration[] { return SETTINGS_ROWS.filter((row) => row.section === section); }

@@ -14,7 +14,7 @@
 import { appWindow } from "@/lib/appWindow";
 import type { PanelTab } from "@/lib/panelTab";
 import {
-  getSessionStore, openAgents, openAutomations, openHome, openIssues, openProjectOverview, openSkills, openStats,
+  getSessionStore, openAgents, openAutomations, openHome, openIssues, openProjectOverview, openSkills,
   selectSession, subscribeSessionStore,
 } from "@/lib/sessions";
 import { whenSessionsLoaded } from "@/lib/tabDeepLink";
@@ -26,7 +26,9 @@ const MAX_PANEL_TABS = 200;
 const PANEL_TABS: readonly PanelTab[] = ["branch", "changes", "files", "browser", "ports", "computer"];
 
 /** The pages a launch can reopen. The new-session form is a draft and is not one: the session behind it is. */
-const PAGES = ["welcome", "home", "issues", "agents", "automations", "skills", "stats", "project"] as const;
+const PAGES = ["welcome", "home", "issues", "agents", "automations", "skills", "project"] as const;
+/** Pages the main window no longer has, and where a launch saved on one opens instead: Stats moved to Settings (PRO-463). */
+const RETIRED_PAGES: Readonly<Record<string, LastPage>> = { stats: "home" };
 export type LastPage = (typeof PAGES)[number];
 
 export interface LastView {
@@ -54,7 +56,7 @@ export function readLastView(): LastView {
     const tabs = raw.panelTabs && typeof raw.panelTabs === "object" && !Array.isArray(raw.panelTabs) ? raw.panelTabs : {};
     return {
       sessionId: typeof raw.sessionId === "string" && raw.sessionId ? raw.sessionId : null,
-      view: PAGES.includes(raw.view as LastPage) ? (raw.view as LastPage) : "welcome",
+      view: PAGES.includes(raw.view as LastPage) ? (raw.view as LastPage) : typeof raw.view === "string" && Object.hasOwn(RETIRED_PAGES, raw.view) ? RETIRED_PAGES[raw.view] : "welcome",
       projectPath: typeof raw.projectPath === "string" && raw.projectPath ? raw.projectPath : null,
       panelTabs: Object.fromEntries(Object.entries(tabs).filter(([, tab]) => PANEL_TABS.includes(tab as PanelTab))) as Record<string, PanelTab>,
     };
@@ -132,7 +134,6 @@ export function restoreLastView(saved: LastView = readLastView()): { sessionId: 
     case "agents": openAgents(); break;
     case "automations": openAutomations(); break;
     case "skills": openSkills(); break;
-    case "stats": openStats(); break;
     case "welcome": return null;
   }
   return { view: saved.view };

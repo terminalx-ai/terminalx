@@ -7,7 +7,7 @@ import { BadgeLegend, CantSaveToast, OpenSettingsFileButton } from "./SettingSou
 import { useSettingsFile } from "@/lib/settingsFile";
 import type { SourceBadgeKind } from "@/lib/settingSources";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { ArrowLeft, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
+import { ArrowLeft, BarChart3, Bot, Wrench, Building2, ChevronDown, ChevronRight, FlaskConical, FolderPlus, HardDrive, Info, Keyboard, KeyRound, Laptop, Mic, Monitor, Network, Palette, Plug, Return, Search, Settings, Smartphone, UserRound, X } from "@/icons";
 import type { LucideIcon } from "lucide-react";
 import { ProjectGlyph } from "@/components/layout/ProjectRail";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ const SECTION_ICONS: Record<SettingsSection, LucideIcon> = {
   account: UserRound,
   devices: Smartphone,
   machines: Laptop,
+  stats: BarChart3,
   general: Settings,
   appearance: Palette,
   agents: Bot,
@@ -72,7 +73,7 @@ const userKeySettingTitle = (key: string) => SETTINGS_ROWS.find((row) => row.lay
 /** The listbox option id of a search result. */
 const resultId = (id: string) => `settings-result-${id}`;
 
-export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initialProjectPath, openRequest = 0, onOpenSkills, onOpenUsage }: {
+export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initialProjectPath, openRequest = 0, onOpenSkills }: {
   onBack: () => void;
   initialTab?: SettingsTab;
   /** The repository instance for a repository-scoped row link. */
@@ -80,7 +81,6 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   /** Repeated requests return to the requested row even after navigation within Settings. */
   openRequest?: number;
   onOpenSkills?: () => void;
-  onOpenUsage?: () => void;
 }) {
   const localBoundary = useSettingsLeaveBoundary();
   const { guards: leaveGuards, warning: leaveWarning, canLeave } = useContext(SettingsLeaveBoundaryContext) ?? localBoundary;
@@ -427,7 +427,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             <SettingControlSlots.Provider value={slots}>
               <div hidden aria-hidden>
                 {pages.filter((page) => page.section !== section && LIVE_CONTROL_SECTIONS.has(page.section) && page.matches.some((match) => slots.has(match.id))).map((page) => (
-                  <div key={page.section} data-search-page={page.section}>{settingsSectionRenderers[page.section]({ onOpenSkills, onOpenUsage })}</div>
+                  <div key={page.section} data-search-page={page.section}>{settingsSectionRenderers[page.section]({ onOpenSkills })}</div>
                 ))}
               </div>
             </SettingControlSlots.Provider>
@@ -437,7 +437,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
               <p className="mt-1 text-[12px] text-faint">Try fewer letters, or <button type="button" className="text-foreground underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/40" onClick={() => choose("shortcuts")}>search keyboard shortcuts</button>.</p>
             </div>}
           </div>}
-          <div hidden={searching} data-search-page={section} className="mx-auto w-full max-w-[48rem] px-6 pt-2 pb-12" key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
+          <div hidden={searching} data-search-page={section} className={cn("mx-auto w-full px-6 pt-2 pb-12", section === "stats" ? "max-w-[58rem]" : "max-w-[48rem]")} key={`${section}:${project?.path ?? ""}:${section === "repositories" ? page : ""}`}>
             <div className={cn("flex flex-wrap items-start justify-between gap-3", section === "repositories" && project ? "mb-3" : "mb-5")}>
               {section === "repositories" && project ? <div className="min-w-0 flex-1 basis-48">
                 {/* One title a page, the page's name, with the project beneath it (design 11.02, 11.10). */}
@@ -450,7 +450,7 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
             {leaveWarning && <p role="alert" className="mb-3 text-sm text-destructive">Save your changes before leaving Settings. If a save is in progress, wait for it to finish.</p>}
             <SettingsHeaderSlotProvider value={headerSlot}>
               <SettingControlSlots.Provider value={searching ? slots : null}>
-                {settingsSectionRenderers[section]({ onOpenSkills, onOpenUsage, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
+                {settingsSectionRenderers[section]({ onOpenSkills, projectPath: project?.path, projectPage: page, row: target, openRequest, onSelectRow: (row) => choose(section, project?.path, row) })}
               </SettingControlSlots.Provider>
             </SettingsHeaderSlotProvider>
             <SectionBadgeLegend section={section} />

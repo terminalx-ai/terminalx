@@ -33,7 +33,6 @@ export interface RailProps {
   onNewSession: () => void;
   onOpenIssues: () => void;
   onOpenAgents: () => void;
-  onOpenStats: () => void;
   onOpenAutomations: () => void;
   onOpenSkills: () => void;
   onSearch: () => void;
