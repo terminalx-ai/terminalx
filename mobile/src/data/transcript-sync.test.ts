@@ -5,7 +5,8 @@ import type { HostConnection } from "../transport/connection";
 import { HostApi } from "./host-api";
 import { cacheEpoch, clearTranscriptCaches, readCache, writeCache, type SyncCursor, type TranscriptCache } from "./transcript-cache";
 import { RelayOuterError } from "../transport/relay-client";
-import { retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "./transcript-sync";
+import { openTranscriptsOf, retryHaltedTranscript, TranscriptHaltedError, watchTranscript } from "./transcript-sync";
+import { startPrefetch } from "./prefetch";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 vi.mock("expo-crypto", () => ({ randomUUID: () => "client" }));
@@ -350,5 +351,24 @@ describe("whether the conversation is caught up with the Mac's (#644)", () => {
     h.start(false); await settle();
     expect(h.updates.length).toBeGreaterThan(0);
     expect(h.known).toEqual([]);
+  });
+});
+
+describe("a prefetch while a conversation is open (#1337)", () => {
+  it("asks the Mac not to send the conversations open on screen, and only those of that Mac", async () => {
+    const h = host(20);
+    const stop = h.start(false, "host");
+    h.start(false, "other");
+    expect(openTranscriptsOf("host")).toEqual([{ sessionId: "session", tabId: "tab" }]);
+    const request = vi.fn(async (method: string, params?: { enabled?: boolean }) => method === "sync.capabilities"
+      ? { ok: true, value: { prefetch: 1, prefetchOpen: 1 } }
+      : { ok: true, value: { enabled: params?.enabled } });
+    const api = new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
+    expect(await startPrefetch(api, "host")).toBe(true);
+    expect(request).toHaveBeenLastCalledWith("sync.prefetch", expect.objectContaining({ open: [{ sessionId: "session", tabId: "tab" }] }));
+    stop();
+    expect(openTranscriptsOf("host")).toEqual([]);
+    await startPrefetch(api, "host");
+    expect(request.mock.lastCall?.[1]).not.toHaveProperty("open");
   });
 });
