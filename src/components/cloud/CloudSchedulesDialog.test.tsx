@@ -436,7 +436,7 @@ describe("batched hosted automation target transitions", () => {
     expect(createButton().disabled).toBe(true);
     await waitFor(() => expect(screen.getByTestId("cloud-schedule-cost").textContent).toContain("$9.00"), { timeout: 3000 });
   });
-  it.each(["create", "resume"])("does not refresh from old %s completion during a batched target A-B-A switch", async (operation) => {
+  it.each(["create", "resume"])("does not refresh from old %s completion after a batched target A-B-A switch", async (operation) => {
     const old = deferred<CloudAutomationDto>();
     if (operation === "resume") listed = [schedule({ state: "paused" })];
     await openHost();
@@ -450,13 +450,17 @@ describe("batched hosted automation target transitions", () => {
       fireEvent.click(within(screen.getByTestId("cloud-schedule-resume-confirm")).getByRole("button", { name: "Resume" }));
       await waitFor(() => expect(mocks.setActive).toHaveBeenCalledTimes(1));
     }
-    await act(async () => {
-      openSchedulesDialog(b); openSchedulesDialog(a); old.resolve(schedule());
-      // Let old continuations run while the target transitions are still batched.
-      await Promise.resolve(); await Promise.resolve();
-    });
+    // Keep the old mutation pending until the new scope's own read is observed:
+    // it cannot supply this second call or hide behind React's act scheduling.
+    act(() => { openSchedulesDialog(b); openSchedulesDialog(a); });
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("cloud-schedule-form")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /New scheduled task/ }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New target draft" } });
+    await act(async () => old.resolve(schedule()));
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("New target draft");
+    expect(screen.getByTestId("cloud-schedule-form")).toBeTruthy();
     expect(mocks.list.mock.calls.every(([workspace]) => workspace === "ws-1")).toBe(true);
   });
 });
