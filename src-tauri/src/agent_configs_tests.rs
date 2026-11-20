@@ -54,7 +54,10 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     fn walk(dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // A link is recorded as where it points, so a dangling one shows too.
+            if let Ok(to) = fs::read_link(&path) {
+                out.insert(path.clone(), format!("-> {}", to.display()).into_bytes());
+            } else if path.is_dir() {
                 walk(&path, out);
             } else {
                 out.insert(path.clone(), fs::read(&path).unwrap());
@@ -423,4 +426,113 @@ fn a_write_that_fails_part_way_names_what_was_already_written() {
     fs::set_permissions(&rig.homes.codex_dir, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(error.starts_with("Wrote ~/.codex/skills/release-notes, then stopped: back up ~/.codex/config.toml"), "{error}");
     assert!(error.ends_with("Nothing after that was written."), "{error}");
+}
+
+/// A Codex folder named like a Claude skill but without SKILL.md: not a listed
+/// skill, yet every file of the copy lands in it.
+#[cfg(unix)]
+fn unlisted_codex_target(rig: &Rig) -> PathBuf {
+    let target = rig.homes.codex_dir.join("skills/release-notes");
+    fs::create_dir_all(&target).unwrap();
+    assert!(!compare_in(&rig.homes).unwrap().items.iter().any(|i| i.kind == Kind::Skill && i.name == "release-notes" && i.codex_summary.is_some()));
+    target
+}
+
+/// Copies release-notes to Codex alongside an MCP server and expects a refusal
+/// that leaves `outside` and both homes exactly as they were.
+#[cfg(unix)]
+fn refused_with_nothing_written(rig: &Rig, outside: &Path, expected: &str) {
+    let before = (snapshot(outside), snapshot(&rig.homes.codex_dir), snapshot(&rig.homes.claude_dir));
+    let changes = [change(Kind::Skill, "release-notes", Direction::ToCodex), change(Kind::Mcp, "linear", Direction::ToCodex)];
+    let error = preview_in(&rig.homes, &changes).unwrap_err().to_string();
+    assert!(error.contains(expected), "{error}");
+    // Even with a token from a preview that did pass, apply plans again and refuses first.
+    let error = apply_in(&rig.homes, &changes, "any").unwrap_err().to_string();
+    assert!(error.starts_with("Nothing was written: "), "{error}");
+    assert!(error.contains(expected), "{error}");
+    assert_eq!((snapshot(outside), snapshot(&rig.homes.codex_dir), snapshot(&rig.homes.claude_dir)), before);
+    assert!(!rig.homes.backups.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlisted_target_linking_a_file_outside_is_not_written_through() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("SKILL.md"), "not a skill").unwrap();
+    let target = unlisted_codex_target(&rig);
+    // Not a file the copy writes, but it makes the folder unsafe to write into.
+    std::os::unix::fs::symlink(outside.join("SKILL.md"), target.join("SKILL.md.link")).unwrap();
+    refused_with_nothing_written(&rig, &outside, "release-notes` on the other side can't be copied over: SKILL.md.link links outside the skill folder");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlisted_target_whose_skill_file_is_a_link_out_is_refused() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    // A link at SKILL.md itself to a file that is not there yet: `is_file` is
+    // false, so the folder is not listed, and a write through it would create the file outside.
+    let target = unlisted_codex_target(&rig);
+    std::os::unix::fs::symlink(outside.join("planted.md"), target.join("SKILL.md")).unwrap();
+    refused_with_nothing_written(&rig, &outside, "SKILL.md is a broken link");
+    assert!(!outside.join("planted.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlisted_target_linking_a_folder_outside_is_not_written_through() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(outside.join("scripts")).unwrap();
+    fs::write(outside.join("scripts/fill.sh"), "#!/bin/sh\necho mine\n").unwrap();
+    let target = rig.homes.codex_dir.join("skills/pdf-tools");
+    fs::remove_file(target.join("SKILL.md")).unwrap();
+    fs::remove_dir_all(target.join("scripts")).unwrap();
+    std::os::unix::fs::symlink(outside.join("scripts"), target.join("scripts")).unwrap();
+    let before = (snapshot(&outside), snapshot(&rig.homes.codex_dir));
+    let changes = [change(Kind::Skill, "pdf-tools", Direction::ToCodex), change(Kind::Mcp, "linear", Direction::ToCodex)];
+    let error = apply_in(&rig.homes, &changes, "any").unwrap_err().to_string();
+    assert_eq!(error, "Nothing was written: skill `pdf-tools` on the other side can't be copied over: scripts links outside the skill folder");
+    assert_eq!((snapshot(&outside), snapshot(&rig.homes.codex_dir)), before);
+    assert!(!rig.homes.backups.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_target_folder_without_skill_md_is_refused() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), "mine").unwrap();
+    std::os::unix::fs::symlink(&outside, rig.homes.codex_dir.join("skills/release-notes")).unwrap();
+    refused_with_nothing_written(&rig, &outside, "skill `release-notes` on the other side links to ~/outside; change that folder instead");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unlisted_target_with_inside_links_and_clashing_paths() {
+    let rig = rig();
+    let target = unlisted_codex_target(&rig);
+    // A link that stays inside the folder is written through, as before.
+    fs::write(target.join("real.md"), "old").unwrap();
+    std::os::unix::fs::symlink("real.md", target.join("SKILL.md")).unwrap();
+    apply_now(&rig.homes, &[change(Kind::Skill, "release-notes", Direction::ToCodex)]);
+    assert!(fs::symlink_metadata(target.join("SKILL.md")).unwrap().file_type().is_symlink());
+    assert_eq!(fs::read(target.join("real.md")).unwrap(), fs::read(rig.homes.claude_dir.join("skills/release-notes/SKILL.md")).unwrap());
+
+    // A folder where the copy writes a file is refused before anything is written.
+    let pdf = rig.homes.codex_dir.join("skills/pdf-tools");
+    fs::remove_file(pdf.join("SKILL.md")).unwrap();
+    fs::create_dir_all(pdf.join("SKILL.md")).unwrap();
+    let error = preview_in(&rig.homes, &[change(Kind::Skill, "pdf-tools", Direction::ToCodex)]).unwrap_err().to_string();
+    assert_eq!(error, "skill `pdf-tools` can't be copied over: SKILL.md is a folder on the other side");
+    // A file where the copy needs a folder, likewise.
+    fs::remove_dir_all(pdf.join("SKILL.md")).unwrap();
+    fs::remove_dir_all(pdf.join("scripts")).unwrap();
+    fs::write(pdf.join("scripts"), "a file").unwrap();
+    let error = preview_in(&rig.homes, &[change(Kind::Skill, "pdf-tools", Direction::ToCodex)]).unwrap_err().to_string();
+    assert_eq!(error, "skill `pdf-tools` can't be copied over: scripts is a file on the other side");
 }
