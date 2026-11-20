@@ -47,9 +47,14 @@ const ACTIVE_ONLY: ReadonlySet<OrganizationPage> = new Set(["members", "cloudCom
 /** Pages only owners and administrators manage: a member's menu leaves them out. */
 const MANAGERS_ONLY: ReadonlySet<OrganizationPage> = new Set(["members", "cloudCompute", "github", "workspace", "environment"]);
 
+/** Whether someone with `role` manages `page`: a member's menu, and their Settings search, leave the rest out. */
+export function roleManagesOrganizationPage(role: string, page: OrganizationPage): boolean {
+  return role !== "member" || !MANAGERS_ONLY.has(page);
+}
+
 /** The pages `organization` has for the person: those they can manage, and those its being active or not allows. */
 export function organizationPages(organization: Pick<OrganizationSummary, "role">, active: boolean) {
-  return ORGANIZATION_PAGES.filter(({ page }) => (active || !ACTIVE_ONLY.has(page)) && (organization.role !== "member" || !MANAGERS_ONLY.has(page)));
+  return ORGANIZATION_PAGES.filter(({ page }) => (active || !ACTIVE_ONLY.has(page)) && roleManagesOrganizationPage(organization.role, page));
 }
 
 /** The page an organization's row lives on. Rows not named here (the overview, console, work status, teardown, delete…) are on General. */

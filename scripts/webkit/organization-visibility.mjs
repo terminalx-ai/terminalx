@@ -35,9 +35,10 @@ try {
   const prefs = () => page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   const openOrganizations = async () => {
     await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
-    // PRO-464: the list of organizations, with the sidebar choices, is found by search (the menu lists each organization).
-    await page.getByRole("combobox", { name: "Search settings" }).fill("organizations in sidebar");
-    await page.getByRole("option", { name: /^Organizations in sidebar/ }).click();
+    // PRO-464: Organizations is one row in the menu; All organizations leads what it lists.
+    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    await nav.getByRole("button", { name: /^Organizations \d+$/ }).click();
+    await nav.getByRole("button", { name: "All organizations", exact: true }).click();
     await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
   };
   const closeSettings = async () => {

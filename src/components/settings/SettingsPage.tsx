@@ -21,7 +21,7 @@ import { settingsSectionRenderers } from "./sectionRenderers";
 import { SettingsHeaderSlotProvider } from "./settingsHeaderActions";
 import { PROJECT_PAGES, projectPageForRow, projectPages, type ProjectPage } from "./RepositoriesTab";
 import { ACTIONS_SUBTITLE } from "./RepositoryActionsPage";
-import { ORGANIZATION_PAGES, ORGANIZATION_ROLE, organizationPageForRow, organizationPages, type OrganizationPage } from "./OrganizationSettings";
+import { ORGANIZATION_PAGES, ORGANIZATION_ROLE, organizationPageForRow, organizationPages, roleManagesOrganizationPage, type OrganizationPage } from "./OrganizationSettings";
 import { signIn, useAccount } from "@/lib/account";
 import { defaultOrgId } from "@/lib/cloudCatalog";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
@@ -176,7 +176,18 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const offered = useCallback((key: string) => settingsSectionOffered(key as Parameters<typeof settingsSectionOffered>[0]), [orchestratorRuns, localVmTasks]);
   // searchSettings reads the Experimental switch itself; the switches re-run it when one changes.
   // Grouped by page, pages in order of their best row; `results` is the rows in that displayed order, which ↑/↓ walk.
-  const pages = useMemo(() => groupSettingsByPage(searchSettings(query)), [query, orchestratorRuns, localVmTasks]);
+  // Every organization the person belongs to has pages, cloud-enabled or not; data privacy mode turns them off.
+  const { status: account } = useAccount();
+  const privacy = useDataPrivacy().enabled;
+  const activeOrganizationId = defaultOrgId(account);
+  const memberships: readonly OrganizationSummary[] = !privacy && account.state === "signed-in" ? (account.organizations ?? []) : [];
+  const organization = section === "organizations" && organizationId ? memberships.find((candidate) => candidate.id === organizationId) : undefined;
+  // An organization's row opens on the organization already open, else the active one (`open` below): a member of it
+  // is not offered the rows of pages they do not manage, which their menu leaves out too.
+  const searchRole = (organization ?? memberships.find((candidate) => candidate.id === activeOrganizationId))?.role;
+  const pages = useMemo(() => groupSettingsByPage(searchSettings(query).filter((match) =>
+    match.row.section !== "organizations" || match.row.scope !== "organization" || !searchRole || roleManagesOrganizationPage(searchRole, organizationPageForRow(match.id)),
+  )), [query, orchestratorRuns, localVmTasks, searchRole]);
   const results = useMemo(() => pages.flatMap((page) => page.matches), [pages]);
   const searching = !!query.trim();
   // The live control slot of each result row, by row id (see SettingControlSlots).
@@ -228,12 +239,6 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
   const project = repositories.find((candidate) => candidate.path === projectPath)
     ?? (section === "repositories" && target ? repositories[0] : undefined);
 
-  // Every organization the person belongs to has pages, cloud-enabled or not; data privacy mode turns them off.
-  const { status: account } = useAccount();
-  const privacy = useDataPrivacy().enabled;
-  const activeOrganizationId = defaultOrgId(account);
-  const memberships: readonly OrganizationSummary[] = !privacy && account.state === "signed-in" ? (account.organizations ?? []) : [];
-  const organization = section === "organizations" && organizationId ? memberships.find((candidate) => candidate.id === organizationId) : undefined;
   const organizationPageShown: OrganizationPage = organization
     ? (() => { const wanted = organizationPage ?? organizationPageForRow(target); return organizationPages(organization, organization.id === activeOrganizationId).some((entry) => entry.page === wanted) ? wanted : "general"; })()
     : "general";
@@ -466,6 +471,12 @@ export function SettingsPage({ onBack, initialTab = DEFAULT_SETTINGS_TAB, initia
                     they can manage, and Create organization at the end (design 11.16). */}
                 <MenuGroupRow label="Organizations" icon={Building2} count={memberships.length} open={organizationsOpen} controls="settings-menu-organizations" onToggle={() => setOrganizationsOpen((open) => !open)} />
                 {organizationsOpen && <div id="settings-menu-organizations" role="group" aria-label="Organizations" className={NESTED_CLASS}>
+                  {/* The list of organizations, with which of them the sidebar shows, leads the group as Project
+                      templates leads Projects. */}
+                  <button type="button" aria-current={section === "organizations" && !organization ? "page" : undefined} onClick={() => chooseOrganization(null)} className={navClass(section === "organizations" && !organization)}>
+                    <Building2 aria-hidden className="size-4 shrink-0" />
+                    <span className="truncate">All organizations</span>
+                  </button>
                   {memberships.map((candidate) => {
                     const open = organization?.id === candidate.id;
                     const name = organizationName(candidate);

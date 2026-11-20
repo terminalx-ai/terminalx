@@ -146,7 +146,7 @@ describe("Organizations in the Settings menu (PRO-464)", () => {
     expect(toggle().textContent).toContain("2");
     expect(nav().queryByRole("button", { name: /^Acme/ })).toBeNull();
     fireEvent.click(toggle());
-    expect(organizations().getAllByRole("button").map((button) => button.textContent)).toEqual(["AAcmeOwner", "BBetaMember", "Create organization"]);
+    expect(organizations().getAllByRole("button").map((button) => button.textContent)).toEqual(["All organizations", "AAcmeOwner", "BBetaMember", "Create organization"]);
     // An organization opens at its General page, listing the pages its role allows (design 11.16).
     fireEvent.click(organizations().getByRole("button", { name: /^Acme/ }));
     expect(organizations().getByRole("button", { name: /^Acme/ }).getAttribute("aria-expanded")).toBe("true");
@@ -162,6 +162,38 @@ describe("Organizations in the Settings menu (PRO-464)", () => {
     fireEvent.click(organizations().getByRole("button", { name: /^Beta/ }));
     expect(nav().queryByRole("group", { name: "Acme settings" })).toBeNull();
     expect(pagesOf("Beta")).toEqual(["General", "Agent logins", "Model access"]);
+  });
+
+  it("leads with All organizations, the list with each one's Show in sidebar switch", () => {
+    render(<SettingsPage onBack={vi.fn()} />);
+    fireEvent.click(toggle());
+    fireEvent.click(organizations().getByRole("button", { name: /^Acme/ }));
+    fireEvent.click(organizations().getByRole("button", { name: "All organizations" }));
+    expect(shown()).toBeNull();
+    expect(organizations().getByRole("button", { name: "All organizations" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe("Organizations");
+    expect(screen.getByRole("radiogroup", { name: "Organizations in sidebar" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Show Beta in sidebar" })).toBeTruthy();
+  });
+
+  it("offers a member no search results for the pages their menu leaves out", () => {
+    // Beta, a member there, is open: its managers' rows are not offered; its own are.
+    render(<SettingsPage initialTab="organizations" onBack={vi.fn()} />);
+    fireEvent.click(organizations().getByRole("button", { name: /^Beta/ }));
+    const search = screen.getByRole("combobox", { name: "Search settings" });
+    for (const [query, id] of [["members", "organizations.members"], ["github", "organizations.github"], ["compute limits", "organizations.compute"], ["workspace settings", "organizations.workspace"]]) {
+      fireEvent.change(search, { target: { value: query } });
+      expect(document.getElementById(`settings-result-${id}`)).toBeNull();
+    }
+    fireEvent.change(search, { target: { value: "model access" } });
+    expect(document.getElementById("settings-result-organizations.agentRoutes")).toBeTruthy();
+    // Acme, where the person is an owner, offers them all.
+    fireEvent.change(search, { target: { value: "" } });
+    fireEvent.click(organizations().getByRole("button", { name: /^Acme/ }));
+    for (const [query, id] of [["members", "organizations.members"], ["github", "organizations.github"], ["compute limits", "organizations.compute"], ["workspace settings", "organizations.workspace"]]) {
+      fireEvent.change(search, { target: { value: query } });
+      expect(document.getElementById(`settings-result-${id}`)).toBeTruthy();
+    }
   });
 
   it("stays as the person left it until Settings closes", () => {
