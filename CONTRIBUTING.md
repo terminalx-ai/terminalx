@@ -28,6 +28,20 @@ run what you change.
   an agent instead of falling back to a shared daemon with another tab's identity.
 - **zsh** and **ripgrep** are required for the full Rust security fixtures.
   Linux CI installs both; install them locally too before running that suite.
+- **On Windows**: the Visual Studio Build Tools with the C++ workload, the
+  WebView2 runtime (part of Windows 11), and **Git for Windows**, whose
+  `sh.exe` runs setup, archive and action scripts. Local VM tasks are not
+  available on a Windows host yet. `pnpm tauri:dev` builds the background runtime
+  first; build it once beforehand (`pnpm build:local-runtime --dev`) so the
+  dev server is up within Tauri's three-minute wait. The Rust unit tests run
+  without the desktop feature (`cargo test --lib --no-default-features`):
+  a test executable has no application manifest, so the desktop build's
+  common-controls imports do not resolve in one. The fixtures write files
+  as they expect to read them back, so run the suite with Git's
+  `core.autocrlf` off (Git for Windows turns it on system-wide), for example
+  from a home whose `.gitconfig` sets it, and from a folder only your account
+  can open: the app refuses state another account could read. Tests that need
+  a POSIX shell, `/bin/sh` stand-ins or Linux-only code run on macOS and Linux.
 - macOS on Apple silicon and Linux are checked in CI. Apple native helpers
   and WebKit layout checks run on macOS; Windows CI remains disabled.
 
@@ -60,6 +74,9 @@ pnpm vitest run
 cd src-tauri && cargo clippy --all-targets -- -D warnings
 cd src-tauri && cargo test
 ```
+
+On Windows the Rust tests run as `cargo test --lib --no-default-features`, set up as
+described under **On Windows** above.
 
 `pnpm check` runs the first two together and `pnpm test` runs vitest alone.
 The same four run on every pull request in `.github/workflows/ci.yml`, with

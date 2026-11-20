@@ -6,6 +6,14 @@
   any other session. The Run | Lead chat strip and the Idle pill no longer
   show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
   (#1404).
+- TerminalX runs on Windows 10 and 11: the desktop app, its background
+  runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
+  machines, phone pairing and the headless `terminalx-serve` tools. Named
+  pipes with owner-only access stand in for Unix sockets, DPAPI for the
+  Keychain, Job Objects and ConPTY for process groups and terminals, and Git
+  for Windows' `sh` runs setup, archive and action scripts. Not yet on
+  Windows: keeping agents running through a runtime update (an update
+  restarts the runtime), Local VM tasks, and the runtime's self-update.
 
 ## 0.2.36
 

@@ -34,6 +34,8 @@ app that owns the tab. A normal shell dials the published `$TERMINALX_HOME/run/h
 reads `$TERMINALX_HOME/run/control.token` automatically; both are owner-only. When two apps share
 a `TERMINALX_HOME`, only one of them answers there (`status` shows `publishesHome: true` for it,
 and its `pid`), and the other takes over when it exits. Never print, copy, or persist the token.
+On Windows these endpoints are named pipes (`\\.\pipe\terminalx-…`) rather than `.sock` files; the
+variables and commands are the same.
 
 ## Selectors
 
