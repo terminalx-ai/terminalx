@@ -121,6 +121,36 @@ impl Target {
         }
         Ok(Self { host: parts[0].into(), owner: parts[1].into(), name: parts[2].into(), number: parts[4].into(), url })
     }
+
+    pub(crate) fn repository_url(&self) -> String {
+        format!("https://{}/{}/{}", self.host, self.owner, self.name)
+    }
+
+    pub(crate) fn require_exact_cli_host(&self) -> Result<()> {
+        // gh's PR URL parser drops ports and strips a leading www.
+        if self.host.contains(':') || self.host.starts_with("www.") {
+            bail!("GitHub CLI cannot target this pull request hostname exactly.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verified_pr_id<'a>(&self, pr: &'a Value) -> Result<&'a str> {
+        if pr["url"].as_str().and_then(|url| crate::pr_associations::identity(url).ok()).as_deref() != Some(&self.url) {
+            bail!("GitHub returned a different pull request.");
+        }
+        pr["id"].as_str().filter(|id| !id.is_empty()).context("GitHub omitted the pull request ID.")
+    }
+
+    pub(crate) fn graphql<E: From<anyhow::Error>>(
+        &self, query: &str, fields: &[String], mut run: impl FnMut(&[&str]) -> std::result::Result<String, E>,
+    ) -> std::result::Result<Value, E> {
+        let query = format!("query={query}");
+        let mut args = vec!["api", "graphql", "--hostname", &self.host, "-f", &query];
+        for field in fields {
+            args.extend(["-f", field]);
+        }
+        response(&run(&args)?).map_err(E::from)
+    }
 }
 
 fn string(v: &Value, key: &str) -> String { v[key].as_str().unwrap_or_default().into() }
@@ -270,15 +300,24 @@ pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) ->
     let _request = crate::github_process::scope();
     match action {
         Action::Edit { title, body, expected_title, expected_body } => {
+            target.require_exact_cli_host()?;
             let title = title.trim();
             if title.is_empty() || title.len() > 1024 || body.len() > 65536 { bail!("Enter a title and a description of at most 64 KB."); }
-            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "title,body"])?)?;
+            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "id,url,title,body"])?)?;
+            let id = target.verified_pr_id(&current)?;
             if current["title"].as_str() != Some(&expected_title) || current["body"].as_str() != Some(&expected_body) {
                 bail!("The title or description changed on GitHub. Copy your draft, cancel, then edit the latest version.");
             }
-            run(&["pr", "edit", &target.url, "--title", title, "--body", &body])?;
+            let edited = target.graphql(
+                "mutation($id: ID!, $title: String!, $body: String!) { updatePullRequest(input: {pullRequestId: $id, title: $title, body: $body}) { pullRequest { id } } }",
+                &[format!("id={id}"), format!("title={title}"), format!("body={body}")], &mut run,
+            )?;
+            if edited["data"]["updatePullRequest"]["pullRequest"]["id"].as_str() != Some(id) {
+                bail!("GitHub did not confirm the edit to this pull request.");
+            }
         }
         Action::Approve { viewer } => {
+            target.require_exact_cli_host()?;
             // Recheck the acting account immediately before writing: a local
             // gh token can also be an App token, or have changed since reading.
             let account: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, "user"])?)?;
@@ -493,7 +532,8 @@ mod tests {
         let mut calls = Vec::new();
         let mut run = |args: &[&str]| {
             calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(if args.starts_with(&["pr", "view"]) { json!({"title":"Before","body":"Original"}).to_string() }
+            Ok(if args.starts_with(&["pr", "view"]) { json!({"id":"PR_fixture","url":target.url,"title":"Before","body":"Original"}).to_string() }
+                else if args.iter().any(|arg| arg.contains("updatePullRequest(input:")) { json!({"data":{"updatePullRequest":{"pullRequest":{"id":"PR_fixture"}}}}).to_string() }
                 else if args.last() == Some(&"user") { json!({"type":"User","login":"ada"}).to_string() }
                 else { String::new() })
         };
@@ -501,8 +541,10 @@ mod tests {
         act_with(&target, Action::Approve { viewer: "ada".into() }, &mut run).unwrap();
         act_with(&target, Action::Request { login: "ada".into(), team: false }, &mut run).unwrap();
         act_with(&target, Action::Remove { login: "OWNER/core".into(), team: true }, &mut run).unwrap();
-        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "title,body"]);
-        assert_eq!(calls[1], ["pr", "edit", &target.url, "--title", "A title", "--body", "$(secret)\n`literal`"]);
+        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "id,url,title,body"]);
+        assert_eq!(calls[1][..4], ["api", "graphql", "--hostname", "git.example.com"]);
+        assert!(calls[1][5].contains("pullRequestId: $id"));
+        assert_eq!(calls[1][6..], ["-f", "id=PR_fixture", "-f", "title=A title", "-f", "body=$(secret)\n`literal`"]);
         assert_eq!(calls[2], ["api", "--hostname", "git.example.com", "user"]);
         assert_eq!(calls[3], ["pr", "review", &target.url, "--approve"]);
         assert_eq!(calls[4], ["api", "--hostname", "git.example.com", "--method", "POST", "repos/owner/repo/pulls/42/requested_reviewers", "-f", "reviewers[]=ada"]);
@@ -533,15 +575,31 @@ mod tests {
 
     #[test]
     fn editing_refuses_a_concurrent_change_without_writing() {
-        for current in [json!({"title":"Changed","body":"Original"}), json!({"title":"Before","body":"Changed"}), json!({})] {
+        let target = target();
+        for current in [
+            json!({"id":"PR_fixture","url":target.url,"title":"Changed","body":"Original"}),
+            json!({"id":"PR_fixture","url":target.url,"title":"Before","body":"Changed"}),
+            json!({"id":"PR_fixture","url":target.url}),
+        ] {
             let mut calls = 0;
-            let error = act_with(&target(), Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
                 calls += 1;
                 assert!(args.starts_with(&["pr", "view"]));
                 Ok(current.to_string())
             }).unwrap_err();
             assert!(error.to_string().contains("changed on GitHub"));
             assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn editing_refuses_hosts_github_cli_would_rewrite() {
+        for host in ["github.example.test:8443", "www.github.example.test"] {
+            let target = Target::new(&format!("https://{host}/acme/widgets/pull/799")).unwrap();
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |_| {
+                panic!("an inexact host must be rejected before running gh");
+            }).unwrap_err();
+            assert!(error.to_string().contains("hostname exactly"));
         }
     }
 

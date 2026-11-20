@@ -10,6 +10,7 @@ import { cn } from "@/lib/cn";
 import { PRIVACY_MESSAGE, useDataPrivacy } from "@/lib/dataPrivacy";
 import { bootMachineHost, createMachineCode, disconnectComputer, letComputerBack, machinesApi, revokeComputer, setAllowOperating, useMachineHost } from "@/lib/machines";
 import { machineConnection, refreshPairedMachines, useMachineConnections } from "@/lib/machineConnections";
+import { useMachineVersion } from "@/lib/machineUpdate";
 import { useSettingsFile } from "@/lib/settingsFile";
 import { openCloudWorkspace } from "@/lib/sessions";
 import { MachinesGuideLink as GuideLink, SettingsDescription } from "@/components/settings/SettingsDescription";
@@ -23,6 +24,7 @@ import { MachineIcon, MachineStateMark, machineTone, toneText } from "./connecti
 import { PlatformIcon, keyLabel, osLabel, routeLabel, seenText, shortDate, soft } from "./machineText";
 import { runningText, useRunningSessions } from "./useRunningSessions";
 import { MachinePage } from "./MachinePage";
+import { UpdateButton, useUpdateAction } from "./MachineUpdate";
 import { RemoveMachineDialog } from "./RemoveMachineDialog";
 import { takeMachinePageRequest, useMachinePageRequest } from "@/lib/machinePage";
 
@@ -347,7 +349,7 @@ const connectedState = (state: MachineConnectionState) => state.state === "direc
 /** The state beside a machine's name on its card (21.02). */
 function CardState({ state }: { state: MachineConnectionState }) {
   if (state.state === "needsUpdate") {
-    return <span className="inline-flex h-5 items-center rounded bg-warning/12 px-1.5 text-[11.5px] font-medium whitespace-nowrap text-warning">Needs update</span>;
+    return <span className="inline-flex h-5 items-center rounded bg-warning/12 px-1.5 text-[12px] font-medium whitespace-nowrap text-warning">Needs update</span>;
   }
   const label: Record<MachineConnectionState["state"], string> = {
     idle: "Not connected",
@@ -391,18 +393,27 @@ function cardLine(machine: PairedMachine, state: MachineConnectionState, running
   }
 }
 
-/** One machine this Mac operates. Choosing it opens the machine's page; the menu removes it. */
-function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMachine; onOpen: () => void; onRemove: () => void }) {
+/**
+ * One machine this Mac operates. Choosing it opens the machine's page; the menu removes it.
+ * A connected machine that does not grant a feature this Mac uses says Needs update, as one
+ * whose connection says so does, with Update when it can be updated from here and otherwise
+ * where to update it (PRO-354).
+ */
+export function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMachine; onOpen: () => void; onRemove: () => void }) {
   const store = useMachineConnections();
   const { state, connection } = machineConnection(store, machine.machineId);
   const running = useRunningSessions(connection, connectedState(state));
+  const version = useMachineVersion(machine.machineId);
+  const update = useUpdateAction(machine.machineId, version);
+  const needsUpdate = !!version.gap;
+  const shown = version.shownState;
   const label = keyLabel(machine.machineId);
   const dim = state.state === "offline" || state.state === "idle";
   return (
-    <li className="group relative" data-testid="paired-machine" data-machine={machine.machineId} data-state={state.state}>
+    <li className="group relative" data-testid="paired-machine" data-machine={machine.machineId} data-state={state.state} data-needs-update={needsUpdate || undefined}>
       <button
         type="button"
-        className={cn(card, "w-full pr-12 text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40")}
+        className={cn(card, "w-full text-left outline-none transition-colors hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40", needsUpdate && update.available ? "pr-36" : "pr-12")}
         aria-label={`Open ${machine.name}`}
         onClick={() => openCloudWorkspace(machineSectionKey(machine.machineId))}
       >
@@ -412,13 +423,15 @@ function MachineCard({ machine, onOpen, onRemove }: { machine: PairedMachine; on
         <span className="min-w-0 flex-1">
           <span className={cn("flex min-w-0 items-center gap-2 text-[13px] font-medium", dim && "text-muted-foreground")}>
             <span className="truncate">{machine.name}</span>
-            <CardState state={state} />
+            <CardState state={shown} />
           </span>
-          <span className="block truncate text-[12px] text-faint">{cardLine(machine, state, running)}</span>
+          <span className="block truncate text-[12px] text-faint" data-testid="paired-machine-line">{cardLine(machine, shown, running)}</span>
+          {needsUpdate && update.note && <span className="block truncate text-[12px] text-faint" data-testid="paired-machine-update-note">{update.note}</span>}
         </span>
         {label && <span className="shrink-0 font-mono text-[12px] text-faint">{label}</span>}
         <ChevronRight className="size-3.5 shrink-0 text-faint" aria-hidden />
       </button>
+      {needsUpdate && <UpdateButton action={update} variant="outline" className="absolute right-16 top-1/2 -translate-y-1/2" />}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button

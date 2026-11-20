@@ -2,6 +2,115 @@
 
 ## Unreleased
 
+## 0.2.36
+
+- Machines: operate TerminalX on another computer from this desktop (PRO-338,
+  #1266). A machine session runs its project's Setup and Run scripts on the
+  machine (PRO-403, #1198); shows its branch, diff size and the Git button
+  with Create PR, push and merge in its header (PRO-404, #1192, #1248); opens
+  Files and Changes on a worktree outside its project (PRO-405, #1191, #1252);
+  removes its worktree on the machine from the desktop, also after its PR
+  merges (PRO-406, #1190, #1249), and links PRs it had on the desktop when
+  you opt in, keeping withdrawn links withdrawn (#1272); attaches files other than images
+  (PRO-407, #1197); and shows cost and the agent account, with Continue in a
+  new tab and Fix check errors (PRO-408, #1195, #1250). Headless machines are
+  listed and paired on the phone (PRO-359, #1251). Machine script runs keep
+  their exit order and retention limit (#1222), Files keeps a session's
+  subfolder root (#1220), and workspace removal has more coverage (#1221,
+  #1234).
+- Checks is its own panel tab, with a header button to fix failing checks,
+  "Waiting for N checks" instead of Blocked, logs in a centre tab and errors
+  that say why (PRO-394, #1062).
+- First run and Home are three numbered steps: agent, project and permissions
+  (PRO-399, #1170).
+- Confirmations use the app's own dialog, with a Sign out dialog, a Discard
+  dialog that names the file, theme preview cards and macOS key order
+  (PRO-400, #1177); Quit confirmations too (PRO-455, #1193, #1253).
+- Session start and composer: the first message and its attachments show at
+  once after Create, with the designed session menu, composer controls and
+  model picker (PRO-397, #1229, #1261, #1205); attachment previews have
+  refined Markdown typography (#1205).
+- Phone: live phone access moved into a Device tab at the lower right, with
+  per-phone Disconnect, and stays visible where the dock is hidden (#1180,
+  #1184). The runtime serves phone relay connections when no window is open
+  (#1236, #1241), and a retired registration closes its forwarded connections
+  (#1243). A resume that fails during runtime setup no longer leaves the
+  workspace saying "This workspace has stopped." (#1188). The Cloud tab lists
+  workspaces of every registered provider (#1175) and no longer hides an
+  accessible workspace (PRO-456, #1186).
+- Pairing: on a desktop-launched runtime, a detached agent can no longer pass
+  for the window (PRO-369, #1194, #1265); pairing is refused when the window
+  cannot be identified (#1233); Keychain failures are reported as such, with
+  recovery steps (#1224); the window's key installation has integration tests
+  (#1225).
+- Guarded commits keep repository, worktree and checkout-path Git
+  configuration, including hooks and signing, without promoting repository
+  configuration into the protected command scope (PRO-458, #1269; PRO-457,
+  #1270; #1278).
+- Forks: a session can be forked when its source worktree folder is missing
+  and its repository is verified (#1232, #1245), and refused otherwise
+  (#1242); turn forks are isolated from Git sessions in the main checkout
+  (#1223) and clean up their new worktree and branch when saving fails
+  (#1199); the turn-fork notice describes copied quick-chat scratch files
+  accurately (#1200); footer wording and the fork-to-tab shortcut no longer
+  conflict (#1230). Workspace removal resolves a subdirectory session to its
+  checkout (#1235, #1244).
+- Cloud: the sidebar lists each agent tab of a cloud session under its row
+  (#1174); an untitled Claude tab is called Claude Code (#1179); unknown
+  agent IDs no longer resolve to inherited labels (#1189).
+- `terminalx sessions pin` and `unpin`, with skill support (#1231).
+  Orchestration asks to confirm the files Check and finish adds to a held
+  piece (#1217). The Overview rail and Working use live local activity
+  (#1219, #1204). An automation run no longer shows Completed while its
+  session is still working (#1196). Read aloud is scoped to its session, tab
+  and turn (#1201). Local VM bounds worker messages by absolute deadlines
+  (#1181).
+- Cloud sessions open in the same session view as local ones, with Retry,
+  Send again, Git and Share; options a cloud session cannot offer are shown
+  disabled with the reason (#1331). A message sent to a starting or busy
+  workspace shows as a Queued card with the workspace status under it
+  (#1309). A booting cloud runtime is waited for instead of cycling through
+  Reconnecting, and the header only moves forward (#1308).
+- Phone: sessions and conversations load faster: the Mac sends only what is
+  new since the last sync, the phone caches transcripts and loads ten earlier
+  turns per tap, and an optional setting lets the Mac send recent data ahead
+  of time (#1299). Phone sessions no longer drop within seconds when the
+  outbound queue fills (#1300). Resume failures say what failed with a next
+  step (#1307). Organizations can be deleted from the phone (#1305).
+  Revoking the last phone fences window takeover and clears unused runtime
+  account tokens (#1276, #1324).
+- Agents: choose each agent's executable, open its settings file, and manage
+  OpenCode providers and models behind an Experimental switch (PRO-157,
+  #1296, #1343). Copy MCP servers, slash commands and skills between Claude
+  Code and Codex from Settings › General (PRO-153, #1295).
+- The app reopens the last view on launch, lists recent projects, and opens
+  terminalx:// links through one router that asks before creating a session
+  (PRO-130, #1275, #1306).
+- Chat: Claude Code `!` shell commands render as a shell block (#1330); native
+  Codex tab replies no longer go missing behind a stuck Queued card (#1301);
+  the transcript and composer show a scrollbar (#1303); question and
+  permission cards stay solid in glass mode (#1304).
+- Organizations: a settings gear on each organization in the sidebar (#1298);
+  installing the GitHub App on an organization no longer ends in
+  "Connection canceled." and each failure says why (#1297); the name to type
+  when deleting one can be selected and copied (#1305).
+- Send scoped server, desktop and mobile diagnostics to support (#1277).
+  Headless logout recovers from an expired or revoked pending session with
+  `terminalx-serve logout --forget-ended` (#1310). Machine PR creation checks
+  the session checkout before recording owned work (#1273). The quit dialog
+  ignores forged events from other windows (#1302).
+- Releases are built from a release/<version> branch, so merges to main
+  cannot stop one (PRO-411, #1280). Phone evidence publication for frame
+  22.06-2 (#1279). Fixes for main after the merges of 2026-11-19 and the
+  team presence layout check (#1342, #1348).
+- Small layout fixes the WebKit layout checks found: a project's Actions page
+  has one title and no path, PR conversation headings and small labels are
+  at least 12px, the Overview table's default columns fit 1440px beside the
+  Views rail, a machine session's port forwards show as expired after they
+  close, and a narrow cloud header leaves out an empty port chip (#1271).
+- Code cleanups and CI fixes; CI keeps macOS runners for the jobs that need
+  them and runs the long suites in parts (#1207, #1213, #1214, #1271).
+
 ## 0.2.35
 
 - Machines is on for everyone: work on your other Macs and Linux servers from

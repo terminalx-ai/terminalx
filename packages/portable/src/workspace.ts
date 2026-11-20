@@ -72,7 +72,7 @@ export const WORKSPACE_DETAILS_RESOURCE_INTERVAL_MS = 10_000;
  * An older runtime grants none of them; check `hasCapability` before offering
  * the matching action.
  */
-export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1"] as const;
+export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1"] as const;
 /**
  * Offered only by a runtime that serves every project of its machine (docs/MACHINES.md).
  * `machine/3` (PRO-354): `machine.updateStatus`, `machine.update` and the
@@ -1063,7 +1063,7 @@ export class WorkspaceRpcClient {
     const view = new Proxy(this, {
       get: (target, property) => {
         if (property === "call") return <T>(method: string, params?: Record<string, unknown>) => target.call<T>(method, scoped(method, params));
-        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string) => target.mutate<T>(method, scoped(method, params), id);
+        if (property === "mutate") return <T>(method: string, params: Record<string, unknown>, id?: string, connection?: WorkspaceConnectionState) => target.mutate<T>(method, scoped(method, params), id, connection);
         if (property === "watchFiles") return (path: string, onChange: (paths: string[] | null) => void) => target.watchFiles(path, onChange, { projectId });
         if (property === "createPty")
           return (params: Parameters<WorkspaceRpcClient["createPty"]>[0]) => target.createPty(params.sessionId === undefined && params.projectId === undefined ? { ...params, projectId } : params);
@@ -1099,11 +1099,17 @@ export class WorkspaceRpcClient {
   /**
    * A mutation. The id is fixed before the first send, so a resend after a
    * dropped connection is the same request to the runtime.
+   * Bind to a connection when a live response established a required guard.
    */
-  async mutate<T = Record<string, unknown>>(method: string, params: Record<string, unknown>, clientRequestId = this.newRequestId()): Promise<T> {
+  async mutate<T = Record<string, unknown>>(method: string, params: Record<string, unknown>, clientRequestId = this.newRequestId(), connection?: WorkspaceConnectionState): Promise<T> {
     this.assertGranted(method);
     const request = { ...params, clientRequestId };
-    return this.resending(() => this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result)));
+    return this.resending(() => {
+      if (connection && this.state !== connection) {
+        throw new WorkspaceRpcError("outcome_unknown", "The workspace connection changed. Refresh the pull request and try again.", method);
+      }
+      return this.untilDropped(this.rpc.request<T>(method, request)).then((result) => unwrap(method, result));
+    });
   }
 
   /**

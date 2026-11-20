@@ -378,8 +378,14 @@ pub(super) fn session_checkout(
         let name = files.relative(&checkout);
         return Some((name.clone(), Some(name)));
     }
-    (path == root || (!exact && path.starts_with(root)))
-        .then(|| (String::new(), project_has_git().then(|| ".".into())))
+    if path != root && (exact || !path.starts_with(root)) {
+        return None;
+    }
+    // Containment is not checkout identity: a separately registered nested
+    // project (or any other repository) under the root is a different Git
+    // repository, so the root's checkout is never that session's to use.
+    let own_repository = path.ancestors().take_while(|dir| *dir != root).all(|dir| !dir.join(".git").exists());
+    Some((String::new(), (own_repository && project_has_git()).then(|| ".".into())))
 }
 
 /// A machine's projects as served, made when first named and kept while
