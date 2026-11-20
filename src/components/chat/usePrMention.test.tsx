@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { gh, type PullRequest } from "@/lib/api";
+import type { ComposerPrs } from "@/lib/cloudComposer";
 import { usePrMention } from "./usePrMention";
 vi.mock("@/lib/api", () => ({ gh: { search: vi.fn(), attach: vi.fn() }, errorMessage: String }));
 const pr = { number: 12, title: "Fix parser", author: "alice", state: "OPEN" } as PullRequest;
@@ -100,4 +101,27 @@ it("starts a new attachment after Escape and keeps its busy state when the cance
   expect(screen.getByText("Attaching pull request…")).toBeTruthy();
   await act(async () => finishNew("/context/pr-13.md"));
   expect((field as HTMLTextAreaElement).value).toBe("Review @/context/pr-13.md ");
+});
+
+it("#1329: a runtime's list attaches the picked pull request as a file and takes the token out", async () => {
+  const file = { name: "pr-12.md", data: "IyAjMTI=", mediaType: "text/markdown" };
+  const source: ComposerPrs = { key: "cloud:o:w|s-1", search: vi.fn(async () => [pr]), pick: vi.fn(async () => ({ file })) };
+  const attached: unknown[] = [];
+  function Remote() {
+    const [draft, setDraft] = useState("Review #12");
+    const [caret, setCaret] = useState(draft.length);
+    const field = useRef<HTMLTextAreaElement>(null);
+    const mention = usePrMention(source, draft, caret, setDraft, field, setCaret, { onAttachFile: (picked) => attached.push(picked) });
+    return <div>{mention.menu}<textarea aria-label="Prompt" ref={field} value={draft} onChange={(e) => { setDraft(e.target.value); setCaret(e.target.value.length); }} onKeyDown={mention.onKeyDown} /></div>;
+  }
+  render(<Remote />);
+  await screen.findByRole("option", { name: /#12 Fix parser/ });
+  expect(source.search).toHaveBeenCalledWith("12");
+  // This computer's gh is never asked about the workspace's pull requests.
+  expect(gh.search).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  await waitFor(() => expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Review "));
+  expect(source.pick).toHaveBeenCalledWith(12);
+  expect(attached).toEqual([file]);
+  expect(gh.attach).not.toHaveBeenCalled();
 });

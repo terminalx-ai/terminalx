@@ -763,6 +763,7 @@ the pull request that adds it.
 | `session.commands` | `composer/1` | Served | |
 | `session.files` | `composer/2` | Served | |
 | `session.attach` | `composer/3` | Served | Needs its store without the cloud agents layer (decision 3); `kind: "file"` with `composer/4` (PRO-407) |
+| `session.prs`, `session.prContext` | `composer/5` | Served | The composer's `#` list from the machine's `gh`, in the session's project (#1329) |
 | `pty.create` | `pty/1` | Needs a project | Unless it names a `sessionId` (`pty/2`), which places it in that session's folder |
 | `pty.list` | `pty/1` | Served | Every terminal; each names its session or project |
 | `pty.write` | `pty/1` | Served | |

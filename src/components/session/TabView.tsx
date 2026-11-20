@@ -996,6 +996,7 @@ export function TabView({
           // in order, its command list held up the terminal view of the tab that is (#449).
           commands={local || active ? backend.commands?.(tab) : null}
           files={backend.files?.()}
+          prs={local ? null : backend.prs?.()}
           remote={!local}
           attachFiles={backend.caps.files}
           busy={live}

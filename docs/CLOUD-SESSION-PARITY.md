@@ -43,8 +43,8 @@ shown disabled with the reason (`SessionBackend.unavailable`,
 | Send again / Retry | yes | **yes**: the message's text, through the mailbox; one with attachments is refused with why | — |
 | "Send now" on a queued message | yes | no; the runtime holds follow-ups (outbox) | #1328 |
 | Held follow-ups tray, hold/now preference | yes | no | #1328 |
-| Attachments | any file | images with `composer/3`; machine files with `composer/4` | #1329 |
-| PR and dropped-file mentions | yes | off | #1329 |
+| Attachments | any file | images with `composer/3`; any file with `composer/4`, uploaded to the runtime and stored in the session's attachments folder there | — |
+| PR and dropped-file mentions | yes | `#` list with `composer/5`: the workspace's pull requests from the runtime's `gh`, a picked one attached as its context file; a dropped file is uploaded and attached (its path here names nothing there), a dropped folder is left out with a word | — |
 | Terminal view toggle | always | with `agent-pty/1` and a terminal-first agent; otherwise the reason (`TERMINAL_VIEW_*`) | runtime update |
 | Interrupt | yes | with `session/3` while connected; otherwise Stop is the hard stop | runtime update |
 

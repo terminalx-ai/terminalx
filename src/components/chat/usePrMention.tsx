@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
-import { errorMessage, gh, type PullRequest } from "@/lib/api";
+import { errorMessage, gh, type FileInput, type PullRequest } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import type { ComposerPrs } from "@/lib/cloudComposer";
 import { tokenAtCaret } from "@/lib/pickers";
 import { PR_ROW_LABEL, prRowState } from "@/lib/prRow";
-import { usePrSearch } from "@/lib/usePrSearch";
+import { usePrSearchIn } from "@/lib/usePrSearch";
 import { CARET_POPOVER_SURFACE, CaretPopover } from "./CaretPopover";
 import { PrStateIcon } from "./PrStateIcon";
 
@@ -62,17 +63,34 @@ function PrMentionList({ query, items, highlighted, onHover, onPick, empty, note
   );
 }
 
-/** PR context is fetched before replacing the token; late answers never overwrite a newer draft. */
+/** This computer's `#` list for a checkout here: its `gh`, and a context file mentioned by its path. */
+function localPrs(cwd: string): ComposerPrs {
+  return {
+    key: cwd,
+    search: (query) => gh.search(cwd, query),
+    pick: async (number) => ({ mention: await gh.attach(cwd, number) }),
+  };
+}
+
+/**
+ * PR context is fetched before replacing the token; late answers never
+ * overwrite a newer draft. `where`: a directory on this computer, or a
+ * runtime's list (`cloudComposerPrs`, #1329), whose pick is a file the
+ * composer attaches (`onAttachFile`) while the token is removed.
+ */
 export function usePrMention(
-  cwd: string | null,
+  where: string | ComposerPrs | null,
   draft: string,
   caret: number,
   onChange: (text: string) => void,
   field: RefObject<HTMLTextAreaElement | null>,
   onCaret: (caret: number) => void,
   /** `floating`: under the caret, over whatever is below, as the new-session box shows it; else above the field. */
-  { floating = false }: { floating?: boolean } = {},
+  { floating = false, onAttachFile }: { floating?: boolean; onAttachFile?: (file: FileInput) => void } = {},
 ) {
+  const source = typeof where === "string" ? localPrs(where) : where;
+  // Names the repository asked, for every check below that a pick still belongs to it.
+  const cwd = source?.key ?? null;
   const token = tokenAtCaret(draft, caret);
   const key = cwd && token?.kind === "pr" ? JSON.stringify([cwd, token.start, token.query]) : null;
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -99,20 +117,24 @@ export function usePrMention(
   const current = useRef({ draft, cwd });
   current.current = { draft, cwd };
   const open = key !== null && key !== dismissed;
-  const result = usePrSearch(open ? cwd : null, token?.kind === "pr" ? token.query : null);
+  const result = usePrSearchIn(open ? cwd : null, source?.search ?? null, token?.kind === "pr" ? token.query : null);
   const items = result.items;
   const highlighted = selection.key === key ? Math.min(selection.row, Math.max(items.length - 1, 0)) : 0;
   const highlight = (row: number) => setSelection({ key: key ?? "", row });
   const pick = async (item: PullRequest) => {
-    if (!cwd || !token || !key || pending.current) return;
+    if (!source || !cwd || !token || !key || pending.current) return;
     const request = ++operation.current;
     pending.current = true;
     setAttaching(true);
     setFailure(null);
     try {
-      const path = await gh.attach(cwd, item.number);
+      const picked = await source.pick(item.number);
       if (operation.current !== request || current.current.draft !== draft || current.current.cwd !== cwd) return;
-      const replacement = `@${/\s/.test(path) ? JSON.stringify(path) : path} `;
+      if ("file" in picked && !onAttachFile) throw new Error("This composer cannot attach a pull request's context file.");
+      // A file read on the agent's runtime is attached as a chip; the `#` token goes.
+      if ("file" in picked) onAttachFile!(picked.file);
+      const path = "mention" in picked ? picked.mention : null;
+      const replacement = path === null ? "" : `@${/\s/.test(path) ? JSON.stringify(path) : path} `;
       const next = draft.slice(0, token.start) + replacement + draft.slice(caret);
       onChange(next);
       const pos = token.start + replacement.length;

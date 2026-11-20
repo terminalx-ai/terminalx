@@ -4,8 +4,8 @@ import { useSyncExternalStore } from "react";
 import { WorkspaceRpcError, type RuntimeIssuePipeline, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { applyEvent, dropTabLog, getTabLog, lastSeq, mergeTabEvents, setFeedContinuity } from "@/lib/agentEvents";
 import type { FileInput, ImageInput } from "@/lib/api";
-import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudImagesBlocked, uploadCloudImages, uploadMachineFiles, type MachineFileRef } from "@/lib/cloudComposer";
-import type { CloudImageRef } from "@/lib/cloudAgentApi";
+import { CLOUD_FILES_NEED_CONNECTION, CLOUD_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_CONNECTION, CloudImageError, cloudFilesBlocked, cloudImagesBlocked, uploadAgentFiles, uploadCloudImages } from "@/lib/cloudComposer";
+import type { CloudFileRef, CloudImageRef } from "@/lib/cloudAgentApi";
 import {
   cloudAgentApi,
   TERMINAL_OUTBOX_STATES,
@@ -224,7 +224,7 @@ export function getCloudAgents(scope: CloudAgentScope): CloudAgentsSnapshot {
  * written: they would land in the next account's cache.
  */
 export function resetCloudAgents() {
-  sentImages.clear();
+  sentAttachments.clear();
   for (const s of stores.values()) {
     if (s.poll) clearTimeout(s.poll);
     for (const timer of s.saves.values()) clearTimeout(timer);
@@ -1174,8 +1174,8 @@ function upsert(s: Store, entry: OutboxEntry) {
     }
   }
   s.outbox = at >= 0 ? s.outbox.map((existing, i) => (i === at ? entry : existing)) : [...s.outbox, entry];
-  // Settled for good: its images are not needed for a "Send again".
-  if (entry.state === "applied" || entry.state === "rejected" || entry.state === "cancelled") sentImages.delete(entry.clientCommandId);
+  // Settled for good: its attachments are not needed for a "Send again".
+  if (entry.state === "applied" || entry.state === "rejected" || entry.state === "cancelled") sentAttachments.delete(entry.clientCommandId);
 }
 
 /** A decision for this request that is, or may be, on its way: never enqueue another. */
@@ -1215,12 +1215,17 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
   const s = store(scope);
   const tab = s.tabs.get(tabId);
   const files = options.files ?? [];
-  // Files other than images go to a machine only (PRO-407), uploaded before the images so a refused file costs no image upload.
-  if (files.length && !isDevScope(scope)) throw new CloudImageError(CLOUD_FILES_REFUSED);
-  let attachedFiles: MachineFileRef[] = [];
-  if (files.length) {
+  // Files other than images go to the runtime (a machine's, PRO-407; a cloud workspace's, #1329), uploaded
+  // before the images so a refused file costs no image upload. The message then names them, as it names images.
+  let attachedFiles: CloudFileRef[] = [];
+  if (files.length && isDevScope(scope)) {
     const target = liveTarget(scope, tabId, client);
-    attachedFiles = await uploadMachineFiles(target.client, { sessionId: target.sessionId, tabId }, files, images.length);
+    attachedFiles = await uploadAgentFiles(target.client, { sessionId: target.sessionId, tabId }, files, images.length);
+  } else if (files.length) {
+    const blocked = cloudFilesBlocked(client, false);
+    if (blocked) throw new CloudImageError(blocked);
+    if (!tab?.info.sessionId) throw new CloudImageError(CLOUD_FILES_NEED_CONNECTION);
+    attachedFiles = await uploadAgentFiles(client!, { sessionId: tab.info.sessionId, tabId }, files, images.length, CLOUD_FILES_OLD_RUNTIME);
   }
   // Images go to the runtime first (PRO-22); the message then names them. A
   // mailbox command is far too small to carry one.
@@ -1231,13 +1236,13 @@ export async function sendToCloudAgent(scope: CloudAgentScope, tabId: string, te
     if (!tab?.info.sessionId) throw new CloudImageError(CLOUD_IMAGES_NEED_CONNECTION);
     attached = await uploadCloudImages(client!, { sessionId: tab.info.sessionId, tabId }, images);
   }
-  const withImages = attached.length ? { images: attached } : {};
+  const withAttachments = { ...(attached.length ? { images: attached } : {}), ...(attachedFiles.length ? { files: attachedFiles } : {}) };
   if (isDevScope(scope)) return sendOverLiveRpc(scope, tabId, text, client, attached, attachedFiles);
   const sent = tab?.pendingConfig ?? null;
   // With settings on board, an earlier notice is replaced by this message's own receipt.
   if (sent) clearSettingsIgnored(s, tabId);
-  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withImages }, client, { wake: options.wake });
-  if (images.length) sentImages.set(entry.clientCommandId, images);
+  const entry = await enqueue(scope, tabId, "send", { text, ...(sent ?? {}), ...withAttachments }, client, { wake: options.wake });
+  if (images.length || files.length) sentAttachments.set(entry.clientCommandId, { images, files });
   // Only what went out is settled; a change made meanwhile waits for the next.
   const current = s.tabs.get(tabId);
   if (current && sent && current.pendingConfig === sent) {
@@ -1287,7 +1292,7 @@ function appliedEntry(tabId: string, kind: OutboxEntry["kind"], text?: string, r
  * prompt during a turn waits in the tab's follow-up queue there. Settings
  * chosen while away ride with it, as they ride with a mailbox send.
  */
-async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = [], files: MachineFileRef[] = []): Promise<OutboxEntry> {
+async function sendOverLiveRpc(scope: CloudAgentScope, tabId: string, text: string, client: WorkspaceRpcClient | null, images: CloudImageRef[] = [], files: CloudFileRef[] = []): Promise<OutboxEntry> {
   const s = store(scope);
   const target = liveTarget(scope, tabId, client);
   const durable = takesLiveCommands(scope, target.client);
@@ -1411,14 +1416,14 @@ export function isDeciding(scope: CloudAgentScope, requestId: string): boolean {
 export function sendAgain(scope: CloudAgentScope, entry: OutboxEntry, client: WorkspaceRpcClient | null) {
   if (entry.kind === "stop") return stopCloudAgent(scope, entry.tabId, client);
   if (entry.kind === "permission-decision") throw new Error("A decision is never sent twice");
-  // A message with images goes again with its images (uploaded again: the runtime may have
+  // A message with images or files goes again with them (uploaded again: the runtime may have
   // dropped them), or not at all. It is never sent as its text alone, or as nothing.
-  if (entry.kind === "send" && (entry.images ?? 0) > 0) {
-    const images = sentImages.get(entry.clientCommandId);
-    if (!images) return Promise.reject(new CloudImageError(SEND_AGAIN_IMAGES_GONE));
-    return sendToCloudAgent(scope, entry.tabId, entry.text ?? "", client, images).then((again) => {
+  if (entry.kind === "send" && ((entry.images ?? 0) > 0 || (entry.files ?? 0) > 0)) {
+    const held = sentAttachments.get(entry.clientCommandId);
+    if (!held) return Promise.reject(new CloudImageError(SEND_AGAIN_IMAGES_GONE));
+    return sendToCloudAgent(scope, entry.tabId, entry.text ?? "", client, held.images, { files: held.files }).then((again) => {
       // The new command holds them now.
-      sentImages.delete(entry.clientCommandId);
+      sentAttachments.delete(entry.clientCommandId);
       return again;
     });
   }
@@ -1426,18 +1431,18 @@ export function sendAgain(scope: CloudAgentScope, entry: OutboxEntry, client: Wo
 }
 
 /**
- * Said when "Send again" is pressed on a message whose images this app no
- * longer holds (it was restarted since): the outbox keeps their count, not
- * the images.
+ * Said when "Send again" is pressed on a message whose images or files this
+ * app no longer holds (it was restarted since): the outbox keeps their
+ * count, not the attachments.
  */
-export const SEND_AGAIN_IMAGES_GONE = "This message had images, which are no longer held here. Attach them again and send it from the composer.";
+export const SEND_AGAIN_IMAGES_GONE = "This message had attachments, which are no longer held here. Attach them again and send it from the composer.";
 
 /**
- * The images of messages whose fate is not known yet, by command, for "Send
- * again". In memory only, and let go as soon as the message is applied,
- * rejected or cancelled.
+ * The images and files of messages whose fate is not known yet, by command,
+ * for "Send again". In memory only, and let go as soon as the message is
+ * applied, rejected or cancelled.
  */
-const sentImages = new Map<string, ImageInput[]>();
+const sentAttachments = new Map<string, { images: ImageInput[]; files: FileInput[] }>();
 
 export async function cancelCloudAgentCommand(scope: CloudAgentScope, clientCommandId: string) {
   const s = store(scope);
