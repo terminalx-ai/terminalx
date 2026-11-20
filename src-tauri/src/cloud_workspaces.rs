@@ -1572,6 +1572,9 @@ pub struct PreflightCheck {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectedRepository {
+    /// Selected organization repository row ID, when provided by the server.
+    #[serde(default)]
+    pub id: Option<String>,
     pub full_name: String,
     #[serde(default)]
     pub clone_url: Option<String>,
@@ -7320,6 +7323,28 @@ mod tests {
         assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/github-app "));
         assert_eq!(selected.repositories[0].full_name, "acme/app");
         assert_eq!(selected.repositories[0].default_branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn phase2_automation_repository_identity_http_and_serde_compatibility() {
+        let body = r#"{"configured":true,"repositories":[{"id":"row-r1","githubRepositoryId":7,"fullName":"acme/app","cloneUrl":"https://github.com/acme/app.git","state":"accessible"},{"fullName":"acme/old","state":"accessible"},{"id":null,"fullName":"acme/null","state":"missing"}]}"#;
+        let (base, _, request) = serve_once(response("200 OK", body, ""), Duration::ZERO);
+        let (_, service) = test_service(&base);
+        let selected = service.selected_repositories(None).unwrap();
+        let captured = request.join().unwrap();
+        assert!(captured.text.starts_with("GET /v1/desktop/orgs/org-1/github-app "));
+        assert_eq!(selected.repositories[0].id.as_deref(), Some("row-r1"));
+        assert_eq!(selected.repositories[1].id, None);
+        assert_eq!(selected.repositories[2].id, None);
+        let projected = serde_json::to_value(&selected).unwrap();
+        assert_eq!(projected["repositories"][0]["id"], "row-r1");
+        assert!(projected["repositories"][1]["id"].is_null());
+        assert!(projected["repositories"][2]["id"].is_null());
+
+        for invalid_id in [serde_json::json!(7), serde_json::json!(true), serde_json::json!({})] {
+            let repository = serde_json::json!({"id": invalid_id, "fullName": "acme/app", "state": "accessible"});
+            assert!(serde_json::from_value::<SelectedRepository>(repository).is_err());
+        }
     }
 
     #[test]
