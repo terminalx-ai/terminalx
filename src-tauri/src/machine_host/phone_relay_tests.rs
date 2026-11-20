@@ -1217,6 +1217,54 @@ async fn authenticated_direct_phone_can_provision_the_runtime_relay() {
         .is_some_and(crate::remote::host::valid_opaque_id));
 }
 
+/// The phone's next close frame: its code, or `None` when the socket ended without one.
+async fn close_code(phone: &mut Phone) -> Option<u16> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), phone.socket.next()).await.expect("the Mac closed the phone") {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            Some(Ok(Message::Close(frame))) => return frame.map(|frame| u16::from(frame.code)),
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    }
+}
+
+/// #1315: the runtime closes a phone whose credential it refuses with 4401,
+/// at authentication and when the phone is revoked while connected, so the
+/// phone tells a revocation from a dropped connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_phones_are_closed_as_refused_when_their_credential_is_refused_or_revoked() {
+    let rig = Rig::new().await;
+    rig.pair("phone", "token", false, true);
+    let rpc = match &*rig.host.rpc.lock().unwrap() {
+        Rpc::Ready(rpc) => rpc.clone(),
+        _ => unreachable!(),
+    };
+    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
+    rig.host.state.lock().unwrap().listening = Some(listener);
+    let connect = |token: &'static str| {
+        let key = rig.key.public_key_b64();
+        async move {
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
+            let handshake = E2eeClientHandshake::with_secret([7; 32], &key, "direct", None).unwrap();
+            Phone::authenticate(socket, handshake, token).await
+        }
+    };
+
+    let mut unknown = connect("not-a-paired-token").await;
+    assert_eq!(close_code(&mut unknown).await, Some(crate::phone::CREDENTIAL_REFUSED), "an unknown credential");
+
+    let mut phone = connect("token").await;
+    phone.authenticated().await;
+    let phones = rig.phones.clone();
+    assert!(tokio::task::spawn_blocking(move || phones.revoke("phone")).await.unwrap().unwrap());
+    assert_eq!(close_code(&mut phone).await, Some(crate::phone::CREDENTIAL_REFUSED), "revoked while connected");
+
+    let mut again = connect("token").await;
+    assert_eq!(close_code(&mut again).await, Some(crate::phone::CREDENTIAL_REFUSED), "the revoked credential afterwards");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn signed_out_and_unreadable_accounts_do_not_admit_automatic_relay_credentials() {
     let rig = Rig::new().await;

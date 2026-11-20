@@ -255,7 +255,8 @@ describe("a refused credential", () => {
     expect(before).toBeInstanceOf(RelayOuterError);
     expect(before).not.toBeInstanceOf(CredentialRefusedError);
 
-    // The Mac answers the handshake with the pinned key, reads e2ee_auth, and refuses the device token.
+    // The Mac answers the handshake with the pinned key, reads e2ee_auth, and refuses the device token
+    // with 4401, as `phone::close_refused` does (src-tauri pairing/mod.rs and machine_host/phones.rs).
     const mac = new EncryptedPeer({ gate: true });
     const connecting = direct(mac, mac.key.publicKey).connect();
     mac.onopen?.(); await flush();

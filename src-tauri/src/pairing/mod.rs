@@ -1206,13 +1206,11 @@ impl PairingManager {
             self.share_socket(socket, session, session_id, link_id).await?;
             return Ok(crate::phone::Ended::by(crate::phone::EndReason::ShareEnded));
         }
-        let device = self
-            .registry
-            .find_by_token(&auth.device_token, generation)?
-            .ok_or_else(|| {
-                anyhow!(diagnostics::Category::Authentication)
-                    .context("paired-device credential was refused")
-            })?;
+        let Some(device) = self.registry.find_by_token(&auth.device_token, generation)? else {
+            // Closed as refused, not dropped: the phone stops using this pairing (#1315).
+            crate::phone::close_refused(&mut socket).await;
+            return Err(anyhow!(diagnostics::Category::Authentication).context("paired-device credential was refused"));
+        };
         // Session invitations are process-local and must never subscribe to
         // the mobile runtime's host-wide broadcasts, even via a disk entry.
         if device.scope == DeviceScope::Session {
@@ -1474,11 +1472,12 @@ impl PairingManager {
         Ok(())
     }
 
+    /// Close a revoked phone's connections, as refused (#1315).
     fn cancel_connections(&self, device_id: &str) {
         let removed = self.connections.lock().unwrap().remove(device_id);
         if let Some(connections) = removed {
             for connection in connections {
-                let _ = connection.signal.send(ConnectionSignal::Cancel);
+                let _ = connection.signal.send(ConnectionSignal::Revoke);
             }
             self.refresh_keep_awake();
         }

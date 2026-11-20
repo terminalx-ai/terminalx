@@ -44,7 +44,9 @@ export const CREDENTIAL_REFUSED = 4401;
 /**
  * A 4401 from a party entitled to refuse this pairing's credential (#1315):
  * the relay refusing a resume credential, or the pinned Mac, once it has
- * proved its key in the handshake, refusing the device token. A 4401 from
+ * proved its key in the handshake, refusing the device token (the Mac closes
+ * a refused or revoked phone with 4401: `phone::close_refused` in src-tauri,
+ * which the relay passes on to a phone on a relay connection). A 4401 from
  * an unverified direct peer (a stale LAN address now answered by another
  * computer) or for a pairing invite stays a plain `RelayOuterError`.
  */

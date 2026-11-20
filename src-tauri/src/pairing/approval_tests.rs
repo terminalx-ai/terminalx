@@ -359,6 +359,22 @@ async fn decline_leaves_no_device_token_or_code() {
     assert!(fixture.manager.decline_pairing(&request.request_id).is_err());
 }
 
+/// A credential the Mac does not hold is refused with 4401 on both legs, not
+/// dropped: the phone tells it from a network failure and stops using that
+/// pairing's diagnostics (#1315).
+#[tokio::test]
+async fn an_unknown_credential_is_closed_as_refused_on_both_legs() {
+    let fixture = fixture(APPROVAL_TTL_MS);
+    for relay in [false, true] {
+        let mut phone = connect(&fixture.manager, &fixture.host, PHONE, relay, "revoked-or-unknown-token", None).await;
+        let next = tokio::time::timeout(Duration::from_secs(5), phone.socket.next()).await.expect("the Mac answered the phone");
+        let Some(Ok(Message::Close(Some(frame)))) = next else { panic!("relay={relay}: expected a close frame, got {next:?}") };
+        assert_eq!(u16::from(frame.code), crate::phone::CREDENTIAL_REFUSED, "relay={relay}");
+        let error = phone.server.await.unwrap().unwrap_err();
+        assert!(format!("{error:#}").contains("credential was refused"), "{error:#}");
+    }
+}
+
 #[tokio::test]
 async fn an_approval_nobody_answers_times_out_and_leaves_no_device_token_or_code() {
     let fixture = fixture(300);
@@ -516,7 +532,8 @@ fn keep_awake_is_persisted_and_held_only_while_on_and_connected() {
     let (_revoked, mut signal) = manager.track_connection("phone", PairingTransport::Direct);
     assert!(held_assertion(&manager).is_some());
     manager.cancel_connections("phone");
-    assert_eq!(signal.try_recv(), Ok(ConnectionSignal::Cancel));
+    // As refused, so the phone knows its pairing is gone (#1315).
+    assert_eq!(signal.try_recv(), Ok(ConnectionSignal::Revoke));
     assert!(held_assertion(&manager).is_none());
 }
 
