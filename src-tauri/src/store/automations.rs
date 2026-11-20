@@ -223,6 +223,28 @@ pub fn replace_run(
     Ok(run)
 }
 
+/// Take one run out of the history: a pending run whose first check's result
+/// was folded into an earlier record (PRO-484).
+pub fn remove_run(automation_id: &str, run_id: &str) -> Result<()> {
+    let _guard = RUN_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let path = runs_path(automation_id)?;
+    let mut runs = resolve_runs(&path)?;
+    runs.retain(|run| run.run_id != run_id);
+    runs.sort_by_key(|run| run.run_number);
+    let mut lines = runs
+        .into_iter()
+        .map(|run| serde_json::to_string(&run))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join("\n");
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
+    super::write_atomic(&path, lines.as_bytes())?;
+    Ok(())
+}
+
 fn resolve_runs(path: &std::path::Path) -> Result<Vec<AutomationRun>> {
     let records: Vec<AutomationRun> = super::read_lines(path)?;
     let mut latest = BTreeMap::new();

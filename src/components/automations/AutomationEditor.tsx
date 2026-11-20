@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
 import { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerReady } from "@/components/automations/AutomationSourceFields";
+import { PrecheckSection, precheckReady } from "@/components/automations/PrecheckSection";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
 import { createAutomation, updateAutomation } from "@/lib/automations";
 import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, bypassEffect, useModels } from "@/lib/models";
@@ -296,6 +297,7 @@ export function AutomationEditor({
     && selection.harness?.id === input.harness
     && !selection.unavailableModel
     && (input.workspace === "newWorktree" || !!input.sessionId)
+    && precheckReady(input.precheck)
     && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim()))
     && (!input.eventTrigger || eventTriggerReady(input.eventTrigger));
 
@@ -488,6 +490,8 @@ export function AutomationEditor({
               </select>
             </label>
           )}
+
+          <PrecheckSection input={input} onChange={(precheck) => patch({ precheck })} />
 
           {input.reuseSession ? (
             <div className="col-span-2 rounded-lg bg-well px-3 py-2.5 text-xs text-faint">Every run goes on in the one session, so there is nothing to archive.</div>

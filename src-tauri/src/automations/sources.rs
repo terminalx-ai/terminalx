@@ -886,6 +886,22 @@ fn context(automation_id: &str, cap: usize) -> Result<PlanContext> {
     Ok(context)
 }
 
+/// Whether a tick would do anything for an event automation now: a read
+/// that is due, or a record to reset after it was switched off.
+pub(super) fn due(automation: &Automation, now: DateTime<Utc>) -> bool {
+    let Some(trigger) = automation.event_trigger.as_ref() else { return false };
+    if matches!(trigger.source, AutomationEventSource::Unsupported(_)) {
+        return false;
+    }
+    let Ok(stored) = load_seen(&automation.id) else { return true };
+    let state = record_for(stored, &trigger.source);
+    if !automation.enabled {
+        return state.initialized || state.retry_after.is_some() || state.last_poll_error.is_some();
+    }
+    let key_changed = matches!(trigger.source, AutomationEventSource::LinearIssue(_)) && state.credential != linear_key().ok().map(|key| credential_print(&key));
+    key_changed || poll_due(&state, trigger.poll_interval_minutes, now)
+}
+
 pub(super) fn evaluate(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
     poll(app, automation, now, read, |wake| insert_run(automation, wake), |wake, run| start(app, automation, wake, run))
 }

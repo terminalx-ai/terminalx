@@ -43,7 +43,7 @@ import type {
 } from "@/types/session";
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
-import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, AutomationEventSource, SourceMatch } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, AutomationEventSource, PrecheckTrial, PrecheckTryInput, SourceMatch } from "@/types/automations";
 import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
@@ -2137,6 +2137,7 @@ export const automationsApi = {
   update: (id: string, input: AutomationInput) => invoke<Automation>("automation_update", { id, input }),
   remove: (id: string) => invoke<void>("automation_delete", { id }),
   runNow: (id: string) => invoke<AutomationRun>("automation_run_now", { id }),
+  tryPrecheck: (input: PrecheckTryInput) => invoke<PrecheckTrial>("automation_precheck_try", { input }),
 };
 
 /** Bots (PRO-466). Every one of these is refused while Settings → Experimental → Bots is off. */

@@ -47,13 +47,15 @@ const STATUS_LABEL: Record<AutomationRunStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   timedOut: "Timed out",
-  skippedPrecheck: "Precheck skipped",
+  skippedPrecheck: "Nothing new",
   skippedMissed: "Missed",
   skippedUnavailable: "Unavailable",
 };
 
 function statusColor(status: AutomationRunStatus | null | undefined): string {
   if (status === "completed") return "bg-add";
+  // A first check that found nothing to do is a quiet success, not a warning.
+  if (status === "skippedPrecheck") return "bg-faint";
   if (status === "pending" || status === "running") return "bg-info animate-pulse-soft";
   if (status === "failed" || status === "timedOut") return "bg-destructive";
   if (status?.startsWith("skipped") || status === "cancelled") return "bg-warning";
@@ -436,7 +438,7 @@ function RunTableRows({ run, waiting, expanded, duration, sessionTitle, sessionA
           {run.worktreeName ? <span className="flex min-w-0 items-center gap-1.5"><GitBranch className="size-3 shrink-0 text-faint" /><span className="truncate font-mono text-[11px]">{run.worktreeName}</span></span> : run.sessionId ? <span className="block truncate text-muted-foreground">{sessionTitle ?? "Session"}</span> : <span className="text-faint">—</span>}
         </td>
         <td className="automation-column-result px-3 py-2.5">
-          {run.reported?.prUrl ? <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
+          {run.reported?.prUrl ? <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.status === "skippedPrecheck" && run.precheck ? <button type="button" aria-expanded={expanded} onClick={onToggle} className="text-muted-foreground hover:text-foreground hover:underline">Check output</button> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
           {run.changedFiles != null && <div className="text-[10px] text-faint">{run.changedFiles} file{run.changedFiles === 1 ? "" : "s"} changed</div>}
         </td>
       </tr>
@@ -454,9 +456,25 @@ function RunDetails({ run }: { run: AutomationRun }) {
         {run.reported?.prUrl && <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="text-[11px] text-info hover:underline">Open pull request</button>}
         {(run.reported?.labels?.length ?? 0) > 0 && <span className="text-[11px] text-faint">Labels: {run.reported!.labels!.join(", ")}</span>}
       </div>
-      {run.finalMessage ? <div><div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-faint">Output snapshot</div><Markdown text={run.finalMessage} /></div> : run.error ? <div className="text-xs leading-relaxed text-destructive">{run.error}</div> : <div className="text-xs text-muted-foreground">{run.status === "running" || run.status === "pending" ? "The agent is still working." : "This run did not produce an assistant message."}</div>}
-      {run.precheck && <div className="mt-3 border-t border-hairline pt-3"><div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-faint">Precheck output</div>{run.precheck.stdoutTail && <pre className="overflow-x-auto whitespace-pre-wrap text-[11px] text-foreground">{run.precheck.stdoutTail}</pre>}{run.precheck.stderrTail && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-destructive">{run.precheck.stderrTail}</pre>}</div>}
+      {run.status === "skippedPrecheck" ? <div className="text-xs text-muted-foreground">Nothing new: the first check printed nothing, so no session started and no model was called.</div> : run.finalMessage ? <div><div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-faint">Output snapshot</div><Markdown text={run.finalMessage} /></div> : run.error ? <div className="text-xs leading-relaxed text-destructive">{run.error}</div> : <div className="text-xs text-muted-foreground">{run.status === "running" || run.status === "pending" ? "The agent is still working." : "This run did not produce an assistant message."}</div>}
+      {run.precheck && <PrecheckDetails run={run} />}
       {run.finalMessage && run.error && <div className="mt-2 text-[11px] text-destructive">{run.error}</div>}
+    </div>
+  );
+}
+
+function PrecheckDetails({ run }: { run: AutomationRun }) {
+  const precheck = run.precheck!;
+  const facts = [
+    precheck.exitCode != null ? `exit ${precheck.exitCode}` : precheck.timedOut ? "timed out" : null,
+    formatDuration(precheck.durationMs),
+    precheck.truncated ? "output cut short" : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className="mt-3 border-t border-hairline pt-3">
+      <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-faint">First check · {facts}</div>
+      {precheck.stdoutTail.trim() ? <pre className="overflow-x-auto whitespace-pre-wrap text-[11px] text-foreground">{precheck.stdoutTail}</pre> : <div className="text-[11px] text-faint">It printed nothing.</div>}
+      {precheck.stderrTail && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{precheck.stderrTail}</pre>}
     </div>
   );
 }

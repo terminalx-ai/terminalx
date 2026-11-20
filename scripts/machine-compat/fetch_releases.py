@@ -132,7 +132,8 @@ def source_at(repo: str, tag: str, path: str) -> str | None:
 
 
 def string_array(source: str, name: str) -> list[str]:
-    match = re.search(rf"pub const {name}: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+    # An array (`[&str; N] = [`) until 0.2.36, a slice (`&[&str] = &[`) since 0.2.37.
+    match = re.search(rf"pub const {name}: (?:\[&str; \d+\] = |&\[&str\] = &)\[(.*?)\];", source, re.S)
     if not match:
         fail(f"no {name} array")
     return re.findall(r'"([^"]+)"', match.group(1))

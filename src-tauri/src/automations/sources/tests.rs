@@ -293,6 +293,20 @@ fn switching_off_and_on_or_changing_the_source_starts_from_now() {
 }
 
 #[test]
+fn a_first_check_on_its_own_thread_still_knows_when_a_source_is_due() {
+    let _home = crate::store::temp_home();
+    let mut automation = stored(linear_source());
+    assert!(due(&automation, at(0)), "never read");
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    assert!(!due(&automation, at(2)), "inside the interval");
+    assert!(due(&automation, at(5)));
+    automation.enabled = false;
+    assert!(due(&automation, at(2)), "switched off: its record is reset");
+    poll(&host(), &automation, at(2), |_, _, _, _| unreachable!(), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    assert!(!due(&automation, at(3)));
+}
+
+#[test]
 fn switching_off_clears_a_back_off_so_switching_on_reads_at_once() {
     let _home = crate::store::temp_home();
     let mut automation = stored(linear_source());
