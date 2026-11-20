@@ -1,9 +1,16 @@
 // PRO-397: drive the real Create dialog and hold the native send at the bridge.
+//
+// Runs against the built app (`pnpm build`), like the other layout checks. It
+// used to start a Vite dev server so the page could import
+// /src/lib/agentEvents.ts and call mergeTabEvents itself; the first load of
+// the whole unbundled app then had to finish inside page.goto's 30 s, which a
+// busy runner did not always manage. Saved history now reaches the page the
+// way it does in the app: the bridge answers load_tab_events and the runtime
+// says it reattached, so the app reads the tab's history again and merges it.
 import assert from "node:assert/strict";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createServer, searchForWorkspaceRoot } from "vite";
-import { launch, open } from "./harness.mjs";
+import { launch, open, serve } from "./harness.mjs";
 
 function fixture() {
   const at = "2026-11-16T00:00:00Z";
@@ -29,12 +36,15 @@ function fixture() {
       started = true;
       window.__createRequest = req;
       setTimeout(() => stub.emit("workspace_setup_changed", setup), 0);
-      return {
+      const session = {
         id: "first", title: req.title, projectPath, cwd, worktreeName: "first", branch: "raccoon/first",
         worktreeBase: { commit: "abc", from: "main", fetched: false, warning: null, fileCopy: { copiedCount: 1, firstCopied: ".env.local", copiedBytes: 10, skippedCount: 0, skipped: [], warnings: [], error: null } },
         created: at, modified: at, archived: false, pinned: false, worktreeRemoved: false, activeTab: "tab",
         tabs: [{ id: "tab", ...req.tab, status: "idle", created: at, modified: at }],
       };
+      // The runtime lists what it created: the app reads the list again when the runtime reattaches.
+      stub.answers.list_sessions = [...stub.answers.list_sessions, session];
+      return session;
     },
     store_attachments: (args) => { window.__storedAttachments = args; return files; },
     send_message: (args) => new Promise((resolve, reject) => {
@@ -45,8 +55,13 @@ function fixture() {
       window.__finishSetup = () => stub.emit("workspace_setup_changed", { ...setup, status: "succeeded", exitCode: 0 });
       window.__publishFirstPrompt = () => stub.emit("agent_event", event);
       window.__publishOtherPrompt = () => stub.emit("agent_event", otherMessage("live", 2, "Another live prompt"));
-      window.__otherHistory = [otherMessage("history", 3, "Another prompt from history")];
-      window.__firstHistory = [event];
+      // A reattached runtime makes the app read every open tab's saved history again.
+      const readHistory = (events) => () => {
+        stub.answers.load_tab_events = events;
+        stub.emit("local_runtime_reattached", null);
+      };
+      window.__readOtherHistory = readHistory([otherMessage("history", 3, "Another prompt from history")]);
+      window.__readFirstHistory = readHistory([event]);
       window.__completeFirstSend = () => resolve({ queued: false, events: [event] });
       window.__failFirstSend = () => reject(new Error("Agent could not start"));
     }),
@@ -55,15 +70,12 @@ function fixture() {
 
 const shots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (shots) await mkdir(shots, { recursive: true });
-const server = await createServer({
-  server: { host: "127.0.0.1", port: 0, strictPort: false, fs: { allow: [searchForWorkspaceRoot(process.cwd()), await realpath("node_modules")] } },
-});
+const server = await serve();
 let browser;
 try {
-  await server.listen();
   browser = await launch();
   for (const [colorScheme, outcome] of [["dark", "reply"], ["light", "broadcast"], ["light", "recorded-failure"], ["light", "failure"]]) {
-    const page = await open(browser, server.resolvedUrls.local[0], { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { colorScheme, extra: `(${fixture.toString()})();` });
+    const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { colorScheme, extra: `(${fixture.toString()})();` });
     page.setDefaultTimeout(12_000);
     page.on("pageerror", (error) => console.error(error));
     await page.getByTestId("sidebar-rail").waitFor();
@@ -109,20 +121,14 @@ try {
       await first.getByText("Check the attached notes.").waitFor();
       await page.evaluate(() => window.__failFirstSend());
       await first.getByRole("alert").filter({ hasText: "Agent could not start" }).waitFor();
-      await page.evaluate(async () => {
-        const { mergeTabEvents } = await import("/src/lib/agentEvents.ts");
-        mergeTabEvents("first", "tab", window.__otherHistory);
-      });
+      await page.evaluate(() => window.__readOtherHistory());
       await chat.getByTestId("reader-message").getByText("Another prompt from history").waitFor();
       await first.getByRole("alert").filter({ hasText: "Agent could not start" }).waitFor();
       await first.getByText("Check the attached notes.").waitFor();
       await first.getByText("notes.md", { exact: true }).waitFor();
       await first.getByRole("button", { name: "View pixel.png" }).waitFor();
       assert.equal(await first.getByText("Sending…").count(), 0);
-      await page.evaluate(async () => {
-        const { mergeTabEvents } = await import("/src/lib/agentEvents.ts");
-        mergeTabEvents("first", "tab", window.__firstHistory);
-      });
+      await page.evaluate(() => window.__readFirstHistory());
       await first.waitFor({ state: "detached" });
       assert.equal(await chat.getByText("Check the attached notes.").count(), 1);
     } else {
@@ -150,5 +156,5 @@ try {
   }
 } finally {
   await browser?.close();
-  await server.close();
+  server.close();
 }
