@@ -4,13 +4,24 @@ import {
   githubAppErrorCode,
   githubAppErrorMessage,
   organizationGithubApp,
+  unsettledOutcome,
   type AttemptOutcome,
   type ConnectAttempt,
 } from "@/lib/organizationGithubApp";
 
 export const CONNECT_POLL_INTERVAL_MS = 2000;
-/** How long past `expiresAt` the desktop waits for the server to settle the attempt before ending it itself. */
-export const CONNECT_EXPIRY_GRACE_MS = 30_000;
+/** The account service's attempt lifetime (the expiry message promises 15 minutes). */
+export const CONNECT_ATTEMPT_LIFETIME_MS = 15 * 60_000;
+/** How long past that lifetime the desktop waits for the server to settle the attempt before it stops checking. */
+export const CONNECT_EXPIRY_GRACE_MS = 60_000;
+/**
+ * The desktop's own cutoff, on its monotonic clock from when it started the
+ * attempt. The server-issued `expiresAt` is never compared with the desktop's
+ * wall clock: the two clocks need not agree, and the wall clock can jump.
+ */
+export const CONNECT_LOCAL_TIMEOUT_MS = CONNECT_ATTEMPT_LIFETIME_MS + CONNECT_EXPIRY_GRACE_MS;
+
+const monotonicNow = () => performance.now();
 
 /**
  * One GitHub App connect attempt, shared by the organization settings card
@@ -25,16 +36,19 @@ export function useGithubConnectAttempt({
   pollIntervalMs = CONNECT_POLL_INTERVAL_MS,
   epoch,
   onEnd,
-  now = Date.now,
+  clock = monotonicNow,
 }: {
   pollIntervalMs?: number;
   /** Bumped by the caller when its account or organization changes; a poll started under an older value is dropped. */
   epoch?: MutableRefObject<number>;
   /** Called once per ending, with the attempt as the server last reported it (null when it could not be read). */
   onEnd: (outcome: AttemptOutcome | null, attempt: ConnectAttempt | null) => void;
-  now?: () => number;
+  /** A monotonic clock in milliseconds; not the wall clock. */
+  clock?: () => number;
 }) {
   const [attempt, setAttempt] = useState<ConnectAttempt | null>(null);
+  // When the desktop started the shown attempt, on `clock`.
+  const startedAt = useRef(0);
   // Bumped whenever the caller ends or replaces an attempt itself, so a poll
   // already in flight cannot bring it back.
   const seq = useRef(0);
@@ -47,10 +61,10 @@ export function useGithubConnectAttempt({
   }, []);
   const onEndRef = useRef(onEnd);
   onEndRef.current = onEnd;
-  const nowRef = useRef(now);
-  nowRef.current = now;
+  const clockRef = useRef(clock);
+  clockRef.current = clock;
 
-  const pastExpiry = (shown: ConnectAttempt) => typeof shown.expiresAt === "number" && nowRef.current() > shown.expiresAt + CONNECT_EXPIRY_GRACE_MS;
+  const timedOut = () => clockRef.current() - startedAt.current > CONNECT_LOCAL_TIMEOUT_MS;
 
   useEffect(() => {
     if (!attempt || attempt.state !== "waiting") return;
@@ -58,10 +72,15 @@ export function useGithubConnectAttempt({
     const started = seq.current;
     let stopped = false;
     const current = () => !stopped && mounted.current && started === seq.current && context === epoch?.current;
-    const endLocally = () => {
+    const endExpired = () => {
       const expired = { ...attempt, state: "expired" };
       setAttempt(expired);
       onEndRef.current(attemptOutcome(expired, "poll"), expired);
+    };
+    // Not an expiry: the server has not said how the attempt ended.
+    const stopUnsettled = () => {
+      setAttempt(null);
+      onEndRef.current(unsettledOutcome(), null);
     };
     const timer = setTimeout(async () => {
       try {
@@ -77,9 +96,9 @@ export function useGithubConnectAttempt({
             expiresAt: next.expiresAt ?? attempt.expiresAt,
             browserOpened: attempt.browserOpened,
           };
-          // The server expires an attempt when it is polled; this covers one
-          // that keeps answering "waiting" anyway.
-          if (pastExpiry(merged)) endLocally();
+          // The server expires an attempt when it is polled, so "waiting" is
+          // believed; this only bounds a server that keeps answering it.
+          if (timedOut()) stopUnsettled();
           else setAttempt(merged);
           return;
         }
@@ -88,10 +107,10 @@ export function useGithubConnectAttempt({
       } catch (failure) {
         if (!current()) return;
         if (githubAppErrorCode(failure) === "github_connect_attempt_expired") {
-          endLocally();
+          endExpired();
         } else if (githubAppErrorCode(failure) === "github_app_request_failed") {
-          // A network blip keeps polling, until the attempt is past its expiry.
-          if (pastExpiry(attempt)) endLocally();
+          // A network blip keeps polling, until the desktop's own cutoff.
+          if (timedOut()) stopUnsettled();
           else setAttempt({ ...attempt });
         } else {
           setAttempt(null);
@@ -110,6 +129,7 @@ export function useGithubConnectAttempt({
   /** Show and poll a newly created attempt. */
   const start = useCallback((next: ConnectAttempt) => {
     seq.current += 1;
+    startedAt.current = clockRef.current();
     setAttempt(next);
   }, []);
 

@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { githubConnectClockScenarios } from "@/lib/githubConnectClockScenarios";
 import { organizationGithubApp, type GithubAppSummary, type LiveRepositories } from "@/lib/organizationGithubApp";
 import { organizationMembers, type OrganizationRoster } from "@/lib/organizationMembers";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
@@ -208,34 +209,15 @@ it.each([
   expect(screen.queryByText("Connection canceled.")).toBeNull();
 });
 
-it("ends an attempt the server keeps answering past its expiry", async () => {
-  const expiresAt = Date.now() - 60_000;
-  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true, expiresAt });
-  api.attempt.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: false, expiresAt });
-  await renderPanel();
-  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
-  await screen.findByText(/expired before it was confirmed/);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  expect(api.attempt).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("button", { name: "Connect another installation" })).toBeTruthy();
-});
-
-it("stops retrying an unreachable server once the attempt is past its expiry", async () => {
-  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true, expiresAt: Date.now() - 60_000 });
-  api.attempt.mockRejectedValue({ code: "github_app_request_failed", status: null });
-  await renderPanel();
-  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
-  await screen.findByText(/expired before it was confirmed/);
-  expect(screen.queryByText(/could not reach the account service/)).toBeNull();
-});
-
-it("explains an expired attempt the server refuses", async () => {
-  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true });
-  api.attempt.mockRejectedValue({ code: "github_connect_attempt_expired", status: 410 });
-  await renderPanel();
-  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
-  await screen.findByText(/expired before it was confirmed/);
-  expect(screen.queryByText(/could not reach the account service/)).toBeNull();
+describe("connect attempt clocks", () => {
+  githubConnectClockScenarios({
+    api,
+    connected: installation({ id: "ghinst_2", accountLogin: "globex" }),
+    begin: async () => {
+      await renderPanel();
+      fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+    },
+  });
 });
 
 it("searches and refreshes the live repository list", async () => {
