@@ -113,6 +113,7 @@ impl BotAccess {
 
     /// The level this build acts on: one it does not know counts as the
     /// most restrictive one it knows.
+    #[allow(dead_code)] // Nothing acts on access yet; the bot's sessions do from PRO-468.
     pub fn effective(&self) -> Self {
         match self {
             Self::Other(_) => Self::ReadReport,
@@ -335,6 +336,7 @@ fn change<T>(sink: &dyn EventSink, f: impl FnOnce(&mut Vec<Bot>) -> Result<T>) -
     Ok(change_listed(sink, f)?.0)
 }
 
+#[cfg(test)]
 pub fn list() -> Result<Vec<Bot>> {
     Ok(listing()?.bots)
 }
