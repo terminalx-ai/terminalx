@@ -491,12 +491,13 @@ where
                 // its acknowledgement contains no session data.
                 if forgetting && response["ok"] == true {
                     tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
-                } else {
+                } else if ending.is_none() {
+                    // The permit first, then the signal: one that came while
+                    // the permit was taken withholds the reply (#1332).
+                    let _permit = connection.output_permit(host).await?;
+                    ending = pending_signal(&mut signals);
                     if ending.is_none() {
-                        ending = pending_signal(&mut signals);
-                    }
-                    if ending.is_none() {
-                        send_with_grant(host, connection, send_message(socket, session, &response, connection.wire())).await?;
+                        tokio::time::timeout(WRITE_TIMEOUT, send_message(socket, session, &response, connection.wire())).await??;
                     }
                 }
                 // Only now may the stream it opened follow it (#1333).

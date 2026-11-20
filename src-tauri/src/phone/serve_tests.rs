@@ -17,6 +17,32 @@ struct StandInOwner {
     build: Build,
     /// Whether the terminal's one delta was handed out.
     delta: std::sync::atomic::AtomicBool,
+    permit: Arc<PermitGate>,
+}
+
+/// Holds the next connection check the test arms it for, as a slow runtime
+/// holds the check an output permit makes.
+#[derive(Default)]
+struct PermitGate {
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+
+impl PermitGate {
+    fn hold(&self) {
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            let open = self.open.lock().unwrap();
+            drop(self.opened.wait_while(open, |open| !*open).unwrap());
+        }
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
 }
 
 impl Owner for StandInOwner {
@@ -24,6 +50,9 @@ impl Owner for StandInOwner {
         Ok(AttachmentIdentity { epoch: "epoch".into(), lease: "lease".into() })
     }
     fn mobile(&self, _: &Actor, method: &str, _: serde_json::Value) -> Result<serde_json::Value> {
+        if method == "check" {
+            self.permit.hold();
+        }
         Ok(match method {
             // A terminal subscription opens with its scrollback snapshot …
             "observe" => json!({ "subscriptionId": "terminal", "snapshot": "scrollback" }),
@@ -113,6 +142,8 @@ struct Served {
     signals: mpsc::UnboundedSender<ConnectionSignal>,
     connection: Arc<rpc::MobileConnection>,
     held: Arc<Held>,
+    /// The connection check the test may hold.
+    permit: Arc<PermitGate>,
     _home: crate::store::TempHome,
 }
 
@@ -122,7 +153,8 @@ async fn served(slow: Duration) -> Served {
     let host = Arc::new(PhoneHost::new(|| 0));
     let sink = Arc::new(crate::sink::BroadcastSink::new(64));
     host.configure(sink.clone()).unwrap();
-    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default(), delta: Default::default() })));
+    let permit = Arc::new(PermitGate::default());
+    host.set_owner(Some(Arc::new(StandInOwner { build: Build::default(), delta: Default::default(), permit: permit.clone() })));
 
     let keypair = HostKeypair::from_secret([3; 32]);
     let handshake = E2eeClientHandshake::with_secret([4; 32], &keypair.public_key_b64(), "direct", None).unwrap();
@@ -176,7 +208,7 @@ async fn served(slow: Duration) -> Served {
             .await
         })
     };
-    Served { phone: Phone { socket: phone, session: phone_session }, sink, server, signals: signals_tx, connection, held, _home: home }
+    Served { phone: Phone { socket: phone, session: phone_session }, sink, server, signals: signals_tx, connection, held, permit, _home: home }
 }
 
 fn agent_event(seq: u64) -> Value {
@@ -294,7 +326,8 @@ fn emit_after_disconnect(served: &Served) {
 /// Disconnected on the Mac while a request is still answered (#1332): the
 /// phone is told at once, before the request completes, and none of the
 /// session events or invalidations raised after the Mac disconnected it
-/// reach the phone, nor does the request's reply once it is answered.
+/// reach the phone. The request in flight is dropped with the connection;
+/// a reply already answered is withheld by the test after this one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_disconnect_on_the_mac_fences_output_while_a_request_is_answered() {
     for _ in 0..20 {
@@ -311,6 +344,31 @@ async fn a_disconnect_on_the_mac_fences_output_while_a_request_is_answered() {
         let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
         assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
         served.held.release.notify_one();
+    }
+}
+
+/// A reply already answered but waiting for its output permit when the Mac
+/// disconnects the phone is withheld (#1332): the permit's check is held
+/// until after the disconnect, and the phone reads only the disconnect notice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disconnect_while_a_reply_waits_for_its_permit_withholds_the_reply() {
+    for _ in 0..20 {
+        let mut served = served(Duration::ZERO).await;
+        served.phone.request_with("held", "session.tail", json!({ "held": true })).await;
+        tokio::time::timeout(Duration::from_secs(5), served.held.entered.notified()).await.expect("the request is being answered");
+        // The next check is the reply's permit, unless the grant check's
+        // tick takes it first; either way the Mac waits on the runtime there.
+        served.permit.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        served.held.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), served.permit.entered.notified()).await.expect("a check is held");
+        served.signals.send(ConnectionSignal::Disconnect).unwrap();
+        emit_after_disconnect(&served);
+        served.permit.release();
+
+        assert_eq!(served.phone.read().await.expect("the disconnect notice"), disconnected_notification());
+        assert_eq!(served.phone.read().await, None, "no reply after the disconnect notice");
+        let ended = tokio::time::timeout(Duration::from_secs(5), &mut served.server).await.unwrap().unwrap().unwrap();
+        assert_eq!(ended.reason, EndReason::DisconnectedOnMac);
     }
 }
 
