@@ -20,6 +20,8 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { TurnBlock, SendingMessage } from "./TurnBlock";
+import { closeImageViewer, useImageViewer } from "@/lib/imageViewer";
+import { renderHook, act } from "@testing-library/react";
 import { EditorSplit } from "@/components/editor/EditorSplit";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildTranscript } from "@/lib/transcript";
@@ -35,6 +37,7 @@ const SESSION = "files";
 const FOLDER = "/Users/me/.terminalx/attachments/files/k3f9qa";
 const NOTES = { path: `${FOLDER}/notes.md`, name: "notes.md", mediaType: "text/markdown", size: 24 };
 const SHOT = { path: `${FOLDER}/shot.png`, name: "shot.png", mediaType: "image/png", size: 2048 };
+const CLIP = { path: `${FOLDER}/clip.mp4`, name: "clip.mp4", mediaType: "video/mp4", size: 4_000_000 };
 // 14:31 on this machine's clock, whatever its zone: the tab says the local time.
 const SENT = new Date(2026, 10, 13, 14, 31, 5).toISOString();
 
@@ -64,14 +67,30 @@ beforeEach(() => {
 });
 afterEach(async () => { cleanup(); await closeAllEditors(SESSION); vi.clearAllMocks(); });
 
-it("draws a chip per attached file on the sent message", () => {
-  render(<Session files={[NOTES, SHOT]} />);
+const names = (root: HTMLElement) => within(root).getAllByTestId("attachment-name").map((name) => name.textContent);
+
+it("draws each attached file on the sent message with its preview (PRO-461)", async () => {
+  render(<Session files={[NOTES, SHOT, CLIP]} />);
   const message = screen.getByTestId("reader-message");
-  const chips = within(message).getAllByTestId("file-chip");
-  expect(chips.map((chip) => chip.textContent)).toEqual(["notes.md", "shot.png"]);
+  const cards = within(message).getAllByTestId("attachment-preview");
+  expect(names(message)).toEqual(["notes.md", "shot.png", "clip.mp4"]);
   expect(within(message).getByRole("button", { name: "Open notes.md" })).toBeDefined();
-  expect(within(message).getByRole("button", { name: "Open shot.png" })).toBeDefined();
-  expect(chips[0].getAttribute("title")).toBe("~/.terminalx/attachments/files/k3f9qa/notes.md");
+  expect(within(message).getByRole("button", { name: "Open clip.mp4" })).toBeDefined();
+  expect(cards[0].getAttribute("title")).toBe("~/.terminalx/attachments/files/k3f9qa/notes.md");
+  // The text file's first lines, the image's thumbnail from its stored copy, the other file's size and type.
+  await waitFor(() => expect(within(cards[0]).getByTestId("attachment-text").textContent).toBe("# Notes\n\nThe plan."));
+  expect(cards.map((card) => card.dataset.kind)).toEqual(["text", "image", "file"]);
+  expect(within(cards[1]).getByRole("img", { name: "shot.png" }).getAttribute("src")).toBe(`asset://localhost/${encodeURIComponent(SHOT.path)}`);
+  expect(within(cards[2]).getByTestId("attachment-meta").textContent).toBe("4 MB · MP4");
+});
+
+it("an image's thumbnail opens the image viewer, with its stored copy for Open in default app", () => {
+  render(<Session files={[SHOT, NOTES]} />);
+  const viewer = renderHook(() => useImageViewer());
+  fireEvent.click(screen.getByRole("button", { name: "View shot.png" }));
+  expect(viewer.result.current).toEqual({ index: 0, images: [{ src: `asset://localhost/${encodeURIComponent(SHOT.path)}`, name: "shot.png", path: SHOT.path }] });
+  act(() => closeImageViewer());
+  expect(getEditors().editors).toHaveLength(0);
 });
 
 it("opens a chip's file in a read-only tab: its path, when it was sent, Preview first with a Source toggle", async () => {
@@ -100,13 +119,13 @@ it("opens a chip's file in a read-only tab: its path, when it was sent, Preview 
   expect((await screen.findByTestId("markdown-preview")).textContent).toContain("The plan.");
 });
 
-it("focuses the tab the file already has when its chip is clicked again", async () => {
-  render(<Session files={[NOTES, SHOT]} />);
+it("focuses the tab the file already has when its card is clicked again", async () => {
+  render(<Session files={[NOTES, CLIP]} />);
   fireEvent.click(screen.getByRole("button", { name: "Open notes.md" }));
   await screen.findByTestId("attachment-toolbar");
-  fireEvent.click(screen.getByRole("button", { name: "Open shot.png" }));
+  fireEvent.click(screen.getByRole("button", { name: "Open clip.mp4" }));
   await waitFor(() => expect(getEditors().editors).toHaveLength(2));
-  expect(getEditors().editors[1]).toMatchObject({ kind: "attachment", media: "image", rel: "k3f9qa/shot.png" });
+  expect(getEditors().editors[1]).toMatchObject({ kind: "attachment", media: "video", rel: "k3f9qa/clip.mp4" });
   fireEvent.click(screen.getByRole("button", { name: "Open notes.md" }));
   expect(getEditors().editors).toHaveLength(2);
   expect(getTerminalState().selected[SESSION]).toEqual({ kind: "review", id: getEditors().editors[0].id });
@@ -142,28 +161,27 @@ it("Download chosen and cancelled, and a refused copy, say what happened", async
   expect((await screen.findByRole("alert")).textContent).toBe("Could not download notes.md: The folder is read-only.");
 });
 
-it("Copy on a media file copies its path; the image opens in the media surface", async () => {
-  render(<Session files={[SHOT]} />);
-  fireEvent.click(screen.getByRole("button", { name: "Open shot.png" }));
+it("Copy on a media file copies its path; the video opens in the media surface", async () => {
+  render(<Session files={[CLIP]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Open clip.mp4" }));
   const toolbar = await screen.findByTestId("attachment-toolbar");
-  await screen.findByRole("img", { name: "shot.png" });
-  expect(fs.openMedia).toHaveBeenCalledWith("/Users/me/.terminalx/attachments/files", "k3f9qa/shot.png");
+  await waitFor(() => expect(fs.openMedia).toHaveBeenCalledWith("/Users/me/.terminalx/attachments/files", "k3f9qa/clip.mp4"));
   expect(fs.readText).not.toHaveBeenCalled();
   expect(within(toolbar).queryByRole("radiogroup")).toBeNull();
   fireEvent.click(within(toolbar).getByRole("button", { name: "Copy" }));
-  await waitFor(() => expect(copyText).toHaveBeenCalledWith(SHOT.path));
+  await waitFor(() => expect(copyText).toHaveBeenCalledWith(CLIP.path));
 });
 
 it("names the files of a message that is still sending, without opening them", () => {
   render(<SendingMessage message={{ text: "Here", images: [], files: [{ name: "draft.md" }, { name: "data.csv" }] }} cwd="/repo" />);
-  const chips = screen.getAllByTestId("file-chip");
-  expect(chips.map((chip) => chip.textContent)).toEqual(["draft.md", "data.csv"]);
-  expect(screen.queryByRole("button", { name: /Open/ })).toBeNull();
+  expect(names(screen.getByTestId("message-files"))).toEqual(["draft.md", "data.csv"]);
+  expect(screen.queryByRole("button", { name: /Open|View/ })).toBeNull();
+  expect(fs.readText).not.toHaveBeenCalled();
 });
 
 it("a cloud session's files are named, not opened: they are not on this computer", () => {
   const [turn] = buildTranscript(sent([NOTES]), false).turns;
   render(<TurnBlock turn={turn} sessionId={SESSION} stream={[]} working={false} />);
-  expect(screen.getByTestId("file-chip").textContent).toBe("notes.md");
+  expect(names(screen.getByTestId("message-files"))).toEqual(["notes.md"]);
   expect(screen.queryByRole("button", { name: "Open notes.md" })).toBeNull();
 });

@@ -338,6 +338,9 @@ struct Stored {
     /// never the images or their ids.
     #[serde(default, skip_serializing_if = "is_zero")]
     images: u32,
+    /// How many other files it names (#1329), counted as its images are.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    files: u32,
     #[serde(default)]
     request_id: Option<String>,
     state: String,
@@ -395,6 +398,7 @@ impl Stored {
             kind: self.kind.clone(),
             text: self.text.clone(),
             images: self.images,
+            files: self.files,
             request_id: self.request_id.clone(),
             state: self.state.clone(),
             wake: self.wake.clone(),
@@ -438,6 +442,9 @@ pub struct OutboxEntry {
     /// How many images the message carries; left out when none.
     #[serde(skip_serializing_if = "is_zero")]
     pub images: u32,
+    /// How many other files it carries (#1329); left out when none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub files: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// `unsent`, or the server's `queued | leased | applied | rejected | cancelled | outcome-unknown`.
@@ -689,11 +696,12 @@ impl CloudAgentClient {
         }
         let Value::Object(mut plaintext) = payload else { return Err("cloud_agent_request_invalid".into()) };
         let text = plaintext.get("text").and_then(Value::as_str).map(str::to_string);
-        let images = plaintext.get("images").and_then(Value::as_array).map_or(0, |images| images.len().min(u32::MAX as usize) as u32);
+        let count = |field: &str| plaintext.get(field).and_then(Value::as_array).map_or(0, |items| items.len().min(u32::MAX as usize) as u32);
+        let (images, files) = (count("images"), count("files"));
         let request_id = plaintext.get("requestId").and_then(Value::as_str).map(str::to_string);
         let valid = match kind {
-            // A prompt is text, images, or both (PRO-22); a steer is always text.
-            "send" if images > 0 => text.is_some(),
+            // A prompt is text, attachments (images PRO-22, files #1329), or both; a steer is always text.
+            "send" if images > 0 || files > 0 => text.is_some(),
             "send" | "steer" => text.as_deref().is_some_and(|text| !text.trim().is_empty()),
             "permission-decision" => {
                 request_id.as_deref().is_some_and(|id| !id.is_empty())
@@ -741,6 +749,7 @@ impl CloudAgentClient {
             ciphertext,
             text,
             images,
+            files,
             request_id,
             state: "unsent".into(),
             wake: None,

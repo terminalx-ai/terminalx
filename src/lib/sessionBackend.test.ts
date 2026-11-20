@@ -14,7 +14,7 @@ vi.mock("./cloudAgents", async (original) => ({
   changeCloudFollowUp: vi.fn(async (_scope: unknown, tabId: string, change: unknown) => void followUpChanges.push({ tabId, change })),
 }));
 
-const { localSessionBackend, sendFirstMessage, cloudSessionBackend, resetCloudWakes, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING, TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN, REVIEW_NEEDS_ADMIN } = await import("./sessionBackend");
+const { localSessionBackend, sendFirstMessage, cloudSessionBackend, resetCloudWakes, REMOTE_UNAVAILABLE, RESEND_ATTACHMENTS, RESEND_MISSING, TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN, REVIEW_NEEDS_ADMIN, HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN } = await import("./sessionBackend");
 const { getSessionStore } = await import("./sessions");
 const { getTerminalState } = await import("./terminal");
 const { applyEvent } = await import("./agentEvents");
@@ -122,9 +122,9 @@ describe("a cloud session's options a local one has (#1289)", () => {
   });
 
   it("says why each option it cannot take is off; a local session has none to say", () => {
-    expect(backend().unavailable).toEqual({ ...REMOTE_UNAVAILABLE, ...TURNS_OFFLINE });
+    expect(backend().unavailable).toEqual({ ...REMOTE_UNAVAILABLE, ...TURNS_OFFLINE, ...HANDOFF_OFFLINE });
     expect(backend().unavailable).toBe(backend().unavailable);
-    for (const key of ["secondOpinion", "retryInNewChat", "runMenu"] as const) expect(REMOTE_UNAVAILABLE[key]).toMatch(/\w/);
+    expect(REMOTE_UNAVAILABLE.runMenu).toMatch(/\w/);
     expect(localSessionBackend("s1").unavailable).toBeUndefined();
   });
 });
@@ -189,7 +189,7 @@ describe("Reset, Fork and turn checkpoints on a remote session (#1326)", () => {
   });
 
   it("an admin resets, reviews and forks on the runtime, and is shown the fork", async () => {
-    const made = client(["session/1", "checkpoints/1"]);
+    const made = client(["session/1", "checkpoints/1", "handoff/1"]);
     const remote = backend(made);
     expect(remote.unavailable).toBe(REMOTE_UNAVAILABLE);
     const turns = remote.turns!;
@@ -215,6 +215,69 @@ describe("Reset, Fork and turn checkpoints on a remote session (#1326)", () => {
       ["fork", { sessionId: "s-cloud", tabId: "t-cloud", endSeq: 4, into: "tab" }],
       ["fork", { sessionId: "s-cloud", tabId: "t-cloud", endSeq: 4, into: "session" }],
     ]);
+  });
+});
+
+describe("a second opinion, Retry in a new chat and the agent handoff on a remote session (#1327)", () => {
+  type Call = [string, unknown[]];
+  const client = (capabilities: string[]) => {
+    const calls: Call[] = [];
+    const connection = { state: "connected", runtimeGeneration: 1, runtimeVersion: "1", capabilities, authority: "manage" } as const;
+    const fake = {
+      connection,
+      hasCapability: (capability: string) => capabilities.includes(capability),
+      handoffAgentTab: async (...args: unknown[]) => (calls.push(["handoff", args]), {
+        sessionId: "s-cloud", tabId: "t-review", startError: null,
+        tab: { sessionId: "s-cloud", tabId: "t-review", title: null, harness: "codex", model: "gpt-5.5", effort: null, permissionMode: "plan", status: "in_progress", process: "running", pendingPermissions: [], followUps: [], lastSeq: 1, created: "", modified: "" },
+      }),
+      handoffContext: async (...args: unknown[]) => (calls.push(["context", args]), { sessionId: "s-cloud", tabId: "t-cloud", transcriptPath: "/home/vm/.claude/projects/w/c.jsonl" }),
+    };
+    return { calls, connection, client: fake as never };
+  };
+  const backend = (made: ReturnType<typeof client> | null, authority = "manage") =>
+    cloudSessionBackend({
+      key: "cloud:org-1:ws-1:s-cloud",
+      workspaceKey: "cloud:org-1:ws-1",
+      scope: { organizationId: "org-1", workspaceId: "ws-1" },
+      sessionId: "s-cloud",
+      state: made ? (made.connection as never) : { state: "idle" },
+      client: made?.client ?? null,
+      workspaceState: made ? "ready" : "suspended",
+      authority,
+      outbox: [],
+      followUps: () => [],
+      wake: vi.fn(async () => undefined),
+    });
+
+  it("are off with why: not connected, a runtime from before handoff/1, or someone who is not an admin", () => {
+    expect(backend(null).handoff).toBeUndefined();
+    expect(backend(null).unavailable).toMatchObject(HANDOFF_OFFLINE);
+    const old = backend(client(["session/1", "checkpoints/1"]));
+    expect(old.handoff).toBeUndefined();
+    expect(old.unavailable).toMatchObject({ ...HANDOFF_OLD_RUNTIME });
+    // Fork and Reset are offered on that runtime: each option says its own reason.
+    expect(old.unavailable?.fork).toBeUndefined();
+    const driver = backend(client(["session/1", "checkpoints/1", "handoff/1"]), "participate");
+    expect(driver.handoff).toBeUndefined();
+    expect(driver.unavailable).toMatchObject({ ...TURNS_NEED_ADMIN, ...HANDOFF_NEED_ADMIN });
+    // The same reasons are the same object each time the backend is made.
+    expect(backend(client(["session/1", "checkpoints/1"])).unavailable).toBe(old.unavailable);
+    for (const off of [HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN]) {
+      for (const key of ["secondOpinion", "retryInNewChat", "agentHandoff"] as const) expect(off[key]).toMatch(/\w/);
+    }
+    expect(localSessionBackend("s1").handoff).toBeUndefined();
+  });
+
+  it("an admin's handoff is one runtime call that opens the tab with its first prompt, and shows it", async () => {
+    const made = client(["session/1", "handoff/1"]);
+    const remote = backend(made);
+    expect(remote.unavailable).not.toHaveProperty("secondOpinion");
+    await expect(remote.handoff!.open({ agent: "codex", model: "gpt-5.5", mode: "plan", prompt: "Give a second opinion", requestId: "handoff-1" })).resolves.toEqual({ tabId: "t-review", startError: null });
+    // The dialog's one request id, so a try after a lost reply is answered with the same tab.
+    expect(made.calls).toEqual([["handoff", ["s-cloud", { agent: "codex", model: "gpt-5.5", mode: "plan", nativeCodex: undefined, prompt: "Give a second opinion" }, "handoff-1"]]]);
+    expect(getTerminalState().selected["cloud:org-1:ws-1:s-cloud"]).toEqual({ kind: "agent", id: "t-review" });
+    await expect(remote.handoff!.context("t-cloud")).resolves.toMatchObject({ transcriptPath: "/home/vm/.claude/projects/w/c.jsonl" });
+    expect(made.calls.at(-1)).toEqual(["context", ["s-cloud", "t-cloud"]]);
   });
 });
 

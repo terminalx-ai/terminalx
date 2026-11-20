@@ -32,6 +32,8 @@ export interface OutboxEntry {
   text?: string | null;
   /** How many images the message carries (PRO-22); absent when none. */
   images?: number;
+  /** How many other files it carries (#1329); absent when none. */
+  files?: number;
   requestId?: string | null;
   state: OutboxState;
   wake?: WakeResult | null;
@@ -52,9 +54,16 @@ export interface CloudImageRef {
   name?: string;
 }
 
+/** A file other than an image the runtime already holds (`session.attach` with `kind: "file"`), as a message names it. */
+export interface CloudFileRef {
+  id: string;
+  name: string;
+  mediaType?: string;
+}
+
 /** The plaintext of a command, without its `v`. */
 export type OutboxPayload =
-  | { text: string; model?: string; effort?: string | null; mode?: string; images?: CloudImageRef[] }
+  | { text: string; model?: string; effort?: string | null; mode?: string; images?: CloudImageRef[]; files?: CloudFileRef[] }
   | { requestId: string; optionId: string }
   | { requestId: string; answers: Record<string, string> }
   | FollowUpChange

@@ -48,7 +48,7 @@ import { beginComposerSend, finishComposerSend, returnToDraft, useComposerSend, 
 import { useComposerHistory } from "./useComposerHistory";
 import { usePrMention } from "./usePrMention";
 import { tokenAtCaret } from "@/lib/pickers";
-import type { ComposerCommandList, ComposerCommands, ComposerFiles } from "@/lib/cloudComposer";
+import type { ComposerCommandList, ComposerCommands, ComposerFiles, ComposerPrs } from "@/lib/cloudComposer";
 
 const NO_COMMANDS: ComposerCommandList = { commands: [], note: null };
 
@@ -103,6 +103,7 @@ export function Composer({
   cwd,
   commands: givenCommands,
   files: givenFiles,
+  prs = null,
   remote = false,
   attachFiles,
   busy,
@@ -148,11 +149,20 @@ export function Composer({
   commands?: ComposerCommands | null;
   /** Where the `@` list comes from for such a tab. Without it and without `cwd` there is no file list. */
   files?: ComposerFiles | null;
-  /** The tab runs on another machine (a cloud workspace): a file dropped from this computer is not mentioned to it. */
+  /**
+   * Where the `#` list comes from for such a tab (its runtime's `gh`, #1329).
+   * Without it a remote tab has no `#` list; a local tab asks this computer in `cwd`.
+   */
+  prs?: ComposerPrs | null;
+  /**
+   * The tab runs on another computer (a cloud workspace, a machine): a file
+   * dropped from this one is not mentioned to it by its path here; it is
+   * attached, when the tab takes files.
+   */
   remote?: boolean;
   /**
-   * Files other than images attach (PRO-290; on a machine, PRO-407). Defaults
-   * to `!remote`: a local tab takes any file, a cloud tab images only.
+   * Files other than images attach (PRO-290; on a machine, PRO-407; in a
+   * cloud workspace, #1329). Defaults to `!remote`.
    */
   attachFiles?: boolean;
   busy: boolean;
@@ -170,7 +180,11 @@ export function Composer({
   onSetModel: (id: string) => void;
   onSetEffort: (e: string | null) => void;
   onSetMode: (m: string) => void;
-  agentHandoff?: { name: string; id: string; run: () => void };
+  /**
+   * Hand the conversation off to another agent in a new tab. With `unavailable`
+   * (a remote session that cannot take it yet, #1327) the item is shown off, with why.
+   */
+  agentHandoff?: { name: string; id: string; run?: () => void; unavailable?: string };
   hasConversation?: boolean;
   contextUsed?: number;
   /** The full model id the session last said it ran (an alias like `opus` resolved). */
@@ -378,7 +392,9 @@ export function Composer({
       setDismissedToken(recalled ? `${recalled.kind}:${recalled.start}` : null);
     },
   });
-  const prMention = usePrMention(!remote && !disabled && dismissedToken !== tokenKey ? cwd ?? null : null, draft, caret, onDraftChange, ref, setCaret);
+  // A remote tab's `#` list is its runtime's: a picked pull request's context file is read there and attached as a file.
+  const prSource = remote ? (attach.imagesOnly ? null : prs) : (cwd ?? null);
+  const prMention = usePrMention(!disabled && dismissedToken !== tokenKey ? prSource : null, draft, caret, onDraftChange, ref, setCaret, { onAttachFile: (file) => void attach.addInputs([file]) });
   // Prompts kept from a turn's menu (PRO-379), offered beside the agent's commands.
   const snippets = useSyncExternalStore(subscribePrefs, savedSnippets, savedSnippets);
   const pickerOpen = !!token && token.kind !== "pr" && dismissedToken !== tokenKey && (token.kind === "mention" ? !!fileSource : commands.length > 0 || snippets.length > 0 || !!commandList.note);
@@ -478,7 +494,7 @@ export function Composer({
       }
     }
     const previews = sendable.flatMap((a) => (a.image && a.previewUrl ? [{ url: a.previewUrl, name: a.name }] : []));
-    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name }] : []));
+    const fileNames = sendable.flatMap((a) => (a.file ? [{ name: a.name, ...(a.size != null ? { size: a.size } : {}) }] : []));
     const operation = beginComposerSend(sendScope, { text, images: previews, ...(fileNames.length ? { files: fileNames } : {}), pressedAt: Date.now(), afterSeq: sentAfter?.() ?? 0 });
     if (!operation) return;
     // The message goes to the chat at once, drawn as sending, and the composer
@@ -728,9 +744,9 @@ export function Composer({
                   {agentHandoff && (
                     <>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onSelect={agentHandoff.run}>
+                      <DropdownMenuItem disabled={!agentHandoff.run} onSelect={agentHandoff.run} data-testid="composer-agent-handoff">
                         <AgentMark id={agentHandoff.id} decorative />
-                        <span>Hand off to {agentHandoff.name}<span className="block text-xs text-faint">Opens in a new tab</span></span>
+                        <span>Hand off to {agentHandoff.name}<span className="block max-w-[16rem] whitespace-normal text-xs text-faint">{agentHandoff.run ? "Opens in a new tab" : agentHandoff.unavailable}</span></span>
                       </DropdownMenuItem>
                     </>
                   )}
@@ -747,7 +763,7 @@ export function Composer({
                     <ModelPickerEmpty
                       agent={agentName(tab.harness)}
                       signIn={SIGN_INS[tab.harness]}
-                      other={agentHandoff?.name}
+                      other={agentHandoff?.run ? agentHandoff.name : undefined}
                       loading={!modelsLoaded}
                       retrying={retryingModels}
                       onRetry={retryModels}

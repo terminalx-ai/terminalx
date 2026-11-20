@@ -36,6 +36,21 @@ use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::index::{self, SessionEntry};
 
+/// `text` cut to at most `max` bytes at a character boundary, and whether
+/// it was cut; a cut text says so at its end.
+fn bounded_text(mut text: String, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str("\n\n… (cut short: the rest did not fit)\n");
+    (text, true)
+}
+
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_PTYS: usize = 16;
 const MAX_EXITED_PTYS: usize = 8;
@@ -51,6 +66,10 @@ fn attachment_owner(peer: &Peer) -> String {
 const MAX_FILE_QUERY_BYTES: usize = 400;
 const DEFAULT_FILE_HITS: usize = 30;
 const MAX_FILE_HITS: usize = 50;
+/// The most of a pull request's context file sent to a composer
+/// (`session.prContext`): well inside a frame, and far more than a
+/// description and a list of changed files usually take.
+const MAX_PR_CONTEXT_BYTES: usize = 512 * 1024;
 
 /// An agent tab's own terminal (`agent-pty/1`, PRO-86) is the pane its CLI
 /// runs in, `tab:<tabId>` ([`SessionManager::pane_id`]).
@@ -1688,7 +1707,7 @@ impl WorkspaceRpc {
 
     fn execute_blocking(self: &Arc<Self>, peer: &Arc<Peer>, method: &str, params: Value, policy_stamp: Option<collab::v2::Stamp>) -> Result<Value, RpcError> {
         self.check_named_project(method, &params)?;
-        let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
+        let configuration = matches!(method, "session.configure" | "session.create" | "session.create.repository" | "session.addTab" | "session.handoff" | "session.toTerminal" | "pty.create" | "pty.write" | "pty.control" | "pty.resize");
         // Raw input only enters a queue here. Its final physical writer holds
         // admission after acquiring the PTY lock; taking it at ingress would
         // block acknowledgement of a queued request behind a partial write.
@@ -1820,11 +1839,15 @@ impl WorkspaceRpc {
             "session.keepTurn" | "session.undoTurn" | "session.restoreUndo" => self.session_review_turn(peer, method, params),
             "session.reset" => self.session_reset(peer, params),
             "session.fork" => self.session_fork(peer, params),
+            "session.handoff" => self.session_handoff(peer, params),
+            "session.handoffContext" => self.session_handoff_context(peer, params),
             "session.subscribe" => self.session_subscribe(peer, params),
             "session.tabs" => self.session_tabs(peer),
             "session.commands" => self.session_commands(peer, params),
             "session.files" => self.session_files(peer, params),
             "session.attach" => self.session_attach(peer, params),
+            "session.prs" => self.session_prs(peer, params),
+            "session.prContext" => self.session_pr_context(peer, params),
             "session.configure" => self.session_configure(peer, params),
             "session.markRead" => self.session_mark_read(peer, params),
             "session.update" => self.session_update(peer, params),
@@ -3550,7 +3573,13 @@ impl WorkspaceRpc {
         // Creation succeeded, but delivery may have partially launched
         // the agent or written work. Keep the session discoverable;
         // never delete its checkout on a failed first send.
-        let mut message = format!("The session was created, but its first prompt could not be sent: {error:#}");
+        self.first_prompt_failed(manager, session_id, tab_id, pipeline, format!("The session was created, but its first prompt could not be sent: {error:#}"))
+    }
+
+    /// A new tab whose first prompt could not be sent: its pipeline (if it
+    /// carries one) and its agent are stopped, and `message`, with whatever
+    /// of that cleanup failed, is recorded in its chat and returned.
+    fn first_prompt_failed(&self, manager: &SessionManager, session_id: &str, tab_id: &str, pipeline: &mut Value, mut message: String) -> String {
         if let Some(id) = pipeline["id"].as_str() {
             let stopped = self.pipeline_host().map_err(|error| anyhow::anyhow!(error.message)).and_then(|host| {
                 crate::issue_pipeline::engine::turn_failed(&host, session_id, tab_id, &message);
@@ -4836,6 +4865,54 @@ impl WorkspaceRpc {
         }
     }
 
+    /// The pull requests a session's composer `#` list offers for `query`
+    /// (`composer/5`, #1329): a number names one, open or not; words match
+    /// open pull requests' titles and authors. Read with the workspace's own
+    /// `gh` in the session's checkout, so they are the workspace's pull
+    /// requests, not those of a checkout on the reader's computer. Anyone who
+    /// may see the session may ask.
+    fn session_prs(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        let query = params.get("query").and_then(Value::as_str).unwrap_or("");
+        if query.len() > MAX_FILE_QUERY_BYTES {
+            return Err(RpcError::invalid("the query is too long"));
+        }
+        let (project, dir) = self.session_checkout(&session)?;
+        Ok(json!({ "prs": project.git.mention_prs(&dir, query)? }))
+    }
+
+    /// The context file a `#` mention attaches for pull request `number`: its
+    /// title, description and changed files as Markdown, named
+    /// `pr-<number>.md` (`composer/5`, #1329). The composer attaches it as a
+    /// file (`composer/4`), so it reaches the agent as a local tab's PR
+    /// context does, stored in the session's attachments folder here. Needs
+    /// what attaching needs.
+    fn session_pr_context(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let session = self.visible_session(peer, required_str(&params, "sessionId")?)?;
+        if self.authority(peer) == Authority::Participate && !self.access(peer).can_drive() {
+            return Err(RpcError::forbidden("attaching a pull request needs driver access to the workspace"));
+        }
+        let number = params.get("number").and_then(Value::as_u64).ok_or_else(|| RpcError::invalid("number is required"))?;
+        let (project, dir) = self.session_checkout(&session)?;
+        let (text, truncated) = bounded_text(project.git.mention_pr_context(&dir, number)?, MAX_PR_CONTEXT_BYTES);
+        Ok(json!({ "number": number, "name": format!("pr-{number}.md"), "text": text, "truncated": truncated }))
+    }
+
+    /// The Git of the project a session belongs to, and the directory its
+    /// agent runs in there (its worktree), or the project's root when that
+    /// directory is gone or outside it.
+    fn session_checkout(&self, session: &SessionEntry) -> Result<(Arc<ServedProject>, std::path::PathBuf), RpcError> {
+        let project = match &self.scope {
+            Scope::Machine { projects, .. } => projects.get(&machine::project_id(&session.project_path))?,
+            Scope::Workspace { project, .. } => project.clone(),
+        };
+        let dir = std::fs::canonicalize(&session.cwd)
+            .ok()
+            .filter(|cwd| project.files.contains(cwd) && cwd.is_dir())
+            .unwrap_or_else(|| project.root.clone());
+        Ok((project, dir))
+    }
+
     /// The files of a session's directory whose path matches `query`, best
     /// first, for the composer's `@` list (`composer/2`, PRO-22): the same
     /// index and ranking as a local tab's (`files::search`), so paths are
@@ -4993,6 +5070,71 @@ impl WorkspaceRpc {
         };
         agents.changed(Some(&tab_id), true);
         Ok(json!({ "sessionId": session_id, "tabId": tab_id, "note": note, "tab": agents.tab(&tab_id) }))
+    }
+
+    /// `handoff/1` (#1327): another agent tab in a session, sent its first
+    /// prompt in the same call: a second opinion on a turn, a failed turn's
+    /// prompt retried in a new chat, or a tab's conversation handed on. The
+    /// tab is added as `session.addTab` adds one and the prompt sent as
+    /// `session.create` sends a new session's, so a resend (answered from the
+    /// cache) never makes a second tab. A prompt that cannot be sent leaves
+    /// the tab open with why in its chat, and says so in `startError`.
+    fn session_handoff(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            session_id: String,
+            agent: String,
+            #[serde(default)]
+            model: String,
+            #[serde(default)]
+            effort: Option<String>,
+            #[serde(default)]
+            mode: Option<String>,
+            /// As in `session.addTab`.
+            #[serde(default)]
+            native_codex: bool,
+            prompt: String,
+        }
+        let p: Params = parse(params)?;
+        if p.prompt.trim().is_empty() {
+            return Err(RpcError::invalid("prompt is empty: a handoff starts with one"));
+        }
+        let session = self.visible_session(peer, &p.session_id)?;
+        // Checked before the tab is made: a runtime that cannot send would leave one with no prompt.
+        let manager = self.manager()?;
+        let mode = index::requested_mode(p.mode);
+        self.check_new_tab(&p.agent, &p.model, mode.as_deref())?;
+        let mut new_tab = crate::session_ops::NewTab { transport: Default::default(), harness: p.agent, model: p.model, effort: p.effort, permission_mode: mode };
+        if p.native_codex { crate::session_ops::native_codex(&mut new_tab, false); }
+        // The session manager refuses a Bypass tab in a shared session, as for `session.addTab`.
+        let tab = manager.add_tab(&session.id, &new_tab).map_err(|error| RpcError::new("refused", error.to_string()))?;
+        let updated = index::get(&session.id).map_err(RpcError::internal)?;
+        self.sink.emit("session_updated", &updated);
+        let (outcome, start_error) = match manager.send(&session.id, &tab.id, p.prompt, Vec::new()) {
+            Ok(outcome) => (Some(outcome), None),
+            Err(error) => {
+                let message = format!("The new tab was opened, but its first prompt could not be sent: {error:#}");
+                (None, Some(self.first_prompt_failed(manager, &session.id, &tab.id, &mut Value::Null, message)))
+            }
+        };
+        let info = self.agents.get().and_then(|agents| {
+            agents.changed(Some(&tab.id), true);
+            agents.tab(&tab.id)
+        });
+        Ok(json!({ "sessionId": session.id, "tabId": tab.id, "session": updated, "tab": info, "outcome": outcome, "startError": start_error }))
+    }
+
+    /// `handoff/1`: what a tab's conversation hands on to another agent, as
+    /// `prepare_continuation` reads it on a desktop: its recent status, last
+    /// prompt and the path of its transcript here, where the new tab's agent
+    /// runs and can read it. A conversation with nothing saved to hand on yet
+    /// (one that never sent a message) is refused with what to do about it.
+    fn session_handoff_context(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {
+        let tab = self.visible_tab(peer, &params)?;
+        let tracked = self.manager().ok().and_then(|manager| manager.tracked_transcript(&tab.session_id, &tab.tab_id));
+        let context = crate::continuation::prepare(&tab.session_id, &tab.tab_id, tracked, false).map_err(|error| RpcError::new("refused", format!("{error:#}")))?;
+        Ok(json!(context))
     }
 
     fn session_mark_read(&self, peer: &Peer, params: Value) -> Result<Value, RpcError> {

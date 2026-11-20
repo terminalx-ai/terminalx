@@ -2,6 +2,8 @@
 // PRO-290, screen 03.23: the real Composer and Toasts with the app's CSS in WebKit. Fifteen files are
 // picked at once (ten attach, terminalx.json is refused, four are not added) in a phone-narrow window,
 // and the chips must wrap inside the composer with nothing scrolling sideways and Send still on screen.
+// PRO-461: each attached file shows its preview (the image a drawn thumbnail, a text file its first lines),
+// every remove control inside the composer, and a tall list scrolls within itself.
 // pnpm test:webkit-composer-attachments
 // WEBKIT_LAYOUT_SCREENSHOTS=/tmp/shots node scripts/webkit/composer-attachments.mjs
 import assert from "node:assert/strict";
@@ -82,7 +84,8 @@ try {
     // Any file attaches: the hidden picker no longer limits itself to images.
     assert.equal(await page.locator('input[type="file"]').getAttribute("accept"), null, `${label}: the picker takes any file`);
     await page.setInputFiles('input[type="file"]', files);
-    await page.getByTestId("file-chip").nth(10).waitFor();
+    await page.locator('[data-testid="file-chip"], [data-testid="attachment-preview"]').nth(10).waitFor();
+    await page.waitForFunction(() => document.querySelector('[data-kind="image"] img')?.naturalWidth > 0, null, { timeout: 3000 });
     await page.locator("[data-attachment-notice]").nth(1).waitFor();
     await page.evaluate(() => document.fonts.ready);
     // The toasts rise clear of the composer that raised them (measured twice a second), and their fade-in ends.
@@ -96,7 +99,11 @@ try {
       const rect = (el) => el.getBoundingClientRect();
       const box = document.querySelector("[data-composer-box]");
       const frame = rect(box);
-      const chips = [...document.querySelectorAll('[data-testid="file-chip"]')];
+      const chips = [...document.querySelectorAll('[data-testid="file-chip"], [data-testid="attachment-preview"]')];
+      const list = document.querySelector('[data-testid="attachment-list"]');
+      const listBox = rect(list);
+      const removes = [...list.querySelectorAll('button[aria-label^="Remove "]')];
+      const thumb = list.querySelector('[data-kind="image"] img');
       const send = document.querySelector('button[aria-label="Send"]');
       const sendBox = rect(send);
       const summary = document.querySelector('[data-testid="attachment-summary"]');
@@ -105,11 +112,17 @@ try {
       const notices = [...document.querySelectorAll("[data-attachment-notice]")];
       return {
         chips: chips.length,
-        names: chips.map((chip) => chip.textContent),
+        names: chips.map((chip) => chip.querySelector('[data-testid="attachment-name"]')?.textContent ?? chip.textContent),
+        kinds: chips.map((chip) => chip.dataset.kind ?? "refused"),
+        thumb: thumb ? { width: rect(thumb.parentElement).width, height: rect(thumb.parentElement).height, drawn: thumb.naturalWidth > 0 } : null,
+        removes: removes.length,
+        removesInside: removes.every((b) => { const r = rect(b); return r.left >= frame.left - 0.5 && r.right <= frame.right + 0.5 && r.top >= listBox.top - 0.5; }),
+        listHeight: listBox.height,
         refused: refused ? { text: refused.textContent, color: getComputedStyle(refused.querySelector("span:last-of-type")).color } : null,
         rows: new Set(chips.map((chip) => Math.round(rect(chip).top))).size,
         chipsInside: chips.every((chip) => { const r = rect(chip); return r.left >= frame.left - 0.5 && r.right <= frame.right + 0.5; }),
-        chipsAboveDraft: chips.every((chip) => rect(chip).bottom <= rect(textarea).top + 0.5),
+        // The list scrolls within itself (PRO-461): it, and so every chip it shows, ends above the draft.
+        chipsAboveDraft: listBox.bottom <= rect(textarea).top + 0.5,
         overlaps: chips.some((a, i) => chips.slice(i + 1).some((b) => { const p = rect(a), q = rect(b); return p.left < q.right - 0.5 && q.left < p.right - 0.5 && p.top < q.bottom - 0.5 && q.top < p.bottom - 0.5; })),
         summary: summary.textContent,
         summaryLines: (() => { const range = document.createRange(); range.selectNodeContents(summary); return new Set([...range.getClientRects()].map((r) => Math.round(r.top))).size; })(),
@@ -129,6 +142,11 @@ try {
     assert.equal(layout.chips, 11, `${label}: ten chips and the refused one ${JSON.stringify(layout.names)}`);
     assert.deepEqual(layout.names.filter((name) => !name.includes("reserved name")), names.filter((name) => name !== "terminalx.json").slice(0, 10), `${label}: the first ten, in order`);
     assert.equal(layout.refused?.text, "terminalx.jsonreserved name", `${label}: the reserved chip says why`);
+    assert.deepEqual(layout.kinds.filter((kind) => kind !== "refused"), ["text", "text", "text", "text", "image", "text", "text", "text", "text", "text"], `${label}: each file with its preview`);
+    assert.ok(layout.thumb?.drawn && Math.round(layout.thumb.width) === 64 && Math.round(layout.thumb.height) === 64, `${label}: the image is a 64px thumbnail ${JSON.stringify(layout.thumb)}`);
+    assert.equal(layout.removes, 11, `${label}: every file keeps its remove control`);
+    assert.ok(layout.removesInside, `${label}: remove controls inside the composer`);
+    assert.ok(layout.listHeight <= 241, `${label}: the list keeps to its height (${layout.listHeight})`);
     assert.equal(layout.summary, "10 attached · 1 refused · 4 not added", `${label}: summary line`);
     assert.equal(layout.summarySize, "11px", `${label}: summary at 11px`);
     assert.equal(layout.summaryLines, 1, `${label}: summary on one line`);
@@ -149,7 +167,7 @@ try {
     const [sent] = await page.evaluate(() => window.__sent);
     assert.deepEqual(sent.images, ["push-timeline.png"], `${label}: image sent as an image`);
     assert.deepEqual(sent.files, names.filter((name) => name !== "terminalx.json" && name !== "push-timeline.png").slice(0, 9), `${label}: files sent beside it`);
-    await page.getByTestId("file-chip").first().waitFor({ state: "detached" });
+    await page.getByTestId("attachment-preview").first().waitFor({ state: "detached" });
     assert.equal(await page.getByTestId("attachment-summary").count(), 0, `${label}: nothing left above the draft`);
     assert.deepEqual(errors, [], `${label}: no page errors`);
     console.log(`ok ${label}: 10 chips + reserved chip wrap in ${layout.rows} rows, no sideways scroll, Send visible, both toasts, send carries the ten`);

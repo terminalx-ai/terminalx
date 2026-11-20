@@ -343,12 +343,13 @@ export function AppShell() {
   const opening = store.view === "new" && !store.selectedSessionId ? store.newSessionReturn : null;
   const behind = opening?.sessionId ? (store.sessions.find((s) => s.id === opening.sessionId && !s.archived) ?? null) : null;
   const localDockVisible = prefs.panelOpen && !settingsOpen && !machineSession && !cloudKey && !!(selected || behind);
-  // Go → Run View (18.01): the open session's run, while it leads one and runs are on (Settings → Experimental).
-  // A session that leads no run, or a cloud one, has none to open: the keys do nothing there.
+  // Go → Run View (18.01): the open session's run, while runs are on (Settings → Experimental). On a session that
+  // leads none it opens the page that says how to start one (18.08), which nothing else in the session offers
+  // (#1404). A cloud session, or one whose run is still being read, has none to open: the keys do nothing there.
   const orchestrating = experimentalSwitches?.orchestratorRuns === true;
   const selectedRun = useRun(selected && !cloudKey ? selected.id : undefined, orchestrating);
   useShortcut("app.runView", () => {
-    if (!selected || !selectedRun) return;
+    if (!selected || selectedRun === undefined) return;
     if (!canLeave()) return;
     setSettingsOpen(false);
     showRunView(selected.id, true);

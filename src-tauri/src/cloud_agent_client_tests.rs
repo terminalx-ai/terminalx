@@ -172,6 +172,22 @@ fn an_outbox_entry_says_how_many_images_its_message_names() {
     }
 }
 
+/// #1329: files other than images are counted as images are, and files
+/// alone are a message.
+#[test]
+fn an_outbox_entry_says_how_many_files_its_message_names() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    give_key(&fixture);
+    let plain = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
+    assert!(serde_json::to_value(&plain).unwrap().get("files").is_none());
+    let with_files = json!({ "text": "", "files": [{ "id": "att-0001", "name": "plan.md" }] });
+    let filed = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_files, true).unwrap();
+    assert_eq!((filed.files, filed.images), (1, 0));
+    assert!(!serde_json::to_string(&filed).unwrap().contains("plan.md"), "a count, never the names");
+    assert_eq!(fixture.client.outbox(ORG, WS, None).unwrap().iter().map(|entry| entry.files).collect::<Vec<_>>(), vec![0, 1], "the count survives a reload");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "", "files": [{ "id": "att-0002" }] }), true).unwrap_err(), "cloud_agent_request_invalid");
+}
+
 #[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
@@ -720,6 +736,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         ciphertext: String::new(),
         text: None,
         images: 0,
+        files: 0,
         request_id: None,
         state: state.into(),
         wake: None,

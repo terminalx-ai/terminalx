@@ -1571,8 +1571,10 @@ describe("attaching any file (PRO-290)", () => {
   const file = (name: string, type = "text/plain", bytes: Uint8Array = new Uint8Array([1, 2, 3])) => new File([bytes], name, { type });
   const dropOn = (container: HTMLElement, files: File[]) =>
     fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files, types: ["Files"] } });
-  const chips = () => screen.queryAllByTestId("file-chip");
-  const sentChips = () => chips().filter((chip) => !chip.hasAttribute("data-refused"));
+  /** Every file above the draft: a refused one as a red chip, the rest with their previews (PRO-461). */
+  const chips = () => [...document.querySelectorAll<HTMLElement>('[data-testid="file-chip"], [data-testid="attachment-preview"]')];
+  const sentChips = () => screen.queryAllByTestId("attachment-preview");
+  const nameOf = (chip: HTMLElement) => within(chip).getByTestId("attachment-name").textContent;
   /** Nine traces, the reserved name, then six more: 10 attached, 1 refused, 4 not added (screen 03.23). */
   const fifteen = () => [
     ...Array.from({ length: 9 }, (_, i) => file(`trace-${i + 1}.log`)),
@@ -1587,7 +1589,7 @@ describe("attaching any file (PRO-290)", () => {
     dropOn(container, fifteen());
     await waitFor(() => expect(chips()).toHaveLength(11));
     expect(sentChips()).toHaveLength(10);
-    expect(sentChips().map((chip) => chip.textContent)).toEqual([...Array.from({ length: 9 }, (_, i) => `trace-${i + 1}.log`), "extra-1.log"]);
+    expect(sentChips().map(nameOf)).toEqual([...Array.from({ length: 9 }, (_, i) => `trace-${i + 1}.log`), "extra-1.log"]);
     const summary = screen.getByTestId("attachment-summary");
     expect(summary.textContent).toBe("10 attached · 1 refused · 4 not added");
     expect(within(summary).getByText("1 refused").className).toContain("text-destructive");
@@ -1639,7 +1641,7 @@ describe("attaching any file (PRO-290)", () => {
     const pending = renderHook(() => useComposerSend("tab-1"));
     onSend.mockImplementation(() => {
       // The message drawn as sending lists its files by name.
-      expect(pending.result.current.pending?.message?.files).toEqual([{ name: "notes.md" }, { name: "huge.png" }]);
+      expect(pending.result.current.pending?.message?.files).toEqual([{ name: "notes.md", size: 3 }, { name: "huge.png", size: 5 * 1024 * 1024 + 1 }]);
     });
     dropOn(container, [file("notes.md", "text/markdown"), file("shot.png", "image/png"), file("huge.png", "image/png", new Uint8Array(5 * 1024 * 1024 + 1))]);
     await waitFor(() => expect(chips()).toHaveLength(3));
@@ -1674,7 +1676,7 @@ describe("attaching any file (PRO-290)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
     // Back above the draft, in their order.
-    await waitFor(() => expect(chips().map((chip) => chip.textContent)).toEqual(["notes.md", "shot.png"]));
+    await waitFor(() => expect(chips().map(nameOf)).toEqual(["notes.md", "shot.png"]));
     await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
@@ -1682,6 +1684,68 @@ describe("attaching any file (PRO-290)", () => {
     expect(again[3][0]).toBe(first[3][0]);
     expect(again[1][0]).toBe(first[1][0]);
     await waitFor(() => expect(chips()).toHaveLength(0));
+  });
+});
+
+describe("attachment previews (PRO-461)", () => {
+  const dropOn = (container: HTMLElement, files: File[]) =>
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files, types: ["Files"] } });
+
+  it("shows an image as a thumbnail that opens the image viewer, and keeps its remove control", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    dropOn(container, [new File([new Uint8Array([1])], "Screenshot 1.42.png", { type: "image/png" }), new File([new Uint8Array([2])], "Screenshot 1.43.png", { type: "image/png" })]);
+    const tiles = await waitFor(() => {
+      const found = screen.getAllByTestId("attachment-preview");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(tiles.map((tile) => tile.dataset.kind)).toEqual(["image", "image"]);
+    expect(within(tiles[1]).getByRole("img", { name: "Screenshot 1.43.png" }).getAttribute("src")).toMatch(/^blob:/);
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("2 attached");
+    const { useImageViewer, closeImageViewer } = await import("@/lib/imageViewer");
+    const viewer = renderHook(() => useImageViewer());
+    fireEvent.click(screen.getByRole("button", { name: "View Screenshot 1.43.png" }));
+    expect(viewer.result.current?.index).toBe(1);
+    expect(viewer.result.current?.images.map((image) => image.name)).toEqual(["Screenshot 1.42.png", "Screenshot 1.43.png"]);
+    act(() => closeImageViewer());
+    fireEvent.click(screen.getByRole("button", { name: "Remove Screenshot 1.42.png" }));
+    await waitFor(() => expect(screen.getAllByTestId("attachment-preview")).toHaveLength(1));
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("1 attached");
+  });
+
+  it("shows a text file's first lines, and any other file's type and size", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    dropOn(container, [
+      new File(["\n# Plan\n\nShip the previews.\nThen the rest.\nNot this line.\n"], "plan.md", { type: "text/markdown" }),
+      new File([new Uint8Array(2048)], "spec.pdf", { type: "application/pdf" }),
+    ]);
+    const [text, pdf] = await waitFor(() => {
+      const found = screen.getAllByTestId("attachment-preview");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(text.dataset.kind).toBe("text");
+    await waitFor(() => expect(within(text).getByTestId("attachment-text").textContent).toBe("# Plan\n\nShip the previews."));
+    expect(pdf.dataset.kind).toBe("file");
+    expect(within(pdf).getByTestId("attachment-name").textContent).toBe("spec.pdf");
+    expect(within(pdf).getByTestId("attachment-meta").textContent).toBe("2 KB · PDF");
+    expect(within(pdf).getByRole("button", { name: "Remove spec.pdf" })).toBeTruthy();
+  });
+
+  it("shows a picked image that goes as a file through the media server, and lets the grant go when it is removed", async () => {
+    openDialog.mockResolvedValue(["/Users/me/Desktop/photo.heic"]);
+    invoke.mockImplementation(async (command: string, args?: { paths?: string[]; root?: string; rel?: string; token?: string }) => {
+      if (command === "inspect_attachments") return args!.paths!.map((path) => ({ path, name: path.split("/").pop()!, size: 4_200_000, mediaType: "image/heic" }));
+      if (command === "open_media_file") return { token: "grant-1", url: "http://127.0.0.1:9/grant-1", mtimeMs: 1 };
+      return undefined;
+    });
+    render(<TestComposer onSend={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    const tile = await screen.findByTestId("attachment-preview");
+    expect(invoke).toHaveBeenCalledWith("open_media_file", { root: "/Users/me/Desktop", rel: "photo.heic" });
+    expect(within(tile).getByRole("img", { name: "photo.heic" }).getAttribute("src")).toBe("http://127.0.0.1:9/grant-1");
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo.heic" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("close_media_file", { token: "grant-1" }));
   });
 });
 
