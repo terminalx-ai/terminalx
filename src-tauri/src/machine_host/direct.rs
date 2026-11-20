@@ -129,7 +129,7 @@ async fn connection(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: toki
     let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await.context("no request")??;
     if request_path(&head)? == MACHINE_PATH {
         anyhow::ensure!(host.enabled(), "computer operation is off");
-        serve_computer(host, rpc, Prefixed::new(head, stream), ComputerRoute::of_peer(peer.ip()), Some(via)).await
+        serve_computer(host, rpc, Prefixed::new(head, stream), ComputerRoute::of_peer(peer.ip()), Some(super::Via { listener: via, peer })).await
     } else {
         forward_phone(&host, head, stream, peer, via).await
     }
@@ -210,7 +210,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 /// full operating rights (decision 5); the live code's token waits for Allow;
 /// anything else is refused. Nothing is granted before Allow: no
 /// `e2ee_authenticated`, no record, no RPC.
-pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S, route: ComputerRoute, via: Option<SocketAddr>) -> Result<()> {
+pub(crate) async fn serve_computer<S: AsyncRead + AsyncWrite + Unpin>(host: Arc<MachineHost>, rpc: Arc<WorkspaceRpc>, stream: S, route: ComputerRoute, via: Option<super::Via>) -> Result<()> {
     let mut socket = tokio_tungstenite::accept_async_with_config(stream, Some(crate::remote::host::websocket_config())).await?;
     let keypair = host.keypair().context("the machine host key is not loaded")?;
     let hello = match tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.next()).await.context("no E2EE hello")? {
@@ -378,13 +378,14 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
     {
         // No window takes phones: the runtime serves the phone itself (PRO-359).
         let Some((route, device_scoped)) = host.direct_phone_route() else {
-            return serve_phone(host, head, stream, via).await;
+            return serve_phone(host, head, stream, super::Via { listener: via, peer }).await;
         };
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut forwarded = host.phones.get().context("phone authority is unavailable")?.forwarded_output(id.clone(), !device_scoped);
         let output = &mut forwarded.authority;
         let generation = *output.borrow_and_update();
         let mut window = tokio::net::UnixStream::connect(&route).await.context("reach the window's phone route")?;
+        let phone_peer = peer;
         let peer = Some(peer.to_string());
         let header = if device_scoped { Forwarded::DirectBound { peer, forwarded_id: id } } else { Forwarded::Direct { peer } };
         window.write_all(&encode_header(&header)?).await?;
@@ -392,7 +393,7 @@ async fn forward_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, he
         // Closed when the host gives up the port, so the window can take it
         // back: the phone reconnects to the window's own listener.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
-        let Some(tracked) = host.track_phone(Some(via), cancel_tx) else { bail!("the machine host is off") };
+        let Some(tracked) = host.track_phone(Some(super::Via { listener: via, peer: phone_peer }), cancel_tx) else { bail!("the machine host is off") };
         let (mut phone_read, mut phone_write) = tokio::io::split(stream);
         let (mut window_read, mut window_write) = window.into_split();
         let output_authority = output.clone();
@@ -442,7 +443,7 @@ async fn copy_window_output<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// Serve a phone here, while no window takes phones (`phones`). It holds
 /// the port as a forwarded phone does, so it closes with the listener.
 #[cfg(unix)]
-async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S, via: SocketAddr) -> Result<()> {
+async fn serve_phone<S: AsyncRead + AsyncWrite + Unpin>(host: &MachineHost, head: Vec<u8>, stream: S, via: super::Via) -> Result<()> {
     let (phones, keypair, port, stopped, epoch) = host.phone_admission().context("the runtime no longer owns phone admission")?;
     let (cancel_tx, mut cancel) = mpsc::unbounded_channel();
     let Some(tracked) = host.track_phone(Some(via), cancel_tx) else { bail!("the machine host is off") };

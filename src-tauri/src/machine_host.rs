@@ -155,8 +155,17 @@ struct Tracked {
     id: u64,
     cancel: mpsc::UnboundedSender<()>,
     route: ComputerRoute,
-    /// The listener it came in on, on a direct route: it closes with it.
-    via: Option<std::net::SocketAddr>,
+    /// How it came in on a direct route: it closes with its listener, and
+    /// when the listen setting no longer answers its address.
+    via: Option<Via>,
+}
+
+/// A direct connection: the listener it came in on, and the address it
+/// came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Via {
+    pub listener: std::net::SocketAddr,
+    pub peer: std::net::SocketAddr,
 }
 
 #[derive(Default)]
@@ -193,7 +202,7 @@ struct State {
     projects_seen: Option<HashMap<String, String>>,
     /// Phones passed to the window from the direct listener. Each holds the
     /// port, so they close with the listener it came in on.
-    phones: HashMap<u64, (Option<std::net::SocketAddr>, mpsc::UnboundedSender<()>)>,
+    phones: HashMap<u64, (Option<Via>, mpsc::UnboundedSender<()>)>,
     awake: Option<crate::power::Assertion>,
     last: Option<Status>,
     /// The live code, the computer waiting for Allow, the attempt limit.
@@ -233,11 +242,33 @@ impl State {
     fn close_listener(&mut self, address: std::net::SocketAddr) {
         let Some(at) = self.listeners.iter().position(|listening| listening.address == address) else { return };
         self.listeners.remove(at).stop();
-        for tracked in self.connections.values().flatten().filter(|tracked| tracked.via == Some(address)) {
+        for tracked in self.connections.values().flatten().filter(|tracked| tracked.via.is_some_and(|via| via.listener == address)) {
             let _ = tracked.cancel.send(());
         }
         for (via, cancel) in self.phones.values() {
-            if *via == Some(address) {
+            if via.is_some_and(|via| via.listener == address) {
+                let _ = cancel.send(());
+            }
+        }
+    }
+
+    /// Whether a direct connection may be let in, or stay: its listener is
+    /// still open, and the plan answers its address.
+    fn keeps(&self, via: Option<Via>) -> bool {
+        via.is_none_or(|via| self.listeners.iter().any(|listening| listening.address == via.listener) && crate::listen::caller_allowed(via.peer.ip(), self.plan().allow_public))
+    }
+
+    /// Close every direct connection the plan no longer answers: public
+    /// callers once they are not allowed. Run whenever the plan changes, so
+    /// a connection let in under the old plan does not outlive it.
+    fn close_refused_callers(&mut self) {
+        let allow_public = self.plan().allow_public;
+        let refused = |via: &Option<Via>| via.is_some_and(|via| !crate::listen::caller_allowed(via.peer.ip(), allow_public));
+        for tracked in self.connections.values().flatten().filter(|tracked| refused(&tracked.via)) {
+            let _ = tracked.cancel.send(());
+        }
+        for (via, cancel) in self.phones.values() {
+            if refused(via) {
                 let _ = cancel.send(());
             }
         }
@@ -349,6 +380,12 @@ pub struct MachineHost {
     account_relay: Mutex<Option<AccountRelay>>,
     /// Refused public callers, for one log line an hour (PRO-487).
     refusals: crate::listen::Refusals,
+    /// Relay devices of pairing-code invites that ended unused and that the
+    /// relay has not yet confirmed revoking, each with whether a
+    /// `device-revoke` is in flight. Kept until the relay answers
+    /// `device-revoked`, so an invite is not left usable because the relay
+    /// was down when its code ended.
+    unrevoked: Arc<Mutex<HashMap<String, bool>>>,
     /// Phones it serves itself while no window takes them (PRO-359). Only a
     /// runtime with an owner lifetime serves them.
     #[cfg(unix)]
@@ -487,6 +524,7 @@ impl MachineHost {
             account_relay_allowed,
             account_relay: Mutex::new(None),
             refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         })
     }
 
@@ -564,6 +602,7 @@ impl MachineHost {
             let mut state = self.state.lock().unwrap();
             state.plan = Some(crate::listen::Plan { choice: listen, chosen: true, allow_public, public_unanswered: false });
             crate::listen::remember(state.plan());
+            state.close_refused_callers();
             let mut status = self.listen_status(&state);
             // As it will be once the listeners follow, a moment from now.
             status.addresses = state.plan().binds(&state.interfaces).into_iter().map(|ip| std::net::SocketAddr::from((ip, self.port)).to_string()).collect();
@@ -835,6 +874,7 @@ impl MachineHost {
                 state.keep_awake = settings.pairing.keep_awake;
                 state.plan = Some(crate::listen::Plan::of(&settings.machines));
                 crate::listen::remember(state.plan());
+                state.close_refused_callers();
             }
             // Addresses come and go (Tailscale up, a new network): the
             // listeners follow them on every pass.
@@ -1223,14 +1263,54 @@ impl MachineHost {
 
     /// End the relay invites of pairing codes that ended unused there, so a
     /// leaked code cannot be used through the relay later.
+    ///
+    /// A device stays queued until the relay confirms with `device-revoked`:
+    /// while the relay is not registered, or a request fails or times out,
+    /// the next pass sends it again (revoking is idempotent). Its open relay
+    /// connections are closed at once either way.
     fn retire_code_invites(&self) {
         let retired = self.state.lock().unwrap().pairing.take_retired();
-        if retired.is_empty() {
-            return;
+        let relay = self.relay();
+        {
+            let mut unrevoked = self.unrevoked.lock().unwrap();
+            for device in retired {
+                if let Some(relay) = &relay {
+                    relay.close_device_connections(&device);
+                }
+                unrevoked.entry(device).or_insert(false);
+            }
+            if unrevoked.is_empty() {
+                return;
+            }
         }
-        let Some(relay) = self.relay() else { return };
-        for device in retired {
-            relay.revoke_device(&device);
+        let Some(relay) = relay.filter(|relay| relay.is_registered()) else { return };
+        let sending: Vec<String> = {
+            let mut unrevoked = self.unrevoked.lock().unwrap();
+            unrevoked.iter_mut().filter(|(_, in_flight)| !**in_flight).map(|(device, in_flight)| {
+                *in_flight = true;
+                device.clone()
+            }).collect()
+        };
+        for device in sending {
+            let (relay, unrevoked) = (relay.clone(), self.unrevoked.clone());
+            Self::off_task(move || {
+                let req_id = uuid::Uuid::new_v4().simple().to_string();
+                let confirmed = relay
+                    .forward_control(json!({ "type": "device-revoke", "v": 1, "reqId": req_id, "relayDeviceId": device }))
+                    .ok()
+                    .and_then(|reply| reply.recv_timeout(RELAY_CONTROL_WAIT).ok())
+                    .and_then(Result::ok)
+                    .is_some_and(|reply| reply["type"] == "device-revoked");
+                let mut unrevoked = unrevoked.lock().unwrap();
+                if confirmed {
+                    unrevoked.remove(&device);
+                } else {
+                    log::debug!("machine host: the relay has not confirmed ending an unused pairing invite; trying again");
+                    if let Some(in_flight) = unrevoked.get_mut(&device) {
+                        *in_flight = false;
+                    }
+                }
+            });
         }
     }
 
@@ -1289,12 +1369,17 @@ impl MachineHost {
 
     /// Note a computer's connection by `route`, unless the switch is off;
     /// the returned id forgets it again. Whether it is its first.
-    fn track(&self, computer: &registry::PairedComputer, route: ComputerRoute, via: Option<std::net::SocketAddr>, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
+    fn track(&self, computer: &registry::PairedComputer, route: ComputerRoute, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let first = {
             let mut state = self.state.lock().unwrap();
             if !state.enabled {
                 bail!("other computers may not operate this machine now");
+            }
+            // Accepted under an earlier plan, or on a listener closed while
+            // it was handshaking: not let in under this one.
+            if !state.keeps(via) {
+                bail!("the machine no longer listens where this computer connected, or no longer answers its address");
             }
             let connections = state.connections.entry(computer.id.clone()).or_default();
             let first = connections.is_empty();
@@ -1319,7 +1404,7 @@ impl MachineHost {
     /// racing this admission is either seen here or finds the connection and
     /// closes it. Admission settles a rotated token (`Registry::admitted`).
     /// Blocking: reads and writes the registry.
-    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, via: Option<std::net::SocketAddr>, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
+    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
         let now = now_ms();
         // One connected now is in use, however long ago it was let in: a
         // second connection (the direct probe beside the relay, a reconnect
@@ -1399,10 +1484,10 @@ impl MachineHost {
     }
 
     /// Note a phone passed to the window, unless the host is off.
-    pub(crate) fn track_phone(&self, via: Option<std::net::SocketAddr>, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
+    pub(crate) fn track_phone(&self, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
-        state.hosting().then(|| {
+        (state.hosting() && state.keeps(via)).then(|| {
             state.phones.insert(id, (via, cancel));
             id
         })
@@ -1594,6 +1679,7 @@ impl MachineHost {
             account_relay_allowed: false,
             account_relay: Mutex::new(None),
             refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         let listening = direct::listen_everywhere(host.clone(), rpc, 0)?;
@@ -1624,6 +1710,7 @@ impl MachineHost {
             account_relay_allowed: false,
             account_relay: Mutex::new(None),
             refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         host
@@ -1652,6 +1739,7 @@ impl MachineHost {
             let mut state = self.state.lock().unwrap();
             state.plan = Some(plan);
             state.interfaces = interfaces;
+            state.close_refused_callers();
         }
         let rpc = self.rpc()?.context("the test host has its rpc")?;
         self.listen_where_chosen(rpc)
@@ -2087,8 +2175,10 @@ impl crate::remote::host::MachineRoutes for MachineHost {
     }
 
     fn is_computer(&self, relay_device_id: &str) -> bool {
-        // A computer pairing with the live code's invite is one too (PRO-487).
-        if self.state.lock().unwrap().pairing.is_relay_device(relay_device_id) {
+        // A computer pairing with the live code's invite is one too (PRO-487),
+        // and so is an ended invite's device the relay has not confirmed
+        // revoking: never handed to the window as a phone.
+        if self.state.lock().unwrap().pairing.is_relay_device(relay_device_id) || self.unrevoked.lock().unwrap().contains_key(relay_device_id) {
             return true;
         }
         self.registry.knows_relay_device(relay_device_id).unwrap_or_else(|error| {

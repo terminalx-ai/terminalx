@@ -2033,6 +2033,11 @@ which runs in a child process because data privacy is one switch per process.
   logged once an hour and its time kept in
   `<data dir>/machine-host/public-callers.json`, which is how the one-time
   question survives a restart.
+- **A plan change applies to connections already in.** Each direct
+  connection keeps its listener and its peer address; withdrawing public
+  callers closes the ones from public addresses at once, and a handshake
+  that finishes after its listener closed, or from an address the plan no
+  longer answers, is not let in.
 - **The one-time question** (decision 3). `ListenStatus.askPublic` is true
   while nobody chose and either the machine has a public address or a public
   caller was refused. `service status`, Settings → Machines and the
@@ -2055,7 +2060,8 @@ which runs in a child process because data privacy is one switch per process.
   `MachineRoutes::pair_computer` accepts only the invite's relay device and
   records it with the computer, so later connections are admitted as for
   any computer with relay access. An invite whose code ends unused is
-  revoked. With neither a listener nor a registration, `createCode` refuses
+  revoked (`device-revoke`); its device stays queued, retried each pass and
+  never taken for a phone, until the relay answers `device-revoked`. With neither a listener nor a registration, `createCode` refuses
   (`not_reachable`) and says to run `terminalx-serve login` or choose a
   listener. A signed-out operating computer gets `sign-in-required`.
 - **Commands.** `terminalx-serve pair` asks where to listen the first time

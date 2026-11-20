@@ -416,6 +416,81 @@ async fn a_machine_from_before_the_setting_asks_once_about_its_public_address() 
     }
 }
 
+/// PRO-487 (security review): a connection let in under one plan does not
+/// outlive it. Withdrawing "answer public callers" closes the direct
+/// connections and phones from public addresses at once, and leaves the
+/// rest; a connection that finishes its handshake after its listener closed,
+/// or from an address the plan no longer answers, is not let in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn withdrawing_public_callers_closes_the_ones_already_in_and_late_handshakes_are_refused() {
+    use super::{Tracked, Via};
+    use crate::listen::Listen;
+    use crate::machine_wire::ComputerRoute;
+    let rig = rig(TTL);
+    let listener: std::net::SocketAddr = format!("0.0.0.0:{}", rig.port).parse().unwrap();
+    let via = |peer: &str| Via { listener, peer: peer.parse().unwrap() };
+    let (public_tx, mut public_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (private_tx, mut private_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (phone_tx, mut phone_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, true));
+        state.connections.entry("far".into()).or_default().push(Tracked { id: 901, cancel: public_tx, route: ComputerRoute::Lan, via: Some(via("203.0.113.7:50000")) });
+        state.connections.entry("near".into()).or_default().push(Tracked { id: 902, cancel: private_tx, route: ComputerRoute::Lan, via: Some(via("192.168.1.20:50000")) });
+        state.connections.entry("relayed".into()).or_default().push(Tracked { id: 903, cancel: relay_tx, route: ComputerRoute::Relay, via: None });
+        state.phones.insert(904, (Some(via("198.51.100.9:50000")), phone_tx));
+        // Allowed: nothing is closed.
+        state.close_refused_callers();
+    }
+    assert!(public_rx.try_recv().is_err() && phone_rx.try_recv().is_err(), "public callers stay while they are allowed");
+
+    // Withdrawn, as the settings file says on the next pass, or machine.setListen at once.
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, false));
+        state.close_refused_callers();
+    }
+    assert!(public_rx.try_recv().is_ok(), "the computer from a public address is closed");
+    assert!(phone_rx.try_recv().is_ok(), "and the phone from one");
+    assert!(private_rx.try_recv().is_err(), "a private caller stays");
+    assert!(relay_rx.try_recv().is_err(), "a relay connection has no address to judge and stays");
+    rig.host.state.lock().unwrap().connections.retain(|id, _| !["far", "near", "relayed"].contains(&id.as_str()));
+    rig.host.state.lock().unwrap().phones.remove(&904);
+
+    // A handshake that ends after the plan changed is judged by the new plan.
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(Some(via("203.0.113.7:50001")), cancel).is_none(), "a public phone is not let in");
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    let phone = rig.host.track_phone(Some(via("192.168.1.20:50001")), cancel).expect("a private phone is");
+    rig.host.untrack_phone(phone);
+    // And by its listener: one closed while it handshook lets nothing in.
+    let gone = Via { listener: "192.168.1.20:6768".parse().unwrap(), peer: "192.168.1.30:50002".parse().unwrap() };
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(Some(gone), cancel).is_none(), "its listener is closed");
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(None, cancel).map(|id| rig.host.untrack_phone(id)).is_some(), "a relay phone has no listener to judge");
+}
+
+/// PRO-487 (security review): an unused pairing code's relay invite is
+/// revoked even if the relay was not there when the code ended. Its device
+/// stays queued, and is never taken for a phone, until the relay confirms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ended_invite_waits_for_the_relay_to_confirm_its_revocation() {
+    let rig = rig(TTL);
+    rig.host.code_with_relay_for_test("computer-unused");
+    // Replaced by a new code with no relay to tell: kept, not forgotten.
+    rig.host.state.lock().unwrap().pairing.create(super::now_ms(), None, None).unwrap();
+    rig.host.retire_code_invites();
+    assert!(rig.host.unrevoked.lock().unwrap().contains_key("computer-unused"), "queued until a relay confirms it");
+    assert_eq!(rig.host.unrevoked.lock().unwrap().get("computer-unused"), Some(&false), "nothing in flight without a registered relay");
+    use crate::remote::host::MachineRoutes;
+    assert!(rig.host.is_computer("computer-unused"), "its connections are never handed on as a phone's");
+    // Every later pass tries again; still nothing to send it to.
+    rig.host.retire_code_invites();
+    assert!(rig.host.unrevoked.lock().unwrap().contains_key("computer-unused"));
+}
+
 /// PRO-487: the listeners follow the choice. "Relay only" opens no port and
 /// closes the connections that came in on one; "Local network" binds private
 /// and Tailscale addresses only, never loopback or a public one; the

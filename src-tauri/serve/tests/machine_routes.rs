@@ -679,6 +679,25 @@ async fn a_relay_only_machine_opens_no_port_and_is_paired_by_code_through_the_re
     let invite = code.relay.clone().expect("a relay invite in the code");
     assert_eq!(invite.relay_host_id, machine_id);
     assert_eq!(relay.invites(&invite.relay_device_id), vec![(invite.invite_token.clone(), false)], "minted for this code's computer, not used yet");
+    let code_first_device = invite.relay_device_id.clone();
+
+    // A code replaced before it was used: the relay revokes its invite's device (security review).
+    let replaced = person(&serve, &world.data, "runtime.machineHost.createCode", json!({}));
+    let replaced = MachineCode::decode(replaced["code"].as_str().unwrap()).unwrap().relay.expect("a relay invite");
+    let created = person(&serve, &world.data, "runtime.machineHost.createCode", json!({}));
+    let code = MachineCode::decode(created["code"].as_str().unwrap()).unwrap();
+    let invite = code.relay.clone().expect("a relay invite in the new code");
+    assert_ne!(invite.relay_device_id, replaced.relay_device_id);
+    eventually("the replaced code's invite to be revoked at the relay", || {
+        relay.revoked(&machine_id, &replaced.relay_device_id).then_some(()).ok_or_else(|| "not yet".to_string())
+    })
+    .await;
+    // So was the first code's, which the second replaced.
+    eventually("the first code's invite to be revoked", || {
+        relay.revoked(&machine_id, &code_first_device).then_some(()).ok_or_else(|| "not yet".to_string())
+    })
+    .await;
+    assert!(!relay.revoked(&machine_id, &invite.relay_device_id), "the live code's invite is not");
 
     // A computer nobody is signed in on cannot use the relay, and is told so; the code is still live.
     let client_secret = random_bytes::<32>();
