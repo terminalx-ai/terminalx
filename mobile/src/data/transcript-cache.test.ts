@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { clearTranscriptCaches, readCache, reclaimOrphanChunks, savedCursors, writeCache, type SyncCursor } from "./transcript-cache";
-import { keepPrefetched } from "./prefetch";
+import { keepPrefetched, startPrefetch } from "./prefetch";
+import { HostApi } from "./host-api";
+import type { HostConnection } from "../transport/connection";
 
 const storage = vi.hoisted(() => new Map<string, string>());
 /** Every key written, in order: what a save costs. */
@@ -141,6 +143,45 @@ describe("keeping what a prefetch sent (#1283)", () => {
     await writeCache("host", "session", "tab", { events: range(1, 300), cursor: cursor(300), hasEarlier: false });
     await keepPrefetched("host", { sessionId: "session", tabId: "tab", page: { events: range(281, 310), cursor: cursor(310), reset: true, hasMore: false, hasEarlier: true } });
     expect((await readCache("host", "session", "tab")).events).toHaveLength(300);
+  });
+
+  it("names the checkpoint of a conversation the Mac will send among more than it can name (#1339)", async () => {
+    // 200 kept conversations, more than the 128 checkpoints a prefetch names;
+    // the one the Mac will send was saved first, so the newest 128 leave it out.
+    vi.useFakeTimers();
+    try {
+      for (let n = 0; n < 200; n++) {
+        vi.setSystemTime(1_000 + n);
+        await writeCache("host", n === 0 ? "session" : `s-${n}`, "tab", { events: n === 0 ? range(1, 300) : [], cursor: cursor(n === 0 ? 300 : n), hasEarlier: false });
+      }
+    } finally { vi.useRealTimers(); }
+    const target = { sessionId: "session", tabId: "tab" };
+    const mac = (features: Record<string, number>) => vi.fn(async (method: string, params?: { enabled?: boolean }) =>
+      method === "sync.capabilities" ? { ok: true, value: features }
+        : method === "sync.prefetchTargets" ? { ok: true, value: { targets: [target, { sessionId: "uncached", tabId: "tab" }] } }
+          : { ok: true, value: { enabled: params?.enabled } });
+    const named = (request: ReturnType<typeof mac>) =>
+      (request.mock.calls.find(([method]) => method === "sync.prefetch")?.[1] as { known: { sessionId: string; cursor: SyncCursor }[] }).known;
+
+    // A Mac that cannot say what it will send is named the newest 128, as before.
+    const older = mac({ prefetch: 1 });
+    expect(await startPrefetch(new HostApi({ request: older, onEvent: () => () => {} } as unknown as HostConnection), "host")).toBe(true);
+    expect(older).not.toHaveBeenCalledWith("sync.prefetchTargets", expect.anything());
+    expect(named(older)).toHaveLength(128);
+    expect(named(older).some(({ sessionId }) => sessionId === "session")).toBe(false);
+
+    const request = mac({ prefetch: 1, prefetchTargets: 1 });
+    expect(await startPrefetch(new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection), "host")).toBe(true);
+    const known = named(request);
+    // Still bounded, with the target's checkpoint first; one the phone does not keep is not named.
+    expect(known).toHaveLength(128);
+    expect(known[0]).toEqual({ ...target, cursor: cursor(300) });
+    expect(known.some(({ sessionId }) => sessionId === "uncached")).toBe(false);
+    expect(known[1].sessionId).toBe("s-199");
+
+    // So the Mac sends the target from that checkpoint, and the page is added to the copy.
+    await keepPrefetched("host", { ...target, after: cursor(300), page: { events: range(301, 305), cursor: cursor(305), reset: false, hasMore: false, hasEarlier: true } });
+    expect(await readCache("host", "session", "tab")).toEqual({ events: range(1, 305), cursor: cursor(305), hasEarlier: false });
   });
 
   it("writes nothing for a Mac forgotten while the page was on its way", async () => {

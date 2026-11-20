@@ -100,8 +100,14 @@ async function readCacheV2(host: string, session: string, tab: string): Promise<
   return data;
 }
 
-/** The checkpoints of the transcripts kept for a Mac, newest saved first (#1283): a prefetch continues from them. */
-export async function savedCursors(host: string, limit: number): Promise<{ sessionId: string; tabId: string; cursor: SyncCursor }[]> {
+/**
+ * The checkpoints of the transcripts kept for a Mac, newest saved first
+ * (#1283): a prefetch continues from them. Those of `first`, the
+ * conversations the Mac said it would send, come before the rest (#1339), so
+ * a kept one is named however long ago it was saved.
+ */
+export async function savedCursors(host: string, limit: number, first: { sessionId: string; tabId: string }[] = []): Promise<{ sessionId: string; tabId: string; cursor: SyncCursor }[]> {
+  const wanted = new Set(first.map(({ sessionId, tabId }) => JSON.stringify([sessionId, tabId])));
   try {
     const keys = (await AsyncStorage.getAllKeys()).filter((k) => k.startsWith(indexPrefix));
     const found: { sessionId: string; tabId: string; cursor: SyncCursor; savedAt: number }[] = [];
@@ -112,7 +118,8 @@ export async function savedCursors(host: string, limit: number): Promise<{ sessi
         if (owner === host && typeof sessionId === "string" && typeof tabId === "string" && index?.cursor) found.push({ sessionId, tabId, cursor: index.cursor, savedAt: index.savedAt });
       } catch { /* A broken entry is read again, and replaced, when its conversation opens. */ }
     }
-    return found.sort((left, right) => right.savedAt - left.savedAt).slice(0, limit).map(({ sessionId, tabId, cursor }) => ({ sessionId, tabId, cursor }));
+    const rank = ({ sessionId, tabId }: { sessionId: string; tabId: string }) => wanted.has(JSON.stringify([sessionId, tabId])) ? 0 : 1;
+    return found.sort((left, right) => rank(left) - rank(right) || right.savedAt - left.savedAt).slice(0, limit).map(({ sessionId, tabId, cursor }) => ({ sessionId, tabId, cursor }));
   } catch { return []; }
 }
 

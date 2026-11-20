@@ -65,7 +65,7 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -244,6 +244,22 @@ export class HostApi {
     const named = enabled ? { known, ...(features.prefetchOpen === 1 && open.length > 0 ? { open } : {}) } : {};
     const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...named });
     return result.ok && result.value?.enabled === true;
+  }
+
+  /**
+   * The conversations a prefetch started now would send (#1339), so the
+   * phone names its checkpoints for those, among more it keeps than it can
+   * name. Empty from a Mac that does not name `prefetchTargets`, or when the
+   * Mac could not say: the prefetch then goes ahead from the newest saved.
+   */
+  async prefetchTargets(): Promise<{ sessionId: string; tabId: string }[]> {
+    const features = await this.features();
+    if (features.prefetchTargets !== 1) return [];
+    const result = await this.connection.request<{ targets?: unknown }>("sync.prefetchTargets", {});
+    const targets = result.ok ? result.value?.targets : undefined;
+    if (!Array.isArray(targets)) return [];
+    return targets.filter((target): target is { sessionId: string; tabId: string } =>
+      typeof target?.sessionId === "string" && typeof target.tabId === "string").map(({ sessionId, tabId }) => ({ sessionId, tabId }));
   }
 
   /** Each conversation a prefetch sends, as the page `session.sync` would have read from `after` (#1283). */

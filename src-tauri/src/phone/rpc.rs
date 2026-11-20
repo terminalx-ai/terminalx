@@ -874,6 +874,7 @@ pub(crate) fn dispatch(
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
         "session.tail" => parse_params(params).and_then(|params| session_tail(connection, request_id(request), params)),
         "sync.prefetch" => parse_params(params).and_then(|params| prefetch(connection, params)),
+        "sync.prefetchTargets" => no_params(&params).and_then(|_| prefetch_targets_reply()),
         "session.image" => parse_params(params).and_then(|params: PromptImageParams| prompt_image(&params)),
         "session.subscribe" => sink
             .as_ref()
@@ -958,7 +959,9 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // `prefetch`: `sync.prefetch` sends the newest part of the most recently
     // active conversations ahead of time, as `session.prefetch` (#1283).
     // `prefetchOpen`: it takes `open`, the conversations on the phone's screen, and sends none of them (#1337).
-    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1 });
+    // `prefetchTargets`: `sync.prefetchTargets` names the conversations a
+    // prefetch would send, so the phone names its checkpoints for those (#1339).
+    let mut named = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1 });
     // `sendIds`: `session.send` and `chat.post` take a `clientMessageId` (#675).
     // `sessionControls`: stop, interrupt, recovery, settings and continuing in
     // a new tab, as the desktop offers them.
@@ -1477,6 +1480,16 @@ fn prefetch(connection: &Arc<MobileConnection>, params: PrefetchParams) -> Resul
     // Replaces the one under way, if any: never more than one thread at work for a connection.
     connection.prefetch.submit(PrefetchJob { connection: Arc::downgrade(connection), known, open })?;
     Ok(json!({ "enabled": true, "sessions": PREFETCH_SESSIONS, "bytes": PREFETCH_BYTES }))
+}
+
+/// The conversations a `sync.prefetch` started now would send (#1339). A
+/// phone keeps more conversations than it can name checkpoints for; it asks
+/// this first and names the checkpoints of these, so a conversation it keeps
+/// is sent from where its copy ends, not as a newest part it would drop. The
+/// list is at most `PREFETCH_SESSIONS` × `PREFETCH_TABS_PER_SESSION` long.
+fn prefetch_targets_reply() -> Result<Value> {
+    let targets = prefetch_targets(index::load()?);
+    Ok(json!({ "targets": targets.into_iter().map(|(session, tab)| json!({ "sessionId": session, "tabId": tab })).collect::<Vec<_>>() }))
 }
 
 /// What one `sync.prefetch` asked for.
@@ -3095,6 +3108,33 @@ mod tests {
         assert_eq!(targets.iter().map(|(session, _)| session).collect::<HashSet<_>>().len(), PREFETCH_SESSIONS);
     }
 
+    /// #1339: the phone asks what a prefetch would send before naming its
+    /// checkpoints, and is told the very conversations the prefetch sends.
+    #[test]
+    fn a_phone_is_told_the_conversations_a_prefetch_would_send() {
+        let _home = store::temp_home();
+        let session = |id: &str, modified: &str, tabs: &[&str], archived: bool| -> SessionEntry {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": "/p", "cwd": "/p", "title": id, "created": "x", "modified": modified, "archived": archived,
+                "tabs": tabs.iter().map(|tab| json!({ "id": tab, "harness": "claude", "created": "x", "modified": modified })).collect::<Vec<_>>(),
+            })).unwrap()
+        };
+        let sessions = vec![
+            session("older", "2026-11-01", &["o-1"], false),
+            session("newer", "2026-11-02", &["n-1"], false),
+            session("archived", "2026-11-03", &["a-1"], true),
+        ];
+        index::save(&sessions).unwrap();
+        let reply = prefetch_targets_reply().unwrap();
+        assert_eq!(reply, json!({ "targets": [
+            { "sessionId": "newer", "tabId": "n-1" },
+            { "sessionId": "older", "tabId": "o-1" },
+        ] }));
+        let sent: Vec<_> = prefetch_targets(index::load().unwrap()).into_iter()
+            .map(|(session, tab)| json!({ "sessionId": session, "tabId": tab })).collect();
+        assert_eq!(reply["targets"], json!(sent));
+    }
+
     #[test]
     fn sync_cold_unchanged_and_large_gap_are_contiguous() {
         let mut events: Vec<_> = (1..=100).map(prompt).collect();
@@ -3702,20 +3742,20 @@ mod tests {
     /// serve, not what this app could serve through a runtime of its own build.
     #[test]
     fn a_phone_is_offered_only_what_the_attached_runtime_serves() {
-        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
+        let released = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1, "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1 });
         let mut every = released.clone();
         every["closeTab"] = json!(1);
         every["layeredConfiguration"] = json!(1);
         every["questions"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
         assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration and answering questions came later");
-        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1 });
+        let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");
         assert_eq!(capabilities(&runtime_of(None, None)), app_only, "nor from one that would not say its version");
         // A runtime that names features is taken at its word, at the level this app knows.
         let named = capabilities(&runtime_of(Some("9.0.0"), Some(json!({ "terminal": 2, "sendIds": 0, "sessionCreate": "1", "futureThing": 1 }))));
-        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "terminal": 1 }));
+        assert_eq!(named, json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1, "terminal": 1 }));
     }
 
     /// #730: an operation the runtime does not know reads as what to do about it.
