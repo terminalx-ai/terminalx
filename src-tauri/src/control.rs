@@ -1060,17 +1060,35 @@ impl ControlService {
         };
         let place = memory::Place::parse(&bot, optional_string(&params, "place").as_deref().unwrap_or(memory::BOT_PLACE)).map_err(failed)?;
         let from_bot = by != bots::OWNER;
+        if from_bot {
+            // Off means off: a bot neither reads, writes nor forgets its notes.
+            if bot.memory_off {
+                return Err(ControlError::new("forbidden", "Your owner turned your memory off: nothing is kept, and there is nothing to read or forget.", None::<String>));
+            }
+            // A conversation reaches its own notes and those of the place it works in; the others are the owner's to manage.
+            let working = memory::working_place(&bot);
+            if place != memory::Place::Bot && place != working {
+                return Err(ControlError::new(
+                    "forbidden",
+                    format!("This conversation works in {}; the notes of other places are not yours to read or change from here.", working.key()),
+                    Some(format!("Use --place bot or --place {}, or leave --place out.", working.key())),
+                ));
+            }
+        }
         match command {
             "bots.memory.add" => {
-                if from_bot && bot.memory_off {
-                    return Err(ControlError::new("forbidden", "Your owner turned your memory off: nothing is kept.", None::<String>));
-                }
                 let recorded = memory::add(sink, &bot, &place, &required_string(&params, "text")?, &by, source).map_err(failed)?;
-                Ok(json!({"bot": bot.id, "place": place.key(), "changes": recorded}))
+                Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
             }
             "bots.memory.forget" => {
-                let recorded = memory::forget(sink, &bot, &place, &required_string(&params, "line")?, &by, source).map_err(failed)?;
-                Ok(json!({"bot": bot.id, "place": place.key(), "changes": recorded}))
+                // `--line N` counts from 1, as the list shows the lines.
+                let index = match params["number"].as_u64() {
+                    Some(0) => return Err(ControlError::invalid("Lines are counted from 1.")),
+                    Some(number) => Some(number as usize - 1),
+                    None => None,
+                };
+                let recorded = memory::forget(sink, &bot, &place, &required_string(&params, "line")?, index, &by, source).map_err(failed)?;
+                Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
             }
             _ => {
                 let view = memory::view(sink, &bot).map_err(failed)?;
@@ -3207,11 +3225,30 @@ mod tests {
         assert_eq!(ask("bots.memory.add", json!({"text": "x"})).unwrap_err().code, "invalid_arguments");
         let owned = ask("bots.memory.add", json!({"bot": "iris", "text": "Prefers the 8/9 frames", "place": "personal"})).unwrap();
         assert_eq!((owned["changes"][0]["by"].as_str(), owned["changes"][0]["source"]["kind"].as_str(), owned["place"].as_str()), (Some("owner"), Some("cli"), Some("personal")));
+        // A conversation reaches its own notes and its place's: Atlas works in Acme, so not personal nor Kestrel's.
+        crate::bots::update(service.sink.as_ref(), &atlas, crate::bots::BotPatch { works_in: Some(vec!["Acme".into(), "Kestrel".into(), "personal".into()]), ..Default::default() }).unwrap();
+        assert!(from_chat("bots.memory.add", json!({"text": "Acme ships on Tuesdays", "place": "Acme"}), "atlas-launch-token").is_ok());
+        for place in ["personal", "Kestrel"] {
+            assert_eq!(from_chat("bots.memory.list", json!({"place": place}), "atlas-launch-token").unwrap_err().code, "forbidden", "{place}");
+            assert_eq!(from_chat("bots.memory.add", json!({"text": "Copied over", "place": place}), "atlas-launch-token").unwrap_err().code, "forbidden", "{place}");
+        }
+        assert!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Kestrel"})).is_ok(), "the owner manages every place");
+
+        // Off, the bot neither writes, forgets nor reads; the owner still does.
         crate::bots::update(service.sink.as_ref(), &atlas, crate::bots::BotPatch { memory_off: Some(true), ..Default::default() }).unwrap();
-        assert_eq!(from_chat("bots.memory.add", json!({"text": "Not kept"}), "atlas-launch-token").unwrap_err().code, "forbidden");
+        for (command, params) in [("bots.memory.add", json!({"text": "Not kept"})), ("bots.memory.forget", json!({"line": "status updates"})), ("bots.memory.list", json!({}))] {
+            assert_eq!(from_chat(command, params, "atlas-launch-token").unwrap_err().code, "forbidden", "{command}");
+        }
         assert!(ask("bots.memory.add", json!({"bot": atlas, "text": "Kept by the owner"})).is_ok());
-        assert!(from_chat("bots.memory.forget", json!({"line": "status updates"}), "atlas-launch-token").is_ok());
-        assert_eq!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Acme"})).unwrap_err().code, "invalid_arguments");
+        assert!(ask("bots.memory.forget", json!({"bot": atlas, "line": "status updates"})).is_ok());
+        assert_eq!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Elsewhere"})).unwrap_err().code, "invalid_arguments");
+
+        // `--line N` names one of two equal notes.
+        let home = crate::bots::home(&crate::bots::get(&iris).unwrap()).unwrap().join("MEMORY.md");
+        std::fs::write(&home, "- 2026-11-01 Twice\n- 2026-11-01 Twice\n").unwrap();
+        assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 0})).unwrap_err().code, "invalid_arguments");
+        assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 2})).is_ok());
     }
 
     /// `terminalx bots …` (PRO-466): refused while the experimental switch

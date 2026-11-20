@@ -6244,13 +6244,16 @@ pub async fn bot_role_read(state: State<'_, AppState>, id: String) -> CmdResult<
 }
 
 #[tauri::command]
-pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String) -> CmdResult<crate::bots::Bot> {
-    bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text})).await
+/// `expected` is the hash of the text the editor started from: a role changed since is not written over.
+pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String, expected: Option<String>) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text, "expected": expected})).await
 }
 
 /// A bot's role and memory (PRO-470), by the owner: the screen's view,
-/// adding and forgetting a note, undoing a change, and putting back a
-/// version of the role. Every change is recorded in the bot's history.
+/// adding and forgetting a note, undoing a change, putting back a version
+/// of the role, a kept text by hash, the role's changes from its template,
+/// and a look for outside edits (every bot's with no `id`). Every change is
+/// recorded in the bot's history.
 #[tauri::command]
 pub async fn bot_memory(state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
     let operation: &'static str = match operation.as_str() {
@@ -6259,6 +6262,9 @@ pub async fn bot_memory(state: State<'_, AppState>, operation: String, params: s
         "memoryForget" => "memoryForget",
         "memoryUndo" => "memoryUndo",
         "roleRestore" => "roleRestore",
+        "memoryLook" => "memoryLook",
+        "memoryText" => "memoryText",
+        "roleDiff" => "roleDiff",
         other => return Err(err(format!("Unknown bot memory operation {other}"))),
     };
     bots_call(state, operation, params).await

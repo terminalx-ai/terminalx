@@ -5,34 +5,46 @@
 //!
 //! Every change the app makes goes through [`commit`], which first looks for
 //! edits made to the files outside the app (by the bot with an editor, or by
-//! a person) and records those as "edited outside the app", then applies its
-//! own edits all or nothing. `known.json` holds each file as the app last
-//! saw it; the first look at a bot's files only records that.
+//! a person) and records those, one change per file at the file's
+//! modification time, as "edited outside the app"; then it applies its own
+//! edits all or nothing. `known.json` holds each file as the app last saw it,
+//! by the hash of its text; a new bot starts from the files hiring wrote.
 //!
 //! An edit is a line added or removed (the memory files), or a whole text
-//! replaced (the role and the topic files). Undoing a change applies its
-//! edits backwards and is itself a change; it refuses, writing nothing, when
-//! a line is no longer where the change left it or a text was changed since.
+//! replaced (the role and the topic files). A whole text is kept once, by its
+//! hash, in `texts/`; the log names it by that hash. Undoing a change applies
+//! its edits backwards and is itself a change; it refuses, writing nothing,
+//! when a line is no longer there or a text was changed since.
+//!
+//! The log is read with a limit and rotated by size, keeping the newest
+//! changes; texts no kept change or `known.json` names are then removed.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read as _, Seek as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 
 use crate::sink::EventSink;
 use crate::store::bots as bot_store;
 
 pub const LOG_FILE: &str = "changes.jsonl";
 pub const KNOWN_FILE: &str = "known.json";
+pub const TEXTS_DIR: &str = "texts";
 /// The event a recorded change is announced with: `{"id": <bot id>}`.
 pub const EVENT: &str = "bot_memory_changed";
 /// A file larger than this is not followed: it is shown, never diffed.
 pub const MAX_TRACKED_BYTES: u64 = 1024 * 1024;
+/// Past this size the log is rotated down to its newest half; at most twice this is ever read.
+pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// More lines than this on both sides of a memory file's edit are recorded as a whole text.
 const MAX_DIFF_CELLS: usize = 4_000_000;
+/// What a secret taken out of the history reads as.
+pub const REDACTED: &str = "[removed: it held a secret]";
 
 /// One change at a time, across every bot: a look for outside edits and the
 /// app's own edits are one step.
@@ -69,24 +81,32 @@ impl Source {
 }
 
 /// One edit to one file of the bot's home, by its path there (`MEMORY.md`,
-/// `orgs/acme-…/memory/archive.md`). A text that is `None` is no file.
+/// `orgs/<id>/memory/archive.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Edit {
     AddLine {
         file: String,
         line: String,
-        /// Where it went, counted from 0; at the end when left out or past it.
+        /// Where it went, counted from 0; at the end when left out.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<usize>,
+        /// The line just above it, so an undo puts a line back under its old
+        /// neighbour wherever that moved; at the end of the file when it is gone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prev: Option<String>,
     },
     RemoveLine {
         file: String,
         line: String,
-        /// Where it was; the first equal line is taken when it is no longer there.
+        /// Where it was; the equal line nearest it is taken when it moved.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         index: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prev: Option<String>,
     },
+    /// The whole text replaced: `before` and `after` are hashes of texts in
+    /// `texts/`, `None` for no file.
     ReplaceText {
         file: String,
         before: Option<String>,
@@ -103,8 +123,8 @@ impl Edit {
 
     fn inverse(&self) -> Self {
         match self.clone() {
-            Self::AddLine { file, line, index } => Self::RemoveLine { file, line, index },
-            Self::RemoveLine { file, line, index } => Self::AddLine { file, line, index },
+            Self::AddLine { file, line, index, prev } => Self::RemoveLine { file, line, index, prev },
+            Self::RemoveLine { file, line, index, prev } => Self::AddLine { file, line, index, prev },
             Self::ReplaceText { file, before, after } => Self::ReplaceText { file, before: after, after: before },
         }
     }
@@ -128,6 +148,10 @@ pub struct Change {
     /// The change this one undid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undoes: Option<String>,
+    /// Each file it touched as it left it, by hash (`None`: no file): a
+    /// state already in the log is never recorded again as an outside edit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub states: BTreeMap<String, Option<String>>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -148,6 +172,14 @@ pub struct NewChange {
     pub source: Source,
     pub by: String,
     pub undoes: Option<String>,
+    /// When it happened, when that is not now: an outside edit's file time.
+    pub at: Option<String>,
+}
+
+impl NewChange {
+    pub fn new(kind: &str, text: impl Into<String>, edits: Vec<Edit>, source: Source, by: &str) -> Self {
+        Self { kind: kind.into(), text: text.into(), edits, source, by: by.into(), undoes: None, at: None }
+    }
 }
 
 /// The log as read: the changes this build reads, oldest first, and how many lines it cannot.
@@ -165,13 +197,26 @@ fn dir(id: &str) -> Result<PathBuf> {
 
 pub fn read_log(id: &str) -> Result<Log> {
     let path = dir(id)?.join(LOG_FILE);
-    let text = match std::fs::read(&path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Log::default()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
+    // Read with a limit: a log grown past it by hand is read from its newest end, from a whole line.
+    let len = file.metadata()?.len();
+    let cut = len > 2 * MAX_LOG_BYTES;
+    if cut {
+        file.seek(std::io::SeekFrom::Start(len - 2 * MAX_LOG_BYTES))?;
+    }
+    let mut bytes = Vec::new();
+    file.take(2 * MAX_LOG_BYTES).read_to_end(&mut bytes).with_context(|| format!("read {}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.split('\n');
+    if cut {
+        lines.next();
+    }
     let mut log = Log::default();
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+    for line in lines.filter(|line| !line.trim().is_empty()) {
         match serde_json::from_str::<Change>(line) {
             Ok(change) => log.changes.push(change),
             Err(_) => log.unreadable += 1,
@@ -180,9 +225,44 @@ pub fn read_log(id: &str) -> Result<Log> {
     Ok(log)
 }
 
-fn read_known(id: &str) -> Result<Option<BTreeMap<String, String>>> {
+/// The hash a text is kept by.
+pub fn hash_of(text: &str) -> String {
+    sha2::Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn is_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Keep a text in the bot's `texts/`, once, and answer its hash.
+pub fn keep_text(id: &str, text: &str) -> Result<String> {
+    let hash = hash_of(text);
+    let folder = crate::store::ensure_dir(dir(id)?.join(TEXTS_DIR))?;
+    let path = folder.join(format!("{hash}.txt"));
+    if !path.is_file() {
+        crate::store::write_atomic(&path, text.as_bytes())?;
+    }
+    Ok(hash)
+}
+
+/// A kept text, by its hash; `None` when it is no longer kept.
+pub fn kept_text(id: &str, hash: &str) -> Result<Option<String>> {
+    if !is_hash(hash) {
+        return Ok(None);
+    }
+    read_file(&dir(id)?.join(TEXTS_DIR).join(format!("{hash}.txt")))
+}
+
+/// What the app last saw of each file, by hash.
+type Known = BTreeMap<String, String>;
+
+fn read_known(id: &str) -> Result<Option<Known>> {
     let path = dir(id)?.join(KNOWN_FILE);
-    crate::store::read_json(&path).with_context(|| format!("{} cannot be read", path.display()))
+    let known: Option<Known> = crate::store::read_json(&path).with_context(|| format!("{} cannot be read", path.display()))?;
+    // A value that is not a hash is the text itself, as an earlier build kept it.
+    known
+        .map(|known| known.into_iter().map(|(rel, value)| Ok((rel, if is_hash(&value) { value } else { keep_text(id, &value)? }))).collect())
+        .transpose()
 }
 
 /// A path inside the home, as an edit names it: plain names only, never out of the home.
@@ -215,17 +295,47 @@ pub fn no_links(home: &Path, rel: &str) -> Result<()> {
     Ok(())
 }
 
+/// Open a file for reading without following a link in its last part:
+/// a link there fails to open rather than being read through.
+pub fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
+/// Whether an open error is the no-follow refusal of a link.
+pub fn is_link_refusal(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// What a file holds now: `None` when there is none. A file that is not a
 /// regular one (a link, a folder) or is too large is refused, and left as it is.
 pub fn read_file(path: &Path) -> Result<Option<String>> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
+    let file = match open_no_follow(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if is_link_refusal(&error) => anyhow::bail!("{} is not a regular file; it is left as it is", path.display()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
+    let meta = file.metadata().with_context(|| format!("read {}", path.display()))?;
     anyhow::ensure!(meta.file_type().is_file(), "{} is not a regular file; it is left as it is", path.display());
     anyhow::ensure!(meta.len() <= MAX_TRACKED_BYTES, "{} is larger than {} KB; it is left as it is", path.display(), MAX_TRACKED_BYTES / 1024);
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TRACKED_BYTES + 1).read_to_end(&mut bytes).with_context(|| format!("read {}", path.display()))?;
+    anyhow::ensure!(bytes.len() as u64 <= MAX_TRACKED_BYTES, "{} is larger than {} KB; it is left as it is", path.display(), MAX_TRACKED_BYTES / 1024);
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
@@ -247,15 +357,30 @@ pub fn by_line(rel: &str) -> bool {
 /// The files of a bot's home as one change sees them: read once, changed in
 /// memory, written together when the change is recorded.
 pub struct Files {
+    id: String,
     home: PathBuf,
     texts: BTreeMap<String, Option<String>>,
     touched: BTreeSet<String>,
     recorded: Vec<NewChange>,
 }
 
+/// Where a line goes back: under its old neighbour nearest where it was, at
+/// the top when it was first, and at the end when its neighbour is gone.
+fn insert_at(lines: &[String], index: Option<usize>, prev: Option<&String>) -> usize {
+    match (prev, index) {
+        (Some(prev), _) => {
+            let near = index.unwrap_or(lines.len());
+            lines.iter().enumerate().filter(|(_, line)| *line == prev).min_by_key(|(at, _)| (at + 1).abs_diff(near)).map_or(lines.len(), |(at, _)| at + 1)
+        }
+        (None, Some(0)) => 0,
+        (None, Some(at)) if at <= lines.len() => at,
+        _ => lines.len(),
+    }
+}
+
 impl Files {
-    fn new(home: PathBuf) -> Self {
-        Self { home, texts: BTreeMap::new(), touched: BTreeSet::new(), recorded: Vec::new() }
+    fn new(id: &str, home: PathBuf) -> Self {
+        Self { id: id.into(), home, texts: BTreeMap::new(), touched: BTreeSet::new(), recorded: Vec::new() }
     }
 
     pub fn get(&mut self, rel: &str) -> Result<Option<String>> {
@@ -278,30 +403,50 @@ impl Files {
         self.touched.insert(rel.into());
     }
 
+    /// The edit that replaces a file's whole text with `text` (`None`: no file), its texts kept by hash.
+    pub fn replacing(&mut self, rel: &str, text: Option<&str>) -> Result<Edit> {
+        let before = self.get(rel)?.map(|before| keep_text(&self.id, &before)).transpose()?;
+        let after = text.map(|after| keep_text(&self.id, after)).transpose()?;
+        Ok(Edit::ReplaceText { file: rel.into(), before, after })
+    }
+
     fn apply(&mut self, edit: &Edit) -> Result<()> {
         let rel = edit.file();
         match edit {
-            Edit::AddLine { line, index, .. } => {
+            Edit::AddLine { line, index, prev, .. } => {
                 let mut lines = self.lines(rel)?;
-                let at = index.filter(|at| *at <= lines.len()).unwrap_or(lines.len());
+                let at = insert_at(&lines, *index, prev.as_ref());
                 lines.insert(at, line.clone());
                 self.set(rel, Some(text_of(&lines)));
             }
             Edit::RemoveLine { line, index, .. } => {
                 let mut lines = self.lines(rel)?;
-                let at = index
-                    .filter(|at| lines.get(*at) == Some(line))
-                    .or_else(|| lines.iter().position(|known| known == line))
+                let near = index.unwrap_or(0);
+                let at = lines
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, known)| *known == line)
+                    .min_by_key(|(at, _)| at.abs_diff(near))
+                    .map(|(at, _)| at)
                     .ok_or_else(|| super::refused(format!("“{}” is no longer in {rel}.", line.trim())))?;
                 lines.remove(at);
                 self.set(rel, Some(text_of(&lines)));
             }
             Edit::ReplaceText { before, after, .. } => {
                 let now = self.get(rel)?;
-                if now.as_deref().map(str::trim_end) != before.as_deref().map(str::trim_end) {
+                let same = match (now.as_deref(), before.as_deref()) {
+                    (None, None) => true,
+                    (Some(now), Some(hash)) => hash_of(now) == hash || kept_text(&self.id, hash)?.is_some_and(|before| before.trim_end() == now.trim_end()),
+                    _ => false,
+                };
+                if !same {
                     return Err(super::refused(format!("{rel} was changed since; that change is not undone.")));
                 }
-                self.set(rel, after.clone());
+                let text = match after {
+                    Some(hash) => Some(kept_text(&self.id, hash)?.ok_or_else(|| super::refused(format!("The text of {rel} that change left is no longer kept.")))?),
+                    None => None,
+                };
+                self.set(rel, text);
             }
         }
         Ok(())
@@ -411,11 +556,12 @@ pub fn diff(before: &[String], after: &[String]) -> Option<Vec<DiffLine>> {
 }
 
 /// The line edits that turn `before` into `after`, in an order that applies:
-/// removals from the last up, then additions from the first down.
+/// removals from the last up, then additions from the first down. Each
+/// names the line above it, for an undo to find its place.
 fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit>> {
     let steps = diff(before, after)?;
     let (mut removed, mut added) = (Vec::new(), Vec::new());
-    let (mut old, mut new) = (0, 0);
+    let (mut old, mut new): (usize, usize) = (0, 0);
     for step in steps {
         match step.kind {
             "same" => {
@@ -423,11 +569,13 @@ fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit
                 new += 1;
             }
             "removed" => {
-                removed.push(Edit::RemoveLine { file: rel.into(), line: step.text, index: Some(old) });
+                let prev = old.checked_sub(1).map(|at| before[at].clone());
+                removed.push(Edit::RemoveLine { file: rel.into(), line: step.text, index: Some(old), prev });
                 old += 1;
             }
             _ => {
-                added.push(Edit::AddLine { file: rel.into(), line: step.text, index: Some(new) });
+                let prev = new.checked_sub(1).map(|at| after[at].clone());
+                added.push(Edit::AddLine { file: rel.into(), line: step.text, index: Some(new), prev });
                 new += 1;
             }
         }
@@ -438,92 +586,190 @@ fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit
 }
 
 /// The edits that turn what the app knew of a file into what it is now.
-fn edits_between(rel: &str, known: Option<&str>, now: Option<&str>) -> Vec<Edit> {
-    if by_line(rel) && known.is_some() && now.is_some() {
-        if let Some(edits) = line_edits(rel, &lines_of(known.unwrap_or_default()), &lines_of(now.unwrap_or_default())) {
-            return edits;
+/// `known` is `Err(hash)` when the earlier text is no longer kept.
+fn edits_between(id: &str, rel: &str, known: Option<Result<String, String>>, now: Option<&str>) -> Result<Vec<Edit>> {
+    if let (true, Some(Ok(known)), Some(now)) = (by_line(rel), known.as_ref(), now) {
+        if let Some(edits) = line_edits(rel, &lines_of(known), &lines_of(now)) {
+            return Ok(edits);
         }
     }
-    vec![Edit::ReplaceText { file: rel.into(), before: known.map(str::to_owned), after: now.map(str::to_owned) }]
+    let before = match known {
+        None => None,
+        Some(Ok(text)) => Some(keep_text(id, &text)?),
+        Some(Err(hash)) => Some(hash),
+    };
+    Ok(vec![Edit::ReplaceText { file: rel.into(), before, after: now.map(|now| keep_text(id, now)).transpose()? }])
 }
 
-/// A line that says what an outside edit did.
-fn outside_text(edits: &[Edit]) -> String {
-    let files: BTreeSet<&str> = edits.iter().map(Edit::file).collect();
+/// A line that says what an outside edit of one file did.
+fn outside_text(rel: &str, edits: &[Edit]) -> String {
     let added = edits.iter().filter(|edit| matches!(edit, Edit::AddLine { .. })).count();
     let removed = edits.iter().filter(|edit| matches!(edit, Edit::RemoveLine { .. })).count();
-    let names = files.into_iter().collect::<Vec<_>>().join(", ");
+    let removes_file = edits.iter().any(|edit| matches!(edit, Edit::ReplaceText { after: None, .. }));
     match (added, removed) {
-        (0, 0) => format!("Changed {names}"),
-        (added, 0) => format!("{added} line{} added to {names}", if added == 1 { "" } else { "s" }),
-        (0, removed) => format!("{removed} line{} removed from {names}", if removed == 1 { "" } else { "s" }),
-        (added, removed) => format!("{added} added, {removed} removed in {names}"),
+        _ if removes_file => format!("{rel} removed"),
+        (0, 0) => format!("Changed {rel}"),
+        (added, 0) => format!("{added} line{} added to {rel}", if added == 1 { "" } else { "s" }),
+        (0, removed) => format!("{removed} line{} removed from {rel}", if removed == 1 { "" } else { "s" }),
+        (added, removed) => format!("{added} added, {removed} removed in {rel}"),
     }
 }
 
-/// The files of a bot's home as hiring wrote them: its role template's text
-/// and an empty memory. `None` for a bot whose template this build does not know.
-fn as_hired(id: &str) -> Option<BTreeMap<String, String>> {
-    let bot = bot_store::get(id).ok()??;
-    let template = super::templates::find(&bot.role_template_id)?;
-    Some(BTreeMap::from([(bot_store::ROLE_FILE.to_string(), super::role_text(&template)), (bot_store::MEMORY_FILE.to_string(), super::memory_text())]))
+/// The files of a bot's home as hiring wrote them, by hash: its role
+/// template's text and an empty memory. `None` for a bot whose template this build does not know.
+fn as_hired(id: &str) -> Result<Option<Known>> {
+    let Some(bot) = bot_store::get(id)? else { return Ok(None) };
+    let Some(template) = super::templates::find(&bot.role_template_id) else { return Ok(None) };
+    let role = keep_text(id, &super::role_text(&template))?;
+    let memory = keep_text(id, &super::memory_text())?;
+    Ok(Some(BTreeMap::from([(bot_store::ROLE_FILE.to_string(), role), (bot_store::MEMORY_FILE.to_string(), memory)])))
 }
 
 /// Start a new bot's history from its files as hiring wrote them.
 pub fn seed(id: &str) -> Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
     if read_known(id)?.is_some() {
         return Ok(());
     }
-    let known = as_hired(id).context("the bot or its role template is unknown")?;
+    let known = as_hired(id)?.context("the bot or its role template is unknown")?;
     let folder = crate::store::ensure_dir(dir(id)?)?;
     crate::store::write_json(&folder.join(KNOWN_FILE), &known)
 }
 
-/// Look for edits made outside the app since it last saw the files: they
-/// are recorded as one `outside` change. The first look only remembers.
-fn notice_outside(id: &str, files: &mut Files, known: &mut Option<BTreeMap<String, String>>) -> Result<()> {
+fn file_time(path: &Path) -> Option<String> {
+    let time = std::fs::symlink_metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// The state the newest change to `rel` in the log left it in.
+fn logged_state<'a>(log: &'a Log, rel: &str) -> Option<&'a Option<String>> {
+    log.changes.iter().rev().find_map(|change| change.states.get(rel))
+}
+
+/// Look for edits made outside the app since it last saw the files: each
+/// file changed is recorded as one `outside` change, at its modification
+/// time. A state the log already ends with is not recorded again. Answers
+/// whether what the app knows changed.
+fn notice_outside(id: &str, files: &mut Files, known: &mut Option<Known>) -> Result<bool> {
     let mut names: BTreeSet<String> = followed(&files.home).into_iter().collect();
     if let Some(known) = known.as_ref() {
         names.extend(known.keys().filter(|rel| checked(rel).is_ok()).cloned());
     }
-    let mut now = BTreeMap::new();
+    // Never looked at before: compare with the files as hiring wrote them, so
+    // an edit made before the first look is recorded too, never taken as the start.
+    let first = known.is_none();
+    if first {
+        *known = as_hired(id)?;
+    }
+    let mut now = Known::new();
+    let mut texts = BTreeMap::new();
     for rel in &names {
         match files.get(rel) {
             Ok(Some(text)) => {
-                now.insert(rel.clone(), text);
+                now.insert(rel.clone(), hash_of(&text));
+                texts.insert(rel.clone(), text);
             }
             Ok(None) => {}
             // A file this app will not read stays as it was known: it is neither followed nor taken as removed.
             Err(error) => {
                 log::warn!("bot {id}: {error:#}");
-                if let Some(text) = known.as_ref().and_then(|known| known.get(rel)) {
-                    now.insert(rel.clone(), text.clone());
+                if let Some(hash) = known.as_ref().and_then(|known| known.get(rel)) {
+                    now.insert(rel.clone(), hash.clone());
                 }
             }
         }
     }
-    // Never looked at before: compare with the files as hiring wrote them, so
-    // an edit made before the first look is recorded too, never taken as the start.
-    if known.is_none() {
-        *known = as_hired(id);
-    }
     let Some(before) = known.as_ref() else {
         log::warn!("bot {id}: its role template is unknown, so its files as they are now are where its history starts");
+        for text in texts.values() {
+            keep_text(id, text)?;
+        }
         *known = Some(now);
-        return Ok(());
+        return Ok(true);
     };
-    let mut edits = Vec::new();
+    let mut log: Option<Log> = None;
     for rel in &names {
-        let (was, is) = (before.get(rel).map(String::as_str), now.get(rel).map(String::as_str));
-        if was.map(str::trim_end) != is.map(str::trim_end) {
-            edits.extend(edits_between(rel, was, is));
+        let (was, is) = (before.get(rel), now.get(rel));
+        if was == is {
+            continue;
+        }
+        let was_text = was.map(|hash| kept_text(id, hash).map(|text| text.ok_or_else(|| hash.clone()))).transpose()?;
+        let is_text = texts.get(rel).map(String::as_str);
+        if let (Some(Ok(was)), Some(is)) = (&was_text, is_text) {
+            if was.trim_end() == is.trim_end() {
+                continue;
+            }
+        }
+        let log = match &mut log {
+            Some(log) => log,
+            None => log.insert(read_log(id)?),
+        };
+        if logged_state(log, rel) == Some(&is.cloned()) {
+            continue;
+        }
+        let edits = edits_between(id, rel, was_text, is_text)?;
+        if edits.is_empty() {
+            continue;
+        }
+        let mut change = NewChange::new("outside", outside_text(rel, &edits), edits, Source::of(OUTSIDE), OUTSIDE);
+        change.at = file_time(&files.home.join(rel));
+        // Already in the files: kept to be recorded, not applied again.
+        files.recorded.push(change);
+    }
+    for text in texts.values() {
+        if !before.values().any(|hash| *hash == hash_of(text)) {
+            keep_text(id, text)?;
         }
     }
-    if !edits.is_empty() {
-        // Already in the files: kept to be recorded, not applied again.
-        files.recorded.push(NewChange { kind: "outside".into(), text: outside_text(&edits), edits, source: Source::of(OUTSIDE), by: OUTSIDE.into(), undoes: None });
-    }
+    let changed = first || before != &now;
     *known = Some(now);
+    Ok(changed)
+}
+
+/// Rotate the log once it passes [`MAX_LOG_BYTES`]: its newest changes are
+/// kept, up to half that, and the texts nothing names any more are removed.
+fn rotate(id: &str, folder: &Path, known: &Known) -> Result<()> {
+    let path = folder.join(LOG_FILE);
+    if std::fs::metadata(&path).map_or(0, |meta| meta.len()) <= MAX_LOG_BYTES {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(&std::fs::read(&path)?).into_owned();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut size = 0;
+    for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
+        if size + line.len() as u64 + 1 > MAX_LOG_BYTES / 2 && !kept.is_empty() {
+            break;
+        }
+        size += line.len() as u64 + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    crate::store::write_atomic(&path, format!("{}\n", kept.join("\n")).as_bytes())?;
+    prune_texts(id, folder, known)
+}
+
+/// Remove the kept texts that no change in the log and nothing in `known` names.
+fn prune_texts(id: &str, folder: &Path, known: &Known) -> Result<()> {
+    let log = read_log(id)?;
+    let mut named: BTreeSet<String> = known.values().cloned().collect();
+    for change in &log.changes {
+        // An edit this build cannot read may name a text too: keep every hash-shaped string it has.
+        for edit in &change.edits {
+            for key in ["before", "after"] {
+                if let Some(hash) = edit[key].as_str().filter(|hash| is_hash(hash)) {
+                    named.insert(hash.into());
+                }
+            }
+        }
+        named.extend(change.states.values().flatten().cloned());
+    }
+    let Ok(entries) = std::fs::read_dir(folder.join(TEXTS_DIR)) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.strip_suffix(".txt").is_some_and(|hash| !named.contains(hash)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     Ok(())
 }
 
@@ -535,42 +781,74 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
     let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let home = bot_store::home_dir(id)?;
     anyhow::ensure!(std::fs::symlink_metadata(&home).is_ok_and(|meta| meta.is_dir()), "the bot's home folder is missing");
-    let mut files = Files::new(home);
+    let mut files = Files::new(id, home);
     let mut known = read_known(id)?;
-    notice_outside(id, &mut files, &mut known)?;
+    let mut known_changed = notice_outside(id, &mut files, &mut known)?;
     let out = f(&mut files)?;
     files.write()?;
     let folder = crate::store::ensure_dir(dir(id)?)?;
+    let mut states = BTreeMap::new();
+    for rel in &files.touched {
+        states.insert(rel.clone(), files.texts[rel].as_deref().map(|text| keep_text(id, text)).transpose()?);
+    }
     // The log before what the app knows of the files: a change whose line
     // could not be appended is still unknown, and is found as an outside edit.
     let mut recorded = Vec::new();
     for change in std::mem::take(&mut files.recorded) {
+        let mut touched: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for edit in &change.edits {
+            let rel = edit.file();
+            let state = match states.get(rel) {
+                Some(state) => state.clone(),
+                // An outside edit: the file as it is now, as `known` has it.
+                None => known.as_ref().and_then(|known| known.get(rel).cloned()),
+            };
+            touched.insert(rel.into(), state);
+        }
         let change = Change {
             id: uuid::Uuid::now_v7().to_string(),
-            at: crate::store::index::now(),
+            at: change.at.unwrap_or_else(crate::store::index::now),
             kind: change.kind,
             text: change.text,
             edits: change.edits.iter().map(serde_json::to_value).collect::<Result<_, _>>()?,
             source: change.source,
             by: change.by,
             undoes: change.undoes,
+            states: touched,
             unknown: BTreeMap::new(),
         };
-        crate::store::append_line(&folder.join(LOG_FILE), &format!("{}\n", serde_json::to_string(&change)?))?;
+        crate::store::append_line(&folder.join(LOG_FILE), &serde_json::to_string(&change)?)?;
         recorded.push(change);
     }
     let mut known = known.unwrap_or_default();
-    for rel in &files.touched {
-        match &files.texts[rel] {
-            Some(text) => known.insert(rel.clone(), text.clone()),
-            None => known.remove(rel),
+    for (rel, state) in states {
+        known_changed = true;
+        match state {
+            Some(hash) => known.insert(rel, hash),
+            None => known.remove(&rel),
         };
     }
-    crate::store::write_json(&folder.join(KNOWN_FILE), &known)?;
+    // A look that found nothing writes nothing.
+    if known_changed {
+        crate::store::write_json(&folder.join(KNOWN_FILE), &known)?;
+    }
     if !recorded.is_empty() {
+        rotate(id, &folder, &known)?;
         sink.emit(EVENT, &serde_json::json!({"id": id}));
     }
     Ok((out, recorded))
+}
+
+/// Look for outside edits to every bot's files, as the Bots page opens. A bot whose files cannot be read is skipped.
+pub fn look_all(sink: &dyn EventSink) -> Result<usize> {
+    let mut found = 0;
+    for bot in bot_store::list()? {
+        match commit(sink, &bot.id, |_| Ok(())) {
+            Ok(((), recorded)) => found += recorded.len(),
+            Err(error) => log::warn!("bot {}: looking for outside edits: {error:#}", bot.id),
+        }
+    }
+    Ok(found)
 }
 
 /// Why a change cannot be undone, or `None` when it can be tried.
@@ -581,21 +859,86 @@ pub fn not_undoable(change: &Change, log: &Log) -> Option<&'static str> {
         Some("This change was already undone.")
     } else if change.known_edits().is_none() {
         Some("A newer version of TerminalX made this change; it cannot be undone here.")
+    } else if change.edits.iter().any(|edit| edit.to_string().contains(REDACTED)) {
+        Some("It held a secret, which was taken out of the history.")
     } else {
         None
     }
 }
 
-/// Undo a change: its edits backwards, recorded as an `undo` by `by`.
-pub fn undo(sink: &dyn EventSink, id: &str, change_id: &str, by: &str, source: Source) -> Result<Change> {
-    let ((), recorded) = commit(sink, id, |files| {
-        let log = read_log(id)?;
-        let change = log.changes.iter().find(|change| change.id == change_id).ok_or_else(|| super::refused(format!("No change {change_id} in this bot's history.")))?;
-        if let Some(why) = not_undoable(change, &log) {
-            return Err(super::refused(why));
+/// Undo a change inside a [`commit`]: its edits backwards, recorded as an
+/// `undo` by `by`. Answers the edits the undo made.
+pub fn undo_in(files: &mut Files, change_id: &str, by: &str, source: Source) -> Result<Vec<Edit>> {
+    let log = read_log(&files.id)?;
+    let change = log.changes.iter().find(|change| change.id == change_id).ok_or_else(|| super::refused(format!("No change {change_id} in this bot's history.")))?;
+    if let Some(why) = not_undoable(change, &log) {
+        return Err(super::refused(why));
+    }
+    let edits: Vec<Edit> = change.known_edits().unwrap_or_default().iter().rev().map(Edit::inverse).collect();
+    let mut undo = NewChange::new("undo", change.text.clone(), edits.clone(), source, by);
+    undo.undoes = Some(change.id.clone());
+    files.record(undo)?;
+    Ok(edits)
+}
+
+/// Take a secret out of the history: every recorded string that holds it is
+/// rewritten, and the kept texts that hold it, other than the files as they
+/// are now, are removed. The changes it was in can no longer be undone.
+pub fn redact(id: &str, secret: &str) -> Result<()> {
+    if secret.trim().is_empty() {
+        return Ok(());
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let folder = dir(id)?;
+    let path = folder.join(LOG_FILE);
+    if let Ok(bytes) = std::fs::read(&path) {
+        let text = String::from_utf8_lossy(&bytes);
+        let escaped = serde_json::to_string(secret)?;
+        if text.contains(secret) || text.contains(escaped.trim_matches('"')) {
+            let mut lines = Vec::new();
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                match serde_json::from_str::<Value>(line) {
+                    Ok(mut value) => {
+                        scrub(&mut value, secret);
+                        lines.push(serde_json::to_string(&value)?);
+                    }
+                    // A line this build cannot read is kept, but not with the secret in it.
+                    Err(_) => lines.push(line.replace(secret, REDACTED)),
+                }
+            }
+            crate::store::write_atomic(&path, format!("{}\n", lines.join("\n")).as_bytes())?;
         }
-        let edits: Vec<Edit> = change.known_edits().unwrap_or_default().iter().rev().map(Edit::inverse).collect();
-        files.record(NewChange { kind: "undo".into(), text: change.text.clone(), edits, source, by: by.into(), undoes: Some(change.id.clone()) })
-    })?;
-    recorded.into_iter().rev().find(|change| change.undoes.as_deref() == Some(change_id)).context("the undo was recorded")
+    }
+    let known: BTreeSet<String> = read_known(id)?.unwrap_or_default().into_values().collect();
+    if let Ok(entries) = std::fs::read_dir(folder.join(TEXTS_DIR)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let current = name.strip_suffix(".txt").is_some_and(|hash| known.contains(hash));
+            if !current && read_file(&entry.path()).ok().flatten().is_some_and(|text| text.contains(secret)) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scrub(value: &mut Value, secret: &str) {
+    match value {
+        Value::String(text) if text.contains(secret) => *text = text.replace(secret, REDACTED),
+        Value::Array(items) => items.iter_mut().for_each(|item| scrub(item, secret)),
+        Value::Object(fields) => fields.values_mut().for_each(|field| scrub(field, secret)),
+        _ => {}
+    }
+}
+
+/// Move a deleted bot's history beside its home in the trash (`<home>.changes`).
+pub fn trash(id: &str, trashed_home: &Path) -> Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let folder = dir(id)?;
+    if !folder.is_dir() {
+        return Ok(());
+    }
+    let mut target = trashed_home.as_os_str().to_owned();
+    target.push(".changes");
+    std::fs::rename(&folder, &target).with_context(|| format!("move {} to the trash", folder.display()))
 }

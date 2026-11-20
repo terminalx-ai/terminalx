@@ -112,15 +112,31 @@ pub(crate) fn log_path_in(root: &Path, session_id: &str, tab_id: &str) -> Result
 /// target already exists its mode is carried over: `~/.claude.json` is the
 /// CLI's file, not ours, and a rewrite is no place to change what its owner
 /// chose.
+///
+/// The temp file is created new, never opened through a link: in a folder
+/// another program can write to (a bot's home), a file or a link planted at
+/// its name is removed (the link itself, never what it points to) and the
+/// create tried once more, so the write never goes through it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = create_private(&tmp, mode_of(path)).with_context(|| format!("create {}", tmp.display()))?;
+    let written = (|| -> Result<()> {
+        let mut f = match create_private(&tmp, mode_of(path)) {
+            Err(error) if matches!(fs::symlink_metadata(&tmp), Ok(meta) if !meta.is_dir()) => {
+                fs::remove_file(&tmp).with_context(|| format!("create {}: {error}", tmp.display()))?;
+                create_private(&tmp, mode_of(path))
+            }
+            created => created,
+        }
+        .with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = written.and_then(|()| fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
-    fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
 }
 
@@ -139,12 +155,12 @@ fn mode_of(_path: &Path) -> Option<u32> {
 #[cfg(unix)]
 fn create_private(path: &Path, keep: Option<u32>) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).create(true).truncate(true).mode(keep.unwrap_or(0o600)).open(path)
+    fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(keep.unwrap_or(0o600)).open(path)
 }
 
 #[cfg(not(unix))]
 fn create_private(path: &Path, _keep: Option<u32>) -> std::io::Result<fs::File> {
-    fs::File::create(path)
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {

@@ -1940,7 +1940,7 @@ terminalx bots delete <bot> --json
 
 ```text
 terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
-terminalx bots memory forget "<note>" [--bot <bot>] [--place <place>] --json
+terminalx bots memory forget "<note>" [--line <n>] [--bot <bot>] [--place <place>] --json
 terminalx bots memory list [--bot <bot>] [--place <place>] --json
 ```
 
@@ -1952,13 +1952,17 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
   another bot answers `forbidden`); the app checks the chat's tab by its launch token, and a
   command that names a bot's chat it cannot prove answers `unauthorized`. From anywhere else
   they are the owner's, and `--bot` names the bot.
-- `<place>` is `bot` (the default: notes that go with the bot), `personal`, or the name of an
-  organisation the bot works in. A conversation is given the bot's own notes and those of the
-  place it works in, 200 lines in all; past that, the oldest notes move to `memory/archive.md`.
-- A note is one line of at most 400 characters. One that looks like a key or a token is
-  refused: memory never keeps secrets. `forget` takes the note's text, or a part of it only
-  one note has. While the owner has turned the bot's memory off, `add` from its chat answers
-  `forbidden`.
+- `<place>` is `bot` (the default: notes that go with the bot), `personal`, or the id of an
+  organisation the bot works in. A conversation is given the newest of the bot's own notes and
+  of those of the place it works in, 200 lines in all; past that, the oldest notes move to
+  `memory/archive.md`. From a bot's chat only `bot` and the place that conversation works in
+  are reachable (another place answers `forbidden`); the owner manages every place.
+- A note is one line of plain text, at most 400 characters. One that looks like a key, a token
+  or a password is refused: memory never keeps secrets, and forgetting a note that held one
+  also takes it out of the change log. `forget` takes the note's text, or a part of it only one
+  note has; for one of two equal notes add `--line <n>`, its line number as `list` shows it.
+- While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
+  answer `forbidden`.
 
 ### This guide
 

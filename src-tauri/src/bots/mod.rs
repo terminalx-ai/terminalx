@@ -30,7 +30,6 @@ pub const RESERVED_SLUGS: [&str; 4] = [OWNER, PERSONAL, "all", "everyone"];
 const DEFAULT_HARNESS: &str = "claude";
 const MAX_NAME_CHARS: usize = 80;
 const MAX_SLUG_CHARS: usize = 40;
-const MAX_ROLE_BYTES: usize = 256 * 1024;
 
 /// Why an operation refused. Anything else that fails is the app's problem,
 /// not something the caller can fix by asking differently.
@@ -550,7 +549,11 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         }
         Ok(removed)
     })?;
-    bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
+    let trashed = bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
+    // Its history goes with its home, so a home put back finds it beside it.
+    if let Some(trashed) = trashed {
+        changes::trash(&removed.id, &trashed).with_context(|| format!("{} is deleted, but its history could not be moved to the trash and is still in bot-changes/", removed.name))?;
+    }
     Ok(())
 }
 
@@ -620,11 +623,12 @@ pub fn role_read(id: &str) -> Result<String> {
 
 /// Replace a bot's standing instructions, by the owner in the app. The
 /// change is recorded in the bot's history (PRO-470) and can be undone.
-pub fn role_write(sink: &dyn EventSink, id: &str, text: &str) -> Result<Bot> {
+/// `expected` is the hash of the text the editor started from: a role
+/// changed since is not written over. A role is at most [`memory::READ_LIMIT`].
+pub fn role_write(sink: &dyn EventSink, id: &str, text: &str, expected: Option<&str>) -> Result<Bot> {
     require_enabled()?;
-    refuse_unless!(text.len() <= MAX_ROLE_BYTES, "A role is at most {} KB.", MAX_ROLE_BYTES / 1024);
     let bot = get(id)?;
-    if memory::write_role(sink, &bot, text, OWNER, changes::Source::of("app"), "role")?.is_empty() {
+    if memory::write_role(sink, &bot, text, OWNER, changes::Source::of("app"), "role", expected)?.is_empty() {
         return Ok(bot);
     }
     change(sink, |bots| {
@@ -665,7 +669,7 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "pauseAll" => serde_json::to_value(pause_all(sink, OWNER)?)?,
         "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
-        "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
+        "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?, params["expected"].as_str())?)?,
         other => return Err(refused(format!("Unknown bots operation {other}"))),
     })
 }

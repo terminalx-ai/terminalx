@@ -1,15 +1,23 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Building2, ExternalLink, FileText, History, Loader2, Lock, Plus, RotateCw, Undo2, UserRound, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
+import { useAccount } from "@/lib/account";
 import { errorMessage, fs } from "@/lib/api";
 import { updateBot } from "@/lib/bots";
-import { botMemoryApi, byLabel, changeHeadline, changeSource, placeLabel, placeNote, useBotRoleMemory } from "@/lib/botMemory";
+import { botMemoryApi, byLabel, changeHeadline, changeSource, keepRoleDraft, placeLabel, placeName, placeNote, roleDraft, useBotRoleMemory } from "@/lib/botMemory";
 import { cn } from "@/lib/cn";
 import { recentTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotChange, BotDiffLine, BotMemoryPlace, BotRoleMemory as RoleMemory, BotRoleVersion } from "@/types/botMemory";
+
+/** The account's organisations by id, for naming the places a bot keeps notes in. */
+function useOrgNames(): ReadonlyMap<string, string> {
+  const { status } = useAccount();
+  const organizations = status.state === "signed-in" ? status.organizations : undefined;
+  return useMemo(() => new Map((organizations ?? []).map((org) => [org.id, org.name])), [organizations]);
+}
 import { BotAvatar } from "./BotAvatar";
 import { reportsToLabel } from "./botLabels";
 
@@ -19,6 +27,7 @@ import { reportsToLabel } from "./botLabels";
  */
 export function BotRoleMemory({ bot, bots, unreadable = 0 }: { bot: Bot; bots: Bot[]; unreadable?: number }) {
   const { view, error, loading, reload } = useBotRoleMemory(bot);
+  const orgNames = useOrgNames();
   if (!view) {
     return (
       <div className="px-6 py-6" data-testid="bot-role-memory">
@@ -31,9 +40,17 @@ export function BotRoleMemory({ bot, bots, unreadable = 0 }: { bot: Bot; bots: B
   return (
     <div className="grid min-w-0 gap-x-8 gap-y-6 px-6 py-5 @5xl/editor-host:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]" data-testid="bot-role-memory" aria-busy={loading}>
       {error && <div className="@5xl/editor-host:col-span-2"><LoadError error={error} onRetry={() => void reload()} /></div>}
+      {view.secrets.length > 0 && (
+        <div className="@5xl/editor-host:col-span-2">
+          <Problem testId="bot-memory-secrets">
+            {view.secrets.length === 1 ? "This file looks" : "These files look"} like {view.secrets.length === 1 ? "it holds" : "they hold"} a secret (a key, a token or a password):{" "}
+            <span className="break-all font-mono text-[11.5px]">{view.secrets.join(", ")}</span>. Memory never keeps secrets: take it out of the file, or forget the note, which also takes it out of the history.
+          </Problem>
+        </div>
+      )}
       <RoleSection bot={bot} bots={bots} unreadable={unreadable} view={view} />
       <div className="flex min-w-0 flex-col gap-6">
-        <MemorySection bot={bot} view={view} />
+        <MemorySection bot={bot} view={view} orgNames={orgNames} />
         <ChangesSection bot={bot} bots={bots} view={view} />
       </div>
     </div>
@@ -127,8 +144,8 @@ function RoleSection({ bot, bots, unreadable, view }: { bot: Bot; bots: Bot[]; u
           </span>
         )}
       </div>
-      {panel === "history" && <RoleHistory bot={bot} bots={bots} versions={role.versions} current={role.text} />}
-      {panel === "template" && <TemplateDiff lines={role.templateDiff} />}
+      {panel === "history" && <RoleHistory bot={bot} bots={bots} versions={role.versions} current={role.hash} />}
+      {panel === "template" && <TemplateDiff bot={bot} current={role.hash} />}
     </section>
   );
 }
@@ -172,25 +189,36 @@ function ReportsTo({ bot, bots, unreadable }: { bot: Bot; bots: Bot[]; unreadabl
 
 function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
   const role = view.role;
-  const [draft, setDraft] = useState(role.text);
-  const [base, setBase] = useState(role.text);
+  // An edit left unsaved (the screen closed, or the bot missing from the list for a moment) comes back.
+  const kept = roleDraft(bot.id);
+  const [draft, setDraftText] = useState(kept?.text ?? role.text);
+  const [base, setBase] = useState(kept ? { text: kept.base, hash: kept.baseHash } : { text: role.text, hash: role.hash });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const dirty = draft !== base;
+  const dirty = draft !== base.text;
+  const setDraft = (text: string, from = base) => {
+    setDraftText(text);
+    keepRoleDraft(bot.id, { text, base: from.text, baseHash: from.hash });
+  };
   // The file changed (saved here, undone, or edited outside the app): follow it unless there is unsaved work.
-  const outsideChange = role.text !== base;
+  const outsideChange = role.hash !== base.hash;
   useEffect(() => {
-    if (outsideChange && !dirty) {
-      setDraft(role.text);
-      setBase(role.text);
+    if (!outsideChange) return;
+    if (!dirty || role.text === base.text) {
+      setBase({ text: role.text, hash: role.hash });
+      if (!dirty) setDraftText(role.text);
     }
-  }, [role.text, outsideChange, dirty]);
+  }, [role.hash, role.text, outsideChange, dirty, base.text]);
+  const conflict = outsideChange && dirty && role.text !== base.text;
+  const now = { text: role.text, hash: role.hash };
 
   const save = () => {
     setSaving(true);
-    botMemoryApi.writeRole(bot.id, draft).then(
+    // The save names the role it started from: one changed since is not written over.
+    botMemoryApi.writeRole(bot.id, draft, base.hash).then(
       () => {
-        setBase(draft);
+        keepRoleDraft(bot.id, null);
+        setBase({ text: draft, hash: base.hash });
         setError(null);
       },
       (cause) => setError(errorMessage(cause)),
@@ -208,12 +236,12 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
       </div>
       {role.problem && <Problem>ROLE.md: {role.problem}</Problem>}
       {role.overLimit && <Problem testId="bot-role-over-limit">ROLE.md is {kb(role.bytes)}. Only the first {kb(view.memory.readLimit)} is read at the start of a conversation.</Problem>}
-      {!role.editable && <Problem testId="bot-role-read-only">ROLE.md is {kb(role.bytes)}, more than a role saved here may be, so it is shown read-only. Shorten it in your editor.</Problem>}
-      {outsideChange && dirty && (
+      {!role.editable && !role.problem && <Problem testId="bot-role-read-only">ROLE.md is {kb(role.bytes)}, more than the {kb(view.memory.readLimit)} a role may be, so it is shown read-only. Shorten it in your editor; the rest can go in a topic file under memory/.</Problem>}
+      {conflict && (
         <Problem testId="bot-role-conflict">
           ROLE.md changed while you were editing.{" "}
-          <button type="button" className="underline" onClick={() => { setDraft(role.text); setBase(role.text); }}>Load the new text</button>{" "}
-          or save yours over it.
+          <button type="button" className="underline" onClick={() => { setBase(now); setDraft(role.text, now); }} data-testid="bot-role-load-new">Load the new text</button>{" "}
+          or <button type="button" className="underline" onClick={() => { setBase(now); setDraft(draft, now); }} data-testid="bot-role-keep-mine">keep yours</button> and save it over the new one.
         </Problem>
       )}
       <textarea
@@ -229,8 +257,8 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
         <span role="status" className={cn("text-[12px]", dirty ? "text-warning" : "text-faint")} data-testid="bot-role-state">{state}</span>
         {error && <span role="alert" className="min-w-0 truncate text-[12px] text-destructive">{error}</span>}
         <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={() => setDraft(base)}>Discard</Button>
-          <Button variant="accent" size="sm" disabled={!dirty || saving || !role.editable} onClick={save} data-testid="bot-role-save">
+          <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={() => setDraft(base.text)} data-testid="bot-role-discard">Discard</Button>
+          <Button variant="accent" size="sm" disabled={!dirty || saving || !role.editable || conflict} onClick={save} data-testid="bot-role-save">
             {saving && <Loader2 className="animate-spin" />} Save
           </Button>
         </div>
@@ -258,15 +286,24 @@ function versionLabel(version: BotRoleVersion): string {
 
 function RoleHistory({ bot, bots, versions, current }: { bot: Bot; bots: Bot[]; versions: BotRoleVersion[]; current: string }) {
   const [open, setOpen] = useState<string | null>(null);
+  // Texts are not in the view: each is read when it is shown.
+  const [texts, setTexts] = useState<Record<string, string | null>>({});
   const [error, setError] = useState<string | null>(null);
   const restore = (version: BotRoleVersion) => botMemoryApi.restoreRole(bot.id, version.change).then(() => setError(null), (cause) => setError(errorMessage(cause)));
+  const toggle = (key: string, hash: string | null) => {
+    if (open === key) return setOpen(null);
+    setOpen(key);
+    if (hash && !(hash in texts)) botMemoryApi.text(bot.id, hash).then((text) => setTexts((known) => ({ ...known, [hash]: text })), (cause) => setError(errorMessage(cause)));
+  };
+  const firstCurrent = versions.findIndex((version) => version.hash === current);
   return (
     <div className="mt-3 rounded-lg border border-hairline" data-testid="bot-role-history">
       {error && <p role="alert" className="px-3 pt-2 text-[12px] text-destructive">{error}</p>}
       <ul className="divide-y divide-hairline">
         {versions.map((version, index) => {
           const key = version.change ?? "template";
-          const isCurrent = (version.text ?? "").trimEnd() === current.trimEnd() && versions.findIndex((other) => (other.text ?? "").trimEnd() === current.trimEnd()) === index;
+          const isCurrent = index === firstCurrent;
+          const text = version.hash === null ? "(no file)" : version.hash in texts ? (texts[version.hash] ?? "(This version is no longer kept.)") : "Reading…";
           return (
             <li key={key} className="px-3 py-2 text-[12.5px]" data-testid="bot-role-version">
               <div className="flex min-w-0 items-center gap-2">
@@ -275,10 +312,10 @@ function RoleHistory({ bot, bots, versions, current }: { bot: Bot; bots: Bot[]; 
                   <span className="text-faint"> · {changeTime(version.at)} · {version.kind === "template" ? "at hire" : byLabel(version.by, bots)}</span>
                 </span>
                 {isCurrent && <span className="text-[11.5px] text-faint">Current</span>}
-                <Button variant="ghost" size="xs" aria-expanded={open === key} onClick={() => setOpen(open === key ? null : key)}>{open === key ? "Hide" : "Show"}</Button>
-                {!isCurrent && version.text !== null && <Button variant="outline" size="xs" onClick={() => void restore(version)} data-testid="bot-role-restore">Restore</Button>}
+                <Button variant="ghost" size="xs" aria-expanded={open === key} onClick={() => toggle(key, version.hash)} data-testid="bot-role-version-show">{open === key ? "Hide" : "Show"}</Button>
+                {!isCurrent && version.hash !== null && <Button variant="outline" size="xs" onClick={() => void restore(version)} data-testid="bot-role-restore">Restore</Button>}
               </div>
-              {open === key && <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-well px-3 py-2 font-mono text-[11.5px] text-muted-foreground">{version.text ?? "(no file)"}</pre>}
+              {open === key && <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-md bg-well px-3 py-2 font-mono text-[11.5px] text-muted-foreground" data-testid="bot-role-version-text">{text}</pre>}
             </li>
           );
         })}
@@ -287,7 +324,19 @@ function RoleHistory({ bot, bots, versions, current }: { bot: Bot; bots: Bot[]; 
   );
 }
 
-function TemplateDiff({ lines }: { lines: BotDiffLine[] | null }) {
+/** The role's changes from the template it was built from, read when opened and again when the role changes. */
+function TemplateDiff({ bot, current }: { bot: Bot; current: string }) {
+  const [lines, setLines] = useState<BotDiffLine[] | null | undefined>(undefined);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let gone = false;
+    botMemoryApi.roleDiff(bot.id).then((next) => !gone && (setLines(next), setError(null)), (cause) => !gone && setError(errorMessage(cause)));
+    return () => {
+      gone = true;
+    };
+  }, [bot.id, current]);
+  if (error) return <p role="alert" className="mt-3 text-[12.5px] text-destructive">Couldn't compare with the template: {error}</p>;
+  if (lines === undefined) return <p role="status" className="mt-3 text-[12.5px] text-faint">Comparing with the role it was built from…</p>;
   if (!lines) return <p className="mt-3 text-[12.5px] text-faint">The role is too long to compare line by line.</p>;
   const changed = lines.filter((line) => line.kind !== "same").length;
   return (
@@ -312,11 +361,9 @@ function PlaceIcon({ place, className }: { place: string; className?: string }) 
   return <Building2 className={className} />;
 }
 
-function workingName(key: string) {
-  return key === "personal" ? "Personal" : key;
-}
-
-function MemorySection({ bot, view }: { bot: Bot; view: RoleMemory }) {
+function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; orgNames: ReadonlyMap<string, string> }) {
+  const workingName = (key: string) => placeName(key, orgNames);
+  const radios = useRef<(HTMLButtonElement | null)[]>([]);
   const memory = view.memory;
   const [selected, setSelected] = useState(memory.workingPlace);
   const place = memory.places.find((value) => value.key === selected) ?? memory.places[0];
@@ -350,19 +397,30 @@ function MemorySection({ bot, view }: { bot: Bot; view: RoleMemory }) {
           <p className="text-faint">Older notes move to the archive, which {bot.name} searches when it needs them.</p>
         </div>
       )}
-      {notRead > 0 && <Problem testId="bot-memory-not-read">{notRead} line{notRead === 1 ? " is" : "s are"} past the {memory.budget}-line budget and not read at the start of a conversation. The next note added moves the oldest to the archive.</Problem>}
+      {notRead > 0 && <Problem testId="bot-memory-not-read">{notRead} older line{notRead === 1 ? " is" : "s are"} past the {memory.budget}-line budget and not read at the start of a conversation. The next note added moves the oldest to the archive.</Problem>}
       {overLimit.map((value) => (
-        <Problem key={value.key} testId="bot-memory-over-limit">{placeLabel(value.key, bot.name)}: MEMORY.md is {kb(value.bytes)}, and only the first {kb(memory.readLimit)} is read.</Problem>
+        <Problem key={value.key} testId="bot-memory-over-limit">{placeLabel(value.key, bot.name, orgNames)}: MEMORY.md is {kb(value.bytes)}, and only the first {kb(memory.readLimit)} is read.</Problem>
       ))}
 
       <h3 className="mb-2 mt-4 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Where it is kept</h3>
-      <div className="grid gap-2" role="radiogroup" aria-label="Where it is kept">
-        {memory.places.map((value) => (
+      <div className="grid gap-2" role="radiogroup" aria-label="Where it is kept" onKeyDown={(event: KeyboardEvent) => {
+        // The arrow keys move between the places, as in any radio group.
+        const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
+        if (!step || !place) return;
+        event.preventDefault();
+        const count = memory.places.length;
+        const next = (memory.places.findIndex((value) => value.key === place.key) + step + count) % count;
+        setSelected(memory.places[next].key);
+        radios.current[next]?.focus();
+      }}>
+        {memory.places.map((value, index) => (
           <button
             key={value.key}
+            ref={(element) => { radios.current[index] = element; }}
             type="button"
             role="radio"
             aria-checked={value.key === place?.key}
+            tabIndex={value.key === place?.key ? 0 : -1}
             onClick={() => setSelected(value.key)}
             className={cn("flex min-w-0 items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40", value.key === place?.key ? "border-accent/50 bg-selected" : "border-hairline hover:bg-selected/50")}
             data-testid="bot-memory-place"
@@ -370,7 +428,7 @@ function MemorySection({ bot, view }: { bot: Bot; view: RoleMemory }) {
           >
             <PlaceIcon place={value.key} className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] text-foreground">{placeLabel(value.key, bot.name)}</span>
+              <span className="block truncate text-[13px] text-foreground">{placeLabel(value.key, bot.name, orgNames)}</span>
               <span className="block truncate text-[12px] text-faint">{placeNote(value.key, value.read, bot.name)}</span>
             </span>
             <span className="shrink-0 text-[12px] text-muted-foreground">{value.lines.length} line{value.lines.length === 1 ? "" : "s"}</span>
@@ -425,13 +483,14 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
       <ul className="max-h-64 overflow-y-auto py-1 scrollbar-thin">
         {notes.length === 0 && <li className="px-3 py-1.5 text-[12.5px] text-faint">Nothing kept here yet.</li>}
         {notes.map(({ line, index, dated }) => (
-          <li key={`${index}:${line}`} className={cn("group flex min-w-0 items-start gap-2 px-3 py-0.5 text-[12.5px]", place.read && index >= place.readLines && "opacity-60")} data-testid="bot-memory-line">
+          // A conversation reads the newest lines: the older ones past the budget are dimmed.
+          <li key={`${index}:${line}`} className={cn("group flex min-w-0 items-start gap-2 px-3 py-0.5 text-[12.5px]", place.read && index < place.lines.length - place.readLines && "opacity-60")} data-testid="bot-memory-line">
             {dated ? (
               <>
                 <span className="shrink-0 font-mono text-[11.5px] text-faint">{dated[1]}</span>
                 <span className="min-w-0 flex-1 break-words text-foreground">{dated[2]}</span>
                 <WithTooltip label="Forget this note">
-                  <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={`Forget “${dated[2]}”`} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100" onClick={() => act(() => botMemoryApi.forget(bot.id, place.key, line))} data-testid="bot-memory-forget">
+                  <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={`Forget “${dated[2]}”`} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100" onClick={() => act(() => botMemoryApi.forget(bot.id, place.key, line, index))} data-testid="bot-memory-forget">
                     <X />
                   </Button>
                 </WithTooltip>

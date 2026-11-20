@@ -2155,7 +2155,8 @@ export const botsApi = {
   resumeAll: () => invoke<BotList>("bots_resume_all"),
   /** The bot's standing instructions, its `ROLE.md`. */
   roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
-  roleWrite: (id: string, text: string) => invoke<Bot>("bot_role_write", { id, text }),
+  /** `expected` is the hash of the text the editor started from: a role changed since is not written over. */
+  roleWrite: (id: string, text: string, expected?: string) => invoke<Bot>("bot_role_write", { id, text, expected: expected ?? null }),
 };
 
 export function errorMessage(e: unknown): string {

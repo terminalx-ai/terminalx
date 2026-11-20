@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
+import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
 import { focusTaken, showBotRoleMemory, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { cn } from "@/lib/cn";
 import type { Bot } from "@/types/bots";
@@ -23,6 +24,13 @@ import { HireBot } from "./HireBot";
 export function BotsView() {
   const page = useBotsPage();
   const store = useBotStore();
+  // Opening the Bots page looks for edits made to the bots' role and memory outside the app (PRO-470), so a bot's own
+  // edit of its files is recorded when it is next seen, not only when its Role and memory page opens.
+  useEffect(() => {
+    Promise.resolve().then(() => botMemoryApi.look()).catch(() => {
+      /* each bot's own page looks again, and says what went wrong */
+    });
+  }, []);
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
   if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
@@ -134,13 +142,23 @@ function BotsTeam({ focus }: { focus: boolean }) {
 function BotRoleMemoryPage({ botId }: { botId: string }) {
   const store = useBotStore();
   const bot = store.bots.find((value) => value.id === botId) ?? null;
+  // Unsaved standing instructions are asked about before leaving; elsewhere the edit is kept for when the page opens again.
+  const [leaving, setLeaving] = useState(false);
+  const back = () => (hasRoleDraft(botId) ? setLeaving(true) : showBotsTeam(true));
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="bot-role-memory-page">
       <BotsHeader title={bot ? `${bot.name} · Role and memory` : "Role and memory"} note={bot?.roleTitle}>
-        <Button variant="outline" size="sm" onClick={() => showBotsTeam(true)} data-testid="bot-role-memory-back">
+        <Button variant="outline" size="sm" onClick={back} data-testid="bot-role-memory-back">
           <ArrowLeft /> Team
         </Button>
       </BotsHeader>
+      {leaving && (
+        <div role="alertdialog" aria-label="Unsaved changes" className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bot-role-leave">
+          <span className="min-w-0 flex-1">The standing instructions have changes that are not saved.</span>
+          <Button variant="outline" size="sm" autoFocus onClick={() => setLeaving(false)} data-testid="bot-role-leave-stay">Keep editing</Button>
+          <Button variant="ghost" size="sm" onClick={() => { keepRoleDraft(botId, null); showBotsTeam(true); }} data-testid="bot-role-leave-discard">Leave and discard them</Button>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         {bot ? <BotRoleMemory bot={bot} bots={store.bots} unreadable={store.unreadable} /> : (
           <p className="px-6 py-6 text-[12.5px] text-faint" role={store.loaded ? "alert" : "status"}>

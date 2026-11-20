@@ -173,7 +173,7 @@ Usage:
   terminalx bots rename BOT --name NAME [--json]
   terminalx bots pause-all|resume-all [--json]
   terminalx bots memory add NOTE [--bot BOT] [--place PLACE] [--json]
-  terminalx bots memory forget NOTE [--bot BOT] [--place PLACE] [--json]
+  terminalx bots memory forget NOTE [--line N] [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory list [--bot BOT] [--place PLACE] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
@@ -1634,6 +1634,12 @@ fn parse_bot_memory(tokens: &mut Tokens) -> Result<Action, ControlError> {
     }
     match action.as_str() {
         "add" | "forget" => {
+            if action == "forget" {
+                if let Some(number) = tokens.option("--line")? {
+                    let number: u64 = number.trim().parse().map_err(|_| invalid("--line needs the note's line number, as `terminalx bots memory list` shows it."))?;
+                    params["number"] = json!(number);
+                }
+            }
             let note = tokens.required_front(if action == "add" { "note" } else { "note to forget" })?;
             if note.trim().is_empty() {
                 return Err(invalid(format!("bots memory {action} needs the note's text.")));
@@ -2110,6 +2116,7 @@ mod tests {
         assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all or memory"));
         // PRO-470: a bot's memory, from its own chat (the caller is sent for the app to check) or naming the bot.
         assert_eq!(rpc_of(&["bots", "memory", "add", "Status updates go in a table.", "--bot", "atlas"]), ("bots.memory.add".into(), json!({"bot": "atlas", "text": "Status updates go in a table."}), short));
+        assert_eq!(rpc_of(&["bots", "memory", "forget", "--line", "3", "Twice", "--bot", "atlas"]), ("bots.memory.forget".into(), json!({"bot": "atlas", "line": "Twice", "number": 3}), short));
         assert_eq!(rpc_of(&["bots", "memory", "forget", "--place", "Acme", "table", "--json"]).1, json!({"place": "Acme", "line": "table"}));
         assert_eq!(rpc_of(&["bots", "memory", "list", "--bot", "atlas", "--place", "personal"]).1, json!({"bot": "atlas", "place": "personal"}));
         let caller = json!({"session": "bot-chat", "tab": "bot-tab"});

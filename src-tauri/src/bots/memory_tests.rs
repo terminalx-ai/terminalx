@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::bots::changes::{read_log, undo, Edit};
+use crate::bots::changes::{read_log, Edit};
 use crate::sink::BroadcastSink;
 
 /// A temporary store with the switch on, one bot hired, and a sink whose events are read back.
@@ -49,20 +49,20 @@ fn a_learned_note_is_logged_with_its_source_and_undo_removes_it() {
     assert!(log_path.is_file() && !log_path.starts_with(home_of(&bot)));
 
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert_eq!(shown.changes[0].change.id, learned.id);
+    assert_eq!(shown.changes[0].id, learned.id);
     assert_eq!((shown.changes[0].undone_by.as_ref(), shown.changes[0].not_undoable.as_ref()), (None, None));
 
-    let undone = undo(sink.as_ref(), &bot.id, &learned.id, OWNER, Source::of("app")).unwrap();
+    let undone = undo(sink.as_ref(), &bot, &learned.id, OWNER, Source::of("app")).unwrap();
     assert_eq!((undone.kind.as_str(), undone.undoes.as_deref()), ("undo", Some(learned.id.as_str())));
     assert!(!file(&bot, "MEMORY.md").contains("Status updates"));
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert_eq!(shown.changes[0].change.id, undone.id);
+    assert_eq!(shown.changes[0].id, undone.id);
     assert_eq!(shown.changes[1].undone_by.as_deref(), Some(undone.id.as_str()));
     assert!(shown.changes[1].not_undoable.is_some() && shown.changes[0].not_undoable.is_some());
     // Neither the change again nor the undo is undone.
-    assert!(undo(sink.as_ref(), &bot.id, &learned.id, OWNER, Source::of("app")).unwrap_err().to_string().contains("already undone"));
-    assert!(undo(sink.as_ref(), &bot.id, &undone.id, OWNER, Source::of("app")).is_err());
-    assert!(undo(sink.as_ref(), &bot.id, "no-such-change", OWNER, Source::of("app")).is_err());
+    assert!(undo(sink.as_ref(), &bot, &learned.id, OWNER, Source::of("app")).unwrap_err().to_string().contains("already undone"));
+    assert!(undo(sink.as_ref(), &bot, &undone.id, OWNER, Source::of("app")).is_err());
+    assert!(undo(sink.as_ref(), &bot, "no-such-change", OWNER, Source::of("app")).is_err());
 }
 
 #[test]
@@ -70,14 +70,14 @@ fn undo_holds_when_other_notes_came_after_and_refuses_when_the_line_is_gone() {
     let (_home, sink, bot) = hired();
     let first = add(sink.as_ref(), &bot, &Place::Bot, "First fact", OWNER, Source::of("app")).unwrap().remove(0);
     let second = add(sink.as_ref(), &bot, &Place::Bot, "Second fact", OWNER, Source::of("app")).unwrap().remove(0);
-    undo(sink.as_ref(), &bot.id, &first.id, OWNER, Source::of("app")).unwrap();
+    undo(sink.as_ref(), &bot, &first.id, OWNER, Source::of("app")).unwrap();
     let memory = file(&bot, "MEMORY.md");
     assert!(!memory.contains("First fact") && memory.contains("Second fact"));
 
     // Forgotten by hand meanwhile: the add has nothing left to undo, and nothing is written.
-    forget(sink.as_ref(), &bot, &Place::Bot, "second", OWNER, Source::of("app")).unwrap();
+    forget(sink.as_ref(), &bot, &Place::Bot, "second", None, OWNER, Source::of("app")).unwrap();
     let before = file(&bot, "MEMORY.md");
-    let refused = undo(sink.as_ref(), &bot.id, &second.id, OWNER, Source::of("app")).unwrap_err();
+    let refused = undo(sink.as_ref(), &bot, &second.id, OWNER, Source::of("app")).unwrap_err();
     assert!(refused.to_string().contains("no longer in MEMORY.md"), "{refused}");
     assert_eq!(file(&bot, "MEMORY.md"), before);
 }
@@ -89,13 +89,13 @@ fn forgetting_names_one_note_and_its_undo_puts_it_back_where_it_was() {
         add(sink.as_ref(), &bot, &Place::Bot, note, OWNER, Source::of("app")).unwrap();
     }
     let lines_before = file(&bot, "MEMORY.md");
-    assert!(forget(sink.as_ref(), &bot, &Place::Bot, "ays", OWNER, Source::of("app")).unwrap_err().to_string().contains("2 notes match"));
-    assert!(forget(sink.as_ref(), &bot, &Place::Bot, "nothing like it", OWNER, Source::of("app")).unwrap_err().to_string().contains("No note"));
-    assert!(forget(sink.as_ref(), &bot, &Place::Bot, " ", OWNER, Source::of("app")).is_err());
-    let forgot = forget(sink.as_ref(), &bot, &Place::Bot, "main stays GREEN", OWNER, Source::of("app")).unwrap().remove(0);
+    assert!(forget(sink.as_ref(), &bot, &Place::Bot, "ays", None, OWNER, Source::of("app")).unwrap_err().to_string().contains("2 notes match"));
+    assert!(forget(sink.as_ref(), &bot, &Place::Bot, "nothing like it", None, OWNER, Source::of("app")).unwrap_err().to_string().contains("No note"));
+    assert!(forget(sink.as_ref(), &bot, &Place::Bot, " ", None, OWNER, Source::of("app")).is_err());
+    let forgot = forget(sink.as_ref(), &bot, &Place::Bot, "main stays GREEN", None, OWNER, Source::of("app")).unwrap().remove(0);
     assert_eq!((forgot.kind.as_str(), forgot.text.as_str()), ("forgot", "Main stays green"));
     assert!(!file(&bot, "MEMORY.md").contains("Main stays green"));
-    undo(sink.as_ref(), &bot.id, &forgot.id, OWNER, Source::of("app")).unwrap();
+    undo(sink.as_ref(), &bot, &forgot.id, OWNER, Source::of("app")).unwrap();
     assert_eq!(file(&bot, "MEMORY.md"), lines_before);
 }
 
@@ -113,7 +113,7 @@ fn a_note_is_one_line_never_a_secret_and_never_twice() {
 #[test]
 fn edits_made_outside_the_app_are_found_logged_and_undone() {
     let (_home, sink, bot) = hired();
-    // The first look only remembers the files as they are.
+    // Nothing changed since hiring: the first look finds nothing.
     assert!(view(sink.as_ref(), &bot).unwrap().changes.is_empty());
     let memory = home_of(&bot).join("MEMORY.md");
     let original = std::fs::read_to_string(&memory).unwrap();
@@ -122,19 +122,30 @@ fn edits_made_outside_the_app_are_found_logged_and_undone() {
     std::fs::write(home_of(&bot).join("ROLE.md"), "Changed my own role.\n").unwrap();
 
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert_eq!(shown.changes.len(), 1);
-    let outside = &shown.changes[0].change;
-    assert_eq!((outside.kind.as_str(), outside.by.as_str(), outside.source.kind.as_str()), ("outside", changes::OUTSIDE, "outside"));
-    let edits = outside.known_edits().unwrap();
-    assert!(edits.contains(&Edit::AddLine { file: "MEMORY.md".into(), line: "- 2026-11-01 Written by hand".into(), index: Some(original.lines().count()) }));
-    assert!(edits.iter().any(|edit| matches!(edit, Edit::ReplaceText { file, before: None, .. } if file == "memory/phase-2.md")));
-    assert!(edits.iter().any(|edit| matches!(edit, Edit::ReplaceText { file, after: Some(after), .. } if file == "ROLE.md" && after == "Changed my own role.\n")));
+    // One change per file, each at the time the file was changed.
+    assert_eq!(shown.changes.len(), 3);
+    assert!(shown.changes.iter().all(|change| (change.kind.as_str(), change.by.as_str(), change.source.kind.as_str()) == ("outside", changes::OUTSIDE, "outside")));
+    let log = read_log(&bot.id).unwrap();
+    let of = |rel: &str| log.changes.iter().find(|change| change.states.contains_key(rel)).unwrap().clone();
+    let (memory_change, topic_change, role_change) = (of("MEMORY.md"), of("memory/phase-2.md"), of("ROLE.md"));
+    let mtime = chrono::DateTime::<chrono::Utc>::from(std::fs::metadata(&memory).unwrap().modified().unwrap()).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert_eq!(memory_change.at, mtime);
+    let last = original.lines().last().map(str::to_owned);
+    assert_eq!(memory_change.known_edits().unwrap(), [Edit::AddLine { file: "MEMORY.md".into(), line: "- 2026-11-01 Written by hand".into(), index: Some(original.lines().count()), prev: last }]);
+    assert!(matches!(&topic_change.known_edits().unwrap()[0], Edit::ReplaceText { file, before: None, .. } if file == "memory/phase-2.md"));
+    let Edit::ReplaceText { after: Some(after), .. } = &role_change.known_edits().unwrap()[0] else { panic!("the role is replaced as a whole text") };
+    // The text is kept once, by its hash, and the log names it.
+    assert_eq!(changes::kept_text(&bot.id, after).unwrap().as_deref(), Some("Changed my own role.\n"));
+    assert!(!std::fs::read_to_string(crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::LOG_FILE)).unwrap().contains("Changed my own role"));
     // Seen once: looking again records nothing more.
-    assert_eq!(view(sink.as_ref(), &bot).unwrap().changes.len(), 1);
+    assert_eq!(view(sink.as_ref(), &bot).unwrap().changes.len(), 3);
     // The role's own change is in its history, never silent.
     assert_eq!(view(sink.as_ref(), &bot).unwrap().role.versions[0].kind, "outside");
 
-    undo(sink.as_ref(), &bot.id, &outside.id, OWNER, Source::of("app")).unwrap();
+    // Each is undone on its own.
+    for change in [&memory_change, &topic_change, &role_change] {
+        undo(sink.as_ref(), &bot, &change.id, OWNER, Source::of("app")).unwrap();
+    }
     assert_eq!(std::fs::read_to_string(&memory).unwrap(), original);
     assert!(!home_of(&bot).join("memory").join("phase-2.md").exists());
     assert_eq!(file(&bot, "ROLE.md"), super::super::role_text(&super::super::templates::find("cto").unwrap()));
@@ -142,9 +153,9 @@ fn edits_made_outside_the_app_are_found_logged_and_undone() {
     // A file removed outside the app is a change too.
     view(sink.as_ref(), &bot).unwrap();
     std::fs::remove_file(&memory).unwrap();
-    let removed = view(sink.as_ref(), &bot).unwrap().changes[0].change.clone();
-    assert_eq!(removed.kind, "outside");
-    undo(sink.as_ref(), &bot.id, &removed.id, OWNER, Source::of("app")).unwrap();
+    let removed = view(sink.as_ref(), &bot).unwrap().changes[0].clone();
+    assert_eq!((removed.kind.as_str(), removed.text.as_str()), ("outside", "MEMORY.md removed"));
+    undo(sink.as_ref(), &bot, &removed.id, OWNER, Source::of("app")).unwrap();
     assert_eq!(std::fs::read_to_string(&memory).unwrap(), original);
 }
 
@@ -160,12 +171,13 @@ fn the_budget_moves_the_oldest_notes_to_the_archive() {
     notes[50] = "- 2025-01-01 The oldest".into();
     std::fs::write(&memory, format!("{header}{}\n", notes.join("\n"))).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert_eq!((shown.memory.read, shown.changes[0].change.kind.as_str()), (BUDGET, "outside"));
+    assert_eq!((shown.memory.read, shown.changes[0].kind.as_str()), (BUDGET, "outside"));
 
     let recorded = add(sink.as_ref(), &bot, &Place::Bot, "One more", &bot.id, chat()).unwrap();
     let kinds: Vec<&str> = recorded.iter().map(|change| change.kind.as_str()).collect();
     assert_eq!(kinds, ["learned", "archived"]);
-    assert_eq!(recorded[1].source.kind, "budget");
+    // The move is the bot's doing: its add caused it.
+    assert_eq!((recorded[1].source.kind.as_str(), recorded[1].by.as_str()), ("budget", bot.id.as_str()));
     let now = file(&bot, "MEMORY.md");
     assert_eq!(now.lines().count(), BUDGET);
     assert!(!now.contains("The oldest") && now.contains("One more") && now.starts_with(&header));
@@ -175,10 +187,12 @@ fn the_budget_moves_the_oldest_notes_to_the_archive() {
     assert_eq!((shown.memory.read, shown.memory.places[0].archive_lines), (BUDGET, 1));
     assert!(shown.memory.topics.iter().any(|topic| topic.name == ARCHIVE_FILE && topic.place == BOT_PLACE));
 
-    // Undoing the move puts the note back and empties the archive.
-    undo(sink.as_ref(), &bot.id, &recorded[1].id, OWNER, Source::of("app")).unwrap();
-    assert!(file(&bot, "MEMORY.md").contains("The oldest"));
-    assert_eq!(file(&bot, "memory/archive.md"), "");
+    // Undoing the move puts the note back, and the budget still holds: the next oldest moves instead.
+    undo(sink.as_ref(), &bot, &recorded[1].id, OWNER, Source::of("app")).unwrap();
+    let now = file(&bot, "MEMORY.md");
+    assert!(now.contains("The oldest") && now.lines().count() == BUDGET, "{now}");
+    let archive = file(&bot, "memory/archive.md");
+    assert!(archive.lines().count() == 1 && archive.starts_with("- 2026-10-10 "), "{archive}");
 }
 
 #[test]
@@ -188,9 +202,9 @@ fn the_budget_counts_the_bots_notes_with_its_places() {
     assert_eq!(working_place(&bot), Place::Org("Acme".into()));
     let acme = Place::parse(&bot, "Acme").unwrap();
     add(sink.as_ref(), &bot, &acme, "Kestrel ships on Tuesdays", OWNER, Source::of("app")).unwrap();
-    // Each organisation has its own folder, out of reach of a look-alike name.
-    let folder = acme.dir();
-    assert!(folder.starts_with("orgs/acme-") && folder != Place::Org("acme".into()).dir());
+    // Each organisation has its own folder, by its id: a rename keeps its notes. An id that is not a plain name is kept by its hash.
+    assert_eq!(acme.dir(), "orgs/Acme/");
+    assert!(Place::Org("a/../b".into()).dir().starts_with("orgs/x-") && Place::Org("x-1".into()).dir() != "orgs/x-1/");
     assert!(file(&bot, &acme.memory_file()).contains("Kestrel ships on Tuesdays"));
 
     // The place's notes fill the budget that the bot's own share.
@@ -234,7 +248,7 @@ fn a_conversation_reads_the_bots_notes_and_its_places_within_limits() {
     assert!(given.contains("Own note") && given.contains("Personal note"), "{given}");
     let bot = with_works_in(sink.as_ref(), &bot, &["Acme"]);
     let given = for_conversation(&bot).unwrap();
-    assert!(given.contains("Own note") && !given.contains("Personal note") && given.contains("Notes kept in Acme"), "{given}");
+    assert!(given.contains("Own note") && !given.contains("Personal note") && given.contains("Notes kept in organisation Acme"), "{given}");
 
     // Turned off, a conversation is given none.
     let off = super::super::update(sink.as_ref(), &bot.id, super::super::BotPatch { memory_off: Some(true), ..Default::default() }).unwrap();
@@ -275,27 +289,28 @@ fn the_role_keeps_its_versions_and_each_can_be_put_back() {
     let shown = view(sink.as_ref(), &bot).unwrap();
     assert_eq!(shown.role.versions.len(), 1);
     assert_eq!((shown.role.versions[0].kind.as_str(), shown.role.versions[0].change.as_ref()), ("template", None));
-    assert!(shown.role.template_diff.as_ref().unwrap().iter().all(|line| line.kind == "same"));
+    assert!(template_diff(&bot).unwrap().unwrap().iter().all(|line| line.kind == "same"));
     assert_eq!(shown.role.template_title.as_deref(), Some("CTO"));
 
-    super::super::role_write(sink.as_ref(), &bot.id, "Version two.\n").unwrap();
-    super::super::role_write(sink.as_ref(), &bot.id, "Version three.\n").unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "Version two.\n", None).unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "Version three.\n", None).unwrap();
     // The same text again records nothing.
-    super::super::role_write(sink.as_ref(), &bot.id, "Version three.\n").unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "Version three.\n", None).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    let texts: Vec<Option<&str>> = shown.role.versions.iter().map(|version| version.text.as_deref()).collect();
-    assert_eq!(texts, [Some("Version three.\n"), Some("Version two.\n"), Some(template.as_str())]);
+    // The view names each version by hash; its text is fetched when shown.
+    let texts: Vec<String> = shown.role.versions.iter().map(|version| role_text(&bot, version.hash.as_deref().unwrap()).unwrap().unwrap()).collect();
+    assert_eq!(texts, ["Version three.\n", "Version two.\n", template.as_str()]);
     assert_eq!(shown.role.versions[0].by, OWNER);
-    assert!(shown.role.template_diff.as_ref().unwrap().iter().any(|line| line.kind == "added" && line.text == "Version three."));
+    assert!(template_diff(&bot).unwrap().unwrap().iter().any(|line| line.kind == "added" && line.text == "Version three."));
 
     // Undo the newest change, then put back the version two changes ago, then the template's.
     let newest = shown.role.versions[0].change.clone().unwrap();
-    undo(sink.as_ref(), &bot.id, &newest, OWNER, Source::of("app")).unwrap();
+    undo(sink.as_ref(), &bot, &newest, OWNER, Source::of("app")).unwrap();
     assert_eq!(file(&bot, "ROLE.md"), "Version two.\n");
     let two = shown.role.versions[1].change.clone().unwrap();
-    super::super::role_write(sink.as_ref(), &bot.id, "Version four.\n").unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "Version four.\n", None).unwrap();
     // Changed since: the old change is not undone over the new text.
-    assert!(undo(sink.as_ref(), &bot.id, &two, OWNER, Source::of("app")).unwrap_err().to_string().contains("changed since"));
+    assert!(undo(sink.as_ref(), &bot, &two, OWNER, Source::of("app")).unwrap_err().to_string().contains("changed since"));
     assert_eq!(file(&bot, "ROLE.md"), "Version four.\n");
     let restored = restore_role(sink.as_ref(), &bot, Some(&two)).unwrap();
     assert_eq!(restored[0].kind, "restored");
@@ -320,10 +335,10 @@ fn a_log_line_this_build_cannot_read_is_kept_and_counted() {
     std::fs::write(&log, &text).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
     assert_eq!((shown.unreadable_changes, shown.total_changes), (1, 2));
-    assert_eq!(shown.changes[0].change.source.kind, "standup");
+    assert_eq!(shown.changes[0].source.kind, "standup");
     assert!(shown.changes[0].not_undoable.as_deref().unwrap().contains("newer version"));
-    assert!(undo(sink.as_ref(), &bot.id, "from-a-newer-build", OWNER, Source::of("app")).is_err());
-    undo(sink.as_ref(), &bot.id, &learned.id, OWNER, Source::of("app")).unwrap();
+    assert!(undo(sink.as_ref(), &bot, "from-a-newer-build", OWNER, Source::of("app")).is_err());
+    undo(sink.as_ref(), &bot, &learned.id, OWNER, Source::of("app")).unwrap();
     assert!(std::fs::read_to_string(&log).unwrap().starts_with(&text), "the log is only appended to");
 }
 
@@ -332,7 +347,7 @@ fn an_edit_never_leaves_the_home() {
     for rel in ["", "../x.md", "/etc/passwd", "a/../../b", "memory/ x.md", "memory\\x.md"] {
         assert!(changes::checked(rel).is_err(), "{rel:?}");
     }
-    for rel in ["MEMORY.md", "orgs/acme-1a2b3c4d/memory/archive.md", "memory/phase-2.md"] {
+    for rel in ["MEMORY.md", "orgs/org_1a2b/memory/archive.md", "memory/phase-2.md"] {
         assert!(changes::checked(rel).is_ok(), "{rel:?}");
     }
 }
@@ -354,8 +369,8 @@ fn the_app_calls_answer_for_the_owner_and_refuse_while_off() {
     let mut settings = crate::store::settings::load();
     settings.experimental.bots = false;
     crate::store::settings::save(&settings).unwrap();
-    for operation in ["memoryView", "memoryAdd", "memoryForget", "memoryUndo", "roleRestore"] {
-        assert_eq!(ask(operation, json!({"id": bot.id, "text": "x", "line": "x", "change": "x"})).unwrap_err().to_string(), super::super::OFF_MESSAGE, "{operation}");
+    for operation in ["memoryView", "memoryLook", "memoryAdd", "memoryForget", "memoryUndo", "memoryText", "roleRestore", "roleDiff"] {
+        assert_eq!(ask(operation, json!({"id": bot.id, "text": "x", "line": "x", "change": "x", "hash": "x"})).unwrap_err().to_string(), super::super::OFF_MESSAGE, "{operation}");
     }
 }
 
@@ -370,6 +385,13 @@ fn a_link_in_the_home_takes_no_read_or_write_out_of_it() {
     view(sink.as_ref(), &bot).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("MEMORY.md"), "- 2026-11-20 Not the bot's\n").unwrap();
+    // A link planted where the write stages its temp file is not written through.
+    let staged = home_of(&bot).join("MEMORY.md").with_extension(format!("tmp.{}", std::process::id()));
+    std::os::unix::fs::symlink(outside.path().join("MEMORY.md"), &staged).unwrap();
+    add(sink.as_ref(), &bot, &Place::Bot, "Written in the home", OWNER, Source::of("app")).unwrap();
+    assert_eq!(std::fs::read_to_string(outside.path().join("MEMORY.md")).unwrap(), "- 2026-11-20 Not the bot's\n");
+    assert!(file(&bot, "MEMORY.md").contains("Written in the home") && !staged.exists());
+
     std::fs::create_dir_all(home_of(&bot).join("orgs")).unwrap();
     std::os::unix::fs::symlink(outside.path(), home_of(&bot).join(acme.dir().trim_end_matches('/'))).unwrap();
     assert!(add(sink.as_ref(), &bot, &acme, "Through the link", OWNER, Source::of("app")).is_err());
@@ -393,8 +415,8 @@ fn an_edit_made_before_the_first_look_is_recorded_not_taken_as_the_start() {
     assert!(crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::KNOWN_FILE).is_file());
     std::fs::write(home_of(&bot).join("ROLE.md"), "Rewritten by the bot before anyone looked.\n").unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert_eq!((shown.changes.len(), shown.changes[0].change.kind.as_str()), (1, "outside"));
-    undo(sink.as_ref(), &bot.id, &shown.changes[0].change.id, OWNER, Source::of("app")).unwrap();
+    assert_eq!((shown.changes.len(), shown.changes[0].kind.as_str()), (1, "outside"));
+    undo(sink.as_ref(), &bot, &shown.changes[0].id, OWNER, Source::of("app")).unwrap();
     assert_eq!(file(&bot, "ROLE.md"), super::super::role_text(&super::super::templates::find("cto").unwrap()));
 
     // A bot hired before the history existed has no start recorded: its files as hiring wrote them are the start.
@@ -403,21 +425,223 @@ fn an_edit_made_before_the_first_look_is_recorded_not_taken_as_the_start() {
     std::fs::write(home_of(&older).join("MEMORY.md"), format!("{}- 2026-11-01 Written by hand\n", file(&older, "MEMORY.md"))).unwrap();
     let shown = view(sink.as_ref(), &older).unwrap();
     assert_eq!(shown.changes.len(), 1);
-    assert!(shown.changes[0].change.known_edits().unwrap().iter().any(|edit| matches!(edit, Edit::AddLine { line, .. } if line.ends_with("Written by hand"))));
+    let log = read_log(&older.id).unwrap();
+    assert!(log.changes[0].known_edits().unwrap().iter().any(|edit| matches!(edit, Edit::AddLine { line, .. } if line.ends_with("Written by hand"))));
 }
 
 #[test]
-fn the_editor_is_given_the_whole_role_never_the_part_a_conversation_reads() {
+fn a_role_has_one_limit_and_the_editor_saves_only_over_what_it_started_from() {
     let (_home, sink, bot) = hired();
-    let long = format!("{}\n", "a line of the role that is long enough\n".repeat(2_000));
+    // Writing past the limit a conversation reads is refused, with a message.
+    let long = "a line of the role that is long enough\n".repeat(2_000);
     assert!(long.len() as u64 > READ_LIMIT);
-    super::super::role_write(sink.as_ref(), &bot.id, &long).unwrap();
+    assert!(super::super::role_write(sink.as_ref(), &bot.id, &long, None).unwrap_err().to_string().contains("at most 64 KB"));
+    // A file already past it is shown read-only, as a conversation reads it.
+    std::fs::write(home_of(&bot).join("ROLE.md"), &long).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert!(shown.role.read.over_limit && shown.role.editable);
-    assert_eq!(shown.role.text, long);
+    assert!(shown.role.read.over_limit && !shown.role.editable && shown.role.text.len() as u64 <= READ_LIMIT);
 
-    // Past what a role may be, the editor shows it but may not save it.
-    std::fs::write(home_of(&bot).join("ROLE.md"), "x".repeat(super::super::MAX_ROLE_BYTES + 1)).unwrap();
+    // The editor names the text it started from: a role changed since is not written over.
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Mine.\n").unwrap();
+    let opened = view(sink.as_ref(), &bot).unwrap().role;
+    assert!(opened.editable && opened.hash == changes::hash_of("Mine.\n"));
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Changed by the bot meanwhile.\n").unwrap();
+    let refused = super::super::role_write(sink.as_ref(), &bot.id, "Mine, edited.\n", Some(&opened.hash)).unwrap_err();
+    assert!(refused.to_string().contains("changed since you opened it"), "{refused}");
+    assert_eq!(file(&bot, "ROLE.md"), "Changed by the bot meanwhile.\n");
+    let now = view(sink.as_ref(), &bot).unwrap().role.hash;
+    super::super::role_write(sink.as_ref(), &bot.id, "Mine, edited.\n", Some(&now)).unwrap();
+    assert_eq!(file(&bot, "ROLE.md"), "Mine, edited.\n");
+}
+
+#[test]
+fn the_view_leaves_texts_out_and_fetches_them_by_hash() {
+    let (_home, sink, bot) = hired();
+    super::super::role_write(sink.as_ref(), &bot.id, "A role with words in it.\n", None).unwrap();
+    add(sink.as_ref(), &bot, &Place::Bot, "A note", OWNER, Source::of("app")).unwrap();
+    let shown = super::super::call(sink.as_ref(), "memoryView", &json!({"id": bot.id})).unwrap();
+    assert!(shown["changes"].as_array().unwrap().iter().all(|change| change.get("edits").is_none()));
+    let versions = shown["role"]["versions"].as_array().unwrap();
+    assert!(versions.iter().all(|version| version.get("text").is_none() && version["hash"].is_string()));
+    assert!(shown["role"].get("templateDiff").is_none());
+    let text = super::super::call(sink.as_ref(), "memoryText", &json!({"id": bot.id, "hash": versions[0]["hash"]})).unwrap();
+    assert_eq!(text, "A role with words in it.\n");
+    // A hash is only ever a name in texts/.
+    assert_eq!(super::super::call(sink.as_ref(), "memoryText", &json!({"id": bot.id, "hash": "../../known"})).unwrap(), Value::Null);
+    let diff = super::super::call(sink.as_ref(), "roleDiff", &json!({"id": bot.id})).unwrap();
+    assert!(diff.as_array().unwrap().iter().any(|line| line["kind"] == "added"));
+}
+
+#[test]
+fn the_log_is_rotated_by_size_keeping_the_newest_and_its_texts() {
+    let (_home, sink, bot) = hired();
+    let first = add(sink.as_ref(), &bot, &Place::Bot, "The first note", OWNER, Source::of("app")).unwrap().remove(0);
+    super::super::role_write(sink.as_ref(), &bot.id, "An old role.\n", None).unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "A newer role.\n", None).unwrap();
+    let old_role = changes::hash_of("An old role.\n");
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    // Older history, padded past the size the log rotates at.
+    let mut padded = std::fs::read_to_string(folder.join(changes::LOG_FILE)).unwrap();
+    let mut filler: serde_json::Value = serde_json::from_str(padded.lines().next().unwrap()).unwrap();
+    filler["text"] = json!("x".repeat(1000));
+    while (padded.len() as u64) < changes::MAX_LOG_BYTES {
+        filler["id"] = json!(uuid::Uuid::now_v7().to_string());
+        padded.push_str(&format!("{filler}\n"));
+    }
+    std::fs::write(folder.join(changes::LOG_FILE), &padded).unwrap();
+    super::super::role_write(sink.as_ref(), &bot.id, "The role now.\n", None).unwrap();
+    let size = std::fs::metadata(folder.join(changes::LOG_FILE)).unwrap().len();
+    assert!(size <= changes::MAX_LOG_BYTES / 2, "{size}");
+    let log = read_log(&bot.id).unwrap();
+    assert_eq!(log.changes.last().unwrap().kind, "role");
+    assert!(!log.changes.iter().any(|change| change.id == first.id), "the oldest went");
+    // The texts the kept changes and the files name stay (the newest change still undoes to the newer role); the old role's is gone with its changes.
+    assert!(changes::kept_text(&bot.id, &changes::hash_of("The role now.\n")).unwrap().is_some());
+    assert!(changes::kept_text(&bot.id, &changes::hash_of("A newer role.\n")).unwrap().is_some());
+    assert!(changes::kept_text(&bot.id, &old_role).unwrap().is_none());
+}
+
+#[test]
+fn a_state_already_logged_is_never_logged_again_and_a_quiet_look_writes_nothing() {
+    let (_home, sink, bot) = hired();
+    let known = crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::KNOWN_FILE);
+    let before = std::fs::read(&known).unwrap();
+    // The note's line reached the log, but what the app knows of the files did not.
+    add(sink.as_ref(), &bot, &Place::Bot, "Logged once", OWNER, Source::of("app")).unwrap();
+    std::fs::write(&known, &before).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert!(!shown.role.editable && shown.role.text.len() as u64 <= READ_LIMIT);
+    assert_eq!(shown.changes.len(), 1, "the note's own change, no outside copy of it");
+    // Looking again, with nothing changed, does not rewrite what the app knows.
+    let stamp = std::fs::metadata(&known).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    view(sink.as_ref(), &bot).unwrap();
+    super::super::call(sink.as_ref(), "memoryLook", &json!({"id": bot.id})).unwrap();
+    assert_eq!(std::fs::metadata(&known).unwrap().modified().unwrap(), stamp);
+}
+
+#[test]
+fn opening_the_bots_page_looks_at_every_bot() {
+    let (_home, sink, bot) = hired();
+    let other = super::super::create(sink.as_ref(), "watcher", "Argus").unwrap();
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Edited by Atlas.\n").unwrap();
+    std::fs::write(home_of(&other).join("ROLE.md"), "Edited by Argus.\n").unwrap();
+    let found = super::super::call(sink.as_ref(), "memoryLook", &json!({})).unwrap();
+    assert_eq!(found["found"], 2);
+    assert_eq!(read_log(&bot.id).unwrap().changes[0].kind, "outside");
+    assert_eq!(read_log(&other.id).unwrap().changes[0].kind, "outside");
+}
+
+#[test]
+fn forgetting_names_one_of_two_equal_notes_by_its_line() {
+    let (_home, sink, bot) = hired();
+    let memory = home_of(&bot).join("MEMORY.md");
+    let header = std::fs::read_to_string(&memory).unwrap();
+    std::fs::write(&memory, format!("{header}- 2026-11-01 Twice\n- 2026-11-02 Between\n- 2026-11-01 Twice\n")).unwrap();
+    assert!(forget(sink.as_ref(), &bot, &Place::Bot, "Twice", None, OWNER, Source::of("app")).unwrap_err().to_string().contains("by its line number"));
+    let second = header.lines().count() + 2;
+    forget(sink.as_ref(), &bot, &Place::Bot, "Twice", Some(second), OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, "MEMORY.md"), format!("{header}- 2026-11-01 Twice\n- 2026-11-02 Between\n"));
+}
+
+#[test]
+fn an_undo_puts_a_line_back_under_its_old_neighbour_or_at_the_end() {
+    let (_home, sink, bot) = hired();
+    for note in ["Alpha", "Bravo", "Charlie"] {
+        add(sink.as_ref(), &bot, &Place::Bot, note, OWNER, Source::of("app")).unwrap();
+    }
+    let forgot = forget(sink.as_ref(), &bot, &Place::Bot, "Bravo", None, OWNER, Source::of("app")).unwrap().remove(0);
+    // Lines added above since: the old line number is wrong now, its neighbour is not.
+    let memory = home_of(&bot).join("MEMORY.md");
+    std::fs::write(&memory, format!("- 2026-11-01 New one\n- 2026-11-01 New two\n{}", std::fs::read_to_string(&memory).unwrap())).unwrap();
+    undo(sink.as_ref(), &bot, &forgot.id, OWNER, Source::of("app")).unwrap();
+    let notes: Vec<String> = file(&bot, "MEMORY.md").lines().filter_map(|line| note_date(line).map(|_| note_text(line).to_owned())).collect();
+    assert_eq!(notes, ["New one", "New two", "Alpha", "Bravo", "Charlie"]);
+
+    // Its neighbour gone: the line goes back at the end.
+    let forgot = forget(sink.as_ref(), &bot, &Place::Bot, "Charlie", None, OWNER, Source::of("app")).unwrap().remove(0);
+    forget(sink.as_ref(), &bot, &Place::Bot, "Bravo", None, OWNER, Source::of("app")).unwrap();
+    add(sink.as_ref(), &bot, &Place::Bot, "Delta", OWNER, Source::of("app")).unwrap();
+    undo(sink.as_ref(), &bot, &forgot.id, OWNER, Source::of("app")).unwrap();
+    assert!(file(&bot, "MEMORY.md").trim_end().ends_with("Charlie"));
+}
+
+#[test]
+fn secrets_are_refused_flagged_and_taken_out_of_the_history_when_forgotten() {
+    let (_home, sink, bot) = hired();
+    for refused in ["sk_live_abcdefghijklmnop1234", "glpat-abcdefghijklmnopqrstu", "npm_abcdefghijklmnopqrstuvwxyz0123456789", "hf_abcdefghijklmnopqrstuvwxyzABCDEF", "the password=hunter2hunter2"] {
+        assert!(add(sink.as_ref(), &bot, &Place::Bot, refused, OWNER, Source::of("app")).unwrap_err().to_string().contains("secret"), "{refused:?}");
+    }
+    for refused in ["one\u{2028}two", "para\u{2029}graph", "abc\u{202E}fed", "mark\u{200F}ed"] {
+        assert!(add(sink.as_ref(), &bot, &Place::Bot, refused, OWNER, Source::of("app")).unwrap_err().to_string().contains("one line"), "{refused:?}");
+    }
+    // Written into the files outside the app, a secret is flagged where it is.
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+    let memory = home_of(&bot).join("MEMORY.md");
+    std::fs::write(&memory, format!("{}- 2026-11-01 The token is {secret}\n", std::fs::read_to_string(&memory).unwrap())).unwrap();
+    std::fs::write(home_of(&bot).join("memory").join("deploy.md"), format!("api_key: {secret}\n")).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert_eq!(shown.secrets.len(), 2, "{:?}", shown.secrets);
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    assert!(std::fs::read_to_string(folder.join(changes::LOG_FILE)).unwrap().contains(secret));
+
+    // Forgetting it takes it out of the history: the log, and the kept texts that are not the files now.
+    forget(sink.as_ref(), &bot, &Place::Bot, "The token is", None, OWNER, Source::of("app")).unwrap();
+    let log = std::fs::read_to_string(folder.join(changes::LOG_FILE)).unwrap();
+    assert!(!log.contains(secret) && log.contains(changes::REDACTED));
+    for entry in std::fs::read_dir(folder.join(changes::TEXTS_DIR)).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        assert!(!text.contains(secret) || text.starts_with("api_key"), "only the topic file as it is now keeps it: {text}");
+    }
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert!(shown.changes.iter().filter(|change| change.kind != "forgot").all(|change| !change.text.contains(secret)));
+    let outside = shown.changes.iter().find(|change| change.text.contains("MEMORY.md")).unwrap();
+    assert!(outside.not_undoable.as_deref().unwrap().contains("secret"));
+}
+
+#[test]
+fn a_conversation_reads_the_newest_lines_and_undated_notes_are_archived_first() {
+    let (_home, sink, bot) = hired();
+    let memory = home_of(&bot).join("MEMORY.md");
+    let header = std::fs::read_to_string(&memory).unwrap();
+    let notes: Vec<String> = (0..BUDGET + 5).map(|n| format!("- 2026-10-{:02} Note {n}", 1 + n % 28)).collect();
+    std::fs::write(&memory, format!("{header}{}\n", notes.join("\n"))).unwrap();
+    let given = for_conversation(&bot).unwrap();
+    assert!(given.contains(&format!("Note {}", BUDGET + 4)) && !given.contains("Notes kept across conversations"), "the newest are read");
+
+    // Undated notes, then the file's own words, are what the budget moves when nothing is dated.
+    let undated: Vec<String> = (0..BUDGET).map(|n| format!("- Undated {n}")).collect();
+    std::fs::write(&memory, format!("{header}{}\n", undated.join("\n"))).unwrap();
+    add(sink.as_ref(), &bot, &Place::Bot, "Dated now", OWNER, Source::of("app")).unwrap();
+    let now = file(&bot, "MEMORY.md");
+    assert_eq!(now.lines().count(), BUDGET);
+    assert!(now.contains("Dated now") && now.starts_with("# Memory") && now.contains("Notes kept across conversations"));
+    assert!(file(&bot, "memory/archive.md").starts_with("- Undated 0\n"));
+}
+
+#[test]
+fn a_full_archive_is_rolled_to_a_dated_file() {
+    let (_home, sink, bot) = hired();
+    let archive = home_of(&bot).join("memory").join(ARCHIVE_FILE);
+    let full = format!("- 2020-01-01 {}\n", "o".repeat(200)).repeat((ARCHIVE_ROLL_BYTES / 200) as usize);
+    std::fs::write(&archive, &full).unwrap();
+    let memory = home_of(&bot).join("MEMORY.md");
+    let header = std::fs::read_to_string(&memory).unwrap();
+    let notes: Vec<String> = (0..BUDGET - header.lines().count()).map(|n| format!("- 2026-10-01 Note {n}")).collect();
+    std::fs::write(&memory, format!("{header}{}\n", notes.join("\n"))).unwrap();
+    let recorded = add(sink.as_ref(), &bot, &Place::Bot, "One more", OWNER, Source::of("app")).unwrap();
+    assert!(recorded.iter().find(|change| change.kind == "archived").unwrap().text.contains("started a new archive file"));
+    let rolled = home_of(&bot).join("memory").join(format!("archive-{}.md", today()));
+    assert_eq!(std::fs::read_to_string(&rolled).unwrap(), full);
+    assert_eq!(std::fs::read_to_string(&archive).unwrap(), "- 2026-10-01 Note 0\n");
+}
+
+#[test]
+fn a_deleted_bot_takes_its_history_to_the_trash() {
+    let (_home, sink, bot) = hired();
+    add(sink.as_ref(), &bot, &Place::Bot, "Kept with it", OWNER, Source::of("app")).unwrap();
+    super::super::delete(sink.as_ref(), &bot.id).unwrap();
+    let root = crate::store::root().unwrap();
+    assert!(!root.join("bot-changes").join(&bot.id).exists());
+    let trashed = root.join("trash").join("bots").join(format!("{}.changes", bot.id));
+    assert!(std::fs::read_to_string(trashed.join(changes::LOG_FILE)).unwrap().contains("Kept with it"));
 }

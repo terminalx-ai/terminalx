@@ -22,8 +22,9 @@
   bot writes memory with `terminalx bots memory add|forget|list` from its own
   chat (proved by its launch token), notes that look like secrets are refused,
   and memory can be switched off per bot. Every change, the bot's own and edits
-  made to the files outside the app included, is recorded with where it came
-  from in a change log kept outside the bot's home folder, each with Undo
+  made to the files outside the app included (found when the Bots page or the
+  bot's page opens, one change per file), is recorded with where it came from
+  in a change log kept outside the bot's home folder, each with Undo
   (PRO-470).
 
 ## 0.2.37

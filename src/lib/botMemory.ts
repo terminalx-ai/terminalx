@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { botsApi, errorMessage, invoke } from "@/lib/api";
 import type { Bot } from "@/types/bots";
-import type { BotChange, BotRoleMemory } from "@/types/botMemory";
+import type { BotChange, BotDiffLine, BotRoleMemory } from "@/types/botMemory";
 
 /**
  * A bot's role and memory (PRO-470), as the owner reads and changes them in the app. Every change is recorded in the
@@ -13,12 +13,49 @@ export const botMemoryApi = {
   view: (id: string) => invoke<BotRoleMemory>("bot_memory", { operation: "memoryView", params: { id } }),
   /** `place` is `bot`, `personal`, or an organisation the bot works in. */
   add: (id: string, place: string, text: string) => invoke<BotChange[]>("bot_memory", { operation: "memoryAdd", params: { id, place, text } }),
-  forget: (id: string, place: string, line: string) => invoke<BotChange[]>("bot_memory", { operation: "memoryForget", params: { id, place, line } }),
+  /** `index` is the line's place in the file, so one of two equal notes is the one forgotten. */
+  forget: (id: string, place: string, line: string, index?: number) => invoke<BotChange[]>("bot_memory", { operation: "memoryForget", params: { id, place, line, index } }),
   undo: (id: string, change: string) => invoke<BotChange>("bot_memory", { operation: "memoryUndo", params: { id, change } }),
   /** Put back the role a change left, or the role template's with `null`. */
   restoreRole: (id: string, change: string | null) => invoke<BotChange[]>("bot_memory", { operation: "roleRestore", params: { id, change } }),
-  writeRole: (id: string, text: string) => botsApi.roleWrite(id, text),
+  /** A version of the role by its hash; `null` when it is no longer kept. */
+  text: (id: string, hash: string) => invoke<string | null>("bot_memory", { operation: "memoryText", params: { id, hash } }),
+  /** From the role template's text to the role now; `null` with no template, or too long to compare. */
+  roleDiff: (id: string) => invoke<BotDiffLine[] | null>("bot_memory", { operation: "roleDiff", params: { id } }),
+  /** Look for edits made outside the app: one bot's files, or every bot's with no id (as the Bots page opens). */
+  look: (id?: string) => invoke<{ found: number }>("bot_memory", { operation: "memoryLook", params: id ? { id } : {} }),
+  /** `expected` is the hash of the text the editor started from: a role changed since is not written over. */
+  writeRole: (id: string, text: string, expected: string) => botsApi.roleWrite(id, text, expected),
 };
+
+/** An unsaved edit of a bot's standing instructions: the text, and the role it started from. */
+export interface RoleDraft {
+  text: string;
+  base: string;
+  baseHash: string;
+}
+
+// Kept for the app's life, by bot: leaving the screen, or the bot missing from the list for a moment, loses no edit.
+const drafts = new Map<string, RoleDraft>();
+
+export function roleDraft(id: string): RoleDraft | undefined {
+  return drafts.get(id);
+}
+
+/** Keep an edit, or drop it with `null` (saved or discarded). */
+export function keepRoleDraft(id: string, draft: RoleDraft | null) {
+  if (draft && draft.text !== draft.base) drafts.set(id, draft);
+  else drafts.delete(id);
+}
+
+/** Whether a bot's standing instructions have an unsaved edit. */
+export function hasRoleDraft(id: string): boolean {
+  return drafts.has(id);
+}
+
+export function resetRoleDraftsForTests() {
+  drafts.clear();
+}
 
 export const MEMORY_CHANGED_EVENT = "bot_memory_changed";
 
@@ -95,11 +132,16 @@ export function useBotRoleMemory(bot: Bot | null): BotRoleMemoryState {
   return { view, error, loading, reload };
 }
 
+/** An organisation place's name: its name from the account, or the id the bot's record has when it is not known. */
+export function placeName(key: string, orgNames: ReadonlyMap<string, string>): string {
+  if (key === "personal") return "Personal";
+  return orgNames.get(key) ?? key;
+}
+
 /** How a place is named on the screen. */
-export function placeLabel(key: string, botName: string): string {
+export function placeLabel(key: string, botName: string, orgNames: ReadonlyMap<string, string> = new Map()): string {
   if (key === "bot") return `Goes with ${botName}`;
-  if (key === "personal") return "Stays in Personal";
-  return `Stays in ${key}`;
+  return `Stays in ${placeName(key, orgNames)}`;
 }
 
 /** The place's line under its name. */

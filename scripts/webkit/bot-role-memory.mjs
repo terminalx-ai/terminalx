@@ -31,16 +31,19 @@ const extra = `(() => {
   const home = "/Users/someone/.terminalx/bots/0198b0c4-5a1e-7d2f-9a43-1f2e3d4c5b6a/";
   const orgDir = home + "orgs/kestrel-studio-and-a-few-more-words-for-an-organisation-with-a-long-name-1a2b3c4d/";
   const place = (key, path, lines, extra) => Object.assign({ key, path, lines, read: true, readLines: lines.length, notRead: 0, archiveLines: 0, bytes: 2048, overLimit: false }, extra);
-  const change = (id, kind, text, source, by, extra) => Object.assign({ id, at: now, kind, text, edits: [], source, by, undoneBy: null, notUndoable: null }, extra);
-  answers.bot_memory = ({ operation }) => {
+  const change = (id, kind, text, source, by, extra) => Object.assign({ id, at: now, kind, text, source, by, undoneBy: null, notUndoable: null }, extra);
+  const texts = { "h-9": role, "h-8": "An older role.\\n", "h-t": "You are a CTO.\\n" };
+  answers.bot_memory = ({ operation, params }) => {
+    if (operation === "memoryText") return texts[params.hash] ?? null;
+    if (operation === "roleDiff") return role.split("\\n").map((text, n) => ({ kind: n % 7 === 3 ? "added" : "same", text }));
+    if (operation === "memoryLook") return { found: 0 };
     if (operation !== "memoryView") return [];
     return {
-      role: { path: home + "ROLE.md", text: role, editable: true, bytes: role.length, overLimit: false, templateTitle: "CTO",
-        templateDiff: role.split("\\n").map((text, n) => ({ kind: n % 7 === 3 ? "added" : "same", text })),
+      role: { path: home + "ROLE.md", text: role, hash: "h-9", editable: true, bytes: role.length, overLimit: false, templateTitle: "CTO",
         versions: [
-          { change: "c-9", at: now, by: "bot-1", kind: "outside", source: { kind: "outside" }, text: role },
-          { change: "c-8", at: now, by: "owner", kind: "role", source: { kind: "app" }, text: "An older role.\\n" },
-          { change: null, at: now, by: "owner", kind: "template", source: { kind: "template" }, text: "You are a CTO.\\n" },
+          { change: "c-9", at: now, by: "bot-1", kind: "outside", source: { kind: "outside" }, hash: "h-9" },
+          { change: "c-8", at: now, by: "owner", kind: "role", source: { kind: "app" }, hash: "h-8" },
+          { change: null, at: now, by: "owner", kind: "template", source: { kind: "template" }, hash: "h-t" },
         ] },
       memory: { off: false, budget: 200, readLimit: 65536, workingPlace: ORG, read: 200,
         places: [
@@ -60,6 +63,7 @@ const extra = `(() => {
         change("c-6", "standup", "A change a newer version made", { kind: "meeting" }, "bot-1", { notUndoable: "A newer version of TerminalX made this change; it cannot be undone here." }),
       ],
       totalChanges: 240, unreadableChanges: 1,
+      secrets: [orgDir + "memory/merge-rules-for-the-release-branch-and-everything-around-it.md"],
     };
   };
 })();`;
@@ -146,6 +150,9 @@ try {
   // History and the template's changes open under the editor and still fit.
   await main.getByTestId("bot-role-history-toggle").click();
   await main.locator("[data-testid=bot-role-version]").nth(2).waitFor();
+  // A version's text, read when shown, opens under it and still fits.
+  await main.locator("[data-testid=bot-role-version]").nth(0).getByTestId("bot-role-version-show").click();
+  await main.getByTestId("bot-role-version-text").waitFor();
   for (const viewport of [viewports[0], viewports[3]]) {
     await page.setViewportSize(viewport);
     const problems = await measure(page);

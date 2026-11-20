@@ -15,13 +15,7 @@ export interface BotChangeSource {
   duty?: string;
 }
 
-/** One edit, by the file's path in the bot's home. An op a newer app wrote arrives as its own string. */
-export type BotEdit =
-  | { op: "addLine"; file: string; line: string; index?: number }
-  | { op: "removeLine"; file: string; line: string; index?: number }
-  | { op: "replaceText"; file: string; before: string | null; after: string | null }
-  | { op: string & {}; file?: string };
-
+/** A change as the screen lists it. Its edits and the texts it replaced stay in the log and are not sent. */
 export interface BotChange {
   id: string;
   at: string;
@@ -29,7 +23,6 @@ export interface BotChange {
   kind: string;
   /** What changed, in a line: the note itself for a note. */
   text: string;
-  edits: BotEdit[];
   source: BotChangeSource;
   /** `owner`, a bot's id, or `outside`. */
   by: string;
@@ -61,29 +54,31 @@ export interface BotRoleVersion {
   by: string;
   kind: string;
   source: BotChangeSource;
-  text: string | null;
+  /** The hash of its text, fetched with `botMemoryApi.text` when shown; `null` for no file. */
+  hash: string | null;
 }
 
 export interface BotRoleView extends BotFileRead {
   path: string;
-  /** The whole file, for the editor; only its first `readLimit` bytes reach a conversation. */
+  /** What a conversation reads: at most `readLimit` bytes. */
   text: string;
-  /** Whether the editor may save it: `false` past the size a role may be, so a save never cuts it short. */
+  /** The hash of the file as read: a save names it, so a role changed since is not written over. */
+  hash: string;
+  /** Whether the editor may save it: `false` for a file past the limit, so a save never cuts it short. */
   editable: boolean;
   templateTitle: string | null;
-  /** From the template's text to the role now; `null` with no template, or too long to compare. */
-  templateDiff: BotDiffLine[] | null;
   /** Newest first; the template's last. */
   versions: BotRoleVersion[];
 }
 
 export interface BotMemoryPlace extends BotFileRead {
-  /** `bot`, `personal`, or the organisation's name. */
+  /** `bot`, `personal`, or the organisation's id. */
   key: string;
   path: string;
   lines: string[];
   /** Given to a conversation where the bot works now. */
   read: boolean;
+  /** How many of its lines a conversation reads: the last ones. */
   readLines: number;
   notRead: number;
   archiveLines: number;
@@ -117,4 +112,6 @@ export interface BotRoleMemory {
   totalChanges: number;
   /** Lines of the log this app cannot read. They are kept. */
   unreadableChanges: number;
+  /** Files that look like they hold a secret (a key, a token, a password), by path. */
+  secrets: string[];
 }

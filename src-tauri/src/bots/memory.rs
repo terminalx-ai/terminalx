@@ -5,20 +5,23 @@
 //! files and `memory/archive.md`:
 //!
 //! - the bot itself (the home folder): notes that go with the bot;
-//! - each organisation it works in (`orgs/<name>-<hash>/`): notes that stay there;
+//! - each organisation it works in (`orgs/<organisation id>/`): notes that stay there;
 //! - `personal/`: notes for the work it does for its owner alone.
 //!
 //! A conversation is given the bot's own notes and those of the place it
 //! works in (the first of its `works_in`), [`BUDGET`] lines in all, the
-//! bot's own first. Adding a note past the budget moves the oldest notes of
-//! those two files to their archives. Every write is recorded in the change
-//! log ([`super::changes`]) and can be undone.
+//! newest of each. Adding a note past the budget moves the oldest notes of
+//! those two files to their archives (undated notes first, a file's own
+//! words under its heading last), by whoever added
+//! it; an archive past [`ARCHIVE_ROLL_BYTES`] is rolled to a dated file.
+//! Every write is recorded in the change log ([`super::changes`]) and can be undone.
 //!
 //! What is read for a conversation is read with limits: a regular file
-//! only, at most [`READ_LIMIT`] bytes, decoded lossily. It is the bot's own
-//! notes, never instructions or approval.
+//! only, opened without following a link, at most [`READ_LIMIT`] bytes,
+//! decoded lossily. It is the bot's own notes, never instructions or
+//! approval. A role is at most that size too: one limit for reading and writing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -35,8 +38,10 @@ use crate::store::bots as bot_store;
 
 /// How many lines of memory a conversation is given: the bot's own and its place's together.
 pub const BUDGET: usize = 200;
-/// How much of a role or memory file is read for a conversation.
+/// How much of a role or memory file is read for a conversation, and the most a role may be.
 pub const READ_LIMIT: u64 = 64 * 1024;
+/// An archive this large is rolled to `memory/archive-<date>.md` before more is added to it.
+pub const ARCHIVE_ROLL_BYTES: u64 = 768 * 1024;
 pub const ARCHIVE_FILE: &str = "archive.md";
 pub const ORGS_DIR: &str = "orgs";
 /// The place key for the notes that go with the bot.
@@ -50,14 +55,14 @@ const SHOWN_CHANGES: usize = 200;
 pub enum Place {
     /// Goes with the bot.
     Bot,
-    /// Stays in one organisation, by its name as the bot's `works_in` has it.
+    /// Stays in one organisation, by its id as the bot's `works_in` has it.
     Org(String),
     /// The owner's own work.
     Personal,
 }
 
 impl Place {
-    /// `bot`, `personal`, or the organisation's name.
+    /// `bot`, `personal`, or the organisation's id.
     pub fn key(&self) -> &str {
         match self {
             Self::Bot => BOT_PLACE,
@@ -85,7 +90,7 @@ impl Place {
         match self {
             Self::Bot => String::new(),
             Self::Personal => format!("{PERSONAL}/"),
-            Self::Org(name) => format!("{ORGS_DIR}/{}/", org_folder(name)),
+            Self::Org(id) => format!("{ORGS_DIR}/{}/", org_folder(id)),
         }
     }
 
@@ -102,12 +107,15 @@ impl Place {
     }
 }
 
-/// An organisation's folder: its name made safe, and a short hash of the
-/// exact name so two names that look alike never share one.
-fn org_folder(name: &str) -> String {
-    let hash = sha2::Sha256::digest(name.as_bytes());
-    let short: String = hash.iter().take(4).map(|byte| format!("{byte:02x}")).collect();
-    format!("{}-{short}", super::slugify(name))
+/// An organisation's folder, by its id: a renamed organisation keeps its
+/// notes. An id that is not a plain name is kept by its hash.
+fn org_folder(id: &str) -> String {
+    let plain = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) && !id.starts_with("x-");
+    if plain {
+        return id.into();
+    }
+    let hash = sha2::Sha256::digest(id.as_bytes());
+    format!("x-{}", hash.iter().take(8).map(|byte| format!("{byte:02x}")).collect::<String>())
 }
 
 /// Every place `bot` keeps notes: itself, each organisation it works in, and personal.
@@ -145,19 +153,26 @@ pub struct Limited {
     pub problem: Option<String>,
 }
 
-/// Read a file the way a conversation is given it: a regular file only, at
-/// most [`READ_LIMIT`] bytes, decoded lossily. A missing file reads as empty.
+/// Read a file the way a conversation is given it: a regular file only,
+/// opened without following a link, at most [`READ_LIMIT`] bytes, decoded
+/// lossily. A missing file reads as empty.
 pub fn read_limited(path: &Path) -> Limited {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta,
+    let not_regular = || Limited { problem: Some("It is not a regular file, so it is not read.".into()), ..Default::default() };
+    let file = match changes::open_no_follow(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Limited::default(),
+        Err(error) if changes::is_link_refusal(&error) => return not_regular(),
+        Err(error) => return Limited { problem: Some(format!("It cannot be read: {error}")), ..Default::default() },
+    };
+    let meta = match file.metadata() {
+        Ok(meta) => meta,
         Err(error) => return Limited { problem: Some(format!("It cannot be read: {error}")), ..Default::default() },
     };
     if !meta.file_type().is_file() {
-        return Limited { problem: Some("It is not a regular file, so it is not read.".into()), ..Default::default() };
+        return not_regular();
     }
     let mut bytes = Vec::new();
-    let read = std::fs::File::open(path).and_then(|file| file.take(READ_LIMIT).read_to_end(&mut bytes));
+    let read = file.take(READ_LIMIT).read_to_end(&mut bytes);
     if let Err(error) = read {
         return Limited { bytes: meta.len(), problem: Some(format!("It cannot be read: {error}")), ..Default::default() };
     }
@@ -197,16 +212,28 @@ pub fn note_text(line: &str) -> &str {
 
 static SECRET: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(concat!(
-        r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}",
+        r"(sk-[A-Za-z0-9_-]{16,}|sk_(?:live|test)_[A-Za-z0-9]{16,}|rk_live_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}",
+        r"|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}",
         r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY|AIza[0-9A-Za-z_-]{30,}|lin_api_[A-Za-z0-9]{20,}",
-        r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.)"
+        r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.",
+        r"|(?i:\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[=:]\s*[^\s,;]{6,}))"
     ))
     .expect("the secret pattern compiles")
 });
 
-/// Whether a note looks like it holds a key or a token. Bots keep no secrets in memory.
+/// Whether a text looks like it holds a key, a token or a password. Bots keep no secrets in memory.
 pub fn looks_secret(text: &str) -> bool {
     SECRET.is_match(text)
+}
+
+/// The parts of a text that look like secrets.
+pub fn secrets_in(text: &str) -> Vec<String> {
+    SECRET.find_iter(text).map(|found| found.as_str().to_owned()).collect()
+}
+
+/// Characters that would make one line read as two, or reorder what is shown.
+fn breaks_a_line(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 fn clean_note(text: &str) -> Result<String> {
@@ -216,6 +243,9 @@ fn clean_note(text: &str) -> Result<String> {
     }
     if note.chars().any(char::is_control) {
         return Err(refused("A note is one line."));
+    }
+    if note.chars().any(breaks_a_line) {
+        return Err(refused("A note is one line of plain text: no line or paragraph separators and no direction marks."));
     }
     if note.chars().count() > MAX_NOTE_CHARS {
         return Err(refused(format!("A note is at most {MAX_NOTE_CHARS} characters. Put longer notes in a topic file under memory/.")));
@@ -230,26 +260,43 @@ fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-/// How many lines of the bot's own notes and of its place's a conversation reads.
+/// How many lines of the bot's own notes and of its place's a conversation reads (the newest of each).
 pub fn read_split(own: usize, place: usize) -> (usize, usize) {
     let own_read = own.min(BUDGET);
     (own_read, place.min(BUDGET - own_read))
 }
 
-/// The two memory files a note in `place` is read with.
-fn read_with(bot: &Bot, place: &Place) -> Option<Place> {
+/// The two memory files a note in `place` is counted with: the bot's own and the place's.
+fn budget_pair(bot: &Bot, place: &Place) -> [Place; 2] {
     match place {
-        Place::Bot => Some(working_place(bot)),
-        _ => Some(place.clone()),
+        Place::Bot => [Place::Bot, working_place(bot)],
+        _ => [Place::Bot, place.clone()],
+    }
+}
+
+/// A line the budget may move: anything but a heading or a blank line.
+fn is_note(line: &str) -> bool {
+    let line = line.trim();
+    !line.is_empty() && !line.starts_with('#')
+}
+
+/// The order the budget moves lines in: undated notes first, then dated
+/// ones oldest first, and other text (a file's own words under its heading) last.
+fn move_order(line: &str) -> (u8, &str) {
+    match note_date(line) {
+        Some(date) => (1, date),
+        None if line.trim_start().starts_with("- ") || line.trim_start().starts_with("* ") => (0, ""),
+        None => (2, ""),
     }
 }
 
 /// Keep the bot's own notes and `place`'s within [`BUDGET`] lines together:
-/// the oldest notes (by date, then the higher in the file) move to their
-/// file's archive, as one `archived` change. `keep` is never moved.
-fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, keep: Option<(&str, &str)>) -> Result<usize> {
-    let Some(other) = read_with(bot, place) else { return Ok(0) };
-    let pair = [Place::Bot, other];
+/// the oldest notes (undated first, then by date, then the higher in the
+/// file) move to their file's archive, as one `archived` change by `by`.
+/// The lines in `keep` are never moved. An archive that would pass
+/// [`ARCHIVE_ROLL_BYTES`] is first rolled to a dated file.
+fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, keep: &BTreeSet<(String, String)>, by: &str) -> Result<usize> {
+    let pair = budget_pair(bot, place);
     let mut texts = Vec::new();
     for place in &pair {
         texts.push(files.lines(&place.memory_file())?);
@@ -258,12 +305,11 @@ fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, kee
     if total <= BUDGET {
         return Ok(0);
     }
-    let mut notes: Vec<(&str, usize, usize)> = Vec::new();
+    let mut notes: Vec<((u8, &str), usize, usize)> = Vec::new();
     for (which, lines) in texts.iter().enumerate() {
         for (at, line) in lines.iter().enumerate() {
-            let kept = keep.is_some_and(|(file, kept)| file == pair[which].memory_file() && kept == line);
-            if let (Some(date), false) = (note_date(line), kept) {
-                notes.push((date, which, at));
+            if is_note(line) && !keep.contains(&(pair[which].memory_file(), line.clone())) {
+                notes.push((move_order(line), which, at));
             }
         }
     }
@@ -273,13 +319,41 @@ fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, kee
         return Ok(0);
     }
     let moved = notes.len();
+    let mut edits = Vec::new();
+    let mut rolled = false;
+    for (which, place) in pair.iter().enumerate() {
+        let added: u64 = notes.iter().filter(|note| note.1 == which).map(|note| texts[which][note.2].len() as u64 + 1).sum();
+        let archive = place.archive_file();
+        let now = files.get(&archive)?.unwrap_or_default();
+        if added == 0 || now.trim().is_empty() || now.len() as u64 + added <= ARCHIVE_ROLL_BYTES {
+            continue;
+        }
+        let mut name = format!("{}/archive-{}.md", place.topics_dir(), today());
+        let mut copy = 2;
+        while files.get(&name)?.is_some() {
+            name = format!("{}/archive-{}-{copy}.md", place.topics_dir(), today());
+            copy += 1;
+        }
+        edits.push(files.replacing(&name, Some(&now))?);
+        edits.push(files.replacing(&archive, None)?);
+        rolled = true;
+    }
     // Removed from the bottom up so each index still holds, then added to the archives oldest first.
     let mut removals = notes.clone();
     removals.sort_by(|a, b| (a.1, b.2).cmp(&(b.1, a.2)));
-    let mut edits: Vec<Edit> = removals.iter().map(|(_, which, at)| Edit::RemoveLine { file: pair[*which].memory_file(), line: texts[*which][*at].clone(), index: Some(*at) }).collect();
-    edits.extend(notes.iter().map(|(_, which, at)| Edit::AddLine { file: pair[*which].archive_file(), line: texts[*which][*at].clone(), index: None }));
-    let text = format!("Moved {moved} older note{} to the archive to stay within {BUDGET} lines", if moved == 1 { "" } else { "s" });
-    files.record(NewChange { kind: "archived".into(), text, edits, source: Source::of("budget"), by: OWNER.into(), undoes: None })?;
+    edits.extend(removals.iter().map(|(_, which, at)| Edit::RemoveLine {
+        file: pair[*which].memory_file(),
+        line: texts[*which][*at].clone(),
+        index: Some(*at),
+        prev: at.checked_sub(1).map(|above| texts[*which][above].clone()),
+    }));
+    edits.extend(notes.iter().map(|(_, which, at)| Edit::AddLine { file: pair[*which].archive_file(), line: texts[*which][*at].clone(), index: None, prev: None }));
+    let text = format!(
+        "Moved {moved} older note{} to the archive to stay within {BUDGET} lines{}",
+        if moved == 1 { "" } else { "s" },
+        if rolled { ", and started a new archive file" } else { "" }
+    );
+    files.record(NewChange::new("archived", text, edits, Source::of("budget"), by))?;
     Ok(moved)
 }
 
@@ -289,67 +363,103 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, place: &Place, text: &str, by: &str,
     let line = format!("- {} {note}", today());
     let file = place.memory_file();
     let ((), recorded) = changes::commit(sink, &bot.id, |files| {
-        if files.lines(&file)?.iter().any(|known| note_text(known).eq_ignore_ascii_case(&note)) {
+        let lines = files.lines(&file)?;
+        if lines.iter().any(|known| note_text(known).eq_ignore_ascii_case(&note)) {
             return Err(refused(format!("{} already has that note.", bot.name)));
         }
-        files.record(NewChange { kind: "learned".into(), text: note.clone(), edits: vec![Edit::AddLine { file: file.clone(), line: line.clone(), index: None }], source, by: by.into(), undoes: None })?;
-        archive_over_budget(files, bot, place, Some((&file, &line)))?;
+        let prev = lines.last().cloned();
+        files.record(NewChange::new("learned", note.clone(), vec![Edit::AddLine { file: file.clone(), line: line.clone(), index: None, prev }], source, by))?;
+        archive_over_budget(files, bot, place, &BTreeSet::from([(file.clone(), line.clone())]), by)?;
         Ok(())
     })?;
     Ok(recorded)
 }
 
 /// Remove the one note in `place` that `which` names: the whole line, the
-/// note's text, or a part of it that only one note has.
-pub fn forget(sink: &dyn EventSink, bot: &Bot, place: &Place, which: &str, by: &str, source: Source) -> Result<Vec<Change>> {
+/// note's text, or a part of it that only one note has. `index` says which
+/// line is meant (counted from 0), so one of two equal notes can be
+/// forgotten. A note that held a secret is also taken out of the history.
+pub fn forget(sink: &dyn EventSink, bot: &Bot, place: &Place, which: &str, index: Option<usize>, by: &str, source: Source) -> Result<Vec<Change>> {
     let wanted = which.trim();
     if wanted.is_empty() {
         return Err(refused("Say which note to forget."));
     }
     let file = place.memory_file();
-    let ((), recorded) = changes::commit(sink, &bot.id, |files| {
+    let matches = |line: &str| line.trim() == wanted || note_text(line).eq_ignore_ascii_case(wanted);
+    let (line, recorded) = changes::commit(sink, &bot.id, |files| {
         let lines = files.lines(&file)?;
-        let lower = wanted.to_lowercase();
-        let exact: Vec<usize> = (0..lines.len()).filter(|at| lines[*at].trim() == wanted || note_text(&lines[*at]).eq_ignore_ascii_case(wanted)).collect();
-        let found = if exact.is_empty() { (0..lines.len()).filter(|at| note_date(&lines[*at]).is_some() && note_text(&lines[*at]).to_lowercase().contains(&lower)).collect() } else { exact };
-        let at = match found.as_slice() {
-            [at] => *at,
-            [] => return Err(refused(format!("No note in {} matches “{wanted}”.", place_label(place)))),
-            several => return Err(refused(format!("{} notes match “{wanted}”; say more of the one to forget.", several.len()))),
+        let at = match index.filter(|at| lines.get(*at).is_some_and(|line| matches(line))) {
+            Some(at) => at,
+            None => {
+                let lower = wanted.to_lowercase();
+                let exact: Vec<usize> = (0..lines.len()).filter(|at| matches(&lines[*at])).collect();
+                let found: Vec<usize> = if exact.is_empty() { (0..lines.len()).filter(|at| is_note(&lines[*at]) && note_text(&lines[*at]).to_lowercase().contains(&lower)).collect() } else { exact };
+                match found.as_slice() {
+                    [at] => *at,
+                    [] => return Err(refused(format!("No note in {} matches “{wanted}”.", place_label(place)))),
+                    several if several.iter().all(|at| lines[*at] == lines[several[0]]) => {
+                        return Err(refused(format!("{} notes read “{wanted}”; say which by its line number (--line N, as `terminalx bots memory list` shows them).", several.len())));
+                    }
+                    several => return Err(refused(format!("{} notes match “{wanted}”; say more of the one to forget.", several.len()))),
+                }
+            }
         };
         let line = lines[at].clone();
-        files.record(NewChange { kind: "forgot".into(), text: note_text(&line).into(), edits: vec![Edit::RemoveLine { file: file.clone(), line, index: Some(at) }], source, by: by.into(), undoes: None })
+        let prev = at.checked_sub(1).map(|above| lines[above].clone());
+        files.record(NewChange::new("forgot", note_text(&line), vec![Edit::RemoveLine { file: file.clone(), line: line.clone(), index: Some(at), prev }], source, by))?;
+        Ok(line)
     })?;
+    for secret in secrets_in(&line) {
+        changes::redact(&bot.id, &secret)?;
+    }
     Ok(recorded)
 }
 
 fn place_label(place: &Place) -> String {
     match place {
         Place::Bot => "the bot's own notes".into(),
-        Place::Org(name) => name.clone(),
+        Place::Org(id) => format!("the notes of organisation {id}"),
         Place::Personal => "personal notes".into(),
     }
 }
 
-/// Replace the bot's standing instructions, recorded as a `role` change. The same text records nothing.
-pub fn write_role(sink: &dyn EventSink, bot: &Bot, text: &str, by: &str, source: Source, kind: &str) -> Result<Vec<Change>> {
+/// Replace the bot's standing instructions, recorded as a `kind` change. The
+/// same text records nothing. `expected` is the hash of the text the editor
+/// started from: a role changed since is not written over.
+pub fn write_role(sink: &dyn EventSink, bot: &Bot, text: &str, by: &str, source: Source, kind: &str, expected: Option<&str>) -> Result<Vec<Change>> {
+    if text.len() as u64 > READ_LIMIT {
+        return Err(refused(format!("A role is at most {} KB, the most a conversation reads. Move the rest to a topic file under memory/.", READ_LIMIT / 1024)));
+    }
     let ((), recorded) = changes::commit(sink, &bot.id, |files| {
         let before = files.get(bot_store::ROLE_FILE)?;
+        if expected.is_some_and(|expected| changes::hash_of(before.as_deref().unwrap_or_default()) != expected) {
+            return Err(refused("ROLE.md changed since you opened it. Load the new text, or save yours over it."));
+        }
         if before.as_deref().map(str::trim_end) == Some(text.trim_end()) {
             return Ok(());
         }
-        let edit = Edit::ReplaceText { file: bot_store::ROLE_FILE.into(), before, after: Some(text.into()) };
-        files.record(NewChange { kind: kind.into(), text: "Standing instructions changed".into(), edits: vec![edit], source, by: by.into(), undoes: None })
+        let edit = files.replacing(bot_store::ROLE_FILE, Some(text))?;
+        files.record(NewChange::new(kind, "Standing instructions changed", vec![edit], source, by))
     })?;
     Ok(recorded)
 }
 
-/// The role's text a change left, if it replaced the role.
+/// The hash of the role's text a change left (`None`: no file), if it replaced the role.
 fn role_after(change: &Change) -> Option<Option<String>> {
     change.known_edits()?.into_iter().rev().find_map(|edit| match edit {
         Edit::ReplaceText { file, after, .. } if file == bot_store::ROLE_FILE => Some(after),
         _ => None,
     })
+}
+
+/// A kept text of the role, by its hash: one a change left, or the role template's.
+pub fn role_text(bot: &Bot, hash: &str) -> Result<Option<String>> {
+    if let Some(template) = super::templates::find(&bot.role_template_id).map(|template| super::role_text(&template)) {
+        if changes::hash_of(&template) == hash {
+            return Ok(Some(template));
+        }
+    }
+    changes::kept_text(&bot.id, hash)
 }
 
 /// Put back a version of the role: the one `change` left, or the role template's when `None`.
@@ -359,10 +469,34 @@ pub fn restore_role(sink: &dyn EventSink, bot: &Bot, change: Option<&str>) -> Re
         Some(id) => {
             let log = changes::read_log(&bot.id)?;
             let change = log.changes.iter().find(|change| change.id == id).ok_or_else(|| refused(format!("No change {id} in {}'s history.", bot.name)))?;
-            role_after(change).ok_or_else(|| refused("That change did not replace the role."))?.unwrap_or_default()
+            match role_after(change).ok_or_else(|| refused("That change did not replace the role."))? {
+                None => String::new(),
+                Some(hash) => changes::kept_text(&bot.id, &hash)?.ok_or_else(|| refused("That version of the role is no longer kept."))?,
+            }
         }
     };
-    write_role(sink, bot, &text, OWNER, Source::of("app"), "restored")
+    write_role(sink, bot, &text, OWNER, Source::of("app"), "restored", None)
+}
+
+/// Undo a change, then keep within the budget: lines the undo put back stay, older ones move to the archive.
+pub fn undo(sink: &dyn EventSink, bot: &Bot, change_id: &str, by: &str, source: Source) -> Result<Change> {
+    let working = working_place(bot);
+    let counted = [Place::Bot.memory_file(), working.memory_file()];
+    let ((), recorded) = changes::commit(sink, &bot.id, |files| {
+        let edits = changes::undo_in(files, change_id, by, source)?;
+        let keep: BTreeSet<(String, String)> = edits
+            .iter()
+            .filter_map(|edit| match edit {
+                Edit::AddLine { file, line, .. } if counted.contains(file) => Some((file.clone(), line.clone())),
+                _ => None,
+            })
+            .collect();
+        if !keep.is_empty() {
+            archive_over_budget(files, bot, &working, &keep, by)?;
+        }
+        Ok(())
+    })?;
+    recorded.into_iter().find(|change| change.undoes.as_deref() == Some(change_id)).ok_or_else(|| anyhow::anyhow!("the undo was recorded"))
 }
 
 /// What a conversation with `bot` is given of its memory: the bot's own
@@ -380,17 +514,18 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
     let theirs = read_in_home(&home, &place.memory_file());
     let (own_lines, place_lines) = (changes::lines_of(&own.text), changes::lines_of(&theirs.text));
     let (own_read, place_read) = read_split(own_lines.len(), place_lines.len());
+    // The newest lines of each: a file past its share loses its oldest, which the archive keeps.
     let section = |title: String, file: &Limited, lines: &[String], read: usize| {
-        let mut text = format!("## {title}\n\n{}\n", if read == 0 { "(empty)".to_string() } else { lines[..read].join("\n") });
+        let mut text = format!("## {title}\n\n{}\n", if read == 0 { "(empty)".to_string() } else { lines[lines.len() - read..].join("\n") });
         let left = lines.len() - read;
         if left > 0 || file.over_limit {
-            text.push_str(&format!("\n({} not read: past the {BUDGET}-line budget or the {} KB limit.)\n", if left > 0 { format!("{left} more lines are") } else { "The rest of the file is".into() }, READ_LIMIT / 1024));
+            text.push_str(&format!("\n({} not read: past the {BUDGET}-line budget or the {} KB limit.)\n", if left > 0 { format!("{left} older lines are") } else { "The rest of the file is".into() }, READ_LIMIT / 1024));
         }
         text
     };
     let own_title = format!("Notes that go with you ({})", bot_store::MEMORY_FILE);
     let place_title = match &place {
-        Place::Org(name) => format!("Notes kept in {name} ({})", place.memory_file()),
+        Place::Org(id) => format!("Notes kept in organisation {id} ({})", place.memory_file()),
         _ => format!("Personal notes ({})", place.memory_file()),
     };
     Some(format!("{}\n{}", section(own_title, &own, &own_lines, own_read), section(place_title, &theirs, &place_lines, place_read)))
@@ -405,22 +540,23 @@ pub struct RoleVersion {
     pub by: String,
     pub kind: String,
     pub source: Source,
-    pub text: Option<String>,
+    /// The hash of its text, fetched with `memoryText` when shown; `None` for no file.
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleView {
     pub path: String,
-    /// The whole file, for the editor; only its first [`READ_LIMIT`] bytes reach a conversation.
+    /// What a conversation reads: at most [`READ_LIMIT`] bytes.
     pub text: String,
-    /// Whether the editor may save it: not past the size a role may be, and read whole.
+    /// The hash of the file as read, for the editor's save to name what it started from.
+    pub hash: String,
+    /// Whether the editor may save it: read whole, so a save never cuts it short.
     pub editable: bool,
     #[serde(flatten)]
     pub read: Limited,
     pub template_title: Option<String>,
-    /// From the template's text to the role now; `None` with no template, or too long to compare.
-    pub template_diff: Option<Vec<DiffLine>>,
     /// Newest first; the template's last.
     pub versions: Vec<RoleVersion>,
 }
@@ -428,13 +564,13 @@ pub struct RoleView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaceView {
-    /// `bot`, `personal`, or the organisation's name.
+    /// `bot`, `personal`, or the organisation's id.
     pub key: String,
     pub path: String,
     pub lines: Vec<String>,
     /// Given to a conversation in the place the bot works in.
     pub read: bool,
-    /// How many of its lines a conversation reads, and how many it does not.
+    /// How many of its lines a conversation reads (the last ones), and how many it does not.
     pub read_lines: usize,
     pub not_read: usize,
     pub archive_lines: usize,
@@ -466,15 +602,34 @@ pub struct MemoryView {
     pub topics: Vec<TopicView>,
 }
 
+/// A change as the screen lists it: its edits and texts are left out.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeShown {
-    #[serde(flatten)]
-    pub change: Change,
+    pub id: String,
+    pub at: String,
+    pub kind: String,
+    pub text: String,
+    pub source: Source,
+    pub by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undoes: Option<String>,
     /// The undo that undid it.
     pub undone_by: Option<String>,
     /// Why it cannot be undone; `None` when Undo is offered.
     pub not_undoable: Option<String>,
+}
+
+impl ChangeShown {
+    fn of(change: &Change, undone_by: Option<String>, not_undoable: Option<&str>) -> Self {
+        let text: String = change.text.chars().take(MAX_NOTE_CHARS).collect();
+        Self { id: change.id.clone(), at: change.at.clone(), kind: change.kind.clone(), text, source: change.source.clone(), by: change.by.clone(), undoes: change.undoes.clone(), undone_by, not_undoable: not_undoable.map(str::to_owned) }
+    }
+}
+
+/// Changes just recorded, as the command line answers them.
+pub fn shown(recorded: &[Change]) -> Vec<ChangeShown> {
+    recorded.iter().map(|change| ChangeShown::of(change, None, None)).collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -488,6 +643,8 @@ pub struct View {
     pub total_changes: usize,
     /// Lines of the log this build cannot read. They are kept.
     pub unreadable_changes: usize,
+    /// The files that look like they hold a secret (a key, a token, a password), by path.
+    pub secrets: Vec<String>,
 }
 
 fn modified(path: &Path) -> Option<String> {
@@ -501,25 +658,22 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let home = bot_store::home_dir(&bot.id)?;
     let shown = |rel: &str| home.join(rel).to_string_lossy().into_owned();
     let log = changes::read_log(&bot.id)?;
+    let mut secrets = Vec::new();
 
     let role = read_in_home(&home, bot_store::ROLE_FILE);
+    if looks_secret(&role.text) {
+        secrets.push(shown(bot_store::ROLE_FILE));
+    }
     let template = super::templates::find(&bot.role_template_id);
     let mut versions: Vec<RoleVersion> = log.changes.iter().rev().filter_map(|change| {
-        Some(RoleVersion { change: Some(change.id.clone()), at: change.at.clone(), by: change.by.clone(), kind: change.kind.clone(), source: change.source.clone(), text: role_after(change)? })
+        Some(RoleVersion { change: Some(change.id.clone()), at: change.at.clone(), by: change.by.clone(), kind: change.kind.clone(), source: change.source.clone(), hash: role_after(change)? })
     }).collect();
     if let Some(template) = &template {
-        versions.push(RoleVersion { change: None, at: bot.created.clone(), by: OWNER.into(), kind: "template".into(), source: Source::of("template"), text: Some(super::role_text(template)) });
+        versions.push(RoleVersion { change: None, at: bot.created.clone(), by: OWNER.into(), kind: "template".into(), source: Source::of("template"), hash: Some(changes::hash_of(&super::role_text(template))) });
     }
-    let template_diff = template.as_ref().and_then(|template| changes::diff(&changes::lines_of(&super::role_text(template)), &changes::lines_of(&role.text)));
-    // The editor is given the whole file, never the part a conversation reads: saving that would cut the rest off.
-    let whole = (role.problem.is_none() && role.bytes <= super::MAX_ROLE_BYTES as u64)
-        .then(|| changes::no_links(&home, bot_store::ROLE_FILE).and_then(|()| changes::read_file(&home.join(bot_store::ROLE_FILE))).ok())
-        .flatten();
-    let (text, editable) = match whole {
-        Some(text) => (text.unwrap_or_default(), true),
-        None => (role.text.clone(), false),
-    };
-    let role = RoleView { path: shown(bot_store::ROLE_FILE), text, editable, read: role, template_title: template.map(|template| template.title.to_string()), template_diff, versions };
+    // One limit everywhere: a role over it is shown as read, and not saved from here.
+    let editable = role.problem.is_none() && !role.over_limit;
+    let role = RoleView { path: shown(bot_store::ROLE_FILE), hash: changes::hash_of(&role.text), text: role.text.clone(), editable, read: role, template_title: template.map(|template| template.title.to_string()), versions };
 
     let working = working_place(bot);
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();
@@ -532,6 +686,9 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let mut topics = Vec::new();
     for place in places(bot) {
         let file = read_in_home(&home, &place.memory_file());
+        if looks_secret(&file.text) {
+            secrets.push(shown(&place.memory_file()));
+        }
         let lines = changes::lines_of(&file.text);
         let read_lines = if place == Place::Bot { own_read } else if place == working { place_read } else { 0 };
         let read = place == Place::Bot || place == working;
@@ -541,42 +698,60 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
         let listed = changes::no_links(&home, &format!("{}/{ARCHIVE_FILE}", place.topics_dir())).is_ok() && std::fs::symlink_metadata(home.join(place.topics_dir())).is_ok_and(|meta| meta.is_dir());
         if let Some(entries) = listed.then(|| std::fs::read_dir(home.join(place.topics_dir())).ok()).flatten() {
             let mut names: Vec<String> = entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file())).filter_map(|entry| entry.file_name().to_str().map(str::to_owned)).filter(|name| name.ends_with(".md") && changes::checked(name).is_ok()).collect();
-            names.sort_by_key(|name| (name == ARCHIVE_FILE, name.clone()));
+            names.sort_by_key(|name| (name.starts_with("archive"), name.clone()));
             for name in names {
                 let rel = format!("{}/{name}", place.topics_dir());
                 let path = home.join(&rel);
-                topics.push(TopicView { place: place.key().into(), lines: read_in_home(&home, &rel).text.lines().count(), modified: modified(&path), path: path.to_string_lossy().into_owned(), name });
+                let text = read_in_home(&home, &rel).text;
+                if looks_secret(&text) {
+                    secrets.push(path.to_string_lossy().into_owned());
+                }
+                topics.push(TopicView { place: place.key().into(), lines: text.lines().count(), modified: modified(&path), path: path.to_string_lossy().into_owned(), name });
             }
         }
     }
     let memory = MemoryView { off: bot.memory_off, budget: BUDGET, read_limit: READ_LIMIT, working_place: working.key().into(), read: own_read + place_read, places: place_views, topics };
 
+    let undone_by: BTreeMap<&str, &str> = log.changes.iter().filter_map(|change| Some((change.undoes.as_deref()?, change.id.as_str()))).collect();
     let total_changes = log.changes.len();
-    let changes = log.changes.iter().rev().take(SHOWN_CHANGES).map(|change| ChangeShown {
-        change: change.clone(),
-        undone_by: log.changes.iter().find(|other| other.undoes.as_deref() == Some(change.id.as_str())).map(|other| other.id.clone()),
-        not_undoable: changes::not_undoable(change, &log).map(str::to_owned),
-    }).collect();
-    Ok(View { role, memory, changes, total_changes, unreadable_changes: log.unreadable })
+    let changes = log.changes.iter().rev().take(SHOWN_CHANGES).map(|change| ChangeShown::of(change, undone_by.get(change.id.as_str()).map(|id| (*id).to_owned()), changes::not_undoable(change, &log))).collect();
+    Ok(View { role, memory, changes, total_changes, unreadable_changes: log.unreadable, secrets })
+}
+
+/// From the role template's text to the role now: `None` with no template, or too long to compare.
+pub fn template_diff(bot: &Bot) -> Result<Option<Vec<DiffLine>>> {
+    let Some(template) = super::templates::find(&bot.role_template_id) else { return Ok(None) };
+    let home = bot_store::home_dir(&bot.id)?;
+    let role = read_in_home(&home, bot_store::ROLE_FILE);
+    Ok(changes::diff(&changes::lines_of(&super::role_text(&template)), &changes::lines_of(&role.text)))
 }
 
 /// The memory operations of the runtime's `bots` call, made in the app by
 /// the owner, or `None` for an operation that is not one of them.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Option<Result<Value>> {
-    if !matches!(operation, "memoryView" | "memoryAdd" | "memoryForget" | "memoryUndo" | "roleRestore") {
+    if !matches!(operation, "memoryView" | "memoryLook" | "memoryAdd" | "memoryForget" | "memoryUndo" | "memoryText" | "roleRestore" | "roleDiff") {
         return None;
     }
     Some((|| {
         let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
+        if operation == "memoryLook" && params["id"].is_null() {
+            return Ok(json!({"found": changes::look_all(sink)?}));
+        }
         let bot = super::get(string("id")?)?;
         let app = || Source::of("app");
         let place = || Place::parse(&bot, params["place"].as_str().unwrap_or(BOT_PLACE));
         Ok(match operation {
             "memoryView" => serde_json::to_value(view(sink, &bot)?)?,
-            "memoryAdd" => json!(add(sink, &bot, &place()?, string("text")?, OWNER, app())?),
-            "memoryForget" => json!(forget(sink, &bot, &place()?, string("line")?, OWNER, app())?),
-            "memoryUndo" => json!(changes::undo(sink, &bot.id, string("change")?, OWNER, app())?),
-            _ => json!(restore_role(sink, &bot, params["change"].as_str())?),
+            "memoryLook" => json!({"found": changes::commit(sink, &bot.id, |_| Ok(()))?.1.len()}),
+            "memoryAdd" => json!(shown(&add(sink, &bot, &place()?, string("text")?, OWNER, app())?)),
+            "memoryForget" => {
+                let index = params["index"].as_u64().map(|index| index as usize);
+                json!(shown(&forget(sink, &bot, &place()?, string("line")?, index, OWNER, app())?))
+            }
+            "memoryUndo" => json!(shown(&[undo(sink, &bot, string("change")?, OWNER, app())?])[0]),
+            "memoryText" => json!(role_text(&bot, string("hash")?)?),
+            "roleDiff" => json!(template_diff(&bot)?),
+            _ => json!(shown(&restore_role(sink, &bot, params["change"].as_str())?)),
         })
     })())
 }
