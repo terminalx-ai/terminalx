@@ -346,7 +346,7 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ pendingCreation?: boolean; branchPrLinks?: boolean; associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
+  prAssociations(sessionId: string): Promise<{ pendingCreation?: boolean; pendingCreationUrls?: string[]; branchPrLinks?: boolean; associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
   }
 
@@ -356,6 +356,15 @@ export class RemoteGit {
 
   unlinkPr(sessionId: string, url: string): Promise<unknown> {
     return this.write("git.prUnlink", { sessionId, url });
+  }
+
+  /**
+   * Settle a pull request a create left unverified, by its URL alone: the
+   * machine clears its cleanup guard once GitHub shows it merged or closed.
+   * Not routed by repository, since its checkout or branch may be gone.
+   */
+  reconcilePrCreation(url: string): Promise<{ url: string; state?: string; cleared: number }> {
+    return this.client.mutate("git.prReconcileCreation", { url });
   }
 
   prLanded(): Promise<{ safe: boolean; head: string | null; branch: string | null }> {

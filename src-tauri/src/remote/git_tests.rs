@@ -1100,6 +1100,117 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
     assert!(calls.contains("\"--repo\", \"github.test/octo/repo\""));
 }
 
+/// A create whose readback was lost leaves `checkout` guarded by PR #1.
+fn unverified_machine_pr(f: &mut Fixture, name: &str) -> (PathBuf, PathBuf) {
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join(name);
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let request = machine_pr_request(f, &checkout);
+    f.fault("view-offline");
+    assert_eq!(f.code("git.prCreateForSession", request), "outcome_unknown");
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some("https://github.test/octo/repo/pull/1"));
+    (remote, checkout)
+}
+
+fn set_pr_state(f: &Fixture, state: &str) {
+    let path = f.state.join("pr-1.json");
+    let mut pr: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    pr["state"] = state.into();
+    std::fs::write(path, serde_json::to_vec(&pr).unwrap()).unwrap();
+}
+
+#[test]
+fn a_merged_pending_pr_is_reconciled_by_url_after_its_branch_and_session_are_gone() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (remote, checkout) = unverified_machine_pr(&mut f, "merged-checkout");
+    let url = "https://github.test/octo/repo/pull/1";
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(rows["pendingCreationUrls"], json!([url]));
+
+    // Merged on GitHub, which deleted the topic branch; the session that
+    // created it is deleted and the checkout moved on to other work.
+    set_pr_state(&f, "MERGED");
+    git(&remote, &["branch", "-D", "feature/pr"]);
+    git(&checkout, &["checkout", "-qb", "next-task", "main"]);
+    crate::store::index::save(&[]).unwrap();
+    let blocked = crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err();
+    assert!(blocked.contains(url), "{blocked}");
+    assert_eq!(crate::session_ops::pending_pr_creation_for(&f.root, &checkout).unwrap().as_deref(), Some(url));
+
+    // Neither another repository's URL nor a malformed one touches the record.
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": "https://github.test/elsewhere/other/pull/1" })).unwrap()["cleared"], 0);
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": "not a url" })), "invalid_params");
+    assert!(pending_pr_creation_in(&checkout).unwrap().is_some());
+
+    let settled = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap();
+    assert_eq!(settled, json!({ "url": url, "state": "MERGED", "cleared": 1 }));
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap();
+    // A repeat after a lost answer finds nothing left to clear.
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": url })).unwrap()["cleared"], 0);
+    assert!(f.gh_calls().contains(&format!("\"{url}\"")));
+}
+
+#[test]
+fn a_closed_pending_pr_keeps_its_surviving_session_association() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (_remote, checkout) = unverified_machine_pr(&mut f, "closed-checkout");
+    set_pr_state(&f, "CLOSED");
+    let url = "https://github.test/octo/repo/pull/1";
+    let settled = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap();
+    assert_eq!(settled["cleared"], 1);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(rows["associations"][0]["url"], url);
+    assert!(rows.get("pendingCreation").is_none());
+}
+
+#[test]
+fn an_open_or_unreachable_pending_pr_stays_protected() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (_remote, checkout) = unverified_machine_pr(&mut f, "open-checkout");
+    let url = "https://github.test/octo/repo/pull/1";
+    crate::store::index::save(&[]).unwrap();
+
+    f.fault("view-offline");
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": url })), "outcome_unknown");
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some(url));
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+
+    let open = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap_err();
+    assert_eq!(open.code, "conflict");
+    assert_eq!(open.data.unwrap()["state"], "OPEN");
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some(url));
+    assert!(crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err().contains("before removing this workspace"));
+
+    // A record of another project's checkout is never cleared from here.
+    let other = f.base.join("other-project");
+    git(&f.base, &["init", "-q", other.to_str().unwrap()]);
+    let foreign = |url: &str| PendingPrCreation {
+        session: "elsewhere".into(),
+        checkout: CheckoutIdentity {
+            path: other.clone(), git_dir: other.join(".git").canonicalize().unwrap(),
+            directory: directory_identity(&other).unwrap(), admin: directory_identity(&other.join(".git")).unwrap(),
+        },
+        branch: "feature/pr".into(), base: "main".into(), head: "0".repeat(40), url: url.into(),
+    };
+    pending_pr_creations(|entries| { entries.push(foreign(url)); ((), true) }).unwrap();
+    set_pr_state(&f, "MERGED");
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": url })).unwrap()["cleared"], 1);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    assert_eq!(pending_pr_creation_in(&other).unwrap().as_deref(), Some(url));
+
+    // Workspaces that are not a machine project record no creates to settle.
+    f.git.project = false;
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": url })), "invalid_params");
+}
+
 #[test]
 fn a_nested_project_session_cannot_create_its_parents_pr() {
     let _home = crate::store::temp_home();
