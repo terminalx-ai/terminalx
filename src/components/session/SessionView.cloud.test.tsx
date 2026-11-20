@@ -993,6 +993,46 @@ describe("the session header's location and connection chips", () => {
     expect(screen.getAllByText("wake up and fix it")).toHaveLength(1);
   });
 
+  it("#1341: a stopped tab's queued card waits for its checkpoint, so an older identical prompt there is not taken for its delivery", async () => {
+    setCatalog(workspaceItem("suspended"));
+    // Saved history of the same words, from an earlier turn; this desktop has none of it cached yet.
+    const older = [ev({ type: "user_message", text: "run the tests", queued: false }), ev({ type: "assistant_text", text: "all green" })];
+    const lastSeq = older.at(-1)!.seq;
+    cache["t-1"] = { tab: tabInfo({ lastSeq }), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    outbox = [{ clientCommandId: "cmd-1341", tabId: "t-1", kind: "send", text: "run the tests", requestId: null, state: "queued", wake: "queued", createdAt: 1, updatedAt: 1 }];
+    let deliver!: (checkpoint: unknown) => void;
+    const delayed = new Promise((resolve) => (deliver = resolve));
+    let reads = 0;
+    guard.handlers.cloud_agent_checkpoint = () => (++reads === 1 ? delayed : null);
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    const card = await screen.findByTestId("queued-message");
+    expect(card.textContent).toContain("run the tests");
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+
+    // The checkpoint comes in late, with the earlier prompt of the same words.
+    await act(async () =>
+      deliver({
+        epoch: 1,
+        version: 1,
+        projection: { v: 1, tabId: "t-1", sessionId: "s-1", title: "Fix login", harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions", status: "idle", process: "running", followUps: [], events: older, truncated: false, updatedAt: 2 },
+      }),
+    );
+    expect(await screen.findByText("all green")).toBeTruthy();
+    // The older prompt is history, not this message arriving: the card stays.
+    expect(screen.getByTestId("queued-message").textContent).toContain("run the tests");
+
+    // Genuine delivery once the workspace is back: the card goes, and the new prompt is drawn once more than before.
+    runtime.tabs = [tabInfo({ lastSeq })];
+    runtime.events = older;
+    await act(async () => runtime.connect("manage"));
+    expect(screen.getByTestId("queued-message").textContent).toContain("run the tests");
+    await act(async () => runtime.stream(ev({ type: "user_message", text: "run the tests", queued: false })));
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(screen.getAllByText("run the tests")).toHaveLength(2);
+  });
+
   it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {
     // A member opens a session someone else has live: nothing is starting.
     setCatalog(workspaceItem("ready", "participate"));

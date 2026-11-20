@@ -350,6 +350,8 @@ export function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
     modified: info.modified,
     // A stopped workspace is read only from what was saved; nothing more is on its way.
     loadingHistory: !tab.historyRead && !asleep,
+    // Whether the history is in at all, asleep or not: a Queued card's delivery is judged only against it (#1341).
+    historyRead: tab.historyRead,
     // The last reset (#1326), as a local tab keeps it: the notice over the chat, and Undo while the runtime can.
     ...(info.history ? { resetLogId: info.history } : {}),
     ...(info.reset?.undoable && info.history ? { resetBackupId: info.history } : {}),
