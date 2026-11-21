@@ -180,7 +180,7 @@ fn is_attributes(path: &str) -> bool {
 /// Whether any of `trees` has `dir` in it, so has paths beneath it.
 fn in_trees(cwd: &Path, dir: &str, trees: &[&str]) -> Result<bool> {
     for tree in trees {
-        if !run(cwd, &["ls-tree", "--full-tree", "--name-only", tree, "--", dir])?.trim().is_empty() {
+        if !run(cwd, &["--literal-pathspecs", "ls-tree", "--full-tree", "--name-only", tree, "--", dir])?.trim().is_empty() {
             return Ok(true);
         }
     }
