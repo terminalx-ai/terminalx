@@ -5,7 +5,7 @@
 // page never scrolls sideways.
 // Run after pnpm build: node scripts/webkit/bot-handoffs.mjs
 // BOT_HANDOFFS_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve, sidebar } from "./harness.mjs";
+import { launch, open, openSession, report, serve, sidebar } from "./harness.mjs";
 
 const shots = process.env.BOT_HANDOFFS_SHOTS;
 const server = await serve();
@@ -119,9 +119,7 @@ try {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await sidebar(page);
-      await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "bot-home" }));
-      const view = page.getByRole("main", { name: "Atlas, CTO" });
-      await view.waitFor();
+      const view = await openSession(page, "bot-home", "Atlas, CTO");
       const selector = "main[aria-label='Atlas, CTO']";
 
       // 23.04: the hand-off cards above the lead's chat.
