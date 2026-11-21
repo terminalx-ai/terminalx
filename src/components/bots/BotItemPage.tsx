@@ -327,7 +327,17 @@ function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
       <ul className="flex flex-col gap-1">
         {waiting.map((message) => (
           <li key={message.id} className="min-w-0 break-words whitespace-pre-wrap text-muted-foreground">
-            <span className="text-warning">{SAID[message.kind] ?? "Your message"}, {relativeTime(message.at)}:</span> {message.text}
+            {message.choice ? (
+              <>
+                <span className="text-warning">You chose answer {message.choice}, {relativeTime(message.at)}.</span>{" "}
+                <span className="rounded border border-hairline px-1.5 text-[10.5px] text-faint">{bot.name}'s wording of that answer</span>{" "}
+                {message.label}
+              </>
+            ) : (
+              <>
+                <span className="text-warning">{SAID[message.kind] ?? "Your message"}, {relativeTime(message.at)}:</span> {message.text}
+              </>
+            )}
           </li>
         ))}
       </ul>

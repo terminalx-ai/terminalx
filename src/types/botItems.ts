@@ -77,6 +77,9 @@ export interface BotItemUndelivered {
   text: string;
   /** Why the last try to send it failed. */
   error?: string;
+  /** A chosen answer: its number, counted from 1, and the bot's label for it (the bot's text). */
+  choice?: number;
+  label?: string;
 }
 
 export interface BotItemList {

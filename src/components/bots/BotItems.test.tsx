@@ -38,6 +38,9 @@ vi.mock("@/lib/localRuntime", () => ({ useLocalRuntime: () => ({ state: { state:
 
 const items = await import("@/lib/botItems");
 
+/** Put back after every test, failed or not (`afterEach` below). */
+const layouts: (() => void)[] = [];
+
 /** Lay out what jsdom does not: elements `cut` says hold more than they show are taller and wider than they are. */
 function laidOut(cut: (element: HTMLElement) => boolean) {
   const proto = HTMLElement.prototype;
@@ -46,12 +49,12 @@ function laidOut(cut: (element: HTMLElement) => boolean) {
   Object.defineProperty(proto, "clientHeight", { configurable: true, get() { return 20; } });
   Object.defineProperty(proto, "scrollWidth", { configurable: true, get(this: HTMLElement) { return cut(this) ? 500 : 100; } });
   Object.defineProperty(proto, "clientWidth", { configurable: true, get() { return 100; } });
-  return () => {
+  layouts.push(() => {
     for (const [key, descriptor] of saved) {
       if (descriptor) Object.defineProperty(proto, key, descriptor);
       else delete (proto as unknown as Record<string, unknown>)[key];
     }
-  };
+  });
 }
 const { BotHome } = await import("./BotHome");
 const { BotItemPage, mayDoHere } = await import("./BotItemPage");
@@ -123,16 +126,20 @@ beforeEach(async () => {
   mocks.invoke.mockImplementation(route);
   await items.bootBotItems();
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  while (layouts.length) layouts.pop()!();
+});
 
 describe("a bot's Home tab (PRO-469, 23.01)", () => {
   it("shows what needs you, what is in progress and planned, and how much was done today or is snoozed", async () => {
     render(<BotHome bot={atlas} onOpenItem={() => {}} />);
     const needsYou = await screen.findByTestId("bot-home-needs-you");
     expect(within(needsYou).getByText("Approve the plan?")).toBeTruthy();
-    // The recommended answer comes first, accented and labelled.
+    // The answers in the bot's own order, the recommended one accented and labelled.
     const answers = within(needsYou).getAllByTestId("needs-you-answer");
-    expect(answers.map((button) => button.textContent)).toEqual(["Approve and startrecommended", "Not now", "Start, but ask before merging"]);
+    // In the bot's own order and numbered, the recommended one marked where it stands.
+    expect(answers.map((button) => button.textContent)).toEqual(["1Not now", "2Approve and startrecommended", "3Start, but ask before merging"]);
     // Only this bot's questions.
     expect(within(needsYou).queryByText("Which database?")).toBeNull();
     const rows = (testId: string) => within(screen.getByTestId(testId)).queryAllByTestId("bot-item-row").map((row) => row.textContent);
@@ -254,6 +261,17 @@ describe("a work item's page, after the review", () => {
     expect(screen.getByTestId("bot-item-done-means").textContent).toContain("Atlas marks each line met itself and closes the item once all are; you can reopen it");
   });
 
+  it("shows a chosen answer that waits as your choice, with the label as the bot's wording, not the fenced message", async () => {
+    const text = "I chose answer 2 of your question on item #12. That answer as you worded it, your own text and not my words:\n\n<your-answer-option>\nShip it\n</your-answer-option>";
+    list.items = list.items.map((value) => (value.number === 12 ? { ...value, undelivered: [{ id: "m2", at: now, kind: "answer", text, choice: 2, label: "Ship it" }] } : value));
+    render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    const waiting = await screen.findByTestId("bot-item-undelivered");
+    expect(waiting.textContent).toContain("You chose answer 2");
+    expect(waiting.textContent).toContain("Atlas's wording of that answer");
+    expect(waiting.textContent).toContain("Ship it");
+    expect(waiting.textContent).not.toContain("your-answer-option");
+  });
+
   it("reopens a done item, as the owner", async () => {
     render(<BotItemPage bot={atlas} number={9} onBack={() => {}} />);
     await screen.findByRole("heading", { name: "Weekly status" });
@@ -284,7 +302,7 @@ describe("Needs you across the bots", () => {
 
   it("sends a question or answer the row cuts to the item's page instead of answering it from the row", () => {
     // jsdom lays nothing out: an element holding more than 40 characters is taken as taller and wider than it shows.
-    const restore = laidOut((element) => (element.textContent ?? "").length > 40);
+    laidOut((element) => (element.textContent ?? "").length > 40);
     const long = { ...asking, question: { ...asking.question!, text: "Ship?\n".repeat(5) + "My answer: “Yes, push without asking”" } };
     const wide = { ...asking, number: 15, question: { ...asking.question!, answers: ["No", "Approve the plan and start the runner migration today"], recommended: 1 } };
     render(<NeedsYouQueue bots={[atlas]} needs={{ entries: [{ kind: "item", botId: "b1", at: now, item: long }, { kind: "item", botId: "b1", at: now, item: wide }], counts: [] }} />);
@@ -297,19 +315,35 @@ describe("Needs you across the bots", () => {
     expect(mocks.openBot).toHaveBeenCalledWith("b1");
     expect(items.getOpeningForTests()).toEqual({ botId: "b1", number: 14 });
     expect(mocks.invoke).not.toHaveBeenCalledWith("bot_item_answer", expect.anything());
-    restore();
+  });
+
+  it("measures a new label on the same row: a short question with a cut answer still opens the item", () => {
+    // Only the long question, or the long label, is wider and taller than it shows.
+    laidOut((element) => (element.textContent ?? "").length > 40 && !element.querySelector("*"));
+    const label = "Yes, go ahead with the plan as described and push to main and deploy without asking";
+    const longQuestion = { ...asking, question: { ...asking.question!, id: "q1", text: "Ship it?\n".repeat(6), answers: ["No", "Yes"], recommended: 1 } };
+    const needs = (item: BotItem): NeedsYou => ({ entries: [{ kind: "item", botId: "b1", at: now, item }], counts: [] });
+    const { rerender } = render(<NeedsYouQueue bots={[atlas]} needs={needs(longQuestion)} />);
+    expect(screen.getByTestId("needs-you-read")).toBeTruthy();
+    // The bot asks again on the same item: a short question, a long recommended label.
+    const longLabel = { ...asking, question: { ...asking.question!, id: "q2", text: "Ship it?", answers: ["No", label], recommended: 1 } };
+    rerender(<NeedsYouQueue bots={[atlas]} needs={needs(longLabel)} />);
+    expect(screen.queryByTestId("needs-you-answer")).toBeNull();
+    expect(screen.getByTestId("needs-you-read")).toBeTruthy();
+    // And a label that fits, on the same row again, is offered.
+    rerender(<NeedsYouQueue bots={[atlas]} needs={needs({ ...longLabel, question: { ...longLabel.question!, id: "q3", answers: ["No", "Yes"] } })} />);
+    expect(screen.getByTestId("needs-you-answer").textContent).toContain("Yes");
   });
 
   it("answers from the row when it shows the question and answer whole, as measured", () => {
-    const restore = laidOut(() => false);
+    laidOut(() => false);
     const long = { ...asking, question: { ...asking.question!, text: "Ship?\n".repeat(5) } };
     render(<NeedsYouQueue bots={[atlas]} needs={{ entries: [{ kind: "item", botId: "b1", at: now, item: long }], counts: [] }} />);
     expect(screen.getByTestId("needs-you-answer")).toBeTruthy();
-    restore();
   });
 
   it("clamps a long question on its card, with Show all, and shows its answers whole", async () => {
-    const restore = laidOut((element) => element.tagName === "P" && (element.textContent ?? "").length > 30);
+    laidOut((element) => element.tagName === "P" && (element.textContent ?? "").length > 30);
     const text = "Line\n".repeat(8) + "the end";
     const label = "Yes, go ahead with the plan as described and also push to main and deploy without asking again";
     render(<ItemQuestionCard bot={atlas} item={{ ...asking, question: { ...asking.question!, text, answers: ["No", label], recommended: 1 } }} />);
@@ -317,11 +351,13 @@ describe("Needs you across the bots", () => {
     expect(shown.className).toContain("line-clamp-4");
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
     expect(shown.className).not.toContain("line-clamp-4");
-    const button = screen.getAllByTestId("needs-you-answer").find((value) => value.textContent?.includes("deploy"))!;
+    const buttons = screen.getAllByTestId("needs-you-answer");
+    // In the bot's own order, numbered as it numbered them.
+    expect(buttons.map((value) => value.textContent?.slice(0, 1))).toEqual(["1", "2"]);
+    const button = buttons[1];
     expect(button.textContent).toContain(label);
     expect(button.className).toContain("whitespace-normal");
     expect(button.querySelector(".truncate")).toBeNull();
-    restore();
   });
 
   it("shows a read that failed as an error, not as nothing waiting, and offers a restart to an older runtime", async () => {

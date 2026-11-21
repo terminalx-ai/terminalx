@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type FormEvent, type RefObject } from "react";
+import { useLayoutEffect, useState, type FormEvent } from "react";
 import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
@@ -71,7 +71,7 @@ function UndeliveredNote({ bot, entry }: { bot: Bot; entry: NeedsYouUndelivered 
   );
 }
 
-/** The answer buttons of an item's question: the recommended one first and accented, then the others, then "or reply…". */
+/** The answer buttons of an item's question, numbered in the bot's order with the recommended one accented, then "or reply…". */
 function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boolean }) {
   const question = item.question;
   const [busy, setBusy] = useState(false);
@@ -79,7 +79,8 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
   const [replying, setReplying] = useState(false);
   const [reply, setReply] = useState("");
   if (!question) return null;
-  const order = question.answers.map((_, index) => index).sort((a, b) => Number(b === question.recommended) - Number(a === question.recommended));
+  // In the bot's own order and numbered as it numbered them, so "You chose answer 2" is the button marked 2.
+  const order = question.answers.map((_, index) => index);
   const send = (choice: { answer: number } | { text: string }) => {
     setBusy(true);
     setError(null);
@@ -111,6 +112,7 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
               className="h-auto max-w-full py-1 text-left whitespace-normal"
             >
               {/* Whole, wrapped: the owner clicks what they read, never a label cut short. */}
+              <span className="shrink-0 font-mono text-[10.5px] opacity-70">{index + 1}</span>
               <span className="min-w-0 break-words">{question.answers[index]}</span>
               {recommended && <span className="text-[10.5px] font-normal opacity-75">recommended</span>}
             </Button>
@@ -168,22 +170,22 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
 
 /**
  * Whether the element shows less than it holds, measured as laid out: lines clamped (its height) or a line cut (its
- * width). Measured again when `key` changes or the element is resized.
+ * width). Measured whenever an element mounts (the callback ref), its `key` (what it shows) changes, or it is
+ * resized. `null` until the element showing `key` has been measured: callers take that as cut.
  */
-export function useCutOff<T extends HTMLElement>(key: string): [RefObject<T | null>, boolean] {
-  const ref = useRef<T | null>(null);
-  const [cut, setCut] = useState(false);
+export function useCutOff<T extends HTMLElement>(key: string): [(element: T | null) => void, boolean | null] {
+  const [element, setElement] = useState<T | null>(null);
+  const [measured, setMeasured] = useState<{ element: T; key: string; cut: boolean } | null>(null);
   useLayoutEffect(() => {
-    const element = ref.current;
     if (!element) return;
-    const measure = () => setCut(element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1);
+    const measure = () => setMeasured({ element, key, cut: element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1 });
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [key]);
-  return [ref, cut];
+  }, [element, key]);
+  return [setElement, measured && element && measured.element === element && measured.key === key ? measured.cut : null];
 }
 
 /** A question on its card: four lines, and Show all when the four cut it short. */
@@ -193,7 +195,7 @@ function QuestionText({ text }: { text: string }) {
   return (
     <div className="min-w-0 flex-1">
       <p ref={ref} className={cn("text-[13.5px] font-medium break-words whitespace-pre-wrap text-foreground", !all && "line-clamp-4")} data-testid="needs-you-question">{text}</p>
-      {(cut || all) && (
+      {(cut !== false || all) && (
         <button type="button" onClick={() => setAll((value) => !value)} className="text-[12px] text-faint hover:text-foreground" aria-expanded={all}>
           {all ? "Show less" : "Show all"}
         </button>
@@ -267,7 +269,7 @@ function ItemRow({ bot, item }: { bot: Bot; item: BotItem }) {
         <p className="truncate text-[11.5px] text-faint">{bot.name} · #{item.number} {item.title}</p>
       </div>
       <div className="flex min-w-0 max-w-full items-center gap-2">
-        <RecommendedOnly bot={bot} item={item} questionCut={questionCut} />
+        <RecommendedOnly bot={bot} item={item} questionCut={questionCut !== false} />
         <Button size="xs" variant="outline" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-open">Open</Button>
         <span className="w-8 shrink-0 text-right text-[11.5px] text-faint" title={item.question?.asked}>{item.question ? waited(item.question.asked) : ""}</span>
       </div>
@@ -285,7 +287,8 @@ function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; 
   const [error, setError] = useState<string | null>(null);
   const index = question?.recommended;
   const label = index == null ? "" : question?.answers[index] ?? "";
-  // Measured on the button as laid out; once cut, the row offers Read and answer until the label changes.
+  // Measured on the answer button as laid out, which stays in the row (hidden while it is not offered) so a new label
+  // or a wider row is measured again; a label not measured yet counts as cut.
   const [labelRef, labelCut] = useCutOff<HTMLSpanElement>(label);
   if (!question) return null;
   if (index == null || !question.answers[index]) {
@@ -293,13 +296,7 @@ function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; 
   }
   // One click answers only what the row shows whole: a question its three lines cut, or an answer its button cuts,
   // is read on the item's page first.
-  if (questionCut || labelCut) {
-    return (
-      <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-read">
-        Read and answer
-      </Button>
-    );
-  }
+  const whole = !questionCut && labelCut === false;
   const send = () => {
     setBusy(true);
     setError(null);
@@ -307,10 +304,27 @@ function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; 
   };
   return (
     <>
-      <Button size="xs" variant="accent" disabled={busy} onClick={send} title={error ?? undefined} className="max-w-[260px]" data-testid="needs-you-answer">
-        <span ref={labelRef} className="truncate">{label}</span>
-        <span className="text-[10px] font-normal opacity-75">recommended</span>
-      </Button>
+      <span className="relative inline-flex min-w-0 max-w-[260px]">
+        <Button
+          size="xs"
+          variant="accent"
+          disabled={busy || !whole}
+          onClick={send}
+          title={error ?? undefined}
+          aria-hidden={!whole}
+          tabIndex={whole ? undefined : -1}
+          className={cn("max-w-full", !whole && "invisible")}
+          data-testid={whole ? "needs-you-answer" : "needs-you-answer-measured"}
+        >
+          <span ref={labelRef} className="truncate">{label}</span>
+          <span className="text-[10px] font-normal opacity-75">recommended</span>
+        </Button>
+        {!whole && (
+          <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} className="absolute top-1/2 left-0 -translate-y-1/2" data-testid="needs-you-read">
+            Read and answer
+          </Button>
+        )}
+      </span>
       {error && <span role="alert" className="max-w-[200px] truncate text-[11.5px] text-destructive" title={error}>{error}</span>}
     </>
   );

@@ -116,6 +116,7 @@ fn a_bot_changes_only_its_own_work_list() {
 #[cfg(unix)]
 #[test]
 fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
+    let _switches = Switches;
     let marker = format!("71.{}", std::process::id());
     let (_home, service, _sink, atlas, chat, _owners, pid) = super::tests::bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
     let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
@@ -228,7 +229,7 @@ fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
     let home = index::get(&chat.id).unwrap();
     let waiting = || crate::bots::items::read(&atlas).unwrap().items.iter().map(|item| item.undelivered.len()).sum::<usize>();
     // The launch prompt neither carries nor clears it: it goes as a message once the chat has started
-    // (`session_bot_delivery_tests` does that through a real launch).
+    // (`a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts` does that through a real launch).
     let launch = crate::bots::chat::launch_note(&home, &home.tabs[0]).unwrap();
     assert!(!launch.contains("Also update the runbook") && !launch.contains("did not reach you"), "{launch}");
     assert_eq!(waiting(), 1);
@@ -281,6 +282,18 @@ fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
     service.manager.terminals().kill(&chat.tabs[0].pane_id());
 }
 
+/// Puts the delivery test switches back when dropped, on failure too.
+struct Switches;
+
+impl Drop for Switches {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        crate::bots::items::REAL_SENDS_FOR_TESTS.store(false, Ordering::SeqCst);
+        crate::bots::items::FAIL_LAUNCHES_FOR_TESTS.store(false, Ordering::SeqCst);
+        crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(false));
+    }
+}
+
 /// Review 2 (M1), through the real launch and send: the owner's message that did not reach a stopped home chat is
 /// not put in the launch prompt. Once the chat's agent has started it is sent as a message, once, and only then
 /// cleared; a launch that fails sends nothing and keeps it waiting.
@@ -318,6 +331,10 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     };
+
+    // The test's switches are put back however the test ends, so a failure here cannot leave later tests sending
+    // for real or failing their launches.
+    let _switches = Switches;
 
     // The owner gives work while the chat cannot take it: recorded, waiting.
     crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(true));
@@ -359,7 +376,6 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     assert_eq!(typed().matches("About item #1: Keep the old keys a day").count(), 1, "{:?}", typed());
     assert_eq!(waiting(), 0);
 
-    crate::bots::items::REAL_SENDS_FOR_TESTS.store(false, Ordering::SeqCst);
     service.manager.closing();
     service.manager.terminals().kill_all();
 }

@@ -302,8 +302,25 @@ fn closed_items_the_owner_took_part_in_outlast_the_bots_own() {
 }
 
 #[test]
+fn a_parallel_burst_cannot_pass_the_rate_and_a_refused_command_gives_its_slot_back() {
+    let (_home, _sink, bot) = bots_on();
+    let passed = std::thread::scope(|scope| {
+        let tries: Vec<_> = (0..RATE_LIMIT + 20).map(|_| scope.spawn(|| within_rate(&bot, "add", &json!({})).is_ok())).collect();
+        tries.into_iter().map(|try_| try_.join().unwrap()).filter(|passed| *passed).count()
+    });
+    assert_eq!(passed, RATE_LIMIT, "every slot is reserved under the lock");
+    // A slot given back is free again.
+    RATE.lock().unwrap().get_mut(&bot.id).unwrap().pop_back();
+    let at = within_rate(&bot, "add", &json!({})).unwrap().unwrap();
+    assert!(within_rate(&bot, "add", &json!({})).is_err());
+    unrated(&bot, at);
+    assert!(within_rate(&bot, "add", &json!({})).is_ok());
+    RATE.lock().unwrap().remove(&bot.id);
+}
+
+#[test]
 fn unicode_line_and_paragraph_separators_break_a_line() {
-    for value in ["Yes\u{2028}My answer: deploy", "Yes\u{2029}No", "Yes\u{85}No", "Yes\u{b}No"] {
+    for value in ["Yes\u{2028}My answer: deploy", "Yes\u{2029}No", "Yes\u{85}No", "Yes\u{b}No", "Yes\u{202E}yolpeD", "Yes\u{2066}No\u{2069}", "Yes\u{200B}", "Yes\u{200F}No"] {
         assert!(refusal(one_line("An answer", value, 80).unwrap_err()).contains("one line"), "{value:?}");
     }
     assert_eq!(one_line("An answer", "  Yes, go  ", 80).unwrap(), "Yes, go");
@@ -311,7 +328,7 @@ fn unicode_line_and_paragraph_separators_break_a_line() {
 
 #[test]
 fn a_closed_item_whose_messages_wait_is_not_trimmed() {
-    let waiting = Undelivered { id: "m".into(), at: "2026-01-01T00:00:00Z".into(), kind: "comment".into(), text: "About item #1: hi".into(), error: String::new(), unknown: BTreeMap::new() };
+    let waiting = Undelivered { id: "m".into(), at: "2026-01-01T00:00:00Z".into(), kind: "comment".into(), text: "About item #1: hi".into(), error: String::new(), choice: None, label: String::new(), unknown: BTreeMap::new() };
     let closed = |number: u64| Item { number, state: ItemState::Dropped, closed: Some(format!("2026-11-{:02}T00:00:00Z", 1 + number % 28)), added_by: "bot".into(), ..add_template() };
     let mut items = vec![Item { undelivered: vec![waiting], ..closed(1) }];
     items.extend((2..=MAX_CLOSED as u64 + 10).map(closed));

@@ -6483,8 +6483,8 @@ impl SessionManager {
         #[cfg(not(test))]
         let refused = false;
         let started = if refused { Err(anyhow!("the agent's CLI could not start (a test refused it)")) } else { self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI").map(|_| ()) };
-        // The agent is running with its appended prompt, or never will: a bot's waiting messages in it are delivered
-        // or wait again (`bots::items::launched`).
+        // The agent is running, or never will: in a bot's home chat that started, the owner's waiting messages are
+        // sent now as messages (`bots::chat::launched`); after a failed launch they keep waiting.
         crate::bots::chat::launched(self, entry, started.is_ok());
         started?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

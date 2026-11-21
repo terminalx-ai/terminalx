@@ -201,6 +201,12 @@ pub struct Undelivered {
     pub text: String,
     #[serde(default)]
     pub error: String,
+    /// A chosen answer: its number (counted from 1) and the bot's label, so the owner is shown "You chose answer N"
+    /// with the label as the bot's text, not the fenced message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -440,8 +446,9 @@ fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     if value.is_empty() {
         return Err(refused(format!("{what} is empty.")));
     }
-    // Unicode's own line and paragraph separators break a line as a newline does.
-    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+    // Unicode's own line and paragraph separators break a line as a newline does; bidirectional overrides and
+    // isolates, and zero-width characters, make a line read other than it is.
+    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}')) {
         return Err(refused(format!("{what} is one line.")));
     }
     if value.chars().count() > max {
@@ -514,7 +521,7 @@ fn queue(item: &mut Item, kind: &str, text: String) -> Result<String> {
         )));
     }
     let id = uuid::Uuid::now_v7().to_string();
-    item.undelivered.push(Undelivered { id: id.clone(), at: index::now(), kind: kind.into(), text, error: String::new(), unknown: BTreeMap::new() });
+    item.undelivered.push(Undelivered { id: id.clone(), at: index::now(), kind: kind.into(), text, error: String::new(), choice: None, label: String::new(), unknown: BTreeMap::new() });
     Ok(id)
 }
 
@@ -949,6 +956,9 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, que
             (Answer::Choice(index), _) => {
                 let label = question.answers.get(*index).cloned().ok_or_else(|| refused(format!("The question has {} answers.", question.answers.len())))?;
                 queue(item, "answer", owner_choice_message(number, *index, &label))?;
+                if let Some(waiting) = item.undelivered.last_mut() {
+                    (waiting.choice, waiting.label) = (Some(*index as u64 + 1), label.clone());
+                }
                 log(item, OWNER, "chose", format!("You chose answer {}", index + 1), label.clone());
                 label
             }
@@ -1209,7 +1219,9 @@ static RATE: Mutex<BTreeMap<String, std::collections::VecDeque<std::time::Instan
 
 /// A bot adds, asks and withdraws at most [`RATE_LIMIT`] times in [`RATE_WINDOW`]: each of those reaches its owner
 /// (a question waits on them) or pushes history out, and a bot looping on them would flood both.
-fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<bool> {
+/// Reserves the command's slot under the lock, so a parallel burst cannot all pass the check: the instant reserved,
+/// for [`unrated`] to give back if the command is then refused. `None` for a command that is not counted.
+fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<Option<std::time::Instant>> {
     let counted = match command {
         "add" | "ask" => true,
         // A change of state is how a bot withdraws a question or drops an item.
@@ -1217,7 +1229,7 @@ fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<bool> {
         _ => false,
     };
     if !counted {
-        return Ok(false);
+        return Ok(None);
     }
     let now = std::time::Instant::now();
     let mut rate = RATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -1234,20 +1246,25 @@ fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<bool> {
             if wait == 1 { "" } else { "s" }
         )));
     }
-    Ok(true)
+    recent.push_back(now);
+    Ok(Some(now))
 }
 
-/// A command that passed counts against the rate; one refused (a bad number, an empty title) does not.
-fn rated(bot: &Bot) {
-    RATE.lock().unwrap_or_else(|error| error.into_inner()).entry(bot.id.clone()).or_default().push_back(std::time::Instant::now());
+/// A command refused (a bad number, an empty title) gives its reserved slot back: only commands that pass count.
+fn unrated(bot: &Bot, at: std::time::Instant) {
+    if let Some(recent) = RATE.lock().unwrap_or_else(|error| error.into_inner()).get_mut(&bot.id) {
+        if let Some(position) = recent.iter().position(|reserved| *reserved == at) {
+            recent.remove(position);
+        }
+    }
 }
 
 /// `terminalx bots items …` for bot `bot`, from its session `session` (`control::Caller` placed it).
 pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
-    let counted = within_rate(bot, command, params)?;
+    let reserved = within_rate(bot, command, params)?;
     let result = cli_command(sink, bot, session, command, params);
-    if counted && result.is_ok() {
-        rated(bot);
+    if let (Some(at), Err(_)) = (reserved, &result) {
+        unrated(bot, at);
     }
     result
 }
