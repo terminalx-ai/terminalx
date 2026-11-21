@@ -1229,6 +1229,11 @@ pub enum Engine {
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
+    /// The bot this tab's session acts for (`bots::chat::acting_bot`), read
+    /// from its entry when the runtime is made: fixed for a session's life,
+    /// so a bot's gate needs no index read per tool call, and cannot lose
+    /// the bot to an index that cannot be read (PRO-478).
+    pub(crate) acting_bot: Option<String>,
     pub harness: String,
     pub seq: u64,
     /// Set only while applying a source transcript record; empty means unknown.
@@ -2696,6 +2701,7 @@ impl SessionManager {
             let rt = Arc::new(Mutex::new(TabRuntime {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
+                acting_bot: crate::bots::chat::acting_bot(&entry),
                 harness: tab.harness.clone(),
                 seq,
                 status: TabStatus::Idle,
@@ -8311,6 +8317,32 @@ impl SessionManager {
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
                 }
             }
+            // A session acting for a bot (PRO-478: its chats and what they started) is held to
+            // the bot's access as it is now, on top of the mode `bots::chat` holds it to: the
+            // frame showed this launch's token, so its session is its own.
+            let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
+            match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+                crate::bots::access::Gate::Leave => {}
+                crate::bots::access::Gate::Refuse(reason) => {
+                    log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
+                    return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+                }
+                // Claude: the gate does not wait here, where Claude gives a hook 10 s. It answers
+                // "ask", so Claude raises its own permission request, whose hook carries the card
+                // (and the gate's reason, see `PermissionRequest` below) for as long as any card;
+                // a lapsed card there leaves the question to Claude's prompt, never to its mode.
+                // Codex parks on this hook as it does in Ask every time, and a reply with no
+                // output (a lapsed card, a tab that moved on), which Codex reads as "go ahead",
+                // is a refusal here.
+                crate::bots::access::Gate::Ask(reason) => {
+                    log::info!("bot session {}/{} asks: {reason}", frame.session, frame.tab);
+                    let output = match kind {
+                        CliKind::Claude => crate::bots::access::claude_ask(&reason),
+                        CliKind::Codex => crate::bots::access::codex_answer(self.ask_permission_because(&rt_arc, &frame, kind, Some(reason)).output),
+                    };
+                    return HookReply { output: Some(output), refused: None };
+                }
+            }
         }
         if frame.event == "StatusLine" {
             if kind == CliKind::Claude && self.status.usage.ingest_claude(usage_account.as_deref(), &frame.payload) {
@@ -8431,7 +8463,20 @@ impl SessionManager {
                     }
                 }
             }
-            "PermissionRequest" => return self.ask_permission(&rt_arc, &frame, kind),
+            "PermissionRequest" => {
+                // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
+                // what it asks about is asked on a card that says why.
+                let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
+                let because = match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+                    crate::bots::access::Gate::Refuse(reason) => {
+                        log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
+                        return HookReply { output: Some(crate::bots::access::permission_refusal(&reason)), refused: None };
+                    }
+                    crate::bots::access::Gate::Ask(reason) => Some(reason),
+                    crate::bots::access::Gate::Leave => None,
+                };
+                return self.ask_permission_because(&rt_arc, &frame, kind, because);
+            }
             // Codex asks twice about one escalating command: once here for
             // every tool, and again as a `PermissionRequest` when the sandbox
             // stops it. The reader answers once.
@@ -8655,6 +8700,12 @@ impl SessionManager {
     /// answered. The hook thread parks here, which is exactly what holds the
     /// CLI's tool call up until the reader decides.
     fn ask_permission(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind) -> HookReply {
+        self.ask_permission_because(rt_arc, frame, kind, None)
+    }
+
+    /// [`Self::ask_permission`], with `because` as why the card is up when the
+    /// app itself is the one asking (a bot's outward call, PRO-478).
+    fn ask_permission_because(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, because: Option<String>) -> HookReply {
         let local_owner = crate::local_runtime::permissions::enabled();
         let _waiter = if local_owner {
             match crate::local_runtime::permissions::Permit::acquire() {
@@ -8758,7 +8809,9 @@ impl SessionManager {
                         .map(String::from),
                     // Codex's sandbox asking to be left is said as that (PRO-160);
                     // no session allowance is offered at that gate.
-                    reason: if kind == CliKind::Codex && gate != "PermissionRequest" && verified_cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
+                    reason: if let Some(because) = because {
+                        Some(because)
+                    } else if kind == CliKind::Codex && gate != "PermissionRequest" && verified_cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
                         Some(match cwd {
                             Some(scope) => format!("Session allowances are limited to {scope}. Commands executing in another directory are blocked and need a separate one-time approval."),
                             None => "Codex did not report a verifiable execution directory. Approval applies only to this invocation.".into(),

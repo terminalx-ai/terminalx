@@ -82,10 +82,10 @@ pub fn guards(command: &str) -> bool {
 
 /// The bots operations of `runtime.session.bots` that give a bot more than
 /// it has (PRO-468): only the window, a person, sends them. An `update` is
-/// witnessed always; the runtime asks for the proof only when it raises
-/// access, changes the reporting line or turns memory back on
-/// (`bots::enforce::needs_person`). The owner's writes to a bot's role and
-/// memory (PRO-470) are a person's too: what a bot is told comes from them.
+/// witnessed always; the runtime asks for the proof only when it gives the
+/// bot more (`bots::enforce::needs_person`), or turns its memory back on.
+/// The owner's writes to a bot's role and memory (PRO-470) are a person's
+/// too: what a bot is told comes from them.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
 pub const GUARDED_BOTS: [&str; 18] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours"];
 
@@ -100,10 +100,13 @@ pub const GIVES_MORE: &str = "givesMore";
 /// while Bots is on (`control::refuse_bot_runtime_call`).
 pub const WINDOW_REGISTER: &str = "runtime.window.register";
 
+/// The fields of an `update` that can give a bot more (`bots::gives_more`).
+pub const UPDATE_GIVES: [&str; 9] = ["access", "reportsTo", "worksIn", "whoCanAsk", "harness", "model", "effort", "name", "runsOn"];
+
 /// Whether this request needs a person's consent: a guarded command, the
 /// window's registration, or a guarded bots operation; an `update` only when
-/// it sets access or the reporting line, and the window did not find it
-/// gives nothing more.
+/// it sets a field that can give more ([`UPDATE_GIVES`]), and the window did
+/// not find it gives nothing more.
 pub fn guards_request(command: &str, params: &Value) -> bool {
     if guards(command) || command == WINDOW_REGISTER {
         return true;
@@ -114,7 +117,8 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
     match params["operation"].as_str() {
         Some("update") => {
             let patch = &params["params"]["patch"];
-            let widens = ["access", "reportsTo"].iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null()));
+            // `effort: null` is a change too: back to the agent's default.
+            let widens = UPDATE_GIVES.iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null() || *field == "effort"));
             // Memory turned back on: a conversation is given notes again.
             let memory_on = patch.get("memoryOff").and_then(Value::as_bool) == Some(false);
             memory_on || (widens && params[GIVES_MORE].as_bool() != Some(false))

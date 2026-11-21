@@ -321,18 +321,16 @@ impl Desktop {
     /// carries this window's proof, and a runtime that cannot verify it is
     /// repaired as for pairing: a fresh runtime when nothing would stop, else
     /// Restart runtime offered (`window_consent::guarded`). An update that
-    /// lowers access asks for no proof: the runtime judges it again itself.
+    /// gives nothing more asks for no proof: the runtime judges it again itself.
     #[cfg(feature = "desktop")]
     pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         use crate::serve_cli::consent;
         let mut request = serde_json::json!({"operation": operation, "params": params});
+        // An update that gives the bot nothing more (`bots::gives_more`) is sent without a proof.
         if operation == "update" {
-            let access = request["params"]["patch"].get("access").filter(|access| !access.is_null()).and_then(|access| serde_json::from_value::<crate::bots::BotAccess>(access.clone()).ok());
-            let reports = request["params"]["patch"].get("reportsTo").is_some_and(|value| !value.is_null());
-            if let (Some(access), false) = (access, reports) {
+            if let Ok(patch) = serde_json::from_value::<crate::bots::BotPatch>(request["params"]["patch"].clone()) {
                 let current = self.sessions()?.bots::<crate::bots::Bot>("get", serde_json::json!({"id": request["params"]["id"]})).ok();
-                let more = current.is_none_or(|bot| crate::bots::access_rank(&access) > crate::bots::access_rank(&bot.access) || matches!(access, crate::bots::BotAccess::Other(_)));
-                request[consent::GIVES_MORE] = serde_json::json!(more);
+                request[consent::GIVES_MORE] = serde_json::json!(current.is_none_or(|bot| crate::bots::gives_more(&bot, &patch)));
             }
         }
         if !consent::guards_request(consent::BOTS_COMMAND, &request) {

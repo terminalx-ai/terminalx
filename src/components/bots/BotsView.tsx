@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
-import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw } from "@/icons";
+import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
 import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
-import { focusTaken, showBotRoleMemory, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { focusTaken, showBotRoleMemory, showBotSettings, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { openBot } from "@/lib/sessions";
@@ -16,6 +16,7 @@ import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } fr
 import { unreadableText } from "./BotsSidebarSection";
 import { BotRoleMemory } from "./BotRoleMemory";
 import { BotsHeader } from "./BotsHeader";
+import { BotSettingsPage } from "./BotSettingsPage";
 import { FirstBot } from "./FirstBot";
 import { NeedsYouQueue, needsYouNote } from "./NeedsYouQueue";
 import { HireBot } from "./HireBot";
@@ -36,6 +37,7 @@ export function BotsView() {
     });
   }, []);
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
+  if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
   if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
@@ -269,6 +271,11 @@ function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot
         <WithTooltip label={`${bot.name}'s role and memory`}>
           <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s role and memory`} onClick={() => showBotRoleMemory(bot.id)} data-testid="bot-role-memory-open">
             <BookUser />
+          </Button>
+        </WithTooltip>
+        <WithTooltip label={`${bot.name}'s settings`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s settings`} onClick={() => showBotSettings(bot.id)} data-testid="bot-settings-open">
+            <Settings2 />
           </Button>
         </WithTooltip>
         <WithTooltip label={bot.paused ? `Resume ${bot.name}` : `Pause ${bot.name}`}>
