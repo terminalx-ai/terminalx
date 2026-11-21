@@ -9,6 +9,16 @@
   owner's account written while one of their bots at Full access was working
   is kept as "not accepted" and asked for again, since the bot could have
   posted it with the owner's login (PRO-502).
+- Bots (experimental): a bot's run the owner approves or starts from its Run
+  view, rather than from the item's question, no longer refuses the lead's
+  later `runs start` with `awaits_owner`; the item records the start and
+  closes its question, as "Approve and start" there would (PRO-501).
+- Issue pipeline: an approved review carries across a merge of main again in a
+  worktree with its dependencies installed. The check for a stray
+  `.gitattributes` took each ignored folder `git status` names (`node_modules/`)
+  for one, so every merge after the final review stopped at "Needs you". Now
+  only real `.gitattributes` files count, and one inside a folder no merged
+  tree has files in (a package's, in `node_modules`) is skipped (PRO-500).
 - Bots (experimental): a lead bot plans and starts orchestration runs. It leads
   a run from a session it starts in the project, then `terminalx bots items
   plan` asks "Approve the plan and start the run?" with a run plan card in its
@@ -159,6 +169,27 @@
   the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
   files on this Mac by other means. Agent and model, rename and delete are
   under the page's menu.
+- Bots (experimental): a duty wakes on events as well as a schedule. The
+  Duties tab's GitHub, Linear, Another bot and Wait until tiles open the
+  editor on that source: a pull request opened, pushed, asking for your
+  review or failing a check; a comment that mentions the bot, a Dependabot
+  security alert, or a failed check on a branch (read with `gh`); a Linear
+  issue matching a filter or a comment that mentions the bot (read with the
+  Linear key); a hand-off, question or status another bot leaves it
+  (`terminalx bots message`, and a duty reporting to its lead leaves one); or
+  a URL, a file or a command's output that changes. Each event wakes the duty
+  once, and what is there when it starts never does. The first check is given
+  the events (`$TERMINALX_EVENTS`) and the agent is given them fenced, as
+  information. Events that arrive while the bot is paused wait and wake it on
+  resume. A duty wakes at most 6 times an hour and 48 a day, one run at a
+  time; what that holds back waits and the duty says until when, and a
+  message passed between bots three times wakes nobody. A GitHub mention
+  wakes it only from the repository's owner, members and collaborators
+  unless you choose anyone, and never from your own `gh` or Linear user.
+  Messages go once read; one bot leaves at most 30 an hour, and an unread
+  message is never let go to make room. Security alerts are Dependabot's;
+  mentions are conversation comments only. Slack, Telegram or WhatsApp and
+  webhooks stay off until they have a connector (PRO-472).
 - TerminalX runs on Windows 10 and 11: the desktop app, its background
   runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
   machines, phone pairing and the headless `terminalx-serve` tools. Named

@@ -2549,6 +2549,16 @@ impl SessionManager {
         })
     }
 
+    /// A person approved or started a run from its Run view: a bot's item that asked them about it is settled
+    /// (PRO-501). Not when the start is an item's own answer, which records itself.
+    fn started_by_person(&self, params: &serde_json::Value) {
+        if params[crate::bots::runs::ANSWERING_ITEM].as_bool() != Some(true) {
+            if let Some(id) = params["id"].as_str() {
+                crate::bots::runs::started_from_run_view(self.sink.as_ref(), id);
+            }
+        }
+    }
+
     /// What the window asks of orchestration runs (`orchestration`). Approve
     /// and Edit are here and nowhere in the `terminalx` CLI: the lead runs
     /// the CLI, and a lead does not approve its own plan.
@@ -2568,7 +2578,9 @@ impl SessionManager {
             "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
             "approve" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
+                let approved = serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                approved
             }
             "start" => {
                 self.accepting_work()?;
@@ -2577,7 +2589,9 @@ impl SessionManager {
             // A person's Start run on a `planned` run (PRO-365): recorded as theirs, and the lead is told.
             "startPlanned" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?
+                let started = serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                started
             }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
             // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.

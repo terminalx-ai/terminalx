@@ -24,6 +24,7 @@ pub mod pause;
 pub mod runs;
 pub mod suggestions;
 pub mod templates;
+pub mod wakes;
 
 use std::collections::BTreeMap;
 
