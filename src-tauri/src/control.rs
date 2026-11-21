@@ -610,6 +610,14 @@ impl ControlService {
                         }
                         params
                     };
+                    #[cfg(not(unix))]
+                    let params = {
+                        let mut params = params;
+                        if command == crate::serve_cli::consent::BOTS_COMMAND {
+                            bots_without_a_window(&mut params)?;
+                        }
+                        params
+                    };
                     return crate::local_runtime::calls::execute(&self.manager, &self.sink, command, params).map_err(ControlError::internal);
                 }
                 // What stopping this runtime now would cut short, and a stop
@@ -2914,7 +2922,6 @@ fn resume_confirmable() -> bool {
 }
 
 /// What a Bots action is called where it is refused.
-#[cfg(unix)]
 fn bots_action(operation: &str) -> &'static str {
     match operation {
         "resume" => "resume a bot",
@@ -2933,6 +2940,32 @@ fn bots_action(operation: &str) -> &'static str {
         "quietHours" => "change a bot's quiet hours",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
+}
+
+/// [`bots_from_a_person`] where no window can sign, as on Linux
+/// (`window_can_confirm`): what needs a person is refused, and an `update`
+/// is never a person's, so `bots::update_as` gives the bot nothing more.
+#[cfg(not(unix))]
+fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
+    let operation = params["operation"].as_str().unwrap_or_default().to_owned();
+    if let Some(object) = params.as_object_mut() {
+        object.remove(crate::serve_cli::consent::PARAM);
+    }
+    if operation == "update" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
+        return Ok(());
+    }
+    if crate::bots::enforce::needs_person(&operation, &params["params"]) {
+        let action = bots_action(&operation);
+        return Err(ControlError::new(
+            "pairing_unavailable",
+            format!("To {action} needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none that can."),
+            Some("Use TerminalX on a Mac for this.".into()),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a person can confirm a Bots action here at all: only the TerminalX

@@ -302,7 +302,7 @@ impl Desktop {
     /// repaired as for pairing: a fresh runtime when nothing would stop, else
     /// Restart runtime offered (`window_consent::guarded`). An update that
     /// lowers access asks for no proof: the runtime judges it again itself.
-    #[cfg(feature = "desktop")]
+    #[cfg(all(unix, feature = "desktop"))]
     pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         use crate::serve_cli::consent;
         let mut request = serde_json::json!({"operation": operation, "params": params});
@@ -320,6 +320,14 @@ impl Desktop {
         }
         let relaunch = super::window_consent::installed().map(|relaunch| relaunch.as_ref() as super::window_consent::Relaunching<'_, Self>);
         super::window_consent::guarded(self, consent::BOTS_COMMAND, request, |runtime, request| runtime.sessions()?.bots_request(request), relaunch)
+    }
+
+    /// [`Self::bots`] on Windows: no window signs for a Bots action there, so
+    /// nothing is proved or repaired; the runtime refuses what needs a
+    /// person and judges an `update` itself (`control::bots_without_a_window`).
+    #[cfg(all(not(unix), feature = "desktop"))]
+    pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        self.sessions()?.bots_request(serde_json::json!({"operation": operation, "params": params}))
     }
 
     /// [`Self::machine_host`] with no one at the window to ask, as for an

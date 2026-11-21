@@ -45,6 +45,11 @@ use crate::machine_wire;
 
 pub const PARAM: &str = "consent";
 
+/// The runtime's Bots command (PRO-468). No window signs for a Bots action
+/// on Windows (`consent.rs` witnesses them only from the window on a Mac), so
+/// the runtime refuses those that need a person (`control::bots_without_a_window`).
+pub const BOTS_COMMAND: &str = "runtime.session.bots";
+
 pub const GUARDED: [&str; 5] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK, machine_wire::PHONE_CODE, machine_wire::PHONE_APPROVE];
 
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
