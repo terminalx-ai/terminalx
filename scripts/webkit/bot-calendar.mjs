@@ -3,7 +3,8 @@
 // from the Bots page's Calendar button (every bot's week, with the bot filter) and as the Calendar view of a bot's
 // Duties tab. The toolbar's controls do not overlap; the seven day columns line up with their heads and with the two
 // counted rows; every block stays inside its day; the right column (next today, the week so far, the key, quiet hours)
-// stands right of the grid; nothing leaves the window, and no page error.
+// stands right of the grid; nothing leaves the window, and no page error. Every hour of the week takes a click and the
+// focus, below the counted rows and above the two hints (PRO-511).
 // Run after pnpm build: node scripts/webkit/bot-calendar.mjs
 // BOT_CALENDAR_SHOTS=<dir> saves a screenshot of each case.
 import { launch, open, openSession, report, serve, sidebar } from "./harness.mjs";
@@ -121,6 +122,24 @@ async function measure(page, calendar, viewport) {
     return r.left >= outer.left - 0.5 && r.right <= outer.right + 0.5;
   }));
   const totals = await Promise.all((await calendar.getByTestId("calendar-total").all()).map(box));
+  // PRO-511: every hour of the week, scrolled to the way the arrow keys scroll to it, takes a click (the hit test a
+  // pointer makes, at the cell's right edge, which no block covers) and the focus; nothing outside the grid's scroll box
+  // (the counted rows above, the two hints below) answers for it.
+  const hints = await Promise.all(["calendar-hint", "calendar-keys"].map((id) => box(calendar.getByTestId(id))));
+  const unreachable = await calendar.getByTestId("calendar-scroll").evaluate((scroll) => {
+    const before = scroll.scrollTop;
+    const cells = [...scroll.querySelectorAll("[data-testid=calendar-cell]")];
+    const missed = cells.filter((cell) => {
+      cell.scrollIntoView({ block: "nearest" });
+      const r = cell.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.right - 1.5, r.top + r.height / 2);
+      cell.focus({ preventScroll: true });
+      return hit !== cell || document.activeElement !== cell;
+    }).map((cell) => cell.getAttribute("aria-label"));
+    document.activeElement?.blur?.();
+    scroll.scrollTop = before;
+    return cells.length === 168 ? missed : [`${cells.length} cells, not 168`];
+  });
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
   const lined = (cells) => cells.length === 7 && cells.every((cell, i) => Math.abs(cell.left - columns[i].left) < 1.5 && Math.abs(cell.right - columns[i].right) < 1.5);
   return {
@@ -140,8 +159,10 @@ async function measure(page, calendar, viewport) {
       "the log notices stand above the grid, inside it and apart": disjoint(logs) && logs.every((log) => inside(log, mainBox) && log.bottom <= headBox.top + 0.5),
       "an \"at least\" total fits its tile": totalsFit,
       "a history-not-kept band stays inside its day": bands,
+      "the two hints stand below the grid's scroll box": hints.every((hint) => hint.top >= scrollBox.bottom - 0.5),
+      "every hour of the week takes a click and the focus": unreachable.length === 0,
     },
-    boxes: { calendarBox, toolbarBox, mainBox, asideBox, gridBox, scrollBox, columns: columns.map((c) => [c.left, c.right]), headCells },
+    boxes: { calendarBox, toolbarBox, mainBox, asideBox, gridBox, scrollBox, hints, unreachable, columns: columns.map((c) => [c.left, c.right]), headCells },
   };
 }
 
@@ -171,8 +192,9 @@ try {
         "no page errors": errors.length === 0,
       }, { ...team.boxes, chips, errors });
 
-      // A clicked empty hour asks which bot.
-      await calendar.getByTestId("calendar-day").nth(6).click({ position: { x: 20, y: 12 * 46 + 10 } });
+      // A clicked empty hour asks which bot. Since PRO-499 the hours are the grid's own cells (the day columns let
+      // clicks through to them), so the click goes to the last day's 12:00 cell, scrolled into view.
+      await calendar.getByTestId("calendar-cells").getByRole("row").nth(12).getByRole("gridcell").nth(6).click();
       const choose = main.getByTestId("bots-duties-choose");
       await choose.waitFor();
       const chooseBox = await box(choose);
