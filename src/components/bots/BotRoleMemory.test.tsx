@@ -204,6 +204,83 @@ describe("Role and memory (PRO-470)", () => {
     await waitFor(() => expect(within(notes).queryByRole("alert")).toBeNull());
   });
 
+  it("retries after a restart with the draft as it is then, shown saving, and offers one restart for the page (PRO-491)", async () => {
+    const RESTART = "runtime_restart_required:e7: TerminalX must restart its runtime to confirm that you asked. That stops Atlas's chat.";
+    serve(view());
+    const served = mocks.invoke.getMockImplementation()!;
+    let adds = 0;
+    mocks.invoke.mockImplementation(async (command: string, args: { operation: string }) => {
+      if (command === "local_runtime_restart_for_window") return undefined;
+      if (args?.operation === "memoryAdd" && adds++ === 0) throw RESTART;
+      return served(command, args);
+    });
+    let finish: (bot: Bot) => void = () => undefined;
+    mocks.api.roleWrite.mockRejectedValueOnce(RESTART).mockImplementationOnce(() => new Promise<Bot>((resolve) => (finish = resolve)));
+    show();
+    const editor = await screen.findByTestId("bot-role-text");
+    fireEvent.change(editor, { target: { value: "First words.\n" } });
+    fireEvent.click(screen.getByTestId("bot-role-save"));
+    await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ });
+    // Edited again while the offer stands; a note fails for the same restart.
+    fireEvent.change(editor, { target: { value: "First words, then more.\n" } });
+    fireEvent.change(screen.getByTestId("bot-memory-add-text"), { target: { value: "Ship on Tuesdays" } });
+    fireEvent.click(screen.getByTestId("bot-memory-add"));
+    // One offer for the page, where the latest write failed.
+    await within(screen.getByTestId("bot-memory-notes")).findByRole("button", { name: /Restart runtime/ });
+    expect(screen.getAllByRole("button", { name: /Restart runtime/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /Restart runtime/ }));
+    // Both are tried again: the role with the draft as it is now, held busy until it is saved.
+    await waitFor(() => expect(mocks.api.roleWrite).toHaveBeenCalledTimes(2));
+    expect(mocks.api.roleWrite).toHaveBeenLastCalledWith("atlas-id", "First words, then more.\n", "h-now");
+    expect(screen.getByTestId("bot-role-state").textContent).toBe("Saving…");
+    expect((screen.getByTestId("bot-role-save") as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(asked("memoryAdd")).toHaveLength(2));
+    await act(async () => finish(ATLAS));
+    await waitFor(() => expect(screen.getByTestId("bot-role-state").textContent).toBe("Saved"));
+    expect(screen.queryByRole("button", { name: /Restart runtime/ })).toBeNull();
+  });
+
+  it("drops the retry of a section that is closed, and shows the offer where a write still waits (PRO-491 review)", async () => {
+    const RESTART = "runtime_restart_required:e7: TerminalX must restart its runtime to confirm that you asked. That stops Atlas's chat.";
+    serve(view());
+    const served = mocks.invoke.getMockImplementation()!;
+    let restores = 0;
+    mocks.invoke.mockImplementation(async (command: string, args: { operation: string }) => {
+      if (command === "local_runtime_restart_for_window") return undefined;
+      if (args?.operation === "roleRestore" && restores++ === 0) throw RESTART;
+      return served(command, args);
+    });
+    mocks.api.roleWrite.mockRejectedValueOnce(RESTART).mockResolvedValue(ATLAS);
+    show();
+    // A save waits on a restart.
+    fireEvent.change(await screen.findByTestId("bot-role-text"), { target: { value: "Saved after the restart.\n" } });
+    fireEvent.click(screen.getByTestId("bot-role-save"));
+    await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ });
+    // A Restore fails the same way: the offer moves to it.
+    fireEvent.click(screen.getByTestId("bot-role-history-toggle"));
+    fireEvent.click(within(screen.getAllByTestId("bot-role-version")[1]).getByTestId("bot-role-restore"));
+    await within(screen.getByTestId("bot-role-history")).findByRole("button", { name: /Restart runtime/ });
+    expect(screen.getAllByRole("button", { name: /Restart runtime/ })).toHaveLength(1);
+    // The history closed: its Restore is abandoned, and the offer shows where the save still waits.
+    fireEvent.click(screen.getByTestId("bot-role-history-toggle"));
+    const offer = await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ });
+    fireEvent.click(offer);
+    await waitFor(() => expect(mocks.api.roleWrite).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId("bot-role-state").textContent).toBe("Saved"));
+    expect(asked("roleRestore")).toHaveLength(1);
+  });
+
+  it("forgets an undated note too, but never a heading or a blank line (PRO-491)", async () => {
+    const shown = view();
+    shown.memory = { ...shown.memory, places: [place("bot", ["# Memory", "", "- Undated, written by hand", "Plain words under the heading"]), place("personal", [])] };
+    serve(shown);
+    show();
+    fireEvent.click(await screen.findByRole("radio", { name: /Goes with Atlas/ }));
+    expect(screen.getAllByTestId("bot-memory-forget")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Forget “Undated, written by hand”" }));
+    await waitFor(() => expect(asked("memoryForget")).toEqual([{ id: "atlas-id", place: "bot", line: "- Undated, written by hand", index: 2 }]));
+  });
+
   it("keeps an unsaved role across leaving the page, and asks before going back to the team", async () => {
     serve(view());
     await boot({ revision: 1, bots: [ATLAS, IRIS], unreadable: 0 });

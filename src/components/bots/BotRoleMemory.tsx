@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useId, useMemo, useRef, useState, type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { Building2, ExternalLink, FileText, History, Loader2, Lock, Plus, RotateCw, Undo2, UserRound, X } from "@/icons";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { errorMessage, fs } from "@/lib/api";
 import { updateBot } from "@/lib/bots";
 import { botMemoryApi, byLabel, changeHeadline, changeSource, keepRoleDraft, placeLabel, placeName, placeNote, roleDraft, useBotRoleMemory } from "@/lib/botMemory";
 import { cn } from "@/lib/cn";
+import { restartRequired } from "@/lib/machines";
 import { recentTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotChange, BotDiffLine, BotMemoryPlace, BotRoleMemory as RoleMemory, BotRoleVersion } from "@/types/botMemory";
@@ -39,6 +40,7 @@ export function BotRoleMemory({ bot, bots, unreadable = 0 }: { bot: Bot; bots: B
     );
   }
   return (
+    <RestartOffer>
     <div className="grid min-w-0 gap-x-8 gap-y-6 px-6 py-5 @5xl/editor-host:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]" data-testid="bot-role-memory" aria-busy={loading}>
       {error && <div className="@5xl/editor-host:col-span-2"><LoadError error={error} onRetry={() => void reload()} /></div>}
       {view.secrets.length > 0 && (
@@ -55,6 +57,7 @@ export function BotRoleMemory({ bot, bots, unreadable = 0 }: { bot: Bot; bots: B
         <ChangesSection bot={bot} bots={bots} view={view} />
       </div>
     </div>
+    </RestartOffer>
   );
 }
 
@@ -68,25 +71,92 @@ function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
 }
 
 /**
- * A write's failure, said as the rest of the Bots screens say it (`MachineHostError`): when the runtime running
- * cannot verify this window (the owner's writes need its proof) it offers Restart runtime, and the write is tried
- * again once a fresh runtime is attached. An unsaved role draft is kept meanwhile (`keepRoleDraft`).
+ * The one Restart runtime offer of the page: when the runtime running cannot verify this window (the owner's writes
+ * need its proof), every write that failed for it waits on the same offer, shown where the latest of them failed.
+ * Restarting tries each again, once a fresh runtime is attached; a write that succeeds meanwhile stops waiting.
+ */
+interface Waiting {
+  error: string;
+  /** The write whose section shows the offer. */
+  shownBy: string;
+  retries: Map<string, () => void>;
+}
+
+const RestartContext = createContext<[Waiting | null, Dispatch<SetStateAction<Waiting | null>>] | null>(null);
+
+function RestartOffer({ children }: { children: ReactNode }) {
+  const waiting = useState<Waiting | null>(null);
+  return <RestartContext.Provider value={waiting}>{children}</RestartContext.Provider>;
+}
+
+function stopWaiting(waiting: Waiting | null, id: string): Waiting | null {
+  if (!waiting?.retries.has(id)) return waiting;
+  const retries = new Map(waiting.retries);
+  retries.delete(id);
+  const next = retries.keys().next();
+  if (next.done) return null;
+  return { ...waiting, retries, shownBy: waiting.shownBy === id ? next.value : waiting.shownBy };
+}
+
+/**
+ * A write's failure, said as the rest of the Bots screens say it (`MachineHostError`), with the page's one Restart
+ * runtime offer (`RestartOffer`). `again` is how the write is tried again after a restart: the section's own action,
+ * which reads what is on screen then (the draft as it is now, not as it was at the first click) and shows it busy.
+ * An unsaved role draft is kept meanwhile (`keepRoleDraft`).
  */
 function useWrite() {
-  const [failure, setFailure] = useState<{ error: string; retry?: () => void } | null>(null);
-  const run = (action: () => Promise<unknown>, after?: () => void): Promise<void> => {
+  const id = useId();
+  const [failure, setFailure] = useState<string | null>(null);
+  const local = useState<Waiting | null>(null);
+  const [waiting, setWaiting] = useContext(RestartContext) ?? local;
+  // A section that goes (a closed history panel, the page left) drops its retry: nobody waits for it any more, and
+  // a Restore no one sees must not run over a role saved meanwhile. The offer moves to a section still shown.
+  useEffect(() => () => setWaiting((now) => stopWaiting(now, id)), [id, setWaiting]);
+  const run = (action: () => Promise<unknown>, after?: () => void, again?: () => void): Promise<void> => {
     const attempt = (): Promise<void> => action().then(
-      () => { setFailure(null); after?.(); },
-      (cause) => setFailure({ error: errorMessage(cause), retry: () => void attempt() }),
+      () => {
+        setFailure(null);
+        setWaiting((now) => stopWaiting(now, id));
+        after?.();
+      },
+      (cause) => {
+        const error = errorMessage(cause);
+        if (!restartRequired(error)) return setFailure(error);
+        setFailure(null);
+        setWaiting((now) => ({ error, shownBy: id, retries: new Map(now?.retries).set(id, again ?? (() => void attempt())) }));
+      },
     );
     return attempt();
   };
-  const fail = (cause: unknown) => setFailure({ error: errorMessage(cause) });
-  const alert = (className?: string) => failure && (
-    <MachineHostError error={failure.error} className={className} onRestarted={() => { const retry = failure.retry; setFailure(null); retry?.(); }}
-      onFailed={(message) => setFailure({ error: message })} />
-  );
+  const fail = (cause: unknown) => setFailure(errorMessage(cause));
+  const alert = (className?: string) => {
+    // A failure of this section's own is said beside the page's offer, never in place of it.
+    const own = failure && <MachineHostError error={failure} className={className} onRestarted={() => setFailure(null)} />;
+    if (waiting?.shownBy !== id) return own || null;
+    return (
+      <>
+      {own}
+      <MachineHostError error={waiting.error} className={className}
+        onRestarted={() => {
+          const retries = [...waiting.retries.values()];
+          setWaiting(null);
+          for (const retry of retries) retry();
+        }}
+        onFailed={(message) => {
+          setWaiting(null);
+          setFailure(message);
+        }} />
+      </>
+    );
+  };
   return { run, fail, alert };
+}
+
+/** The latest render's `action`, for a retry made later to act on what is on screen then. */
+function useLatest<T extends (...args: never[]) => unknown>(action: T): T {
+  const latest = useRef(action);
+  latest.current = action;
+  return useRef(((...args: Parameters<T>) => latest.current(...args)) as T).current;
 }
 
 function SectionTitle({ id, title, note, children }: { id: string; title: string; note?: string; children?: ReactNode }) {
@@ -235,15 +305,16 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
   const conflict = outsideChange && dirty && role.text !== base.text;
   const now = { text: role.text, hash: role.hash };
 
-  const save = () => {
+  // Tried again after a restart as it is then: the draft as edited meanwhile, shown saving.
+  const save = useLatest(() => {
     setSaving(true);
     // The save names the role it started from: one changed since is not written over. The draft is kept until it is saved.
     const [text, from] = [draft, base.hash];
     void write.run(() => botMemoryApi.writeRole(bot.id, text, from), () => {
       keepRoleDraft(bot.id, null);
       setBase({ text, hash: from });
-    }).finally(() => setSaving(false));
-  };
+    }, save).finally(() => setSaving(false));
+  });
   const state = saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved";
   return (
     <div className="min-w-0" data-testid="bot-role-editor">
@@ -309,7 +380,7 @@ function RoleHistory({ bot, bots, versions, current }: { bot: Bot; bots: Bot[]; 
   // Texts are not in the view: each is read when it is shown.
   const [texts, setTexts] = useState<Record<string, string | null>>({});
   const write = useWrite();
-  const restore = (version: BotRoleVersion) => write.run(() => botMemoryApi.restoreRole(bot.id, version.change));
+  const restore = (version: BotRoleVersion): Promise<void> => write.run(() => botMemoryApi.restoreRole(bot.id, version.change), undefined, () => void restore(version));
   const toggle = (key: string, hash: string | null) => {
     if (open === key) return setOpen(null);
     setOpen(key);
@@ -395,7 +466,7 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
 
   const turn = (on: boolean) => {
     setSwitching(true);
-    void write.run(() => updateBot(bot.id, { memoryOff: !on })).finally(() => setSwitching(false));
+    void write.run(() => updateBot(bot.id, { memoryOff: !on }), undefined, () => turn(on)).finally(() => setSwitching(false));
   };
 
   return (
@@ -478,19 +549,29 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
 
 const DATED = /^- (\d{4}-\d{2}-\d{2}) (.*)$/;
 
+/** A line that is a note, dated or not: anything but a heading or a blank line (as `memory::is_note` has it). */
+function isNote(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed !== "" && !trimmed.startsWith("#");
+}
+
 function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const write = useWrite();
-  const notes = useMemo(() => place.lines.map((line, index) => ({ line, index, dated: DATED.exec(line) })), [place.lines]);
-  const act = (action: () => Promise<unknown>, after?: () => void) => {
+  const notes = useMemo(() => place.lines.map((line, index) => ({ line, index, dated: DATED.exec(line), note: isNote(line) })), [place.lines]);
+  // Tried again after a restart shown busy, and an add with the text in the box then.
+  const act = (action: () => Promise<unknown>, after?: () => void, again?: () => void) => {
     setBusy(true);
-    void write.run(action, after).finally(() => setBusy(false));
+    void write.run(action, after, again ?? (() => act(action, after))).finally(() => setBusy(false));
   };
+  const addNow = useLatest(() => {
+    if (!text.trim()) return;
+    act(() => botMemoryApi.add(bot.id, place.key, text), () => setText(""), addNow);
+  });
   const add = (event: FormEvent) => {
     event.preventDefault();
-    if (!text.trim()) return;
-    act(() => botMemoryApi.add(bot.id, place.key, text), () => setText(""));
+    addNow();
   };
   return (
     <div className="mt-3 rounded-lg border border-hairline" data-testid="bot-memory-notes">
@@ -502,21 +583,24 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
       {place.problem && <div className="px-3 pt-2"><Problem>MEMORY.md: {place.problem}</Problem></div>}
       <ul className="max-h-64 overflow-y-auto py-1 scrollbar-thin">
         {notes.length === 0 && <li className="px-3 py-1.5 text-[12.5px] text-faint">Nothing kept here yet.</li>}
-        {notes.map(({ line, index, dated }) => (
+        {notes.map(({ line, index, dated, note }) => (
           // A conversation reads the newest lines: the older ones past the budget are dimmed.
           <li key={`${index}:${line}`} className={cn("group flex min-w-0 items-start gap-2 px-3 py-0.5 text-[12.5px]", place.read && index < place.lines.length - place.readLines && "opacity-60")} data-testid="bot-memory-line">
             {dated ? (
               <>
                 <span className="shrink-0 font-mono text-[11.5px] text-faint">{dated[1]}</span>
                 <span className="min-w-0 flex-1 break-words text-foreground">{dated[2]}</span>
-                <WithTooltip label="Forget this note">
-                  <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={`Forget “${dated[2]}”`} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100" onClick={() => act(() => botMemoryApi.forget(bot.id, place.key, line, index))} data-testid="bot-memory-forget">
-                    <X />
-                  </Button>
-                </WithTooltip>
               </>
             ) : (
-              <span className="min-w-0 flex-1 break-words text-muted-foreground">{line || " "}</span>
+              <span className={cn("min-w-0 flex-1 break-words", note ? "text-foreground" : "text-muted-foreground")}>{line || " "}</span>
+            )}
+            {/* Any note can be forgotten, dated or not; a heading or a blank line is not a note. */}
+            {note && (
+              <WithTooltip label="Forget this note">
+                <Button variant="ghost" size="icon-xs" disabled={busy} aria-label={`Forget “${dated ? dated[2] : line.trim().replace(/^[-*] /, "")}”`} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100" onClick={() => act(() => botMemoryApi.forget(bot.id, place.key, line, index))} data-testid="bot-memory-forget">
+                  <X />
+                </Button>
+              </WithTooltip>
             )}
           </li>
         ))}
@@ -539,7 +623,7 @@ function ChangesSection({ bot, bots, view }: { bot: Bot; bots: Bot[]; view: Role
   const write = useWrite();
   const undo = (change: BotChange) => {
     setBusy(change.id);
-    void write.run(() => botMemoryApi.undo(bot.id, change.id)).finally(() => setBusy(null));
+    void write.run(() => botMemoryApi.undo(bot.id, change.id), undefined, () => undo(change)).finally(() => setBusy(null));
   };
   return (
     <section aria-labelledby="bot-changes-heading" className="min-w-0" data-testid="bot-changes">
