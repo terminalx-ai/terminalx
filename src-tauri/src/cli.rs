@@ -2469,6 +2469,18 @@ mod tests {
         }
     }
 
+    /// The access gate's help groups (PRO-494) are each a group this command line parses by name, before
+    /// the built-in browser's verbs, and none is a command of the headless runtime's binary.
+    #[test]
+    fn the_access_gates_help_groups_are_command_groups_here() {
+        for group in crate::bots::access::HELP_GROUPS {
+            if let Err(error) = parse(&args(&[group])) {
+                assert!(!error.message.contains("Unknown command group"), "{group}: {}", error.message);
+            }
+            assert!(!crate::serve_cli::COMMANDS.contains(&group), "{group} is also terminalx-serve's");
+        }
+    }
+
     fn rpc_of(values: &[&str]) -> (String, Value, Duration) {
         match parse(&args(values)).unwrap().action {
             Action::Rpc { command, params, timeout } => (command, params, timeout),

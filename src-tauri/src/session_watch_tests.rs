@@ -4083,6 +4083,18 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
         assert!(reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("Read and report"));
         assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "ls", cwd))), "deny", "{kind:?}: a read");
         assert!(rig.manager.pending_permissions().is_empty());
+        // A sub-agent's call (PRO-494): Claude Code sends it on the same session's hooks, with the
+        // sub-agent's id and type and its own transcript. The gate goes by the tab, so it meets it the same.
+        let mut by_subagent = edit();
+        by_subagent.payload["agent_id"] = json!("a5f2c1");
+        by_subagent.payload["agent_type"] = json!("general-purpose");
+        by_subagent.payload["transcript_path"] = json!(format!("{cwd}/subagents/agent-a5f2c1.jsonl"));
+        assert_eq!(decision(&rig.manager.on_hook(by_subagent.clone())), "deny", "{kind:?}: a sub-agent's edit");
+        let mut subagent_push = command_frame(&rig, "PreToolUse", "git push origin main", cwd);
+        for key in ["agent_id", "agent_type", "transcript_path"] {
+            subagent_push.payload[key] = by_subagent.payload[key].clone();
+        }
+        assert_eq!(decision(&rig.manager.on_hook(subagent_push)), "deny", "{kind:?}: a sub-agent's push");
         // The lead's N1 and N3, through the hook: a `terminalx` command that changes state, or any
         // program named like it, is refused; a `terminalx` read and the agent's own bookkeeping are not.
         for command in ["terminalx issues status PRO-1 --to Done", "./scripts/terminalx sessions list", "terminalx computer type-text --app sessions --text list"] {

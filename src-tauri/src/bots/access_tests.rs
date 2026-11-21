@@ -364,8 +364,25 @@ fn only_known_reads_go_unasked() {
         "terminalx --help",
         "terminalx sessions create --help",
         "tnx --version",
+        "terminalx --json bots pause atlas -h",
     ] {
         assert_eq!(gate(&read, &shell(command, &cwd)), Gate::Leave, "{command}");
+    }
+    // PRO-494: a help or version flag is a read only where the command line takes it first: alone, or after
+    // one of its own groups. The headless runtime's commands, the browser's verbs and options before a
+    // group are not that.
+    for command in [
+        "terminalx service uninstall --help",
+        "terminalx update --version",
+        "terminalx pair -h",
+        "tnx login --help",
+        "terminalx projects add /tmp/x --help",
+        "terminalx --data-dir /tmp/x service install --help",
+        "terminalx goto https://example.com --help",
+        "terminalx --machine m sessions create --help",
+    ] {
+        assert!(is_ask(&gate(&ask, &shell(command, &cwd))), "{command} at ask");
+        assert!(is_refused(&gate(&read, &shell(command, &cwd))), "{command} at read and report");
     }
     // The lead's N3: the agents' own bookkeeping, by the names Claude Code 2.1.330 and Codex 0.169.0 send,
     // goes unasked at both levels; what acts does not.
@@ -514,6 +531,54 @@ fn a_repository_flag_or_a_query_from_a_file_does_not_get_past_the_gate() {
     ] {
         assert_eq!(gate(&BotAccess::Full, &shell(command, &cwd)), Gate::Leave, "{command}");
     }
+}
+
+/// PRO-494: a bare `terminalx` is the app's command line only when no relative folder of the
+/// session's path, which finds what the repository holds, has one before an absolute folder does.
+#[cfg(unix)]
+#[test]
+fn a_terminalx_found_through_a_relative_folder_of_the_path_is_not_the_apps() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = tempfile::tempdir().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let program = |dir: &Path, name: &str| {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    program(&repo.path().join("bin"), "terminalx");
+    program(app.path(), "terminalx");
+    program(app.path(), "tnx");
+    let cwd = repo.path().to_str();
+    let path = |entries: &[&str]| std::ffi::OsString::from(entries.join(":"));
+    let apps = app.path().to_str().unwrap();
+    assert!(shadowed_cli("terminalx", &path(&["bin", apps]), cwd), "the repository's bin comes first");
+    assert!(!shadowed_cli("terminalx", &path(&[apps, "bin"]), cwd), "the app's comes first");
+    assert!(!shadowed_cli("tnx", &path(&["bin", apps]), cwd), "the repository has no tnx");
+    assert!(!shadowed_cli("terminalx", &path(&["/usr/bin", "node_modules/.bin", apps]), cwd), "a relative folder without one");
+    assert!(shadowed_cli("terminalx", &path(&["bin", apps]), None), "a relative folder, from where cannot be told");
+    // An empty entry is the folder the command runs in.
+    program(repo.path(), "tnx");
+    assert!(shadowed_cli("tnx", &path(&["", apps]), cwd));
+    assert!(!shadowed_cli("git", &path(&["bin"]), cwd), "only the app's command line's names");
+}
+
+/// PRO-494: a skill's inline command runs when it loads, which no hook sees; a bot's Claude
+/// sessions are launched with it off, and nothing changes for anyone else or while Bots is off.
+#[test]
+fn a_bots_claude_sessions_run_no_skills_inline_command() {
+    let (_home, _sink) = bots_on();
+    let mut settings = json!({"hooks": {}});
+    claude_settings(Some("b1"), &mut settings);
+    assert_eq!(settings["disableSkillShellExecution"], true);
+    let mut plain = json!({"hooks": {}});
+    claude_settings(None, &mut plain);
+    assert_eq!(plain, json!({"hooks": {}}));
+    set_bots(false);
+    let mut off = json!({"hooks": {}});
+    claude_settings(Some("b1"), &mut off);
+    assert_eq!(off, json!({"hooks": {}}), "inert with Bots off");
 }
 
 #[test]

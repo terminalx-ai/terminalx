@@ -94,7 +94,15 @@ the first sub-issues.
   a known read; Read and report runs known reads, asks before a report, and
   refuses the rest. A paused bot only reads. A known read is a named read
   tool, a shell command vetted read-only, or an exact `terminalx` read (not
-  the built-in browser's `wait`). The bot's own memory and work-list
+  the built-in browser's `wait`). A help or version flag is a read after one
+  of the command line's own groups only, never after a command of the
+  headless runtime's binary (`terminalx-serve service|update|pair…`), and a
+  `terminalx` the session's path finds in a relative folder before the app's
+  own is not the app's (PRO-494). A sub-agent's calls come on its session's
+  hooks and meet the same gate. A bot's Claude Code sessions are launched
+  with `disableSkillShellExecution`: a skill's inline `!` command runs as the
+  skill loads, with no tool call for the gate to see, so it is replaced by a
+  placeholder. The bot's own memory and work-list
   commands pass at every level (see above). It is not a sandbox. **Web and MCP resource reads
   count as reads**: `WebFetch`, `WebSearch`, a connected server's resource
   reads and a vetted read-only command that fetches a URL run unasked at

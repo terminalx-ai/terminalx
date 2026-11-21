@@ -1,4 +1,4 @@
-import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { MachineHostError } from "@/components/machines/MachineHostError";
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useAccount } from "@/lib/account";
 import { botsApi, errorMessage, gh, issues, type GitHubConnectionStatus, type LinearStatus, type OrganizationSummary } from "@/lib/api";
-import { updateBot, useBotStore } from "@/lib/bots";
+import { getBotStore, updateBot, useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { readOrganizationRoster } from "@/lib/organizationRoster";
@@ -30,9 +30,13 @@ export function BotSettings({ bot }: { bot: Bot }) {
   // The last save that failed, with how to try it again: a change that gives the bot more is confirmed by this window,
   // and a runtime that cannot verify it is restarted from the error (`MachineHostError`), then the save is tried again.
   const [error, setError] = useState<{ message: string; retry: () => void } | null>(null);
-  const save = (what: string, patch: BotPatch) => {
+  // This page's saves go one after another, so each is sent against the bot as the one before it left it.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const save = (what: string, patch: () => BotPatch) => {
     setBusy((current) => new Set(current).add(what));
-    updateBot(bot.id, patch)
+    const sent = queue.current.then(() => updateBot(bot.id, patch()));
+    queue.current = sent.catch(() => undefined);
+    void sent
       .then(() => setError(null), (cause) => setError({ message: errorMessage(cause), retry: () => save(what, patch) }))
       .finally(() => setBusy((current) => {
         const next = new Set(current);
@@ -41,7 +45,16 @@ export function BotSettings({ bot }: { bot: Bot }) {
       }));
   };
   // A whole list is saved against the bot as this page read it, so a change made elsewhere meanwhile is not undone.
-  const saveList = (what: "worksIn" | "whoCanAsk", patch: BotPatch) => save(what, { ...patch, ifModified: bot.modified });
+  // A save of this page's own that went first (another section's) moved `modified` on: while the list is still the one
+  // shown when it was changed, it is sent against the bot as it is now (PRO-494).
+  const saveList = (what: "worksIn" | "whoCanAsk", change: Pick<BotPatch, "worksIn" | "whoCanAsk">) => {
+    const seen = bot;
+    save(what, () => {
+      const now = getBotStore().bots.find((value) => value.id === seen.id);
+      const unchanged = now !== undefined && JSON.stringify(now[what] ?? null) === JSON.stringify(seen[what] ?? null);
+      return { ...change, ifModified: unchanged ? now.modified : seen.modified };
+    });
+  };
   return (
     <div className="flex min-w-0 max-w-[1040px] flex-col" data-testid="bot-settings">
       {error && (
@@ -53,7 +66,7 @@ export function BotSettings({ bot }: { bot: Bot }) {
         <RunsOn bot={bot} />
       </Section>
       <Section title="Access" note={`What ${bot.name} may do without asking you first.`}>
-        <Access bot={bot} busy={busy.has("access")} onChange={(access) => save("access", { access })} />
+        <Access bot={bot} busy={busy.has("access")} onChange={(access) => save("access", () => ({ access }))} />
       </Section>
       <Section title="Works in" note={`${bot.name} is yours and goes where you work. Its role and skills go everywhere. What it learns inside an organisation stays there.`}>
         <WorksIn bot={bot} busy={busy.has("worksIn")} onChange={(worksIn) => saveList("worksIn", { worksIn })} />
@@ -82,7 +95,11 @@ function Section({ title, note, children }: { title: string; note: string; child
   );
 }
 
-/** Arrow keys move between a radio group's enabled cards and choose the one reached, as a radio group does. */
+/**
+ * Arrow keys move between a radio group's enabled cards; Space or Enter chooses the one reached (PRO-494). A choice
+ * here is saved at once and may need this window's confirmation, so passing over a level on the way to another must
+ * not choose it.
+ */
 function moveBetweenRadios(event: KeyboardEvent<HTMLElement>) {
   const step = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
   if (!step) return;
@@ -90,13 +107,11 @@ function moveBetweenRadios(event: KeyboardEvent<HTMLElement>) {
   const at = radios.indexOf(document.activeElement as HTMLButtonElement);
   if (radios.length === 0 || at < 0) return;
   event.preventDefault();
-  const next = radios[(at + step + radios.length) % radios.length];
-  next.focus();
-  next.click();
+  radios[(at + step + radios.length) % radios.length].focus();
 }
 
 /** One choice of a set of cards: its icon, title and what it means. */
-function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disabled, badge, onSelect, testId }: {
+function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disabled, busy = false, badge, onSelect, testId }: {
   icon: ComponentType<{ className?: string }>;
   title: string;
   note: string;
@@ -104,6 +119,8 @@ function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disab
   /** Takes the group's tab stop though not chosen: the level an unknown value is held to. */
   focusable?: boolean;
   disabled?: boolean;
+  /** Its group is saving: it takes no choice, but keeps the focus it has. */
+  busy?: boolean;
   badge?: string;
   onSelect?: () => void;
   testId: string;
@@ -116,11 +133,12 @@ function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disab
       // One stop in the tab order per group: the chosen card; arrows move within it.
       tabIndex={checked || focusable ? 0 : -1}
       disabled={disabled}
-      onClick={checked ? undefined : onSelect}
+      aria-disabled={busy || undefined}
+      onClick={checked || busy ? undefined : onSelect}
       className={cn(
         "flex min-w-0 flex-1 basis-[200px] flex-col rounded-md border px-3 py-2.5 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
         checked ? "border-accent/55 bg-accent/[.06]" : "border-hairline-strong hover:bg-muted/40",
-        disabled && "cursor-not-allowed opacity-60 hover:bg-transparent",
+        (disabled || busy) && "cursor-not-allowed opacity-60 hover:bg-transparent",
       )}
       data-testid={testId}
     >
@@ -167,7 +185,7 @@ function Access({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (a
     <div className="flex min-w-0 flex-col gap-2">
       <div role="radiogroup" aria-label="Access" aria-busy={busy} onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
         {ACCESS.map((level) => (
-          <ChoiceCard key={level.value} icon={level.icon} title={level.title} note={level.note} checked={bot.access === level.value} focusable={!known && level.value === "readReport"} disabled={busy} onSelect={() => onChange(level.value)} testId={`bot-access-${level.value}`} />
+          <ChoiceCard key={level.value} icon={level.icon} title={level.title} note={level.note} checked={bot.access === level.value} focusable={!known && level.value === "readReport"} busy={busy} onSelect={() => onChange(level.value)} testId={`bot-access-${level.value}`} />
         ))}
       </div>
       {!known && (

@@ -237,16 +237,59 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     }
   });
 
-  it("access: arrow keys move between the levels and pick the one reached; the chosen level is the tab stop", async () => {
+  it("access: arrow keys move between the levels and Space or Enter picks one; the chosen level is the tab stop", async () => {
     const page = await open([bot("b1", "Sentry")], "b1");
     const full = page.getByTestId("bot-access-full");
     expect([full.tabIndex, page.getByTestId("bot-access-askOutward").tabIndex]).toEqual([0, -1]);
     full.focus();
+    // Passing over a level saves nothing (PRO-494): the arrows only move.
     fireEvent.keyDown(full, { key: "ArrowRight" });
-    await waitFor(() => expect(lastPatch()).toEqual({ access: "askOutward" }));
-    expect(document.activeElement).toBe(page.getByTestId("bot-access-askOutward"));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(page.getByTestId("bot-access-readReport"));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(full);
     fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
-    await waitFor(() => expect(lastPatch()).toEqual({ access: "full" }));
+    expect(mocks.api.update).not.toHaveBeenCalled();
+    // A button takes Space and Enter as a click.
+    let finish: (value: Bot) => void = () => {};
+    mocks.api.update.mockImplementationOnce(() => new Promise<Bot>((resolve) => { finish = resolve; }));
+    fireEvent.click(document.activeElement!);
+    await waitFor(() => expect(lastPatch()).toEqual({ access: "readReport" }));
+    // While it saves, the focus stays where it was, and the cards take no other choice.
+    const chosen = page.getByTestId("bot-access-readReport");
+    await waitFor(() => expect(chosen.getAttribute("aria-disabled")).toBe("true"));
+    expect(document.activeElement).toBe(chosen);
+    fireEvent.click(full);
+    expect(mocks.api.update).toHaveBeenCalledTimes(1);
+    await act(async () => finish(bot("b1", "Sentry", { access: "readReport" })));
+    expect(document.activeElement).toBe(chosen);
+  });
+
+  it("two sections saved together do not refuse each other, and a list changed elsewhere still is", async () => {
+    const page = await open([bot("b1", "Sentry", { worksIn: ["personal", "org-gone", "org-old"] })], "b1");
+    const later = "2026-11-20T10:05:00Z";
+    let finish: (value: Bot) => void = () => {};
+    mocks.api.update.mockImplementationOnce(() => new Promise<Bot>((resolve) => { finish = resolve; }));
+    fireEvent.click(page.getByTestId("bot-access-readReport"));
+    await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(1));
+    // Works in is changed while the access save is out: it waits for it, then goes against what that save left.
+    fireEvent.click(page.getByTestId("bot-works-in-switch-org-gone"));
+    expect(mocks.api.update).toHaveBeenCalledTimes(1);
+    await act(async () => finish(bot("b1", "Sentry", { access: "readReport", worksIn: ["personal", "org-gone", "org-old"], modified: later })));
+    await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(2));
+    expect(lastPatch()).toEqual({ worksIn: ["personal", "org-old"], ifModified: later });
+
+    // Works in changed elsewhere while the page's own access save was out: the list save goes against the bot as the
+    // page showed it, so it is refused rather than undoing that change.
+    mocks.api.update.mockImplementationOnce(() => new Promise<Bot>((resolve) => { finish = resolve; }));
+    fireEvent.click(page.getByTestId("bot-access-askOutward"));
+    await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(3));
+    fireEvent.click(page.getByTestId("bot-works-in-switch-org-old"));
+    const latest = "2026-11-20T10:09:00Z";
+    await act(async () => finish(bot("b1", "Sentry", { access: "askOutward", worksIn: ["personal", "org-new"], modified: latest })));
+    await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(4));
+    // The page last showed the bot as the stand-in server answered the Works in save, at SEEN; not `latest`.
+    expect(lastPatch()).toEqual({ worksIn: ["personal"], ifModified: SEEN });
   });
 
   it("a section waits on its own save; the others stay usable", async () => {
@@ -254,7 +297,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     let finish: (value: Bot) => void = () => {};
     mocks.api.update.mockImplementationOnce(() => new Promise<Bot>((resolve) => { finish = resolve; }));
     fireEvent.click(page.getByTestId("bot-access-readReport"));
-    await waitFor(() => expect((page.getByTestId("bot-access-full") as HTMLButtonElement).disabled).toBe(true));
+    await waitFor(() => expect(page.getByTestId("bot-access-full").getAttribute("aria-disabled")).toBe("true"));
     expect((page.getByTestId("bot-works-in-switch-org-gone") as HTMLButtonElement).disabled).toBe(false);
     expect((page.getByTestId("bot-asker-add") as HTMLButtonElement).disabled).toBe(false);
     await act(async () => finish(bot("b1", "Sentry", { access: "readReport", worksIn: ["personal", "org-gone"] })));

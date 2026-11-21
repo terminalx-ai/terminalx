@@ -6767,6 +6767,8 @@ impl SessionManager {
         if crate::orchestration::guard::limited(entry) {
             crate::orchestration::guard::claude_settings(&mut settings);
         }
+        // A session acting for a bot runs no skill's inline command, which no hook would see (PRO-494).
+        crate::bots::access::claude_settings(rt.acting_bot.as_deref(), &mut settings);
         // A route that names its model runs on it: the endpoint may serve no
         // model of the tab's name.
         let route_model = route.and_then(|route| route.model.clone());
