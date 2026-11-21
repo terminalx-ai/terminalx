@@ -96,7 +96,10 @@ async function measure(page, root) {
       }
       return { left, right, top, bottom, width: rect.width, height: Math.max(0, bottom - top) };
     };
-    const shown = [...view.querySelectorAll("button, h1, h2, input, textarea, li, [data-testid=needs-you-answer]")].filter((element) => visible(element).width > 0 && visible(element).height > 0);
+    // Not what is hidden with visibility: the chat's Latest button waits so until the chat is scrolled up, and where it
+    // waits in a short chat lies over the terminal view's own header, which the chat covers.
+    const shown = [...view.querySelectorAll("button, h1, h2, input, textarea, li, [data-testid=needs-you-answer]")]
+      .filter((element) => visible(element).width > 0 && visible(element).height > 0 && element.checkVisibility({ visibilityProperty: true }));
     for (const element of shown) {
       const rect = visible(element);
       if (rect.left < slot.left - 1 || rect.right > slot.right + 1) problems.push(`"${element.textContent.trim().slice(0, 40)}" leaves the view`);

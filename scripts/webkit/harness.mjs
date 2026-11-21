@@ -61,9 +61,11 @@ export async function launch(options) {
  * `colorScheme` the system appearance the page sees, and `reducedMotion`
  * ("reduce") the system's Reduce motion.
  */
-export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale, reducedMotion, waitUntil = "load", navigationTimeout } = {}) {
+export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale, reducedMotion, waitUntil = "load", navigationTimeout, now } = {}) {
   const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}), ...(locale ? { locale } : {}), ...(reducedMotion ? { reducedMotion } : {}) });
   if (process.env.WEBKIT_TIMEOUT_MS) page.setDefaultTimeout(Number(process.env.WEBKIT_TIMEOUT_MS));
+  // `now`: the page's Date reads this one instant (timers still run), before the fixture's script asks it the time.
+  if (now) await page.clock.setFixedTime(now);
   await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}\n${extra}`);
   await page.goto(url, { waitUntil, timeout: navigationTimeout });
   return page;
