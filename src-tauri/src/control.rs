@@ -2934,7 +2934,8 @@ fn refuse_other_bots_items(manager: &SessionManager, params: &Value, window: Opt
 /// Whether a call reads bot `bot`'s own duties. The window and a person's
 /// terminal read any bot's; a process in a bot's session reads only its own.
 fn own_duties_read(command: &str, params: &Value, bot: Option<&str>) -> bool {
-    command == "runtime.session.bots" && params["operation"] == "duties" && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
+    // The week of duties (PRO-473) likewise, for its own bot only: never every bot's.
+    command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("duties" | "dutyWeek")) && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
 }
 
 /// The `runtime.session.*` and `runtime.pty.*` calls that only read, which
@@ -4380,6 +4381,29 @@ mod tests {
         assert_eq!(crate::bots::duties::duties_of(&id).unwrap().len(), before, "nothing was added");
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
         let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+    }
+
+    /// PRO-473: a process in a bot's session, through the dispatch, reads its
+    /// own bot's week of duties, and neither another bot's nor every bot's.
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_session_reads_its_own_week_of_duties_only() {
+        let marker = format!("72.{}", std::process::id());
+        let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let bots = |params: Value| service.execute("runtime.session.bots", json!({"operation": "dutyWeek", "params": params}), "r");
+        let own = bots(json!({"id": id, "timezone": "UTC"}));
+        let other_week = bots(json!({"id": other, "timezone": "UTC"}));
+        let every = bots(json!({"timezone": "UTC"}));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+        let own = own.unwrap();
+        assert!(own["days"].as_array().is_some_and(|days| days.len() == 7), "{own}");
+        assert_eq!(other_week.unwrap_err().code, "forbidden", "another bot's week");
+        assert_eq!(every.unwrap_err().code, "forbidden", "every bot's week");
     }
 
     /// F1: after a handover the runtime that took over adopts the bot's

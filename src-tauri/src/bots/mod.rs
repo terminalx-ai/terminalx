@@ -11,6 +11,7 @@ pub mod access;
 pub mod changes;
 pub mod memory;
 pub mod chat;
+pub mod calendar;
 pub mod duties;
 pub mod enforce;
 pub mod items;
