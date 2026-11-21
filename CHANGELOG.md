@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- CI: every Linux job runs on Instabox (`instabox-medium`), pull requests
+  included. The macOS jobs and the runtime release stay on GitHub's runners
+  (docs/CI-RUNNERS.md).
 - Bots (experimental): a lead bot plans and starts orchestration runs. It leads
   a run from a session it starts in the project, then `terminalx bots items
   plan` asks "Approve the plan and start the run?" with a run plan card in its
