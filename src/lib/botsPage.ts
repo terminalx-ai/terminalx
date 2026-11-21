@@ -47,6 +47,7 @@ export function showHireBot(roleId: string | null = null) {
 /** A bot's settings (23.07, PRO-478), by its id. */
 export function showBotSettings(botId: string) {
   set({ page: "settings", botId });
+  openBots();
 }
 
 /** A bot's Role and memory (PRO-470, 23.06), by the bot's id. */

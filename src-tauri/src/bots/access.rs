@@ -105,7 +105,7 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
         return Gate::Refuse(format!("TerminalX refused this: it names {what}, where your owner keeps your access, your reporting line and whether you are paused. A bot does not change them, and runs no command on them; read them with the Read tool if you must. Ask your owner in the chat if something there should change."));
     }
     let access = access.effective();
-    if access == BotAccess::Full || reads(tool, input, cwd) {
+    if access == BotAccess::Full || reads(tool, input, cwd) || single(tool, input, own_notes) {
         return Gate::Leave;
     }
     let what = describe(tool, input);
@@ -127,7 +127,7 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
 /// does cannot be told from its name. Left out because they act: Bash and
 /// Monitor (a command), Edit, Write and NotebookEdit, CronCreate and
 /// ScheduleWakeup (later work), SendMessage, PushNotification, Workflow,
-/// EnterWorktree and ExitWorktree, and Codex's apply_patch.
+/// EnterWorktree and ExitWorktree, and Codex's apply_patch and write_stdin.
 const READ_TOOLS: &[&str] = &[
     // Reading files and the web.
     "Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "view_image", "web_search",
@@ -135,8 +135,9 @@ const READ_TOOLS: &[&str] = &[
     "ListMcpResourcesTool", "ReadMcpResourceTool",
     // The agent's own task list, plan and goals.
     "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "update_plan", "get_goal", "create_goal", "update_goal",
-    // Output of, input to, or stopping a command it already started (which met the gate when it started).
-    "BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop", "write_stdin",
+    // Output of, or stopping, a command it already started (which met the gate when it started).
+    // Not Codex's `write_stdin`: it types into a running program, which may then do anything.
+    "BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop",
     // Loading tools and skills (what a skill then runs meets the gate), sub-agents (whose calls meet it too), and the agents list.
     "ToolSearch", "Skill", "Task", "Agent", "ListAgents",
     // Plan mode, and asking the owner.
@@ -169,7 +170,10 @@ fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> b
 
 /// The `terminalx` commands that only read, as (group, verb); an empty verb
 /// for a group that is a command of its own. Exact: `issues status` and
-/// `sessions status` change state and are not here (`cli.rs`).
+/// `sessions status` change state and are not here (`cli.rs`). Of these
+/// groups only `wait` is also a built-in browser verb ([`terminalx_read`]);
+/// every other is parsed by name before the browser's, and none reaches
+/// computer use (`computer`, `vm`).
 const TERMINALX_READS: &[(&str, &str)] = &[
     ("status", ""),
     ("read", ""),
@@ -195,32 +199,64 @@ const TERMINALX_READS: &[(&str, &str)] = &[
     ("machines", "status"),
     ("cloud", "status"),
     ("config", "show"),
+    ("skills", "get"),
 ];
 
-/// A `terminalx` read: the bare `terminalx` or `tnx` the app puts on the
-/// path (never a path to one, which may be any program), then the group as
-/// the first word after the global options `--json` and `--machine <name>`,
-/// then its verb, a pair in [`TERMINALX_READS`].
-fn terminalx_read(program: &str, args: &[&str]) -> bool {
+/// A `terminalx` command's group and the words after it, read as the command
+/// line reads them (`cli.rs` `parse_with_stdin`): every `--json` dropped
+/// first, the group the first word left, and for a group that runs on a
+/// paired machine its `--machine NAME`, from wherever it is. `None` when it is
+/// not the bare `terminalx` or `tnx` the app puts on the path (a path to one
+/// may be any program), or when `--machine` has no name after it.
+fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
     if !matches!(program, "terminalx" | "tnx") {
+        return None;
+    }
+    let mut words: Vec<&str> = args.iter().copied().filter(|word| *word != "--json").collect();
+    if words.is_empty() {
+        return None;
+    }
+    let group = words.remove(0);
+    let owned: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+    let browser_wait = group == "wait" && crate::browser::cli::is_browser_wait(&owned);
+    if crate::cli::MACHINE_GROUPS.contains(&group) && !browser_wait {
+        if let Some(at) = words.iter().position(|word| *word == "--machine") {
+            let name = words.get(at + 1)?;
+            if name.starts_with('-') {
+                return None;
+            }
+            words.drain(at..=at + 1);
+        }
+    }
+    Some((group, words))
+}
+
+/// A `terminalx` read: help or the version (anything with `--help`, `-h`,
+/// `--version` or `-V` prints that, or nothing), or a (group, verb) pair in
+/// [`TERMINALX_READS`]. `wait` with a browser wait flag is the built-in
+/// browser's, which can run a script in a signed-in page (`--fn`) or save a
+/// file (`--download`), so it is no read.
+fn terminalx_read(program: &str, args: &[&str]) -> bool {
+    if matches!(program, "terminalx" | "tnx") && args.iter().any(|word| matches!(*word, "--help" | "-h" | "--version" | "-V")) {
+        return true;
+    }
+    let Some((group, rest)) = terminalx_words(program, args) else { return false };
+    if group == "wait" && crate::browser::cli::is_browser_wait(&rest.iter().map(|word| word.to_string()).collect::<Vec<_>>()) {
         return false;
     }
-    let mut words = args.iter().copied();
-    let mut next = || loop {
-        match words.next()? {
-            "--json" => {}
-            "--machine" => {
-                words.next()?;
-            }
-            word => return Some(word),
-        }
-    };
-    let Some(group) = next() else { return false };
     if TERMINALX_READS.contains(&(group, "")) {
         return true;
     }
-    let Some(verb) = next() else { return false };
-    TERMINALX_READS.contains(&(group, verb))
+    rest.first().is_some_and(|verb| TERMINALX_READS.contains(&(group, verb)))
+}
+
+/// A bot's own notes (PRO-470): `terminalx bots memory add|forget|list`, the
+/// commands its rules tell it to keep them with, pass at every level and
+/// while paused, with no card. Exactly those, and nothing else under `bots`:
+/// the runtime takes the bot from the caller (`control::Caller`) and refuses
+/// a `--bot` or `--place` that is not its own.
+fn own_notes(program: &str, args: &[&str]) -> bool {
+    terminalx_words(program, args).is_some_and(|(group, rest)| group == "bots" && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..]))
 }
 
 /// A call as the card and the agent are told it.

@@ -178,6 +178,11 @@ fn a_paused_bot_only_reads() {
     assert!(reason.contains("Atlas is paused"), "{reason}");
     assert!(is_refused(&gate_of(&chat.id, &edit("/tmp/x"))));
     assert_eq!(gate_of(&chat.id, &tool("Read", json!({"file_path": "/tmp/x"}))), Gate::Leave);
+    // Its own notes go on while it is paused (PRO-470's rules say so); the browser's `wait` does not.
+    for command in ["terminalx bots memory add 'Paused on Friday'", "terminalx bots memory forget friday", "terminalx bots memory list"] {
+        assert_eq!(gate_of(&chat.id, &shell(command, &cwd)), Gate::Leave, "{command}");
+    }
+    assert!(is_refused(&gate_of(&chat.id, &shell("terminalx wait --fn x", &cwd))));
 }
 
 /// Native Codex runs no hooks: its approval requests meet the same gate.
@@ -291,7 +296,7 @@ fn only_known_reads_go_unasked() {
         "gh run rerun 12",
         "terminalx computer click 1",
         "terminalx sessions create --project p",
-        "terminalx --machine m sessions create",
+        "terminalx sessions create --machine m",
         "cargo test",
     ];
     for command in acting {
@@ -303,7 +308,7 @@ fn only_known_reads_go_unasked() {
         assert!(is_ask(&gate(&ask, &call)), "{name} at ask");
         assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
     }
-    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": "/tmp/x"})), tool("WebFetch", json!({"url": "https://example.com"})), shell("terminalx sessions list --json", &cwd), shell("terminalx --machine m runs show r1", &cwd)];
+    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": "/tmp/x"})), tool("WebFetch", json!({"url": "https://example.com"})), shell("terminalx sessions list --json", &cwd), shell("terminalx runs show r1", &cwd)];
     if cfg!(unix) {
         reads.push(shell("ls", &cwd));
     }
@@ -322,25 +327,63 @@ fn only_known_reads_go_unasked() {
         "terminalx --project sessions list",
         "terminalx sessions --json create",
         "terminalx",
+        // H1: `wait` with a browser wait flag is the built-in browser's: a script in a signed-in page, or a saved file.
+        "terminalx wait --fn x",
+        "terminalx wait --download f",
+        "terminalx wait --selector=#go",
+        "terminalx wait s1 --fn=document.cookie",
+        "terminalx --json wait --text Done",
+        // The global options as the command line reads them: `--machine` comes after the group, and needs a name.
+        "terminalx --machine m sessions list",
+        "terminalx sessions list --machine --json",
+        "terminalx read --machine --tail s1",
+        "terminalx sessions --machine",
+        // Under `bots`, only its own memory's three commands pass.
+        "terminalx bots memory",
+        "terminalx bots memory undo c-1",
+        "terminalx bots pause atlas",
+        "terminalx memory add x",
+        "./terminalx bots memory add x",
     ] {
         assert!(is_ask(&gate(&ask, &shell(command, &cwd))), "{command} at ask");
         assert!(is_refused(&gate(&read, &shell(command, &cwd))), "{command} at read and report");
     }
-    for command in ["terminalx --json bots show atlas", "tnx read s1", "terminalx status", "terminalx --machine m sessions list", "terminalx issues view PRO-1 --comments", "terminalx sessions --json list"] {
+    for command in [
+        "terminalx --json bots show atlas",
+        "tnx read s1",
+        "terminalx status",
+        "terminalx sessions list --machine m",
+        "terminalx sessions --json list --json",
+        "terminalx read s1 --machine m --tail 5",
+        "terminalx issues view PRO-1 --comments",
+        "terminalx wait s1 --timeout 60",
+        "terminalx skills get terminalx-cli --full",
+        "terminalx --help",
+        "terminalx sessions create --help",
+        "tnx --version",
+    ] {
         assert_eq!(gate(&read, &shell(command, &cwd)), Gate::Leave, "{command}");
     }
     // The lead's N3: the agents' own bookkeeping, by the names Claude Code 2.1.330 and Codex 0.169.0 send,
     // goes unasked at both levels; what acts does not.
-    for name in ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite", "ToolSearch", "Skill", "TaskStop", "KillShell", "TaskOutput", "EnterPlanMode", "ListMcpResourcesTool", "ReadMcpResourceTool", "write_stdin", "update_plan", "request_user_input", "get_goal", "update_goal", "ListAgents"] {
+    for name in ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite", "ToolSearch", "Skill", "TaskStop", "KillShell", "TaskOutput", "EnterPlanMode", "ListMcpResourcesTool", "ReadMcpResourceTool", "update_plan", "request_user_input", "get_goal", "update_goal", "ListAgents"] {
         let call = tool(name, json!({}));
         assert_eq!(gate(&ask, &call), Gate::Leave, "{name} at ask");
         assert_eq!(gate(&read, &call), Gate::Leave, "{name} at read and report");
     }
-    for name in ["Monitor", "CronCreate", "ScheduleWakeup", "SendMessage", "PushNotification", "Workflow", "EnterWorktree", "Write", "apply_patch"] {
+    // `write_stdin` types into a running program, which may then do anything.
+    for name in ["Monitor", "CronCreate", "ScheduleWakeup", "SendMessage", "PushNotification", "Workflow", "EnterWorktree", "Write", "apply_patch", "write_stdin"] {
         let call = tool(name, json!({}));
         assert!(is_ask(&gate(&ask, &call)), "{name} at ask");
         assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
     }
+    // M1: the bot's own notes, the commands its rules tell it to keep them with, pass at every level with no card.
+    for command in ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory forget --line 2 x", "terminalx bots memory list --json", "tnx --json bots memory add --place Acme 'Acme ships on Tuesdays'"] {
+        for access in [BotAccess::Full, ask.clone(), read.clone(), BotAccess::Other("someday".into())] {
+            assert_eq!(gate(&access, &shell(command, &cwd)), Gate::Leave, "{command} at {access:?}");
+        }
+    }
+    assert!(is_refused(&gate(&read, &shell("terminalx bots memory add x && git push", &cwd))), "joined to anything, it is no note");
     // A `terminalx` read joined to anything else is not a read.
     assert!(is_ask(&gate(&ask, &shell("terminalx sessions list; git push", &cwd))));
 

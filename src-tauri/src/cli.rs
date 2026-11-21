@@ -1014,7 +1014,7 @@ fn is_machine_key(value: &str) -> bool {
 }
 
 /// The command groups that take `--machine` (PRO-356).
-const MACHINE_GROUPS: [&str; 8] = ["projects", "sessions", "tabs", "send", "read", "wait", "permissions", "worktrees"];
+pub(crate) const MACHINE_GROUPS: [&str; 8] = ["projects", "sessions", "tabs", "send", "read", "wait", "permissions", "worktrees"];
 
 /// How long the CLI waits on the socket for `machine.<action>`: a little
 /// longer than the app waits for its window, so the app's answer is printed.

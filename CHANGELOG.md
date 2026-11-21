@@ -71,8 +71,9 @@
   Ask before outward actions reads freely and asks you on a card before it
   changes anything or runs a command; Read and report reads and runs only
   commands known to read, asks before a comment or a message, and refuses the
-  rest; a paused bot only reads. At every level a bot is refused writes to
-  its own record and the app's settings. Adding an organisation, someone new,
+  rest; a paused bot only reads. At every level, and while paused, a bot
+  keeps its own notes with `terminalx bots memory add|forget|list`, and is
+  refused writes to its own record and the app's settings. Adding an organisation, someone new,
   changed or more able in Who can ask, another agent or model, a rename and
   another place to run are confirmed by the TerminalX window, as raising
   access is, and a runtime that cannot confirm it offers Restart runtime on

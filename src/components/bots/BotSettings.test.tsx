@@ -36,6 +36,7 @@ vi.mock("@/lib/settingsLinks", async (importOriginal) => ({ ...(await importOrig
 const { bootBots, resetBotsForTests } = await import("@/lib/bots");
 const { resetBotsPageForTests, showBotSettings, showBotsTeam, getBotsPage } = await import("@/lib/botsPage");
 const { BotsView } = await import("./BotsView");
+const { getSessionStore, openAgents } = await import("@/lib/sessions");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 
 const bot = (id: string, name: string, extra: Partial<Bot> = {}): Bot => ({
@@ -347,6 +348,13 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     fireEvent.click(within(await screen.findByTestId("bot-menu-error")).getByRole("button", { name: "Restart runtime" }));
     await waitFor(() => expect(mocks.api.remove).toHaveBeenCalledTimes(2));
+  });
+
+  it("opening a bot's settings from elsewhere in the app shows the Bots page", () => {
+    act(() => openAgents());
+    expect(getSessionStore().view).toBe("agents");
+    act(() => showBotSettings("b1"));
+    expect([getSessionStore().view, getBotsPage()]).toEqual(["bots", { page: "settings", botId: "b1" }]);
   });
 
   it("a bot that is not in the list says why", async () => {

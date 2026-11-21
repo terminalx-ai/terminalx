@@ -4037,6 +4037,15 @@ mod tests {
 
         // Another bot's memory is refused; a claim with no secret, a forged one or the control token is no proof, and is not the owner either.
         assert_eq!(from_chat("bots.memory.add", json!({"bot": "iris", "text": "x"}), proved).unwrap_err().code, "forbidden");
+        // PRO-478: the access gate lets each of the three through at every level, so each must refuse another bot here,
+        // by name or by id, and each must refuse another place (below).
+        for bot in ["iris", iris.as_str()] {
+            for (command, params) in [("bots.memory.list", json!({"bot": bot})), ("bots.memory.forget", json!({"bot": bot, "line": "x"})), ("bots.memory.add", json!({"bot": bot, "text": "x"}))] {
+                assert_eq!(from_chat(command, params, proved).unwrap_err().code, "forbidden", "{command} {bot}");
+            }
+        }
+        // Its own, named, is its own.
+        assert!(from_chat("bots.memory.list", json!({"bot": atlas}), proved).is_ok());
         for token in [None, Some(""), Some("forged"), Some(service.endpoint.token.as_str())] {
             for (command, params) in [("bots.memory.add", json!({"text": "Spoofed"})), ("bots.memory.add", json!({"bot": "iris", "text": "Spoofed"})), ("bots.memory.list", json!({"bot": "iris"}))] {
                 assert_eq!(from_chat(command, params, token).unwrap_err().code, "unauthorized", "{command} {token:?}");
@@ -4071,6 +4080,7 @@ mod tests {
         for place in ["personal", "Kestrel"] {
             assert_eq!(from_chat("bots.memory.list", json!({"place": place}), proved).unwrap_err().code, "forbidden", "{place}");
             assert_eq!(from_chat("bots.memory.add", json!({"text": "Copied over", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
+            assert_eq!(from_chat("bots.memory.forget", json!({"line": "Acme", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
         }
         assert!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Kestrel"})).is_ok(), "the owner manages every place");
 

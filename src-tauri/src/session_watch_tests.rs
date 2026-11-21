@@ -4049,10 +4049,12 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
             assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd))), "deny", "{kind:?}: {command}");
         }
         assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx sessions list --json", cwd))), "deny", "{kind:?}");
-        for name in ["TaskCreate", "ToolSearch", "Skill", "write_stdin"] {
-            let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload: json!({"cwd": cwd, "tool_name": name, "tool_input": {}}) };
-            assert_ne!(decision(&rig.manager.on_hook(frame)), "deny", "{kind:?}: {name}");
+        let named = |name: &str| HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload: json!({"cwd": cwd, "tool_name": name, "tool_input": {}}) };
+        for name in ["TaskCreate", "ToolSearch", "Skill"] {
+            assert_ne!(decision(&rig.manager.on_hook(named(name))), "deny", "{kind:?}: {name}");
         }
+        // Codex's `write_stdin` types into a running program: not a read (the lead's third review).
+        assert_eq!(decision(&rig.manager.on_hook(named("write_stdin"))), "deny", "{kind:?}");
         assert!(rig.manager.pending_permissions().is_empty());
         // One that reaches the permission request anyway is denied there too, saying why, with no card.
         let mut asked = edit();
@@ -4096,6 +4098,33 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
                 }
             }
         }
+
+        // The lead's M1: at every level, and paused, the bot's own memory commands pass with no card. H1: the
+        // browser's `wait --fn` is refused at Read and report and while paused.
+        let notes = ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory list"];
+        for level in ["full", "askOutward", "readReport", "paused"] {
+            if level == "paused" {
+                crate::bots::pause(&sink, &bot.id, crate::bots::OWNER).unwrap();
+            } else {
+                set(level);
+            }
+            for command in notes {
+                let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd));
+                assert!(!matches!(decision(&reply).as_str(), Some("deny" | "ask")), "{kind:?} {level}: {command}");
+                assert!(rig.manager.pending_permissions().is_empty(), "{kind:?} {level}: no card for {command}");
+            }
+            if matches!(level, "readReport" | "paused") {
+                assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx wait --fn x", cwd))), "deny", "{kind:?} {level}");
+            }
+        }
+        crate::bots::resume(&sink, &bot.id).unwrap();
+
+        // A sub-agent's call reaches the same hook, with the tab's launch token, and meets the same gate.
+        set("readReport");
+        let mut from_sub_agent = edit();
+        from_sub_agent.payload["agent_id"] = json!("a1b2c3");
+        from_sub_agent.payload["agent_type"] = json!("general-purpose");
+        assert_eq!(decision(&rig.manager.on_hook(from_sub_agent)), "deny", "{kind:?}: a sub-agent's edit");
 
         // Full access: the agent's own mode decides; the gate refuses nothing.
         set("full");
