@@ -1020,3 +1020,30 @@ fn a_first_check_that_outlasts_its_trigger_writes_nothing_back() {
     }, |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
     assert_eq!(seen(&automation), before, "the poll's state is not saved over it");
 }
+
+/// PRO-472 review 1: pruning a bot source's seen events moves its start on
+/// past what they were, but never past an event read and still unseen (held
+/// back by the duty's limit, or waiting its turn), which must still wake it.
+#[test]
+fn pruning_seen_events_never_turns_a_held_event_into_one_from_before_the_start() {
+    let base = chrono::DateTime::parse_from_rfc3339("2026-11-21T10:00:00Z").unwrap().with_timezone(&Utc);
+    let full = || {
+        let mut state = SourceSeen { initialized: true, started_at: Some(stamp(base)), ..SourceSeen::default() };
+        for n in 0..=crate::bots::wakes::SEEN_LIMIT {
+            state.events.insert(format!("msg:{n}"), SeenEvent { value: String::new(), at: stamp(base + chrono::TimeDelta::seconds(60 + n as i64)), run_id: None });
+        }
+        state
+    };
+    let mut state = full();
+    prune_seen(&mut state, None);
+    assert_eq!(state.events.len(), crate::bots::wakes::SEEN_LIMIT);
+    assert_eq!(state.started_at, Some(stamp(base + chrono::TimeDelta::seconds(60))), "on to when the pruned one was seen");
+
+    let held = base + chrono::TimeDelta::seconds(30);
+    let mut state = full();
+    prune_seen(&mut state, Some(held));
+    let started = parse(state.started_at.as_deref()).unwrap();
+    assert!(started < held, "{started} must stay before the held event at {held}");
+    let event = crate::bots::wakes::BotEvent { at: Some(stamp(held)), ..Default::default() };
+    assert!(!event.before(Some(started)));
+}

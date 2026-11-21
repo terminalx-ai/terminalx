@@ -478,7 +478,9 @@ impl Drop for Claim {
 /// next tick is skipped while its check is still going. False, and nothing
 /// done, for an automation without a check: the scheduler evaluates it in turn.
 pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation, now: chrono::DateTime<chrono::Utc>) -> bool {
-    if configured(automation.precheck.as_ref()).is_none() {
+    // A duty's event read (a watched command of up to 300 s, a page, `gh` or Linear) is as slow as a check (PRO-472).
+    let reads_slowly = automation.event_trigger.is_some() && crate::bots::duties::is_duty(automation);
+    if configured(automation.precheck.as_ref()).is_none() && !reads_slowly {
         return false;
     }
     if !due(automation, now) {
@@ -741,34 +743,35 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
 /// quiet or failing check, which writes its one (folded) history row; the
 /// caller then marks nothing seen. False, with nothing written, when the
 /// automation changed while its check ran.
-pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<bool> {
+pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<super::sources::Gated> {
+    use super::sources::Gated;
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
-        return Ok(true);
+        return Ok(Gated::Go);
     };
     if !agent_available(automation) {
-        return Ok(true);
+        return Ok(Gated::Go);
     }
     // Only a duty's check is given the events; an ordinary automation's runs as it always has.
     let events = crate::bots::duties::is_duty(automation).then(|| super::sources::wake_events(automation, wakes));
     let trial = check_with(automation, precheck, events.as_ref());
     let Ok(current) = automation_store::get(&automation.id) else {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     };
     if !current.enabled || current.event_trigger != automation.event_trigger || current.precheck != automation.precheck {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     }
     match trial.outcome {
         PrecheckOutcome::Proceed => {
             POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial }));
-            Ok(true)
+            Ok(Gated::Go)
         }
         PrecheckOutcome::NothingNew => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::SkippedPrecheck, None, trial.result)?;
-            Ok(false)
+            Ok(Gated::Quiet)
         }
         PrecheckOutcome::Failed => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::Failed, trial.reason, trial.result)?;
-            Ok(false)
+            Ok(Gated::Stopped)
         }
     }
 }

@@ -326,6 +326,39 @@ describe("duties that wake on an event (PRO-472)", () => {
     expect(savedInput().wake).toMatchObject({ source: { kind: "githubMention", repo: "acme/widgets", handle: "argus" }, maxRunsPerTick: 1 });
   });
 
+  it("wakes on a mention only from the repository's members unless anyone is chosen, with a warning", async () => {
+    tab();
+    fireEvent.click(tile("GitHub"));
+    const editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    fireEvent.change(within(editor).getByPlaceholderText("owner/repo"), { target: { value: "acme/widgets" } });
+    fireEvent.change(within(editor).getByTestId("duty-wake-kind"), { target: { value: "githubMention" } });
+    const only = within(editor).getByTestId("duty-wake-only-from") as HTMLSelectElement;
+    expect(only.value).toBe("members");
+    expect(within(editor).getByTestId("duty-wake-untrusted").textContent).toContain("can be untrusted");
+    expect(within(editor).queryByTestId("duty-wake-anyone-warning")).toBeNull();
+    fireEvent.change(only, { target: { value: "anyone" } });
+    expect(within(editor).getByTestId("duty-wake-anyone-warning").textContent).toContain("anyone can wake this bot");
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake.source).toMatchObject({ kind: "githubMention", onlyFrom: "anyone" });
+  });
+
+  it("shows a wake kind it does not know read-only, whatever its name, and keeps it", async () => {
+    const newer = duty("d8", "Watch discussions", { eventTrigger: { source: { kind: "githubDiscussion", repo: "acme/widgets" }, pollIntervalMinutes: 5, maxRunsPerTick: 1 } as unknown as Automation["eventTrigger"] });
+    mocks.automations = { ...mocks.automations, automations: [newer] };
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Watch discussions" }));
+    fireEvent.click(screen.getByTestId("duty-edit"));
+    const editor = screen.getByTestId("duty-editor");
+    expect(within(editor).queryByRole("radiogroup", { name: "Wakes on" })).toBeNull();
+    expect(within(editor).queryByTestId("duty-wake-kind")).toBeNull();
+    expect(editor.textContent).toContain("An event this version does not know");
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake.source).toEqual({ kind: "githubDiscussion", repo: "acme/widgets" });
+  });
+
   it("adds a Linear issue duty that never comments on the issue", async () => {
     tab();
     fireEvent.click(tile("Linear"));

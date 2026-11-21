@@ -206,29 +206,67 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
 
 - **Once per event.** The trigger's seen record (`source-seen.json`) keeps
   what woke it; a mention, an alert or a message from before the trigger
-  started is never news. A watch and a branch's checks wake on each change
+  started is never news. A trigger starts when the duty is saved on or
+  switched on (`sources::switched`), paused bot or not; switched off, it
+  starts again from when it is switched back on, so nothing that came while
+  it was off wakes it. A watch and a branch's checks wake on each change
   after the first read. A Linear issue a duty wakes on is never commented on
   or moved: the report goes to the owner or the lead.
+- **Who can wake it.** A GitHub mention wakes a duty only from the
+  repository's owner, members and collaborators (`author_association`
+  `OWNER`, `MEMBER`, `COLLABORATOR`) unless the owner chooses "Anyone who can
+  comment" (`onlyFrom: "anyone"`) in the editor, saved through the guarded
+  `dutySave`, with a warning beside it; a value this build does not know is
+  kept and read as members. A comment by the signed-in `gh` user, or by the
+  Linear key's own user, never wakes it, so a bot quoting its own handle does
+  not wake itself. Linear mentions come from the workspace's own people.
+  Whatever any of them writes can be untrusted, and the editor says so.
 - **What it is given.** The first check gets the events a read would wake on
   as a JSON file named in `TERMINALX_EVENTS`, in its own folder. The agent
   gets them after the duty's prompt, under "What woke this duty", with what
-  others wrote capped and fenced (`chat::fenced`) as information.
+  others wrote capped and fenced (`chat::fenced`) as information. One-line
+  fields keep no control character, line or paragraph separator,
+  bidirectional override or zero-width character (`chat::breaks_line`). A
+  watched URL is shown without its name, password, query or fragment.
+- **A quiet first check.** When a duty's check finds nothing new in the event
+  it was given, that event is seen, so the next read checks the one behind
+  it. A check that fails leaves it unseen, to be tried again.
 - **Paused.** A paused bot's duties are not read, so what arrives waits and
   wakes them on resume. A schedule's due runs are still skipped, not run late.
 - **Bounded.** One run at a time (a read wakes one); a duty wakes at most
   6 times an hour and 48 a day from all its events, past which they wait and
   its status says until when; one pull request wakes at most 4 runs an hour
-  (PRO-485). A watched command runs as the owner in `duty-checks/watch-<id>`.
+  (PRO-485). A read of GitHub mentions looks at the repository's comments
+  changed since the last read, oldest first, up to 1000; past that the next
+  read goes on from the last one read, and the status says so. A read of
+  Linear mentions pages up to 1000 too, and says when it stopped there. A
+  duty's event read runs on a thread of its own, as a first check does, so a
+  watched command (up to 300 s) or a slow page holds up no other automation.
+  A watched command runs as the owner in `duty-checks/watch-<id>`, `gh` reads
+  in `duty-checks/read-<id>`, never in the bot's home, and a watched file
+  that is a link is not followed.
 - **Another bot.** `terminalx bots message <bot> "<text>" --kind
   handoff|question|status` runs only from a bot's own session (who sends is
   `Caller`), and a duty that reports to its lead leaves the lead a status.
-  Messages are kept in `bot-messages.json` at the store root, the newest 100
-  per bot, and go when the bot is deleted. Each carries how many times it has
-  passed between bots: a run woken by a message sends one more, and one that
-  has passed three times wakes nobody (the status says so), so two bots
-  cannot keep waking each other. A bot does not message itself.
+  Messages are kept in `bot-messages.json` at the store root and go once
+  every duty of the receiving bot that may wake on them has seen them; one no
+  duty waits for goes with the next message, and the sender's answer says it
+  wakes nothing. A message no duty has read is never let go to make room:
+  when 100 (or 256 KB) wait unread for one bot, or the file is full, the
+  sender is refused and told why. One bot leaves at most 30 an hour. They go
+  when the bot is deleted. Each carries how many times it has passed between
+  bots: a run woken by a message sends one more, as does any session started
+  from it, and one that has passed three times wakes nobody (the status and a
+  row in the duty's history say so, and so does the sender's answer), so two
+  bots cannot keep waking each other. A bot does not message itself. The
+  hired CTO's "Take problems from the other bots" waits for hand-offs and
+  questions only, not the status every reporting duty sends.
+- **Not covered.** Security alerts are Dependabot's only, not code scanning
+  or secret scanning. Mentions are conversation comments only, not review
+  comments, reviews or a pull request's or issue's own text.
 - **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
   connector (PRO-480, PRO-481); their tiles stay off.
+
 ## The week of duties (PRO-473)
 
 The calendar (screen 23.13) is a view of what already exists, not a store of

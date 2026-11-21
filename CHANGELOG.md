@@ -135,8 +135,13 @@
   information. Events that arrive while the bot is paused wait and wake it on
   resume. A duty wakes at most 6 times an hour and 48 a day, one run at a
   time; what that holds back waits and the duty says until when, and a
-  message passed between bots three times wakes nobody. Slack, Telegram or
-  WhatsApp and webhooks stay off until they have a connector (PRO-472).
+  message passed between bots three times wakes nobody. A GitHub mention
+  wakes it only from the repository's owner, members and collaborators
+  unless you choose anyone, and never from your own `gh` or Linear user.
+  Messages go once read; one bot leaves at most 30 an hour, and an unread
+  message is never let go to make room. Security alerts are Dependabot's;
+  mentions are conversation comments only. Slack, Telegram or WhatsApp and
+  webhooks stay off until they have a connector (PRO-472).
 - TerminalX runs on Windows 10 and 11: the desktop app, its background
   runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
   machines, phone pairing and the headless `terminalx-serve` tools. Named

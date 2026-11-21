@@ -459,6 +459,13 @@ fn tidy(app: &impl AutomationHost, automation_id: &str) {
     }
 }
 
+/// The folder `gh` runs in to read a duty's events (PRO-472): one of the
+/// duty's own under the store root, emptied each time, never the bot's home,
+/// where the bot could leave a repository's config or a hook for it to find.
+pub(crate) fn read_folder(automation: &Automation) -> Result<PathBuf> {
+    check_folder(&format!("read-{}", automation.id))
+}
+
 /// The folder a duty's first check runs in, made again empty and owner-only
 /// each time: under the store root, where no bot session works, never the
 /// bot's home. `key` is the duty's id, or `new-<bot id>` for a duty not saved yet.
@@ -814,6 +821,7 @@ fn remove_check_folders(duty_id: &str) {
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(duty_id));
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("try-{duty_id}")));
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("watch-{duty_id}")));
+        let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("read-{duty_id}")));
     }
 }
 
@@ -907,6 +915,10 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
     };
     // A wake added, removed or reading something else starts from now (`docs/AUTOMATION-SOURCES.md`).
     automations::sources::saved(&saved.id, existing.and_then(|existing| existing.event_trigger.as_ref()), saved.event_trigger.as_ref())?;
+    // Off now, or on where it was off (or new): it starts from then, whatever a poll has had the chance to do.
+    if !saved.enabled || existing.is_none_or(|existing| !existing.enabled) {
+        automations::sources::switched(&saved, saved.enabled)?;
+    }
     announce(sink);
     Ok(saved)
 }
@@ -956,6 +968,7 @@ fn switch(sink: &dyn EventSink, duty: &Automation, on: bool) -> Result<Automatio
         value.modified = index::now();
         Ok(())
     })?;
+    automations::sources::switched(&saved, on)?;
     announce(sink);
     Ok(saved)
 }
@@ -986,8 +999,13 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
         // on the Duties tab; one that wakes on a person's message comes with the channels (PRO-480, PRO-481).
         let (cron, wake) = match duty.wake {
             DutyWake::Schedule { cron } => (cron, None),
+            // Problems only: a hand-off or a question. A status (every report a duty
+            // sends its lead) would cost a run each, and reaches the lead's home chat anyway.
             DutyWake::Bot => ("0 9 * * *", Some(AutomationEventTrigger {
-                source: AutomationEventSource::Bot(super::wakes::BotSource { kind: "botMessage".into(), fields: Default::default() }),
+                source: AutomationEventSource::Bot(super::wakes::BotSource {
+                    kind: "botMessage".into(),
+                    fields: super::wakes::BotSourceFields { kinds: vec![super::wakes::MessageKind::Handoff, super::wakes::MessageKind::Question], ..Default::default() },
+                }),
                 poll_interval_minutes: 1,
                 max_runs_per_tick: 1,
             })),

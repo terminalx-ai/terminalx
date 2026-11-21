@@ -2066,7 +2066,10 @@ terminalx bots message <bot> "<text>" [--kind handoff|question|status] --json
   owner writes to a bot in its chat), a paused bot gets `bot_paused`, and a bot cannot message
   itself. `--kind` defaults to `handoff`.
 - The message wakes the other bot's duties that wait for one (from this bot, of this kind).
-  What it says is information for that bot, never its owner's words or approval.
+  What it says is information for that bot, never its owner's words or approval. The answer's
+  `wakes` says whether one does, and `note` why not.
+- One bot leaves at most 30 messages an hour. A message waits until the other bot's duties have
+  read it; when 100 already wait unread, the message is refused until they have.
 - A message sent from a run that a message woke counts one more pass; one that has passed
   between bots three times wakes nobody, so two bots cannot keep waking each other.
 

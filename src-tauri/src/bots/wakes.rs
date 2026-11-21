@@ -163,8 +163,25 @@ pub struct BotSourceFields {
     pub value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u32>,
+    /// Whose GitHub mentions wake it: `members` (absent: the repository's
+    /// owner, members and collaborators) or `anyone` who can comment, which the
+    /// owner chooses in the editor. Any other value is kept and read as `members`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_from: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
+}
+
+/// The `author_association` values of the people a GitHub mention wakes a duty for by default.
+pub const MEMBER_ASSOCIATIONS: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
+
+/// Whose comments a mention wakes on.
+#[derive(Debug, Clone, Default)]
+pub struct CommentAuthors {
+    /// Anyone who can comment, not only the repository's owner, members and collaborators.
+    pub anyone: bool,
+    /// The signed-in login, whose own comments (the bot's, posted as its owner) never wake it.
+    pub viewer: Option<String>,
 }
 
 /// A source only a bot's duty has. `kind` is one of [`KINDS`].
@@ -279,10 +296,11 @@ pub struct BotEvent {
 }
 
 impl BotEvent {
-    /// Before `started`, or at it: never news for a source that wakes only on what happens after it starts.
+    /// Before `started`: never news for a source that wakes only on what happens after it starts. What
+    /// happens in the very instant it starts counts, so a message left as it starts is not lost.
     pub fn before(&self, started: Option<DateTime<Utc>>) -> bool {
         let at = self.at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
-        matches!((at, started), (Some(at), Some(started)) if at <= started)
+        matches!((at, started), (Some(at), Some(started)) if at < started)
     }
 
     /// What the run record keeps of it (no body), for the history.
@@ -303,7 +321,8 @@ fn capped(text: &str, limit: usize) -> String {
 
 /// A value someone else chose, on one line.
 fn one_line(text: &str) -> String {
-    capped(&text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>(), 200)
+    // Nothing that breaks the line, or makes it read other than it is, reaches the event block or the run record.
+    capped(&text.chars().map(|c| if chat::breaks_line(c) { ' ' } else { c }).collect::<String>(), 200)
 }
 
 /// Whether `body` mentions `@handle` as a word of its own (any letter case).
@@ -351,7 +370,9 @@ pub fn read(automation: &Automation, source: &BotSource, first: bool, since: Opt
     if first && source.only_after_start() {
         return Ok(BotRead::default());
     }
-    let cwd = Path::new(&automation.project_path);
+    // `gh` runs in a folder of the duty's own, never in the bot's home.
+    let folder = super::duties::read_folder(automation).map_err(|error| plain(format!("{error:#}")))?;
+    let cwd = folder.as_path();
     if source.kind == "githubMention" {
         return github_mention_read(cwd, source, since);
     }
@@ -387,12 +408,17 @@ fn github_mention_read(cwd: &Path, source: &BotSource, since: Option<DateTime<Ut
         return Ok(BotRead::default());
     };
     let from = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let authors = CommentAuthors {
+        anyone: source.fields.only_from.as_deref() == Some("anyone"),
+        // A comment the signed-in user left (the bot's own, through `gh`) is never news.
+        viewer: gh_json(cwd, "user")?["login"].as_str().map(str::to_owned),
+    };
     let mut events = Vec::new();
     for page in 1..=MENTION_PAGES {
         let path = format!("repos/{}/issues/comments?sort=updated&direction=asc&since={from}&per_page={READ_EVENTS}&page={page}", source.repo());
         let value = gh_json(cwd, &path)?;
         let comments = value.as_array().map_or(&[][..], Vec::as_slice);
-        events.extend(github_mentions(&value, &handle));
+        events.extend(github_mentions(&value, &handle, &authors));
         if comments.len() < READ_EVENTS {
             return Ok(BotRead { events, ..BotRead::default() });
         }
@@ -433,8 +459,9 @@ thread_local! {
     pub static TEST_GH: std::cell::RefCell<Option<GhAnswer>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Comments that mention `handle`, from `GET repos/{repo}/issues/comments`.
-pub fn github_mentions(value: &Value, handle: &str) -> Vec<BotEvent> {
+/// Comments that mention `handle`, from `GET repos/{repo}/issues/comments`,
+/// by the people `authors` lets through and never by the signed-in user.
+pub fn github_mentions(value: &Value, handle: &str, authors: &CommentAuthors) -> Vec<BotEvent> {
     value
         .as_array()
         .into_iter()
@@ -442,6 +469,13 @@ pub fn github_mentions(value: &Value, handle: &str) -> Vec<BotEvent> {
         .filter_map(|comment| {
             let body = comment["body"].as_str().unwrap_or_default();
             if !mentions(body, handle) {
+                return None;
+            }
+            let login = comment["user"]["login"].as_str().unwrap_or_default();
+            if authors.viewer.as_deref().is_some_and(|viewer| viewer.eq_ignore_ascii_case(login)) {
+                return None;
+            }
+            if !authors.anyone && !MEMBER_ASSOCIATIONS.contains(&comment["author_association"].as_str().unwrap_or_default()) {
                 return None;
             }
             let id = comment["id"].as_i64()?;
@@ -523,7 +557,7 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, S
     if let Some(team) = source.fields.team_id.as_deref().map(str::trim).filter(|team| !team.is_empty()) {
         filter["issue"] = json!({"team": {"id": {"eq": team}}});
     }
-    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { displayName name } botActor { name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
+    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { viewer { id } comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { id displayName name } botActor { name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
     let mut events = Vec::new();
     let mut after = Value::Null;
     for _ in 0..MENTION_PAGES {
@@ -538,8 +572,10 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, S
     Ok(BotRead { events, resume: None, bound: Some(MENTION_READ) })
 }
 
-/// Comments that mention `handle`, from a Linear `comments` query.
+/// Comments that mention `handle`, from a Linear `comments` query, never
+/// those of the key's own user (the bot's, posted as its owner).
 pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
+    let viewer = data["viewer"]["id"].as_str();
     data["comments"]["nodes"]
         .as_array()
         .into_iter()
@@ -547,6 +583,9 @@ pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
         .filter_map(|comment| {
             let body = comment["body"].as_str().unwrap_or_default();
             if !mentions(body, handle) {
+                return None;
+            }
+            if viewer.is_some_and(|viewer| comment["user"]["id"].as_str() == Some(viewer)) {
                 return None;
             }
             let issue = comment["issue"]["identifier"].as_str().unwrap_or("an issue");
@@ -565,12 +604,27 @@ pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
         .collect()
 }
 
+/// A watched URL as it is shown, in the prompt, the run's record or an error:
+/// without a name and password, its query or its fragment, which may hold a token.
+pub fn shown_url(url: &str) -> String {
+    match url::Url::parse(url.trim()) {
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            one_line(parsed.as_str())
+        }
+        Err(_) => "the watched URL".into(),
+    }
+}
+
 /// A watch's one event: its content now, by hash.
 fn watch(automation: &Automation, source: &BotSource) -> Result<BotEvent, SourceError> {
     use sha2::Digest;
     let value = source.text(&source.fields.value);
     let (content, what): (Vec<u8>, String) = match source.fields.target {
-        Some(WatchTarget::Url) => (fetch(&value)?, format!("{} changed", one_line(&value))),
+        Some(WatchTarget::Url) => (fetch(&value)?, format!("{} changed", shown_url(&value))),
         Some(WatchTarget::File) => match read_watched(Path::new(&value)) {
             Ok(Some(bytes)) => (bytes, format!("{} changed", one_line(&value))),
             Ok(None) => (Vec::new(), format!("{} is not there", one_line(&value))),
@@ -593,7 +647,7 @@ fn watch(automation: &Automation, source: &BotSource) -> Result<BotEvent, Source
         kind: "watch".into(),
         summary: what,
         by: "what it watches".into(),
-        url: if matches!(source.fields.target, Some(WatchTarget::Url)) { one_line(&value) } else { String::new() },
+        url: if matches!(source.fields.target, Some(WatchTarget::Url)) { shown_url(&value) } else { String::new() },
         body: capped(&String::from_utf8_lossy(&content), BODY_CHARS),
         ..BotEvent::default()
     })
@@ -602,29 +656,36 @@ fn watch(automation: &Automation, source: &BotSource) -> Result<BotEvent, Source
 fn fetch(url: &str) -> Result<Vec<u8>, SourceError> {
     use std::io::Read as _;
     let agent = crate::data_privacy::http_agent().timeout(std::time::Duration::from_secs(20)).redirects(5).build();
+    // An error names the URL as it is shown, and never says what the transport saw (it may repeat the URL whole).
+    let shown = shown_url(url);
     match agent.get(url).call() {
         Ok(response) => {
             let mut bytes = Vec::new();
-            response.into_reader().take(WATCH_BYTES).read_to_end(&mut bytes).map_err(|error| plain(format!("Could not read {url}: {error}")))?;
+            response.into_reader().take(WATCH_BYTES).read_to_end(&mut bytes).map_err(|_| plain(format!("Could not read {shown}.")))?;
             Ok(bytes)
         }
-        Err(ureq::Error::Status(429, _)) => Err(SourceError { message: format!("{url} answered 429: too many requests"), rate_limited: true, signed_out: false }),
-        Err(ureq::Error::Status(code, _)) => Err(plain(format!("{url} answered {code}"))),
-        Err(error) => Err(plain(format!("Could not reach {url}: {error}"))),
+        Err(ureq::Error::Status(429, _)) => Err(SourceError { message: format!("{shown} answered 429: too many requests"), rate_limited: true, signed_out: false }),
+        Err(ureq::Error::Status(code, _)) => Err(plain(format!("{shown} answered {code}"))),
+        Err(ureq::Error::Transport(error)) => Err(plain(format!("Could not reach {shown} ({:?}).", error.kind()))),
     }
 }
 
-/// A watched file's first [`WATCH_BYTES`], or `None` when it is not there. Only a regular file is read.
-fn read_watched(path: &Path) -> Result<Option<Vec<u8>>> {
+/// A watched file's first [`WATCH_BYTES`], or `None` when it is not there.
+/// Only a regular file is read, and a link in its place is never followed:
+/// the file is opened without following one, and what was opened is checked.
+pub(crate) fn read_watched(path: &Path) -> Result<Option<Vec<u8>>> {
     use std::io::Read as _;
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
+    let file = match super::changes::open_no_follow(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if super::changes::is_link_refusal(&error) => anyhow::bail!("{} is a link, which a watch does not follow", path.display()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
     };
-    anyhow::ensure!(meta.is_file(), "{} is not a file", path.display());
+    anyhow::ensure!(file.metadata()?.is_file(), "{} is not a file", path.display());
+    #[cfg(not(unix))]
+    anyhow::ensure!(!std::fs::symlink_metadata(path)?.file_type().is_symlink(), "{} is a link, which a watch does not follow", path.display());
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?.take(WATCH_BYTES).read_to_end(&mut bytes)?;
+    file.take(WATCH_BYTES).read_to_end(&mut bytes)?;
     Ok(Some(bytes))
 }
 
@@ -656,9 +717,6 @@ struct Inbox {
     /// By the receiving bot's id; an entry this build cannot read is kept as it is.
     #[serde(default)]
     bots: BTreeMap<String, Vec<Value>>,
-    /// By the receiving bot's id: how many of its messages were let go unread (the oldest, past its budget).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    dropped: BTreeMap<String, u64>,
     /// By the sending bot's id: when it left its messages in the last hour.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     sent: BTreeMap<String, Vec<String>>,
@@ -755,7 +813,7 @@ fn needed(message: &BotMessage, waiting: &[Waiting]) -> bool {
     let at = DateTime::parse_from_rfc3339(&message.at).ok().map(|at| at.with_timezone(&Utc));
     waiting.iter().any(|duty| {
             let started = duty.seen.started_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
-        duty.source.takes(message) && !duty.seen.events.contains_key(&format!("msg:{}", message.id)) && started.is_none_or(|started| at.is_some_and(|at| at > started))
+        duty.source.takes(message) && !duty.seen.events.contains_key(&format!("msg:{}", message.id)) && started.is_none_or(|started| at.is_some_and(|at| at >= started))
     })
 }
 
@@ -767,9 +825,7 @@ fn release_in(inbox: &mut Inbox, bot_id: &str, waiting: &[Waiting]) -> bool {
     list.retain(|value| serde_json::from_value::<BotMessage>(value.clone()).map_or(true, |message| needed(&message, waiting)));
     let changed = list.len() != before;
     if list.is_empty() {
-        // Read up: what was let go unread before is no longer news.
         inbox.bots.remove(bot_id);
-        inbox.dropped.remove(bot_id);
     }
     changed
 }
@@ -779,59 +835,19 @@ pub fn release(bot_id: &str) -> Result<()> {
     let waiting = waiting(bot_id);
     let _lock = INBOX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut inbox = read_inbox()?;
-    let had_dropped = inbox.dropped.contains_key(bot_id);
-    if release_in(&mut inbox, bot_id, &waiting) || had_dropped != inbox.dropped.contains_key(bot_id) {
+    if release_in(&mut inbox, bot_id, &waiting) {
         write_inbox(&inbox)?;
     }
     Ok(())
 }
 
-/// What a duty waiting for `bot_id`'s messages says when some were let go unread.
-pub fn dropped_notice(bot_id: &str) -> Option<String> {
-    let dropped = read_inbox().ok()?.dropped.get(bot_id).copied().filter(|count| *count > 0)?;
-    Some(format!(
-        "{dropped} message{} left for this bot went unread: at most {INBOX_PER_BOT} wait for one bot, the oldest going first.",
-        if dropped == 1 { "" } else { "s" },
-    ))
-}
-
-fn entry_at(value: &Value) -> &str {
-    value["at"].as_str().unwrap_or_default()
-}
-
-/// Keep `inbox` within its budgets: per bot, then the whole file. The oldest
-/// go first and are counted, so the duties waiting for them say so.
-fn trim(inbox: &mut Inbox) {
-    for (bot, list) in &mut inbox.bots {
-        let mut bytes: usize = list.iter().map(|value| value.to_string().len()).sum();
-        let mut over = list.len().saturating_sub(INBOX_PER_BOT);
-        while over < list.len() && bytes > INBOX_BYTES_PER_BOT {
-            bytes -= list[over].to_string().len();
-            over += 1;
-        }
-        if over > 0 {
-            list.drain(..over);
-            *inbox.dropped.entry(bot.clone()).or_default() += over as u64;
-        }
-    }
-    inbox.bots.retain(|_, list| !list.is_empty());
-    let mut size = serde_json::to_vec_pretty(&*inbox).map_or(0, |bytes| bytes.len());
-    while size > INBOX_WRITE_LIMIT {
-        let Some(bot) = inbox.bots.iter().filter_map(|(bot, list)| list.first().map(|value| (entry_at(value).to_owned(), bot.clone()))).min().map(|(_, bot)| bot) else { break };
-        let list = inbox.bots.get_mut(&bot).expect("chosen above");
-        size = size.saturating_sub(list.remove(0).to_string().len());
-        *inbox.dropped.entry(bot.clone()).or_default() += 1;
-        if list.is_empty() {
-            inbox.bots.remove(&bot);
-        }
-    }
-}
-
 /// Leave bot `to` a message from bot `from`, and whether a duty of `to` waits
 /// for it. A bot does not message itself, and leaves at most
 /// [`SENT_PER_HOUR`] an hour. Messages wait until every duty that may wake on
-/// them has seen them; one no duty waits for goes with the next message. At
-/// most [`INBOX_PER_BOT`] wait for one bot, the oldest going first.
+/// them has seen them; one no duty waits for goes with the next message. A
+/// message still unread is never let go to make room: when [`INBOX_PER_BOT`]
+/// (or [`INBOX_BYTES_PER_BOT`]) wait unread for one bot, or the file is full,
+/// the sender is refused and told why.
 pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: MessageKind, text: &str, hops: u32) -> Result<(BotMessage, bool)> {
     if from.id == to.id {
         return Err(refused("A bot does not leave itself a message."));
@@ -870,9 +886,20 @@ pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: Messa
         if !inbox.bots.contains_key(&to.id) && inbox.bots.len() >= INBOX_BOTS {
             return Err(refused("Too many bots have messages waiting."));
         }
-        inbox.bots.entry(to.id.clone()).or_default().push(serde_json::to_value(&message)?);
+        let list = inbox.bots.entry(to.id.clone()).or_default();
+        list.push(serde_json::to_value(&message)?);
+        let bytes: usize = list.iter().map(|value| value.to_string().len()).sum();
+        if list.len() > INBOX_PER_BOT || bytes > INBOX_BYTES_PER_BOT {
+            return Err(refused(format!(
+                "{} has {} messages waiting that its duties have not read yet, the most one bot keeps. It takes more once it has read them; a paused bot reads them when it is resumed.",
+                to.name,
+                list.len() - 1,
+            )));
+        }
         inbox.sent.entry(from.id.clone()).or_default().push(message.at.clone());
-        trim(&mut inbox);
+        if serde_json::to_vec_pretty(&inbox)?.len() > INBOX_WRITE_LIMIT {
+            return Err(refused("The bots' messages are full of ones their duties have not read yet. Leave this one once they have read some."));
+        }
         write_inbox(&inbox)?;
     }
     sink.emit("bot_message", &json!({"to": to.id, "from": from.id, "kind": message.kind, "id": message.id}));
@@ -883,26 +910,40 @@ pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: Messa
 pub fn forget_bot(bot_id: &str) -> Result<()> {
     let _lock = INBOX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut inbox = read_inbox()?;
-    let gone = [inbox.bots.remove(bot_id).is_some(), inbox.dropped.remove(bot_id).is_some(), inbox.sent.remove(bot_id).is_some()];
+    let gone = [inbox.bots.remove(bot_id).is_some(), inbox.sent.remove(bot_id).is_some()];
     if gone.contains(&true) {
         write_inbox(&inbox)?;
     }
     Ok(())
 }
 
-/// How many times the work of session `session_id` stands from a person: the
-/// hops of the message that woke the duty run it is, or none.
+/// How many times the work of a session stands from a person: the hops of the
+/// message that woke the duty run it is, or that started a session it was
+/// started from (followed up to a bound), or none.
 pub fn hops_of_session(entry: &crate::store::index::SessionEntry) -> u32 {
-    let Some(stamp) = entry.automation.as_ref() else { return 0 };
-    crate::store::automations::list_runs(&stamp.id)
-        .ok()
-        .and_then(|runs| runs.into_iter().find(|run| run.run_id == stamp.run_id))
-        .map_or(0, |run| hops_of_run(&run))
+    let mut entry = entry.clone();
+    for _ in 0..16 {
+        if let Some(stamp) = entry.automation.as_ref() {
+            return crate::store::automations::list_runs(&stamp.id)
+                .ok()
+                .and_then(|runs| runs.into_iter().find(|run| run.run_id == stamp.run_id))
+                .map_or(0, |run| hops_of_run(&run));
+        }
+        let Some(parent) = entry.parent.as_ref().and_then(|parent| crate::store::index::get(&parent.session_id).ok()) else { return 0 };
+        entry = parent;
+    }
+    // Started from too long a line of sessions to follow: counted as passed on too often.
+    MAX_HOPS
 }
 
 /// The hops of the event that woke `run`, when a message did.
 pub fn hops_of_run(run: &crate::automations::AutomationRun) -> u32 {
     run.unknown.get(RUN_EVENT).and_then(|event| event["hops"].as_u64()).map_or(0, |hops| hops.min(u64::from(u32::MAX)) as u32)
+}
+
+/// What a duty's history says of a message passed on too often, and what its sender is told.
+pub fn looped_text() -> String {
+    format!("A message had passed between bots {MAX_HOPS} times and woke nobody, so two bots cannot keep waking each other.")
 }
 
 /// The key of a run's record that says which bot event woke it.

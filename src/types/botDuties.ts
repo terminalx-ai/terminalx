@@ -40,6 +40,8 @@ export interface BotWakeSource {
   /** The URL, the file's full path, or the command. */
   value?: string | null;
   timeoutSeconds?: number | null;
+  /** Whose GitHub mentions wake it: the repository's owner, members and collaborators when absent, or `anyone`. */
+  onlyFrom?: string | null;
   [unknown: string]: unknown;
 }
 

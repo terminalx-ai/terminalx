@@ -38,15 +38,18 @@ const MESSAGE_KINDS: { value: BotMessageKind; label: string }[] = [
 export const WAKES_PER_HOUR = 6;
 export const WAKES_PER_DAY = 48;
 
-/** The group a duty's wake is in; `schedule` for none. A kind this app does not know stays in its own. */
+const GROUP_OF: Record<string, WakeGroup> = {
+  githubPullRequest: "github", githubMention: "github", githubSecurityAlert: "github", githubBranchCheck: "github",
+  linearIssue: "linear", linearMention: "linear", botMessage: "bot", watch: "watch",
+};
+
+/**
+ * The group a duty's wake is in; `schedule` for none. A kind this app does not know, whatever its name starts with,
+ * is its own: shown read-only and kept as it is, never replaced by touching a choice.
+ */
 export function wakeGroupOf(wake: DutyWake | null): WakeGroup | "unknown" {
   if (!wake) return "schedule";
-  const kind = wake.source.kind as string;
-  if (kind.startsWith("github")) return "github";
-  if (kind.startsWith("linear")) return "linear";
-  if (kind === "botMessage") return "bot";
-  if (kind === "watch") return "watch";
-  return "unknown";
+  return GROUP_OF[wake.source.kind as string] ?? "unknown";
 }
 
 /** A new wake of `kind`, keeping the repository already typed. */
@@ -150,6 +153,7 @@ export function BotDutyWake({ bot, bots, home, wake, onChange }: {
           </span>
         </label>
       )}
+      {kind === "githubMention" && <OnlyFrom value={source.onlyFrom ?? null} onChange={(onlyFrom) => patch({ onlyFrom })} />}
       {kind === "githubBranchCheck" && (
         <label className={LABEL}>
           Branch
@@ -160,7 +164,17 @@ export function BotDutyWake({ bot, bots, home, wake, onChange }: {
       {kind === "botMessage" && <FromBots bot={bot} bots={bots} source={source} onChange={patch} />}
       {kind === "watch" && <WatchFields bot={bot} source={source} onChange={patch} />}
       {kind !== "githubPullRequest" && kind !== "linearIssue" && every}
-      {kind === "githubSecurityAlert" && <div className={NOTE}>Reads the repository's open Dependabot alerts with gh, which needs to be signed in with access to them.</div>}
+      {kind === "githubSecurityAlert" && <div className={NOTE}>Reads the repository's open Dependabot alerts with gh, which needs to be signed in with access to them. Code scanning and secret scanning alerts are not read.</div>}
+      {(kind === "githubMention" || kind === "linearMention") && (
+        <div className={NOTE} data-testid="duty-wake-untrusted">
+          Only a conversation comment counts, not a review comment or a pull request's description. Whoever writes the comment writes what {bot.name} is given, so it can be untrusted; comments you leave yourself (as the signed-in {kind === "githubMention" ? "gh" : "Linear"} user) never wake it.
+        </div>
+      )}
+      {(kind === "githubPullRequest" || kind === "linearIssue") && (
+        <div className={NOTE} data-testid="duty-wake-untrusted">
+          A title, a description or a branch name is written by whoever opened it, so what {bot.name} is given can be untrusted.
+        </div>
+      )}
       <div className={NOTE} data-testid="duty-wake-note">
         What wakes it is given to its first check (a file named in <span className="font-mono">$TERMINALX_EVENTS</span>) and to {bot.name} as information, never as instructions or your approval.
         <div className="mt-1">
@@ -168,6 +182,26 @@ export function BotDutyWake({ bot, bots, home, wake, onChange }: {
         </div>
       </div>
     </>
+  );
+}
+
+/** Whose GitHub mentions wake the duty: members by default; anyone is the owner's choice, with a warning. */
+function OnlyFrom({ value, onChange }: { value: string | null; onChange: (next: string | null) => void }) {
+  const known = value === null || value === "members" || value === "anyone";
+  return (
+    <label className={LABEL}>
+      Only from
+      <select value={value ?? "members"} onChange={(event) => onChange(event.target.value === "members" ? null : event.target.value)} className={INPUT} data-testid="duty-wake-only-from">
+        <option value="members">The repository's owner, members and collaborators</option>
+        <option value="anyone">Anyone who can comment</option>
+        {!known && <option value={value}>{value} (read as members)</option>}
+      </select>
+      {value === "anyone" && (
+        <span role="alert" className="font-normal text-warning" data-testid="duty-wake-anyone-warning">
+          On a public repository, anyone can wake this bot and write what it is given.
+        </span>
+      )}
+    </label>
   );
 }
 
