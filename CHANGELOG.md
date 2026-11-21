@@ -56,10 +56,11 @@
   changes anything or runs a command; Read and report reads and runs only
   commands known to read, asks before a comment or a message, and refuses the
   rest; a paused bot only reads. At every level a bot is refused writes to
-  its own record and the app's settings. Adding an organisation, someone new
-  or more able in Who can ask, another agent or model, and a rename are
-  confirmed by the TerminalX window, as raising access is; taking any of them
-  away is not. This is not a sandbox: a bot with full access can still write
+  its own record and the app's settings. Adding an organisation, someone new,
+  changed or more able in Who can ask, another agent or model, a rename and
+  another place to run are confirmed by the TerminalX window, as raising
+  access is, and a runtime that cannot confirm it offers Restart runtime on
+  the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
   files on this Mac by other means. Agent and model, rename and delete are
   under the page's menu.
 

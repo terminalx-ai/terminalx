@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Cpu, Ellipsis, Loader2, Pencil, Trash2 } from "@/icons";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
@@ -41,17 +42,26 @@ export function BotMenu({ bot, onDeleted }: { bot: Bot; onDeleted: () => void })
   );
 }
 
+/**
+ * A dialog's save, and its failure shown so it can be acted on: a change that gives the bot more is confirmed by this
+ * window, and a runtime that cannot verify it offers Restart runtime, after which the same save is tried again.
+ */
 function useSave(onDone: () => void) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [failed, setFailed] = useState<{ message: string; action: () => Promise<unknown> } | null>(null);
   const run = (action: () => Promise<unknown>) => {
     setBusy(true);
-    setError(null);
+    setFailed(null);
     action().then(onDone, (cause) => {
-      setError(errorMessage(cause));
+      setFailed({ message: errorMessage(cause), action });
       setBusy(false);
     });
   };
+  const error = failed && (
+    <div data-testid="bot-menu-error">
+      <MachineHostError error={failed.message} onRestarted={() => run(failed.action)} className="text-xs" />
+    </div>
+  );
   return { busy, error, run };
 }
 
@@ -97,7 +107,7 @@ function AgentDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
             {models.map((value) => <option key={value.id} value={value.id}>{value.label}</option>)}
           </select>
         </label>
-        {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+        {error}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
           <Button type="submit" size="sm" disabled={busy} data-testid="bot-agent-save">{busy && <Loader2 className="animate-spin" />} Save</Button>
@@ -115,7 +125,7 @@ function RenameDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
     <SmallDialog title={`Rename ${bot.name}`} note="Its slug follows the name. Anything that keeps the bot keeps its id, which never changes." onClose={onClose} busy={busy}>
       <form className="mt-3 flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (!busy && name.trim()) save(); }}>
         <input autoFocus spellCheck={false} maxLength={80} value={name} disabled={busy} onChange={(event) => setName(event.target.value)} aria-label="Name" className={FIELD} data-testid="bot-rename-input" />
-        {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+        {error}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={onClose}>Cancel</Button>
           <Button type="submit" size="sm" disabled={busy || !name.trim()} data-testid="bot-rename-save">{busy && <Loader2 className="animate-spin" />} Rename</Button>

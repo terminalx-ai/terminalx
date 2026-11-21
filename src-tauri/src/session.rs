@@ -1226,6 +1226,11 @@ pub enum Engine {
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
+    /// The bot this tab's session acts for (`bots::chat::acting_bot`), read
+    /// from its entry when the runtime is made: fixed for a session's life,
+    /// so a bot's gate needs no index read per tool call, and cannot lose
+    /// the bot to an index that cannot be read (PRO-478).
+    pub(crate) acting_bot: Option<String>,
     pub harness: String,
     pub seq: u64,
     /// Set only while applying a source transcript record; empty means unknown.
@@ -2693,6 +2698,7 @@ impl SessionManager {
             let rt = Arc::new(Mutex::new(TabRuntime {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
+                acting_bot: crate::bots::chat::acting_bot(&entry),
                 harness: tab.harness.clone(),
                 seq,
                 status: TabStatus::Idle,
@@ -8285,7 +8291,8 @@ impl SessionManager {
             // A session acting for a bot (PRO-478: its chats and what they started) is held to
             // the bot's access as it is now, on top of the mode `bots::chat` holds it to: the
             // frame showed this launch's token, so its session is its own.
-            match crate::bots::access::session_gate(&frame.session, &frame.payload) {
+            let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
+            match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
                 crate::bots::access::Gate::Leave => {}
                 crate::bots::access::Gate::Refuse(reason) => {
                     log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
@@ -8428,10 +8435,16 @@ impl SessionManager {
                 }
             }
             "PermissionRequest" => {
-                // A bot's gate asked first (PRO-478): the card says why.
-                let because = match crate::bots::access::session_gate(&frame.session, &frame.payload) {
+                // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
+                // what it asks about is asked on a card that says why.
+                let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
+                let because = match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+                    crate::bots::access::Gate::Refuse(reason) => {
+                        log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
+                        return HookReply { output: Some(crate::bots::access::permission_refusal(&reason)), refused: None };
+                    }
                     crate::bots::access::Gate::Ask(reason) => Some(reason),
-                    _ => None,
+                    crate::bots::access::Gate::Leave => None,
                 };
                 return self.ask_permission_because(&rt_arc, &frame, kind, because);
             }

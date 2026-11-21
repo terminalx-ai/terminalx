@@ -4,6 +4,7 @@ use serde_json::json;
 
 use super::*;
 use crate::sink::BroadcastSink;
+use crate::bots::chat;
 use crate::store::index::{self, SessionEntry};
 
 fn bots_on() -> (crate::store::TempHome, Arc<BroadcastSink>) {
@@ -45,6 +46,15 @@ fn tool(name: &str, input: Value) -> Value {
     json!({"hook_event_name": "PreToolUse", "tool_name": name, "tool_input": input, "cwd": "/tmp"})
 }
 
+/// The bot a session acts for, as its tab's runtime is stamped with it when it is made.
+fn acting(session_id: &str) -> Option<String> {
+    index::get(session_id).ok().as_ref().and_then(chat::acting_bot)
+}
+
+fn gate_of(session_id: &str, payload: &Value) -> Gate {
+    session_gate(acting(session_id).as_deref(), payload)
+}
+
 fn is_ask(gate: &Gate) -> bool {
     matches!(gate, Gate::Ask(_))
 }
@@ -71,33 +81,33 @@ fn each_access_level_gates_the_next_call_of_the_bots_chat() {
     // Full access, the default: everything is the agent's own permission mode's to decide.
     assert_eq!(bot.access, BotAccess::Full);
     for call in [&push, &comment, &tests, &read, &edit(&file)] {
-        assert_eq!(session_gate(&chat.id, call), Gate::Leave, "{call}");
+        assert_eq!(gate_of(&chat.id, call), Gate::Leave, "{call}");
     }
 
     // Ask before outward actions: reads freely, asks before it changes anything or runs a command.
     set_access(sink.as_ref(), &bot.id, "askOutward");
     for call in [&push, &comment, &tests, &edit(&file)] {
-        assert!(is_ask(&session_gate(&chat.id, call)), "{call}");
+        assert!(is_ask(&gate_of(&chat.id, call)), "{call}");
     }
     if cfg!(unix) {
-        assert_eq!(session_gate(&chat.id, &read), Gate::Leave);
+        assert_eq!(gate_of(&chat.id, &read), Gate::Leave);
     }
 
     // Read and report: no change, here or elsewhere; a report is asked about; reading goes ahead.
     set_access(sink.as_ref(), &bot.id, "readReport");
-    assert!(is_refused(&session_gate(&chat.id, &push)));
-    assert!(is_refused(&session_gate(&chat.id, &tests)), "cargo test writes target/");
-    assert!(is_refused(&session_gate(&chat.id, &edit(&file))));
-    assert!(is_ask(&session_gate(&chat.id, &comment)));
+    assert!(is_refused(&gate_of(&chat.id, &push)));
+    assert!(is_refused(&gate_of(&chat.id, &tests)), "cargo test writes target/");
+    assert!(is_refused(&gate_of(&chat.id, &edit(&file))));
+    assert!(is_ask(&gate_of(&chat.id, &comment)));
     if cfg!(unix) {
-        assert_eq!(session_gate(&chat.id, &read), Gate::Leave, "a command that only reads");
+        assert_eq!(gate_of(&chat.id, &read), Gate::Leave, "a command that only reads");
     }
-    let Gate::Refuse(reason) = session_gate(&chat.id, &edit(&file)) else { unreachable!() };
+    let Gate::Refuse(reason) = gate_of(&chat.id, &edit(&file)) else { unreachable!() };
     assert!(reason.contains("Read and report") && reason.contains("did not run"), "{reason}");
 
     // And back to full access.
     set_access(sink.as_ref(), &bot.id, "full");
-    assert_eq!(session_gate(&chat.id, &push), Gate::Leave);
+    assert_eq!(gate_of(&chat.id, &push), Gate::Leave);
 }
 
 #[test]
@@ -141,18 +151,18 @@ fn an_access_change_limits_the_bots_chat_and_what_it_started() {
     let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
     let push = shell("git push origin main", &cwd);
     for session in [&home.id, &started.id] {
-        assert_eq!(session_gate(session, &push), Gate::Leave, "full access");
+        assert_eq!(gate_of(session, &push), Gate::Leave, "full access");
     }
 
     super::super::enforce::call(&manager, "update", &json!({"id": bot.id, "patch": {"access": "readReport"}})).unwrap();
     assert_eq!(index::get(&home.id).unwrap().tabs[0].permission_mode, "plan");
     for session in [&home.id, &started.id] {
-        assert!(is_refused(&session_gate(session, &push)), "{session}");
+        assert!(is_refused(&gate_of(session, &push)), "{session}");
     }
 
     super::super::enforce::call(&manager, "update", &json!({"id": bot.id, "patch": {"access": "askOutward"}})).unwrap();
     for session in [&home.id, &started.id] {
-        assert!(is_ask(&session_gate(session, &push)), "{session}");
+        assert!(is_ask(&gate_of(session, &push)), "{session}");
     }
 }
 
@@ -164,10 +174,10 @@ fn a_paused_bot_only_reads() {
     let chat = chat_of(&bot.id, "plan");
     super::super::pause(sink.as_ref(), &bot.id, super::super::OWNER).unwrap();
     let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
-    let Gate::Refuse(reason) = session_gate(&chat.id, &shell("gh pr comment 1 --body hi", &cwd)) else { panic!("a report is not refused while paused") };
+    let Gate::Refuse(reason) = gate_of(&chat.id, &shell("gh pr comment 1 --body hi", &cwd)) else { panic!("a report is not refused while paused") };
     assert!(reason.contains("Atlas is paused"), "{reason}");
-    assert!(is_refused(&session_gate(&chat.id, &edit("/tmp/x"))));
-    assert_eq!(session_gate(&chat.id, &tool("Read", json!({"file_path": "/tmp/x"}))), Gate::Leave);
+    assert!(is_refused(&gate_of(&chat.id, &edit("/tmp/x"))));
+    assert_eq!(gate_of(&chat.id, &tool("Read", json!({"file_path": "/tmp/x"}))), Gate::Leave);
 }
 
 /// Native Codex runs no hooks: its approval requests meet the same gate.
@@ -178,7 +188,7 @@ fn native_codex_approvals_meet_the_gate() {
     let chat = chat_of(&bot.id, "plan");
     let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
     let command = |line: &str| json!({"threadId": "t", "turnId": "u", "itemId": "i", "command": line, "cwd": cwd});
-    let run = |method: &str, params: &Value| approval_gate(&chat.id, method, params, Some(&cwd));
+    let run = |method: &str, params: &Value| approval_gate(acting(&chat.id).as_deref(), method, params, Some(&cwd));
     assert_eq!(run("item/commandExecution/requestApproval", &command("git push")), Gate::Leave, "full access");
     set_access(sink.as_ref(), &bot.id, "readReport");
     assert!(is_refused(&run("item/commandExecution/requestApproval", &command("git push"))));
@@ -188,7 +198,7 @@ fn native_codex_approvals_meet_the_gate() {
     let Gate::Ask(reason) = run("item/commandExecution/requestApproval", &command("git push")) else { panic!("not asked") };
     assert!(reason.contains("`git push`"), "{reason}");
     let plain = crate::session_ops::create_quick_chat_entry(Default::default()).unwrap();
-    assert_eq!(approval_gate(&plain.id, "item/commandExecution/requestApproval", &command("git push"), Some(&cwd)), Gate::Leave);
+    assert_eq!(approval_gate(acting(&plain.id).as_deref(), "item/commandExecution/requestApproval", &command("git push"), Some(&cwd)), Gate::Leave);
 }
 
 #[test]
@@ -200,15 +210,15 @@ fn nothing_is_gated_outside_a_bot_chat_while_bots_are_off_or_for_a_bot_that_is_g
     let plain = crate::session_ops::create_quick_chat_entry(Default::default()).unwrap();
     let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
     let push = shell("git push", &cwd);
-    assert!(is_refused(&session_gate(&chat.id, &push)));
-    assert_eq!(session_gate(&plain.id, &push), Gate::Leave);
-    assert_eq!(session_gate("no-such-session", &push), Gate::Leave);
+    assert!(is_refused(&gate_of(&chat.id, &push)));
+    assert_eq!(gate_of(&plain.id, &push), Gate::Leave);
+    assert_eq!(gate_of("no-such-session", &push), Gate::Leave);
 
     set_bots(false);
-    assert_eq!(session_gate(&chat.id, &push), Gate::Leave, "inert with the switch off");
+    assert_eq!(gate_of(&chat.id, &push), Gate::Leave, "inert with the switch off");
     set_bots(true);
     super::super::delete(sink.as_ref(), &bot.id).unwrap();
-    assert_eq!(session_gate(&chat.id, &push), Gate::Leave, "the chat of a bot that is gone is an ordinary chat");
+    assert_eq!(gate_of(&chat.id, &push), Gate::Leave, "the chat of a bot that is gone is an ordinary chat");
 }
 
 #[test]
@@ -217,11 +227,12 @@ fn bots_that_cannot_be_read_hold_their_chats_to_read_and_report() {
     let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
     let chat = chat_of(&bot.id, "bypassPermissions");
     std::fs::write(crate::store::root().unwrap().join("bots.json"), "{ not json").unwrap();
-    assert!(is_refused(&session_gate(&chat.id, &edit("/tmp/x"))));
+    assert!(is_refused(&gate_of(&chat.id, &edit("/tmp/x"))));
 }
 
 /// A bot never raises its own access, changes whom it reports to or resumes
 /// itself: at every level, the definitions and settings are not its to change.
+#[cfg(unix)]
 #[test]
 fn no_level_lets_a_bot_change_its_own_record_or_the_settings() {
     let (_home, _sink) = bots_on();
@@ -300,11 +311,41 @@ fn only_known_reads_go_unasked() {
         assert_eq!(gate(&ask, call), Gate::Leave, "{call}");
         assert_eq!(gate(&read, call), Gate::Leave, "{call}");
     }
+    // The lead's N1: a `terminalx` read is a bare `terminalx` or `tnx`, its group first after the
+    // global options, and an exact (group, verb) read. These change state, or may run anything.
+    for command in [
+        "terminalx issues status PRO-1 --to Done",
+        "terminalx sessions status s1 --status done",
+        "./scripts/terminalx sessions list",
+        "/tmp/repo/bin/tnx sessions list",
+        "terminalx computer type-text --app sessions --text list",
+        "terminalx --project sessions list",
+        "terminalx sessions --json create",
+        "terminalx",
+    ] {
+        assert!(is_ask(&gate(&ask, &shell(command, &cwd))), "{command} at ask");
+        assert!(is_refused(&gate(&read, &shell(command, &cwd))), "{command} at read and report");
+    }
+    for command in ["terminalx --json bots show atlas", "tnx read s1", "terminalx status", "terminalx --machine m sessions list", "terminalx issues view PRO-1 --comments", "terminalx sessions --json list"] {
+        assert_eq!(gate(&read, &shell(command, &cwd)), Gate::Leave, "{command}");
+    }
+    // The lead's N3: the agents' own bookkeeping, by the names Claude Code 2.1.330 and Codex 0.169.0 send,
+    // goes unasked at both levels; what acts does not.
+    for name in ["TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite", "ToolSearch", "Skill", "TaskStop", "KillShell", "TaskOutput", "EnterPlanMode", "ListMcpResourcesTool", "ReadMcpResourceTool", "write_stdin", "update_plan", "request_user_input", "get_goal", "update_goal", "ListAgents"] {
+        let call = tool(name, json!({}));
+        assert_eq!(gate(&ask, &call), Gate::Leave, "{name} at ask");
+        assert_eq!(gate(&read, &call), Gate::Leave, "{name} at read and report");
+    }
+    for name in ["Monitor", "CronCreate", "ScheduleWakeup", "SendMessage", "PushNotification", "Workflow", "EnterWorktree", "Write", "apply_patch"] {
+        let call = tool(name, json!({}));
+        assert!(is_ask(&gate(&ask, &call)), "{name} at ask");
+        assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
+    }
     // A `terminalx` read joined to anything else is not a read.
     assert!(is_ask(&gate(&ask, &shell("terminalx sessions list; git push", &cwd))));
 
     // Read and report asks before a report, alone; anything joined to one is refused.
-    for command in ["gh pr comment 3 -b hi", "gh issue create --title t --body b", "terminalx sessions send s1 'Done: three findings'"] {
+    for command in ["gh pr comment 3 -b hi", "gh issue create --title t --body b", "terminalx send s1 'Done: three findings'"] {
         let Gate::Ask(reason) = gate(&read, &shell(command, &cwd)) else { panic!("{command}") };
         assert!(reason.contains("report"), "{reason}");
     }

@@ -329,6 +329,7 @@ impl Rig {
         let rt = Arc::new(Mutex::new(TabRuntime {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
+            acting_bot: None,
             harness: match kind {
                 CliKind::Claude => "claude".into(),
                 CliKind::Codex => "codex".into(),
@@ -4011,6 +4012,21 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
             Ok(())
         })
         .unwrap();
+        // The rig made its runtime before the entry was marked; a real one reads the mark when it is made.
+        let runtime = rig.manager.runtime(SESSION, TAB).unwrap();
+        assert_eq!(runtime.lock().unwrap().acting_bot, None);
+        runtime.lock().unwrap().acting_bot = crate::bots::chat::acting_bot(&index::get(SESSION).unwrap());
+        // A runtime made for a session a bot's chat started is stamped with the bot from its entry.
+        let with_tab = || crate::session_ops::NewQuickChat { tab: Some(crate::session_ops::NewTab { harness: "claude".into(), transport: Default::default(), model: String::new(), effort: None, permission_mode: Some("plan".into()) }), ..Default::default() };
+        let started = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        index::update_session(&started.id, |entry| {
+            entry.unknown.insert(crate::bots::chat::STARTED_KEY.into(), json!({"id": bot.id}));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rig.manager.runtime(&started.id, &started.tabs[0].id).unwrap().lock().unwrap().acting_bot.as_deref(), Some(bot.id.as_str()));
+        let plain = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        assert_eq!(rig.manager.runtime(&plain.id, &plain.tabs[0].id).unwrap().lock().unwrap().acting_bot, None);
         let set = |access: &str| {
             crate::bots::update(&sink, &bot.id, serde_json::from_value(json!({"access": access})).unwrap()).unwrap();
         };
@@ -4027,6 +4043,25 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
         assert!(reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("Read and report"));
         assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "ls", cwd))), "deny", "{kind:?}: a read");
         assert!(rig.manager.pending_permissions().is_empty());
+        // The lead's N1 and N3, through the hook: a `terminalx` command that changes state, or any
+        // program named like it, is refused; a `terminalx` read and the agent's own bookkeeping are not.
+        for command in ["terminalx issues status PRO-1 --to Done", "./scripts/terminalx sessions list", "terminalx computer type-text --app sessions --text list"] {
+            assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd))), "deny", "{kind:?}: {command}");
+        }
+        assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx sessions list --json", cwd))), "deny", "{kind:?}");
+        for name in ["TaskCreate", "ToolSearch", "Skill", "write_stdin"] {
+            let frame = HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload: json!({"cwd": cwd, "tool_name": name, "tool_input": {}}) };
+            assert_ne!(decision(&rig.manager.on_hook(frame)), "deny", "{kind:?}: {name}");
+        }
+        assert!(rig.manager.pending_permissions().is_empty());
+        // One that reaches the permission request anyway is denied there too, saying why, with no card.
+        let mut asked = edit();
+        asked.event = "PermissionRequest".into();
+        let reply = rig.manager.on_hook(asked);
+        let output = reply.output.unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny", "{kind:?}");
+        assert!(output["hookSpecificOutput"]["decision"]["message"].as_str().unwrap().contains("Read and report"), "{output}");
+        assert!(rig.manager.pending_permissions().is_empty(), "no card for a refusal");
 
         // Ask before outward actions: the command is asked about.
         set("askOutward");

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   },
   openRow: vi.fn(),
   switches: { bots: true },
+  restart: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -22,6 +23,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return { ...real, botsApi: mocks.api, gh: { ...real.gh, connectionStatus: mocks.github }, issues: { ...real.issues, linearStatus: mocks.linear } };
 });
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@/lib/machines", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/machines")>();
+  return { ...real, machinesApi: { ...real.machinesApi, restartRuntimeForWindow: mocks.restart } };
+});
 vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mocks.switches, getExperimentalSettings: () => mocks.switches }));
 vi.mock("@/lib/account", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/account")>()), useAccount: () => mocks.account }));
 vi.mock("@/lib/organizationRoster", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/organizationRoster")>()), readOrganizationRoster: mocks.roster }));
@@ -71,6 +76,7 @@ beforeEach(() => {
   mocks.linear.mockReset().mockResolvedValue({ connected: false });
   mocks.roster.mockReset();
   mocks.openRow.mockReset();
+  mocks.restart.mockReset().mockResolvedValue(undefined);
   mocks.account.status.organizations = [];
   resetBotsPageForTests();
 });
@@ -293,6 +299,54 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(model.value).toBe("some-model");
     fireEvent.click(screen.getByTestId("bot-agent-save"));
     await waitFor(() => expect(lastPatch()).toEqual({ model: "some-model" }));
+  });
+
+  // A change that gives the bot more is confirmed by this window; a runtime that cannot verify it is restarted from the
+  // error, which then tries the same save again (the lead's N2).
+  const RESTART = "runtime_restart_required:epoch-7: TerminalX cannot confirm this window to the runtime running now. Restarting it stops one running session.";
+
+  it("a save the runtime cannot confirm offers Restart runtime, then saves again", async () => {
+    const page = await open([bot("b1", "Sentry", { access: "readReport" })], "b1");
+    mocks.api.update.mockRejectedValueOnce(RESTART);
+    fireEvent.click(page.getByTestId("bot-access-full"));
+    const error = await page.findByTestId("bot-settings-error");
+    expect(error.textContent).toContain("Restarting it stops one running session.");
+    expect(error.textContent).not.toContain("runtime_restart_required");
+    fireEvent.click(within(error).getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("epoch-7"));
+    await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(2));
+    expect(mocks.api.update.mock.calls[1]).toEqual(["b1", { access: "full" }]);
+    await waitFor(() => expect(page.queryByTestId("bot-settings-error")).toBeNull());
+  });
+
+  it("the menu's dialogs offer Restart runtime too, and save again after it", async () => {
+    const page = await open([bot("b1", "Sentry")], "b1");
+    for (const [item, act, patch] of [
+      ["bot-menu-rename", async () => {
+        fireEvent.change(await screen.findByTestId("bot-rename-input"), { target: { value: "Sentinel" } });
+        fireEvent.click(screen.getByTestId("bot-rename-save"));
+      }, { name: "Sentinel" }],
+      ["bot-menu-agent", async () => fireEvent.click(await screen.findByTestId("bot-agent-save")), { model: "" }],
+    ] as const) {
+      mocks.api.update.mockClear();
+      mocks.restart.mockClear();
+      mocks.api.update.mockRejectedValueOnce(RESTART);
+      mouseClick(page.getByTestId("bot-menu"));
+      fireEvent.click(await screen.findByTestId(item));
+      await act();
+      const error = await screen.findByTestId("bot-menu-error");
+      expect(error.textContent).toContain("Restarting it stops one running session.");
+      fireEvent.click(within(error).getByRole("button", { name: "Restart runtime" }));
+      await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(2));
+      expect(mocks.api.update.mock.calls[1]).toEqual(["b1", patch]);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
+    mocks.api.remove.mockRejectedValueOnce(RESTART).mockResolvedValueOnce(undefined);
+    mouseClick(page.getByTestId("bot-menu"));
+    fireEvent.click(await screen.findByTestId("bot-menu-delete"));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    fireEvent.click(within(await screen.findByTestId("bot-menu-error")).getByRole("button", { name: "Restart runtime" }));
+    await waitFor(() => expect(mocks.api.remove).toHaveBeenCalledTimes(2));
   });
 
   it("a bot that is not in the list says why", async () => {

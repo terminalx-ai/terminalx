@@ -573,9 +573,10 @@ fn a_stale_resume_request_is_not_announced() {
 }
 
 /// L2: an update no person was shown to ask for is judged under the store's
-/// lock: less access, fewer places and fewer askers go through; more access,
-/// another reporting line, a new place, a new or wider asker, another agent,
-/// model or effort, and a rename (PRO-478) do not.
+/// lock: less access, fewer places, fewer askers and an asker who may do less
+/// go through; more access, another reporting line, a new place, a new, wider
+/// or otherwise changed asker, another agent, model or effort, a rename and
+/// another place to run (PRO-478) do not.
 #[test]
 fn an_update_no_person_asked_for_gives_nothing_more() {
     let (_home, sink, _events) = bots_on();
@@ -596,6 +597,8 @@ fn an_update_no_person_asked_for_gives_nothing_more() {
         BotPatch { model: Some("some-model".into()), ..Default::default() },
         BotPatch { effort: Some(Some("high".into())), ..Default::default() },
         BotPatch { name: Some("Atlas II".into()), ..Default::default() },
+        BotPatch { who_can_ask: Some(vec![serde_json::from_value(json!({"kind": "person", "id": "u1", "may": "ask", "org": "org-b"})).unwrap()]), ..Default::default() },
+        BotPatch { runs_on: Some(BotRunsOn::Other("cloudWorkspace".into())), ..Default::default() },
     ] {
         let refused = update_as(sink.as_ref(), &atlas.id, patch, false).unwrap_err().to_string();
         assert!(refused.contains(PERSON_REQUIRED), "{refused}");

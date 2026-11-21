@@ -3707,6 +3707,9 @@ mod tests {
             json!({"id": id, "patch": {"model": "claude-opus-5-5"}}),
             json!({"id": id, "patch": {"effort": "high"}}),
             json!({"id": id, "patch": {"name": "Atlas II"}}),
+            // An asker it had, changed other than to do less; and another place to run.
+            json!({"id": id, "patch": {"whoCanAsk": [{"kind": "person", "id": "u1", "name": "Someone else", "may": "ask"}]}}),
+            json!({"id": id, "patch": {"runsOn": "cloudWorkspace"}}),
         ];
         let windows = [crate::serve_cli::consent::Window::Headless, crate::serve_cli::consent::Window::Keyed([7; 32])];
         for window in &windows {

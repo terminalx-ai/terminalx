@@ -93,7 +93,7 @@ pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "cr
 pub const GIVES_MORE: &str = "givesMore";
 
 /// The fields of an `update` that can give a bot more (`bots::gives_more`).
-pub const UPDATE_GIVES: [&str; 8] = ["access", "reportsTo", "worksIn", "whoCanAsk", "harness", "model", "effort", "name"];
+pub const UPDATE_GIVES: [&str; 9] = ["access", "reportsTo", "worksIn", "whoCanAsk", "harness", "model", "effort", "name", "runsOn"];
 
 /// Whether this request needs a person's consent: a guarded command, or a
 /// guarded bots operation; an `update` only when it sets a field that can

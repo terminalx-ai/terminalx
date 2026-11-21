@@ -552,7 +552,7 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
 pub const BY_PERSON: &str = "byPerson";
 
 /// What an update [`PERSON_REQUIRED`] for names: what [`gives_more`] finds.
-pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, or a new name) needs you to confirm it in the TerminalX window.";
+pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, a new name, or another place to run) needs you to confirm it in the TerminalX window.";
 
 /// How much an entry of Who can ask may do; a value this build does not know is the most.
 fn may_rank(may: &str) -> u8 {
@@ -566,21 +566,26 @@ fn may_rank(may: &str) -> u8 {
 
 /// Whether `patch` gives `bot` more than it has, so only a person may make
 /// it (PRO-468, PRO-478): more access, another reporting line, a place it
-/// does not work in yet, an entry of Who can ask that is new or may do more,
-/// another agent, model or effort, or another name. Taking any of them away
+/// does not work in yet, an entry of Who can ask that is new, changed or may
+/// do more, another agent, model or effort, another name, or another place to
+/// run. Taking any of them away
 /// gives nothing, and needs no one.
 pub fn gives_more(bot: &Bot, patch: &BotPatch) -> bool {
     let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
     let reports_elsewhere = patch.reports_to.as_ref().is_some_and(|reports_to| *reports_to != bot.reports_to);
     let new_place = patch.works_in.as_ref().is_some_and(|places| places.iter().any(|place| !bot.works_in.contains(place)));
+    // An entry it had, unchanged but for what it may do, and that no more: anything else is new.
     let new_asker = patch.who_can_ask.as_ref().is_some_and(|askers| {
-        askers.iter().any(|asker| !bot.who_can_ask.iter().any(|had| had.kind == asker.kind && had.id == asker.id && may_rank(&had.may) >= may_rank(&asker.may)))
+        askers.iter().any(|asker| {
+            !bot.who_can_ask.iter().any(|had| BotAsker { may: asker.may.clone(), ..had.clone() } == *asker && may_rank(&asker.may) <= may_rank(&had.may))
+        })
     });
+    let elsewhere = patch.runs_on.as_ref().is_some_and(|runs_on| *runs_on != bot.runs_on);
     let other_agent = patch.harness.as_ref().is_some_and(|harness| *harness != bot.harness)
         || patch.model.as_ref().is_some_and(|model| *model != bot.model)
         || patch.effort.as_ref().is_some_and(|effort| *effort != bot.effort);
     let renamed = patch.name.as_ref().is_some_and(|name| clean_name(name).map_or(true, |name| name != bot.name));
-    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed
+    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed || elsewhere
 }
 
 /// How much an access level lets a bot do; a level this build does not know is the least.

@@ -34,10 +34,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::{chat, BotAccess};
+use super::BotAccess;
 use crate::orchestration::guard;
 use crate::store::bots as bot_store;
-use crate::store::index;
 
 /// What becomes of one tool call of a bot's chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,21 +49,19 @@ pub enum Gate {
     Refuse(String),
 }
 
-/// The gate for one tool call of `session_id`, whose frame carried its
-/// launch's token, as the bot it acts for is now (`chat::acting_bot`: its
-/// chats and the sessions they started). Nothing for any other session, nor
-/// while Bots is off (its chats are stopped, `enforce::reconcile`), nor for a
-/// bot that is gone (the mode it was held to stays). A paused bot, or one
-/// that cannot be read, is gated as read and report with nothing asked: not
-/// knowing never reads as full access.
-pub fn session_gate(session_id: &str, payload: &Value) -> Gate {
+/// The gate for one tool call of a session that acts for `bot`
+/// (`TabRuntime::acting_bot`, from `chat::acting_bot`: the bot's chats and
+/// the sessions they started), as the bot is now. Nothing for any other
+/// session, nor while Bots is off (its chats are stopped,
+/// `enforce::reconcile`), nor for a bot that is gone (the mode it was held to
+/// stays). A paused bot, or one whose record cannot be read, is gated as read
+/// and report with nothing asked: not knowing never reads as full access.
+pub fn session_gate(bot: Option<&str>, payload: &Value) -> Gate {
+    let Some(bot_id) = bot else { return Gate::Leave };
     if !super::enabled() {
         return Gate::Leave;
     }
-    let Some(bot_id) = index::get(session_id).ok().as_ref().and_then(chat::acting_bot) else {
-        return Gate::Leave;
-    };
-    match bot_store::get(&bot_id) {
+    match bot_store::get(bot_id) {
         Ok(Some(bot)) if bot.paused.is_some() => held(payload, &format!("{} is paused", bot.name)),
         Ok(Some(bot)) => gate(&bot.access, payload),
         Ok(None) => Gate::Leave,
@@ -78,13 +75,13 @@ pub fn session_gate(session_id: &str, payload: &Value) -> Gate {
 /// [`session_gate`] for an approval native Codex asks for: it runs no hooks,
 /// so its requests to run a command or change files are where its calls meet
 /// the gate. Plan mode's read-only sandbox runs the rest without asking.
-pub fn approval_gate(session_id: &str, method: &str, params: &Value, cwd: Option<&str>) -> Gate {
+pub fn approval_gate(bot: Option<&str>, method: &str, params: &Value, cwd: Option<&str>) -> Gate {
     let payload = match method {
         "item/commandExecution/requestApproval" => json!({"tool_name": "Bash", "tool_input": {"command": params["command"]}, "cwd": cwd}),
         "item/fileChange/requestApproval" => json!({"tool_name": "apply_patch", "tool_input": params, "cwd": cwd}),
         other => json!({"tool_name": other, "tool_input": params, "cwd": cwd}),
     };
-    session_gate(session_id, &payload)
+    session_gate(bot, &payload)
 }
 
 /// A paused bot, or one that cannot be read: it reads, and nothing else runs, nor is asked.
@@ -121,10 +118,30 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
     }
 }
 
-/// The tools that only read, or only talk to the owner, by the names the
-/// agents give them. A connected server's (MCP) tool is never one: what it
-/// does cannot be told from its name.
-const READ_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite", "Task", "Agent", "ExitPlanMode", "AskUserQuestion", "BashOutput", "view_image", "update_plan"];
+/// The tools that only read, keep the agent's own notes, or only talk to the
+/// owner, by the names the agents send to the hook (Claude Code 2.1.330 and
+/// Codex 0.169.0, from the tool lists each sends its model, and the names in
+/// Claude Code's binary for the tools only an interactive session has). A
+/// Read and report bot keeps its task list, plan and skills; an Ask bot raises
+/// no card for them. A connected server's (MCP) tool is never one: what it
+/// does cannot be told from its name. Left out because they act: Bash and
+/// Monitor (a command), Edit, Write and NotebookEdit, CronCreate and
+/// ScheduleWakeup (later work), SendMessage, PushNotification, Workflow,
+/// EnterWorktree and ExitWorktree, and Codex's apply_patch.
+const READ_TOOLS: &[&str] = &[
+    // Reading files and the web.
+    "Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "view_image", "web_search",
+    // A connected server's resources, read (not its tools).
+    "ListMcpResourcesTool", "ReadMcpResourceTool",
+    // The agent's own task list, plan and goals.
+    "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "update_plan", "get_goal", "create_goal", "update_goal",
+    // Output of, input to, or stopping a command it already started (which met the gate when it started).
+    "BashOutput", "TaskOutput", "KillShell", "KillBash", "TaskStop", "write_stdin",
+    // Loading tools and skills (what a skill then runs meets the gate), sub-agents (whose calls meet it too), and the agents list.
+    "ToolSearch", "Skill", "Task", "Agent", "ListAgents",
+    // Plan mode, and asking the owner.
+    "EnterPlanMode", "ExitPlanMode", "AskUserQuestion", "request_user_input",
+];
 
 /// Whether a call only reads.
 fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
@@ -142,24 +159,68 @@ fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
     single(tool, input, terminalx_read)
 }
 
-/// A shell call's program and arguments when it is one plain command.
+/// A shell call's program, as written, and its arguments when it is one plain command.
 fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> bool {
     let Some(words) = shell_command(tool, input).as_deref().and_then(guard::single_command) else { return false };
     let Some((program, args)) = words.split_first() else { return false };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    check(program.rsplit('/').next().unwrap_or(program), &args)
+    check(program, &args)
 }
 
-/// The `terminalx` groups and the verbs that only read in them.
+/// The `terminalx` commands that only read, as (group, verb); an empty verb
+/// for a group that is a command of its own. Exact: `issues status` and
+/// `sessions status` change state and are not here (`cli.rs`).
+const TERMINALX_READS: &[(&str, &str)] = &[
+    ("status", ""),
+    ("read", ""),
+    ("wait", ""),
+    ("sessions", "list"),
+    ("sessions", "show"),
+    ("sessions", "report"),
+    ("sessions", "usage"),
+    ("projects", "list"),
+    ("tabs", "list"),
+    ("permissions", "list"),
+    ("worktrees", "list"),
+    ("issues", "list"),
+    ("issues", "view"),
+    ("review", "comments"),
+    ("pipelines", "list"),
+    ("pipelines", "show"),
+    ("runs", "list"),
+    ("runs", "show"),
+    ("bots", "list"),
+    ("bots", "show"),
+    ("machines", "list"),
+    ("machines", "status"),
+    ("cloud", "status"),
+    ("config", "show"),
+];
+
+/// A `terminalx` read: the bare `terminalx` or `tnx` the app puts on the
+/// path (never a path to one, which may be any program), then the group as
+/// the first word after the global options `--json` and `--machine <name>`,
+/// then its verb, a pair in [`TERMINALX_READS`].
 fn terminalx_read(program: &str, args: &[&str]) -> bool {
-    const GROUPS: &[&str] = &["sessions", "projects", "tabs", "issues", "worktrees", "pipelines", "runs", "bots", "permissions", "machines", "cloud", "review"];
-    const VERBS: &[&str] = &["list", "show", "status", "view", "transcript", "get", "read", "help"];
     if !matches!(program, "terminalx" | "tnx") {
         return false;
     }
-    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
-    let Some(at) = plain.iter().take(3).position(|word| GROUPS.contains(word)) else { return false };
-    plain.get(at + 1).is_some_and(|verb| VERBS.contains(verb))
+    let mut words = args.iter().copied();
+    let mut next = || loop {
+        match words.next()? {
+            "--json" => {}
+            "--machine" => {
+                words.next()?;
+            }
+            word => return Some(word),
+        }
+    };
+    let Some(group) = next() else { return false };
+    if TERMINALX_READS.contains(&(group, "")) {
+        return true;
+    }
+    let Some(verb) = next() else { return false };
+    TERMINALX_READS.contains(&(group, verb))
 }
 
 /// A call as the card and the agent are told it.
@@ -186,7 +247,8 @@ fn report_command(program: &str, args: &[&str]) -> Option<String> {
     let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
     match (program, plain.as_slice()) {
         ("gh", ["pr" | "issue", "comment", ..] | ["issue", "create", ..]) => Some(format!("gh {} {}", plain[0], plain[1])),
-        ("terminalx" | "tnx", ["sessions", "send", ..] | ["issues", "comment" | "create", ..]) => Some(format!("{program} {} {}", plain[0], plain[1])),
+        ("terminalx" | "tnx", ["send", ..]) => Some(format!("{program} send")),
+        ("terminalx" | "tnx", ["issues", "comment" | "create", ..]) => Some(format!("{program} issues {}", plain[1])),
         _ => None,
     }
 }
@@ -302,6 +364,11 @@ const NOT_ALLOWED: &str = "Your owner did not allow this. It did not run. Say in
 /// own permission request, which the app's card answers.
 pub fn claude_ask(reason: &str) -> Value {
     json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "ask", "permissionDecisionReason": reason } })
+}
+
+/// A `PermissionRequest` the gate refuses, in the form both agents read: denied, saying why.
+pub fn permission_refusal(reason: &str) -> Value {
+    json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "deny", "message": reason}}})
 }
 
 /// The owner's answer on the card, as Codex's `PreToolUse` hook prints it.

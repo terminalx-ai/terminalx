@@ -1,5 +1,6 @@
 import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
@@ -22,11 +23,13 @@ import { BotAvatar } from "./BotAvatar";
 export function BotSettings({ bot }: { bot: Bot }) {
   // Each section waits on its own save; the others stay usable.
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
+  // The last save that failed, with how to try it again: a change that gives the bot more is confirmed by this window,
+  // and a runtime that cannot verify it is restarted from the error (`MachineHostError`), then the save is tried again.
+  const [error, setError] = useState<{ message: string; retry: () => void } | null>(null);
   const save = (what: string, patch: BotPatch) => {
     setBusy((current) => new Set(current).add(what));
     updateBot(bot.id, patch)
-      .then(() => setError(null), (cause) => setError(errorMessage(cause)))
+      .then(() => setError(null), (cause) => setError({ message: errorMessage(cause), retry: () => save(what, patch) }))
       .finally(() => setBusy((current) => {
         const next = new Set(current);
         next.delete(what);
@@ -37,7 +40,11 @@ export function BotSettings({ bot }: { bot: Bot }) {
   const saveList = (what: "worksIn" | "whoCanAsk", patch: BotPatch) => save(what, { ...patch, ifModified: bot.modified });
   return (
     <div className="flex min-w-0 max-w-[1040px] flex-col" data-testid="bot-settings">
-      {error && <p role="alert" className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive" data-testid="bot-settings-error">{error}</p>}
+      {error && (
+        <div data-testid="bot-settings-error">
+          <MachineHostError error={error.message} onRestarted={() => { setError(null); error.retry(); }} className="mb-3 rounded-md bg-destructive/10 px-3 py-2" />
+        </div>
+      )}
       <Section title="Runs on" note={`Where ${bot.name} lives and works. Moving a bot takes its role, memory and duties with it.`}>
         <RunsOn bot={bot} />
       </Section>

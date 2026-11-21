@@ -59,6 +59,16 @@ the first sub-issues.
 - **Only a person's words count as approval.** A message from one bot to
   another is labelled with the sender and the sender's authority. A bot cannot
   grant itself more access, and a bot cannot resume itself after a pause.
+- **Access is a mode plus a per-call gate (PRO-478).** A bot's sessions run no
+  wider than `bots::chat::permission_mode` allows. Every tool call also passes
+  `bots::access`: Ask before outward actions asks before anything that is not
+  a known read; Read and report runs known reads, asks before a report, and
+  refuses the rest. A known read is a named read tool, a shell command vetted
+  read-only, or an exact `terminalx` read. It is not a sandbox. **Web reads
+  count as reads**: `WebFetch`, `WebSearch` and a vetted read-only command
+  that fetches a URL run unasked at Read and report (and at Ask before
+  outward actions), and a web request can carry data out of this Mac in its
+  address. Keep secrets away from a bot that should not send them anywhere.
 - **Pause says what it stopped.** Pause and Pause all are recorded with who
   paused the bot. A paused bot still answers its owner in chat (screen 23.12).
 - **Templates carry no credentials or permissions.** Every duty in a template
