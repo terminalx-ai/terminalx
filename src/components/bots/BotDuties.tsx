@@ -14,11 +14,16 @@ import { formatCost } from "@/lib/stats";
 import { useSessionStore } from "@/lib/sessions";
 import type { Automation, AutomationRun } from "@/types/automations";
 import type { Bot } from "@/types/bots";
-import type { DutyState, QuietHours } from "@/types/botDuties";
+import type { DutyInput, DutyState, QuietHours } from "@/types/botDuties";
+import { dutyAt } from "@/lib/botCalendar";
 import { BotDuty } from "./BotDuty";
 import { BotDutyEditor } from "./BotDutyEditor";
+import { DutiesCalendar, DutiesViewSwitch, type DutiesView } from "./DutiesCalendar";
 
-type Screen = { kind: "list" } | { kind: "duty"; id: string } | { kind: "edit"; id: string | null };
+type Screen = { kind: "list" } | { kind: "duty"; id: string } | { kind: "edit"; id: string | null; initial?: DutyInput };
+
+/** List or Calendar (PRO-473), as last chosen on a bot's Duties tab while the app runs. */
+let lastView: DutiesView = "list";
 
 /** What wakes a bot, as the "Add a duty" tiles offer it. Only a schedule is built here; the rest come with the triggers ticket. */
 const WAKES: { label: string; note: string; icon: typeof CalendarClock; ready: boolean }[] = [
@@ -64,6 +69,11 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
   const bots = useBotStore();
   const sessions = useSessionStore();
   const [screen, setScreen] = useState<Screen>({ kind: "list" });
+  const [view, setView] = useState<DutiesView>(lastView);
+  const choose = (next: DutiesView) => {
+    lastView = next;
+    setView(next);
+  };
   const duties = useMemo(() => dutiesOf(automations.automations, bot.id), [automations.automations, bot.id]);
   const runs = useDutyRuns(duties);
   const stateKey = useMemo(() => duties.map((duty) => `${duty.id}:${duty.modified}:${duty.lastRunAt ?? ""}`).join("|"), [duties]);
@@ -84,6 +94,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         bot={bot}
         bots={bots.bots}
         duty={duty}
+        initial={screen.initial}
         home={state?.home ?? duty?.projectPath ?? null}
         onClose={(saved) => setScreen(saved ? { kind: "duty", id: saved } : duty ? { kind: "duty", id: duty.id } : { kind: "list" })}
       />
@@ -108,6 +119,18 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
     );
   }
 
+  if (view === "calendar") {
+    return (
+      <DutiesCalendar
+        bots={bots.bots.some((other) => other.id === bot.id) ? bots.bots : [bot, ...bots.bots]}
+        single={bot}
+        lead={<><h2 className="text-[15px] font-semibold text-foreground">Duties</h2><DutiesViewSwitch value={view} onChange={choose} /></>}
+        onAdd={(_, slot) => setScreen({ kind: "edit", id: null, initial: slot ? dutyAt(slot.day, slot.minute, slot.timezone) : undefined })}
+        onOpenDuty={(_, id) => setScreen({ kind: "duty", id })}
+      />
+    );
+  }
+
   const all = duties.flatMap((duty) => (runs[duty.id] ?? []).map((run) => ({ duty, run })));
   const log = all.filter(({ run }) => runAt(run)).sort((a, b) => (runAt(b.run) ?? "").localeCompare(runAt(a.run) ?? "")).slice(0, 12);
   const today = todayCounts(all.map(({ run }) => run));
@@ -116,7 +139,10 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
       <section className="min-w-0 flex-[1_1_520px]" aria-label="Duties">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-foreground">Duties</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-[15px] font-semibold text-foreground">Duties</h2>
+              <DutiesViewSwitch value={view} onChange={choose} />
+            </div>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">What wakes {bot.name}. A quick check runs first; the model runs only when there is something to say.</p>
           </div>
           <Button size="sm" variant="secondary" onClick={() => setScreen({ kind: "edit", id: null })} data-testid="duty-add"><Plus /> Add a duty</Button>

@@ -887,6 +887,7 @@ pub fn run() {
             commands::bot_brief,
             commands::bot_brief_write,
             commands::bot_duties,
+            commands::bot_duty_week,
             commands::bot_duty_save,
             commands::bot_duty_switch,
             commands::bot_duty_delete,

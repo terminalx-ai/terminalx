@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
 import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
-import { focusTaken, showBotRoleMemory, showBotSettings, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { focusTaken, showBotRoleMemory, showBotSettings, showBotsDuties, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { openBot } from "@/lib/sessions";
@@ -15,6 +15,7 @@ import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
 import { BotRoleMemory } from "./BotRoleMemory";
+import { BotsDuties } from "./BotsDuties";
 import { BotsHeader } from "./BotsHeader";
 import { BotSettingsPage } from "./BotSettingsPage";
 import { FirstBot } from "./FirstBot";
@@ -39,6 +40,7 @@ export function BotsView() {
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
   if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
   if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
+  if (page.page === "duties") return <BotsDuties />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -78,14 +80,10 @@ function BotsTeam({ focus }: { focus: boolean }) {
             {busy ? <Loader2 className="animate-spin" /> : <Pause />} Pause all
           </Button>
         )}
-        {/* Filled by the calendar ticket. */}
-        <WithTooltip label="The bots' calendar comes in a later build">
-          <span>
-            <Button variant="outline" size="sm" disabled aria-label="Calendar (coming later)">
-              <Calendar /> Calendar
-            </Button>
-          </span>
-        </WithTooltip>
+        {/* The week of every bot's duties (PRO-473). */}
+        <Button variant="outline" size="sm" disabled={bots.length === 0} onClick={() => showBotsDuties()} data-testid="bots-calendar">
+          <Calendar /> Calendar
+        </Button>
         <Button variant="accent" size="sm" onClick={() => showHireBot()} data-testid="bots-hire">
           <Plus /> Hire a bot
         </Button>

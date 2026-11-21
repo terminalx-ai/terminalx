@@ -23,14 +23,16 @@ const DAYS = [["MO", "Monday"], ["TU", "Tuesday"], ["WE", "Wednesday"], ["TH", "
  * editor asks only what the duty does: its name, when it wakes, its first check, what the bot looks at, and where the
  * result goes. Slack, Telegram and a pull request are shown, switched off, until their tickets land.
  */
-export function BotDutyEditor({ bot, bots, duty, home, onClose }: {
+export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
   bot: Bot;
   bots: readonly Bot[];
   duty: Automation | null;
   home: string | null;
+  /** Where a new duty starts: an hour clicked on the week's calendar (PRO-473). */
+  initial?: DutyInput;
   onClose: (saved: string | null) => void;
 }) {
-  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : newDutyInput()));
+  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : initial ?? newDutyInput()));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const patch = (value: Partial<DutyInput>) => setInput((current) => ({ ...current, ...value }));
