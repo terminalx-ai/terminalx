@@ -66,6 +66,19 @@ struct Windows {
     renewed: HashMap<String, u64>,
 }
 
+/// Why a runtime cannot hold bots by this window's proof (PRO-489). `pinned`:
+/// the runtime pinned the window's key, and did not take this app for the
+/// window, which could not prove it; registering again with the proof
+/// repairs it. Otherwise the runtime was started without the key (Keychain
+/// could not be read at its launch), and holds bots by where a command comes
+/// from, as on Linux, until it is restarted with the key.
+#[derive(serde::Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnprovenWindow {
+    pub why: String,
+    pub pinned: bool,
+}
+
 pub struct Desktop {
     client: Arc<Client>,
     events: Bridge,
@@ -77,7 +90,7 @@ pub struct Desktop {
     /// window (PRO-489), and the endpoint it registered, to register again
     /// with its proof ([`Self::prove_again`]). None once proven, or where
     /// none is asked.
-    unproven: Mutex<Option<(super::supervisor::UnprovenWindow, crate::hooks::ControlEndpoint)>>,
+    unproven: Mutex<Option<(UnprovenWindow, crate::hooks::ControlEndpoint)>>,
 }
 
 impl Desktop {
@@ -160,7 +173,7 @@ impl Desktop {
             Ok(answer) if answer["proven"] == false => {
                 let why = local.unwrap_or_else(|| answer["message"].as_str().unwrap_or("no proof").to_owned());
                 log::warn!("the runtime attached this window without taking it for the window: {why}");
-                *self.unproven.lock().unwrap() = Some((super::supervisor::UnprovenWindow { why, pinned: true }, endpoint));
+                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: true }, endpoint));
                 Ok(())
             }
             // A runtime started without the window's key (Keychain could not
@@ -169,7 +182,7 @@ impl Desktop {
             Ok(answer) if answer["pinned"] == false => {
                 let why = answer["message"].as_str().unwrap_or("This runtime was started without the window's key.").to_owned();
                 log::warn!("the runtime this window attached to has no window key pinned: {why}");
-                *self.unproven.lock().unwrap() = Some((super::supervisor::UnprovenWindow { why, pinned: false }, endpoint));
+                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: false }, endpoint));
                 Ok(())
             }
             other => {
@@ -182,7 +195,7 @@ impl Desktop {
     /// Why the runtime attached this window without taking it for the
     /// window, while it has not proved it since (PRO-489): while Bots is on,
     /// its session and terminal changes are refused until it does.
-    pub fn unproven(&self) -> Option<super::supervisor::UnprovenWindow> {
+    pub fn unproven(&self) -> Option<UnprovenWindow> {
         self.unproven.lock().unwrap().as_ref().map(|(unproven, _)| unproven.clone())
     }
 

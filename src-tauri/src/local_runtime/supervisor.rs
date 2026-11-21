@@ -32,18 +32,7 @@ const STABLE: Duration = Duration::from_secs(30);
 const LOST_EVENTS: &str = "The connection to the background runtime closed. Agents and terminal commands keep running.";
 const LOST_VIEW: &str = "Live terminal output in this window disconnected. Agents and terminal commands keep running.";
 
-/// Why a runtime cannot hold bots by this window's proof (PRO-489). `pinned`:
-/// the runtime pinned the window's key, and did not take this app for the
-/// window, which could not prove it; registering again with the proof
-/// repairs it. Otherwise the runtime was started without the key (Keychain
-/// could not be read at its launch), and holds bots by where a command comes
-/// from, as on Linux, until it is restarted with the key.
-#[derive(Serialize, Debug, PartialEq, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct UnprovenWindow {
-    pub why: String,
-    pub pinned: bool,
-}
+pub use super::desktop::UnprovenWindow;
 
 /// What one window shows. Read without asking the owner anything, so it never
 /// waits on an owner that has stopped answering.
