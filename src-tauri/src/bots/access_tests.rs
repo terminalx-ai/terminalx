@@ -344,6 +344,7 @@ fn only_known_reads_go_unasked() {
         "terminalx bots items",
         "terminalx bots items needsYou 3",
         "terminalx bots pause atlas",
+        "terminalx bots handoffstop 4",
         "terminalx memory add x",
         "./terminalx bots memory add x",
     ] {
@@ -384,7 +385,10 @@ fn only_known_reads_go_unasked() {
         // PRO-469: its own work list, kept as its rules say.
         "terminalx bots items list", "terminalx bots items show 3", "terminalx bots items add --title 'Fix the build' --done 'CI green | gh run view'",
         "terminalx bots items set 3 --state doing", "terminalx bots items ask 3 --question 'Ship?' --answer Yes --answer No", "terminalx bots items check 3 1 --met",
-        "terminalx bots items comment 3 'Halfway'", "terminalx bots items done 3"] {
+        "terminalx bots items comment 3 'Halfway'", "terminalx bots items done 3",
+        // PRO-475: a hand-off is answered at any level, a read-and-report bot's too.
+        "terminalx bots handoff --to sentry --title 'Check the runner' --scope 'Read only.'", "terminalx bots handoff --retry 4",
+        "terminalx bots tell --to lead --text 'Queue is long'", "tnx --json bots tell --to atlas --about 4 --failed --text 'No access'", "terminalx bots handoffs --all"] {
         for access in [BotAccess::Full, ask.clone(), read.clone(), BotAccess::Other("someday".into())] {
             assert_eq!(gate(&access, &shell(command, &cwd)), Gate::Leave, "{command} at {access:?}");
         }

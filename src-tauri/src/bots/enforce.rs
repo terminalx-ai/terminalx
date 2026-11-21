@@ -189,6 +189,8 @@ pub fn before_delete(manager: &SessionManager, id: &str) {
     for entry in sessions(|entry| acting_bot(entry).as_deref() == Some(id)) {
         stop(manager, &entry);
     }
+    // Other bots' work on what it handed them stops too (PRO-475).
+    super::handoffs::before_delete(manager, id);
 }
 
 /// After bot `id` is deleted: its chats go to the archive, where they can
@@ -197,6 +199,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
     // Its work list goes to the trash with its home (PRO-469).
     if let Err(error) = super::items::trash(id) {
         log::warn!("move the work items of deleted bot {id} to the trash: {error:#}");
+    }
+    // Its hand-offs and messages leave with it (PRO-475).
+    if let Err(error) = super::handoffs::forget_bot(sink, id) {
+        log::warn!("move the hand-offs of deleted bot {id} to the trash: {error:#}");
     }
     let ids: Vec<String> = chats(id).into_iter().filter(|entry| !entry.archived).map(|entry| entry.id).collect();
     if ids.is_empty() {
@@ -219,6 +225,10 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     if let Some(answer) = super::items::runtime_call(manager, operation, params) {
         return answer;
     }
+    // Hand-offs, and the team brief (PRO-475).
+    if let Some(answer) = super::handoffs::runtime_call(manager, operation, params) {
+        return answer;
+    }
     if operation == "reconcile" {
         reconcile(manager, None);
         return Ok(serde_json::Value::Null);
@@ -233,6 +243,7 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     let answer = super::call(sink.as_ref(), operation, params)?;
     if let Some(id) = &deleting {
         after_delete(sink.as_ref(), id);
+        super::handoffs::deliver_waiting_all(manager);
     }
     // What changed reaches the sessions of the bot that changed (every bot for the switches over all).
     match operation {
@@ -247,6 +258,12 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
         "memoryUndo" if params["id"].as_str().zip(answer["id"].as_str()).is_some_and(|(bot, change)| undid_role(bot, change)) => refresh(manager, params["id"].as_str()),
         "update" if access_before != after_access(params) => refresh(manager, params["id"].as_str()),
         "resumeAll" => refresh(manager, None),
+        _ => {}
+    }
+    // Work handed to it while it was paused starts now, and what waited for it is sent (PRO-475).
+    match operation {
+        "resume" => super::handoffs::resumed(manager, params["id"].as_str()),
+        "resumeAll" => super::handoffs::resumed(manager, None),
         _ => {}
     }
     Ok(answer)
@@ -283,6 +300,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
     match operation {
         "resume" | "resumeAll" | "dismissResume" | "create" | "delete" => true,
         "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
+        // PRO-475: handing an item on makes a bot work; the team brief is what every bot is told.
+        "itemHand" | "briefWrite" => true,
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             // A patch this build cannot read may give more than it can tell.

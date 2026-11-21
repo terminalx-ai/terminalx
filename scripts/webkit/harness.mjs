@@ -69,16 +69,6 @@ export async function open(browser, url, fixture, viewport, { extra = "", colorS
   return page;
 }
 
-/**
- * Emit a native event once the app listens for it. A page just loaded may not
- * have subscribed yet on a slow runner, and the stub, like Tauri, drops an
- * event no one hears (PRO-497: `open_session` lost, the bot's view never opened).
- */
-export async function emitHeard(page, event, payload) {
-  await page.waitForFunction((name) => window.__PW_STUB__.heard(name), event);
-  await page.evaluate(([name, value]) => window.__PW_STUB__.emit(name, value), [event, payload]);
-}
-
 /** Print each check and return how many failed. */
 export function report(name, checks, detail) {
   let failed = 0;
@@ -99,6 +89,25 @@ export async function sidebar(page) {
   const rail = page.locator('[data-testid="sidebar-rail"]');
   await rail.waitFor();
   return rail;
+}
+
+/**
+ * Open session `sessionId` as the native menu does (`open_session`) and resolve with its view, `main` named `name`.
+ * The app takes the event only once its listener is set and the session is in its list (`openTarget` drops it
+ * before), so on a loaded runner the first one can go unheard: it is sent again until the view shows, 30 s at most.
+ */
+export async function openSession(page, sessionId, name, { timeout = 30_000 } = {}) {
+  const view = page.getByRole("main", { name });
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    await page.evaluate((id) => window.__PW_STUB__.emit("open_session", { sessionId: id }), sessionId);
+    try {
+      await view.waitFor({ timeout: Math.min(2_000, Math.max(1, deadline - Date.now())) });
+      return view;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+    }
+  }
 }
 
 /**

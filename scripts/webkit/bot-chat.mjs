@@ -6,7 +6,7 @@
 // Settings tab with the bot's five settings sections inside the view.
 // Run after pnpm build: node scripts/webkit/bot-chat.mjs
 // BOT_CHAT_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve, sidebar, emitHeard } from "./harness.mjs";
+import { launch, open, openSession, report, serve, sidebar } from "./harness.mjs";
 
 const shots = process.env.BOT_CHAT_SHOTS;
 const server = await serve();
@@ -52,9 +52,7 @@ try {
         await rail.getByText("Move the macOS jobs to our own runner").first().waitFor();
         const listed = await rail.getByText("Chat with Kestrel").count();
         // Open the home chat the way a notification does: it opens in its bot's view.
-        await emitHeard(page, "open_session", { sessionId: "bot-home" });
-        const view = page.getByRole("main", { name: "Kestrel, CTO" });
-        await view.waitFor();
+        const view = await openSession(page, "bot-home", "Kestrel, CTO");
         const heading = view.getByRole("heading", { name: "Kestrel", exact: true });
         const chips = view.locator("span", { hasText: "Full access" }).last();
         const pause = view.getByRole("button", { name: paused ? "Resume" : "Pause" }).first();

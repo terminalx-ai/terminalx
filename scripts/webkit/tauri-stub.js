@@ -221,12 +221,8 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     answers,
     settingsFile: settings.file,
     fixture: f,
-    // An event no one listens for yet is dropped, as Tauri drops it: `heard` says whether the app listens.
     emit(event, payload) {
       for (const { eventId, handler } of listening.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });
-    },
-    heard(event) {
-      return (listening.get(event) ?? []).length > 0;
     },
   };
   window.__TAURI_INTERNALS__ = {

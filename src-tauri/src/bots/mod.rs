@@ -13,7 +13,9 @@ pub mod memory;
 pub mod chat;
 pub mod calendar;
 pub mod duties;
+pub mod brief;
 pub mod enforce;
+pub mod handoffs;
 pub mod items;
 pub mod templates;
 

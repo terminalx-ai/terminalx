@@ -994,6 +994,7 @@ impl ControlService {
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
             "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1073,6 +1074,7 @@ impl ControlService {
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
                 bots::enforce::after_delete(sink, &bot.id);
+                bots::handoffs::deliver_waiting_all(&self.manager);
                 json!({"deleted": bot.id, "name": bot.name})
             }
             "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
@@ -3031,6 +3033,8 @@ fn bots_action(operation: &str) -> &'static str {
         "dutyRun" => "run a bot's duty",
         "dutyTryCheck" => "try a duty's first check",
         "quietHours" => "change a bot's quiet hours",
+        "itemHand" => "hand a bot's item to another bot",
+        "briefWrite" => "change the team brief",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -5919,3 +5923,7 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+// Bots hand-offs from the command line (PRO-475).
+#[path = "control_bot_handoffs.rs"]
+mod bot_handoffs;

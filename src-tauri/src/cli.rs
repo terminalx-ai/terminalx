@@ -183,6 +183,10 @@ Usage:
   terminalx bots items check ITEM LINE --met|--unmet [--how TEXT] [--json]
   terminalx bots items comment ITEM --text TEXT [--json]
   terminalx bots items done ITEM [--text NOTE] [--json]
+  terminalx bots handoff --to BOT|lead --title TITLE [--scope TEXT] [--due WHEN] [--json]
+  terminalx bots handoff --retry HANDOFF [--json]
+  terminalx bots tell --to BOT|lead --text TEXT [--about HANDOFF [--failed]] [--json]
+  terminalx bots handoffs [--all] [--bot BOT] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -1593,7 +1597,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// slug, id or name. The app answers `bots_off` while Settings → Experimental
 /// → Bots is off.
 fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all or memory";
+    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell or handoffs";
     let command = tokens.required_front(&format!("bots command ({COMMANDS})"))?;
     let said = |tokens: &mut Tokens, option: &str, what: &str| -> Result<String, ControlError> {
         match tokens.option(option)? {
@@ -1635,8 +1639,68 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
         }
         "memory" => parse_bot_memory(tokens),
         "items" => parse_bot_items(tokens),
+        "handoff" | "tell" | "handoffs" => parse_bot_handoffs(&command, tokens),
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
+}
+
+/// Hand-offs between bots (PRO-475). From one of a bot's sessions they are
+/// that bot's, which the app works out from where the command runs; from
+/// anywhere else `handoffs --bot` reads one bot's, and nothing is sent.
+fn parse_bot_handoffs(command: &str, tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let mut params = json!({});
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    let number = |value: &str, what: &str| -> Result<u64, ControlError> {
+        value.trim().trim_start_matches('#').parse().ok().filter(|number| *number > 0).ok_or_else(|| invalid(format!("{value} is not {what}.")))
+    };
+    match command {
+        "handoffs" => {
+            if let Some(bot) = tokens.option("--bot")? {
+                params["bot"] = json!(bot);
+            }
+            params["all"] = json!(tokens.flag("--all")?);
+        }
+        "handoff" => {
+            if let Some(retry) = tokens.option("--retry")? {
+                params["retry"] = json!(number(&retry, "a hand-off's number")?);
+            } else {
+                match tokens.option("--to")? {
+                    Some(to) if !to.trim().is_empty() => params["to"] = json!(to),
+                    _ => return Err(invalid("bots handoff needs --to BOT (or lead).")),
+                }
+                match tokens.option("--title")? {
+                    Some(title) if !title.trim().is_empty() => params["title"] = json!(title),
+                    _ => return Err(invalid("bots handoff needs --title TITLE.")),
+                }
+                for (option, key) in [("--scope", "scope"), ("--due", "due")] {
+                    if let Some(value) = tokens.option(option)? {
+                        params[key] = json!(value);
+                    }
+                }
+            }
+        }
+        _ => {
+            match tokens.option("--to")? {
+                Some(to) if !to.trim().is_empty() => params["to"] = json!(to),
+                _ => return Err(invalid("bots tell needs --to BOT (or lead).")),
+            }
+            match tokens.option("--text")? {
+                Some(text) if !text.trim().is_empty() => params["text"] = json!(text),
+                _ => return Err(invalid("bots tell needs --text TEXT.")),
+            }
+            if let Some(about) = tokens.option("--about")? {
+                params["about"] = json!(number(&about, "a hand-off's number")?);
+            }
+            let failed = tokens.flag("--failed")?;
+            if failed && params.get("about").is_none() {
+                return Err(invalid("--failed goes with --about HANDOFF."));
+            }
+            params["failed"] = json!(failed);
+        }
+    }
+    rpc(&format!("bots.{command}"), params, tokens)
 }
 
 /// A bot's work items (PRO-469). From one of a bot's sessions they are that
@@ -2237,7 +2301,7 @@ mod tests {
         assert_eq!(inside[4], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[5], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[6], json!({"role": "cto", "name": "Echo", "caller": caller}));
-        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all or memory"));
+        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell or handoffs"));
         // PRO-470: a bot's memory, from its own chat (the caller is sent for the app to check) or naming the bot.
         assert_eq!(rpc_of(&["bots", "memory", "add", "Status updates go in a table.", "--bot", "atlas"]), ("bots.memory.add".into(), json!({"bot": "atlas", "text": "Status updates go in a table."}), short));
         assert_eq!(rpc_of(&["bots", "memory", "forget", "--line", "3", "Twice", "--bot", "atlas"]), ("bots.memory.forget".into(), json!({"bot": "atlas", "line": "Twice", "number": 3}), short));
@@ -3427,3 +3491,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cli_bot_items_tests.rs"]
 mod bot_items_tests;
+
+#[cfg(test)]
+#[path = "cli_bot_handoffs_tests.rs"]
+mod bot_handoffs_tests;
