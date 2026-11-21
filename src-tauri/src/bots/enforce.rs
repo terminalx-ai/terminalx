@@ -236,6 +236,11 @@ pub fn before_delete(manager: &SessionManager, id: &str) {
     super::handoffs::before_delete(manager, id);
 }
 
+/// Whether bot `id` has no record any more: a delete that failed after removing it still needs [`after_delete`].
+pub fn is_gone(id: &str) -> bool {
+    matches!(crate::store::bots::get(id), Ok(None))
+}
+
 /// After bot `id` is deleted: its chats go to the archive, where they can
 /// still be read. A session it started stays where it is, held to plan mode.
 pub fn after_delete(sink: &dyn EventSink, id: &str) {
@@ -306,11 +311,16 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
         }
     }
     let access_before = (operation == "update").then(|| after_access(params)).flatten().and(params["id"].as_str().and_then(|id| crate::store::bots::get(id).ok().flatten()).map(|bot| bot.access));
-    let answer = super::call(sink.as_ref(), operation, params)?;
-    if let Some(id) = &deleting {
+    let answer = super::call(sink.as_ref(), operation, params);
+    // A bot whose record is gone is cleaned up after even when moving its home or history failed.
+    if let Some(id) = deleting.as_deref().filter(|id| answer.is_ok() || is_gone(id)) {
         after_delete(sink.as_ref(), id);
         super::handoffs::deliver_waiting_all(manager);
+        if answer.is_err() {
+            reconcile(manager, Some(id));
+        }
     }
+    let answer = answer?;
     // What changed reaches the sessions of the bot that changed (every bot for the switches over all).
     match operation {
         "resume" | "update" | "delete" => reconcile(manager, params["id"].as_str()),

@@ -50,6 +50,16 @@ with its record next to it as `bot.json`.
   organisation), or as personal notes (`personal/`). A conversation is given
   the newest lines of the bot's own notes and of the place it works in, 200
   in all; past that the oldest move to that place's `memory/archive.md`.
+  The place a conversation works in is the bot's first organisation (or
+  personal): a conversation carries no organisation of its own until one bot
+  works across several (PRO-483). An organisation's folder is its id when
+  that is a plain lower-case name, else `x-<hash>`, so ids that differ only
+  in case never share a folder on a Mac; a folder an earlier build kept by an
+  id with capitals is moved on the next look.
+- **Line numbers.** A memory past 64 KB is listed from its end (its newest
+  notes). `forget --line N`, a tidy's line numbers and the screen's Forget
+  count from the first line listed, as `terminalx bots memory list` shows
+  them, not from the top of the file.
 - **The two memory commands.** A bot writes memory only with
   `terminalx bots memory add "<note>"` and `terminalx bots memory forget
   "<words>"` (`list` reads), never by editing the files. From a bot's chat, or
@@ -67,8 +77,22 @@ with its record next to it as `bot.json`.
   and resuming do (`enforce::needs_person`). From the command line the owner
   names the bot with `--bot`, from a terminal of their own.
 - **History.** Every change, edits made outside the app included, is
-  recorded with where it came from and can be undone. A large edit is kept as
-  the whole texts by hash. A rotation keeps the newest role change.
+  recorded with where it came from and can be undone. A large edit, the
+  app's own move to the archive included, is kept as the whole texts by
+  hash. The log rotates past 1 MB, or once the texts its past changes keep
+  pass 16 MB; a rotation keeps the newest role change. Files are written by
+  direction (those that gain lines first, those that lose lines last), so a
+  crash between two writes of a move or of its undo leaves a line in both,
+  never in neither. A look (every chat launch) reads again only the files
+  whose size, times or inode changed, and follows topic files of any name
+  without control characters, line breaks, `\` or `:`. An unreadable
+  `known.json` is set aside and rebuilt from the log.
+- **The window's key in memory.** The window reads its consent key from
+  Keychain once and holds it in memory only (`consent::witness_for`), so a
+  guarded write does not read Keychain each time; the key a launch pins
+  replaces it, and it is forgotten wherever the launch key is
+  (`consent::forget_launch_key`), so the next write reads Keychain again. A
+  failed read is not held.
 
 ## Rules every sub-issue keeps
 

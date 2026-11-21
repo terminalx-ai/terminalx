@@ -202,8 +202,9 @@ fn the_budget_counts_the_bots_notes_with_its_places() {
     assert_eq!(working_place(&bot), Place::Org("Acme".into()));
     let acme = Place::parse(&bot, "Acme").unwrap();
     add(sink.as_ref(), &bot, &acme, "Kestrel ships on Tuesdays", OWNER, Source::of("app")).unwrap();
-    // Each organisation has its own folder, by its id: a rename keeps its notes. An id that is not a plain name is kept by its hash.
-    assert_eq!(acme.dir(), "orgs/Acme/");
+    // Each organisation has its own folder, by its id: a rename keeps its notes. An id that is not a plain
+    // lower-case name is kept by its hash, so ids that differ only in case never share one (PRO-491).
+    assert!(acme.dir().starts_with("orgs/x-") && Place::Org("acme".into()).dir() == "orgs/acme/" && acme.dir() != Place::Org("ACME".into()).dir());
     assert!(Place::Org("a/../b".into()).dir().starts_with("orgs/x-") && Place::Org("x-1".into()).dir() != "orgs/x-1/");
     assert!(file(&bot, &acme.memory_file()).contains("Kestrel ships on Tuesdays"));
 
@@ -693,15 +694,21 @@ fn one_large_outside_edit_keeps_the_role_change_and_the_rest_of_the_history() {
     pad_log(&bot, changes::MAX_LOG_BYTES * 3 / 4);
     let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
 
-    std::fs::write(home_of(&bot).join("ROLE.md"), "Atlas rewrote its own role.\n").unwrap();
-    let archive: String = (0..5200).map(|n| format!("- 2026-01-01 An archived note, number {n}, long enough to make the archive large: {}\n", "y".repeat(40))).collect();
-    assert!(archive.len() > 500 * 1024);
+    // The archive is there before the edit, so the edit is one of lines, not a new file (PRO-491).
     std::fs::create_dir_all(home_of(&bot).join("memory")).unwrap();
+    std::fs::write(home_of(&bot).join("memory/archive.md"), "- 2025-12-01 Archived before\n").unwrap();
+    assert_eq!(super::super::call(sink.as_ref(), "memoryLook", &json!({"id": bot.id})).unwrap()["found"], 1);
+    let before = read_log(&bot.id).unwrap().changes.len();
+
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Atlas rewrote its own role.\n").unwrap();
+    let archive: String = std::iter::once("- 2025-12-01 Archived before\n".to_string()).chain((0..5200).map(|n| format!("- 2026-01-01 An archived note, number {n}, long enough to make the archive large: {}\n", "y".repeat(40)))).collect();
+    assert!(archive.len() > 500 * 1024);
     std::fs::write(home_of(&bot).join("memory/archive.md"), &archive).unwrap();
     assert_eq!(super::super::call(sink.as_ref(), "memoryLook", &json!({"id": bot.id})).unwrap()["found"], 2);
 
     let log = read_log(&bot.id).unwrap();
-    let archived = log.changes.iter().find(|change| change.states.contains_key("memory/archive.md")).unwrap();
+    assert_eq!(log.changes.len(), before + 2);
+    let archived = log.changes.iter().rev().find(|change| change.states.contains_key("memory/archive.md")).unwrap();
     assert!(matches!(archived.known_edits().unwrap().as_slice(), [Edit::ReplaceText { .. }]), "whole texts by hash, not 5200 line edits");
     assert!(serde_json::to_string(archived).unwrap().len() < 4096);
     assert!(log.changes.iter().any(|change| change.id == note), "nothing rotated out");
@@ -715,6 +722,50 @@ fn one_large_outside_edit_keeps_the_role_change_and_the_rest_of_the_history() {
     super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": role_change["id"]})).unwrap();
     assert_ne!(file(&bot, "ROLE.md"), "Atlas rewrote its own role.\n");
     super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": archived.id})).unwrap();
+    assert_eq!(file(&bot, "memory/archive.md"), "- 2025-12-01 Archived before\n");
+}
+
+/// PRO-491: an edit of lines in the middle of `MEMORY.md` whose line edits
+/// would pass the cap by a little is kept as whole texts; one line fewer is kept as lines.
+#[test]
+fn a_middle_edit_of_the_memory_just_over_the_cap_is_kept_as_whole_texts() {
+    let (_home, sink, bot) = hired();
+    let lines: Vec<String> = (0..600).map(|n| format!("- 2026-10-01 Note {n:03}: {}", "m".repeat(80))).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), changes::text_of(&lines)).unwrap();
+    changes::look(sink.as_ref(), &bot.id).unwrap();
+    // The fewest middle lines rewritten whose line edits pass the cap.
+    let edited = |count: usize| -> Vec<String> {
+        lines.iter().enumerate().map(|(at, line)| if (300 - count / 2..300 - count / 2 + count).contains(&at) { format!("{line} (edited)") } else { line.clone() }).collect()
+    };
+    let over = (1..300).find(|count| changes::line_edits("MEMORY.md", &lines, &edited(*count)).is_none()).unwrap();
+    assert!(changes::line_edits("MEMORY.md", &lines, &edited(over - 1)).is_some(), "just over the cap");
+    std::fs::write(home_of(&bot).join("MEMORY.md"), changes::text_of(&edited(over))).unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1);
+    let change = read_log(&bot.id).unwrap().changes.pop().unwrap();
+    assert!(matches!(change.known_edits().unwrap().as_slice(), [Edit::ReplaceText { .. }]));
+    assert!(serde_json::to_string(&change).unwrap().len() < 4096);
+    super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": change.id})).unwrap();
+    assert_eq!(file(&bot, "MEMORY.md"), changes::text_of(&lines));
+}
+
+/// PRO-491: the app's own move to the archive is capped too: a memory grown
+/// large outside the app moves many lines as whole texts, in one small log entry, and an undo puts them back.
+#[test]
+fn a_large_archive_move_is_kept_as_whole_texts() {
+    let (_home, sink, bot) = hired();
+    let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-10-{:02} Grown outside, note {n:04}", 1 + n % 28)).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), changes::text_of(&lines)).unwrap();
+    changes::look(sink.as_ref(), &bot.id).unwrap();
+    let recorded = add(sink.as_ref(), &bot, &Place::Bot, "One more", OWNER, Source::of("app")).unwrap();
+    let archived = recorded.iter().find(|change| change.kind == "archived").unwrap();
+    assert!(archived.text.starts_with("Moved 2801 older notes"), "{}", archived.text);
+    assert!(archived.known_edits().unwrap().iter().all(|edit| matches!(edit, Edit::ReplaceText { .. })));
+    assert!(serde_json::to_string(archived).unwrap().len() < 4096, "one small entry");
+    assert_eq!(file(&bot, "MEMORY.md").lines().count(), BUDGET);
+    assert_eq!(file(&bot, "memory/archive.md").lines().count(), 2801);
+    assert!(file(&bot, "MEMORY.md").contains("One more"));
+    undo(sink.as_ref(), &bot, &archived.id, OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, "MEMORY.md").lines().count(), 3001);
     assert!(file(&bot, "memory/archive.md").is_empty());
 }
 
@@ -783,6 +834,7 @@ fn the_look_over_every_bot_needs_the_switch() {
 }
 
 /// A note moved to the archive is written there before it leaves the memory.
+#[cfg(unix)]
 #[test]
 fn an_archive_move_writes_the_archive_first() {
     let (_home, sink, bot) = hired();
@@ -798,4 +850,159 @@ fn an_archive_move_writes_the_archive_first() {
     assert!(failed.is_err());
     assert!(file(&bot, "memory/archive.md").contains("Note 0"), "the archive was written first");
     assert!(std::fs::read_to_string(&memory).unwrap().contains("Note 0"), "and the note is still in the memory");
+}
+
+/// PRO-491: undoing a move to the archive writes the memory first: the note
+/// is back in the memory before it leaves the archive, so a crash between the
+/// two writes loses nothing.
+#[cfg(unix)]
+#[test]
+fn undoing_an_archive_move_writes_the_memory_first() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_home, sink, bot) = hired();
+    let notes: Vec<String> = (0..BUDGET).map(|n| format!("- 2026-10-{:02} Note {n}", 1 + n % 28)).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}\n", notes.join("\n"))).unwrap();
+    let recorded = add(sink.as_ref(), &bot, &Place::Bot, "One too many", OWNER, Source::of("app")).unwrap();
+    let archived = recorded.iter().find(|change| change.kind == "archived").unwrap().clone();
+    assert!(file(&bot, "memory/archive.md").contains("Note 0\n"));
+    // Room for the note to come back without another move.
+    forget(sink.as_ref(), &bot, &Place::Bot, "One too many", None, OWNER, Source::of("app")).unwrap();
+    // The archive's folder made read-only: the memory is written first, so the failed archive write leaves the note in both.
+    let folder = home_of(&bot).join("memory");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = undo(sink.as_ref(), &bot, &archived.id, OWNER, Source::of("app"));
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err());
+    assert!(file(&bot, "MEMORY.md").contains("- 2026-10-01 Note 0\n"), "the memory was written first");
+    assert!(file(&bot, "memory/archive.md").contains("Note 0\n"), "and the note is still in the archive");
+}
+
+/// PRO-491: a tidy and a forget by line number count from the first line
+/// the list shows, which for a memory past the read limit is not the file's first.
+#[test]
+fn line_numbers_past_the_read_limit_count_as_the_list_shows_them() {
+    let (_home, sink, bot) = hired();
+    let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the limit")).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), changes::text_of(&lines)).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let listed = &shown.memory.places[0].lines;
+    assert_eq!(lines_not_listed(&file(&bot, "MEMORY.md")), 3000 - listed.len());
+    let at = listed.iter().position(|line| line.contains("Note number 2995")).unwrap();
+    let plan = TidyPlan { remove: vec![TidyLine { place: None, line: at + 1, note: note_text(&listed[at]).into() }], merge: vec![] };
+    tidy(sink.as_ref(), &bot, &plan, &places(&bot), OWNER, Source::of("app"), None).unwrap();
+    assert!(!file(&bot, "MEMORY.md").contains("Note number 2995"));
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let listed = &shown.memory.places[0].lines;
+    let at = listed.iter().position(|line| line.contains("Note number 2996")).unwrap();
+    // The screen's forget names the line by where the list has it.
+    super::super::call(sink.as_ref(), "memoryForget", &json!({"id": bot.id, "place": "bot", "line": listed[at], "index": at})).unwrap();
+    assert!(!file(&bot, "MEMORY.md").contains("Note number 2996"));
+    assert_eq!(file(&bot, "MEMORY.md").lines().count(), 2998);
+}
+
+/// PRO-491: the kept texts of past changes are held within a limit: past it
+/// the log rotates, keeping the newest changes and their texts.
+#[test]
+fn the_kept_texts_stay_within_their_limit() {
+    let (_home, sink, bot) = hired();
+    let topic = home_of(&bot).join("memory/big.md");
+    let mut last = None;
+    for round in 0..24 {
+        std::fs::write(&topic, format!("Round {round}\n{}", format!("{round:02} {}\n", "t".repeat(997)).repeat(900))).unwrap();
+        assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1);
+        last = read_log(&bot.id).unwrap().changes.pop();
+    }
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id).join(changes::TEXTS_DIR);
+    let total: u64 = std::fs::read_dir(&folder).unwrap().flatten().map(|entry| entry.metadata().unwrap().len()).sum();
+    assert!(total < changes::MAX_HISTORY_TEXT_BYTES, "{total}");
+    let log = read_log(&bot.id).unwrap();
+    assert!(log.changes.len() < 24, "older changes rotated out with their texts");
+    let last = last.unwrap();
+    assert!(log.changes.iter().any(|change| change.id == last.id));
+    // The newest change keeps what it needs: its Undo works.
+    undo(sink.as_ref(), &bot, &last.id, OWNER, Source::of("app")).unwrap();
+    assert!(file(&bot, "memory/big.md").starts_with("Round 22\n"));
+}
+
+/// PRO-491: a topic file named with spaces or letters past ASCII is listed and followed.
+#[test]
+fn topic_files_with_spaces_and_accents_are_listed_and_followed() {
+    let (_home, sink, bot) = hired();
+    let name = "Release notes – été 2026.md";
+    std::fs::write(home_of(&bot).join("memory").join(name), "Ship on Thursdays.\n").unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1, "a new topic file is an outside edit");
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    assert!(shown.memory.topics.iter().any(|topic| topic.name == name), "{:?}", shown.memory.topics);
+    std::fs::write(home_of(&bot).join("memory").join(name), "Ship on Fridays.\n").unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1);
+    let change = read_log(&bot.id).unwrap().changes.pop().unwrap();
+    assert!(change.states.contains_key(&format!("memory/{name}")));
+    undo(sink.as_ref(), &bot, &change.id, OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, &format!("memory/{name}")), "Ship on Thursdays.\n");
+    // Still never a path out of the home, nor one with a line break in it.
+    assert!(changes::checked("memory/../ROLE.md").is_err() && changes::checked("memory/a\nb.md").is_err() && changes::checked("memory/a\u{2028}b.md").is_err());
+}
+
+/// PRO-491: a look (every chat launch) reads again only the files that changed, however many topic files there are.
+#[test]
+fn a_look_reads_only_the_files_that_changed() {
+    let (_home, sink, bot) = hired();
+    for n in 0..300 {
+        std::fs::write(home_of(&bot).join("memory").join(format!("topic-{n:03}.md")), format!("Topic {n}\n")).unwrap();
+    }
+    changes::look(sink.as_ref(), &bot.id).unwrap();
+    let reads = || changes::LOOK_READS.with(|reads| reads.replace(0));
+    reads();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 0);
+    assert_eq!(reads(), 0, "nothing changed, nothing read");
+    std::fs::write(home_of(&bot).join("memory/topic-007.md"), "Topic seven, edited\n").unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1, "an edit is still found");
+    assert_eq!(reads(), 1);
+}
+
+/// PRO-491: an unreadable `known.json` is set aside and rebuilt from the
+/// log: the owner's writes go on, and an edit made since is still found.
+#[test]
+fn an_unreadable_known_file_does_not_block_writes() {
+    let (_home, sink, bot) = hired();
+    add(sink.as_ref(), &bot, &Place::Bot, "Before it broke", OWNER, Source::of("app")).unwrap();
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    std::fs::write(folder.join(changes::KNOWN_FILE), "{ cut sh").unwrap();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}- 2026-11-20 Edited by hand\n", file(&bot, "MEMORY.md"))).unwrap();
+    let recorded = add(sink.as_ref(), &bot, &Place::Bot, "After it broke", OWNER, Source::of("app")).unwrap();
+    let kinds: Vec<&str> = recorded.iter().map(|change| change.kind.as_str()).collect();
+    assert_eq!(kinds, ["outside", "learned"], "the edit by hand is found, and nothing else taken for one");
+    assert!(file(&bot, "MEMORY.md").contains("After it broke"));
+    assert!(std::fs::read_dir(&folder).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with("known.json.unreadable-")), "set aside");
+    let known: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.join(changes::KNOWN_FILE)).unwrap()).unwrap();
+    assert!(known["MEMORY.md"].is_string());
+}
+
+/// PRO-491: organisation ids that differ only in case keep their notes apart,
+/// and a folder an earlier build kept by an id with capitals moves to where it is kept now, with no outside edit.
+#[test]
+fn organisation_ids_that_differ_only_in_case_keep_their_notes_apart() {
+    let (_home, sink, bot) = hired();
+    let bot = with_works_in(sink.as_ref(), &bot, &["Kestrel", "kestrel", PERSONAL]);
+    add(sink.as_ref(), &bot, &Place::Org("Kestrel".into()), "Upper", OWNER, Source::of("app")).unwrap();
+    add(sink.as_ref(), &bot, &Place::Org("kestrel".into()), "Lower", OWNER, Source::of("app")).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let notes = |key: &str| shown.memory.places.iter().find(|place| place.key == key).unwrap().lines.join("\n");
+    assert!(notes("Kestrel").contains("Upper") && !notes("Kestrel").contains("Lower"));
+    assert!(notes("kestrel").contains("Lower") && !notes("kestrel").contains("Upper"));
+
+    // An earlier build's `orgs/Acme/`, known as it was.
+    let bot = with_works_in(sink.as_ref(), &bot, &["Acme", PERSONAL]);
+    let old = home_of(&bot).join("orgs/Acme");
+    std::fs::create_dir_all(&old).unwrap();
+    let text = "- 2026-11-01 Acme ships on Tuesdays\n";
+    std::fs::write(old.join("MEMORY.md"), text).unwrap();
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    let mut known: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.join(changes::KNOWN_FILE)).unwrap()).unwrap();
+    known["orgs/Acme/MEMORY.md"] = json!(changes::keep_text(&bot.id, text).unwrap());
+    std::fs::write(folder.join(changes::KNOWN_FILE), known.to_string()).unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 0, "moved, not taken for an edit");
+    let acme = Place::Org("Acme".into());
+    assert_eq!(file(&bot, &acme.memory_file()), text);
+    assert!(!old.exists());
 }

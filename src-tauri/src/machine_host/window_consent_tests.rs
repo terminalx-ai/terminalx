@@ -354,7 +354,10 @@ fn window(role: &str) {
     );
 
     // Even possession of the adopted host key cannot prove window identity.
+    // The window holds its key in memory once read (PRO-491): forgotten, as
+    // after a relaunch, the next write reads Keychain again.
     secrets.set(&service, CONSENT_ACCOUNT, &KEY).unwrap();
+    crate::serve_cli::consent::forget_launch_key();
     assert_person_required(call(wire::CREATE_CODE, json!({})), "different signing key");
     assert_person_required(
         call(wire::APPROVE, answer.clone()),
@@ -364,6 +367,7 @@ fn window(role: &str) {
     secrets
         .set(&service, CONSENT_ACCOUNT, &SIGNING_SEED)
         .unwrap();
+    crate::serve_cli::consent::forget_launch_key();
     let approved = call(wire::APPROVE, answer).unwrap();
     assert_eq!(approved["approved"], true);
     let status = call(wire::STATUS, json!({})).unwrap();

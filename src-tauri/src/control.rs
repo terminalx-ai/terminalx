@@ -1125,9 +1125,17 @@ impl ControlService {
                 caller.person_only("delete bots")?;
                 let bot = named()?;
                 bots::enforce::before_delete(&self.manager, &bot.id);
-                bots::delete(sink, &bot.id).map_err(failed)?;
-                bots::enforce::after_delete(sink, &bot.id);
-                bots::handoffs::deliver_waiting_all(&self.manager);
+                let deleted = bots::delete(sink, &bot.id);
+                // A bot whose record is gone is cleaned up after even when moving its home or history failed, so
+                // that failure is not also its chats left open and its work left running.
+                if deleted.is_ok() || bots::enforce::is_gone(&bot.id) {
+                    bots::enforce::after_delete(sink, &bot.id);
+                    bots::handoffs::deliver_waiting_all(&self.manager);
+                    if deleted.is_err() {
+                        bots::enforce::reconcile(&self.manager, Some(&bot.id));
+                    }
+                }
+                deleted.map_err(failed)?;
                 json!({"deleted": bot.id, "name": bot.name})
             }
             "bots.pauseAll" => bots::enforce::pause(&self.manager, None, &by, bots::pause::FROM_CLI).map_err(failed)?,
@@ -4874,6 +4882,44 @@ mod tests {
         assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice"})).unwrap_err().code, "invalid_arguments");
         assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 0})).unwrap_err().code, "invalid_arguments");
         assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 2})).is_ok());
+
+        // PRO-491: past the read limit the list starts from the file's end, and `--line N` counts as the list does.
+        let mut long: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the read limit")).collect();
+        long.insert(2991, "- 2026-11-02 Twice".into());
+        long.push("- 2026-11-02 Twice".into());
+        std::fs::write(&home, format!("{}\n", long.join("\n"))).unwrap();
+        let listed = ask("bots.memory.list", json!({"bot": "iris"})).unwrap();
+        let lines: Vec<&str> = listed["lines"].as_array().unwrap().iter().map(|line| line.as_str().unwrap()).collect();
+        assert!(lines.len() < 3000 && lines[0].contains("Note number"), "read from the end");
+        let number = lines.iter().position(|line| *line == "- 2026-11-02 Twice").unwrap() + 1;
+        assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": number})).is_ok());
+        let left = std::fs::read_to_string(&home).unwrap();
+        assert!(left.contains("Note number 2990, written long enough to pass the read limit\n- 2026-11-01 Note number 2991"), "the one the list numbered is the one forgotten");
+        assert!(left.ends_with("- 2026-11-02 Twice\n"));
+    }
+
+    /// PRO-491: a delete whose history cannot be moved to the trash still
+    /// cleans up after the bot, whose record is gone: its chats go to the
+    /// archive, and the failure is said.
+    #[test]
+    fn a_delete_whose_history_cannot_move_still_cleans_up_after_the_bot() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chats = || index::load().unwrap().into_iter().filter(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).collect::<Vec<_>>();
+        assert!(!chats().is_empty() && chats().iter().all(|entry| !entry.archived));
+        assert!(crate::store::root().unwrap().join("bot-changes").join(&id).is_dir());
+        // Where its history would go is taken.
+        let taken = crate::store::root().unwrap().join("trash").join("bots").join(format!("{id}.changes"));
+        std::fs::create_dir_all(taken.join("kept")).unwrap();
+        let error = ask("bots.delete", json!({"bot": "atlas"})).unwrap_err();
+        assert!(error.message.contains("history could not be moved"), "{}", error.message);
+        assert!(crate::bots::enforce::is_gone(&id));
+        assert!(chats().iter().all(|entry| entry.archived), "its chats went to the archive all the same");
     }
 
     /// PRO-470 H1: a process in a bot's pane that names no session (its
