@@ -997,6 +997,7 @@ impl ControlService {
             "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             "bots.suggest" => self.bot_suggest(params),
             "bots.post" | "bots.reply" => self.bot_channels(command, params),
+            "bots.message" => self.bot_message(params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1291,6 +1292,67 @@ impl ControlService {
             caller.refuse_while_paused("change its work items")?;
         }
         crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), action, &params).map_err(failed)
+    }
+
+    /// A message from one bot to another (`terminalx bots message`, PRO-472):
+    /// a hand-off, a question or a status, which wakes the other bot's duties
+    /// that wait for one. The sender is the [`Caller`]: only a caller placed
+    /// in a bot's session (or proving its claim to one) sends, and as that
+    /// bot; the owner talks to a bot in its chat. What it says reaches the
+    /// other bot as information from this one, never as the owner's words.
+    fn bot_message(&self, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, wakes, BotError, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
+        let caller = Caller::of(&self.manager, &params);
+        caller.refuse_gone()?;
+        let Some(own) = caller.verified_bot() else {
+            return Err(ControlError::new(
+                "forbidden",
+                "Only a bot leaves another bot a message, from its own chat or duty run. To give a bot work, write to it in its chat.",
+                None::<String>,
+            ));
+        };
+        caller.refuse_while_paused("leave another bot a message")?;
+        let to = match bots::named(&required_string(&params, "bot")?).map_err(failed)? {
+            Named::One(bot) => *bot,
+            Named::Several => return Err(ControlError::new("ambiguous_selector", bots::several_named(&required_string(&params, "bot")?), Some("Use the id from `terminalx bots list --json`.".into()))),
+            Named::Nobody => return Err(ControlError::not_found(bots::nobody_named(&required_string(&params, "bot")?))),
+        };
+        let from = bots::get(&own).map_err(failed)?;
+        let kind = wakes::MessageKind::parse(optional_string(&params, "kind").as_deref().unwrap_or("handoff"));
+        if matches!(kind, wakes::MessageKind::Other(_)) {
+            return Err(ControlError::invalid("--kind is handoff, question or status."));
+        }
+        // The reporting line, as `bots handoff` and `bots tell` judge it (PRO-475): a hand-off goes where work may be
+        // handed, a question or a status stays on the line.
+        if from.id != to.id {
+            let allowed = match kind {
+                wakes::MessageKind::Handoff => bots::handoffs::may_hand_off(&from, &to),
+                _ if bots::handoffs::on_line(&from, &to) => Ok(()),
+                _ => Err(format!("{} is not on your reporting line (your lead or a bot that reports to you), so it is not sent. Ask your owner to set the line in its settings.", to.name)),
+            };
+            allowed.map_err(ControlError::invalid)?;
+        }
+        // One hop more than the message that woke the duty run it is sent from, so two bots cannot wake each other for ever.
+        let hops = caller.session.as_deref().and_then(|session| index::get(session).ok()).map_or(0, |entry| wakes::hops_of_session(&entry)).saturating_add(1);
+        let (message, waits) = wakes::post(self.sink.as_ref(), &from, &to, kind, &required_string(&params, "text")?, hops).map_err(failed)?;
+        // Whether a duty of the other bot waits for it, and if not, why it wakes nothing.
+        let note = if hops >= wakes::MAX_HOPS {
+            Some(wakes::looped_text())
+        } else if !waits {
+            Some(format!("{} has no duty that waits for this message, so it wakes nothing; it goes unread.", to.name))
+        } else {
+            None
+        };
+        Ok(json!({"to": to.id, "toName": to.name, "message": message, "wakes": waits, "note": note}))
     }
 
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
@@ -4218,6 +4280,59 @@ mod tests {
         (home, service, sink, id, chat, owners, pid)
     }
 
+    /// `terminalx bots message` (PRO-472): only a bot sends, as the bot its
+    /// session proves it is, never as the owner; it does not message itself;
+    /// what it leaves is the other bot's to read, labelled with the sender;
+    /// and it stays on the reporting line as `bots tell` does (PRO-475).
+    #[test]
+    fn a_bot_leaves_another_bot_a_message_only_as_itself() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == atlas && bot.home)).expect("a hire makes the home chat");
+        service.manager.install_review_test_cli(&chat.id, &chat.tabs[0].id, "atlas-launch-token");
+        let from_chat = |params: Value, token: Option<&str>| {
+            let mut params = params;
+            params["caller"] = json!({"session": chat.id, "tab": chat.tabs[0].id});
+            if let Some(token) = token {
+                params["hookToken"] = json!(token);
+            }
+            ask("bots.message", params)
+        };
+        // Off the reporting line (both report to the owner), as `bots tell` judges it: refused, and nothing is left.
+        let off_line = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap_err();
+        assert_eq!(off_line.code, "invalid_arguments");
+        assert!(off_line.message.contains("not on your reporting line"), "{}", off_line.message);
+        let handed = from_chat(json!({"bot": "iris", "text": "Take this.", "kind": "handoff"}), Some("atlas-launch-token")).unwrap_err();
+        assert!(handed.message.contains("does not report to Atlas"), "{}", handed.message);
+        assert!(crate::bots::wakes::messages(&iris).unwrap().is_empty());
+        crate::bots::update(service.sink.as_ref(), &iris, crate::bots::BotPatch { reports_to: Some(atlas.clone()), ..Default::default() }).unwrap();
+        let sent = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap();
+        assert_eq!(sent["to"], iris.as_str());
+        let left = crate::bots::wakes::messages(&iris).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].from.as_str(), left[0].from_name.as_str(), left[0].kind.as_str(), left[0].hops), (atlas.as_str(), "Atlas", "question", 1));
+
+        // Not to itself; not with a claim it cannot prove; not as the owner; not while paused; not with Bots off.
+        assert_eq!(from_chat(json!({"bot": "atlas", "text": "Me"}), Some("atlas-launch-token")).unwrap_err().code, "invalid_arguments");
+        assert_eq!(from_chat(json!({"bot": "iris", "text": "x", "kind": "order"}), Some("atlas-launch-token")).unwrap_err().code, "invalid_arguments");
+        for token in [None, Some("forged")] {
+            assert_eq!(from_chat(json!({"bot": "iris", "text": "Spoofed"}), token).unwrap_err().code, "forbidden", "{token:?}");
+        }
+        assert_eq!(ask("bots.message", json!({"bot": "iris", "text": "From the owner"})).unwrap_err().code, "forbidden");
+        ask("bots.pause", json!({"bot": "atlas"})).unwrap();
+        assert_eq!(from_chat(json!({"bot": "iris", "text": "Paused"}), Some("atlas-launch-token")).unwrap_err().code, "bot_paused");
+        assert_eq!(crate::bots::wakes::messages(&iris).unwrap().len(), 1);
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(ask("bots.message", json!({"bot": "iris", "text": "Off"})).unwrap_err().code, "bots_off");
+    }
+
     /// `terminalx bots memory …` (PRO-470): who asks is the `Caller`. A
     /// claim of a bot's session is that bot's only when the tab's launch
     /// secret proves it, and refused otherwise, never taken for the owner; a
@@ -4926,7 +5041,8 @@ mod tests {
         assert_eq!(ask("bots.delete", json!({"bot": "kestrel"})).unwrap(), json!({"deleted": id, "name": "Kestrel"}));
         assert!(!home.exists() && crate::store::root().unwrap().join("trash").join("bots").join(&id).join("ROLE.md").is_file());
         assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 1);
-        assert_eq!(changes(&mut heard), 11);
+        // Each pause is told twice: once paused, once with what it stopped (PRO-474).
+        assert_eq!(changes(&mut heard), 13);
 
         // Refusals name what was wrong.
         assert_eq!(ask("bots.show", json!({"bot": "kestrel"})).unwrap_err().code, "not_found");

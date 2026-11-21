@@ -18,7 +18,10 @@ import {
   runTook,
   todayCounts,
   tookText,
+  wakeOf,
+  wakesOn,
 } from "@/lib/botDuties";
+import { useAutomationStore } from "@/lib/automations";
 import { builtinOf } from "@/lib/botSuggestions";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
@@ -97,7 +100,11 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
 
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2" data-testid="duty-stats">
         <Card label="Last run" value={last ? clockOf(runAt(last)) || "–" : "Never"} detail={last ? runOutcome(last, leadName) : "It has not run yet"} />
-        <Card label="Next run" value={duty.enabled && !bot.paused ? nextWallTime(duty.nextRunAt, duty.schedule.timezone) || "–" : "–"} detail={duty.enabled ? (bot.paused ? "Not while paused" : relativeNext(duty.nextRunAt)) : "Switched off"} />
+        {wakeOf(duty) ? (
+          <Card label="Next run" value={duty.enabled && !bot.paused ? "On event" : "–"} detail={duty.enabled ? (bot.paused ? "Events wait until you resume" : "When something it waits for happens") : "Switched off"} />
+        ) : (
+          <Card label="Next run" value={duty.enabled && !bot.paused ? nextWallTime(duty.nextRunAt, duty.schedule.timezone) || "–" : "–"} detail={duty.enabled ? (bot.paused ? "Not while paused" : relativeNext(duty.nextRunAt)) : "Switched off"} />
+        )}
         <Card label="Today" value={`${today.checks} checks`} detail={`${today.reports} reported · ${today.nothingNew} nothing new`} />
         <Card label="Spend" value={`${formatCost(spend.today)} today`} detail={`${formatCost(spend.month)} this month`} />
       </div>
@@ -106,9 +113,16 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
         <div className="min-w-0 flex-[1_1_520px]">
           <h3 className="text-[11px] font-medium tracking-[.06em] text-faint uppercase">What happens each time</h3>
           <ol className="mt-2 flex flex-col gap-2" data-testid="duty-steps">
-            <Step n={1} icon={<CalendarClock />} title="Wakes on a schedule" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
-              <p className="text-muted-foreground">{describeSchedule(duty.schedule)}{duty.schedule.kind === "cron" && duty.schedule.cron ? <span className="ml-1.5 font-mono text-faint">{duty.schedule.cron}</span> : null}</p>
-            </Step>
+            {wakeOf(duty) ? (
+              <Step n={1} icon={<CalendarClock />} title="Wakes on an event" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
+                <p className="text-muted-foreground">{wakesOn(duty, leadName)}</p>
+                <WakeStatus duty={duty} />
+              </Step>
+            ) : (
+              <Step n={1} icon={<CalendarClock />} title="Wakes on a schedule" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
+                <p className="text-muted-foreground">{describeSchedule(duty.schedule)}{duty.schedule.kind === "cron" && duty.schedule.cron ? <span className="ml-1.5 font-mono text-faint">{duty.schedule.cron}</span> : null}</p>
+              </Step>
+            )}
             <Step n={2} icon={<Zap />} title="First checks" tag="a script · no model · free">
               {duty.precheck ? (
                 <>
@@ -258,5 +272,18 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
       <dt className="text-faint">{label}</dt>
       <dd className="min-w-0 truncate text-muted-foreground">{children}</dd>
     </>
+  );
+}
+
+/** How an event duty's source last read: when, why it could not, and what it holds back (`automation_issue_state`). */
+function WakeStatus({ duty }: { duty: Automation }) {
+  const status = useAutomationStore().issueStates[duty.id];
+  if (!status) return null;
+  return (
+    <div className="mt-1 flex flex-col gap-0.5 text-[11.5px]" data-testid="duty-wake-status">
+      {status.lastPolledAt && <span className="text-faint">Last looked at {clockOf(status.lastPolledAt)}</span>}
+      {status.lastPollError && <span className="text-destructive">{status.lastPollError}</span>}
+      {status.notice && <span className="text-muted-foreground">{status.notice}</span>}
+    </div>
   );
 }

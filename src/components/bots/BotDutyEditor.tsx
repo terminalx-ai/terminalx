@@ -14,26 +14,39 @@ import type { Automation, AutomationInput, AutomationSchedule, ScheduleKind, Sch
 import type { Bot } from "@/types/bots";
 import type { DutyInput } from "@/types/botDuties";
 import { HomeFileWarning } from "./BotDuty";
+import { BotDutyWake, wakeForGroup, wakeGroupOf, wakeReady, type WakeGroup } from "./BotDutyWake";
+
+const WAKE_GROUPS: { value: WakeGroup; label: string }[] = [
+  { value: "schedule", label: "A schedule" },
+  { value: "github", label: "GitHub" },
+  { value: "linear", label: "Linear" },
+  { value: "bot", label: "Another bot" },
+  { value: "watch", label: "Wait until" },
+];
 
 const INPUT = "h-8 w-full rounded-md bg-well px-2.5 text-[13px] outline-none ring-offset-background focus:ring-2 focus:ring-ring/30";
 const LABEL = "flex flex-col gap-1.5 text-xs font-medium";
 const DAYS = [["MO", "Monday"], ["TU", "Tuesday"], ["WE", "Wednesday"], ["TH", "Thursday"], ["FR", "Friday"], ["SA", "Saturday"], ["SU", "Sunday"]];
 
 /**
- * Add or change a duty that wakes on a schedule (PRO-471). Its agent, model, access and folder are its bot's, so the
+ * Add or change a duty that wakes on a schedule (PRO-471) or an event (PRO-472): GitHub, Linear, another bot, or a
+ * change it waits for. `start` is the tile it was opened from. Its agent, model, access and folder are its bot's, so the
  * editor asks only what the duty does: its name, when it wakes, its first check, what the bot looks at, and where the
  * result goes. Slack, Telegram and a pull request are shown, switched off, until their tickets land.
  */
-export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
+export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedule", onClose }: {
   bot: Bot;
   bots: readonly Bot[];
   duty: Automation | null;
   home: string | null;
   /** Where a new duty starts: an hour clicked on the week's calendar (PRO-473). */
   initial?: DutyInput;
+  /** What it wakes on, as the tile it was opened from (PRO-472). */
+  start?: WakeGroup;
   onClose: (saved: string | null) => void;
 }) {
-  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : initial ?? newDutyInput()));
+  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : initial ?? { ...newDutyInput(), wake: wakeForGroup(start, bot) }));
+  const group = wakeGroupOf(input.wake);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const patch = (value: Partial<DutyInput>) => setInput((current) => ({ ...current, ...value }));
@@ -53,7 +66,8 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
   // A built-in's name and prompt are TerminalX's (PRO-477): its editor changes when it wakes, its check, and Look
   // around's focus line.
   const builtin = duty ? builtinOf(duty) : null;
-  const canSave = !!input.name.trim() && (!!builtin || !!input.prompt.trim()) && precheckReady(input.precheck) && (input.schedule.kind !== "cron" || !!input.schedule.cron?.trim());
+  const canSave = !!input.name.trim() && (!!builtin || !!input.prompt.trim()) && precheckReady(input.precheck) && wakeReady(input.wake)
+    && (!!input.wake || input.schedule.kind !== "cron" || !!input.schedule.cron?.trim());
 
   const save = async () => {
     if (!canSave) return;
@@ -92,7 +106,15 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
         )}
 
         <div className="col-span-2 flex flex-col gap-1.5 border-t border-hairline pt-3">
-          <span className="text-xs font-medium">Wakes on a schedule</span>
+          <span className="text-xs font-medium">Wakes on</span>
+          {group === "unknown" ? (
+            <span role="note" className="text-[11px] text-faint">An event this version does not know: it is kept as it is and not checked here.</span>
+          ) : (
+            <Segmented<WakeGroup> aria-label="Wakes on" value={group} onChange={(next) => patch({ wake: wakeForGroup(next, bot) })} options={WAKE_GROUPS} />
+          )}
+        </div>
+        {input.wake ? (group !== "unknown" && <BotDutyWake bot={bot} bots={bots} home={home} wake={input.wake} onChange={(wake) => patch({ wake })} />) : <>
+        <div className="col-span-2 flex flex-col gap-1.5">
           <span className="text-[11px] text-faint">{describeSchedule(input.schedule)} · {input.schedule.timezone}</span>
           <Segmented<ScheduleKind> aria-label="Schedule type" value={input.schedule.kind} onChange={setScheduleKind} options={[{ value: "preset", label: "Preset" }, { value: "cron", label: "Cron" }]} />
         </div>
@@ -118,6 +140,7 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
         ) : (
           <label className={`${LABEL} col-span-2`}>Five-field cron expression<input value={input.schedule.cron ?? ""} onChange={(event) => patchSchedule({ cron: event.target.value })} className={`${INPUT} font-mono`} placeholder="*/30 * * * *" spellCheck={false} /></label>
         )}
+        </>}
 
         <PrecheckSection
           input={precheckInput}

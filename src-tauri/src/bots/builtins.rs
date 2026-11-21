@@ -253,7 +253,7 @@ pub fn ensure(sink: &dyn EventSink, bot: &Bot, on: bool) -> Result<()> {
             continue;
         }
         let schedule: AutomationSchedule = serde_json::from_value(json!({"kind": "cron", "cron": kind.cron(), "timezone": timezone, "dtstart": index::now()}))?;
-        let input = DutyInput { name: kind.name().into(), prompt: prompt_text(kind, None), schedule, precheck: None, reports_to: DutyReport::TerminalX, enabled: on, focus: None };
+        let input = DutyInput { wake: Some(None), name: kind.name().into(), prompt: prompt_text(kind, None), schedule, precheck: None, reports_to: DutyReport::TerminalX, enabled: on, focus: None };
         duties::save_builtin(sink, bot, input, kind)?;
     }
     Ok(())
