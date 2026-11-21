@@ -85,7 +85,7 @@ pub fn guards(command: &str) -> bool {
 /// witnessed always; the runtime asks for the proof only when it raises
 /// access or changes the reporting line (`bots::enforce::needs_person`).
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 12] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "quietHours"];
+pub const GUARDED_BOTS: [&str; 13] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no

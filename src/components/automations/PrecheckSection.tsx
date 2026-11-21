@@ -26,7 +26,14 @@ export function precheckReady(precheck: AutomationPrecheck | null | undefined): 
  * The editor's optional "First check" (PRO-484): a shell command run before
  * the agent, in the folder the run would use, and a Try it that runs it once.
  */
-export function PrecheckSection({ input, onChange }: { input: AutomationInput; onChange: (precheck: AutomationPrecheck | null) => void }) {
+export function PrecheckSection({ input, onChange, onTry, where }: {
+  input: AutomationInput;
+  onChange: (precheck: AutomationPrecheck | null) => void;
+  /** Runs Try it somewhere else than the automation's folder (a bot's duty, PRO-471). */
+  onTry?: (precheck: AutomationPrecheck) => Promise<PrecheckTrial>;
+  /** Where the check runs, said under Try it, when it is not the automation's folder. */
+  where?: string;
+}) {
   const precheck = input.precheck ?? null;
   const [trial, setTrial] = useState<PrecheckTrial | null>(null);
   const [trying, setTrying] = useState(false);
@@ -62,7 +69,7 @@ export function PrecheckSection({ input, onChange }: { input: AutomationInput; o
     setError(null);
     setTrial(null);
     try {
-      const result = await automationsApi.tryPrecheck({ projectPath: input.projectPath, workspace: input.workspace, sessionId: input.sessionId ?? null, precheck });
+      const result = onTry ? await onTry(precheck) : await automationsApi.tryPrecheck({ projectPath: input.projectPath, workspace: input.workspace, sessionId: input.sessionId ?? null, precheck });
       if (latest.current === asked) setTrial(result);
     } catch (cause) {
       if (latest.current === asked) setError(errorMessage(cause));
@@ -118,11 +125,11 @@ export function PrecheckSection({ input, onChange }: { input: AutomationInput; o
                 className={INPUT}
               />
             </label>
-            <Button variant="secondary" size="sm" disabled={trying || !precheck.command.trim() || !input.projectPath || !folderReady} onClick={() => void tryIt()}>
+            <Button variant="secondary" size="sm" disabled={trying || !precheck.command.trim() || (!onTry && (!input.projectPath || !folderReady))} onClick={() => void tryIt()}>
               {trying ? <><Loader2 className="size-3.5 animate-spin" /> Trying…</> : "Try it"}
             </Button>
             <span className="min-w-0 flex-1 text-[11px] text-faint">
-              {input.workspace === "session" ? "Runs in the chosen session's folder." : "Runs in the project folder, not in the run's new worktree."}
+              {where ?? (input.workspace === "session" ? "Runs in the chosen session's folder." : "Runs in the project folder, not in the run's new worktree.")}
             </span>
           </div>
           {error && <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}

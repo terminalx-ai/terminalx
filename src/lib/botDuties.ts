@@ -1,6 +1,6 @@
 import { invoke } from "@/lib/api";
 import { describeSchedule } from "@/lib/automationSchedule";
-import type { Automation, AutomationRun } from "@/types/automations";
+import type { Automation, AutomationPrecheck, AutomationRun, PrecheckTrial } from "@/types/automations";
 import type { Bot } from "@/types/bots";
 import type { DutyInput, DutyReportsTo, DutyState, QuietHours } from "@/types/botDuties";
 
@@ -20,12 +20,42 @@ export const dutiesApi = {
   duplicate: (id: string, dutyId: string) => invoke<Automation>("bot_duty_duplicate", { id, dutyId }),
   /** The first check, then the bot only when the check found something. */
   run: (id: string, dutyId: string) => invoke<AutomationRun>("bot_duty_run", { id, dutyId }),
+  /** The first check once, where the duty's runs run it: its own empty folder, as you. Nothing is recorded. */
+  tryCheck: (id: string, dutyId: string | null, precheck: AutomationPrecheck) => invoke<PrecheckTrial>("bot_duty_try_check", { id, dutyId, precheck }),
   quietHours: (id: string, quietHours: QuietHours | null) => invoke<{ quietHours: QuietHours | null }>("bot_quiet_hours", { id, quietHours }),
 };
 
 /** Whether an automation is a bot's duty, listed under its bot rather than on the Automations page. */
 export function isDuty(automation: Pick<Automation, "bot">): boolean {
   return !!automation.bot;
+}
+
+/**
+ * Whether the Automations page lists `automation`: every automation that is not a duty, and a duty whose bot is gone
+ * for certain (the bots were read, none is unreadable, and its bot is not among them), so it can still be removed.
+ * While Bots is off the bots cannot be read, and a duty stays off the page.
+ */
+export function shownOnAutomations(
+  automation: Pick<Automation, "bot">,
+  bots: { loaded: boolean; error: string | null; unreadable: number; bots: readonly Pick<Bot, "id">[] },
+): boolean {
+  const id = automation.bot?.id;
+  if (!automation.bot) return true;
+  return bots.loaded && !bots.error && bots.unreadable === 0 && !bots.bots.some((bot) => bot.id === id);
+}
+
+/** The variable a duty's first check finds its bot's home in (`bots::duties::HOME_ENV`). */
+export const HOME_ENV = "TERMINALX_BOT_HOME";
+
+/**
+ * Whether a first check names something in the bot's home, which the bot can change: the home's path, the variable
+ * that holds it, or a bot's home under `~/.raccoon/bots`. The check runs in a folder of its own, as the owner, so only
+ * a command that reaches into the home on purpose runs what the bot last wrote there. A guess, for a warning only.
+ */
+export function checkRunsHomeFile(command: string, home: string | null): boolean {
+  if (command.includes("$" + HOME_ENV) || command.includes("${" + HOME_ENV + "}")) return true;
+  if (home && command.includes(home)) return true;
+  return /(~|\$HOME|\$\{HOME\})\/\.raccoon\/bots\//.test(command);
 }
 
 /** The duties of bot `botId`, oldest first: the order they were added in. */

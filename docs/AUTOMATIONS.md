@@ -52,9 +52,11 @@ it started from. A run left pending without a session when its thread ends
 
 An automation that names a bot (`bot` on its definition) is that bot's duty:
 it is listed on the bot's Duties tab, not on the Automations page, and
-`automationSave`, `automationDelete` and `automationRun` refuse it. It runs
-through this same scheduler and first check, as its bot, and while Bots is
-off it does not wake. See [BOTS.md](BOTS.md#duties-pro-471). Automations that
+`automationSave`, `automationDelete` and `automationRun` refuse it, except
+that `automationDelete` removes one whose bot is gone. It runs through this
+same scheduler, as its bot; its first check runs as the owner in a folder of
+the duty's own (`duty-checks/<id>` under the store root), never in the bot's
+home. While Bots is off it does not wake. See [BOTS.md](BOTS.md#duties-pro-471). Automations that
 name no bot run exactly as before.
 
 ### Issue automations

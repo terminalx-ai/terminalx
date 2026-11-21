@@ -860,6 +860,7 @@ pub fn run() {
             commands::bot_duty_delete,
             commands::bot_duty_duplicate,
             commands::bot_duty_run,
+            commands::bot_duty_try_check,
             commands::bot_quiet_hours,
             commands::session_summaries,
             commands::stats_usage_snapshot,

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AppWindow, CalendarClock, CircleDot, Github, Hash, Hourglass, Link, Loader2, Moon, Plus, Send, Users, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { loadAutomationRuns, useAutomationStore } from "@/lib/automations";
@@ -120,7 +121,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
           </div>
           <Button size="sm" variant="secondary" onClick={() => setScreen({ kind: "edit", id: null })} data-testid="duty-add"><Plus /> Add a duty</Button>
         </div>
-        {stateError && <p role="alert" className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{stateError}</p>}
+        {stateError && <MachineHostError error={stateError} onRestarted={reload} className="mt-3" />}
         {!automations.loaded ? (
           <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading the duties…</p>
         ) : duties.length === 0 ? (
@@ -245,6 +246,8 @@ export function QuietHoursCard({ bot, quiet, loaded, onSaved }: { bot: Bot; quie
   const [to, setTo] = useState(quiet?.to ?? "07:00");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The quiet hours that failed, sent again once a restarted runtime can confirm them.
+  const [pending, setPending] = useState<{ value: QuietHours | null } | null>(null);
   useEffect(() => {
     if (!editing) {
       setFrom(quiet?.from ?? "22:00");
@@ -253,7 +256,8 @@ export function QuietHoursCard({ bot, quiet, loaded, onSaved }: { bot: Bot; quie
   }, [quiet?.from, quiet?.to, editing]);
   const save = (value: QuietHours | null) => {
     setBusy(true);
-    dutiesApi.quietHours(bot.id, value).then(() => { setError(null); setEditing(false); onSaved(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    setPending({ value });
+    dutiesApi.quietHours(bot.id, value).then(() => { setError(null); setPending(null); setEditing(false); onSaved(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
   return (
     <section aria-label="Quiet hours" data-testid="quiet-hours">
@@ -276,7 +280,7 @@ export function QuietHoursCard({ bot, quiet, loaded, onSaved }: { bot: Bot; quie
       ) : (
         <p className="mt-2 flex items-start gap-2 text-[12.5px] text-muted-foreground"><Moon className="mt-0.5 size-3.5 shrink-0" /> {quietText(quiet)}</p>
       )}
-      {error && <p role="alert" className="mt-1.5 text-[11.5px] text-destructive">{error}</p>}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (pending) save(pending.value); }} className="mt-1.5" />}
     </section>
   );
 }

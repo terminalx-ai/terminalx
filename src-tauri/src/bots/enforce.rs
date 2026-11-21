@@ -254,7 +254,7 @@ fn after_access(params: &serde_json::Value) -> Option<super::BotAccess> {
 pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
     match operation {
         "resume" | "resumeAll" | "dismissResume" | "create" | "delete" => true,
-        "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "quietHours" => super::duties::needs_person(operation, params),
+        "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             let patch = &params["patch"];
             if patch.get("reportsTo").is_some_and(|value| !value.is_null()) {

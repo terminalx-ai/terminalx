@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
 import { AppWindow, CalendarClock, ChevronLeft, Copy, Loader2, Pause, Pencil, Play, Sparkles, Trash2, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { errorMessage } from "@/lib/api";
 import { describeSchedule, nextWallTime, relativeNext } from "@/lib/automationSchedule";
 import {
   checkFound,
+  checkRunsHomeFile,
   clockOf,
   dutiesApi,
   dutySpend,
@@ -45,12 +47,17 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What failed, to send again once a restarted runtime can confirm it.
+  const [failed, setFailed] = useState<{ name: string; action: () => Promise<unknown> } | null>(null);
   const act = (name: string, action: () => Promise<unknown>) => {
     setBusy(name);
-    action().then(() => { setError(null); onChanged(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(null));
+    action().then(
+      () => { setError(null); setFailed(null); onChanged(); },
+      (cause) => { setError(errorMessage(cause)); setFailed({ name, action }); },
+    ).finally(() => setBusy(null));
   };
   const remove = async () => {
-    const yes = await confirmInApp({ title: `Remove "${duty.name}"?`, body: `${bot.name} stops doing it. Its runs and its note are kept until removed with the bot.`, action: "Remove", destructive: true });
+    const yes = await confirmInApp({ title: `Remove "${duty.name}"?`, body: `${bot.name} stops doing it, and its runs are removed with it. Its note stays in ${bot.name}'s home.`, action: "Remove", destructive: true });
     if (yes) act("remove", () => dutiesApi.remove(bot.id, duty.id).then(onBack));
   };
   const last = runs[0] ?? null;
@@ -81,7 +88,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
         <span className="truncate" title={duty.name}>{duty.name}</span>
         <span className={cn("shrink-0 text-[12.5px] font-normal", duty.enabled && !bot.paused ? "text-success" : "text-faint")} data-testid="duty-status">· {status}</span>
       </h2>
-      {error && <p role="alert" className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</p>}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed.name, failed.action); }} className="mt-3" />}
 
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2" data-testid="duty-stats">
         <Card label="Last run" value={last ? clockOf(runAt(last)) || "–" : "Never"} detail={last ? runOutcome(last, leadName) : "It has not run yet"} />
@@ -102,6 +109,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
                 <>
                   <pre className="overflow-x-auto rounded-md bg-well px-2.5 py-1.5 font-mono text-[12px] text-foreground scrollbar-thin">{duty.precheck.command}</pre>
                   <p className="mt-1.5 text-faint">If the script prints nothing, the duty ends here. Nobody is told and nothing is spent.</p>
+                  {checkRunsHomeFile(duty.precheck.command, state?.home ?? duty.projectPath) && <HomeFileWarning bot={bot} />}
                 </>
               ) : (
                 <p className="text-faint">No first check: the model looks every time it wakes.</p>
@@ -192,6 +200,15 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
         </aside>
       </div>
     </div>
+  );
+}
+
+/** The check runs a file the bot can change, as the owner and without asking. */
+export function HomeFileWarning({ bot }: { bot: Pick<Bot, "name"> }) {
+  return (
+    <p role="note" className="mt-1.5 rounded-md bg-warning/10 px-2.5 py-1.5 text-[12px] text-warning" data-testid="duty-home-file">
+      This check runs a file in {bot.name}'s home, which {bot.name} can change. It runs as you, on its schedule, without asking and outside {bot.name}'s access. Keep the script outside the home, or check what it does.
+    </p>
   );
 }
 

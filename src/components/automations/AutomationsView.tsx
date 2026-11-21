@@ -20,7 +20,8 @@ import {
 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AutomationEditor } from "@/components/automations/AutomationEditor";
-import { isDuty } from "@/lib/botDuties";
+import { shownOnAutomations } from "@/lib/botDuties";
+import { useBotStore } from "@/lib/bots";
 import { eventTriggerSentence } from "@/components/automations/AutomationSourceFields";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
@@ -101,8 +102,9 @@ function issueTriggerSentence(automation: Automation): string | null {
 /** One full workspace surface at a time: list, selected automation, or editor. */
 export function AutomationsView({ initialAutomationId = null }: { initialAutomationId?: string | null }) {
   const store = useAutomationStore();
-  // A bot's duties are listed on its bot's Duties tab (PRO-471).
-  const owned = store.automations.filter((automation) => !isDuty(automation));
+  const botStore = useBotStore();
+  // A bot's duties are listed on its bot's Duties tab (PRO-471); one whose bot was deleted is listed here.
+  const owned = store.automations.filter((automation) => shownOnAutomations(automation, botStore));
   const automationStore = { ...store, automations: owned };
   const sessionStore = useSessionStore();
   const [selectedId, setSelectedId] = useState(initialAutomationId);
@@ -126,7 +128,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
       name: sessionStore.projects.find((project) => project.path === path)?.name ?? path.split("/").pop() ?? path,
       automations: automations.sort((a, b) => a.name.localeCompare(b.name)),
     }));
-  }, [store.automations, sessionStore.projects]);
+  }, [store.automations, botStore, sessionStore.projects]);
 
   useEffect(() => {
     if (selected) void loadAutomationRuns(selected.id).catch((cause) => setError(errorMessage(cause)));

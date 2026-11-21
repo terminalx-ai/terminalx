@@ -99,9 +99,18 @@ permission system.
   (`chat::permission_mode`). Its agent gets the role and memory as any chat
   does, then the duty's prompt with the first check's output, a "Your duty"
   section and the duty's own note, fenced as the bot's notes.
-- **Free first check.** The automation's first check (PRO-484) runs in the
-  bot's home. Printing nothing ends the run as "nothing new": no session, no
-  model, nobody told. A failing check is a failed run, which notifies.
+- **Free first check.** The automation's first check (PRO-484) runs as the
+  owner, never in the bot's home, which the bot can write: in a folder of the
+  duty's own, `duty-checks/<duty id>` under the store root, made again empty
+  and owner-only (0700) before each run, so nothing the bot left anywhere is
+  on its path. The bot's home is named in `TERMINALX_BOT_HOME` for a script
+  the owner wants to look there; the editor says where the check runs and
+  that it runs as the owner, and the duty page warns when a check reaches
+  into the home. Try it runs the check the same way (`dutyTryCheck`, which
+  needs a person). Printing nothing ends the run as "nothing new": no
+  session, no model, nobody told. A failing check is a failed run, which
+  notifies. Its output reaches the agent labelled as information, not
+  instructions.
 - **Reports to.** `terminalx`: a status line in the bot's home chat and a
   notification (`bot_duty_report`). `lead`: a status line in the lead bot's
   home chat, labelled with the sender and its access, and no notification
@@ -117,19 +126,24 @@ permission system.
 - **Pause.** A paused bot's due runs are recorded as skipped (one folded row)
   and its next run moves to the schedule's next; Run now is refused. A run
   that reaches its start while the bot is paused ends cancelled.
+- **One run at a time.** A due run is skipped (one folded row) while the
+  duty's previous run has not finished. A run that goes on past its timeout
+  (30 minutes unless the duty says otherwise) is ended as timed out and its
+  agent stopped. The sessions of finished runs past the newest three are
+  archived.
 - **Who may change one.** Add, change, run, copy, remove, switch on and quiet
   hours carry the window's proof (`bots::enforce::needs_person`,
   `consent::guards_request`); switching one off is open. The Automations
-  page's own routes refuse a duty. A bot's session cannot read or change
-  duties.
+  page's own routes refuse a duty. A process in a bot's session reads its own
+  bot's duties and no other's, and changes none.
 - **At hire** the role template's duties that wake on a schedule are created
   switched off; the ones that wake on events wait for PRO-472.
 - **With Bots off** a duty does not wake, nothing about it is read, and every
   duty call is refused.
-
-Not held here (PRO-489): the first check is a shell command in the bot's home,
-which the bot can write; a check that runs a script the bot rewrote runs that
-script.
+- **Deleting a bot** removes its duties and its quiet hours. Their definitions
+  and settings (`duties-removed.json`) and run logs (`duty-runs/`) go into
+  its home, which goes to the trash. A duty left behind when its bot is gone
+  for certain is listed on the Automations page, which can remove it.
 
 ## Build map
 

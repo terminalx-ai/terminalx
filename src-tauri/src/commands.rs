@@ -6329,6 +6329,12 @@ pub async fn bot_duty_run(state: State<'_, AppState>, id: String, duty_id: Strin
     bots_call(state, "dutyRun", serde_json::json!({"id": id, "dutyId": duty_id})).await
 }
 
+/// Try a duty's first check once, where its runs run it (its own folder, not the bot's home). Nothing is recorded.
+#[tauri::command]
+pub async fn bot_duty_try_check(state: State<'_, AppState>, id: String, duty_id: Option<String>, precheck: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    bots_call(state, "dutyTryCheck", serde_json::json!({"id": id, "dutyId": duty_id, "precheck": precheck})).await
+}
+
 /// The bot's quiet hours, or `null` for none.
 #[tauri::command]
 pub async fn bot_quiet_hours(state: State<'_, AppState>, id: String, quiet_hours: serde_json::Value) -> CmdResult<serde_json::Value> {

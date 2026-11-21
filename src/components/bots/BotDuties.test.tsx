@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   loadRuns: vi.fn(async () => []),
   confirm: vi.fn(async () => true),
+  restart: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: (error: unknown) => String(error), automationsApi: { tryPrecheck: vi.fn() } }));
@@ -19,6 +20,13 @@ vi.mock("@/lib/bots", () => ({ useBotStore: () => mocks.bots }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => mocks.sessions }));
 vi.mock("@/lib/runFamily", () => ({ sessionSpend: () => 0.21 }));
 vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.confirm }));
+vi.mock("@/lib/machines", () => ({
+  machinesApi: { restartRuntimeForWindow: mocks.restart },
+  restartRequired: (error: string | null) => {
+    const match = /^runtime_restart_required:([^:\s]+): ([\s\S]*)$/.exec(error ?? "");
+    return match ? { epoch: match[1], message: match[2] } : null;
+  },
+}));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { BotDuties } = await import("./BotDuties");
@@ -63,9 +71,11 @@ beforeEach(() => {
     if (command === "bot_duties") return { quietHours: { from: "22:00", to: "07:00" }, notes: { d1: { text: "Last told: s-41 stalled", cut: false } }, home: "/bots/argus" };
     if (command === "bot_duty_save") return { ...stalled, id: "d4", name: (args.input as { name: string }).name };
     if (command === "bot_duty_duplicate") return { ...stalled, id: "d5" };
+    if (command === "bot_duty_try_check") return { outcome: "nothingNew", result: { exitCode: 0, stdoutTail: "", stderrTail: "", truncated: false, timedOut: false, durationMs: 300 } };
     return {};
   });
   mocks.confirm.mockClear();
+  mocks.restart.mockClear();
 });
 afterEach(cleanup);
 
@@ -176,5 +186,70 @@ describe("a duty's page (PRO-471, design 23.10)", () => {
     expect(mocks.invoke).not.toHaveBeenCalledWith("bot_duty_delete", expect.anything());
     fireEvent.click(screen.getByRole("button", { name: "Remove Release readiness" }));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_delete", { id: "b1", dutyId: "d3" }));
+  });
+});
+
+const RESTART = "runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restarting stops what it runs: Argus's chat.";
+
+describe("a duty's changes when the runtime cannot confirm them (PRO-471 review 1)", () => {
+  it("offers Restart runtime, and saves the same draft once it has restarted", async () => {
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByTestId("duty-add"));
+    const editor = screen.getByTestId("duty-editor");
+    fireEvent.change(within(editor).getByPlaceholderText("Queue time on main"), { target: { value: "Watch CI" } });
+    fireEvent.change(within(editor).getByPlaceholderText(/Say which jobs are slow/), { target: { value: "Say what broke." } });
+    let first = true;
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_save" && first) { first = false; throw RESTART; }
+      return answer(command, args);
+    });
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    const alert = await within(editor).findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot confirm that you asked/);
+    expect(alert.textContent).not.toMatch(/runtime_restart_required/);
+    expect((within(editor).getByPlaceholderText("Queue time on main") as HTMLInputElement).value).toBe("Watch CI");
+    fireEvent.click(within(alert).getByRole("button", { name: /Restart runtime/ }));
+    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("e1"));
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_save")).toHaveLength(2));
+    const [, second] = mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_save");
+    expect(second[1]).toMatchObject({ id: "b1", dutyId: null, input: { name: "Watch CI", prompt: "Say what broke." } });
+  });
+
+  it("sends a failed Run now again after the restart", async () => {
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));
+    const answer = mocks.invoke.getMockImplementation()!;
+    let first = true;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_run" && first) { first = false; throw RESTART; }
+      return answer(command, args);
+    });
+    fireEvent.click(screen.getByTestId("duty-run"));
+    fireEvent.click(await screen.findByRole("button", { name: /Restart runtime/ }));
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_run")).toHaveLength(2));
+  });
+});
+
+describe("a duty's first check (PRO-471 review 1)", () => {
+  it("is tried in the duty's own folder, as you, and says so", async () => {
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));
+    fireEvent.click(screen.getByTestId("duty-edit"));
+    const editor = screen.getByTestId("duty-editor");
+    expect(within(editor).getByText(/Runs as you, not as Argus: in an empty folder of the duty's own, never in Argus's home, which is in \$TERMINALX_BOT_HOME/)).toBeTruthy();
+    fireEvent.click(within(editor).getByRole("button", { name: "Try it" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_try_check", { id: "b1", dutyId: "d1", precheck: { command: "gh run list --status failure", timeoutSeconds: 30 } }));
+    expect(screen.queryByTestId("duty-home-file")).toBeNull();
+    fireEvent.change(within(editor).getByPlaceholderText(/gh pr list/), { target: { value: "sh \"$TERMINALX_BOT_HOME/check.sh\"" } });
+    expect(screen.getByTestId("duty-home-file").textContent).toMatch(/runs a file in Argus's home, which Argus can change/);
+  });
+
+  it("says on removal that its runs go with it and its note stays", async () => {
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Release readiness" }));
+    mocks.confirm.mockResolvedValueOnce(false);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Release readiness" }));
+    await waitFor(() => expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ body: "Argus stops doing it, and its runs are removed with it. Its note stays in Argus's home." })));
   });
 });

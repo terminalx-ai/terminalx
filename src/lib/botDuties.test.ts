@@ -3,7 +3,7 @@ import type { Automation, AutomationRun } from "@/types/automations";
 
 vi.mock("@/lib/api", () => ({ invoke: vi.fn() }));
 
-const { checkFound, dutiesOf, dutyInputOf, dutySpend, inQuietHours, isDuty, reportsToLabel, runOutcome, runTook, todayCounts, tookText } = await import("./botDuties");
+const { checkFound, checkRunsHomeFile, shownOnAutomations, dutiesOf, dutyInputOf, dutySpend, inQuietHours, isDuty, reportsToLabel, runOutcome, runTook, todayCounts, tookText } = await import("./botDuties");
 
 const now = new Date("2026-11-21T15:00:00");
 const at = (hours: number, minutes = 0) => new Date(2026, 10, 21, hours, minutes).toISOString();
@@ -77,5 +77,26 @@ describe("a bot's duties (PRO-471)", () => {
     expect(inQuietHours({ from: "12:00", to: "13:00" }, 12 * 60 + 30)).toBe(true);
     expect(inQuietHours(null, 0)).toBe(false);
     expect(inQuietHours({ from: "late", to: "07:00" }, 0)).toBe(false);
+  });
+});
+
+describe("a duty's first check and the Automations page (PRO-471 review 1)", () => {
+  it("warns when a check reaches into the bot's home", () => {
+    const home = "/Users/me/.raccoon/bots/b1";
+    expect(checkRunsHomeFile("gh pr list --json number", home)).toBe(false);
+    expect(checkRunsHomeFile("./check.sh", home)).toBe(false);
+    for (const command of ["sh \"$TERMINALX_BOT_HOME/check.sh\"", "cat ${TERMINALX_BOT_HOME}/x", `python ${home}/x.py`, "~/.raccoon/bots/b2/run.sh", "$HOME/.raccoon/bots/b1/a"]) {
+      expect(checkRunsHomeFile(command, home)).toBe(true);
+    }
+  });
+
+  it("lists a duty only once its bot is gone for certain", () => {
+    const bots = { loaded: true, error: null, unreadable: 0, bots: [{ id: "b1" }] };
+    expect(shownOnAutomations({ bot: null }, bots)).toBe(true);
+    expect(shownOnAutomations({ bot: { id: "b1", reportsTo: "terminalx" } }, bots)).toBe(false);
+    expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, bots)).toBe(true);
+    expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, unreadable: 1 })).toBe(false);
+    expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, error: "Bots is off" })).toBe(false);
+    expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, loaded: false })).toBe(false);
   });
 });

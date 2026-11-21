@@ -81,6 +81,18 @@ pub const ELSEWHERE: &str = "This automation is a bot's duty. Change it, run it 
 pub const PAUSED_SKIP: &str = "Skipped: its bot was paused, so this scheduled run did not happen.";
 /// The most bots `bot-duties.json` keeps settings for.
 const MAX_SETTINGS: usize = 1000;
+/// A due run skipped because the duty's previous run had not finished: a duty never overlaps itself.
+pub const BUSY_SKIP: &str = "Skipped: its previous run had not finished.";
+/// How long a duty's run may take, unless its definition says otherwise.
+pub const RUN_TIMEOUT_MINUTES: u32 = 30;
+/// How many of a duty's newest finished runs keep their sessions in the bot's list; older ones are archived.
+const VISIBLE_RUNS: usize = 3;
+/// Where under the store root each duty's first check runs: a folder of its own, owner-only, emptied each time.
+const CHECKS_DIR: &str = "duty-checks";
+/// The variable that tells a duty's first check where its bot's home is.
+pub const HOME_ENV: &str = "TERMINALX_BOT_HOME";
+/// What a deleted bot's duties are kept as, in its home, which goes to the trash.
+const REMOVED_FILE: &str = "duties-removed.json";
 
 /// Where a duty's result goes. A target a newer build wrote (Slack, Telegram,
 /// a pull request, with the channel tickets) is kept as [`DutyReport::Other`]
@@ -359,31 +371,125 @@ pub fn may_wake(app: &impl AutomationHost, automation: &Automation, now: DateTim
         Ok(Some(bot)) => bot,
         _ => return false,
     };
+    // A run still going: stopped once past its time, and no second one meanwhile.
+    let runs = automation_store::list_runs(&automation.id).unwrap_or_default();
+    if let Some(running) = runs.iter().find(|run| matches!(run.status, AutomationRunStatus::Pending | AutomationRunStatus::Running)) {
+        if !time_out(app, automation, running, now) {
+            skip_due(app, automation, now, BUSY_SKIP);
+            return false;
+        }
+    }
     if bot.paused.is_none() {
         return true;
     }
+    skip_due(app, automation, now, PAUSED_SKIP);
+    false
+}
+
+/// When `automation` is due now, record that run as skipped (folded into one
+/// row with the ones before it) and move its next run to the schedule's next.
+fn skip_due(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>, why: &str) {
     if automation.issue_trigger.is_some() || automation.event_trigger.is_some() {
-        return false;
+        return;
     }
-    let Ok(Some(action)) = automations::due_action(automation, now) else { return false };
+    let Ok(Some(action)) = automations::due_action(automation, now) else { return };
     let scheduled_for = match action {
         DueAction::Dispatch { scheduled_for } | DueAction::SkipMissed { scheduled_for } => scheduled_for,
     };
-    let Ok(next) = automations::next_run_after(&automation.schedule, now) else { return false };
+    let Ok(next) = automations::next_run_after(&automation.schedule, now) else { return };
     let next = next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     if let Err(error) = automation_store::update(&automation.id, |value| {
         value.next_run_at = next;
         value.modified = index::now();
         Ok(())
     }) {
-        log::warn!("duty {}: skip its run while its bot is paused: {error:#}", automation.id);
-        return false;
+        log::warn!("duty {}: skip a due run: {error:#}", automation.id);
+        return;
     }
     automations::emit_definitions(app);
-    if let Err(error) = automations::record_skipped(app, automation, scheduled_for, AutomationRunStatus::Cancelled, PAUSED_SKIP) {
+    if let Err(error) = automations::record_skipped(app, automation, scheduled_for, AutomationRunStatus::Cancelled, why) {
         log::warn!("duty {}: record its skipped run: {error:#}", automation.id);
     }
-    false
+}
+
+/// End `run` as timed out, and stop its agent, once it has gone on longer
+/// than the duty allows. Whether it ended. A run still in its first check
+/// (no session yet) is left to the check's own timeout.
+fn time_out(app: &impl AutomationHost, automation: &Automation, run: &AutomationRun, now: DateTime<Utc>) -> bool {
+    let (Some(session), Some(tab)) = (run.session_id.as_deref(), run.tab_id.as_deref()) else { return false };
+    let Some(started) = run.started_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()) else { return false };
+    let limit = automation.run_timeout_minutes.unwrap_or(RUN_TIMEOUT_MINUTES).max(1);
+    if now.signed_duration_since(started) < chrono::TimeDelta::minutes(i64::from(limit)) {
+        return false;
+    }
+    automations::time_out_run(app, session, tab, &format!("Timed out: it ran for more than {limit} minutes, and its agent was stopped."));
+    if let Ok(sessions) = app.sessions() {
+        if let Err(error) = sessions.stop(session, tab) {
+            log::warn!("duty {}: stop its timed-out run: {error:#}", automation.id);
+        }
+    }
+    true
+}
+
+/// Archive the sessions of a duty's finished runs past its newest few, so a
+/// duty that wakes often does not fill its bot's list.
+fn tidy(app: &impl AutomationHost, automation_id: &str) {
+    let Ok(runs) = automation_store::list_runs(automation_id) else { return };
+    let older: Vec<String> = runs
+        .iter()
+        .filter(|run| run.session_id.is_some() && run.status.is_terminal())
+        .skip(VISIBLE_RUNS)
+        .filter_map(|run| run.session_id.clone())
+        .collect();
+    if older.is_empty() {
+        return;
+    }
+    let Ok(entries) = index::load() else { return };
+    let live: Vec<String> = older.into_iter().filter(|id| entries.iter().any(|entry| &entry.id == id && !entry.archived)).collect();
+    if live.is_empty() {
+        return;
+    }
+    if let Err(error) = crate::session_archive::set_archived(app.sink().as_ref(), &live, true, crate::session_archive::By::Automation) {
+        log::warn!("duty {automation_id}: archive its older runs: {error:#}");
+    }
+}
+
+/// The folder a duty's first check runs in, made again empty and owner-only
+/// each time: under the store root, where no bot session works, never the
+/// bot's home. `key` is the duty's id, or `new-<bot id>` for a duty not saved yet.
+fn check_folder(key: &str) -> Result<PathBuf> {
+    anyhow::ensure!(!key.is_empty() && key.len() <= 80 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "a duty's id names no folder");
+    let root = crate::store::root()?.join(CHECKS_DIR);
+    let dir = root.join(key);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&dir)?,
+        Ok(_) => std::fs::remove_file(&dir)?,
+        Err(_) => {}
+    }
+    std::fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Run a duty's first check as its runs do: in its own folder, as the owner,
+/// with the bot's home in [`HOME_ENV`] for a script that wants to look there.
+fn run_check_in(key: &str, bot_id: &str, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+    let dir = check_folder(key)?;
+    let home = bot_store::home_dir(bot_id)?;
+    automations::precheck::run_in_folder(&dir, &[(HOME_ENV.to_string(), home.to_string_lossy().into_owned())], precheck)
+}
+
+/// A duty's first check, for its run (`precheck::check`).
+pub fn run_check(automation: &Automation, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+    let bot_id = owner_id(automation).context("the duty names no bot")?;
+    run_check_in(&automation.id, bot_id, precheck)
 }
 
 /// The session a run of `automation` (bound by [`bind`]) goes ahead in: a new
@@ -525,12 +631,14 @@ fn note_in_home_chat(app: &impl AutomationHost, bot_id: &str, text: &str) -> Opt
 /// window already notifies every failed automation run). The run records
 /// what was reported, to whom, and whether the owner was notified.
 pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
-    let Ok(automation) = automation_store::get(&run.automation_id) else { return };
-    let Some(owner) = owner(&automation) else { return };
-    if !super::enabled() {
+    // With Bots off an ordinary automation's ending reads nothing more.
+    if !super::enabled_cached() {
         return;
     }
+    let Ok(automation) = automation_store::get(&run.automation_id) else { return };
+    let Some(owner) = owner(&automation) else { return };
     let Ok(Some(bot)) = bot_store::get(&owner.id) else { return };
+    tidy(app, &automation.id);
     let (text, failed) = match run.status {
         AutomationRunStatus::Completed => (run.final_message.clone().unwrap_or_default(), false),
         AutomationRunStatus::Failed | AutomationRunStatus::TimedOut => (run.error.clone().unwrap_or_else(|| "The run did not finish.".into()), true),
@@ -598,6 +706,64 @@ fn duty_of(bot: &Bot, duty_id: &str) -> Result<Automation> {
         .ok_or_else(|| refused(format!("{} has no duty {duty_id}.", bot.name)))
 }
 
+/// The bot id a duty names, as written, whether or not the rest of its owner can be read.
+fn owner_id(automation: &Automation) -> Option<&str> {
+    automation.unknown.get(AUTOMATION_KEY)?.get("id")?.as_str()
+}
+
+/// Whether bot `bot_id` is gone for certain: not listed, and no record this build cannot read may be it.
+fn bot_gone(bot_id: &str) -> bool {
+    let Ok(snapshot) = bot_store::snapshot() else { return false };
+    !snapshot.bots.iter().any(|bot| bot.id == bot_id)
+        && snapshot.unreadable.iter().all(|record| record.get("id").and_then(Value::as_str).is_some_and(|id| id != bot_id))
+}
+
+/// Whether `automation` is the duty of a bot that was deleted: then nothing is
+/// left to hold it to, and the ordinary routes may remove it.
+pub fn orphaned(automation: &Automation) -> bool {
+    owner_id(automation).is_some_and(bot_gone)
+}
+
+/// A deleted bot's duties, with their run logs, and its duty settings go with
+/// it. Their notes were in its home, which goes to the trash.
+pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
+    let duties: Vec<Automation> = automation_store::list()?.into_iter().filter(|automation| owner_id(automation) == Some(bot_id)).collect();
+    let ids: Vec<String> = duties.iter().map(|duty| duty.id.clone()).collect();
+    // Kept in its home, which goes to the trash with it: the definitions, the settings, and each duty's run log.
+    // A record whose id names no home (one edited by hand) has nowhere to keep them: they are only removed.
+    if let Some(home) = bot_store::home_dir(bot_id).ok().filter(|home| home.is_dir()) {
+        let kept = json!({"duties": duties, "settings": read_settings_file().ok().and_then(|file| file.bots.get(bot_id).cloned())});
+        crate::store::write_json(&home.join(REMOVED_FILE), &kept)?;
+        let logs = crate::store::root()?.join("automations");
+        for id in &ids {
+            if logs.join(id).is_dir() {
+                std::fs::create_dir_all(home.join("duty-runs"))?;
+                std::fs::rename(logs.join(id), home.join("duty-runs").join(id))?;
+            }
+        }
+    }
+    let mut failed = None;
+    for id in &ids {
+        if let Err(error) = automation_store::remove(id) {
+            failed.get_or_insert(error);
+        }
+        if let Ok(root) = crate::store::root() {
+            let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(id));
+        }
+    }
+    if !ids.is_empty() {
+        announce(sink);
+    }
+    {
+        let _lock = SETTINGS_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let mut file = read_settings_file()?;
+        if file.bots.remove(bot_id).is_some() {
+            crate::store::write_json(&settings_path()?, &file)?;
+        }
+    }
+    failed.map_or(Ok(()), Err)
+}
+
 fn announce(sink: &dyn EventSink) {
     if let Ok(list) = automation_store::list() {
         sink.emit("automations_changed", &list);
@@ -641,7 +807,7 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
             schedule: input.schedule,
             precheck: input.precheck,
             missed_run_grace_minutes: existing.map_or(60, |existing| existing.missed_run_grace_minutes),
-            run_timeout_minutes: existing.and_then(|existing| existing.run_timeout_minutes),
+            run_timeout_minutes: Some(existing.and_then(|existing| existing.run_timeout_minutes).unwrap_or(RUN_TIMEOUT_MINUTES)),
             issue_trigger: None,
             event_trigger: None,
             pipeline: None,
@@ -653,7 +819,32 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
     let mut owner = previous.unwrap_or(DutyOwner { id: bot.id.clone(), reports_to: DutyReport::TerminalX, template: template.map(str::to_owned), unknown: BTreeMap::new() });
     owner.reports_to = input.reports_to;
     set_owner(&mut automation, &owner);
-    let saved = if existing.is_some() { automation_store::replace(automation)? } else { automation_store::insert(automation)? };
+    let saved = match existing {
+        // Under the store's lock, on the record as it is now: only what the duty editor owns changes, so a field
+        // it does not show (an event trigger a newer build added, an owner's unknown fields) is kept.
+        Some(existing) => automation_store::update(&existing.id, |stored| {
+            anyhow::ensure!(owner_id(stored) == Some(bot.id.as_str()), "{} has no duty {}.", bot.name, existing.id);
+            let mut stored_owner = self::owner(stored).unwrap_or_else(|| owner.clone());
+            stored_owner.reports_to = owner.reports_to.clone();
+            stored.name = automation.name;
+            stored.prompt = automation.prompt;
+            stored.schedule = automation.schedule;
+            stored.precheck = automation.precheck;
+            stored.enabled = automation.enabled;
+            stored.next_run_at = automation.next_run_at;
+            stored.harness = automation.harness;
+            stored.model = automation.model;
+            stored.effort = automation.effort;
+            stored.mode = automation.mode;
+            stored.project_path = automation.project_path;
+            stored.run_timeout_minutes = stored.run_timeout_minutes.or(automation.run_timeout_minutes);
+            stored.modified = automation.modified;
+            set_owner(stored, &stored_owner);
+            Ok(())
+        })
+        .map_err(|error| refused(format!("{error:#}")))?,
+        None => automation_store::insert(automation)?,
+    };
     announce(sink);
     Ok(saved)
 }
@@ -726,7 +917,7 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
 /// The duty operations of the runtime's `bots` call, or `None` for another
 /// operation. `id` is the bot's; `dutyId` names one of its duties.
 pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Option<Result<Value>> {
-    if !matches!(operation, "duties" | "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "quietHours") {
+    if !matches!(operation, "duties" | "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours") {
         return None;
     }
     Some(answer(manager, operation, params))
@@ -755,9 +946,21 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
             serde_json::to_value(switch(sink, &duty()?, on)?)?
         }
         "dutyDelete" => {
-            automation_store::remove(&duty()?.id)?;
+            let id = duty()?.id;
+            automation_store::remove(&id)?;
+            let _ = std::fs::remove_dir_all(crate::store::root()?.join(CHECKS_DIR).join(&id));
             announce(sink);
             Value::Null
+        }
+        // The editor's Try it: the check once, where the duty's runs run it. Nothing is recorded.
+        "dutyTryCheck" => {
+            let precheck: AutomationPrecheck = serde_json::from_value(params["precheck"].clone()).map_err(|error| refused(format!("Invalid first check: {error}")))?;
+            refuse_unless!(!precheck.command.trim().is_empty(), "Enter a command to try.");
+            let key = match params["dutyId"].as_str() {
+                Some(_) => duty()?.id,
+                None => format!("new-{}", bot.id),
+            };
+            serde_json::to_value(run_check_in(&key, &bot.id, &precheck)?)?
         }
         "dutyDuplicate" => {
             let original = duty()?;
@@ -795,7 +998,7 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
 /// off need no one.
 pub fn needs_person(operation: &str, params: &Value) -> bool {
     match operation {
-        "dutySave" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "quietHours" => true,
+        "dutySave" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => true,
         "dutySwitch" => params["on"].as_bool() != Some(false),
         _ => false,
     }

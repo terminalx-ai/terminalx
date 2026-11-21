@@ -622,8 +622,10 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         }
         Ok(removed)
     })?;
+    // Its duties go with it (PRO-471); one left behind can still be removed on the Automations page.
+    let duties = duties::forget_bot(sink, &removed.id);
     bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
-    Ok(())
+    duties.with_context(|| format!("{} is deleted, but not all of its duties could be removed; remove them on the Automations page", removed.name))
 }
 
 fn set_paused(bot: &mut Bot, pause: Option<&BotPause>) -> bool {

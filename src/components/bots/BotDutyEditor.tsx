@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { ChevronLeft, Loader2 } from "@/icons";
 import { PrecheckSection, precheckReady } from "@/components/automations/PrecheckSection";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { describeSchedule } from "@/lib/automationSchedule";
-import { REPORT_TARGETS, dutiesApi, dutyInputOf, newDutyInput, reportsToLabel } from "@/lib/botDuties";
+import { HOME_ENV, REPORT_TARGETS, checkRunsHomeFile, dutiesApi, dutyInputOf, newDutyInput, reportsToLabel } from "@/lib/botDuties";
 import { cn } from "@/lib/cn";
 import type { Automation, AutomationInput, AutomationSchedule, ScheduleKind, SchedulePreset } from "@/types/automations";
 import type { Bot } from "@/types/bots";
 import type { DutyInput } from "@/types/botDuties";
+import { HomeFileWarning } from "./BotDuty";
 
 const INPUT = "h-8 w-full rounded-md bg-well px-2.5 text-[13px] outline-none ring-offset-background focus:ring-2 focus:ring-ring/30";
 const LABEL = "flex flex-col gap-1.5 text-xs font-medium";
@@ -41,7 +43,7 @@ export function BotDutyEditor({ bot, bots, duty, home, onClose }: {
     const weekdays = preset === "weekdays" ? ["MO", "TU", "WE", "TH", "FR"] : preset === "weekly" ? [input.schedule.weekdays[0] ?? "MO"] : [];
     patchSchedule({ preset, weekdays });
   };
-  // The first check runs in the bot's home; Try it runs it there once, recording nothing.
+  // The first check runs in a folder of the duty's own, as the owner; Try it runs it there once, recording nothing.
   const precheckInput = { projectPath: home ?? "", workspace: "newWorktree", sessionId: null, precheck: input.precheck } as unknown as AutomationInput;
   // A target a newer app wrote stays as it is, and is shown as such.
   const unknownTarget = !REPORT_TARGETS.some((target) => target.id === input.reportsTo);
@@ -103,7 +105,13 @@ export function BotDutyEditor({ bot, bots, duty, home, onClose }: {
           <label className={`${LABEL} col-span-2`}>Five-field cron expression<input value={input.schedule.cron ?? ""} onChange={(event) => patchSchedule({ cron: event.target.value })} className={`${INPUT} font-mono`} placeholder="*/30 * * * *" spellCheck={false} /></label>
         )}
 
-        <PrecheckSection input={precheckInput} onChange={(precheck) => patch({ precheck })} />
+        <PrecheckSection
+          input={precheckInput}
+          onChange={(precheck) => patch({ precheck })}
+          onTry={(precheck) => dutiesApi.tryCheck(bot.id, duty?.id ?? null, precheck)}
+          where={`Runs as you, not as ${bot.name}: in an empty folder of the duty's own, never in ${bot.name}'s home, which is in $${HOME_ENV}.`}
+        />
+        {input.precheck && checkRunsHomeFile(input.precheck.command, home) && <div className="col-span-2 -mt-2"><HomeFileWarning bot={bot} /></div>}
 
         <label className={`${LABEL} col-span-2 border-t border-hairline pt-3`}>
           Then {bot.name} looks
@@ -155,7 +163,8 @@ export function BotDutyEditor({ bot, bots, duty, home, onClose }: {
         </label>
       </div>
 
-      {error && <p role="alert" className="mt-4 max-w-[720px] rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</p>}
+      {/* The draft stays in this editor while the runtime restarts; the save is sent again after. */}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); void save(); }} className="mt-4 max-w-[720px]" />}
       <div className="mt-5 flex max-w-[720px] justify-end gap-2">
         <Button variant="ghost" onClick={() => onClose(null)} disabled={saving}>Cancel</Button>
         <Button onClick={() => void save()} disabled={!canSave || saving} data-testid="duty-save">{saving ? <Loader2 className="animate-spin" /> : null} {duty ? "Save" : "Add the duty"}</Button>

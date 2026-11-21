@@ -167,7 +167,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       ) : tab === "duties" ? (
         <div role="tabpanel" aria-label="Duties" className="flex min-h-0 flex-1 flex-col">
           {/* A duty's run opens on Chat, among the bot's duty runs. */}
-          <BotDuties bot={bot} onOpenSession={(sessionId) => { selectSession(sessionId); setTab("chat"); }} />
+          <BotDuties key={bot.id} bot={bot} onOpenSession={(sessionId) => { selectSession(sessionId); setTab("chat"); }} />
         </div>
       ) : (
         <div role="tabpanel" aria-label={TABS.find((value) => value.id === tab)?.label} className="px-6 py-8">

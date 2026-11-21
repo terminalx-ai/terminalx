@@ -826,7 +826,8 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
 }
 
 pub fn remove_definition(app: &impl AutomationHost, id: &str) -> Result<()> {
-    if automation_store::get(id).is_ok_and(|automation| crate::bots::duties::is_duty(&automation)) {
+    // A duty whose bot was deleted has no Duties tab left to be removed from (PRO-471).
+    if automation_store::get(id).is_ok_and(|automation| crate::bots::duties::is_duty(&automation) && !crate::bots::duties::orphaned(&automation)) {
         bail!("{}", crate::bots::duties::ELSEWHERE);
     }
     automation_store::remove(id)?;
@@ -1615,6 +1616,11 @@ fn archive_finished_run(app: &impl AutomationHost, finished: &AutomationRun) {
 
 pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
     end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Failed);
+}
+
+/// End a run that has gone on past its time (a bot's duty, PRO-471). Its agent is stopped by the caller.
+pub(crate) fn time_out_run(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::TimedOut);
 }
 
 pub fn cancel_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
