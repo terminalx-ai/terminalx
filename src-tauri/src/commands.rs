@@ -6370,6 +6370,25 @@ pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64
     bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
 }
 
+// A bot's suggestions and its look around (PRO-477).
+
+/// A bot's open suggestions, newest first, and the status of its look around and memory tidy.
+#[tauri::command]
+pub async fn bot_suggestions(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestions", serde_json::json!({"id": id})).await
+}
+
+/// Start a suggestion: it becomes an item, sent to the bot as the owner's message, and the bot begins.
+#[tauri::command]
+pub async fn bot_suggestion_start(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionStart", serde_json::json!({"id": id, "number": number})).await
+}
+
+#[tauri::command]
+pub async fn bot_suggestion_dismiss(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionDismiss", serde_json::json!({"id": id, "number": number})).await
+}
+
 /// A bot's newest mentions on GitHub and Linear, and what it posted there (PRO-480).
 #[tauri::command]
 pub async fn bot_channels(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {

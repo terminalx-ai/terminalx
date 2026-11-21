@@ -85,9 +85,10 @@ pub fn guards(command: &str) -> bool {
 /// witnessed always; the runtime asks for the proof only when it gives the
 /// bot more (`bots::enforce::needs_person`), or turns its memory back on.
 /// The owner's writes to a bot's role and memory (PRO-470) are a person's
-/// too: what a bot is told comes from them.
+/// too: what a bot is told comes from them. Starting a suggestion (PRO-477)
+/// gives the bot work as the owner's message.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 20] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite"];
+pub const GUARDED_BOTS: [&str; 21] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -118,6 +119,9 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
         }
         // Switching a duty off gives its bot nothing (PRO-471).
         Some("dutySwitch") => params["params"]["on"].as_bool() != Some(false),
+        // A chosen answer may approve a bot's run (PRO-476): witnessed always, as the runtime judges whether it
+        // does under the item list's lock (`bots::items::answer_as`). Typed words never approve.
+        Some("itemAnswer") => !params["params"]["answer"].is_null(),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }

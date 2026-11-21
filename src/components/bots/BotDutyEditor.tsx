@@ -8,6 +8,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { describeSchedule } from "@/lib/automationSchedule";
 import { HOME_ENV, REPORT_TARGETS, checkRunsHomeFile, dutiesApi, dutyInputOf, newDutyInput, reportsToLabel } from "@/lib/botDuties";
+import { builtinOf } from "@/lib/botSuggestions";
 import { cn } from "@/lib/cn";
 import type { Automation, AutomationInput, AutomationSchedule, ScheduleKind, SchedulePreset } from "@/types/automations";
 import type { Bot } from "@/types/bots";
@@ -49,7 +50,10 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
   const precheckInput = { projectPath: home ?? "", workspace: "newWorktree", sessionId: null, precheck: input.precheck } as unknown as AutomationInput;
   // A target a newer app wrote stays as it is, and is shown as such.
   const unknownTarget = !REPORT_TARGETS.some((target) => target.id === input.reportsTo);
-  const canSave = !!input.name.trim() && !!input.prompt.trim() && precheckReady(input.precheck) && (input.schedule.kind !== "cron" || !!input.schedule.cron?.trim());
+  // A built-in's name and prompt are TerminalX's (PRO-477): its editor changes when it wakes, its check, and Look
+  // around's focus line.
+  const builtin = duty ? builtinOf(duty) : null;
+  const canSave = !!input.name.trim() && (!!builtin || !!input.prompt.trim()) && precheckReady(input.precheck) && (input.schedule.kind !== "cron" || !!input.schedule.cron?.trim());
 
   const save = async () => {
     if (!canSave) return;
@@ -70,14 +74,22 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
       <button type="button" onClick={() => onClose(null)} className="flex w-fit items-center gap-1 rounded-md text-[12.5px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40">
         <ChevronLeft className="size-3.5" /> {duty ? duty.name : "Duties"}
       </button>
-      <h2 className="mt-3 text-[15px] font-semibold text-foreground">{duty ? "Change the duty" : `Add a duty for ${bot.name}`}</h2>
-      <p className="mt-0.5 text-[12.5px] text-muted-foreground">It runs as {bot.name}: its agent, model, access and home. A quick check runs first; the model runs only when the check finds something.</p>
+      <h2 className="mt-3 text-[15px] font-semibold text-foreground">{builtin ? `Change ${duty?.name}` : duty ? "Change the duty" : `Add a duty for ${bot.name}`}</h2>
+      <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+        {builtin
+          ? builtin === "tidyMemory"
+            ? `Built in. ${bot.name} merges its duplicate notes and removes the ones newer notes contradict, as one change you can undo in Memory.`
+            : `Built in. ${bot.name} reads what changed and suggests work on its Home tab. It may only read while it looks: TerminalX refuses anything else.`
+          : <>It runs as {bot.name}: its agent, model, access and home. A quick check runs first; the model runs only when the check finds something.</>}
+      </p>
 
       <div className="mt-5 grid max-w-[720px] grid-cols-2 gap-4">
-        <label className={`${LABEL} col-span-2`}>
-          Name
-          <input value={input.name} maxLength={80} onChange={(event) => patch({ name: event.target.value })} className={INPUT} placeholder="Queue time on main" autoFocus />
-        </label>
+        {!builtin && (
+          <label className={`${LABEL} col-span-2`}>
+            Name
+            <input value={input.name} maxLength={80} onChange={(event) => patch({ name: event.target.value })} className={INPUT} placeholder="Queue time on main" autoFocus />
+          </label>
+        )}
 
         <div className="col-span-2 flex flex-col gap-1.5 border-t border-hairline pt-3">
           <span className="text-xs font-medium">Wakes on a schedule</span>
@@ -115,7 +127,14 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
         />
         {input.precheck && checkRunsHomeFile(input.precheck.command, home) && <div className="col-span-2 -mt-2"><HomeFileWarning bot={bot} /></div>}
 
-        <label className={`${LABEL} col-span-2 border-t border-hairline pt-3`}>
+        {builtin === "lookAround" && (
+          <label className={`${LABEL} col-span-2 border-t border-hairline pt-3`}>
+            Focus
+            <span className="font-normal text-faint">What to look at first, in a line. Empty, {bot.name} looks at everything it can see.</span>
+            <input value={input.focus ?? ""} maxLength={200} onChange={(event) => patch({ focus: event.target.value || null })} className={INPUT} placeholder="Open pull requests on the release branch" data-testid="duty-focus" />
+          </label>
+        )}
+        {!builtin && <label className={`${LABEL} col-span-2 border-t border-hairline pt-3`}>
           Then {bot.name} looks
           <span className="font-normal text-faint">What to do with what the check found. The check's output goes with it.</span>
           <textarea
@@ -125,9 +144,11 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
             className="w-full resize-y rounded-lg bg-well px-3 py-2 text-[13px] leading-relaxed outline-none focus:ring-2 focus:ring-ring/30"
             placeholder="Say which jobs are slow and why. Say nothing new when nothing changed."
           />
-        </label>
+        </label>}
 
-        <div className="col-span-2 flex flex-col gap-1.5 border-t border-hairline pt-3" role="radiogroup" aria-label="Reports to">
+        {builtin ? (
+          <p className="col-span-2 border-t border-hairline pt-3 text-[11px] text-faint">Its report is a note in {bot.name}'s home chat. Nothing reaches your notifications unless it is urgent.</p>
+        ) : <div className="col-span-2 flex flex-col gap-1.5 border-t border-hairline pt-3" role="radiogroup" aria-label="Reports to">
           <span className="text-xs font-medium">Reports to</span>
           <div className="flex flex-wrap gap-1.5" data-testid="duty-reports-to">
             {REPORT_TARGETS.map((target) => {
@@ -157,7 +178,7 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, onClose }: {
               ? "A note in its lead's home chat. Nothing reaches your notifications unless it is urgent."
               : "A note in its home chat and a notification. In quiet hours only urgent ones notify."}
           </span>
-        </div>
+        </div>}
 
         <label className="col-span-2 flex items-center justify-between gap-3 border-t border-hairline pt-3 text-xs">
           <span><span className="block font-medium">On</span><span className="text-faint">Switched off, it wakes only when you run it.</span></span>

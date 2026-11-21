@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, RotateCcw, Square, SquareTerminal } from "@/icons";
+import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, RotateCcw, Square, SquareTerminal, Users } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { errorMessage } from "@/lib/api";
@@ -15,6 +15,8 @@ import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
 import { ItemQuestionCard } from "./NeedsYou";
 import { HandToBot } from "./BotHandoffs";
+import { CheckBackRow, HandoffRow, RunLinks } from "./BotRuns";
+import { checkBackText, runningWorkers, withHandoffs } from "@/lib/botRuns";
 
 const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
 
@@ -30,9 +32,9 @@ function clock(iso: string): string {
   return Number.isNaN(at.getTime()) ? "" : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Who did something: you, or the bot. */
+/** Who did something: you, the bot, or TerminalX itself (a check-back it woke the bot for). */
 function who(by: string, bot: Bot): string {
-  return by === "owner" ? "You" : by === bot.id ? bot.name : by;
+  return by === "owner" ? "You" : by === bot.id ? bot.name : by === "terminalx" ? "TerminalX" : by;
 }
 
 /** What the bot may do on this item, from its access. */
@@ -76,6 +78,11 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
   // The item's own work first (a session the bot started for it), then the chat it was added from; newest first.
   const takeOver = [...sessions].sort((a, b) => Number(!!a.bot) - Number(!!b.bot) || (b.modified || b.created).localeCompare(a.modified || a.created))[0] ?? null;
   const closed = item.state === "done" || item.state === "dropped";
+  // PRO-476: the runs it links, with their workers; a run link that has a view is shown as the run, not as a bare id.
+  const runs = item.runViews ?? [];
+  const shownRuns = new Set(runs.map((run) => run.id));
+  const otherLinks = (item.links ?? []).filter((link) => !(link.kind === "run" && shownRuns.has(link.target)));
+  const workers = runs.reduce((sum, run) => sum + runningWorkers(run), 0);
   const lines = item.doneMeans ?? [];
   const met = lines.filter((line) => line.met).length;
 
@@ -131,6 +138,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
                 <StateIcon item={item} className="size-3" /> {itemStateLabel(item.state)}
               </Chip>
               {sessions.length > 0 && <Chip><SquareTerminal className="size-3" /> {sessions.length === 1 ? "1 session" : `${sessions.length} sessions`}</Chip>}
+              {workers > 0 && <Chip title="Workers of its runs at work now" data-testid="bot-item-workers"><Users className="size-3" /> {workers === 1 ? "1 worker" : `${workers} workers`}</Chip>}
               {(item.links ?? []).filter((link) => link.kind === "pullRequest" || link.kind === "ticket").slice(0, 3).map((link) => (
                 <Chip key={`${link.kind}:${link.target}`} title={link.title || link.target}>{link.kind === "pullRequest" ? <GitPullRequest className="size-3" /> : <Hash className="size-3" />} {link.target}</Chip>
               ))}
@@ -175,7 +183,10 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               <span className="text-[12px] text-faint">{usd.format(item.spentUsd || 0)} spent on this item</span>
             </div>
             <ol className="flex flex-col">
-              {(item.activity ?? []).map((entry, index) => <ActivityRow key={index} entry={entry} bot={bot} />)}
+              {withHandoffs(item.activity ?? [], runs).map((row, index) =>
+                row.kind === "entry" ? <ActivityRow key={index} entry={row.entry} bot={bot} /> : <HandoffRow key={index} handoff={row.handoff} />,
+              )}
+              {!closed && <CheckBackRow bot={bot} checkBack={item.checkBack} />}
             </ol>
           </section>
 
@@ -191,13 +202,15 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
             <Fact label="Updated">{relativeTime(item.modified)}</Fact>
             {item.closed && <Fact label={item.state === "done" ? "Done" : "Closed"}>{relativeTime(item.closed)}</Fact>}
             {item.snoozedUntil && <Fact label="Snoozed until">{new Date(item.snoozedUntil).toLocaleString()}</Fact>}
+            {!closed && checkBackText(item.checkBack) && <Fact label="Checks back">{checkBackText(item.checkBack)}</Fact>}
           </Panel>
           <Panel label="Sessions and links">
-            {(item.links ?? []).length === 0 ? (
+            {otherLinks.length === 0 && runs.length === 0 ? (
               <p className="text-[12.5px] text-faint">None yet.</p>
             ) : (
               <ul className="flex flex-col divide-y divide-hairline">
-                {(item.links ?? []).map((link) => <LinkRow key={`${link.kind}:${link.target}`} link={link} session={store.sessions.find((session) => session.id === link.target) ?? null} />)}
+                <RunLinks runs={runs} />
+                {otherLinks.map((link) => <LinkRow key={`${link.kind}:${link.target}`} link={link} session={store.sessions.find((session) => session.id === link.target) ?? null} />)}
               </ul>
             )}
           </Panel>
@@ -294,13 +307,14 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
   const owners = entry.by === "owner";
   // A bot's notes are its own words: shown as such, never as an instruction or an approval.
   const words = entry.kind === "comment" || entry.kind === "chose" || entry.kind === "asked" || entry.kind === "done" || entry.kind === "added";
+  const app = entry.by === "terminalx";
   // A typed answer is the owner's words, in the entry's text. A chosen answer's label, kept as its detail, is the
   // bot's own wording of that answer: shown as the bot's, never as the owner's.
   const detailLabel = entry.kind === "chose" ? `${bot.name}'s wording of that answer` : owners ? "your words" : `${bot.name}'s words · not an approval`;
   return (
-    <li className="flex min-w-0 gap-3 border-b border-hairline py-2 last:border-b-0" data-testid="bot-item-activity-row" data-by={owners ? "owner" : "bot"}>
+    <li className="flex min-w-0 gap-3 border-b border-hairline py-2 last:border-b-0" data-testid="bot-item-activity-row" data-by={owners ? "owner" : app ? "terminalx" : "bot"}>
       <span className="w-12 shrink-0 pt-0.5 font-mono text-[11.5px] text-faint" title={entry.at}>{clock(entry.at)}</span>
-      <MessageSquare className={cn("mt-0.5 size-3.5 shrink-0", owners ? "text-accent" : "text-muted-foreground")} />
+      <MessageSquare className={cn("mt-0.5 size-3.5 shrink-0", owners ? "text-accent" : app ? "text-faint" : "text-muted-foreground")} />
       <div className="min-w-0 flex-1">
         <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-foreground">
           <span className="break-words">{entry.text || `${who(entry.by, bot)}: ${entry.kind}`}</span>

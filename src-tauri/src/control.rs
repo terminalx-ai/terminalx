@@ -992,9 +992,10 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
-            "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
-            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" | "bots.memory.tidy" => self.bot_memory(command, params),
+            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.plan" | "bots.items.ask-merge" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
             "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
+            "bots.suggest" => self.bot_suggest(params),
             "bots.post" | "bots.reply" => self.bot_channels(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
@@ -1143,7 +1144,8 @@ impl ControlService {
             (Some(own), _) => {
                 // The session it runs in: where the kernel placed it, else the one its proved claim names.
                 let entry = caller.session.as_deref().and_then(|session| index::get(session).ok());
-                let duty = entry.as_ref().and_then(|entry| entry.unknown.get("botDuty")).and_then(Value::as_str).map(str::to_owned);
+                // The duty's id, under `botDuty` (`{"id"}`, PRO-471).
+                let duty = entry.as_ref().and_then(|entry| entry.unknown.get("botDuty")).and_then(|duty| duty.get("id").or(Some(duty))).and_then(Value::as_str).map(str::to_owned);
                 let source = crate::bots::changes::Source {
                     kind: if duty.is_some() { "duty".into() } else { "chat".into() },
                     session: caller.session.clone(),
@@ -1183,6 +1185,29 @@ impl ControlService {
             "bots.memory.add" => {
                 let recorded = memory::add(sink, &bot, &place, &required_string(&params, "text")?, &by, source).map_err(failed)?;
                 Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
+            }
+            "bots.memory.tidy" => {
+                let plan: memory::TidyPlan = serde_json::from_value(params["plan"].clone()).map_err(|error| {
+                    ControlError::invalid(format!("The tidy plan is not one TerminalX reads: {error}. It is {{\"merge\": [{{\"lines\": [{{\"line\": N, \"note\": TEXT}}, …], \"into\": TEXT}}], \"remove\": [{{\"line\": N, \"note\": TEXT}}]}}."))
+                })?;
+                // The owner may tidy every place; a bot, its own notes and its working place's.
+                let places = if by == bots::OWNER { memory::places(&bot) } else { memory::conversation_places(&bot) };
+                // One tidy is one change: a run of the built-in Tidy memory makes one (PRO-477). Said as forbidden here
+                // when it plainly already tidied; `memory::tidy` judges it again under the history's lock, so two tidies
+                // sent at once still record one.
+                let tidy_run = caller
+                    .session
+                    .as_deref()
+                    .filter(|_| by != bots::OWNER)
+                    .filter(|session| index::get(session).ok().as_ref().and_then(crate::bots::builtins::of_session).is_some_and(|run| run.kind == crate::bots::builtins::Builtin::TidyMemory));
+                if let Some(session) = tidy_run {
+                    let tidied = crate::bots::changes::read_log(&bot.id).map_err(ControlError::internal)?.changes.iter().any(|change| change.kind == memory::TIDY_KIND && change.source.session.as_deref() == Some(session));
+                    if tidied {
+                        return Err(ControlError::new("forbidden", "This run already tidied your memory: one tidy is one change. Reply with what you merged and removed.", None::<String>));
+                    }
+                }
+                let recorded = memory::tidy(sink, &bot, &plan, &places, &by, source, tidy_run).map_err(failed)?;
+                Ok(json!({"bot": bot.id, "changes": memory::shown(&recorded)}))
             }
             "bots.memory.forget" => {
                 // `--line N` counts from 1, as the list shows the lines.
@@ -1325,6 +1350,27 @@ impl ControlService {
         // A bot's session steers only the runs led for the same bot.
         if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
             placement.may_steer(&run)?;
+        }
+        // PRO-476: a run a bot asked its owner about starts only on their answer, and with "Start, but ask before
+        // merging" merges only once they said Merge. Judged by the run, whoever calls: a process a bot starts outside
+        // its sessions is not placed in one. The owner's own Start and Merge are the window's and do not come here.
+        if command == "runs.start" {
+            if let Some(number) = crate::bots::runs::start_awaits_owner(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "awaits_owner",
+                    format!("Run {} starts only on your owner's answer to item #{number}.", run.id),
+                    Some("End your turn: their Approve and start, in the TerminalX window, starts it.".into()),
+                ));
+            }
+        }
+        if command == "runs.merge" {
+            if let Some(number) = crate::bots::runs::merge_held_for(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "merge_held",
+                    format!("Your owner asked to be asked before run {} merges (item #{number}).", run.id),
+                    Some(format!("Ask them with `terminalx bots items ask-merge {number}`, end your turn, and merge once they answer Merge.")),
+                ));
+            }
         }
         match command {
             "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
@@ -2985,6 +3031,19 @@ fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli:
         }
         return Ok(());
     }
+    if operation == "itemAnswer" {
+        // PRO-476: whether the answer approves a run is judged again under the list's lock (`items::answer_as`),
+        // so the question cannot change into one that does after this check: it is told whether a person asked.
+        let mut proved = witnessed && consent::verify_for(run, params, window).is_ok();
+        if !proved && crate::bots::enforce::needs_person(&operation, &params["params"]) {
+            consent::verify_for(run, params, window).map_err(|error| bots_refusal(&operation, error, window))?;
+            proved = true;
+        }
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
+        }
+        return Ok(());
+    }
     if !crate::bots::enforce::needs_person(&operation, &params["params"]) {
         if let Some(object) = params.as_object_mut() {
             object.remove(consent::PARAM);
@@ -3034,7 +3093,9 @@ fn bots_action(operation: &str) -> &'static str {
         "dutyTryCheck" => "try a duty's first check",
         "quietHours" => "change a bot's quiet hours",
         "itemHand" => "hand a bot's item to another bot",
+        "suggestionStart" => "start a bot's suggestion",
         "briefWrite" => "change the team brief",
+        "itemAnswer" => "approve a bot's run",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -3053,6 +3114,11 @@ fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
             inner.insert(crate::bots::BY_PERSON.into(), json!(false));
         }
         return Ok(());
+    }
+    if operation == "itemAnswer" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
     }
     if crate::bots::enforce::needs_person(&operation, &params["params"]) {
         let action = bots_action(&operation);
@@ -5924,9 +5990,17 @@ mod wait_tests;
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
 
+#[cfg(test)]
+#[path = "control_bot_runs_tests.rs"]
+mod bot_runs_tests;
+
 // Bots hand-offs from the command line (PRO-475).
 #[path = "control_bot_handoffs.rs"]
 mod bot_handoffs;
+
+// A bot's suggestions from the command line (PRO-477).
+#[path = "control_bot_suggestions.rs"]
+mod bot_suggestions;
 
 // Bots' posts on GitHub and Linear from the command line (PRO-480).
 #[path = "control_bot_channels.rs"]

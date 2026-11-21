@@ -333,6 +333,7 @@ impl Rig {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
             acting_bot: None,
+            bot_builtin: None,
             harness: match kind {
                 CliKind::Claude => "claude".into(),
                 CliKind::Codex => "codex".into(),

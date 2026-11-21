@@ -47,6 +47,10 @@ pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Result
             if let Some(question) = params["question"].as_str() {
                 call["question"] = json!(question);
             }
+            // A paired phone allowed to drive is the person (its device grant, checked by the runtime before this):
+            // so an answer that approves a run's plan (PRO-476) is theirs, said here rather than left to a default.
+            // The question's id it was shown is what `runs::refuse_approval` asks for, and the phone always sends it.
+            call[super::BY_PERSON] = json!(true);
             super::enforce::call(manager, "itemAnswer", &call)
         }
         "pause" => super::enforce::call(manager, "pause", &json!({"id": id()?, "from": super::pause::FROM_PHONE})),

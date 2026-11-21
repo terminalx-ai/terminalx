@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Bots (experimental): a lead bot plans and starts orchestration runs. It leads
+  a run from a session it starts in the project, then `terminalx bots items
+  plan` asks "Approve the plan and start the run?" with a run plan card in its
+  chat (pieces, workers, estimate). Only the owner's answer approves and starts
+  the run; "Start, but ask before merging" holds the bot's `runs merge` until
+  the owner says Merge (`bots items ask-merge`). The item links the run and its
+  workers, shows each hand-off with its cost and report, cannot close until the
+  run ends, and `--check-back TIME|report` wakes the bot without spending
+  anything while it waits. "Started by <bot>" shows the bot's runs with their
+  state. Needs Orchestrator runs on too (PRO-476).
 - Bots (experimental, off by default): the foundation for AI employees with
   standing roles. Settings → Experimental → Bots turns on the bots' store and
   `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
@@ -162,6 +172,19 @@
   it: what is next today, the week so far, the key and quiet hours. Days a
   duty's log no longer reaches back over say "history not kept" and the
   totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): a bot proposes work by itself. Each bot has two
+  built-in duties, on from hire. Look around (08:00 to 20:00, every four
+  hours, with an optional focus line) reads what changed and suggests work;
+  while it looks it may only read, enforced in the session's hooks, and an
+  action it tries anyway is refused with a note to suggest it instead. Its
+  suggestions are on the bot's Home tab, each with why, Start (an item you
+  asked for, sent to the bot as your message, so it begins) and Dismiss,
+  under a line saying when it last looked, what it suggested and what was
+  refused. Tidy memory (nightly) merges duplicate notes and removes
+  contradicted ones as one change with one Undo. A free check skips either
+  when nothing has changed, logged as "Nothing new" with no model run. The
+  Home tab's right column also shows Up next, the bot's next duty runs
+  (PRO-477).
 - Bots (experimental): the bots on the phone. While a paired Mac has Bots on,
   the phone gets a Bots tab: what needs you across every bot first, the
   newest question answerable from the list with its recommended answer, then

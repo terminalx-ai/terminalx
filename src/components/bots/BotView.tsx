@@ -22,6 +22,11 @@ import type { SessionEntry } from "@/types/session";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
 import { HandoffCards, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
+import { RunPlanCards, StartedRunRow } from "./BotRuns";
+import { runStateLine, startedStateLine, workerSessions } from "@/lib/botRuns";
+import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { useRunsByLead } from "@/lib/orchestration";
+import type { Run } from "@/types/orchestration";
 import { BotMenu } from "./BotMenu";
 import { BotSettings } from "./BotSettings";
 
@@ -184,6 +189,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             ) : open ? (
               <ErrorBoundary key={open.id} label="the chat">
                 <HandoffCards bot={bot} chatId={open.id} />
+                <RunPlanCards bot={bot} chatId={open.id} chats={chats} />
                 <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
               </ErrorBoundary>
             ) : (
@@ -311,6 +317,24 @@ function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: bool
   );
 }
 
+/**
+ * "Started by <bot>" (PRO-476, 23.04): the runs led from the bot's sessions, each as one row with where it is, and the
+ * other sessions its chats started with their state. A run's workers are under its run, not rows of their own.
+ */
+export function startedRows(startedBy: SessionEntry[], chats: SessionEntry[], runsByLead: Record<string, Run | null>): { runs: { run: Run; lead: SessionEntry }[]; sessions: SessionEntry[] } {
+  const leads = [...chats, ...startedBy];
+  const runs = leads.flatMap((lead) => {
+    const run = runsByLead[lead.id];
+    return run ? [{ run, lead }] : [];
+  });
+  const hidden = new Set<string>();
+  for (const { run, lead } of runs) {
+    for (const id of workerSessions(run)) hidden.add(id);
+    hidden.add(lead.id);
+  }
+  return { runs, sessions: startedBy.filter((session) => !hidden.has(session.id)) };
+}
+
 function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewChat, busy, briefOpen = false, onOpenBrief }: {
   bot: Bot;
   chats: SessionEntry[];
@@ -323,6 +347,9 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
   briefOpen?: boolean;
   onOpenBrief?: () => void;
 }) {
+  // The runs only with Settings → Experimental → Orchestrator runs on, as the sidebar shows them.
+  const runsByLead = useRunsByLead(useExperimentalSettings()?.orchestratorRuns === true);
+  const started = startedRows(startedBy, chats, runsByLead);
   return (
     <nav aria-label={`${bot.name}'s chats`} className="flex w-[236px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline px-2 py-3">
       <ChatGroup label={`Chats with ${bot.name}`} action={
@@ -332,9 +359,10 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
       }>
         {chats.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={!!chat.bot?.home} />)}
       </ChatGroup>
-      {startedBy.length > 0 && (
+      {(started.runs.length > 0 || started.sessions.length > 0) && (
         <ChatGroup label={`Started by ${bot.name}`}>
-          {startedBy.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
+          {started.runs.map(({ run, lead }) => <StartedRunRow key={run.id} goal={run.goal} state={runStateLine(run)} selected={lead.id === openId && !chats.includes(lead)} onOpen={() => onOpen(lead)} />)}
+          {started.sessions.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} sub={startedStateLine(chat)} />)}
         </ChatGroup>
       )}
       {dutyRuns.length > 0 && (
@@ -363,7 +391,7 @@ function ChatGroup({ label, action, children }: { label: string; action?: ReactN
   );
 }
 
-function ChatRow({ chat, selected, home, onOpen }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void }) {
+function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void; sub?: string }) {
   const working = chat.tabs.some((tab) => tab.status === "in_progress");
   const source = home ? null : chatSource(chat);
   const Icon = home ? Home : chat.botChannel?.kind === "github" ? Github : chat.botChannel?.kind === "linear" ? SquareKanban : MessageSquare;
@@ -378,8 +406,8 @@ function ChatRow({ chat, selected, home, onOpen }: { chat: SessionEntry; selecte
         <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] text-foreground">{home ? "Home chat" : conversationTitle(chat)}</span>
-          <span className="block truncate text-[11.5px] text-faint" data-testid={source ? "bot-chat-source" : undefined}>
-            {source ? `${source} · ${relativeTime(chat.modified || chat.created)}` : relativeTime(chat.modified || chat.created)}
+          <span className="block truncate text-[11.5px] text-faint" data-testid={!sub && source ? "bot-chat-source" : undefined}>
+            {sub ?? (source ? `${source} · ${relativeTime(chat.modified || chat.created)}` : relativeTime(chat.modified || chat.created))}
           </span>
         </span>
         {working && <Loader2 aria-label="Working" className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" />}

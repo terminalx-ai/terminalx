@@ -16,6 +16,7 @@ import type { Automation, AutomationRun } from "@/types/automations";
 import type { Bot } from "@/types/bots";
 import type { DutyInput, DutyState, QuietHours } from "@/types/botDuties";
 import { dutyAt } from "@/lib/botCalendar";
+import { builtinOf } from "@/lib/botSuggestions";
 import { BotDuty } from "./BotDuty";
 import { BotDutyEditor } from "./BotDutyEditor";
 import { DutiesCalendar, DutiesViewSwitch, type DutiesView } from "./DutiesCalendar";
@@ -174,7 +175,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
                         </button>
                         <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[11.5px] text-faint">
                           <Zap className="size-3 shrink-0" />
-                          <span className="truncate" title={duty.precheck?.command}>{duty.precheck ? `First checks: ${duty.precheck.command}` : "No first check: the model looks each time"}</span>
+                          <span className="truncate" title={duty.precheck?.command}>{builtinOf(duty) ? `Built in · ${builtinCheck(duty)}` : duty.precheck ? `First checks: ${duty.precheck.command}` : "No first check: the model looks each time"}</span>
                         </span>
                       </td>
                       <td className="px-2 py-2.5 align-top text-muted-foreground"><span className="block truncate" title={wakesOn(duty)}><CalendarClock className="mr-1.5 inline size-3.5 align-[-2px]" />{wakesOn(duty)}</span></td>
@@ -311,3 +312,8 @@ export function QuietHoursCard({ bot, quiet, loaded, onSaved }: { bot: Bot; quie
   );
 }
 
+/** A built-in duty's free check, in words (PRO-477): what lets it skip the model. */
+function builtinCheck(duty: Automation): string {
+  if (duty.precheck) return `first checks: ${duty.precheck.command}`;
+  return builtinOf(duty) === "tidyMemory" ? "skips when memory has not changed" : "skips when nothing it can see has changed";
+}

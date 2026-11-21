@@ -1999,7 +1999,25 @@ terminalx bots items ask <item> --question "<question>" --answer "<a>" --answer 
 terminalx bots items check <item> <line> --met|--unmet [--how "<how it is checked>"] --json
 terminalx bots items comment <item> --text "<note>" --json
 terminalx bots items done <item> [--text "<note>"] --json
+terminalx bots items plan <item> --run <run> [--note "<why this plan>"] [--minutes N] [--recommend 1|2|3] --json
+terminalx bots items ask-merge <item> [--run <run>] [--note "<what is ready>"] --json
+terminalx bots items set <item> --check-back <time>|report|off --json
 ```
+
+- **Leading a run (PRO-476).** A bot's chat is not in a git project, so it leads a run from a
+  session it starts in the project (`terminalx sessions create --project … --prompt …`), which
+  runs `terminalx runs create`. Then `plan <item> --run <run>` asks the owner "Approve the plan
+  and start the run?" with "Approve and start", "Start, but ask before merging" and "Not now"
+  (the first is recommended unless `--recommend` says otherwise), and links the run to the item.
+  End your turn: only the owner's answer, in the TerminalX window, approves and starts the run.
+  You never run `runs approve` or `runs start` yourself.
+- With "Start, but ask before merging", `runs merge` is refused with `merge_held` until you ask
+  `ask-merge <item>` and the owner answers Merge.
+- `--check-back` wakes you at a time, on a worker's report (`report`), or both (a time also wakes
+  on a report). Nothing runs and nothing is spent while you wait; TerminalX's note says only that
+  it is time to look, never what a worker wrote.
+- An item that links a run cannot be `done` until the run has ended. Both Settings → Experimental
+  → Bots and Orchestrator runs must be on: with runs off, `plan` and the approval are refused.
 
 - `<item>` is the item's number (`14` or `#14`). Numbers are never reused.
 - States: `planned`, `inProgress`, `needsYou`, `waiting`, `done`, `dropped`. Only `ask` puts an
@@ -2101,6 +2119,7 @@ terminalx bots reply --text "<answer>" --json
 terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
 terminalx bots memory forget "<note>" [--line <n>] [--bot <bot>] [--place <place>] --json
 terminalx bots memory list [--bot <bot>] [--place <place>] --json
+terminalx bots memory tidy --plan '<plan JSON>' [--bot <bot>] --json
 ```
 
 - `MEMORY.md` holds one dated note per line (`- 2026-11-20 <note>`). **A bot writes its memory
@@ -2125,6 +2144,31 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
   note has; for one of two equal notes add `--line <n>`, its line number as `list` shows it.
 - While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
   answer `forbidden`.
+- `tidy` merges duplicate notes and removes contradicted ones as **one** change the owner undoes
+  with one Undo. The plan names each note by its line number (as `list` shows it) and its text,
+  with `place` when it is not `bot`:
+  `{"merge":[{"lines":[{"line":3,"note":"…"},{"line":9,"note":"…"}],"into":"<the one note>"}],"remove":[{"line":5,"note":"…"}]}`.
+  A merge takes two or more notes; at most 200 lines in all. If any line no longer reads as
+  named, the whole plan is refused (`invalid_arguments`) and nothing changes: read again and
+  send a new one. A Tidy memory run tidies once.
+
+#### Suggestions
+
+A bot proposes work for its owner; the owner presses Start or Dismiss on its Home tab. Run from
+a bot's own sessions only; from anywhere else it answers `forbidden`.
+
+```text
+terminalx bots suggest --title "<what to do, one line>" --why "<why it is worth doing>" --json
+```
+
+- Start makes the suggestion an item the owner asked for, in progress, and sends it to the
+  bot's home chat as the owner's message. Dismiss only closes it. Neither is a CLI command.
+- A title is at most 200 characters and why at most 400, one line each; one that holds a
+  secret is refused. At most 20 suggestions wait at once, at most 5 come from one look around,
+  and an open title is not suggested twice. A paused bot suggests nothing (`bot_paused`).
+- A built-in Look around run may only read and suggest: every other action is refused before
+  it runs, with a message saying to suggest it instead. Kept in
+  `$TERMINALX_HOME/bot-suggestions/<bot id>.json`.
 
 ### This guide
 
