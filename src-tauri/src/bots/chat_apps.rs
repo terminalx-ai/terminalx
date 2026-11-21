@@ -80,10 +80,14 @@ pub const BODY_CHARS: usize = 4000;
 pub const OUT_CHARS: usize = 12_000;
 /// Messages that reach one bot in an hour; the rest wait.
 pub const PER_HOUR: usize = 30;
-/// A link code: this many letters and digits, good for [`CODE_MINUTES`] and [`CODE_TRIES`] wrong tries.
+/// A link code: this many letters and digits, good for [`CODE_MINUTES`]. A chat that sends [`CODE_TRIES`] wrong
+/// codes cannot link with it; after [`CODE_ALL_TRIES`] wrong ones from all chats it is gone. Kept per chat, so a
+/// stranger who finds the bot cannot use up the owner's tries; the whole cap keeps guessing a code (one in 32^6)
+/// out of reach.
 pub const CODE_LEN: usize = 6;
 pub const CODE_MINUTES: i64 = 10;
 pub const CODE_TRIES: u32 = 5;
+pub const CODE_ALL_TRIES: u32 = 200;
 /// Letters and digits that cannot be mistaken for one another.
 const CODE_LETTERS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// Chats one bot may have linked on one service.
@@ -368,8 +372,12 @@ pub struct Code {
     pub service: String,
     pub code: String,
     pub made: String,
+    /// Wrong codes from all chats.
     #[serde(default)]
     pub tries: u32,
+    /// Wrong codes by chat.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wrong: BTreeMap<String, u32>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -498,7 +506,7 @@ pub struct Store {
     pub messages: Vec<Kept<Inbound>>,
     #[serde(default)]
     pub outbox: Vec<Kept<Outgoing>>,
-    /// Where Telegram's updates were read up to, by bot: the next `offset`.
+    /// Where Telegram's updates were read up to, by bot and Telegram bot ([`offset_key`]): the next `offset`.
     #[serde(default)]
     pub offsets: BTreeMap<String, i64>,
     /// "Also sends to", by bot: the services its home chat's replies to the owner also go to.
@@ -543,7 +551,7 @@ impl Store {
 
     fn trim(&mut self) {
         let now = Utc::now();
-        self.codes.retain(|kept| kept.known().is_none_or(|code| parse_time(&code.made).is_some_and(|made| now - made < chrono::TimeDelta::minutes(CODE_MINUTES)) && code.tries < CODE_TRIES));
+        self.codes.retain(|kept| kept.known().is_none_or(|code| parse_time(&code.made).is_some_and(|made| now - made < chrono::TimeDelta::minutes(CODE_MINUTES)) && code.tries < CODE_ALL_TRIES));
         let closed = |kept: &Kept<Inbound>| kept.known().is_some_and(|message| message.state != WAITING && (message.state != DELIVERED || message.replied.is_some()));
         let mut extra = self.messages.iter().filter(|kept| closed(kept)).count().saturating_sub(KEEP_MESSAGES);
         self.messages.retain(|kept| {
@@ -630,7 +638,7 @@ pub fn code_in(text: &str) -> Option<String> {
 /// from is linked.
 pub fn new_code(store: &mut Store, bot: &str, service: &str) -> Code {
     store.codes.retain(|kept| kept.known().is_none_or(|code| !(code.bot == bot && code.service == service)));
-    let code = Code { bot: bot.into(), service: service.into(), code: fresh_code(), made: index::now(), tries: 0, unknown: BTreeMap::new() };
+    let code = Code { bot: bot.into(), service: service.into(), code: fresh_code(), made: index::now(), tries: 0, wrong: BTreeMap::new(), unknown: BTreeMap::new() };
     store.codes.push(Kept::Known(code.clone()));
     code
 }
@@ -656,7 +664,8 @@ pub enum Taken {
 /// to the outbox.
 pub fn take_in(store: &mut Store, bot: &Bot, service: &str, account: &str, message: &Incoming) -> Taken {
     let Incoming::Message { id, chat, chat_name, direct, message: message_id, thread, sender, text, .. } = message else { return Taken::Nothing };
-    let seen = format!("{}:{id}", bot.id);
+    // Per login: another Telegram bot's update ids start again.
+    let seen = format!("{}:{account}:{id}", bot.id);
     if store.seen.contains(&seen) || sender.automated || chat.is_empty() {
         return Taken::Nothing;
     }
@@ -664,12 +673,17 @@ pub fn take_in(store: &mut Store, bot: &Bot, service: &str, account: &str, messa
     let notice = |store: &mut Store, text: String| {
         store.outbox.push(Kept::Known(outgoing(&bot.id, service, chat, "notice", text, message_id, thread)));
     };
-    // A code waiting for this bot: a message that is one links its chat, a wrong one counts against it.
+    // A code waiting for this bot: a message that is one links its chat; a wrong one from a chat not linked counts
+    // against that chat, and is answered only when it was sent as a command (`/start CODE`, `/link CODE`): a word
+    // that only looks like a code ("thanks") is a message, not a try.
+    let command = text.trim_start().starts_with('/');
+    let linked_here = store.link(&bot.id, service, chat).is_some();
     if let Some(code) = code_in(text) {
         let waiting = store.codes.iter_mut().filter_map(Kept::known_mut).find(|known| known.bot == bot.id && known.service == service);
         if let Some(waiting) = waiting {
             let fresh = parse_time(&waiting.made).is_some_and(|made| Utc::now() - made < chrono::TimeDelta::minutes(CODE_MINUTES));
-            if fresh && waiting.tries < CODE_TRIES && waiting.code == code {
+            let chat_tries = waiting.wrong.get(chat.as_str()).copied().unwrap_or(0);
+            if fresh && chat_tries < CODE_TRIES && waiting.tries < CODE_ALL_TRIES && waiting.code == code {
                 let user_name = if sender.name.is_empty() { sender.handle.clone().unwrap_or_else(|| "you".into()) } else { sender.name.clone() };
                 let link = Link {
                     bot: bot.id.clone(),
@@ -698,10 +712,15 @@ pub fn take_in(store: &mut Store, bot: &Bot, service: &str, account: &str, messa
                 notice(store, format!("Linked to {name} in TerminalX. {reach} Unlink it in TerminalX → {name} → Settings → Channels.", name = bot.name));
                 return Taken::Linked(link);
             }
-            waiting.tries += 1;
-            if store.link(&bot.id, service, chat).is_none() {
-                notice(store, "That code is not right, or it is no longer good: make a new one in TerminalX.".into());
-                return Taken::NotAccepted("A wrong link code was sent".into());
+            if !linked_here {
+                waiting.tries += 1;
+                *waiting.wrong.entry(chat.clone()).or_default() += 1;
+                if command {
+                    notice(store, "That code is not right, or it is no longer good: make a new one in TerminalX.".into());
+                }
+                let why = "A wrong link code was sent".to_string();
+                push_inbound(store, bot, service, message, String::new(), NOT_ACCEPTED, &sender_shown(sender), &why);
+                return Taken::NotAccepted(why);
             }
         }
     }
@@ -1608,33 +1627,10 @@ fn run_telegram(manager: &SessionManager, root: &std::path::Path, bot: &str, sav
     while wanted(root, bot, TELEGRAM, saved) {
         let Some(login) = login_of(bot, TELEGRAM, saved) else { break };
         let client = super::telegram::Client::new(super::telegram::API, &login.token);
-        let offset = read().ok().and_then(|store| store.offsets.get(bot).copied()).unwrap_or(0);
-        match client.get_updates(offset, super::telegram::POLL_SECONDS) {
-            Ok(updates) => {
+        match poll_telegram(manager, &client, bot, &login, super::telegram::POLL_SECONDS) {
+            Ok(()) => {
                 set_status(root, bot, TELEGRAM, "connected", String::new());
                 backoff = 2;
-                let mut next = offset;
-                for update in &updates {
-                    if let Some(id) = update["update_id"].as_i64() {
-                        next = next.max(id + 1);
-                    }
-                    match super::telegram::incoming(update) {
-                        Incoming::Press { id, chat, message, sender, data } => {
-                            let note = pressed(manager, TELEGRAM, &login.account.id, &chat, &message, &sender, &data);
-                            if let Err(error) = client.answer_press(&id, &note) {
-                                log::warn!("bot chat apps: answer a Telegram button press for {bot}: {error}");
-                            }
-                        }
-                        message @ Incoming::Message { .. } => take_and_wake(bot, TELEGRAM, &login.account.id, &message),
-                        Incoming::Ignored => {}
-                    }
-                }
-                if next != offset {
-                    let _ = change(|store| {
-                        store.offsets.insert(bot.into(), next);
-                        Ok(())
-                    });
-                }
             }
             Err(error) => {
                 let wait = match &error {
@@ -1648,6 +1644,51 @@ fn run_telegram(manager: &SessionManager, root: &std::path::Path, bot: &str, sav
             }
         }
     }
+}
+
+/// One long poll of Telegram for `bot` through `login`: take in what came and confirm it by moving the offset on.
+/// The offset is the Telegram bot's (the login's account), not the TerminalX bot's: another @BotFather bot numbers
+/// its updates from its own start, so an offset carried over from the last one would confirm and drop them.
+fn poll_telegram(manager: &SessionManager, client: &super::telegram::Client, bot: &str, login: &Login, wait: u64) -> std::result::Result<(), super::telegram::Error> {
+    let key = offset_key(bot, &login.account.id);
+    let offset = read().ok().and_then(|store| store.offsets.get(&key).copied()).unwrap_or(0);
+    let updates = client.get_updates(offset, wait)?;
+    let mut next = offset;
+    for update in &updates {
+        if let Some(id) = update["update_id"].as_i64() {
+            next = next.max(id + 1);
+        }
+        match super::telegram::incoming(update) {
+            Incoming::Press { id, chat, message, sender, data } => {
+                let note = pressed(manager, TELEGRAM, &login.account.id, &chat, &message, &sender, &data);
+                if let Err(error) = client.answer_press(&id, &note) {
+                    log::warn!("bot chat apps: answer a Telegram button press for {bot}: {error}");
+                }
+            }
+            message @ Incoming::Message { .. } => take_and_wake(bot, TELEGRAM, &login.account.id, &message),
+            Incoming::Ignored => {}
+        }
+    }
+    let stale = read().ok().is_some_and(|store| store.offsets.keys().any(|kept| kept != &key && offset_of_bot(bot, kept)));
+    if next != offset || stale {
+        let _ = change(|store| {
+            // The offsets of the bot's earlier Telegram bots go: one connected again starts from what it still holds.
+            store.offsets.retain(|kept, _| kept == &key || !offset_of_bot(bot, kept));
+            store.offsets.insert(key.clone(), next);
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+/// Where Telegram's updates were read up to is kept by bot and by the Telegram bot (the login's account) it reads.
+fn offset_key(bot: &str, account: &str) -> String {
+    format!("{bot}/{account}")
+}
+
+/// Whether an offset's key is `bot`'s: one per Telegram bot, or one kept by bot alone before PRO-509.
+fn offset_of_bot(bot: &str, key: &str) -> bool {
+    key == bot || key.strip_prefix(bot).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// A Slack user's name, email and whether they are a bot, read at most every half hour.
@@ -1747,7 +1788,7 @@ pub fn forget_bot(id: &str) -> Result<()> {
         store.codes.retain(|kept| kept.known().is_none_or(|code| code.bot != id));
         store.messages.retain(|kept| kept.known().is_none_or(|message| message.bot != id));
         store.outbox.retain(|kept| kept.known().is_none_or(|out| out.bot != id));
-        store.offsets.remove(id);
+        store.offsets.retain(|key, _| !offset_of_bot(id, key));
         store.also.remove(id);
         Ok(())
     })?;
@@ -1788,11 +1829,9 @@ pub fn view(bot: &Bot) -> Result<Value> {
                 (Some(_), None) => ("connecting", String::new()),
             };
             let links: Vec<Value> = store.links().filter(|link| link.bot == bot.id && link.service == *service).map(|link| json!({"chat": link.chat, "name": link.name, "direct": link.direct, "by": link.user_name, "linked": link.linked})).collect();
-            let code = store.codes().find(|code| code.bot == bot.id && code.service == *service).map(|code| {
-                let expires = parse_time(&code.made).map(|made| stamp(made + chrono::TimeDelta::minutes(CODE_MINUTES)));
-                let link = login.filter(|_| *service == TELEGRAM).and_then(|login| super::telegram::start_link(&login.account.name, &code.code));
-                json!({"code": code.code, "expires": expires, "link": link})
-            });
+            // Only that one waits, never the code: the view needs no person, and whoever sends the code first links
+            // their chat. The code itself is in the answer to `chatAppLink` alone ([`made`]).
+            let code = store.codes().find(|code| code.bot == bot.id && code.service == *service).map(|code| json!({"expires": code_expires(code)}));
             json!({
                 "service": service, "connected": login.is_some(), "state": state, "why": why,
                 "account": login.map(|login| json!({"name": login.account.name})), "links": links, "code": code,
@@ -1807,6 +1846,17 @@ pub fn view(bot: &Bot) -> Result<Value> {
     activity.reverse();
     activity.truncate(20);
     Ok(json!({"services": services, "alsoSendsTo": also_sends(&store, &bot.id), "activity": activity}))
+}
+
+fn code_expires(code: &Code) -> Option<String> {
+    parse_time(&code.made).map(|made| stamp(made + chrono::TimeDelta::minutes(CODE_MINUTES)))
+}
+
+/// A new code as `chatAppLink` answers with it, a person's call: the code, when it stops being good, and on Telegram
+/// the `t.me` link that sends it.
+fn made(bot: &Bot, service: &str, code: &Code) -> Result<Value> {
+    let link = if service == TELEGRAM { read_logins()?.get(&bot.id, service).and_then(|login| super::telegram::start_link(&login.account.name, &code.code)) } else { None };
+    Ok(json!({"service": service, "code": code.code, "expires": code_expires(code), "link": link}))
 }
 
 /// The window's calls about a bot's chat apps, or `None` for another operation: the view, a link code, unlinking a
@@ -1834,8 +1884,9 @@ pub fn runtime_call(manager: &SessionManager, operation: &str, params: &Value) -
                 }
                 let code = change(|store| Ok(new_code(store, &bot.id, service)))?;
                 supervise(manager);
+                let made = made(&bot, service, &code)?;
                 view(&bot).map(|mut view| {
-                    view["made"] = json!(code.code);
+                    view["made"] = made;
                     view
                 })
             }

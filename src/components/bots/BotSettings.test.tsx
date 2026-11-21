@@ -461,7 +461,8 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
       return { service: "telegram", account: { name: "@sentry_tx_bot" } };
     });
     mocks.api.chatAppLink.mockImplementation(async () => ({
-      services: [slack, { ...telegramOn, code: { code: "ABC234", expires: SEEN, link: "https://t.me/sentry_tx_bot?start=ABC234" } }], alsoSendsTo: [], activity: [],
+      services: [slack, { ...telegramOn, code: { expires: SEEN } }], alsoSendsTo: [], activity: [],
+      made: { service: "telegram", code: "ABC234", expires: SEEN, link: "https://t.me/sentry_tx_bot?start=ABC234" },
     }));
     const page = await open([bot("b1", "Sentry")], "b1");
 

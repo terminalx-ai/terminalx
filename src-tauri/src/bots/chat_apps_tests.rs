@@ -70,9 +70,12 @@ fn a_code_links_the_chat_it_is_sent_from_and_nothing_else_reaches_the_bot() {
     assert_eq!(early, Taken::NotAccepted(format!("This chat is not linked to {}", bot.name)));
     assert!(store.messages().all(|known| known.text.is_empty() && known.state == NOT_ACCEPTED));
 
-    // A wrong code counts against the one waiting, and the chat is told.
-    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("u2", "7", true, owner.clone(), "ZZZZZZ")), Taken::NotAccepted(_)));
-    assert_eq!(store.codes().next().map(|code| code.tries), Some(1));
+    // A word that only looks like a code counts against this chat and is not answered; a wrong code sent as a
+    // command is, and neither reaches the bot.
+    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("u2", "7", true, owner.clone(), "thanks")), Taken::NotAccepted(_)));
+    assert!(!notices(&store).iter().any(|text| text.contains("not right")), "a stranger's 'thanks' is sent nothing");
+    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("u2b", "7", true, owner.clone(), "/start ZZZZZZ")), Taken::NotAccepted(_)));
+    assert_eq!(store.codes().next().map(|code| (code.tries, code.wrong.get("7").copied())), Some((2, Some(2))));
     assert!(notices(&store).iter().any(|text| text.contains("not right")));
 
     // The right one links it: whoever sent it is the owner there.
@@ -108,14 +111,107 @@ fn a_code_that_is_old_or_tried_too_often_links_nothing() {
         kept.made = stamp(Utc::now() - chrono::TimeDelta::minutes(CODE_MINUTES + 1));
     }
     assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("a", "7", true, person("7", "P", None), &code.code)), Taken::NotAccepted(_)));
+    // A stranger's wrong tries shut out their own chat, not the owner's.
     let code = new_code(&mut store, &bot.id, TELEGRAM);
     for attempt in 0..CODE_TRIES {
         let _ = take_in(&mut store, &bot, TELEGRAM, "acct", &message(&format!("w{attempt}"), "50", true, person("50", "X", None), "ZZZZZZ"));
     }
     store.trim();
-    assert!(store.codes().next().is_none(), "a code tried {CODE_TRIES} times wrongly is gone");
-    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("late", "7", true, person("7", "P", None), &code.code)), Taken::NotAccepted(_)));
-    assert!(store.links().next().is_none());
+    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("guessed", "50", true, person("50", "X", None), &code.code)), Taken::NotAccepted(_)), "past its tries, even the right code links nothing there");
+    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("owner", "7", true, person("7", "P", None), &code.code)), Taken::Linked(_)), "the owner still links");
+    assert_eq!(store.links().count(), 1);
+
+    // Wrong codes from many chats use up the code as a whole: guessing it stays out of reach.
+    let code = new_code(&mut store, &bot.id, SLACK);
+    for attempt in 0..CODE_ALL_TRIES {
+        let _ = take_in(&mut store, &bot, SLACK, "acct", &message(&format!("g{attempt}"), &format!("D{attempt}"), true, person(&format!("U{attempt}"), "X", None), "ZZZZZZ"));
+    }
+    store.trim();
+    assert!(store.codes().next().is_none(), "a code tried {CODE_ALL_TRIES} times wrongly is gone");
+    assert!(matches!(take_in(&mut store, &bot, SLACK, "acct", &message("late", "D-owner", true, person("U-owner", "P", None), &code.code)), Taken::NotAccepted(_)));
+}
+
+#[test]
+fn the_view_never_shows_a_waiting_code() {
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let code = change(|store| Ok(new_code(store, &bot.id, TELEGRAM))).unwrap();
+    let shown = view(&bot).unwrap();
+    assert!(!shown.to_string().contains(&code.code), "{shown}");
+    let telegram = shown["services"].as_array().unwrap().iter().find(|service| service["service"] == TELEGRAM).unwrap().clone();
+    assert!(telegram["code"]["expires"].is_string(), "only that one waits, and until when");
+}
+
+#[test]
+fn a_message_is_known_again_by_its_login_not_only_its_bot() {
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let mut store = Store::default();
+    linked(&mut store, &bot.id, TELEGRAM, "7", true);
+    for kept in store.links.iter_mut().filter_map(Kept::known_mut) {
+        kept.user = "7".into();
+    }
+    assert_eq!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("telegram:5", "7", true, person("7", "P", None), "first")), Taken::Waiting);
+    for kept in store.links.iter_mut().filter_map(Kept::known_mut) {
+        kept.account = "acct-2".into();
+    }
+    // A new @BotFather bot numbers its updates from the start again: its update 5 is a new message.
+    assert_eq!(take_in(&mut store, &bot, TELEGRAM, "acct-2", &message("telegram:5", "7", true, person("7", "P", None), "second")), Taken::Waiting);
+}
+
+/// PRO-509: a second Telegram bot connected in place of the first numbers its updates from its own start, below
+/// where the first was read up to. Its poll starts from nothing, its first update (a link code) is taken in, and
+/// the first bot's offset goes.
+#[test]
+fn a_second_telegram_bot_with_lower_update_ids_is_read_from_its_first_update() {
+    use crate::bots::chat_app_test_server as server;
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let manager = crate::session::SessionManager::new(
+        std::sync::Arc::new(BroadcastSink::new(64)),
+        std::sync::Arc::new(crate::sink::NoObserver),
+        std::sync::Arc::new(crate::harness::host::Host::new()),
+        std::sync::Arc::new(crate::pty::Terminals::new()),
+        std::sync::Arc::new(Default::default()),
+        std::sync::Arc::new(Default::default()),
+        crate::hooks::prepare_control().unwrap(),
+    );
+    // The first Telegram bot (account 41) was read up to update 1000, as the store kept it before and since.
+    change(|store| {
+        store.offsets.insert(bot.id.clone(), 1001);
+        store.offsets.insert(offset_key(&bot.id, "41"), 1001);
+        Ok(())
+    })
+    .unwrap();
+    let code = change(|store| Ok(new_code(store, &bot.id, TELEGRAM))).unwrap();
+    let text = format!("/start {}", code.code);
+    let server = server::serve(move |request| {
+        let body = match request.path.rsplit('/').next().unwrap_or_default() {
+            // Telegram returns what is not confirmed yet from the offset on: from 0, its update 5.
+            "getUpdates" if request.json()["offset"].as_i64().unwrap_or(0) <= 5 => json!([
+                {"update_id": 5, "message": {"message_id": 1, "from": {"id": 7, "is_bot": false, "first_name": "Paresh"}, "chat": {"id": 7, "type": "private", "first_name": "Paresh"}, "date": 1_763_715_600, "text": text}}
+            ]),
+            "getUpdates" => json!([]),
+            _ => json!({"message_id": 2, "chat": {"id": 7, "type": "private"}, "date": 1_763_715_601}),
+        };
+        (200, Vec::new(), json!({"ok": true, "result": body}).to_string())
+    });
+    let login = Login { token: "123456789:AAE_second-0123456789abcdefghijklmno".into(), app_token: String::new(), account: Account { id: "42".into(), name: "@second_bot".into(), ..Account::default() }, saved: index::now(), unknown: BTreeMap::new() };
+    let client = crate::bots::telegram::Client::new(&server.base, &login.token);
+
+    poll_telegram(&manager, &client, &bot.id, &login, 0).unwrap();
+    let first = server.requests().into_iter().find(|request| request.path.ends_with("/getUpdates")).unwrap();
+    assert_eq!(first.json()["offset"], 0, "the new Telegram bot is read from its start, not from the last one's 1001");
+    let store = read().unwrap();
+    let link = store.link(&bot.id, TELEGRAM, "7").expect("its first update, the link code, linked the chat");
+    assert_eq!(link.account, "42");
+    assert_eq!(store.offsets.get(&offset_key(&bot.id, "42")), Some(&6), "update 5 is confirmed");
+    assert_eq!(store.offsets.len(), 1, "the first Telegram bot's offsets went: {:?}", store.offsets);
+
+    poll_telegram(&manager, &client, &bot.id, &login, 0).unwrap();
+    let asked: Vec<i64> = server.requests().iter().filter(|request| request.path.ends_with("/getUpdates")).filter_map(|request| request.json()["offset"].as_i64()).collect();
+    assert_eq!(asked, vec![0, 6], "the next poll goes on from there");
+    manager.closing();
 }
 
 #[test]

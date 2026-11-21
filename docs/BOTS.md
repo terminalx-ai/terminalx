@@ -801,11 +801,30 @@ its row stays off.
   services' answers, not the HTTP library's, which would print Telegram's
   address and its token.
 - **Linking.** "Link a chat" makes a code (six letters and digits, ten
-  minutes, five wrong tries) that is sent from the chat to link: bare,
-  `/start CODE` (the `t.me` link the dialog opens) or `/link@bot CODE` in a
-  group. Whoever sends it is the owner there. A message from a chat that is
-  not linked, or linked through another login, is kept without its text,
-  shown in the dialog's "Lately", and never reaches the agent.
+  minutes) that is sent from the chat to link: bare, `/start CODE` (the
+  `t.me` link the dialog opens) or `/link@bot CODE` in a group. Whoever
+  sends it is the owner there. A message from a chat that is not linked, or
+  linked through another login, is kept without its text, shown in the
+  dialog's "Lately", and never reaches the agent.
+- **The code is the window's alone (PRO-509).** `chatAppLink` needs a
+  person (the window signs it) and only its answer carries the code
+  (`made`: the code, when it stops being good, Telegram's `t.me` link).
+  The `chatApps` view, which needs no person and which any agent tab can
+  read with the control token, says only that a code waits and until when.
+  The dialog shows the code from the answer that made it; reopened, it
+  offers "Make a new code", which replaces the waiting one.
+- **Wrong tries are kept per chat (PRO-509).** A chat not linked that sends
+  five wrong codes can no longer link with that code, and other chats still
+  can, so someone who finds the bot cannot use up the owner's tries. Two
+  hundred wrong codes from all chats end the code, which keeps guessing one
+  (one in 32⁶) out of reach. A wrong code from a linked chat is a message,
+  not a try. Only a wrong code sent as a command (`/start`, `/link`) is
+  answered "not right"; a word that only looks like a code ("thanks") is
+  sent nothing.
+- **Unlinking needs a person (PRO-509).** `chatAppUnlink` is signed by the
+  window as linking is: unlinking the owner's direct chat cuts the channel
+  their reports and questions reach them by, which an agent tab must not do
+  quietly.
 - **Who may ask.** In a linked group or channel, someone else is accepted
   only when they are in Who can ask by the email Slack gives for them,
   judged as a GitHub or Linear mention is (`channels::judge`). Telegram
@@ -835,6 +854,12 @@ its row stays off.
   and one connector per saved login; each stops when its login changes or
   goes, the bot is deleted, or Bots is switched off. Deleting a bot forgets
   its links, messages and logins.
+- **Telegram's offset is the Telegram bot's (PRO-509).** Where updates
+  were read up to (`offsets`) is kept by TerminalX bot and Telegram bot
+  (the login's account id, `bot/account`), as is the record of updates taken
+  in (`seen`). Another @BotFather bot connected in place of the first is read
+  from its own start, so its first updates (link codes, button presses) are
+  not confirmed and dropped; the first one's offset goes at that poll.
 
 ## The week of duties (PRO-473)
 
