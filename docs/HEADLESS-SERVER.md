@@ -15,7 +15,11 @@ It takes about five minutes: install, pair, start a session.
 - `curl`, and OpenSSH 8.1 or later (`ssh-keygen` checks the release
   signature). Ubuntu and macOS have both. On a minimal image:
   `sudo apt install curl openssh-client`.
-- No root. TerminalX installs into your home directory and runs as you.
+- No root needed. TerminalX installs into the home directory of the user who
+  runs the installer and runs as that user. Nothing in install, update or
+  pairing asks for `sudo`; the one command that does is yours to run
+  (`loginctl enable-linger`, below). Root may install and run it, with a
+  warning: see [Which user to run as](#which-user-to-run-as).
 - **Linux:** a systemd user session. To keep the runtime running after you log
   out, and to start it at boot, turn on lingering once:
   `sudo loginctl enable-linger "$USER"`.
@@ -25,7 +29,8 @@ It takes about five minutes: install, pair, start a session.
 
 ## Install
 
-Log in to the server as the user who will run the agents, and run:
+Log in to the server as the user who will run the agents (see
+[Which user to run as](#which-user-to-run-as)), and run:
 
 ```sh
 curl -fsSL https://terminalx.ai/install.sh | sh
@@ -51,7 +56,10 @@ The installer:
   logs/runtime.log                     the service's log
 ```
 
-If the installer says `~/.local/bin` is not on your `PATH`, add it:
+The installer ends with the two commands to run next, `login` and `pair`,
+written so they work as printed: by name when `~/.local/bin` is on your
+`PATH`, by full path (`~/.terminalx/current/terminalx-serve`) when it is not.
+In that case it also says how to add it:
 
 ```sh
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile && . ~/.profile
@@ -61,7 +69,45 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile && . ~/.profile
 `~/.terminalx/current/terminalx-serve` works everywhere `terminalx-serve` is
 written below.
 
-Check the service with `terminalx-serve service status`.
+Check the service with `terminalx-serve service status`. It says whether the
+service runs, where the server listens, and which user it runs as:
+
+```text
+Listening  Relay only: no port is open
+           (`terminalx-serve hosting --listen relay|tailscale|lan|all` changes it)
+Runs as    dev
+Sudo       dev has no passwordless sudo
+```
+
+## Which user to run as
+
+The runtime runs as the user who installed it. **Every paired computer and
+every agent on the server acts as that user**: a paired computer has a shell
+there, and so does each agent. The installer never creates a user or
+switches to another one; you choose by logging in as the user you want before
+you run it. Three set-ups:
+
+- **A disposable VM** (one you create for a task and delete): a dedicated
+  user with passwordless `sudo`, as cloud images set up by default (`ubuntu`,
+  `ec2-user`). Agents can install packages and change the system, which is
+  the point of such a VM; anything they break goes away with it. Running as
+  root there comes to the same thing.
+- **A shared or long-lived server:** a dedicated user with **no** `sudo`, or
+  `sudo` limited to named commands in `/etc/sudoers.d`
+  (`dev ALL=(root) NOPASSWD: /usr/bin/systemctl restart myapp`). Agents then
+  cannot read other users' files or change the system. Mind the `docker`
+  group: a member can start a container that mounts the host's disk as root,
+  so membership is passwordless root in practice. Add the user to it only if
+  you would also give it `sudo`; rootless Docker or Podman avoids this.
+- **Your own machine** (a workstation, a Mac mini under your desk): your own
+  user, as for the desktop app. Agents work with your files, as you do.
+
+Root is allowed. The installer and `terminalx-serve service install` print a
+warning that every paired computer and every agent on the server will act as
+root, and carry on; the runtime logs the same warning each time it starts.
+`terminalx-serve service status` and the server's page on your computer
+(Settings → Machines → the server) say that it runs as root, and for any
+other user whether it has passwordless `sudo`.
 
 ## Pair it with your computer
 
@@ -72,8 +118,10 @@ or an agent), run:
 terminalx-serve pair
 ```
 
-It shows a one-time code. On your computer, open TerminalX → **Settings →
-Machines → Add a machine → Headless server** and enter the code. The server's
+The first time, it asks where the server should listen (below); Enter takes
+the default, **Relay only**. It then shows a one-time code. On your computer,
+open TerminalX → **Settings → Machines → Add a machine → Headless server**
+and enter the code. The server's
 terminal then names your computer, shows a fingerprint, and asks
 `Allow? [y/N]`. Check that the fingerprint matches the one on your computer,
 then type `y`. Anything else, or no answer, declines.
@@ -81,14 +129,44 @@ then type `y`. Anything else, or no answer, declines.
 Pairing turns on "Let other computers operate this one" on the server. The
 server then appears under Machines on your computer, with its projects.
 
+### Where the server listens
+
+| Choice | What it opens | Use it when |
+| --- | --- | --- |
+| **Relay only** (default) | No port. Your computer and phone reach the server through the TerminalX relay, end-to-end encrypted. | The server has a public address, or you do not want to think about firewalls. Needs `terminalx-serve login`. |
+| **Tailscale** | TCP 6768 on the server's Tailscale address only. | Your computer is on the same tailnet. |
+| **Local network** | TCP 6768 on its private (10.x, 172.16–31.x, 192.168.x) and Tailscale addresses. | Your computer is on the same network. |
+| **All interfaces** | TCP 6768 on every address, public ones included. | You front it with your own firewall. Never the default: you choose it in so many words. |
+
+`terminalx-serve pair` asks the first time, naming this server's addresses of
+each kind. Change it later, with no restart:
+
+```sh
+terminalx-serve hosting --listen lan
+terminalx-serve hosting                 # what it is now
+```
+
+Whatever the choice, a connection **from** a public address is refused, even
+under All interfaces, unless you add `--allow-public`
+(`terminalx-serve hosting --listen all --allow-public`). The first refusal in
+each hour is written to the log. The phone listener follows the same setting,
+and the addresses a pairing code or QR code carries are only those the server
+is listening on.
+
+**A server installed before this setting existed** keeps listening as it did
+until you choose. If it has a public address, or a caller from one reaches
+it, it refuses those callers from the update on and asks once: `service
+status` and its page on your computer say so, with the two answers
+(`hosting --listen all --allow-public` keeps the public address;
+`--listen relay`, `tailscale` or `lan` closes it). Meanwhile it stays
+reachable through the relay and your private networks. A server that was
+reached only over its public address and never signed in is brought back
+over SSH: run `terminalx-serve login`, or the `hosting` command above.
+
 ### How your computer reaches the server
 
-- **Same network or Tailscale:** pairing by code needs nothing else. Your
-  computer connects to the server directly (TCP port 6768), so that port must
-  be reachable from your computer: on the same network, over Tailscale, or
-  through your firewall.
-- **Relay after pairing:** once the server is paired, sign it in to the same
-  TerminalX account as your Mac to reconnect without an inbound port:
+- **Relay (the default):** sign the server in to the same TerminalX account as
+  your computer, before or after `pair`:
 
   ```sh
   terminalx-serve login
@@ -96,19 +174,20 @@ server then appears under Machines on your computer, with its projects.
 
   It prints a link. Open it on any device where you are signed in to
   TerminalX, check that it shows the same code as the server's terminal, and
-  approve. Keep the direct route available until the server's service log
-  (`~/.terminalx/logs/runtime.log`) says `machine host: registered with the relay`.
-  With the direct route still available, quit TerminalX on your Mac with
-  **⌘Q** and reopen it. Wait for the server to show **Direct** in the sidebar.
-  TerminalX requests a relay credential in the background on this new
-  connection. Before relying on relay access, try connecting from a network
-  with internet access where the Mac has no direct route to the server.
-  The server should show **Relay** in the sidebar. If it goes **Offline**,
-  confirm that the Mac is signed in, restore the direct route, and wait
-  for **Direct** before trying the relay again.
+  approve. The service log (`~/.terminalx/logs/runtime.log`) then says
+  `machine host: registered with the relay`. A code made after that carries
+  a single-use relay invite, so **the first pairing itself goes through the
+  relay**, with no port open on the server. Your computer must be signed in
+  to TerminalX too; if it is not, Add a machine says so. `pair` on a
+  Relay-only server that has not signed in tells you to run `login` first.
+- **Same network or Tailscale:** with **Tailscale** or **Local network**
+  chosen, pairing by code needs no account. Your computer connects to the
+  server directly (TCP port 6768), so that port must be reachable from it.
+  Signed in as well, the server is reached directly when it can be and
+  through the relay otherwise; the sidebar says **Direct** or **Relay**.
 
   The server keeps its sign-in session in
-  `~/.terminalx/data/account/session.json`, readable by you only.
+  `~/.terminalx/data/account/session.json`, readable by its user only.
   `terminalx-serve logout` signs the server out again. The relay carries
   end-to-end encrypted traffic.
 
@@ -235,4 +314,10 @@ for TerminalX, `sudo loginctl disable-linger "$USER"` turns it off.
   Use Ubuntu 22.04 or later.
 - **The service does not start at boot (Linux):** turn on lingering (see
   Requirements), then run `terminalx-serve service install` again.
+- **Add a machine cannot reach the server:** run `terminalx-serve service
+  status` there. With **Relay only** the server must be signed in (`login`)
+  and so must your computer; with another choice, your computer must reach
+  one of the addresses it lists on TCP 6768.
+- **"callers from public addresses are refused":** see
+  [Where the server listens](#where-the-server-listens).
 - The service's log is `~/.terminalx/logs/runtime.log`.

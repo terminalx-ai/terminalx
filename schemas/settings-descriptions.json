@@ -16,6 +16,8 @@
   "linearApiKey": "Connect a personal API key for Linear issues.",
   "machineName": "Name this computer for your paired devices.",
   "machines.allowOperating": "Computers you approve can start sessions, open terminals and change files here. Connections are end-to-end encrypted; the relay only passes sealed messages.",
+  "machines.allowPublic": "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
+  "machines.listen": "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
   "mergedCleanup.deleteConversations": "Whether to delete conversations when removing a merged workspace.",
   "mergedCleanup.enabled": "For workspaces TerminalX created. Once a workspace's pull request is merged, its worktree and local branch are deleted, and its branch on the remote too while that still points at the merged commit. Nothing is forced: a workspace with uncommitted or unmerged work, ignored local files, a turn running or a terminal open stays, and its row says why.",
   "mergedCleanup.graceMinutes": "Counted from when the merge is first seen, and from the last thing done in the workspace's sessions if that is later. A notice offers to keep the workspace, and a removal can be undone while its commit is still in the repository.",

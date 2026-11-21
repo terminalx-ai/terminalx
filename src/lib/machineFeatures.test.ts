@@ -15,7 +15,7 @@ import {
 
 // What a current machine grants: every namespace but the ones it withholds by design, and machine/1–7.
 const WITHHELD = ["keys/1", "mirror/1", "collab/1"];
-const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8"];
+const CURRENT = [...WORKSPACE_CAPABILITIES.filter((name) => !WITHHELD.includes(name)), "machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8", "machine/9"];
 const without = (...names: string[]) => CURRENT.filter((name) => !names.includes(name));
 const connected = { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 4 } as const;
 

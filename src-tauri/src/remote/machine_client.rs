@@ -664,7 +664,7 @@ async fn request(connection: &mut Connection, method: &str, params: Value) -> Re
 
 /// What this computer asks for: every namespace it knows, and the machine's.
 pub fn wanted_capabilities() -> Vec<&'static str> {
-    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8]).collect()
+    CAPABILITIES.iter().copied().chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8, super::machine::MACHINE_9]).collect()
 }
 
 /// `rpc.hello`, `machine.describe` and, when asked, `machine.relayAccess`.
@@ -767,6 +767,86 @@ async fn provision(target: &Target, access: RelayAccess, user_id: String) -> Res
         }),
         Ok(Err(error)) => bail!("pairing.provisionRelay refused: {}", error["code"]),
         Err(failure) => bail!("pairing.provisionRelay: {failure:?}"),
+    }
+}
+
+/// How pairing through a code's relay invite ended (PRO-487).
+pub enum RelayPairing {
+    /// Allowed: this computer's relay credential for the machine, and what
+    /// the machine said of itself (`machine.describe`), if it answered.
+    Paired { credential: RelayCredential, described: Option<Value> },
+    /// The machine's sealed `pairing_refused`, with its reason.
+    Refused(String),
+    /// The relay or the machine refused the invite or the code's token: the
+    /// code was used, replaced or expired.
+    CodeInactive,
+    /// Nobody answered in time: not allowed within the approval wait.
+    NotAnswered,
+    /// The relay, or the machine through it, could not be reached.
+    Unreachable(String),
+}
+
+/// What [`pair_through_relay`] proves and says of this computer.
+pub struct RelayPairer<'a> {
+    pub public_key_b64: &'a str,
+    pub device_token: &'a str,
+    pub client_secret: [u8; 32],
+    pub label: &'a str,
+    pub platform: &'a str,
+    /// The account signed in here, which the credential is kept for.
+    pub user_id: &'a str,
+}
+
+/// Pair by code through the relay (PRO-487; docs/MACHINES.md "As built
+/// (PRO-487)"), for a machine with no listener open or none this computer
+/// reaches: connect with the code's single-use invite, run E2EE pinned to
+/// the code's key, prove the code's token and wait for Allow, then install
+/// a resume credential on that same invite connection, as
+/// `machine.relayAccess` provisioning does for a paired computer.
+pub async fn pair_through_relay(invite: &crate::machine_wire::MachineRelay, me: RelayPairer<'_>, approval_wait: Duration) -> RelayPairing {
+    let deadline = tokio::time::Instant::now() + RELAY_TIMEOUT;
+    let route = RelayRoute { cell_url: &invite.cell_url, relay_host_id: &invite.relay_host_id, public_key_b64: me.public_key_b64, client_secret: Some(me.client_secret) };
+    let mut connection = match relay_connect(&route, &Credential::Invite(invite.invite_token.clone()), None, deadline).await {
+        Ok(connection) => connection,
+        // The relay knows the invite no more: used, ended or expired.
+        Err(closed) if matches!(closed.code, Some(4401 | 4403 | 4404)) => return RelayPairing::CodeInactive,
+        Err(closed) => return RelayPairing::Unreachable(format!("{} {}", closed.code.unwrap_or(0), closed.reason)),
+    };
+    let auth = json!({ "deviceToken": me.device_token, "label": me.label, "platform": me.platform });
+    match tokio::time::timeout(approval_wait, authenticate(&mut connection, auth, tokio::time::Instant::now() + approval_wait + CALL_TIMEOUT)).await {
+        Err(_) => return RelayPairing::NotAnswered,
+        Ok(Ok(Authenticated::Yes)) => {}
+        Ok(Ok(Authenticated::Refused(reason))) => return RelayPairing::Refused(reason),
+        Ok(Err(closed)) if closed.code == Some(4401) => return RelayPairing::CodeInactive,
+        Ok(Err(closed)) => return RelayPairing::Unreachable(closed.reason),
+    }
+    let resume = Zeroizing::new(client::random_token());
+    let hash = general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(resume.as_bytes()));
+    let installed = request(&mut connection, "pairing.provisionRelay", json!({ "reqId": uuid::Uuid::new_v4().simple().to_string(), "newResumeTokenHash": hash })).await;
+    match installed {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return RelayPairing::Unreachable(format!("the machine did not keep a relay credential for this computer ({})", error["code"])),
+        Err(failure) => return RelayPairing::Unreachable(format!("the machine did not keep a relay credential for this computer ({failure:?})")),
+    }
+    let hello = json!({ "protocol": PROTOCOL, "want": [super::machine::MACHINE], "client": { "app": "terminalx-desktop", "version": env!("CARGO_PKG_VERSION") } });
+    let described = match request(&mut connection, "rpc.hello", hello).await {
+        Ok(Ok(_)) => request(&mut connection, "machine.describe", json!({})).await.ok().and_then(Result::ok),
+        _ => None,
+    };
+    let _ = connection.socket.close(None).await;
+    RelayPairing::Paired {
+        credential: RelayCredential {
+            info: RelayInfo {
+                director_url: invite.director_url.clone(),
+                cell_url: invite.cell_url.clone(),
+                assignment_epoch: invite.assignment_epoch,
+                relay_host_id: invite.relay_host_id.clone(),
+                relay_device_id: invite.relay_device_id.clone(),
+                user_id: me.user_id.to_string(),
+            },
+            resume_token: resume,
+        },
+        described,
     }
 }
 

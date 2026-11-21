@@ -101,8 +101,11 @@ export const WORKSPACE_CAPABILITIES = ["pty/1", "pty/2", "fs/1", "git/1", "sessi
  * `machine/8` (PRO-408): `session.usage`, `session.prepareContinuation` and
  * `session.checkFailures`, a machine session's cost chip, Continue in a new
  * tab and Fix check errors read and done on the machine.
+ * `machine/9` (PRO-487): `machine.setListen`, choosing where the machine
+ * listens and whether it answers public callers. `machine.describe` says
+ * where it listens (`listen`) and who its runtime runs as (`runsAs`).
  */
-export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8"] as const;
+export const MACHINE_CAPABILITIES = ["machine/1", "machine/2", "machine/3", "machine/4", "machine/5", "machine/6", "machine/7", "machine/8", "machine/9"] as const;
 export type WorkspaceCapability = (typeof WORKSPACE_CAPABILITIES)[number] | (typeof MACHINE_CAPABILITIES)[number];
 
 /**
@@ -129,6 +132,7 @@ export const METHOD_CAPABILITIES: Readonly<Record<string, WorkspaceCapability>> 
   "session.usage": "machine/8",
   "session.prepareContinuation": "machine/8",
   "session.checkFailures": "machine/8",
+  "machine.setListen": "machine/9",
   "pipeline.list": "pipeline/1",
   "pipeline.act": "pipeline/1",
   "pipeline.resolveConflicts": "pipeline/1",

@@ -727,7 +727,7 @@ async fn machine_3_is_granted_only_when_asked_for() {
     // A newer desktop asking for a namespace this runtime does not have
     // learns its version and what it offers.
     let (newer, _events) = Peer::new("computer-new".into(), Authority::Manage);
-    let error = failure(&m.rpc, &newer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/9"] })).await;
+    let error = failure(&m.rpc, &newer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["machine/99"] })).await;
     assert_eq!(error["code"], "update_required");
     assert_eq!(error["data"]["runtimeVersion"], env!("CARGO_PKG_VERSION"));
     assert!(error["data"]["offered"].as_array().unwrap().contains(&json!("machine/3")), "{error}");

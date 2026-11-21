@@ -46,6 +46,7 @@ export const MACHINE_FEATURES: readonly MachineFeature[] = [
   { id: "projects", label: "Adding projects from here", capability: "machine/6", action: "add and remove its projects" },
   { id: "sessionRuns", label: "Setup and Run scripts", capability: "machine/7", action: "run its sessions' Setup and Run scripts" },
   { id: "sessionParity", label: "Session cost, Continue in a new tab and Fix check errors", capability: "machine/8", action: "read session costs, continue in a new tab and fix check errors" },
+  { id: "listen", label: "Choosing where it listens", capability: "machine/9", action: "choose where it listens" },
 ];
 
 export function machineFeature(capability: string): MachineFeature | null {
