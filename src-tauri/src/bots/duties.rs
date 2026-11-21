@@ -445,7 +445,9 @@ fn tidy(app: &impl AutomationHost, automation_id: &str) {
         return;
     }
     let Ok(entries) = index::load() else { return };
-    let live: Vec<String> = older.into_iter().filter(|id| entries.iter().any(|entry| &entry.id == id && !entry.archived)).collect();
+    // A pinned chat, and one with a turn in progress or waiting on a person, stay.
+    let busy = |entry: &index::SessionEntry| entry.tabs.iter().any(|tab| matches!(tab.status, index::TabStatus::InProgress | index::TabStatus::Waiting));
+    let live: Vec<String> = older.into_iter().filter(|id| entries.iter().any(|entry| &entry.id == id && !entry.archived && !entry.pinned && !busy(entry))).collect();
     if live.is_empty() {
         return;
     }
@@ -460,13 +462,17 @@ fn tidy(app: &impl AutomationHost, automation_id: &str) {
 fn check_folder(key: &str) -> Result<PathBuf> {
     anyhow::ensure!(!key.is_empty() && key.len() <= 80 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "a duty's id names no folder");
     let root = crate::store::root()?.join(CHECKS_DIR);
+    // The folder that holds them is a real one: a link or a file in its place is refused, never followed.
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) => anyhow::ensure!(meta.is_dir(), "{} is not a folder (a link or a file is in its place), so no first check runs", root.display()),
+        Err(_) => std::fs::create_dir_all(&root)?,
+    }
     let dir = root.join(key);
     match std::fs::symlink_metadata(&dir) {
         Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&dir)?,
         Ok(_) => std::fs::remove_file(&dir)?,
         Err(_) => {}
     }
-    std::fs::create_dir_all(&root)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -483,7 +489,10 @@ fn check_folder(key: &str) -> Result<PathBuf> {
 fn run_check_in(key: &str, bot_id: &str, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
     let dir = check_folder(key)?;
     let home = bot_store::home_dir(bot_id)?;
-    automations::precheck::run_in_folder(&dir, &[(HOME_ENV.to_string(), home.to_string_lossy().into_owned())], precheck)
+    let folder = dir.to_string_lossy().into_owned();
+    // git looks for a repository no higher than the check's own folder.
+    let set = [(HOME_ENV.to_string(), home.to_string_lossy().into_owned()), ("GIT_CEILING_DIRECTORIES".to_string(), folder)];
+    automations::precheck::run_in_folder(&dir, &set, precheck)
 }
 
 /// A duty's first check, for its run (`precheck::check`).
@@ -731,7 +740,8 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
     let ids: Vec<String> = duties.iter().map(|duty| duty.id.clone()).collect();
     // Kept in its home, which goes to the trash with it: the definitions, the settings, and each duty's run log.
     // A record whose id names no home (one edited by hand) has nowhere to keep them: they are only removed.
-    if let Some(home) = bot_store::home_dir(bot_id).ok().filter(|home| home.is_dir()) {
+    // A copy that cannot be kept does not keep them: they are removed all the same, and the failure is said.
+    let keep = |home: &std::path::Path| -> Result<()> {
         let kept = json!({"duties": duties, "settings": read_settings_file().ok().and_then(|file| file.bots.get(bot_id).cloned())});
         crate::store::write_json(&home.join(REMOVED_FILE), &kept)?;
         let logs = crate::store::root()?.join("automations");
@@ -741,15 +751,18 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
                 std::fs::rename(logs.join(id), home.join("duty-runs").join(id))?;
             }
         }
-    }
-    let mut failed = None;
+        Ok(())
+    };
+    let mut failed = bot_store::home_dir(bot_id).ok().filter(|home| home.is_dir()).and_then(|home| keep(&home).err().map(|error| error.context("a copy of its duties could not be kept in its home")));
     for id in &ids {
         if let Err(error) = automation_store::remove(id) {
             failed.get_or_insert(error);
         }
-        if let Ok(root) = crate::store::root() {
-            let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(id));
-        }
+        remove_check_folders(id);
+    }
+    // The folder its Try it used for a duty not saved yet.
+    if let Ok(root) = crate::store::root() {
+        let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("new-{bot_id}")));
     }
     if !ids.is_empty() {
         announce(sink);
@@ -762,6 +775,19 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
         }
     }
     failed.map_or(Ok(()), Err)
+}
+
+/// A duty's check folders: its runs' and its Try it's.
+fn remove_check_folders(duty_id: &str) {
+    if let Ok(root) = crate::store::root() {
+        let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(duty_id));
+        let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("try-{duty_id}")));
+    }
+}
+
+/// Whether a run of `duty_id` is going: its first check or its agent.
+fn running(duty_id: &str) -> bool {
+    automation_store::list_runs(duty_id).unwrap_or_default().iter().any(|run| matches!(run.status, AutomationRunStatus::Pending | AutomationRunStatus::Running))
 }
 
 fn announce(sink: &dyn EventSink) {
@@ -948,7 +974,7 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
         "dutyDelete" => {
             let id = duty()?.id;
             automation_store::remove(&id)?;
-            let _ = std::fs::remove_dir_all(crate::store::root()?.join(CHECKS_DIR).join(&id));
+            remove_check_folders(&id);
             announce(sink);
             Value::Null
         }
@@ -956,8 +982,9 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
         "dutyTryCheck" => {
             let precheck: AutomationPrecheck = serde_json::from_value(params["precheck"].clone()).map_err(|error| refused(format!("Invalid first check: {error}")))?;
             refuse_unless!(!precheck.command.trim().is_empty(), "Enter a command to try.");
+            // Never the folder a run's check may be running in at the same moment.
             let key = match params["dutyId"].as_str() {
-                Some(_) => duty()?.id,
+                Some(_) => format!("try-{}", duty()?.id),
                 None => format!("new-{}", bot.id),
             };
             serde_json::to_value(run_check_in(&key, &bot.id, &precheck)?)?
@@ -979,6 +1006,7 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
             if let Bound::Refused(why) = bind(&duty) {
                 return Err(refused(why));
             }
+            refuse_unless!(!running(&duty.id), "{} is already running. Run it again once this run has finished.", duty.name);
             serde_json::to_value(automations::precheck::run_now_of(&manager.automation_host(), duty)?)?
         }
         "quietHours" => {

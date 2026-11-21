@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { automationsApi, errorMessage } from "@/lib/api";
 import type { AutomationInput, AutomationPrecheck, PrecheckTrial } from "@/types/automations";
 
@@ -132,7 +133,10 @@ export function PrecheckSection({ input, onChange, onTry, where }: {
               {where ?? (input.workspace === "session" ? "Runs in the chosen session's folder." : "Runs in the project folder, not in the run's new worktree.")}
             </span>
           </div>
-          {error && <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
+          {/* A duty's Try it is guarded (PRO-471): its error can offer a restart, after which it is tried again. */}
+          {error && (onTry
+            ? <MachineHostError error={error} onRestarted={() => { setError(null); void tryIt(); }} />
+            : <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>)}
           {trial && <PrecheckTrialResult trial={trial} />}
         </>
       )}

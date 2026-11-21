@@ -216,6 +216,28 @@ describe("a duty's changes when the runtime cannot confirm them (PRO-471 review 
     expect(second[1]).toMatchObject({ id: "b1", dutyId: null, input: { name: "Watch CI", prompt: "Say what broke." } });
   });
 
+  it("offers Restart runtime on Try it, and tries the check again once it has restarted", async () => {
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));
+    fireEvent.click(screen.getByTestId("duty-edit"));
+    const editor = screen.getByTestId("duty-editor");
+    const answer = mocks.invoke.getMockImplementation()!;
+    let first = true;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_try_check" && first) { first = false; throw RESTART; }
+      return answer(command, args);
+    });
+    fireEvent.click(within(editor).getByRole("button", { name: "Try it" }));
+    const alert = await within(editor).findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot confirm that you asked/);
+    expect(alert.textContent).not.toMatch(/runtime_restart_required/);
+    fireEvent.click(within(alert).getByRole("button", { name: /Restart runtime/ }));
+    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("e1"));
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_try_check")).toHaveLength(2));
+    expect(await within(editor).findByText(/Nothing new: the run would end here/)).toBeTruthy();
+    expect(within(editor).queryByRole("alert")).toBeNull();
+  });
+
   it("sends a failed Run now again after the restart", async () => {
     render(<BotDuties bot={argus} onOpenSession={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));

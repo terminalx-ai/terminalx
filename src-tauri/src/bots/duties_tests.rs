@@ -485,18 +485,25 @@ fn quiet_hours_cross_midnight_and_a_reply_is_read_as_people_write_it() {
 
 #[test]
 fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_be_removed() {
+    // No run here reaches an agent; the stand-in is held so none could start a real one.
+    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
     let argus = rig.hire("watcher", "Argus");
     let atlas = rig.hire("cto", "Atlas");
-    let mine = rig.add(&argus, Some("echo found"), true);
+    let mine = rig.add(&argus, Some("true"), true);
     run_now(&rig, &argus, &mine);
-    wait_run(&mine, |run| run.precheck.is_some());
+    wait_run(&mine, |run| run.status.is_terminal());
+    // The folder its Try it used for a duty not saved yet goes with it.
+    rig.bots("dutyTryCheck", json!({"id": argus.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap();
+    let unsaved = crate::store::root().unwrap().join(CHECKS_DIR).join(format!("new-{}", argus.id));
+    assert!(unsaved.is_dir());
     rig.bots("quietHours", json!({"id": argus.id, "quietHours": {"from": "22:00", "to": "07:00"}})).unwrap();
     rig.bots("quietHours", json!({"id": atlas.id, "quietHours": {"from": "23:00", "to": "06:00"}})).unwrap();
     let theirs = rig.add(&atlas, None, false);
     assert!(!duties_of(&argus.id).unwrap().is_empty());
 
     rig.bots("delete", json!({"id": argus.id})).unwrap();
+    assert!(!unsaved.exists() && !crate::store::root().unwrap().join(CHECKS_DIR).join(&mine.id).exists());
     // Its duties, their run logs and its settings go; another bot's stay.
     assert!(duties_of(&argus.id).unwrap().is_empty());
     assert!(automation_store::get(&mine.id).is_err());
@@ -559,6 +566,8 @@ fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestPro
 /// where the bot could leave a script; the home is only named, in a variable.
 #[test]
 fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_home() {
+    // The run below prints, so it would go on to the agent: only ever the stand-in.
+    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
     let bot = rig.hire("cto", "Atlas");
     let home = super::super::home(&bot).unwrap();
@@ -568,7 +577,7 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     let folder = root.join(CHECKS_DIR).join(format!("new-{}", bot.id));
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("left.sh"), "echo left behind\n").unwrap();
-    let probe = json!({"command": "sh check.sh 2>&1; echo \"in $(pwd -P)\"; echo \"home $TERMINALX_BOT_HOME\"; echo \"files $(ls -A | wc -l | tr -d ' ')\"", "timeoutSeconds": 30});
+    let probe = json!({"command": "sh check.sh 2>&1; echo \"in $(pwd -P)\"; echo \"home $TERMINALX_BOT_HOME\"; echo \"files $(ls -A | wc -l | tr -d ' ')\"; echo \"git $GIT_CEILING_DIRECTORIES\"", "timeoutSeconds": 30});
     let trial = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": probe})).unwrap();
     let out = trial["result"]["stdoutTail"].as_str().unwrap().to_owned();
     assert!(!out.contains("planted by the bot") && !out.contains("left behind"), "{out}");
@@ -576,6 +585,7 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     assert!(out.contains(&format!("in {}", canonical(&folder))), "{out}");
     assert!(out.contains(&format!("home {}", home.to_string_lossy())), "{out}");
     assert!(out.contains("files 0"), "{out}");
+    assert!(out.contains(&format!("git {}", folder.to_string_lossy())), "{out}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -594,6 +604,20 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     let printed = run.precheck.as_ref().unwrap().stdout_tail.trim().to_owned();
     assert_eq!(printed, canonical(&root.join(CHECKS_DIR).join(&duty.id)));
     assert!(home.is_dir() && home.join("check.sh").is_file(), "the link was removed, not what it pointed at");
+    // Try it on a saved duty uses a folder apart: a run's check running at the same moment keeps its own.
+    std::fs::write(root.join(CHECKS_DIR).join(&duty.id).join("run.marker"), "").unwrap();
+    let trial = rig.bots("dutyTryCheck", json!({"id": bot.id, "dutyId": duty.id, "precheck": {"command": "pwd -P", "timeoutSeconds": 30}})).unwrap();
+    assert_eq!(trial["result"]["stdoutTail"].as_str().unwrap().trim(), canonical(&root.join(CHECKS_DIR).join(format!("try-{}", duty.id))));
+    assert!(root.join(CHECKS_DIR).join(&duty.id).join("run.marker").is_file());
+    // A link or a file in place of the folder that holds them all: refused, never followed.
+    std::fs::remove_dir_all(root.join(CHECKS_DIR)).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), root.join(CHECKS_DIR)).unwrap();
+    let refused = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap_err().to_string();
+    assert!(refused.contains("is not a folder"), "{refused}");
+    assert!(std::fs::read_dir(elsewhere.path()).unwrap().next().is_none(), "nothing was made through the link");
+    std::fs::remove_file(root.join(CHECKS_DIR)).unwrap();
     // Not a bot's to ask: Try it needs a person, as a run does.
     assert!(crate::bots::enforce::needs_person("dutyTryCheck", &json!({})));
 }
@@ -612,6 +636,9 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     run_now(&rig, &bot, &duty);
     let first = wait_run(&duty, |run| run.session_id.is_some());
     let sessions = index::load().unwrap().len();
+    // Run now while it runs: refused, no second session.
+    let refused = rig.bots("dutyRun", json!({"id": bot.id, "dutyId": duty.id})).unwrap_err().to_string();
+    assert!(refused.contains("Watch CI is already running"), "{refused}");
     // Due again while the first is still going: skipped, twice into one row, and no second session.
     for repeat in 1..=2 {
         due_now(&duty);
@@ -631,18 +658,36 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     let timed_out = runs(&duty).into_iter().find(|run| run.run_id == first.run_id).unwrap();
     assert_eq!(timed_out.status, AutomationRunStatus::TimedOut);
     assert!(timed_out.error.as_deref().unwrap().starts_with("Timed out"), "{timed_out:?}");
-    // Four more finished runs: only the newest three finished runs keep their sessions in view.
+    // Five more finished runs: only the newest three keep their sessions in view, and a pinned chat or one waiting on a person stays.
     let host = rig.host();
+    // What the turn's stop hook sets, which this test goes around: the third run's chat is left waiting on a person.
+    let settle = |session: &str, status: index::TabStatus| {
+        index::update(|entries| {
+            entries.iter_mut().filter(|entry| entry.id == session).flat_map(|entry| entry.tabs.iter_mut()).for_each(|tab| tab.status = status);
+            Ok(())
+        })
+        .unwrap();
+    };
     let mut finished = vec![first.session_id.clone().unwrap()];
-    for _ in 0..4 {
+    settle(&finished[0], index::TabStatus::Completed);
+    for _ in 0..5 {
         run_now(&rig, &bot, &duty);
         let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
         crate::automations::complete_from_turn(&host, started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), Some("Nothing new.".into()), 1);
         wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
+        settle(started.session_id.as_deref().unwrap(), if finished.len() == 2 { index::TabStatus::Waiting } else { index::TabStatus::Completed });
         finished.push(started.session_id.unwrap());
+        if finished.len() == 2 {
+            let pinned = finished[0].clone();
+            index::update(|entries| {
+                entries.iter_mut().filter(|entry| entry.id == pinned).for_each(|entry| entry.pinned = true);
+                Ok(())
+            })
+            .unwrap();
+        }
     }
     let archived: Vec<bool> = finished.iter().map(|id| index::get(id).unwrap().archived).collect();
-    assert_eq!(archived, [true, true, false, false, false]);
+    assert_eq!(archived, [false, true, false, false, false, false], "pinned, archived, waiting on a person, then the newest three");
 }
 
 /// L6 (PRO-471 review 1): a save changes only what the duty editor owns, on
@@ -665,4 +710,19 @@ fn a_duty_save_keeps_what_the_editor_does_not_own() {
     assert_eq!(saved.unknown["fromNewer"], json!({"keep": true}));
     assert_eq!((saved.missed_run_grace_minutes, saved.run_timeout_minutes), (5, Some(7)));
     assert_eq!(automation_store::get(&duty.id).unwrap(), saved);
+}
+
+/// L (PRO-471 review 2): when a copy of a deleted bot's duties cannot be kept
+/// in its home, they are removed all the same and the failure is said.
+#[test]
+fn a_bots_duties_go_with_it_even_when_their_copy_cannot_be_kept() {
+    let rig = rig();
+    let bot = rig.hire("cto", "Atlas");
+    let duty = rig.add(&bot, None, false);
+    // A folder where the copy's file would go: it cannot be written.
+    std::fs::create_dir_all(bot_store::home_dir(&bot.id).unwrap().join(REMOVED_FILE)).unwrap();
+    let error = rig.bots("delete", json!({"id": bot.id})).unwrap_err();
+    assert!(format!("{error:#}").contains("not all of its duties could be removed") || format!("{error:#}").contains("could not be kept"), "{error:#}");
+    assert!(duties_of(&bot.id).unwrap().is_empty());
+    assert!(automation_store::get(&duty.id).is_err());
 }
