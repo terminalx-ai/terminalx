@@ -261,13 +261,18 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
     rest.first().is_some_and(|verb| TERMINALX_READS.contains(&(group, verb)))
 }
 
-/// A bot's own notes (PRO-470): `terminalx bots memory add|forget|list`, the
-/// commands its rules tell it to keep them with, pass at every level and
-/// while paused, with no card. Exactly those, and nothing else under `bots`:
-/// the runtime takes the bot from the caller (`control::Caller`) and refuses
-/// a `--bot` or `--place` that is not its own.
+/// A bot's own notes and work list, kept with the commands its rules tell it
+/// to use: `terminalx bots memory add|forget|list` (PRO-470) and
+/// `terminalx bots items list|show|add|set|ask|check|comment|done` (PRO-469).
+/// They pass at every level and while paused, with no card. Exactly those,
+/// and nothing else under `bots`: the runtime takes the bot from the caller
+/// (`control::Caller`), refuses a `--bot` or `--place` that is not its own,
+/// and refuses a paused bot's changes to its work list.
 fn own_notes(program: &str, args: &[&str]) -> bool {
-    terminalx_words(program, args).is_some_and(|(group, rest)| group == "bots" && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..]))
+    terminalx_words(program, args).is_some_and(|(group, rest)| {
+        group == "bots"
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "check" | "comment" | "done", ..])
+    })
 }
 
 /// A call as the card and the agent are told it.

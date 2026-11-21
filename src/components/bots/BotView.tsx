@@ -12,11 +12,14 @@ import { botsApi, errorMessage } from "@/lib/api";
 import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { showBotsTeam } from "@/lib/botsPage";
+import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
+import { BotHome } from "./BotHome";
+import { BotItemPage } from "./BotItemPage";
 import { BotMenu } from "./BotMenu";
 import { BotSettings } from "./BotSettings";
 
@@ -29,11 +32,6 @@ const TABS: { id: BotTab; label: string; icon: typeof Home }[] = [
   { id: "role", label: "Role and memory", icon: Brain },
   { id: "settings", label: "Settings", icon: Settings2 },
 ];
-
-/** What a tab this ticket does not fill says, until its own ticket does. */
-const COMING: Record<Exclude<BotTab, "chat" | "duties" | "role" | "settings">, string> = {
-  home: "The bot's work list (what needs you, what is in progress and what is planned) is coming.",
-};
 
 const ACCESS_LABEL = { full: "Full access", askOutward: "Asks before outward", readReport: "Read and report" } as const;
 
@@ -72,6 +70,20 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => setStartedId(null), [chatId]);
+  // The Home tab's open item (PRO-469); another bot opens on its own Home.
+  const [item, setItem] = useState<number | null>(null);
+  useEffect(() => setItem(null), [botId]);
+  const opening = useOpeningItem(botId);
+  useEffect(() => {
+    if (opening === null) return;
+    setTab("home");
+    setItem(opening);
+    tookOpening();
+  }, [opening]);
+  const needs = useNeedsYou();
+  const asking = needsYouCount(needs, botId);
+  const trouble = needsYouTrouble(needs, useNeedsYouError(), botId);
+  const working = needs?.counts.find((count) => count.botId === botId)?.inProgress ?? 0;
 
   // The home chat is made at hire; a bot hired before, or whose home chat was archived, gets one when it is opened.
   const hasHome = chats.some((chat) => chat.bot?.home);
@@ -133,7 +145,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat" aria-label={`${bot.name}, ${bot.roleTitle}`}>
       <TitleStrip sidebarOpen={sidebarOpen} onToggleSidebar={onToggleSidebar} inset={titlebarInset} />
-      <BotHeader bot={bot} spent={spentTodayLabel(spent?.usd ?? null)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
+      <BotHeader bot={bot} working={working} asking={asking} spent={spentTodayLabel(spent?.usd ?? null)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
       <div role="tablist" aria-label={`${bot.name}'s view`} className="flex shrink-0 items-center gap-1 border-b border-hairline px-5">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
@@ -141,10 +153,15 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             type="button"
             role="tab"
             aria-selected={tab === id}
-            onClick={() => setTab(id)}
+            onClick={() => {
+              setTab(id);
+              if (id === "home") setItem(null);
+            }}
             className={cn("-mb-px flex h-9 items-center gap-1.5 border-b-2 px-2 text-[13px]", tab === id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
           >
             <Icon className="size-3.5" /> {label}
+            {id === "home" && trouble && <span className="text-[11px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-home-count-error">!</span>}
+            {id === "home" && !trouble && asking > 0 && <span className="text-[11px] font-medium text-accent" aria-label={`${asking} need you`} data-testid="bot-home-count">{asking}</span>}
           </button>
         ))}
       </div>
@@ -169,6 +186,10 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             )}
           </section>
         </div>
+      ) : tab === "home" ? (
+        <div role="tabpanel" aria-label="Home" className="flex min-h-0 flex-1 flex-col">
+          {item !== null ? <BotItemPage bot={bot} number={item} onBack={() => setItem(null)} /> : <BotHome bot={bot} onOpenItem={setItem} />}
+        </div>
       ) : tab === "duties" ? (
         <div role="tabpanel" aria-label="Duties" className="flex min-h-0 flex-1 flex-col">
           {/* A duty's run opens on Chat, among the bot's duty runs. */}
@@ -180,15 +201,11 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             <BotRoleMemory bot={bot} bots={bots.bots} unreadable={bots.unreadable} />
           </ErrorBoundary>
         </div>
-      ) : tab === "settings" ? (
+      ) : (
         <div role="tabpanel" aria-label="Settings" className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-view-settings">
           <div className="px-8 py-4">
             <BotSettings bot={bot} />
           </div>
-        </div>
-      ) : (
-        <div role="tabpanel" aria-label={TABS.find((value) => value.id === tab)?.label} className="px-6 py-8">
-          <p className="max-w-[560px] text-sm text-muted-foreground">{COMING[tab]}</p>
         </div>
       )}
     </main>
@@ -206,7 +223,13 @@ function TitleStrip({ sidebarOpen, onToggleSidebar, inset }: { sidebarOpen: bool
   );
 }
 
-function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: Bot; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
+/** "Working on 2 things · 2 need you", or Ready. */
+function workLine(working: number, asking: number): string {
+  const parts = [working > 0 ? `Working on ${working === 1 ? "1 thing" : `${working} things`}` : "", asking > 0 ? `${asking} need${asking === 1 ? "s" : ""} you` : ""].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Ready";
+}
+
+function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, onResume }: { bot: Bot; working: number; asking: number; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
   const full = effectiveAccess(bot.access) === "full";
   return (
     <div data-tauri-drag-region="deep" className="flex shrink-0 flex-wrap items-center gap-3 px-5 pt-4 pb-3">
@@ -216,9 +239,9 @@ function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: 
           <h1 className="truncate text-lg font-semibold text-foreground">{bot.name}</h1>
           <span className="truncate text-[13px] text-muted-foreground">{bot.roleTitle}</span>
         </div>
-        <p className={cn("flex min-w-0 items-center gap-1.5 text-[12.5px]", bot.paused ? "text-warning" : "text-muted-foreground")}>
-          {bot.paused ? <Pause className="size-3.5 shrink-0" /> : <CircleDot className="size-3.5 shrink-0" />}
-          <span className="truncate">{bot.paused ? `Paused ${relativeTime(bot.paused.at)}` : "Ready"}</span>
+        <p className={cn("flex min-w-0 items-center gap-1.5 text-[12.5px]", bot.paused || asking > 0 ? "text-warning" : "text-muted-foreground")}>
+          {bot.paused ? <Pause className="size-3.5 shrink-0" /> : working > 0 ? <Loader2 className="size-3.5 shrink-0" /> : <CircleDot className="size-3.5 shrink-0" />}
+          <span className="truncate" data-testid="bot-work-line">{bot.paused ? `Paused ${relativeTime(bot.paused.at)}` : workLine(working, asking)}</span>
         </p>
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">

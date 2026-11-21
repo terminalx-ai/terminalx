@@ -4101,7 +4101,7 @@ fn a_bots_access_gates_its_chat_through_on_hook() {
 
         // The lead's M1: at every level, and paused, the bot's own memory commands pass with no card. H1: the
         // browser's `wait --fn` is refused at Read and report and while paused.
-        let notes = ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory list"];
+        let notes = ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory list", "terminalx bots items add --title 'Fix the build'", "terminalx bots items list"];
         for level in ["full", "askOutward", "readReport", "paused"] {
             if level == "paused" {
                 crate::bots::pause(&sink, &bot.id, crate::bots::OWNER).unwrap();

@@ -83,6 +83,7 @@ import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
 import { bootBots, shutBots, useBotStore } from "@/lib/bots";
+import { bootBotItems, noteBotSessions, shutBotItems } from "@/lib/botItems";
 import { botViewFor } from "@/lib/botChats";
 import { BotView } from "@/components/bots/BotView";
 import { showBotsTeam, useLeaveBotsWhenOff } from "@/lib/botsPage";
@@ -339,9 +340,18 @@ export function AppShell() {
   const botsOn = experimentalSwitches?.bots === true;
   const botView = botViewFor(botsOn, bots, selected, store);
   useEffect(() => {
-    if (botsOn) void bootBots();
-    else shutBots();
+    if (botsOn) {
+      void bootBots();
+      void bootBotItems();
+    } else {
+      shutBots();
+      shutBotItems();
+    }
   }, [botsOn]);
+  // A question card opening or closing in a bot's session changes what needs the owner (PRO-469). Nothing while off.
+  useEffect(() => {
+    if (botsOn) noteBotSessions(store.sessions);
+  }, [botsOn, store.sessions]);
   // Registered only while the switch is on, so with it off ⇧⌘J reaches whatever else has it.
   useShortcut("app.bots", () => { if (!canLeave()) return; setSettingsOpen(false); showBotsTeam(); }, { enabled: botsOn });
   useLeaveBotsWhenOff();

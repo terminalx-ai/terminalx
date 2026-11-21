@@ -41,6 +41,7 @@ const checks = [
   "automation-sources",
   "bots-screens", "bot-role-memory",
   "bot-chat", "bot-settings",
+  "bot-items",
   "bot-duties",
 ];
 

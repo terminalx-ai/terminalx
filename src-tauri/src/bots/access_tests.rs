@@ -341,6 +341,8 @@ fn only_known_reads_go_unasked() {
         // Under `bots`, only its own memory's three commands pass.
         "terminalx bots memory",
         "terminalx bots memory undo c-1",
+        "terminalx bots items",
+        "terminalx bots items needsYou 3",
         "terminalx bots pause atlas",
         "terminalx memory add x",
         "./terminalx bots memory add x",
@@ -378,7 +380,11 @@ fn only_known_reads_go_unasked() {
         assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
     }
     // M1: the bot's own notes, the commands its rules tell it to keep them with, pass at every level with no card.
-    for command in ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory forget --line 2 x", "terminalx bots memory list --json", "tnx --json bots memory add --place Acme 'Acme ships on Tuesdays'"] {
+    for command in ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory forget --line 2 x", "terminalx bots memory list --json", "tnx --json bots memory add --place Acme 'Acme ships on Tuesdays'",
+        // PRO-469: its own work list, kept as its rules say.
+        "terminalx bots items list", "terminalx bots items show 3", "terminalx bots items add --title 'Fix the build' --done 'CI green | gh run view'",
+        "terminalx bots items set 3 --state doing", "terminalx bots items ask 3 --question 'Ship?' --answer Yes --answer No", "terminalx bots items check 3 1 --met",
+        "terminalx bots items comment 3 'Halfway'", "terminalx bots items done 3"] {
         for access in [BotAccess::Full, ask.clone(), read.clone(), BotAccess::Other("someday".into())] {
             assert_eq!(gate(&access, &shell(command, &cwd)), Gate::Leave, "{command} at {access:?}");
         }

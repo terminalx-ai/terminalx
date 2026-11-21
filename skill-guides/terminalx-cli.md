@@ -1979,6 +1979,49 @@ terminalx bots delete <bot> --json
   `ambiguous_selector` when several bots share the name (use the id); `internal` when the app
   cannot read or write its store, which no change to the arguments fixes.
 
+#### A bot's work items
+
+Each bot keeps one list of work items: what it is doing for its owner. A bot edits only its own
+list, from its own sessions: the app works out which bot from where the command runs, never
+from what it names, and refuses another bot's list with `forbidden`. From anywhere else,
+`list` and `show` read a list by naming the bot with `--bot`; every change from outside the
+bot's sessions is refused, because the owner answers, comments, gives work and stops items in
+the TerminalX window. While the bot is paused its changes are refused with `bot_paused`.
+
+```text
+terminalx bots items list [--all] --json
+terminalx bots items show <item> --json
+terminalx bots items add --title "<title>" [--summary "<text>"] [--done "<text> | <how it is checked>"]... [--start] --json
+terminalx bots items set <item> [--title …] [--summary …] [--state planned|inProgress|waiting|dropped] [--done "…"]... [--link KIND:TARGET[=TITLE]]... [--snooze <time>|off] --json
+terminalx bots items ask <item> --question "<question>" --answer "<a>" --answer "<b>" [--answer …] [--recommend N] --json
+terminalx bots items check <item> <line> --met|--unmet [--how "<how it is checked>"] --json
+terminalx bots items comment <item> --text "<note>" --json
+terminalx bots items done <item> [--text "<note>"] --json
+```
+
+- `<item>` is the item's number (`14` or `#14`). Numbers are never reused.
+- States: `planned`, `inProgress`, `needsYou`, `waiting`, `done`, `dropped`. Only `ask` puts an
+  item in `needsYou`, with a question, two to four answers and the one recommended (counted
+  from 1); the owner may also type their own. Their answer moves the item back to `inProgress`
+  and arrives in the bot's home chat as the owner's message, never with the bot's title or
+  question. A typed answer is the owner's words ("You answered …"); a chosen one says which
+  answer ("You chose answer 2") and quotes your own label inside a fence as your text, not
+  theirs. An answer, comment or piece of work that cannot be sent waits on the item (ten at
+  most) and is sent as a message once the home chat's agent next starts. Setting another state withdraws an open question.
+- `done` is refused while a line of the item's done means is unmet, or a question waits for
+  the owner. Mark each line with `check <item> <line> --met` once it holds.
+- `--link` kinds are `session`, `pullRequest`, `ticket`, `run` and `url`. A session or run must
+  work for the same bot. `add` links the session it runs from.
+- Done and dropped items cannot change any more (a comment still can); add a new item for more
+  work. An item keeps 200 activity entries and 64 KB of their text (the bot's own entries go
+  before its owner's); a bot keeps at most 200 open items. A change that would make the list
+  larger than 8 MB is refused (a change of state, which makes room, still goes in).
+- `add`, `ask` and changes of state are limited to 40 in 10 minutes per bot; past that the
+  command says how long to wait.
+- The list is kept in `$TERMINALX_HOME/bot-items/<id>/items.json`, beside the bot's home folder.
+  Change it only with these commands: they record who did what. A deleted bot's list moves to
+  `$TERMINALX_HOME/trash/bot-items/<id>/`.
+
 #### A bot's memory
 
 ```text
