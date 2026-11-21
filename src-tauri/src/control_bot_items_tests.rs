@@ -452,6 +452,11 @@ fn needs_you_does_not_wait_behind_a_launching_tab() {
     let release = service.manager.hold_tab_for_tests(&chat.id, &chat.tabs[0].id);
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
+        // Lead review of #1456: a read that waits (the window's, the CLI's, the phone's) sits behind the held tab
+        // meanwhile; Needs you does not wait behind it.
+        let waiting = scope.spawn(|| service.manager.pending_permissions().len());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!waiting.is_finished(), "the waiting read is behind the held tab");
         scope.spawn(|| {
             done.send(ask("runtime.session.bots", json!({"operation": "needsYou", "params": {}}))).ok();
         });
@@ -462,7 +467,23 @@ fn needs_you_does_not_wait_behind_a_launching_tab() {
         assert_eq!((entries[0]["kind"].as_str(), entries[0]["botId"].as_str(), entries[0]["questions"][0]["question"].as_str()), (Some("agentQuestion"), Some(sentry.as_str()), Some("File the finding?")));
         drop(release);
         drop(release_sentry);
+        assert_eq!(waiting.join().unwrap(), 1, "the waiting read finishes once the tab is let go");
     });
+    // A tab whose lock stays held shows what it last asked only for a while (a minute; none here).
+    struct Memory;
+    impl Drop for Memory {
+        fn drop(&mut self) {
+            crate::session::PENDING_MEMORY_FOR_TESTS.store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _memory = Memory;
+    assert_eq!(needs()["entries"].as_array().unwrap().len(), 1);
+    let release_sentry = service.manager.hold_tab_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id);
+    crate::session::PENDING_MEMORY_FOR_TESTS.store(0, std::sync::atomic::Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    assert!(needs()["entries"].as_array().unwrap().is_empty(), "too old to show");
+    drop(release_sentry);
+    drop(_memory);
     // Answered (gone from its tab): it leaves Needs you.
     service.manager.set_wait_state_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id, crate::store::index::TabStatus::Idle, false);
     assert!(needs()["entries"].as_array().unwrap().is_empty());

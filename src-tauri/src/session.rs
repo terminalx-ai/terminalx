@@ -1841,8 +1841,25 @@ pub(crate) struct Placed {
     pub tab: Option<String>,
 }
 
-/// [`SessionManager::pending_permissions_now`]'s last read of each tab, by its key.
-static LAST_PENDING: Mutex<std::collections::BTreeMap<String, Vec<PendingPermission>>> = Mutex::new(std::collections::BTreeMap::new());
+/// [`SessionManager::pending_permissions_now`]'s last read of each tab, by its key, with when it was read.
+static LAST_PENDING: Mutex<std::collections::BTreeMap<String, (std::time::Instant, Vec<PendingPermission>)>> = Mutex::new(std::collections::BTreeMap::new());
+/// How long a tab whose lock stays held (a wedged launch) keeps showing what it was last read to ask.
+const PENDING_MEMORY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A shorter [`PENDING_MEMORY`] in tests, in milliseconds.
+#[cfg(test)]
+pub(crate) static PENDING_MEMORY_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn pending_memory() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let millis = PENDING_MEMORY_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst);
+        if millis != u64::MAX {
+            return std::time::Duration::from_millis(millis);
+        }
+    }
+    PENDING_MEMORY
+}
 
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
@@ -3516,8 +3533,8 @@ impl SessionManager {
     }
 
     /// [`Self::pending_permissions`] without waiting: a tab whose lock is held (a launch in progress, which can take
-    /// seconds) gives what the last such read found on it, so a read of what waits on the owner never waits behind
-    /// it, and a question there does not drop out for one read.
+    /// seconds) gives what the last such read found on it (up to a minute old), so a read of what waits on the owner
+    /// never waits behind it, and a question there does not drop out for one read.
     pub fn pending_permissions_now(&self) -> Vec<PendingPermission> {
         self.pending_permissions_as(false)
     }
@@ -3525,12 +3542,9 @@ impl SessionManager {
     fn pending_permissions_as(&self, wait: bool) -> Vec<PendingPermission> {
         let runtimes: Vec<(String, Arc<Mutex<TabRuntime>>)> = self.tabs.lock().unwrap().iter().map(|(key, runtime)| (key.clone(), runtime.clone())).collect();
         let mut out = Vec::new();
-        // What the last read without waiting found on each tab: a tab whose lock is held now gives that, so a question
-        // does not drop out of Needs you for one read and come back (PRO-498).
-        let mut last = LAST_PENDING.lock().unwrap_or_else(|error| error.into_inner());
-        if !wait {
-            last.retain(|key, _| runtimes.iter().any(|(live, _)| live == key));
-        }
+        // Read without waiting: what each tab holds now, `None` for a tab whose lock is held. The memory of earlier
+        // reads is taken only after, briefly, and never by a read that waits (PRO-498 review).
+        let mut read: Vec<(String, Option<Vec<PendingPermission>>)> = Vec::new();
         for (key, runtime) in runtimes {
             let runtime = if wait {
                 runtime.lock().unwrap()
@@ -3539,36 +3553,60 @@ impl SessionManager {
                     Ok(runtime) => runtime,
                     Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                     Err(std::sync::TryLockError::WouldBlock) => {
-                        out.extend(last.get(&key).cloned().unwrap_or_default());
+                        read.push((key, None));
                         continue;
                     }
                 }
             };
-            let mut found = Vec::new();
-            for (request_id, pending) in &runtime.pending {
-                let mut options = vec!["allow".to_string(), "deny".to_string()];
-                options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
-                if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
-                    options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
-                }
-                found.push(PendingPermission {
-                    session_id: runtime.session_id.clone(),
-                    tab_id: runtime.tab_id.clone(),
-                    request_id: request_id.clone(),
-                    tool_name: pending.tool_name.clone(),
-                    input: pending.input.clone(),
-                    options,
-                });
-            }
-            if found.is_empty() {
-                last.remove(&key);
+            let found = Self::pending_of(&runtime);
+            if wait {
+                out.extend(found);
             } else {
-                last.insert(key, found.clone());
+                read.push((key, Some(found)));
             }
-            out.extend(found);
+        }
+        if !wait {
+            // A tab whose lock is held gives what the last such read found on it, at most `PENDING_MEMORY` old, so a
+            // question does not drop out of Needs you for one read and come back, nor linger once answered meanwhile.
+            let now = std::time::Instant::now();
+            let mut last = LAST_PENDING.lock().unwrap_or_else(|error| error.into_inner());
+            last.retain(|key, (at, _)| now.duration_since(*at) <= pending_memory() && read.iter().any(|(live, _)| live == key));
+            for (key, found) in read {
+                match found {
+                    Some(found) => {
+                        if found.is_empty() {
+                            last.remove(&key);
+                        } else {
+                            last.insert(key, (now, found.clone()));
+                        }
+                        out.extend(found);
+                    }
+                    None => out.extend(last.get(&key).map(|(_, found)| found.clone()).unwrap_or_default()),
+                }
+            }
         }
         out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
         out
+    }
+
+    fn pending_of(runtime: &TabRuntime) -> Vec<PendingPermission> {
+        let mut found = Vec::new();
+        for (request_id, pending) in &runtime.pending {
+            let mut options = vec!["allow".to_string(), "deny".to_string()];
+            options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
+            if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
+                options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
+            }
+            found.push(PendingPermission {
+                session_id: runtime.session_id.clone(),
+                tab_id: runtime.tab_id.clone(),
+                request_id: request_id.clone(),
+                tool_name: pending.tool_name.clone(),
+                input: pending.input.clone(),
+                options,
+            });
+        }
+        found
     }
 
     /// The startup observer must never wait behind a child launch holding a
