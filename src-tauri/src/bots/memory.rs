@@ -165,13 +165,16 @@ pub struct Limited {
 /// lossily. A missing file reads as empty.
 #[cfg(test)]
 pub fn read_limited(path: &Path) -> Limited {
-    read_limited_to(path, READ_LIMIT)
+    read_limited_to(path, READ_LIMIT, false)
 }
 
 /// [`read_limited`] to at most `limit` bytes.
-pub fn read_limited_to(path: &Path, limit: u64) -> Limited {
+/// [`read_limited`] to at most `limit` bytes; `tail`: of a file past it, its
+/// end, from the first whole line (a memory's newest notes are last).
+pub fn read_limited_to(path: &Path, limit: u64, tail: bool) -> Limited {
+    use std::io::Seek as _;
     let not_regular = || Limited { problem: Some("It is not a regular file, so it is not read.".into()), ..Default::default() };
-    let file = match changes::open_no_follow(path) {
+    let mut file = match changes::open_no_follow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Limited::default(),
         Err(error) if changes::is_link_refusal(&error) => return not_regular(),
@@ -184,13 +187,18 @@ pub fn read_limited_to(path: &Path, limit: u64) -> Limited {
     if !meta.file_type().is_file() {
         return not_regular();
     }
+    let over_limit = meta.len() > limit;
+    let from_tail = tail && over_limit;
     let mut bytes = Vec::new();
-    let read = file.take(limit).read_to_end(&mut bytes);
+    let read = if from_tail { file.seek(std::io::SeekFrom::Start(meta.len() - limit)).map(drop) } else { Ok(()) }.and_then(|()| file.take(limit).read_to_end(&mut bytes));
     if let Err(error) = read {
         return Limited { bytes: meta.len(), problem: Some(format!("It cannot be read: {error}")), ..Default::default() };
     }
-    let over_limit = meta.len() > limit;
-    if over_limit {
+    if from_tail {
+        // A line cut in half at the start is not read.
+        let start = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |at| at + 1);
+        bytes.drain(..start);
+    } else if over_limit {
         // A line cut in half is not read.
         let whole = bytes.iter().rposition(|byte| *byte == b'\n').map_or(0, |at| at + 1);
         bytes.truncate(whole);
@@ -202,8 +210,9 @@ pub fn read_limited_to(path: &Path, limit: u64) -> Limited {
 /// through a link the home does not own reads as nothing, and says why.
 pub fn read_in_home(home: &Path, rel: &str) -> Limited {
     let limit = if rel == bot_store::ROLE_FILE { ROLE_LIMIT } else { READ_LIMIT };
+    let tail = rel.rsplit('/').next() == Some(bot_store::MEMORY_FILE);
     match changes::no_links(home, rel) {
-        Ok(()) => read_limited_to(&home.join(rel), limit),
+        Ok(()) => read_limited_to(&home.join(rel), limit, tail),
         Err(error) => Limited { problem: Some(format!("{error:#}")), ..Default::default() },
     }
 }
@@ -521,7 +530,7 @@ pub fn undo(sink: &dyn EventSink, bot: &Bot, change_id: &str, by: &str, source: 
 /// like a heading made plain text, so nothing in a note passes for a section
 /// of the instructions. `None` when the owner turned its memory off.
 pub fn for_conversation(bot: &Bot) -> Option<String> {
-    use super::chat::{fenced, read_capped_to, Read};
+    use super::chat::{fenced, read_capped_tail, Read};
     if bot.memory_off {
         return None;
     }
@@ -532,7 +541,7 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
     let read = |place: &Place| {
         let rel = place.memory_file();
         match changes::no_links(&home, &rel) {
-            Ok(()) => read_capped_to(&home.join(&rel), READ_LIMIT),
+            Ok(()) => read_capped_tail(&home.join(&rel), READ_LIMIT),
             Err(error) => Read::Unreadable(format!("{error:#}")),
         }
     };
@@ -556,7 +565,7 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
                     body.push_str(&format!("\n\n({left} older lines in {file} are not shown here.)"));
                 }
                 if *cut {
-                    body.push_str(&format!("\n\n(More lines in {file} are not shown here: it is past the {} KB limit.)", READ_LIMIT / 1024));
+                    body.push_str(&format!("\n\n(Older lines in {file} are not shown here: it is past the {} KB limit, and only its end is read.)", READ_LIMIT / 1024));
                 }
                 body
             }
@@ -789,6 +798,8 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Option<Res
     }
     Some((|| {
         let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
+        // Inert with the switch off, the look over every bot included.
+        super::require_enabled()?;
         if operation == "memoryLook" && params["id"].is_null() {
             return Ok(json!({"found": changes::look_all(sink)?}));
         }

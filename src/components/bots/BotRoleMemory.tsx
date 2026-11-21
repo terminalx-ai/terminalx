@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Building2, ExternalLink, FileText, History, Loader2, Lock, Plus, RotateCw, Undo2, UserRound, X } from "@/icons";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -64,6 +65,27 @@ function LoadError({ error, onRetry }: { error: string; onRetry: () => void }) {
       <Button variant="outline" size="sm" onClick={onRetry}><RotateCw /> Retry</Button>
     </div>
   );
+}
+
+/**
+ * A write's failure, said as the rest of the Bots screens say it (`MachineHostError`): when the runtime running
+ * cannot verify this window (the owner's writes need its proof) it offers Restart runtime, and the write is tried
+ * again once a fresh runtime is attached. An unsaved role draft is kept meanwhile (`keepRoleDraft`).
+ */
+function useWrite() {
+  const [failure, setFailure] = useState<{ error: string; retry?: () => void } | null>(null);
+  const run = (action: () => Promise<unknown>, after?: () => void): Promise<void> => {
+    const attempt = (): Promise<void> => action().then(
+      () => { setFailure(null); after?.(); },
+      (cause) => setFailure({ error: errorMessage(cause), retry: () => void attempt() }),
+    );
+    return attempt();
+  };
+  const fail = (cause: unknown) => setFailure({ error: errorMessage(cause) });
+  const alert = (className?: string) => failure && (
+    <MachineHostError error={failure.error} className={className} onRestarted={() => { const retry = failure.retry; setFailure(null); retry?.(); }} />
+  );
+  return { run, fail, alert };
 }
 
 function SectionTitle({ id, title, note, children }: { id: string; title: string; note?: string; children?: ReactNode }) {
@@ -152,7 +174,7 @@ function RoleSection({ bot, bots, unreadable, view }: { bot: Bot; bots: Bot[]; u
 
 function JobTitle({ bot }: { bot: Bot }) {
   const [draft, setDraft] = useState(bot.roleTitle);
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   useEffect(() => setDraft(bot.roleTitle), [bot.roleTitle]);
   const save = () => {
     const title = draft.trim();
@@ -160,29 +182,29 @@ function JobTitle({ bot }: { bot: Bot }) {
       setDraft(bot.roleTitle);
       return;
     }
-    updateBot(bot.id, { roleTitle: title }).then(() => setError(null), (cause) => setError(errorMessage(cause)));
+    void write.run(() => updateBot(bot.id, { roleTitle: title }));
   };
   return (
     <>
       <input aria-label="Job title" className={fieldClass} value={draft} spellCheck={false} maxLength={80} onChange={(event) => setDraft(event.target.value)} onBlur={save} onKeyDown={(event) => event.key === "Enter" && (event.target as HTMLInputElement).blur()} data-testid="bot-job-title" />
-      {error && <p role="alert" className="mt-1 text-[12px] text-destructive">{error}</p>}
+      {write.alert("mt-1 text-[12px]")}
     </>
   );
 }
 
 function ReportsTo({ bot, bots, unreadable }: { bot: Bot; bots: Bot[]; unreadable: number }) {
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   const others = bots.filter((other) => other.id !== bot.id);
   // A lead that is not in the list (removed, or unreadable by this version) is kept and named plainly.
   const known = bot.reportsTo === "owner" || others.some((other) => other.id === bot.reportsTo);
   return (
     <>
-      <select aria-label="Reports to" className={fieldClass} value={bot.reportsTo} onChange={(event) => updateBot(bot.id, { reportsTo: event.target.value }).then(() => setError(null), (cause) => setError(errorMessage(cause)))} data-testid="bot-reports-to">
+      <select aria-label="Reports to" className={fieldClass} value={bot.reportsTo} onChange={(event) => { const reportsTo = event.target.value; void write.run(() => updateBot(bot.id, { reportsTo })); }} data-testid="bot-reports-to">
         <option value="owner">You</option>
         {others.map((other) => <option key={other.id} value={other.id}>{other.name} · {other.roleTitle}</option>)}
         {!known && <option value={bot.reportsTo}>{reportsToLabel(bot.reportsTo, bots, unreadable)}</option>}
       </select>
-      {error && <p role="alert" className="mt-1 text-[12px] text-destructive">{error}</p>}
+      {write.alert("mt-1 text-[12px]")}
     </>
   );
 }
@@ -194,7 +216,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
   const [draft, setDraftText] = useState(kept?.text ?? role.text);
   const [base, setBase] = useState(kept ? { text: kept.base, hash: kept.baseHash } : { text: role.text, hash: role.hash });
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   const dirty = draft !== base.text;
   const setDraft = (text: string, from = base) => {
     setDraftText(text);
@@ -214,15 +236,12 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
 
   const save = () => {
     setSaving(true);
-    // The save names the role it started from: one changed since is not written over.
-    botMemoryApi.writeRole(bot.id, draft, base.hash).then(
-      () => {
-        keepRoleDraft(bot.id, null);
-        setBase({ text: draft, hash: base.hash });
-        setError(null);
-      },
-      (cause) => setError(errorMessage(cause)),
-    ).finally(() => setSaving(false));
+    // The save names the role it started from: one changed since is not written over. The draft is kept until it is saved.
+    const [text, from] = [draft, base.hash];
+    void write.run(() => botMemoryApi.writeRole(bot.id, text, from), () => {
+      keepRoleDraft(bot.id, null);
+      setBase({ text, hash: from });
+    }).finally(() => setSaving(false));
   };
   const state = saving ? "Saving…" : dirty ? "Unsaved changes" : "Saved";
   return (
@@ -230,7 +249,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
       <div className="mb-1.5 flex min-w-0 items-center gap-2 text-[12.5px]">
         <span className="shrink-0 font-medium text-foreground">Standing instructions</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-faint" title={role.path}>{role.path}</span>
-        <Button variant="ghost" size="sm" onClick={() => fs.openPath(role.path).catch((cause) => setError(errorMessage(cause)))} data-testid="bot-role-open">
+        <Button variant="ghost" size="sm" onClick={() => fs.openPath(role.path).catch(write.fail)} data-testid="bot-role-open">
           <ExternalLink /> Open in editor
         </Button>
       </div>
@@ -255,7 +274,6 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
       />
       <div className="mt-2 flex items-center gap-2">
         <span role="status" className={cn("text-[12px]", dirty ? "text-warning" : "text-faint")} data-testid="bot-role-state">{state}</span>
-        {error && <span role="alert" className="min-w-0 truncate text-[12px] text-destructive">{error}</span>}
         <div className="ml-auto flex items-center gap-2">
           <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={() => setDraft(base.text)} data-testid="bot-role-discard">Discard</Button>
           <Button variant="accent" size="sm" disabled={!dirty || saving || !role.editable || conflict} onClick={save} data-testid="bot-role-save">
@@ -263,6 +281,7 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
           </Button>
         </div>
       </div>
+      {write.alert("mt-2 text-[12px]")}
     </div>
   );
 }
@@ -288,17 +307,17 @@ function RoleHistory({ bot, bots, versions, current }: { bot: Bot; bots: Bot[]; 
   const [open, setOpen] = useState<string | null>(null);
   // Texts are not in the view: each is read when it is shown.
   const [texts, setTexts] = useState<Record<string, string | null>>({});
-  const [error, setError] = useState<string | null>(null);
-  const restore = (version: BotRoleVersion) => botMemoryApi.restoreRole(bot.id, version.change).then(() => setError(null), (cause) => setError(errorMessage(cause)));
+  const write = useWrite();
+  const restore = (version: BotRoleVersion) => write.run(() => botMemoryApi.restoreRole(bot.id, version.change));
   const toggle = (key: string, hash: string | null) => {
     if (open === key) return setOpen(null);
     setOpen(key);
-    if (hash && !(hash in texts)) botMemoryApi.text(bot.id, hash).then((text) => setTexts((known) => ({ ...known, [hash]: text })), (cause) => setError(errorMessage(cause)));
+    if (hash && !(hash in texts)) botMemoryApi.text(bot.id, hash).then((text) => setTexts((known) => ({ ...known, [hash]: text })), write.fail);
   };
   const firstCurrent = versions.findIndex((version) => version.hash === current);
   return (
     <div className="mt-3 rounded-lg border border-hairline" data-testid="bot-role-history">
-      {error && <p role="alert" className="px-3 pt-2 text-[12px] text-destructive">{error}</p>}
+      {write.alert("px-3 pt-2 text-[12px]")}
       <ul className="divide-y divide-hairline">
         {versions.map((version, index) => {
           const key = version.change ?? "template";
@@ -368,14 +387,14 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
   const [selected, setSelected] = useState(memory.workingPlace);
   const place = memory.places.find((value) => value.key === selected) ?? memory.places[0];
   const [switching, setSwitching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   const topics = memory.topics.filter((topic) => topic.place === place?.key);
   const notRead = memory.places.reduce((sum, value) => sum + value.notRead, 0);
   const overLimit = memory.places.filter((value) => value.read && value.overLimit);
 
   const turn = (on: boolean) => {
     setSwitching(true);
-    updateBot(bot.id, { memoryOff: !on }).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setSwitching(false));
+    void write.run(() => updateBot(bot.id, { memoryOff: !on })).finally(() => setSwitching(false));
   };
 
   return (
@@ -386,7 +405,7 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
           <Switch checked={!memory.off} disabled={switching} onCheckedChange={turn} aria-label={`${bot.name}'s memory`} data-testid="bot-memory-switch" />
         </label>
       </SectionTitle>
-      {error && <p role="alert" className="mb-2 text-[12px] text-destructive">{error}</p>}
+      {write.alert("mb-2 text-[12px]")}
       {memory.off ? (
         <Problem testId="bot-memory-off">Memory is off. Conversations with {bot.name} start with none of its notes, and {bot.name} cannot write any. You can still read and change them here.</Problem>
       ) : (
@@ -399,7 +418,7 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
       )}
       {notRead > 0 && <Problem testId="bot-memory-not-read">{notRead} older line{notRead === 1 ? " is" : "s are"} past the {memory.budget}-line budget and not read at the start of a conversation. The next note added moves the oldest to the archive.</Problem>}
       {overLimit.map((value) => (
-        <Problem key={value.key} testId="bot-memory-over-limit">{placeLabel(value.key, bot.name, orgNames)}: MEMORY.md is {kb(value.bytes)}, and only the first {kb(memory.readLimit)} is read.</Problem>
+        <Problem key={value.key} testId="bot-memory-over-limit">{placeLabel(value.key, bot.name, orgNames)}: MEMORY.md is {kb(value.bytes)}, and only its last {kb(memory.readLimit)}, the newest notes, is read.</Problem>
       ))}
 
       <h3 className="mb-2 mt-4 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Where it is kept</h3>
@@ -443,7 +462,7 @@ function MemorySection({ bot, view, orgNames }: { bot: Bot; view: RoleMemory; or
         <ul className="grid gap-1" data-testid="bot-memory-topics">
           {topics.map((topic) => (
             <li key={topic.path}>
-              <button type="button" onClick={() => fs.openPath(topic.path).catch((cause) => setError(errorMessage(cause)))} className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] hover:bg-selected/50" title={topic.path}>
+              <button type="button" onClick={() => fs.openPath(topic.path).catch(write.fail)} className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] hover:bg-selected/50" title={topic.path}>
                 <FileText className="size-3.5 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1 truncate font-mono text-foreground">{topic.name}</span>
                 <span className="shrink-0 text-faint">{topic.lines} line{topic.lines === 1 ? "" : "s"}{topic.modified ? ` · ${versionAge(topic.modified)}` : ""}</span>
@@ -461,11 +480,11 @@ const DATED = /^- (\d{4}-\d{2}-\d{2}) (.*)$/;
 function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   const notes = useMemo(() => place.lines.map((line, index) => ({ line, index, dated: DATED.exec(line) })), [place.lines]);
   const act = (action: () => Promise<unknown>, after?: () => void) => {
     setBusy(true);
-    action().then(() => { setError(null); after?.(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    void write.run(action, after).finally(() => setBusy(false));
   };
   const add = (event: FormEvent) => {
     event.preventDefault();
@@ -477,7 +496,7 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
       <div className="flex min-w-0 items-center gap-2 border-b border-hairline px-3 py-1.5 text-[12px]">
         <span className="min-w-0 flex-1 truncate font-mono text-faint" title={place.path}>{place.path}</span>
         {/* A place's file is made with its first note: there is nothing to open before that. */}
-        {place.bytes > 0 && <Button variant="ghost" size="xs" onClick={() => fs.openPath(place.path).catch((cause) => setError(errorMessage(cause)))}><ExternalLink /> Open</Button>}
+        {place.bytes > 0 && <Button variant="ghost" size="xs" onClick={() => fs.openPath(place.path).catch(write.fail)}><ExternalLink /> Open</Button>}
       </div>
       {place.problem && <div className="px-3 pt-2"><Problem>MEMORY.md: {place.problem}</Problem></div>}
       <ul className="max-h-64 overflow-y-auto py-1 scrollbar-thin">
@@ -507,7 +526,7 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
           {busy ? <Loader2 className="animate-spin" /> : <Plus />} Add
         </Button>
       </form>
-      {error && <p role="alert" className="px-3 pb-2 text-[12px] text-destructive">{error}</p>}
+      {write.alert("px-3 pb-2 text-[12px]")}
     </div>
   );
 }
@@ -516,15 +535,15 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
 
 function ChangesSection({ bot, bots, view }: { bot: Bot; bots: Bot[]; view: RoleMemory }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const write = useWrite();
   const undo = (change: BotChange) => {
     setBusy(change.id);
-    botMemoryApi.undo(bot.id, change.id).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(null));
+    void write.run(() => botMemoryApi.undo(bot.id, change.id)).finally(() => setBusy(null));
   };
   return (
     <section aria-labelledby="bot-changes-heading" className="min-w-0" data-testid="bot-changes">
       <h2 id="bot-changes-heading" className="mb-2 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Changes kept outside {bot.name}’s reach</h2>
-      {error && <p role="alert" className="mb-2 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{error}</p>}
+      {write.alert("mb-2 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px]")}
       {view.unreadableChanges > 0 && <Problem>{view.unreadableChanges} recorded change{view.unreadableChanges === 1 ? "" : "s"} cannot be read by this version. They are kept.</Problem>}
       {view.changes.length === 0 ? (
         <p className="rounded-lg border border-dashed border-hairline-strong px-4 py-3 text-[12.5px] text-faint">No changes yet. Every note {bot.name} learns or forgets, and every change to its role, is listed here with Undo.</p>

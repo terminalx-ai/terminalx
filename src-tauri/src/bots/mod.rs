@@ -739,7 +739,8 @@ pub fn role_read(id: &str) -> Result<String> {
 /// Replace a bot's standing instructions, by the owner in the app. The
 /// change is recorded in the bot's history (PRO-470) and can be undone.
 /// `expected` is the hash of the text the editor started from: a role
-/// changed since is not written over. A role is at most [`memory::READ_LIMIT`].
+/// changed since is not written over. A role is at most [`memory::ROLE_LIMIT`],
+/// what a launch reads of it (`chat::ROLE_READ_LIMIT`).
 pub fn role_write(sink: &dyn EventSink, id: &str, text: &str, expected: Option<&str>) -> Result<Bot> {
     require_enabled()?;
     let bot = get(id)?;

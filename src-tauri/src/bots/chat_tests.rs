@@ -197,14 +197,18 @@ fn memory_is_framed_capped_and_read_safely() {
         assert!(text.contains(said), "{said:?} is not in {text}");
     }
 
-    // Oversized, one endless line, a NUL and bytes that are not UTF-8: read in part, never failing.
-    let mut bytes = b"short line\0\xff\n".to_vec();
+    // Oversized, one endless line, a NUL and bytes that are not UTF-8: read in part, never failing. Past the
+    // limit its end is read (PRO-470: the newest notes are last), from the first whole line.
+    let mut bytes = b"oldest line\n".to_vec();
     bytes.extend(std::iter::repeat_n(b'x', 100 * 1024));
-    bytes.extend(b"\0\xff\xfe tail");
+    bytes.extend(b"\nshort line\0\xff\n");
+    bytes.extend(std::iter::repeat_n(b'z', 3 * LINE_LIMIT));
+    bytes.extend(b"\0\xff\xfe tail\n");
     std::fs::write(&memory, &bytes).unwrap();
     let text = note(&chat);
-    assert!(!text.contains('\0') && text.contains("short line") && text.contains("x…"), "the line is cut at {LINE_LIMIT} characters");
-    assert!(text.len() < 2 * READ_LIMIT as usize && text.contains("(More lines in MEMORY.md are not shown here: it is past the 64 KB limit.)"), "{text}");
+    assert!(!text.contains('\0') && text.contains("short line") && text.contains("z…") && !text.contains("oldest line"), "the line is cut at {LINE_LIMIT} characters: {text}");
+    assert!(!text.contains("xxxx"), "the line cut in half by the limit is not read");
+    assert!(text.len() < 2 * READ_LIMIT as usize && text.contains("(Older lines in MEMORY.md are not shown here: it is past the 64 KB limit, and only its end is read.)"), "{text}");
     assert!(crate::cloud_config::prompt_argv("claude", &[Some(&text)])[1].len() < 140 * 1024, "far under any argument limit");
 
     // Not a regular file: said so, never read as empty, and never waited on.

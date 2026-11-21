@@ -307,7 +307,17 @@ pub fn read_capped(path: &std::path::Path) -> Read {
 
 /// [`read_capped`] to at most `limit` bytes.
 pub fn read_capped_to(path: &std::path::Path, limit: u64) -> Read {
-    use std::io::Read as _;
+    read_capped_part(path, limit, false)
+}
+
+/// [`read_capped_to`], but of a file past `limit` its last `limit` bytes,
+/// from the first whole line: a memory's newest notes are at its end (PRO-470).
+pub fn read_capped_tail(path: &std::path::Path, limit: u64) -> Read {
+    read_capped_part(path, limit, true)
+}
+
+fn read_capped_part(path: &std::path::Path, limit: u64, tail: bool) -> Read {
+    use std::io::{Read as _, Seek as _};
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -316,22 +326,33 @@ pub fn read_capped_to(path: &std::path::Path, limit: u64) -> Read {
         // Opening a FIFO for reading waits for a writer; a link is not followed.
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
-    let file = match options.open(path) {
+    let mut file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
         Err(error) => return Read::Unreadable(format!("{error}")),
     };
-    match file.metadata() {
-        Ok(meta) if meta.is_file() => {}
+    let len = match file.metadata() {
+        Ok(meta) if meta.is_file() => meta.len(),
         Ok(_) => return Read::Unreadable("it is not a regular file".into()),
         Err(error) => return Read::Unreadable(format!("{error}")),
+    };
+    let from_tail = tail && len > limit;
+    if from_tail {
+        if let Err(error) = file.seek(std::io::SeekFrom::Start(len - limit)) {
+            return Read::Unreadable(format!("{error}"));
+        }
     }
     let mut bytes = Vec::new();
     if let Err(error) = file.take(limit + 1).read_to_end(&mut bytes) {
         return Read::Unreadable(format!("{error}"));
     }
-    let cut = bytes.len() as u64 > limit;
+    let cut = from_tail || bytes.len() as u64 > limit;
     bytes.truncate(limit as usize);
+    if from_tail {
+        // A line cut in half at the start is not read.
+        let start = bytes.iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |at| at + 1);
+        bytes.drain(..start);
+    }
     let text = String::from_utf8_lossy(&bytes).replace('\0', "");
     let text = text
         .lines()

@@ -648,3 +648,140 @@ fn a_deleted_bot_takes_its_history_to_the_trash() {
     let trashed = root.join("trash").join("bots").join(format!("{}.changes", bot.id));
     assert!(std::fs::read_to_string(trashed.join(changes::LOG_FILE)).unwrap().contains("Kept with it"));
 }
+
+/// The log, padded with older history to `size` bytes.
+fn pad_log(bot: &Bot, size: u64) {
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    let mut padded = std::fs::read_to_string(folder.join(changes::LOG_FILE)).unwrap();
+    let first = padded.lines().find(|line| line.contains("\"learned\"")).expect("a note to copy").to_owned();
+    let mut filler: serde_json::Value = serde_json::from_str(&first).unwrap();
+    filler["text"] = json!("x".repeat(1000));
+    filler["undoes"] = serde_json::Value::Null;
+    let mut lines: Vec<String> = Vec::new();
+    while (padded.len() + lines.iter().map(|line| line.len() + 1).sum::<usize>()) < size as usize {
+        filler["id"] = json!(uuid::Uuid::now_v7().to_string());
+        lines.push(filler.to_string());
+    }
+    // Older than everything already logged.
+    padded = format!("{}\n{padded}", lines.join("\n"));
+    std::fs::write(folder.join(changes::LOG_FILE), padded).unwrap();
+}
+
+/// N1 (PRO-470 second review): a bot edits its role and appends about 520 KB
+/// to its archive. The archive's change is kept as whole texts by hash, so
+/// the log stays small, nothing rotates, and the role change is listed with
+/// Undo, all through the app's own operations.
+#[test]
+fn one_large_outside_edit_keeps_the_role_change_and_the_rest_of_the_history() {
+    let (_home, sink, bot) = hired();
+    let note = super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "Written before"})).unwrap();
+    let note = note[0]["id"].as_str().unwrap().to_owned();
+    pad_log(&bot, changes::MAX_LOG_BYTES * 3 / 4);
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+
+    std::fs::write(home_of(&bot).join("ROLE.md"), "Atlas rewrote its own role.\n").unwrap();
+    let archive: String = (0..5200).map(|n| format!("- 2026-01-01 An archived note, number {n}, long enough to make the archive large: {}\n", "y".repeat(40))).collect();
+    assert!(archive.len() > 500 * 1024);
+    std::fs::create_dir_all(home_of(&bot).join("memory")).unwrap();
+    std::fs::write(home_of(&bot).join("memory/archive.md"), &archive).unwrap();
+    assert_eq!(super::super::call(sink.as_ref(), "memoryLook", &json!({"id": bot.id})).unwrap()["found"], 2);
+
+    let log = read_log(&bot.id).unwrap();
+    let archived = log.changes.iter().find(|change| change.states.contains_key("memory/archive.md")).unwrap();
+    assert!(matches!(archived.known_edits().unwrap().as_slice(), [Edit::ReplaceText { .. }]), "whole texts by hash, not 5200 line edits");
+    assert!(serde_json::to_string(archived).unwrap().len() < 4096);
+    assert!(log.changes.iter().any(|change| change.id == note), "nothing rotated out");
+    assert!(std::fs::metadata(folder.join(changes::LOG_FILE)).unwrap().len() < changes::MAX_LOG_BYTES);
+
+    let shown = super::super::call(sink.as_ref(), "memoryView", &json!({"id": bot.id})).unwrap();
+    assert_eq!(shown["role"]["versions"][0]["kind"], "outside", "not 'unchanged since it was hired'");
+    let role_change = shown["changes"].as_array().unwrap().iter().find(|change| change["text"].as_str().unwrap().contains("ROLE.md")).unwrap().clone();
+    assert!(role_change["notUndoable"].is_null());
+    // Undo of both puts the files back.
+    super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": role_change["id"]})).unwrap();
+    assert_ne!(file(&bot, "ROLE.md"), "Atlas rewrote its own role.\n");
+    super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": archived.id})).unwrap();
+    assert!(file(&bot, "memory/archive.md").is_empty());
+}
+
+/// A rotation keeps what the commit just wrote and the newest role change,
+/// with the text it replaced, however old it is.
+#[test]
+fn a_rotation_keeps_the_newest_role_change_and_its_text() {
+    let (_home, sink, bot) = hired();
+    super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "The first note"})).unwrap();
+    let template = changes::hash_of(&file(&bot, "ROLE.md"));
+    super::super::role_write(sink.as_ref(), &bot.id, "The role, edited once.\n", None).unwrap();
+    let role_change = read_log(&bot.id).unwrap().changes.last().unwrap().id.clone();
+    // Push the role change to the oldest end, past what a rotation would keep.
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    let log = std::fs::read_to_string(folder.join(changes::LOG_FILE)).unwrap();
+    let mut filler: serde_json::Value = serde_json::from_str(log.lines().find(|line| line.contains("\"learned\"")).unwrap()).unwrap();
+    filler["text"] = json!("x".repeat(1000));
+    let mut padded = log.clone();
+    while (padded.len() as u64) < changes::MAX_LOG_BYTES {
+        filler["id"] = json!(uuid::Uuid::now_v7().to_string());
+        padded.push_str(&format!("{filler}\n"));
+    }
+    std::fs::write(folder.join(changes::LOG_FILE), &padded).unwrap();
+
+    let fresh = super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "After the rotation"})).unwrap()[0]["id"].as_str().unwrap().to_owned();
+    let log = read_log(&bot.id).unwrap();
+    assert!(std::fs::metadata(folder.join(changes::LOG_FILE)).unwrap().len() <= changes::MAX_LOG_BYTES / 2 + 4096);
+    assert!(log.changes.iter().any(|change| change.id == fresh));
+    assert!(log.changes.iter().any(|change| change.id == role_change), "the newest role change stays");
+    assert!(!log.changes.iter().any(|change| change.text == "The first note"), "older notes went");
+    assert!(changes::kept_text(&bot.id, &template).unwrap().is_some(), "with the text it replaced");
+    let shown = super::super::call(sink.as_ref(), "memoryView", &json!({"id": bot.id})).unwrap();
+    assert_eq!(shown["role"]["versions"][0]["kind"], "role");
+    super::super::call(sink.as_ref(), "memoryUndo", &json!({"id": bot.id, "change": role_change})).unwrap();
+    assert_eq!(changes::hash_of(&file(&bot, "ROLE.md")), template);
+}
+
+/// A memory past the read limit is read from its end: the newest notes are
+/// the ones a conversation and the page are given.
+#[test]
+fn a_memory_past_the_read_limit_is_read_from_its_end() {
+    let (_home, sink, bot) = hired();
+    let lines: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the limit")).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}\n", lines.join("\n"))).unwrap();
+    assert!(file(&bot, "MEMORY.md").len() as u64 > READ_LIMIT);
+    let given = for_conversation(&bot).unwrap();
+    assert!(given.contains("Note number 2999") && !given.contains("Note number 0000"), "the newest");
+    assert!(given.contains("Older lines in MEMORY.md are not shown here"), "{given}");
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let own = &shown.memory.places[0];
+    assert!(own.file.over_limit && own.lines.last().unwrap().contains("Note number 2999") && !own.lines[0].contains("Note number 0000"));
+    assert!(own.lines.iter().all(|line| line.starts_with("- 2026-11-01 Note number")), "no line cut in half");
+}
+
+/// Inert with Bots off: the look over every bot as the Bots page opens, too.
+#[test]
+fn the_look_over_every_bot_needs_the_switch() {
+    let (_home, sink, bot) = hired();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), "- 2026-11-01 Edited while off\n").unwrap();
+    let mut settings = crate::store::settings::load();
+    settings.experimental.bots = false;
+    crate::store::settings::save(&settings).unwrap();
+    let before = read_log(&bot.id).unwrap().changes.len();
+    assert!(super::super::call(sink.as_ref(), "memoryLook", &json!({})).is_err());
+    assert_eq!(read_log(&bot.id).unwrap().changes.len(), before, "nothing recorded");
+}
+
+/// A note moved to the archive is written there before it leaves the memory.
+#[test]
+fn an_archive_move_writes_the_archive_first() {
+    let (_home, sink, bot) = hired();
+    let notes: Vec<String> = (0..BUDGET).map(|n| format!("- 2026-10-{:02} Note {n}", 1 + n % 28)).collect();
+    std::fs::write(home_of(&bot).join("MEMORY.md"), format!("{}\n", notes.join("\n"))).unwrap();
+    // The memory file made read-only: the archive is written first, and the failed memory write leaves the note in both, not in neither.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(home_of(&bot).join("memory")).unwrap();
+    let memory = home_of(&bot).join("MEMORY.md");
+    std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = super::super::call(sink.as_ref(), "memoryAdd", &json!({"id": bot.id, "place": "bot", "text": "One too many"}));
+    std::fs::set_permissions(home_of(&bot), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err());
+    assert!(file(&bot, "memory/archive.md").contains("Note 0"), "the archive was written first");
+    assert!(std::fs::read_to_string(&memory).unwrap().contains("Note 0"), "and the note is still in the memory");
+}

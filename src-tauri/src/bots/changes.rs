@@ -41,6 +41,10 @@ pub const EVENT: &str = "bot_memory_changed";
 pub const MAX_TRACKED_BYTES: u64 = 1024 * 1024;
 /// Past this size the log is rotated down to its newest half; at most twice this is ever read.
 pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
+/// The most a change's line edits of one file may take, serialised; past it
+/// the change is kept as the whole text before and after, by hash, so one
+/// large edit never fills the log and rotates the rest of the history out.
+pub const MAX_LINE_EDIT_BYTES: usize = 32 * 1024;
 /// More lines than this on both sides of a memory file's edit are recorded as a whole text.
 const MAX_DIFF_CELLS: usize = 4_000_000;
 /// What a secret taken out of the history reads as.
@@ -464,8 +468,13 @@ impl Files {
         Ok(())
     }
 
+    /// Write the touched files, each place's `MEMORY.md` last: a note moved to
+    /// an archive is in the archive before it leaves the memory, so a crash
+    /// between the two loses nothing.
     fn write(&self) -> Result<()> {
-        for rel in &self.touched {
+        let mut order: Vec<&String> = self.touched.iter().collect();
+        order.sort_by_key(|rel| (rel.rsplit('/').next() == Some(bot_store::MEMORY_FILE), rel.as_str()));
+        for rel in order {
             no_links(&self.home, rel)?;
             let path = self.home.join(rel);
             match &self.texts[rel] {
@@ -557,7 +566,8 @@ pub fn diff(before: &[String], after: &[String]) -> Option<Vec<DiffLine>> {
 
 /// The line edits that turn `before` into `after`, in an order that applies:
 /// removals from the last up, then additions from the first down. Each
-/// names the line above it, for an undo to find its place.
+/// names the line above it, for an undo to find its place. `None` past
+/// [`MAX_LINE_EDIT_BYTES`]: the caller keeps the whole texts instead.
 fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit>> {
     let steps = diff(before, after)?;
     let (mut removed, mut added) = (Vec::new(), Vec::new());
@@ -582,7 +592,8 @@ fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit
     }
     removed.reverse();
     removed.extend(added);
-    Some(removed)
+    let size: usize = removed.iter().map(|edit| serde_json::to_string(edit).map_or(usize::MAX, |text| text.len())).fold(0, usize::saturating_add);
+    (size <= MAX_LINE_EDIT_BYTES).then_some(removed)
 }
 
 /// The edits that turn what the app knew of a file into what it is now.
@@ -728,22 +739,32 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<Known>) -> Res
 
 /// Rotate the log once it passes [`MAX_LOG_BYTES`]: its newest changes are
 /// kept, up to half that, and the texts nothing names any more are removed.
-fn rotate(id: &str, folder: &Path, known: &Known) -> Result<()> {
+/// The `fresh` changes just written are always kept, and so is the newest
+/// change to the role, with the text it replaced: the role's history and its
+/// Undo never rotate out behind a large memory edit.
+fn rotate(id: &str, folder: &Path, known: &Known, fresh: usize) -> Result<()> {
     let path = folder.join(LOG_FILE);
     if std::fs::metadata(&path).map_or(0, |meta| meta.len()) <= MAX_LOG_BYTES {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&std::fs::read(&path)?).into_owned();
-    let mut kept: Vec<&str> = Vec::new();
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let touches_role = |line: &str| serde_json::from_str::<Change>(line).is_ok_and(|change| change.states.contains_key(bot_store::ROLE_FILE));
+    let newest_role = lines.iter().rposition(|line| touches_role(line));
+    let mut keep = vec![false; lines.len()];
     let mut size = 0;
-    for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
-        if size + line.len() as u64 + 1 > MAX_LOG_BYTES / 2 && !kept.is_empty() {
+    for (at, line) in lines.iter().enumerate().rev() {
+        let must = lines.len() - at <= fresh;
+        if !must && size + line.len() as u64 + 1 > MAX_LOG_BYTES / 2 {
             break;
         }
         size += line.len() as u64 + 1;
-        kept.push(line);
+        keep[at] = true;
     }
-    kept.reverse();
+    if let Some(at) = newest_role {
+        keep[at] = true;
+    }
+    let kept: Vec<&str> = lines.iter().zip(&keep).filter(|(_, keep)| **keep).map(|(line, _)| *line).collect();
     crate::store::write_atomic(&path, format!("{}\n", kept.join("\n")).as_bytes())?;
     prune_texts(id, folder, known)
 }
@@ -833,7 +854,7 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
         crate::store::write_json(&folder.join(KNOWN_FILE), &known)?;
     }
     if !recorded.is_empty() {
-        rotate(id, &folder, &known)?;
+        rotate(id, &folder, &known, recorded.len())?;
         sink.emit(EVENT, &serde_json::json!({"id": id}));
     }
     Ok((out, recorded))

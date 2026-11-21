@@ -156,6 +156,53 @@ describe("Role and memory (PRO-470)", () => {
     await waitFor(() => expect(mocks.api.roleWrite).toHaveBeenLastCalledWith("atlas-id", "My draft\n", "h-atlas"));
   });
 
+  it("offers Restart runtime when the runtime cannot verify the window, and saves again after it, keeping the draft", async () => {
+    const RESTART = "runtime_restart_required:e7: TerminalX must restart its runtime to confirm that you asked. That stops Atlas's chat.";
+    serve(view());
+    const restarted = vi.fn(async () => undefined);
+    const served = mocks.invoke.getMockImplementation()!;
+    let adds = 0;
+    mocks.invoke.mockImplementation(async (command: string, args: { operation: string }) => {
+      if (command === "local_runtime_restart_for_window") return restarted();
+      if (args?.operation === "memoryAdd" && adds++ === 0) throw RESTART;
+      return served(command, args);
+    });
+    mocks.api.roleWrite.mockRejectedValueOnce(RESTART).mockResolvedValue(ATLAS);
+    show();
+    const editor = await screen.findByTestId("bot-role-text");
+    fireEvent.change(editor, { target: { value: "Keep main green.\n" } });
+    fireEvent.click(screen.getByTestId("bot-role-save"));
+    // Said as the other Bots screens say it, never as the raw code; the draft is still there.
+    const editorBox = screen.getByTestId("bot-role-editor");
+    expect(await within(editorBox).findByText(/must restart its runtime to confirm that you asked/)).toBeTruthy();
+    expect(editorBox.textContent).not.toContain("runtime_restart_required");
+    expect((editor as HTMLTextAreaElement).value).toBe("Keep main green.\n");
+    expect(screen.getByTestId("bot-role-state").textContent).toBe("Unsaved changes");
+    // Gone and back before the restart: the draft is kept, and the save fails the same way again.
+    mocks.api.roleWrite.mockRejectedValueOnce(RESTART);
+    cleanup();
+    show();
+    expect(((await screen.findByTestId("bot-role-text")) as HTMLTextAreaElement).value).toBe("Keep main green.\n");
+    fireEvent.click(screen.getByTestId("bot-role-save"));
+    // Restart runtime, and the same draft is saved over the role it started from.
+    fireEvent.click(await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ }));
+    await waitFor(() => expect(mocks.api.roleWrite).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId("bot-role-state").textContent).toBe("Saved"));
+    expect(mocks.api.roleWrite).toHaveBeenLastCalledWith("atlas-id", "Keep main green.\n", "h-now");
+    expect(restarted).toHaveBeenCalledTimes(1);
+
+    // A note added meanwhile fails the same way; Restart runtime, then it is added.
+    fireEvent.change(screen.getByTestId("bot-memory-add-text"), { target: { value: "Ship on Tuesdays" } });
+    fireEvent.click(screen.getByTestId("bot-memory-add"));
+    const notes = screen.getByTestId("bot-memory-notes");
+    fireEvent.click(await within(notes).findByRole("button", { name: /Restart runtime/ }));
+    await waitFor(() => expect(restarted).toHaveBeenCalledTimes(2));
+    expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: "e7" });
+    await waitFor(() => expect(asked("memoryAdd")).toHaveLength(2));
+    expect(asked("memoryAdd")[1]).toEqual({ id: "atlas-id", place: "personal", text: "Ship on Tuesdays" });
+    await waitFor(() => expect(within(notes).queryByRole("alert")).toBeNull());
+  });
+
   it("keeps an unsaved role across leaving the page, and asks before going back to the team", async () => {
     serve(view());
     await boot({ revision: 1, bots: [ATLAS, IRIS], unreadable: 0 });
@@ -270,7 +317,7 @@ describe("Role and memory (PRO-470)", () => {
     serve(shown);
     show();
     expect((await screen.findByTestId("bot-memory-not-read")).textContent).toContain("12 older lines are past the 200-line budget");
-    expect(screen.getByTestId("bot-memory-over-limit").textContent).toContain("only the first 64 KB is read");
+    expect(screen.getByTestId("bot-memory-over-limit").textContent).toContain("only its last 64 KB, the newest notes, is read");
     expect(screen.getByTestId("bot-role-over-limit").textContent).toContain("ROLE.md is 79 KB");
   });
 
