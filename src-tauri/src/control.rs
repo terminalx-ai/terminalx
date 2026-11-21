@@ -1134,11 +1134,12 @@ impl ControlService {
             "bots.delete" => {
                 caller.person_only("delete bots")?;
                 let bot = named()?;
+                let was_a_bot = bots::enforce::is_a_bot(&bot.id);
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 let deleted = bots::delete(sink, &bot.id);
                 // A bot whose record is gone is cleaned up after even when moving its home or history failed, so
                 // that failure is not also its chats left open and its work left running.
-                if deleted.is_ok() || bots::enforce::is_gone(&bot.id) {
+                if bots::enforce::removed(was_a_bot, deleted.is_ok(), &bot.id) {
                     bots::enforce::after_delete(sink, &bot.id);
                     bots::handoffs::deliver_waiting_all(&self.manager);
                     if deleted.is_err() {
@@ -4924,8 +4925,52 @@ mod tests {
         std::fs::create_dir_all(taken.join("kept")).unwrap();
         let error = ask("bots.delete", json!({"bot": "atlas"})).unwrap_err();
         assert!(error.message.contains("history could not be moved"), "{}", error.message);
-        assert!(crate::bots::enforce::is_gone(&id));
+        assert!(crate::bots::get(&id).is_err(), "its record is gone");
         assert!(chats().iter().all(|entry| entry.archived), "its chats went to the archive all the same");
+    }
+
+    /// PRO-491 review: the clean-up after a delete runs only for a bot that
+    /// call removed: never for an id that was never a bot or was deleted
+    /// before, and never with Bots off.
+    #[test]
+    fn the_delete_clean_up_runs_only_for_a_bot_the_delete_removed() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        // A session that says it is the chat of a bot that never was.
+        let mut ghost = chat.clone();
+        ghost.id = "ghost-chat".into();
+        ghost.unknown.insert(crate::bots::chat::SESSION_KEY.into(), json!({"id": "ghost"}));
+        index::update(|entries| { entries.push(ghost.clone()); Ok(()) }).unwrap();
+        let archived = |session: &str| index::get(session).unwrap().archived;
+        let runtime_delete = |id: &str| crate::bots::enforce::call(&service.manager, "delete", &json!({"id": id}));
+
+        assert_eq!(ask("bots.delete", json!({"bot": "ghost"})).unwrap_err().code, "not_found");
+        assert!(runtime_delete("ghost").is_err());
+        assert!(!archived("ghost-chat"), "no clean-up for an id that was never a bot");
+
+        // With Bots off, nothing is cleaned up after, even for a bot there is.
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(ask("bots.delete", json!({"bot": "atlas"})).unwrap_err().code, "bots_off");
+        assert!(runtime_delete(&id).is_err());
+        assert!(!archived(&chat.id) && crate::store::bots::get(&id).unwrap().is_some());
+
+        // On, the delete cleans up after the bot it removed, and a second delete does nothing more.
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        assert!(ask("bots.delete", json!({"bot": "atlas"})).is_ok());
+        assert!(archived(&chat.id));
+        let mut back = index::get(&chat.id).unwrap();
+        back.archived = false;
+        index::update(|entries| { entries.retain(|entry| entry.id != back.id); entries.push(back.clone()); Ok(()) }).unwrap();
+        assert!(runtime_delete(&id).is_err());
+        assert!(!archived(&chat.id), "a second delete cleans up nothing");
     }
 
     /// PRO-470 H1: a process in a bot's pane that names no session (its

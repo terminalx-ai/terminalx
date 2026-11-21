@@ -236,9 +236,18 @@ pub fn before_delete(manager: &SessionManager, id: &str) {
     super::handoffs::before_delete(manager, id);
 }
 
-/// Whether bot `id` has no record any more: a delete that failed after removing it still needs [`after_delete`].
-pub fn is_gone(id: &str) -> bool {
-    matches!(crate::store::bots::get(id), Ok(None))
+/// Whether a delete of `id` that is about to run may need [`after_delete`]:
+/// only with Bots on, for a bot that has a record now. Asked before the delete.
+pub fn is_a_bot(id: &str) -> bool {
+    super::enabled() && matches!(crate::store::bots::get(id), Ok(Some(_)))
+}
+
+/// Whether a delete of a bot that [`is_a_bot`] before it removed its record:
+/// it succeeded, or failed after the record went (moving its home or history),
+/// and is cleaned up after either way. An id that was never a bot, one deleted
+/// before, or any with Bots off, is not.
+pub fn removed(was_a_bot: bool, deleted: bool, id: &str) -> bool {
+    was_a_bot && (deleted || matches!(crate::store::bots::get(id), Ok(None)))
 }
 
 /// After bot `id` is deleted: its chats go to the archive, where they can
@@ -312,16 +321,15 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
         "pauseHeld" => return super::pause::held(manager),
         _ => {}
     }
-    let deleting = (operation == "delete").then(|| params["id"].as_str().map(str::to_owned)).flatten();
+    // Only a bot there is, with Bots on, is stopped before and cleaned up after.
+    let deleting = (operation == "delete").then(|| params["id"].as_str().map(str::to_owned)).flatten().filter(|id| is_a_bot(id));
     if let Some(id) = &deleting {
-        if super::enabled() {
-            before_delete(manager, id);
-        }
+        before_delete(manager, id);
     }
     let access_before = (operation == "update").then(|| after_access(params)).flatten().and(params["id"].as_str().and_then(|id| crate::store::bots::get(id).ok().flatten()).map(|bot| bot.access));
     let answer = super::call(sink.as_ref(), operation, params);
     // A bot whose record is gone is cleaned up after even when moving its home or history failed.
-    if let Some(id) = deleting.as_deref().filter(|id| answer.is_ok() || is_gone(id)) {
+    if let Some(id) = deleting.as_deref().filter(|id| removed(true, answer.is_ok(), id)) {
         after_delete(sink.as_ref(), id);
         super::handoffs::deliver_waiting_all(manager);
         if answer.is_err() {

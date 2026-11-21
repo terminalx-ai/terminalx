@@ -109,6 +109,9 @@ function useWrite() {
   const [failure, setFailure] = useState<string | null>(null);
   const local = useState<Waiting | null>(null);
   const [waiting, setWaiting] = useContext(RestartContext) ?? local;
+  // A section that goes (a closed history panel, the page left) drops its retry: nobody waits for it any more, and
+  // a Restore no one sees must not run over a role saved meanwhile. The offer moves to a section still shown.
+  useEffect(() => () => setWaiting((now) => stopWaiting(now, id)), [id, setWaiting]);
   const run = (action: () => Promise<unknown>, after?: () => void, again?: () => void): Promise<void> => {
     const attempt = (): Promise<void> => action().then(
       () => {
@@ -127,9 +130,12 @@ function useWrite() {
   };
   const fail = (cause: unknown) => setFailure(errorMessage(cause));
   const alert = (className?: string) => {
-    if (failure) return <MachineHostError error={failure} className={className} onRestarted={() => setFailure(null)} />;
-    if (waiting?.shownBy !== id) return null;
+    // A failure of this section's own is said beside the page's offer, never in place of it.
+    const own = failure && <MachineHostError error={failure} className={className} onRestarted={() => setFailure(null)} />;
+    if (waiting?.shownBy !== id) return own || null;
     return (
+      <>
+      {own}
       <MachineHostError error={waiting.error} className={className}
         onRestarted={() => {
           const retries = [...waiting.retries.values()];
@@ -140,6 +146,7 @@ function useWrite() {
           setWaiting(null);
           setFailure(message);
         }} />
+      </>
     );
   };
   return { run, fail, alert };

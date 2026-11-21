@@ -240,6 +240,36 @@ describe("Role and memory (PRO-470)", () => {
     expect(screen.queryByRole("button", { name: /Restart runtime/ })).toBeNull();
   });
 
+  it("drops the retry of a section that is closed, and shows the offer where a write still waits (PRO-491 review)", async () => {
+    const RESTART = "runtime_restart_required:e7: TerminalX must restart its runtime to confirm that you asked. That stops Atlas's chat.";
+    serve(view());
+    const served = mocks.invoke.getMockImplementation()!;
+    let restores = 0;
+    mocks.invoke.mockImplementation(async (command: string, args: { operation: string }) => {
+      if (command === "local_runtime_restart_for_window") return undefined;
+      if (args?.operation === "roleRestore" && restores++ === 0) throw RESTART;
+      return served(command, args);
+    });
+    mocks.api.roleWrite.mockRejectedValueOnce(RESTART).mockResolvedValue(ATLAS);
+    show();
+    // A save waits on a restart.
+    fireEvent.change(await screen.findByTestId("bot-role-text"), { target: { value: "Saved after the restart.\n" } });
+    fireEvent.click(screen.getByTestId("bot-role-save"));
+    await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ });
+    // A Restore fails the same way: the offer moves to it.
+    fireEvent.click(screen.getByTestId("bot-role-history-toggle"));
+    fireEvent.click(within(screen.getAllByTestId("bot-role-version")[1]).getByTestId("bot-role-restore"));
+    await within(screen.getByTestId("bot-role-history")).findByRole("button", { name: /Restart runtime/ });
+    expect(screen.getAllByRole("button", { name: /Restart runtime/ })).toHaveLength(1);
+    // The history closed: its Restore is abandoned, and the offer shows where the save still waits.
+    fireEvent.click(screen.getByTestId("bot-role-history-toggle"));
+    const offer = await within(screen.getByTestId("bot-role-editor")).findByRole("button", { name: /Restart runtime/ });
+    fireEvent.click(offer);
+    await waitFor(() => expect(mocks.api.roleWrite).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByTestId("bot-role-state").textContent).toBe("Saved"));
+    expect(asked("roleRestore")).toHaveLength(1);
+  });
+
   it("forgets an undated note too, but never a heading or a blank line (PRO-491)", async () => {
     const shown = view();
     shown.memory = { ...shown.memory, places: [place("bot", ["# Memory", "", "- Undated, written by hand", "Plain words under the heading"]), place("personal", [])] };
