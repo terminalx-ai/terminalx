@@ -715,6 +715,13 @@ impl ApprovalPhone {
         })).unwrap();
     }
 
+    /// The phone's `bots` operation (PRO-479), with `params` beside its operation.
+    pub(crate) fn bots(&self, manager: &crate::session::SessionManager, mut params: Value) -> Result<Value> {
+        params["actor"] = serde_json::to_value(&self.actor)?;
+        params["connection"] = serde_json::json!("approval-connection");
+        execute(manager, &self.lifetime, "bots", params)
+    }
+
     pub(crate) fn send(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, text: &str) {
         execute(manager, &self.lifetime, "send", serde_json::json!({
             "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
@@ -750,8 +757,10 @@ impl ApprovalPhone {
 /// - `sessionAccounts`: `create` takes an `account` and starts the session on it (#980).
 /// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
 ///   resolves setup and archive scripts and the archive timeout from them.
+/// - `bots`: `bots`, the reads and the owner's acts a phone makes on the bots
+///   (`bots::phone`, PRO-479). The desktop names it only while Bots is on.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1, "bots": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -898,6 +907,14 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             Ok(serde_json::to_value(resolved)?)
         }
         "settings" => Ok(phone_settings(&crate::store::settings::load())),
+        // The bots (PRO-479): reads, and the owner's acts through the window's own
+        // operations. Only a phone that may drive sessions acts.
+        "bots" => {
+            let operation = string("operation")?;
+            if !crate::bots::phone::OPERATIONS.contains(&operation) { bail!(UNSUPPORTED); }
+            if crate::bots::phone::acts(operation) { grant.driver()?; }
+            crate::bots::phone::call(manager, operation, &params)
+        }
         "setSettings" => {
             grant.driver()?;
             let native_codex = params["nativeCodex"].as_bool().context("nativeCodex must be true or false")?;
