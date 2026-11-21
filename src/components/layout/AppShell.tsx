@@ -82,7 +82,8 @@ import { bootStatus, useStatus } from "@/lib/status";
 import { useRuntimeSwitch } from "@/lib/localRuntime";
 import { AutomationsView } from "@/components/automations/AutomationsView";
 import { bootAutomations } from "@/lib/automations";
-import { bootBots, shutBots, useBotStore } from "@/lib/bots";
+import { bootBots, pauseAllBots, shutBots, useBotStore } from "@/lib/bots";
+import { bootBotPause, noteBotsForPause, noteSessionsForPause, shutBotPause } from "@/lib/botPause";
 import { bootBotItems, noteBotSessions, shutBotItems } from "@/lib/botItems";
 import { botViewFor } from "@/lib/botChats";
 import { BotView } from "@/components/bots/BotView";
@@ -343,17 +344,33 @@ export function AppShell() {
     if (botsOn) {
       void bootBots();
       void bootBotItems();
+      void bootBotPause();
     } else {
       shutBots();
       shutBotItems();
+      shutBotPause();
     }
   }, [botsOn]);
-  // A question card opening or closing in a bot's session changes what needs the owner (PRO-469). Nothing while off.
+  // A question card opening or closing in a bot's session changes what needs the owner (PRO-469), and a worker
+  // ending the step it was on changes what a pause holds (PRO-474). Nothing while off.
   useEffect(() => {
-    if (botsOn) noteBotSessions(store.sessions);
+    if (!botsOn) return;
+    noteBotSessions(store.sessions);
+    noteSessionsForPause(store.sessions);
   }, [botsOn, store.sessions]);
+  useEffect(() => {
+    if (botsOn) noteBotsForPause(bots);
+  }, [botsOn, bots]);
   // Registered only while the switch is on, so with it off ⇧⌘J reaches whatever else has it.
   useShortcut("app.bots", () => { if (!canLeave()) return; setSettingsOpen(false); showBotsTeam(); }, { enabled: botsOn });
+  // Pause all from anywhere (PRO-474, 23.12), then the Bots page says what it stopped. A page with unsaved work stays
+  // open; the pause happens all the same.
+  useShortcut("app.pauseAllBots", () => {
+    void pauseAllBots("shortcut").catch((error) => console.warn("Pause all bots:", error));
+    if (!canLeave()) return;
+    setSettingsOpen(false);
+    showBotsTeam();
+  }, { enabled: botsOn });
   useLeaveBotsWhenOff();
   useEffect(() => startMachineConnections(), []);
   // Another computer may ask this Mac's app to update (PRO-354): the runtime only asks while this Mac lets others operate it.

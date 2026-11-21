@@ -176,6 +176,12 @@ pub trait Host: Send + Sync {
         anyhow::bail!("Worker archival is not configured")
     }
 
+    /// Why no worker starts for `run` now: its lead works for a paused bot
+    /// (PRO-474), named here. The pieces stay as they are and start when the
+    /// bot is resumed ([`bot_resumed`]). `None` for every run of a host with no bots.
+    fn held_by_pause(&self, _run: &Run) -> Option<String> {
+        None
+    }
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError>;
     /// The agents a worker can be here.
     fn worker_agents(&self) -> Vec<String>;
@@ -745,6 +751,36 @@ fn schedule_reset(run: &mut Run, auto: &AutoDecide, now_ms: i64) -> Option<RunEv
 
 fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, EngineError> {
     let run = stored(id)?;
+    // A paused bot's run starts no worker (PRO-474): what is ready stays ready, and starts on its resume. A
+    // person's own start is told why; the engine's own (a retry, a free slot) simply waits.
+    if let Some(bot) = host.held_by_pause(&run) {
+        // The lead's own start of a run not started yet starts it, as a start every worker limit holds does: it is
+        // running with nothing in a turn, so the resume (`bot_resumed`) starts its ready pieces.
+        let run = if matches!(launch, Launch::Ready) && run.state == RunState::Planned {
+            let (run, ()) = store::update(id, |run| {
+                if run.state == RunState::Planned {
+                    run.state = RunState::Running;
+                }
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            changed(host, &run);
+            run
+        } else {
+            run
+        };
+        if matches!(launch, Launch::Ready) && run.ready().iter().any(|piece| piece.state == PieceState::Queued) {
+            let mut error = EngineError::new(
+                "bot_paused",
+                format!("Run {id} is led by {bot}, who is paused: no worker starts until you resume it."),
+                Some("Resume the bot on its page or the Bots page; its run's ready pieces start then."),
+            );
+            error.details = json!({"run": id});
+            return Err(error);
+        }
+        let waiting = waiting(&run);
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new(), edited: None });
+    }
     // Until its piece is stored, a worker is known as one by who started it.
     let _limited = guard::starting(&run.lead.session_id);
     let app_limit = host.limits(&run.project_path).workers_at_once as usize;
@@ -2844,6 +2880,30 @@ fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Resu
     let started = if start.started.is_empty() { "No piece waited to start; call `terminalx runs start` when the next one is ready.".to_string() } else { format!("Workers were started for: {}.", start.started.join(", ")) };
     host.tell_lead(&start.run, &format!("Run {id} is running again. {how} {started}"));
     Ok(start)
+}
+
+/// After a bot is resumed (PRO-474): every running run it leads (`leads`)
+/// starts what became ready while it was paused, as the lead's `runs start`
+/// would, then whatever waits for a free slot anywhere. Its lead is told.
+pub fn bot_resumed(host: &dyn Host, leads: &dyn Fn(&Run) -> bool) {
+    let runs = match store::list() {
+        Ok(runs) => runs,
+        Err(error) => return log::warn!("read the runs after a bot's resume: {error:#}"),
+    };
+    for run in runs.into_iter().filter(|run| run.state == RunState::Running && leads(run)) {
+        let started = {
+            let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+            launch_ready(host, &run.id, Launch::Ready)
+        };
+        match started {
+            Ok(start) if !start.started.is_empty() => {
+                host.tell_lead(&start.run, &format!("Your owner resumed you, so run {} goes on. Workers were started for: {}.", run.id, start.started.join(", ")));
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("start run {} after its bot's resume: {error}", run.id),
+        }
+    }
+    fill_slots(host);
 }
 
 /// Start the pieces that wait for a free worker slot, in every running run,

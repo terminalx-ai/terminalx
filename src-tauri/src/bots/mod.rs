@@ -19,6 +19,7 @@ pub mod builtins;
 pub mod enforce;
 pub mod handoffs;
 pub mod items;
+pub mod pause;
 pub mod suggestions;
 pub mod templates;
 
@@ -174,7 +175,7 @@ macro_rules! string_serde {
 string_serde!(BotAccess);
 string_serde!(BotRunsOn);
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BotPause {
     pub at: String,
@@ -182,7 +183,16 @@ pub struct BotPause {
     /// run from a bot's own chat is that bot's (PRO-468), and that chat may
     /// not resume it.
     pub by: String,
-    /// What a newer build records about a pause (its source, a reason) survives a save by this one.
+    /// Where it was paused from (PRO-474): [`pause::FROM_APP`], [`pause::FROM_SHORTCUT`],
+    /// [`pause::FROM_PHONE`] or [`pause::FROM_CLI`]. Empty for a pause an older build recorded; a
+    /// place a newer build wrote is kept and shown as the app's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// What the pause stopped, as it was the moment the bot was paused (PRO-474). Written once,
+    /// right after the pause, and never again: a second pause keeps the first one's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<pause::Stopped>,
+    /// What a newer build records about a pause (a reason) survives a save by this one.
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -870,13 +880,20 @@ fn pause_every(sink: &dyn EventSink, pause: Option<BotPause>) -> Result<BotList>
     .1)
 }
 
-fn pause_now(by: &str) -> BotPause {
-    BotPause { at: crate::store::index::now(), by: by.into(), unknown: BTreeMap::new() }
+fn pause_now(by: &str, from: &str) -> BotPause {
+    BotPause { at: crate::store::index::now(), by: by.into(), from: from.into(), stopped: None, unknown: BTreeMap::new() }
 }
 
-/// Record that a bot is paused, when and by whom. Nothing is stopped here.
+/// Record that a bot is paused, when and by whom. Nothing is stopped here:
+/// `enforce::pause` stops what runs and says what it stopped.
+#[cfg(test)]
 pub fn pause(sink: &dyn EventSink, id: &str, by: &str) -> Result<Bot> {
-    pause_one(sink, id, Some(pause_now(by)))
+    pause_from(sink, id, by, pause::FROM_APP)
+}
+
+/// [`pause`], saying where it was paused from.
+pub fn pause_from(sink: &dyn EventSink, id: &str, by: &str, from: &str) -> Result<Bot> {
+    pause_one(sink, id, Some(pause_now(by, from)))
 }
 
 pub fn resume(sink: &dyn EventSink, id: &str) -> Result<Bot> {
@@ -884,8 +901,14 @@ pub fn resume(sink: &dyn EventSink, id: &str) -> Result<Bot> {
 }
 
 /// The one pause switch: every bot not already paused is paused now.
+#[cfg(test)]
 pub fn pause_all(sink: &dyn EventSink, by: &str) -> Result<BotList> {
-    pause_every(sink, Some(pause_now(by)))
+    pause_all_from(sink, by, pause::FROM_APP)
+}
+
+/// [`pause_all`], saying where it was paused from.
+pub fn pause_all_from(sink: &dyn EventSink, by: &str, from: &str) -> Result<BotList> {
+    pause_every(sink, Some(pause_now(by, from)))
 }
 
 pub fn resume_all(sink: &dyn EventSink) -> Result<BotList> {
@@ -946,10 +969,11 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
             delete(sink, string("id")?)?;
             Value::Null
         }
-        // Every caller is the owner today; see `BotPause::by`.
-        "pause" => serde_json::to_value(pause(sink, string("id")?, OWNER)?)?,
+        // The runtime's callers are the owner's: the window and the phone (`BotPause::by`). The command line's
+        // pause is `control.rs`'s, which places a bot that pauses itself.
+        "pause" => serde_json::to_value(pause_from(sink, string("id")?, OWNER, pause::from_param(params))?)?,
         "resume" => serde_json::to_value(resume(sink, string("id")?)?)?,
-        "pauseAll" => serde_json::to_value(pause_all(sink, OWNER)?)?,
+        "pauseAll" => serde_json::to_value(pause_all_from(sink, OWNER, pause::from_param(params))?)?,
         "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
         "dismissResume" => serde_json::to_value(dismiss_resume(sink, string("id")?)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
