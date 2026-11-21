@@ -33,13 +33,37 @@ extend automations or orchestration runs instead.
 | -- | -- |
 | Record: name, slug, role title, template, agent, model, effort, access, runs on, reports to, works in, paused | `bots.json` (`src-tauri/src/store/bots.rs`, `src-tauri/src/bots/mod.rs`; TypeScript `src/types/bots.ts`) |
 | Role ("soul"): standing instructions | `bots/<id>/ROLE.md`, started from a role template |
-| Memory | `bots/<id>/MEMORY.md` and `bots/<id>/memory/` |
+| Memory | `bots/<id>/MEMORY.md` and `bots/<id>/memory/` (the bot's own notes), `personal/` and `orgs/<org>/` beside them (each place's), `src-tauri/src/bots/memory.rs` |
+| History of role and memory | `bot-changes/<id>/` outside the home folder: `changes.jsonl`, `known.json`, `texts/` (`src-tauri/src/bots/changes.rs`) |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all` |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list` |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
 with its record next to it as `bot.json`.
+
+## Role and memory (PRO-470)
+
+- **Places.** A note is kept with the bot (`bot`, it goes everywhere the bot
+  works), in an organisation it works in (`orgs/<org>/`, stays with that
+  organisation), or as personal notes (`personal/`). A conversation is given
+  the newest lines of the bot's own notes and of the place it works in, 200
+  in all; past that the oldest move to that place's `memory/archive.md`.
+- **The two memory commands.** A bot writes memory only with
+  `terminalx bots memory add "<note>"` and `terminalx bots memory forget
+  "<words>"` (`list` reads), never by editing the files. From a bot's chat, or
+  a session it started (who asks is `Caller`, in `control.rs`), they reach
+  only that bot's own notes and its place's. A read-and-report bot may use
+  them too. With memory off they answer `forbidden`. A note that looks like a
+  secret is refused.
+- **Proof for the owner's changes.** The owner's changes to a role or memory
+  in the app (`roleWrite`, `roleRestore`, `memoryAdd`, `memoryForget`,
+  `memoryUndo`) and turning memory back on need the window's proof, as hiring
+  and resuming do (`enforce::needs_person`). From the command line the owner
+  names the bot with `--bot`, from a terminal of their own.
+- **History.** Every change, edits made outside the app included, is
+  recorded with where it came from and can be undone. A large edit is kept as
+  the whole texts by hash. A rotation keeps the newest role change.
 
 ## Rules every sub-issue keeps
 
@@ -161,7 +185,7 @@ issue.
 | PRO-478 | Settings: runs on, access, works in, channels, who can ask | 23.07 | In review |
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
 | PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
-| PRO-470 | Role and memory, with history and undo | 23.06 | Backlog |
+| PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | In review |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
 | PRO-473 | Week calendar of duties | 23.13 | Backlog |

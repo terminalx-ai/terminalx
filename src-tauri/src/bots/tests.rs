@@ -215,7 +215,7 @@ fn deleting_a_bot_moves_its_home_to_the_trash() {
     let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
     let iris = create(sink.as_ref(), "ux-designer", "Iris").unwrap();
     update(sink.as_ref(), &iris.id, BotPatch { reports_to: Some(atlas.id.clone()), ..Default::default() }).unwrap();
-    role_write(sink.as_ref(), &atlas.id, "Lead the others.\n").unwrap();
+    role_write(sink.as_ref(), &atlas.id, "Lead the others.\n", None).unwrap();
     let home = home(&atlas).unwrap();
     std::fs::write(home.join("memory").join("decisions.md"), "Ship on Thursdays.").unwrap();
     changes(&mut events);
@@ -245,13 +245,13 @@ fn a_role_is_read_and_replaced_through_its_bot() {
     let (_home, sink, mut events) = bots_on();
     let bot = create(sink.as_ref(), "docs-writer", "Quill").unwrap();
     changes(&mut events);
-    let written = role_write(sink.as_ref(), &bot.id, "Keep the changelog current.\n").unwrap();
+    let written = role_write(sink.as_ref(), &bot.id, "Keep the changelog current.\n", None).unwrap();
     assert_eq!(role_read(&bot.id).unwrap(), "Keep the changelog current.\n");
     assert!(written.modified >= bot.modified);
     assert_eq!(changes(&mut events), 1);
-    assert!(role_write(sink.as_ref(), &bot.id, &"x".repeat(MAX_ROLE_BYTES + 1)).is_err());
+    assert!(role_write(sink.as_ref(), &bot.id, &"x".repeat(memory::ROLE_LIMIT as usize + 1), None).is_err());
     for id in ["missing", "../settings", ""] {
-        assert!(role_read(id).is_err() && role_write(sink.as_ref(), id, "x").is_err(), "{id:?}");
+        assert!(role_read(id).is_err() && role_write(sink.as_ref(), id, "x", None).is_err(), "{id:?}");
     }
     assert_eq!(role_read(&bot.id).unwrap(), "Keep the changelog current.\n");
 }

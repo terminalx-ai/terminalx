@@ -14,7 +14,7 @@
   no bots it offers three roles to hire in one click, and Hire a bot lists
   every role with its duties and skills and asks only for a name (PRO-467).
 - Bots (experimental): each bot has a home chat, made at hire, that runs in its
-  home folder; its agent is given the bot's role, the first 200 lines of its
+  home folder; its agent is given the bot's role, the newest 200 lines of its
   memory and a few fixed rules each time it starts, so an edited `ROLE.md`
   reaches the next conversation. A bot's view has its header and tabs, with
   Chat filled: its chats and the sessions they started beside the transcript.
@@ -45,6 +45,22 @@
   stops every session that works for it and archives its chats; turning Bots
   off stops them. A bot's memory reaches its agent as its own notes, read safely
   and capped (PRO-468).
+- Bots (experimental): a bot's Role and memory. The owner edits its job title,
+  who it reports to and its standing instructions (`ROLE.md`, with a saved
+  state, Open in editor, every earlier version and the role it was built from).
+  Memory is one dated note per line, kept with the bot, in each organisation it
+  works in, or as personal notes; a conversation is given the bot's own and its
+  place's, 200 lines in all, and older notes move to `memory/archive.md`. The
+  bot writes memory with `terminalx bots memory add|forget|list` from its own
+  chat or a session it started (a read-and-report bot too), notes that look
+  like secrets are refused, and memory can be switched off per bot. The
+  owner's changes to a role or memory, and turning memory back on, need the
+  TerminalX window. The screen is the bot's Role and memory tab, and is
+  reached from its row on the team page too. Every change, the bot's own and
+  edits made to the files outside the app included (found when the Bots page
+  or the bot's page opens and before each of its chats starts, one change per
+  file), is recorded with where it came from in a change log kept outside the
+  bot's home folder, each with Undo (PRO-470).
 - Bots (experimental): duties. A duty is an automation a bot owns, listed on
   its bot's Duties tab rather than on the Automations page, and run as the
   bot: on its agent, model and access, in its home folder, with its role and

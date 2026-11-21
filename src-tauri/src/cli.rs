@@ -172,6 +172,9 @@ Usage:
   terminalx bots show|pause|resume|delete BOT [--json]
   terminalx bots rename BOT --name NAME [--json]
   terminalx bots pause-all|resume-all [--json]
+  terminalx bots memory add NOTE [--bot BOT] [--place PLACE] [--json]
+  terminalx bots memory forget NOTE [--line N] [--bot BOT] [--place PLACE] [--json]
+  terminalx bots memory list [--bot BOT] [--place PLACE] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -1582,7 +1585,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// slug, id or name. The app answers `bots_off` while Settings → Experimental
 /// → Bots is off.
 fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all or resume-all";
+    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all or memory";
     let command = tokens.required_front(&format!("bots command ({COMMANDS})"))?;
     let said = |tokens: &mut Tokens, option: &str, what: &str| -> Result<String, ControlError> {
         match tokens.option(option)? {
@@ -1622,7 +1625,44 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
             let bot = tokens.required_front("bot")?;
             rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
         }
+        "memory" => parse_bot_memory(tokens),
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
+    }
+}
+
+/// A bot's memory (PRO-470): one dated note per line. From a bot's own chat
+/// it is that bot's, and the app records each write as the bot's from that
+/// chat; from anywhere else `--bot` names the bot. PLACE is `bot` (the
+/// default: notes that go with the bot), `personal`, or an organisation the
+/// bot works in.
+fn parse_bot_memory(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let action = tokens.required_front("bots memory command (add, forget or list)")?;
+    let mut params = json!({});
+    for option in ["--bot", "--place"] {
+        if let Some(value) = tokens.option(option)? {
+            params[&option[2..]] = json!(value);
+        }
+    }
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    match action.as_str() {
+        "add" | "forget" => {
+            if action == "forget" {
+                if let Some(number) = tokens.option("--line")? {
+                    let number: u64 = number.trim().parse().map_err(|_| invalid("--line needs the note's line number, as `terminalx bots memory list` shows it."))?;
+                    params["number"] = json!(number);
+                }
+            }
+            let note = tokens.required_front(if action == "add" { "note" } else { "note to forget" })?;
+            if note.trim().is_empty() {
+                return Err(invalid(format!("bots memory {action} needs the note's text.")));
+            }
+            params[if action == "add" { "text" } else { "line" }] = json!(note);
+            rpc(&format!("bots.memory.{action}"), params, tokens)
+        }
+        "list" => rpc("bots.memory.list", params, tokens),
+        other => Err(invalid(format!("Unknown bots memory command {other}. Use add, forget or list."))),
     }
 }
 
@@ -2098,11 +2138,24 @@ mod tests {
         assert_eq!(inside[4], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[5], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[6], json!({"role": "cto", "name": "Echo", "caller": caller}));
-        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all or resume-all"));
-        for said in ["terminalx bots list [--json]", "terminalx bots create --role ROLE --name NAME", "terminalx bots show|pause|resume|delete BOT", "terminalx bots rename BOT --name NAME", "terminalx bots pause-all|resume-all"] {
+        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all or memory"));
+        // PRO-470: a bot's memory, from its own chat (the caller is sent for the app to check) or naming the bot.
+        assert_eq!(rpc_of(&["bots", "memory", "add", "Status updates go in a table.", "--bot", "atlas"]), ("bots.memory.add".into(), json!({"bot": "atlas", "text": "Status updates go in a table."}), short));
+        assert_eq!(rpc_of(&["bots", "memory", "forget", "--line", "3", "Twice", "--bot", "atlas"]), ("bots.memory.forget".into(), json!({"bot": "atlas", "line": "Twice", "number": 3}), short));
+        assert_eq!(rpc_of(&["bots", "memory", "forget", "--place", "Acme", "table", "--json"]).1, json!({"place": "Acme", "line": "table"}));
+        assert_eq!(rpc_of(&["bots", "memory", "list", "--bot", "atlas", "--place", "personal"]).1, json!({"bot": "atlas", "place": "personal"}));
+        let caller = json!({"session": "bot-chat", "tab": "bot-tab"});
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+        let inside = rpc_of(&["bots", "memory", "add", "macOS CI is the limit."]).1;
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+        assert_eq!(inside, json!({"text": "macOS CI is the limit.", "caller": caller}));
+        for refused in [&["bots", "memory"][..], &["bots", "memory", "add"], &["bots", "memory", "add", "  "], &["bots", "memory", "remember", "x"], &["bots", "memory", "list", "extra"], &["bots", "memory", "add", "a", "b"]] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
+        }
+        for said in ["terminalx bots list [--json]", "terminalx bots create --role ROLE --name NAME", "terminalx bots show|pause|resume|delete BOT", "terminalx bots rename BOT --name NAME", "terminalx bots pause-all|resume-all", "terminalx bots memory add NOTE [--bot BOT] [--place PLACE]", "terminalx bots memory list"] {
             assert!(help_text().contains(said), "{said}");
         }
-        for said in ["### Bots", "terminalx bots create --role <role> --name <name>", "`bots_off`", "trash/bots/<id>/", "`ROLE.md`"] {
+        for said in ["### Bots", "terminalx bots create --role <role> --name <name>", "`bots_off`", "trash/bots/<id>/", "`ROLE.md`", "#### A bot's memory", "terminalx bots memory add \"<note>\"", "edited outside the app", "memory never keeps secrets"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
         }
     }

@@ -28,6 +28,9 @@ vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mock
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
 vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: ({ bot }: { bot: Bot }) => <div data-testid="bot-duties">{bot.name}'s duties</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/bots/BotRoleMemory", () => ({
+  BotRoleMemory: ({ bot, bots, unreadable }: { bot: Bot; bots: Bot[]; unreadable: number }) => <div data-testid="bot-role-memory">{`${bot.id} of ${bots.length}, ${unreadable} unreadable`}</div>,
+}));
 
 const { BotView } = await import("./BotView");
 
@@ -53,7 +56,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("a bot's view (PRO-468)", () => {
-  it("has the bot's header and its five tabs, with only Chat filled", async () => {
+  it("has the bot's header and its five tabs, Chat open", async () => {
     view();
     expect(screen.getByRole("heading", { name: "Atlas" })).toBeTruthy();
     expect(screen.getByText("CTO")).toBeTruthy();
@@ -68,6 +71,19 @@ describe("a bot's view (PRO-468)", () => {
     // Duties are filled since PRO-471.
     expect(screen.getByTestId("bot-duties").textContent).toBe("Atlas's duties");
     expect(screen.queryByTestId("session-view")).toBeNull();
+  });
+
+  it("shows the bot's role and memory in its Role and memory tab (PRO-470)", () => {
+    mocks.bots = { ...mocks.bots, unreadable: 2 };
+    view();
+    expect(screen.queryByTestId("bot-role-memory")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Role and memory" }));
+    expect(screen.getByRole("tabpanel", { name: "Role and memory" })).toBeTruthy();
+    expect(screen.getByTestId("bot-role-memory").textContent).toBe("b1 of 1, 2 unreadable");
+    expect(screen.queryByText(/coming/)).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Chat" }));
+    expect(screen.queryByTestId("bot-role-memory")).toBeNull();
+    expect(screen.getByTestId("session-view")).toBeTruthy();
   });
 
   it("lists its chats and the sessions they started, and shows the home chat first", () => {

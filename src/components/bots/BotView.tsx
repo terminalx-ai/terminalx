@@ -3,6 +3,7 @@ import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
 import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
+import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
@@ -27,9 +28,8 @@ const TABS: { id: BotTab; label: string; icon: typeof Home }[] = [
 ];
 
 /** What a tab this ticket does not fill says, until its own ticket does. */
-const COMING: Record<Exclude<BotTab, "chat" | "duties">, string> = {
+const COMING: Record<Exclude<BotTab, "chat" | "duties" | "role">, string> = {
   home: "The bot's work list (what needs you, what is in progress and what is planned) is coming.",
-  role: "Editing the bot's role and memory here is coming. Its ROLE.md and MEMORY.md are in its home folder.",
   settings: "The bot's settings (its agent, where it runs, what it works in and its access) are coming.",
 };
 
@@ -46,8 +46,9 @@ function runsOnLabel(bot: Bot): string {
 }
 
 /**
- * A bot's view (PRO-468, designs 23.01 and 23.04): its header with what it runs on and its Pause, and its tabs. Only
- * Chat has content here: the bot's chats on the left, the open one's transcript and composer on the right.
+ * A bot's view (PRO-468, designs 23.01 and 23.04): its header with what it runs on and its Pause, and its tabs. Chat
+ * has the bot's chats on the left, the open one's transcript and composer on the right; Role and memory is the bot's
+ * role, memory and their history (PRO-470, design 23.06). An unsaved role edit is kept when another tab is opened.
  */
 export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarInset }: {
   botId: string;
@@ -168,6 +169,12 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
         <div role="tabpanel" aria-label="Duties" className="flex min-h-0 flex-1 flex-col">
           {/* A duty's run opens on Chat, among the bot's duty runs. */}
           <BotDuties key={bot.id} bot={bot} onOpenSession={(sessionId) => { selectSession(sessionId); setTab("chat"); }} />
+        </div>
+      ) : tab === "role" ? (
+        <div role="tabpanel" aria-label="Role and memory" className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+          <ErrorBoundary key={bot.id} label="the role and memory">
+            <BotRoleMemory bot={bot} bots={bots.bots} unreadable={bots.unreadable} />
+          </ErrorBoundary>
         </div>
       ) : (
         <div role="tabpanel" aria-label={TABS.find((value) => value.id === tab)?.label} className="px-6 py-8">
