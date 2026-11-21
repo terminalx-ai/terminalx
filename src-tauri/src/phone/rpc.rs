@@ -2855,6 +2855,75 @@ mod tests {
         }
     }
 
+    /// The methods `dispatch` answers, read from its own match: each arm's
+    /// names, and whether its handler asks `require_driver` before anything
+    /// else. Read from the source, so a handler added without a place on the
+    /// gate's lists is caught here, not by a phone (PRO-510).
+    fn dispatched_methods() -> Vec<(String, bool)> {
+        let source = include_str!("rpc.rs");
+        let start = source.find("pub(crate) fn dispatch(").expect("dispatch is defined here");
+        let end = start + source[start..].find("        _ => return None,").expect("dispatch ends with its fallback");
+        let mut arms: Vec<(Vec<String>, String)> = Vec::new();
+        for line in source[start..end].lines() {
+            let names = line.trim().split_once("=>").and_then(|(pattern, _)| {
+                let names: Vec<String> = pattern.split('|').map(str::trim)
+                    .map(|name| name.strip_prefix('"').and_then(|name| name.strip_suffix('"')).map(str::to_owned))
+                    .collect::<Option<_>>()?;
+                (!names.is_empty() && names.iter().all(|name| !name.is_empty())).then_some(names)
+            });
+            match (names, arms.last_mut()) {
+                (Some(names), _) => arms.push((names, line.to_owned())),
+                (None, Some((_, body))) => { body.push('\n'); body.push_str(line); }
+                (None, None) => {}
+            }
+        }
+        arms.into_iter()
+            .flat_map(|(names, body)| {
+                let driver = body.contains("require_driver(device).and_then");
+                names.into_iter().map(move |name| (name, driver))
+            })
+            .collect()
+    }
+
+    /// Every method the phone dispatch answers is reachable through the gate
+    /// both transports run first (`allowed_method`): a driver reaches each one,
+    /// a viewer reaches each read and none whose handler asks for a driver,
+    /// and a name no handler answers is refused to both (PRO-510).
+    #[test]
+    fn every_method_the_dispatch_answers_is_admitted_as_its_handler_asks() {
+        use super::super::allowed_method;
+        let methods = dispatched_methods();
+        let names: HashSet<&str> = methods.iter().map(|(name, _)| name.as_str()).collect();
+        // The reading above found the dispatch, not an empty or partial one.
+        for known in ["sync.capabilities", "session.send", "bots.list", "bots.pauseAll", "cloud.pin", "notifications.subscribe"] {
+            assert!(names.contains(known), "{known} not read from dispatch: {names:?}");
+        }
+        assert_eq!(names.len(), methods.len(), "a method is answered by two arms");
+        assert!(methods.iter().any(|(_, driver)| *driver) && methods.iter().any(|(_, driver)| !*driver));
+        // Admitted only to a driver by the gate, though its handler does not ask:
+        // a lease is released by the driver that took it (`steerLease.acquire`).
+        let driver_by_gate = ["steerLease.release"];
+        for (method, driver) in &methods {
+            assert!(allowed_method(DeviceScope::Driver, method), "{method} is answered but refused to a driver before its handler");
+            if *driver {
+                assert!(!allowed_method(DeviceScope::Viewer, method), "{method} asks for a driver but a viewer reaches it");
+            } else if !driver_by_gate.contains(&method.as_str()) {
+                assert!(allowed_method(DeviceScope::Viewer, method), "{method} is a read but refused to a viewer before its handler");
+            }
+        }
+        for name in driver_by_gate {
+            assert!(names.contains(name) && !allowed_method(DeviceScope::Viewer, name), "{name}");
+        }
+        // Names no handler answers: the window's own bot and pin operations
+        // a phone was never given, and methods that never existed.
+        for unknown in ["bots.delete", "bots.update", "cloud.unpin", "sessions.unpin", "files.read", "bots", ""] {
+            assert!(!names.contains(unknown), "{unknown}");
+            for scope in [DeviceScope::Viewer, DeviceScope::Driver] {
+                assert!(!allowed_method(scope, unknown), "{unknown} is admitted with no handler");
+            }
+        }
+    }
+
     #[test]
     fn a_phone_is_offered_accounts_only_with_more_than_one_and_never_a_token_or_address() {
         let repo = store::projects::public_id("/repos/raccoon");
