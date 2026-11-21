@@ -376,6 +376,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "itemHand" | "briefWrite" => true,
         // PRO-477: Start makes a bot work, as the owner's message.
         "suggestionStart" => true,
+        // PRO-476: an answer that approves a run's plan starts its workers, or lets it merge.
+        "itemAnswer" => super::runs::answer_starts_run(params),
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             // A patch this build cannot read may give more than it can tell.

@@ -993,7 +993,7 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" | "bots.memory.tidy" => self.bot_memory(command, params),
-            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.plan" | "bots.items.ask-merge" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
             "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             "bots.suggest" => self.bot_suggest(params),
             "bots.post" | "bots.reply" => self.bot_channels(command, params),
@@ -1350,6 +1350,27 @@ impl ControlService {
         // A bot's session steers only the runs led for the same bot.
         if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
             placement.may_steer(&run)?;
+        }
+        // PRO-476: a run a bot asked its owner about starts only on their answer, and with "Start, but ask before
+        // merging" merges only once they said Merge. Judged by the run, whoever calls: a process a bot starts outside
+        // its sessions is not placed in one. The owner's own Start and Merge are the window's and do not come here.
+        if command == "runs.start" {
+            if let Some(number) = crate::bots::runs::start_awaits_owner(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "awaits_owner",
+                    format!("Run {} starts only on your owner's answer to item #{number}.", run.id),
+                    Some("End your turn: their Approve and start, in the TerminalX window, starts it.".into()),
+                ));
+            }
+        }
+        if command == "runs.merge" {
+            if let Some(number) = crate::bots::runs::merge_held_for(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "merge_held",
+                    format!("Your owner asked to be asked before run {} merges (item #{number}).", run.id),
+                    Some(format!("Ask them with `terminalx bots items ask-merge {number}`, end your turn, and merge once they answer Merge.")),
+                ));
+            }
         }
         match command {
             "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
@@ -3010,6 +3031,19 @@ fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli:
         }
         return Ok(());
     }
+    if operation == "itemAnswer" {
+        // PRO-476: whether the answer approves a run is judged again under the list's lock (`items::answer_as`),
+        // so the question cannot change into one that does after this check: it is told whether a person asked.
+        let mut proved = witnessed && consent::verify_for(run, params, window).is_ok();
+        if !proved && crate::bots::enforce::needs_person(&operation, &params["params"]) {
+            consent::verify_for(run, params, window).map_err(|error| bots_refusal(&operation, error, window))?;
+            proved = true;
+        }
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
+        }
+        return Ok(());
+    }
     if !crate::bots::enforce::needs_person(&operation, &params["params"]) {
         if let Some(object) = params.as_object_mut() {
             object.remove(consent::PARAM);
@@ -3061,6 +3095,7 @@ fn bots_action(operation: &str) -> &'static str {
         "itemHand" => "hand a bot's item to another bot",
         "suggestionStart" => "start a bot's suggestion",
         "briefWrite" => "change the team brief",
+        "itemAnswer" => "approve a bot's run",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -3079,6 +3114,11 @@ fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
             inner.insert(crate::bots::BY_PERSON.into(), json!(false));
         }
         return Ok(());
+    }
+    if operation == "itemAnswer" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
     }
     if crate::bots::enforce::needs_person(&operation, &params["params"]) {
         let action = bots_action(&operation);
@@ -5949,6 +5989,10 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+#[cfg(test)]
+#[path = "control_bot_runs_tests.rs"]
+mod bot_runs_tests;
 
 // Bots hand-offs from the command line (PRO-475).
 #[path = "control_bot_handoffs.rs"]

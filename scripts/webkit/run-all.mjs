@@ -45,6 +45,7 @@ const checks = [
   "bot-duties",
   "bot-handoffs",
   "bot-calendar",
+  "bot-runs",
   "bot-suggestions",
 ];
 

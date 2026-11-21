@@ -267,7 +267,7 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 
 /// A bot's own notes and work list, kept with the commands its rules tell it
 /// to use: `terminalx bots memory add|forget|list` (PRO-470) and
-/// `terminalx bots items list|show|add|set|ask|check|comment|done` (PRO-469),
+/// `terminalx bots items list|show|add|set|ask|plan|ask-merge|check|comment|done` (PRO-469, PRO-476),
 /// and its hand-offs with other bots, which it answers at any level:
 /// `terminalx bots handoff|tell|handoffs` (PRO-475), its suggestions and its
 /// memory tidy, `terminalx bots suggest` and `terminalx bots memory tidy`
@@ -281,7 +281,7 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest", ..])
     })
 }
 

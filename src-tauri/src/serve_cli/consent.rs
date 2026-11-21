@@ -119,6 +119,9 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
         }
         // Switching a duty off gives its bot nothing (PRO-471).
         Some("dutySwitch") => params["params"]["on"].as_bool() != Some(false),
+        // A chosen answer may approve a bot's run (PRO-476): witnessed always, as the runtime judges whether it
+        // does under the item list's lock (`bots::items::answer_as`). Typed words never approve.
+        Some("itemAnswer") => !params["params"]["answer"].is_null(),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }
