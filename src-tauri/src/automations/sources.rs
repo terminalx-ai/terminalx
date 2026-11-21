@@ -909,7 +909,7 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                 }
                 let entry = (event.key.clone(), event.value.clone());
                 // The baseline, and what happened before the trigger started, is never news.
-                if !state.initialized || (source.from_now_only() && event.before(started)) {
+                if !state.initialized || (source.only_after_start() && event.before(started)) {
                     out.record.push(entry);
                 } else if event.hops >= crate::bots::wakes::MAX_HOPS {
                     // Passed between bots too often: seen, shown, and woken on by nobody.

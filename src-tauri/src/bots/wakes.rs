@@ -199,7 +199,7 @@ impl BotSource {
     /// Whether what happened before the trigger started is never news: true
     /// for mentions, alerts and messages; a watch and a branch's checks wake
     /// on what changed since the first read.
-    pub fn from_now_only(&self) -> bool {
+    pub fn only_after_start(&self) -> bool {
         matches!(self.kind.as_str(), "githubMention" | "githubSecurityAlert" | "linearMention" | "botMessage")
     }
 
@@ -324,7 +324,7 @@ pub fn read(automation: &Automation, source: &BotSource, first: bool, since: Opt
     if !super::duties::is_duty(automation) {
         return Err(plain("Only a bot's duty wakes on this."));
     }
-    if first && source.from_now_only() {
+    if first && source.only_after_start() {
         return Ok(Vec::new());
     }
     let cwd = Path::new(&automation.project_path);
