@@ -3,7 +3,7 @@ import type { SessionEntry } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
 
-const { actingBotOf, botChats, botOf, botViewFor, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
+const { actingBotOf, botChats, botOf, botViewFor, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
 
 const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
   id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
@@ -89,5 +89,15 @@ describe("a bot's duty runs (PRO-471)", () => {
     expect(dutyRuns.map((entry) => entry.id)).toEqual(["late", "early"]);
     // Still the bot's: the sidebar leaves them to its view.
     expect(listedUnderBot(late, [{ id: "b1" }])).toBe(true);
+  });
+});
+
+describe("a chat a mention started (PRO-480)", () => {
+  it("says where it came from, and nothing for any other chat", () => {
+    expect(chatSource(session("a", { botChannel: { kind: "github", label: "acme/app#7", url: "u" } }))).toBe("GitHub · acme/app#7");
+    expect(chatSource(session("b", { botChannel: { kind: "linear", label: "PRO-9", url: "u" } }))).toBe("Linear · PRO-9");
+    expect(chatSource(session("c", { botChannel: { kind: "slack", label: "#eng", url: "u" } }))).toBe("slack · #eng");
+    expect(chatSource(session("d"))).toBeNull();
+    expect(chatSource(session("e", { botChannel: { kind: "github" } as never }))).toBeNull();
   });
 });
