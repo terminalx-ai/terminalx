@@ -1003,6 +1003,39 @@ fn stamp(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// Whether a bot opens spells, by store and bot: when it was read, the
+/// definitions' write count then, and the answer (PRO-505).
+type Opens = (PathBuf, String, u64, std::time::Instant, bool);
+
+/// How long [`opens_spells`] keeps an answer when `bots.json` is not saved by this process meanwhile.
+const OPENS_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+static OPENS: Mutex<Vec<Opens>> = Mutex::new(Vec::new());
+
+/// The bot is at Full access and not paused, as `bots.json` says, read at
+/// most once a second per bot (PRO-505): a bot below Full access opens no
+/// spell, so without this every prompt, turn start and tool call of its
+/// tabs would read and parse the file again. A save by this process (any
+/// access or pause change the app makes) is seen at once; an edit from
+/// outside it within a second. A bot that is gone, or a file that cannot
+/// be read, opens none and is read again next time.
+fn opens_spells(root: &Path, bot_id: &str) -> Option<bool> {
+    let writes = crate::store::bots::writes();
+    {
+        let held = OPENS.lock().unwrap_or_else(|error| error.into_inner());
+        let fresh = held.iter().find(|(at, id, at_writes, read, _)| at == root && id == bot_id && *at_writes == writes && read.elapsed() < OPENS_FOR);
+        if let Some((.., opens)) = fresh {
+            return Some(*opens);
+        }
+    }
+    let Ok(Some(bot)) = crate::store::bots::get(bot_id) else { return None };
+    let opens = bot.paused.is_none() && bot.access.effective() == super::BotAccess::Full;
+    let mut held = OPENS.lock().unwrap_or_else(|error| error.into_inner());
+    held.retain(|(at, id, ..)| !(at == root && id == bot_id));
+    held.push((root.to_path_buf(), bot_id.to_owned(), writes, std::time::Instant::now(), opens));
+    Some(opens)
+}
+
 /// A tab of a session that acts for `bot_id` shows it is at work: a prompt
 /// reached it, its turn started, or it called a tool (`SessionManager`'s
 /// events). When the bot is at Full access, and not paused, a spell opens
@@ -1012,13 +1045,12 @@ pub fn working(bot_id: &str, session: &str, tab: &str) {
     if OPEN.lock().unwrap_or_else(|error| error.into_inner()).contains(&key) || !super::enabled_cached() {
         return;
     }
-    let Ok(Some(bot)) = crate::store::bots::get(bot_id) else { return };
-    if bot.paused.is_some() || bot.access.effective() != super::BotAccess::Full {
+    if opens_spells(&key.0, bot_id) != Some(true) {
         return;
     }
     let opened = change(|store| {
         if !store.spells().any(|spell| spell.to.is_none() && spell.session == session && spell.tab == tab) {
-            store.working.push(Kept::Known(Working { bot: bot.id.clone(), session: session.into(), tab: tab.into(), from: stamp(Utc::now()), to: None, unknown: BTreeMap::new() }));
+            store.working.push(Kept::Known(Working { bot: bot_id.into(), session: session.into(), tab: tab.into(), from: stamp(Utc::now()), to: None, unknown: BTreeMap::new() }));
         }
         Ok(())
     });

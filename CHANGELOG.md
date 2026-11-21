@@ -18,6 +18,12 @@
   Duplicate (PRO-492). A comment edited to add a mention wakes a duty, a
   hand-off's work chat counts the passes it was handed with, and a duty's wake
   changed while its bot is paused starts at the save (PRO-503).
+- Bots (experimental): the gate on a bot's unsigned GitHub posts also refuses
+  `gh pr -R owner/repo comment`, `gh issue --repo=owner/repo comment` and
+  `gh pr -R owner/repo review`, and a `gh api graphql` call that sends its
+  query with `--input` or reads it from a file (`-F query=@file`), since what
+  it sends cannot be read. Whether a bot is at Full access is read at most
+  once a second, not on every tool call (PRO-505).
 - CI: every Linux job runs on Instabox (`instabox-medium`), pull requests
   included. The macOS jobs and the runtime release stay on GitHub's runners
   (docs/CI-RUNNERS.md).
@@ -31,7 +37,8 @@
 - Bots (experimental): a bot's run the owner approves or starts from its Run
   view, rather than from the item's question, no longer refuses the lead's
   later `runs start` with `awaits_owner`; the item records the start and
-  closes its question, as "Approve and start" there would (PRO-501).
+  closes its question, as "Approve and start" there would (PRO-501). A done
+  or dropped item that links the run is left as it closed (PRO-506).
 - Issue pipeline: an approved review carries across a merge of main again in a
   worktree with its dependencies installed. The check for a stray
   `.gitattributes` took each ignored folder `git status` names (`node_modules/`)

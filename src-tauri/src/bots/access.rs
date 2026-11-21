@@ -337,15 +337,15 @@ fn report_command(program: &str, args: &[&str]) -> Option<String> {
 /// review. What it is, as the refusal names it.
 ///
 /// It reads only what is written as such a command, anywhere in a command
-/// line (`guard::find_command`: lists, pipes, `sh -c`, `env`, `sudo`). A
-/// script, another program, a connected server's tool or a call spelt some
-/// other way is not recognised; `channels` keeps a second check that reads no
-/// command.
+/// line (`guard::find_command`: lists, pipes, `sh -c`, `env`, `sudo`), with
+/// `-R`/`--repo` and its value anywhere (PRO-505). A script, another program,
+/// a connected server's tool or a call spelt some other way is not
+/// recognised; `channels` keeps a second check that reads no command.
 fn unsigned_post(program: &str, args: &[&str]) -> Option<String> {
     if program != "gh" {
         return None;
     }
-    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+    let plain = gh_words(args);
     match plain.as_slice() {
         ["pr" | "issue", "comment", ..] | ["pr", "review", ..] => Some(format!("gh {} {}", plain[0], plain[1])),
         ["api", ..] => gh_api_writes_comment(&args[args.iter().position(|arg| *arg == "api")? + 1..]).then(|| "gh api".to_string()),
@@ -353,11 +353,34 @@ fn unsigned_post(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+/// `gh`'s words that are not options or an option's value. `-R`/`--repo`
+/// (`gh pr`'s and `gh issue`'s repository) takes the next word unless its
+/// value is joined on (`-Ro/r`, `--repo=o/r`), and may stand before the
+/// subcommand: `gh pr -R o/r comment 12` is `pr`, `comment`, `12` (PRO-505).
+/// Any other word that starts with `-` is dropped alone.
+fn gh_words<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut words = Vec::new();
+    let mut rest = args.iter().copied();
+    while let Some(arg) = rest.next() {
+        match arg {
+            "-R" | "--repo" => {
+                rest.next();
+            }
+            _ if arg.starts_with('-') => {}
+            _ => words.push(arg),
+        }
+    }
+    words
+}
+
 /// `gh api`'s arguments write a comment or a review: a method other than GET
 /// (a field or `--input` makes it POST unless `-X GET` says otherwise) to a
 /// path with a `comments` or `reviews` part (`repos/o/r/issues/7/comments`,
 /// `repos/o/r/pulls/7/reviews/1/events`, `…/comments/9/replies`), or to
-/// `graphql` with a mutation that names a comment or a review.
+/// `graphql` with a mutation that names a comment or a review. A GraphQL
+/// query that is not written in the command, sent with `--input` or read
+/// from a file or stdin (`-F query=@add.graphql`, `-F query=@-`), cannot be
+/// read, so it counts as such a mutation (PRO-505).
 fn gh_api_writes_comment(args: &[&str]) -> bool {
     const VALUE_OPTIONS: &[&str] = &["-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--input", "-q", "--jq", "-t", "--template", "--hostname", "--cache", "-p", "--preview"];
     const FIELDS: &[&str] = &["-f", "--raw-field", "-F", "--field"];
@@ -365,6 +388,8 @@ fn gh_api_writes_comment(args: &[&str]) -> bool {
     let mut sends = false;
     let mut endpoint: Option<&str> = None;
     let mut values: Vec<&str> = Vec::new();
+    // The query comes from `--input` or a file: what it says cannot be read.
+    let mut unread_query = false;
     let mut at = 0;
     while let Some(arg) = args.get(at).copied() {
         let (name, inline) = match arg.split_once('=') {
@@ -386,9 +411,16 @@ fn gh_api_writes_comment(args: &[&str]) -> bool {
             };
             match name {
                 "-X" | "--method" => method = Some(value.to_ascii_uppercase()),
-                "--input" => sends = true,
+                "--input" => {
+                    sends = true;
+                    unread_query = true;
+                }
                 _ if FIELDS.contains(&name) => {
                     sends = true;
+                    // `-F`/`--field` reads a value written `@file` from that file (`@-`: stdin); `-f` keeps it as written.
+                    if matches!(name, "-F" | "--field") && value.split_once('=').is_some_and(|(key, value)| key == "query" && value.starts_with('@')) {
+                        unread_query = true;
+                    }
                     values.push(value);
                 }
                 _ => {}
@@ -406,7 +438,7 @@ fn gh_api_writes_comment(args: &[&str]) -> bool {
     let path = endpoint.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
     if path.trim_matches('/') == "graphql" {
         // A GraphQL call is a POST whatever it does; a mutation is what writes.
-        return values.iter().any(|value| {
+        return unread_query || values.iter().any(|value| {
             let value = value.to_ascii_lowercase();
             value.contains("mutation") && (value.contains("comment") || value.contains("review"))
         });
