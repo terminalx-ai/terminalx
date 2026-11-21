@@ -6362,6 +6362,44 @@ pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64
     bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
 }
 
+// Hand-offs between bots and the team brief (PRO-475).
+
+/// The hand-offs a bot gave or was given (every bot's with no `id`).
+#[tauri::command]
+pub async fn bot_handoffs(state: State<'_, AppState>, id: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffs", serde_json::json!({"id": id})).await
+}
+
+/// Stop one hand-off: only the receiving bot's work on it stops.
+#[tauri::command]
+pub async fn bot_handoff_stop(state: State<'_, AppState>, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffStop", serde_json::json!({"number": number})).await
+}
+
+/// Send again, now, a bots' message that could not reach its chat (its count of tries starts again).
+#[tauri::command]
+pub async fn bot_handoff_resend(state: State<'_, AppState>, message: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffResend", serde_json::json!({"message": message})).await
+}
+
+/// Hand a bot's item to another bot, with the owner's own note.
+#[tauri::command]
+pub async fn bot_item_hand(state: State<'_, AppState>, id: String, number: u64, to: String, note: String, due: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemHand", serde_json::json!({"id": id, "number": number, "to": to, "note": note, "due": due})).await
+}
+
+/// The team brief every bot reads.
+#[tauri::command]
+pub async fn bot_brief(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "brief", serde_json::json!({})).await
+}
+
+/// `expected` is the hash of the brief the editor started from: one changed since is not written over.
+#[tauri::command]
+pub async fn bot_brief_write(state: State<'_, AppState>, text: String, expected: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "briefWrite", serde_json::json!({"text": text, "expected": expected})).await
+}
+
 /// What a bot's sessions spent today, at Stats' prices (PRO-468).
 #[tauri::command]
 pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {

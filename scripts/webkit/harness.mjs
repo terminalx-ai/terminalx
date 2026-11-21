@@ -92,6 +92,25 @@ export async function sidebar(page) {
 }
 
 /**
+ * Open session `sessionId` as the native menu does (`open_session`) and resolve with its view, `main` named `name`.
+ * The app takes the event only once its listener is set and the session is in its list (`openTarget` drops it
+ * before), so on a loaded runner the first one can go unheard: it is sent again until the view shows, 30 s at most.
+ */
+export async function openSession(page, sessionId, name, { timeout = 30_000 } = {}) {
+  const view = page.getByRole("main", { name });
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    await page.evaluate((id) => window.__PW_STUB__.emit("open_session", { sessionId: id }), sessionId);
+    try {
+      await view.waitFor({ timeout: Math.min(2_000, Math.max(1, deadline - Date.now())) });
+      return view;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+    }
+  }
+}
+
+/**
  * Open a conversation from the sidebar by its name. In the project view a row
  * alone on its branch is named "<branch>, <title>" ("No branch, …" until the
  * branch is known); in the flat list it is named by its title alone. Resolves

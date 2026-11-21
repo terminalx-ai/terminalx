@@ -3915,6 +3915,13 @@ impl SessionManager {
         self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
     }
 
+    /// A message one bot sends another (PRO-475): its agent gets `text`, and the transcript names `author`, the
+    /// sending bot, so the message is never shown as the owner's words. A stopped tab starts, as any send starts it.
+    pub(crate) fn send_from_bot(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person) -> Result<SendOutcome> {
+        let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
+        self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: None }, Vec::new(), None, crate::recovery_log::Origin::Programmatic)
+    }
+
     #[cfg(test)]
     pub(crate) fn send_shared(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
