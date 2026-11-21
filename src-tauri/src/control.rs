@@ -534,7 +534,7 @@ impl ControlService {
                 let window = current_window();
                 let proven = if crate::bots::enabled_cached() && window.keyed() {
                     let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                    match crate::serve_cli::consent::verify_peer_for(run, &mut params, &window) {
+                    match crate::serve_cli::consent::verify_window_for(run, &mut params, &window) {
                         Ok(witness) => Some(witness),
                         // Unproven (a window that cannot read its Keychain key, or
                         // not the window at all): its attachment stays, so the app
@@ -3108,7 +3108,9 @@ fn refuse_unless_window_or_person(manager: &SessionManager, window: Option<(i32,
         if is_the_window(window, pid) {
             return Ok(());
         }
-        let duties = call.filter(|(command, params)| *command == "runtime.session.bots" && params["operation"] == "duties");
+        // Its duties and its week of duties (PRO-471, PRO-473): every read
+        // `own_duties_read` lets a bot's session make of its own.
+        let duties = call.filter(|(command, params)| *command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("duties" | "dutyWeek")));
         // Not placed: no other process does this here, whoever it is, but for
         // a bot's session reading its own duties.
         if keyed {
@@ -5115,6 +5117,91 @@ mod tests {
         let _ = stranger.kill();
         let _ = stranger.wait();
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 lead review M1: on a keyed runtime with Bots on, a process
+    /// with the control token and a pseudo-terminal of its own, outside the
+    /// runtime's tree (as `script` gives one), is not taken for the window
+    /// when it registers without the key's proof, and writes nothing; the same
+    /// registration proved with the key is registered and recognised end to
+    /// end, and its writes pass the guard.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_of_its_own_registers_as_the_window_only_with_the_keys_proof() {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = format!("74.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        let run = service.endpoint.socket.parent().unwrap().to_owned();
+        // The window's own endpoint: a private socket in this runtime's `run`.
+        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        let register = |key: Option<&[u8; 32]>| {
+            let (pid, terminal, mut params) = crate::serve_cli::consent::tests::detached_request_with(&run, crate::serve_cli::consent::WINDOW_REGISTER, key, true);
+            assert!(terminal, "the registrant has a terminal of its own");
+            for (field, value) in registration.as_object().unwrap() {
+                params[field] = value.clone();
+            }
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+            (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
+        };
+        let write = || service.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r").map_err(|error| error.code).err();
+
+        let (_, unproven) = register(None);
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
+        assert!(unproven["message"].as_str().unwrap().contains("window's key"), "{unproven}");
+        assert!(lifetime.window.window_process().is_none(), "not taken for the window on its terminal alone");
+        assert_eq!(write().as_deref(), Some("person_required"), "and it writes nothing");
+
+        let (pid, proven) = register(Some(&[7; 32]));
+        assert_eq!(proven["registered"], true, "{proven}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid), "the process that proved it is the window");
+        assert_ne!(write().as_deref(), Some("person_required"), "the proven window writes");
+
+        std::fs::write(run.join("done"), b"").unwrap();
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 lead review M5: on a keyed runtime too, a process in a bot's
+    /// session reads its own bot's week of duties through the dispatch, as
+    /// its duties, and neither another bot's nor every bot's.
+    #[cfg(unix)]
+    #[test]
+    fn on_a_keyed_runtime_a_bots_session_reads_its_own_duties_and_week_only() {
+        let marker = format!("75.{}", std::process::id());
+        let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let bots = |operation: &str, params: Value| service.execute("runtime.session.bots", json!({"operation": operation, "params": params}), "r");
+        let own_week = bots("dutyWeek", json!({"id": id, "timezone": "UTC"}));
+        let other_week = bots("dutyWeek", json!({"id": other, "timezone": "UTC"}));
+        let every_week = bots("dutyWeek", json!({"timezone": "UTC"}));
+        let own_duties = bots("duties", json!({"id": id}));
+        let other_duties = bots("duties", json!({"id": other}));
+        // Main's other bot reads are not a bot's own to make here: they are the window's.
+        let window_reads = ["handoffs", "brief", "suggestions", "channels", "pauseHeld"].map(|operation| (operation, bots(operation, json!({"id": id}))));
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+        let own_week = own_week.unwrap();
+        assert!(own_week["days"].as_array().is_some_and(|days| days.len() == 7), "{own_week}");
+        assert!(own_duties.is_ok(), "{own_duties:?}");
+        for (what, refused) in [("another bot's week", other_week), ("every bot's week", every_week), ("another bot's duties", other_duties)] {
+            assert_eq!(refused.unwrap_err().code, "person_required", "{what}");
+        }
+        for (operation, refused) in window_reads {
+            assert_eq!(refused.unwrap_err().code, "person_required", "{operation}");
+        }
     }
 
     /// M2 (review 6): after a handover, the window's frames reach a runtime

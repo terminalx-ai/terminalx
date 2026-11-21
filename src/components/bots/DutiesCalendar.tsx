@@ -300,7 +300,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col px-6 pt-3 pb-3" data-testid="calendar-main">
           {error && <WeekError error={error} onRestarted={() => { setError(null); setTick((value) => value + 1); }} />}
           {moveError && pending && (
-            <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} className="mb-2" />
+            <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} onFailed={setMoveError} className="mb-2" />
           )}
           {notice && <p role="status" className="mb-2 rounded-md bg-warning/10 px-3 py-1.5 text-[12px] text-warning" data-testid="calendar-notice">{notice}</p>}
           {moved && !pending && (

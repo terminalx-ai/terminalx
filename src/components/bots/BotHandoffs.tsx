@@ -105,7 +105,7 @@ function Undelivered({ messages, onResent }: { messages: UndeliveredMessage[]; o
           </Button>
         </p>
       ))}
-      {error && <MachineHostError error={error} onRestarted={onResent} />}
+      {error && <MachineHostError error={error} onRestarted={onResent} onFailed={setError} />}
     </div>
   );
 }
@@ -155,7 +155,7 @@ function HandoffCard({ handoff, now, undelivered, onResent }: { handoff: Handoff
       )}
       {handoff.waitingMessages > 0 && <p className="text-[11.5px] text-faint">{handoff.waitingMessages === 1 ? "1 message waits" : `${handoff.waitingMessages} messages wait`} for its chat to start.</p>}
       {undelivered.length > 0 && <Undelivered messages={undelivered} onResent={onResent} />}
-      {error && <MachineHostError error={error} onRestarted={stop} />}
+      {error && <MachineHostError error={error} onRestarted={stop} onFailed={setError} />}
     </article>
   );
 }
@@ -278,7 +278,7 @@ export function TeamBriefEditor() {
           <Button size="sm" variant="outline" type="button" disabled={busy} onClick={loadNewer} data-testid="bot-team-brief-load-newer">Load the newer text</Button>
           <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={saveOver} data-testid="bot-team-brief-save-over">Save mine over it</Button>
         </div>
-      ) : error && <MachineHostError error={error} onRestarted={() => save()} className="max-w-[760px]" />}
+      ) : error && <MachineHostError error={error} onRestarted={() => save()} onFailed={setError} className="max-w-[760px]" />}
     </form>
   );
 }
@@ -387,7 +387,7 @@ export function HandToBot({ bot, item, onClose, onHanded }: { bot: Bot; item: Bo
       <p className="min-w-0 text-[12px] text-faint">
         {target?.name ?? "It"} gets a chat of its own for it, under its own access{target?.paused ? ", once you resume it" : ""}. The item's text goes as {bot.name}'s words; your note goes as yours. Its answer comes back to {bot.name}.
       </p>
-      {error && <MachineHostError error={error} onRestarted={() => hand()} />}
+      {error && <MachineHostError error={error} onRestarted={() => hand()} onFailed={setError} />}
       <div className="flex flex-wrap items-center justify-end gap-2">
         <Button size="sm" variant="ghost" type="button" onClick={onClose}>Cancel</Button>
         <Button size="sm" variant="accent" type="submit" disabled={busy || !to} data-testid="bot-hand-submit">{busy && <Loader2 className="animate-spin" />} Hand to {target?.name ?? "bot"}</Button>

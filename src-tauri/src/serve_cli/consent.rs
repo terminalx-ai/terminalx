@@ -154,6 +154,9 @@ pub enum Refusal {
     NotWindow,
     /// A desktop runtime cannot establish window provenance.
     UnsupportedDesktop,
+    /// A registration as the window that did not prove it with the
+    /// window's key, whatever terminal it has ([`verify_window_for`]).
+    Unproven,
 }
 
 impl Refusal {
@@ -165,6 +168,7 @@ impl Refusal {
             Self::NoTerminal => "it was asked by a process with no terminal, on a server with no window",
             Self::NotWindow => "it was asked by a process with no terminal that is not the TerminalX window",
             Self::UnsupportedDesktop => "this desktop cannot verify its window's identity; pairing is unavailable",
+            Self::Unproven => "it did not prove with the window's key that it is the TerminalX window",
         }
     }
 }
@@ -506,6 +510,21 @@ pub fn verify_for(run: &Path, params: &mut Value, window: &Window) -> Result<(),
 /// [`verify_for`], answering the process that proved it: the witness's, as
 /// the kernel says, for the caller to bind to the connection that asked.
 pub fn verify_peer_for(run: &Path, params: &mut Value, window: &Window) -> Result<libc::pid_t, ControlError> {
+    verify_peer(run, params, window, false)
+}
+
+/// The window's registration ([`WINDOW_REGISTER`]) on a runtime whose
+/// window's key is pinned: proved with that key whatever the registrant's
+/// terminal (PRO-489). A person's terminal may pair, but no process is
+/// taken for the window on a terminal alone: one that holds the control
+/// token and opens a pseudo-terminal of its own outside the runtime's tree
+/// would otherwise be, and then pass every guard the window passes.
+/// Answers the process that proved it, as [`verify_peer_for`] does.
+pub fn verify_window_for(run: &Path, params: &mut Value, window: &Window) -> Result<libc::pid_t, ControlError> {
+    verify_peer(run, params, window, true)
+}
+
+fn verify_peer(run: &Path, params: &mut Value, window: &Window, registering: bool) -> Result<libc::pid_t, ControlError> {
     let consent = params
         .as_object_mut()
         .and_then(|object| object.remove(PARAM))
@@ -517,12 +536,18 @@ pub fn verify_peer_for(run: &Path, params: &mut Value, window: &Window) -> Resul
     let runtime = unsafe { libc::getpid() };
     let refusal = judge(peer, runtime, &runtime_terminals(runtime)).or_else(|| {
         let proven = window.proven(consent[WINDOW_FIELD].as_str(), &socket, nonce);
+        if registering {
+            return (!(window.keyed() && proven)).then_some(Refusal::Unproven);
+        }
         terminal_rule(window, controlling_terminal(peer).is_some(), proven)
     });
     if let Some(refusal) = refusal {
-        log::warn!("machine host: refused a pairing request from process {peer}: {}", refusal.says());
+        log::warn!("refused a request that needs a person or the window from process {peer}: {}", refusal.says());
         if refusal == Refusal::UnsupportedDesktop {
             return Err(ControlError::new("pairing_unavailable", refusal.says(), Some("In TerminalX on a supported desktop, open Settings → Machines and choose Create pairing code: TerminalX restarts its runtime so it can verify the window, or offers Restart runtime there. On a headless server, use `terminalx-serve pair` in your own terminal.".into())));
+        }
+        if registering {
+            return Err(refused(format!("Only the TerminalX window registers as the window, and {}.", refusal.says())));
         }
         return Err(refused(format!("Only a person may do this, and {}.", refusal.says())));
     }
@@ -780,7 +805,7 @@ fn masters_of(pid: libc::pid_t) -> HashSet<Device> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
@@ -1002,9 +1027,29 @@ mod tests {
                 use std::os::unix::process::CommandExt;
                 let mut next = Command::new(std::env::current_exe().unwrap());
                 next.args(helper_args()).env(STAGE, "2").stdin(Stdio::null());
-                // SAFETY: setsid is async-signal-safe.
+                // With a pseudo-terminal of its own (PRO-489): opened here, and
+                // made the new session's controlling terminal. The second
+                // stage inherits both ends, so the terminal outlives this one.
+                let tty = std::env::var_os("TERMINALX_CONSENT_HELPER_TTY").is_some().then(|| {
+                    let (mut master, mut slave) = (-1, -1);
+                    // SAFETY: two out-pointers to ints; no name, termios or size.
+                    let opened = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+                    assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+                    slave
+                });
+                // SAFETY: setsid and ioctl are async-signal-safe.
                 unsafe {
-                    next.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+                    next.pre_exec(move || {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if let Some(slave) = tty {
+                            if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) < 0 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+                        }
+                        Ok(())
+                    });
                 }
                 next.spawn().unwrap();
                 std::process::exit(0);
@@ -1046,7 +1091,18 @@ mod tests {
     /// `command`, proving `key` if given: its pid, whether it has a terminal,
     /// and its parameters.
     fn detached_request(run: &Path, command: &str, key: Option<&[u8; 32]>) -> (libc::pid_t, bool, Value) {
+        detached_request_with(run, command, key, false)
+    }
+
+    /// [`detached_request`] from a process in a new session that has a
+    /// pseudo-terminal of its own (`tty`), as `script` gives one.
+    pub(crate) fn detached_request_with(run: &Path, command: &str, key: Option<&[u8; 32]>, tty: bool) -> (libc::pid_t, bool, Value) {
         let mut first = Command::new(std::env::current_exe().unwrap());
+        if tty {
+            first.env("TERMINALX_CONSENT_HELPER_TTY", "1");
+        } else {
+            first.env_remove("TERMINALX_CONSENT_HELPER_TTY");
+        }
         first
             .args(helper_args())
             .env("TERMINALX_CONSENT_HELPER_STAGE", "1")
@@ -1127,10 +1183,25 @@ mod tests {
         let desktop = keyed(&signing_key(&key));
         assert!(guards_request(WINDOW_REGISTER, &json!({})), "the window's client always witnesses its registration");
         let (pid, _, mut params) = detached_request(&run, WINDOW_REGISTER, Some(&key));
-        assert_eq!(verify_peer_for(&run, &mut params, &desktop).unwrap(), pid);
+        assert_eq!(verify_window_for(&run, &mut params, &desktop).unwrap(), pid);
         assert!(params.get(PARAM).is_none(), "taken out before the registration is read");
         let (_, _, mut params) = detached_request(&run, WINDOW_REGISTER, None);
-        assert_eq!(verify_peer_for(&run, &mut params, &desktop).unwrap_err().code, "person_required");
+        assert_eq!(verify_window_for(&run, &mut params, &desktop).unwrap_err().code, "person_required");
+        // M1: a process with a pseudo-terminal of its own, outside the
+        // runtime's tree, pairs as a person would, but is no window without
+        // the key's proof; with it, it is.
+        let (_, terminal, mut pairing) = detached_request_with(&run, WINDOW_REGISTER, None, true);
+        assert!(terminal, "the helper has a terminal of its own");
+        assert!(verify_peer_for(&run, &mut pairing, &desktop).is_ok(), "a terminal of its own passes where a person's would");
+        let (_, _, mut params) = detached_request_with(&run, WINDOW_REGISTER, None, true);
+        let error = verify_window_for(&run, &mut params, &desktop).unwrap_err();
+        assert_eq!(error.code, "person_required");
+        assert!(error.message.contains("window's key"), "{}", error.message);
+        let (pid, _, mut params) = detached_request_with(&run, WINDOW_REGISTER, Some(&key), true);
+        assert_eq!(verify_window_for(&run, &mut params, &desktop).unwrap(), pid);
+        // Where no key is pinned, nothing proves the window.
+        let (_, _, mut params) = detached_request_with(&run, WINDOW_REGISTER, Some(&key), true);
+        assert!(verify_window_for(&run, &mut params, &Window::Headless).is_err());
         assert!(desktop.keyed() && !Window::Headless.keyed() && !Window::Unrecognisable.keyed());
         std::fs::write(run.join("done"), b"").unwrap();
     }
