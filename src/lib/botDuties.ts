@@ -138,6 +138,14 @@ export function checkFound(run: Pick<AutomationRun, "precheck">): string | null 
   return line ?? null;
 }
 
+/**
+ * The run a duty's "last run" is (PRO-492): the one still going, when one is, else the newest. A due time skipped while
+ * it runs is listed in the log but is not its last run.
+ */
+export function lastRun<T extends Pick<AutomationRun, "status">>(runs: readonly T[]): T | null {
+  return runs.find((run) => run.status === "pending" || run.status === "running") ?? runs[0] ?? null;
+}
+
 /** When a run happened, for the log: its newest repeat, else when it ended or started. */
 export function runAt(run: Pick<AutomationRun, "lastRepeatAt" | "endedAt" | "startedAt" | "scheduledFor">): string | null {
   return run.lastRepeatAt ?? run.endedAt ?? run.startedAt ?? run.scheduledFor ?? null;

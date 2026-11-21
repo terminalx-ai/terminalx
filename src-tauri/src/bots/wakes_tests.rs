@@ -509,41 +509,38 @@ fn a_github_mention_wakes_only_from_members_unless_anyone_is_chosen_and_never_fr
 
 /// M4 (review 1): a read of mentions pages through what changed, oldest
 /// first, and one that stops at its bound goes on from there next time.
+/// Each page starts at the last comment read (PRO-503), as GitHub's `since`
+/// is answered here: every comment changed at or after it, oldest first.
 #[test]
 fn a_github_mention_read_pages_on_and_goes_on_from_where_it_stopped() {
     let source = BotSource::from_value(json!({"kind": "githubMention", "repo": "acme/widgets", "handle": "argus"})).unwrap().unwrap();
     let since = chrono::DateTime::parse_from_rfc3339("2026-11-21T10:00:00Z").unwrap().with_timezone(&chrono::Utc);
-    let page = move |page: usize, count: usize| -> Value {
-        (0..count)
-            .map(|n| {
-                let id = page * 1000 + n;
-                let at = since + chrono::TimeDelta::seconds((page * 100 + n) as i64);
-                json!({"id": id, "body": if n == 0 { "@argus here" } else { "chatter" }, "created_at": at.to_rfc3339(), "updated_at": at.to_rfc3339(), "issue_url": "x/1", "user": {"login": "mia"}, "author_association": "MEMBER"})
-            })
-            .collect::<Vec<_>>()
-            .into()
+    // Comment n changed n seconds after `since`; every hundredth mentions the bot.
+    let comment = move |n: usize| {
+        let at = since + chrono::TimeDelta::seconds(n as i64);
+        json!({"id": n, "body": if n.is_multiple_of(100) { "@argus here" } else { "chatter" }, "created_at": at.to_rfc3339(), "updated_at": at.to_rfc3339(), "issue_url": "x/1", "user": {"login": "mia"}, "author_association": "MEMBER"})
     };
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
-    let answer = |short_at: Option<usize>| {
+    let answer = |total: usize| {
         let asked = asked.clone();
         move |path: &str| {
             asked.borrow_mut().push(path.to_owned());
             if path == "user" {
                 return Ok(json!({"login": "me"}));
             }
-            let number: usize = path.rsplit("page=").next().unwrap().parse().unwrap();
-            Ok(page(number, if Some(number) == short_at { 7 } else { READ_EVENTS }))
+            Ok(gh_page(path, &(0..total).map(comment).collect::<Vec<_>>()))
         }
     };
-    TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(answer(Some(3)))));
+    TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(answer(207))));
     let read = github_mention_read(std::path::Path::new("/"), &source, Some(since)).unwrap();
-    assert_eq!((read.events.len(), read.resume), (3, None), "three pages, the last short: all read");
+    assert_eq!((read.events.len(), read.resume), (3, None), "three pages, the last short: all read, each once");
     assert!(asked.borrow().iter().any(|path| path.contains("direction=asc") && path.contains("since=2026-11-21T10:00:00Z") && path.contains("page=1")), "{:?}", asked.borrow());
+    assert!(asked.borrow().iter().any(|path| path.contains("since=2026-11-21T10:01:39Z") && path.contains("page=1")), "on from the last one read: {:?}", asked.borrow());
 
-    TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(answer(None))));
+    TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(answer(100_000))));
     let read = github_mention_read(std::path::Path::new("/"), &source, Some(since)).unwrap();
-    assert_eq!(read.events.len(), MENTION_READ / READ_EVENTS);
-    let last = since + chrono::TimeDelta::seconds((MENTION_READ / READ_EVENTS * 100 + READ_EVENTS - 1) as i64);
+    assert_eq!(read.events.len(), MENTION_PAGES);
+    let last = since + chrono::TimeDelta::seconds((MENTION_PAGES * (READ_EVENTS - 1)) as i64);
     assert_eq!(read.resume, Some(last), "it goes on from the last comment it read");
     TEST_GH.with(|slot| *slot.borrow_mut() = None);
 
@@ -841,4 +838,182 @@ fn a_mention_with_no_person_behind_it_wakes_nothing_and_an_unknown_gh_user_stops
         assert!(stopped.message.contains("signed in as"), "{}", stopped.message);
     }
     TEST_GH.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// GitHub's answer to `issues/comments?since=…&page=…` over `comments` (oldest change first): those changed at or after `since`, a page of [`READ_EVENTS`].
+fn gh_page(path: &str, comments: &[Value]) -> Value {
+    let query = |key: &str| path.split(['?', '&']).find_map(|part| part.strip_prefix(&format!("{key}="))).unwrap().to_owned();
+    let since = chrono::DateTime::parse_from_rfc3339(&query("since")).unwrap();
+    let page: usize = query("page").parse().unwrap();
+    let mut changed: Vec<&Value> = comments.iter().filter(|comment| chrono::DateTime::parse_from_rfc3339(comment["updated_at"].as_str().unwrap()).unwrap() >= since).collect();
+    changed.sort_by_key(|comment| chrono::DateTime::parse_from_rfc3339(comment["updated_at"].as_str().unwrap()).unwrap());
+    changed.into_iter().skip((page - 1) * READ_EVENTS).take(READ_EVENTS).cloned().collect::<Vec<_>>().into()
+}
+
+/// PRO-503: a comment edited between two page reads moves to the end of what
+/// changed; the comment after it, older than the five-minute overlap, is not
+/// passed over, as it was when the second page was asked for by number.
+#[test]
+fn a_comment_edited_between_two_page_reads_passes_over_no_mention() {
+    let source = BotSource::from_value(json!({"kind": "githubMention", "repo": "acme/widgets", "handle": "argus"})).unwrap().unwrap();
+    let since = chrono::DateTime::parse_from_rfc3339("2026-11-21T10:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let comment = move |n: usize, seconds: i64, body: &str| {
+        let at = (since + chrono::TimeDelta::seconds(seconds)).to_rfc3339();
+        json!({"id": n, "body": body, "created_at": at, "updated_at": at, "issue_url": "x/1", "user": {"login": "mia"}, "author_association": "MEMBER"})
+    };
+    // 150 comments; the one at 100 mentions the bot.
+    let comments = std::rc::Rc::new(std::cell::RefCell::new((0..150).map(|n| comment(n, n as i64, if n == 100 { "@argus look" } else { "chatter" })).collect::<Vec<_>>()));
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (list, count) = (comments.clone(), reads.clone());
+    TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(move |path: &str| {
+        if path == "user" {
+            return Ok(json!({"login": "me"}));
+        }
+        let page = gh_page(path, &list.borrow());
+        count.set(count.get() + 1);
+        if count.get() == 1 {
+            // Comment 50 is edited (an hour later) once the first page was read.
+            list.borrow_mut()[50] = comment(50, 3600, "chatter, edited");
+        }
+        Ok(page)
+    })));
+    let read = github_mention_read(std::path::Path::new("/"), &source, Some(since)).unwrap();
+    TEST_GH.with(|slot| *slot.borrow_mut() = None);
+    assert_eq!(read.events.iter().map(|event| event.key.as_str()).collect::<Vec<_>>(), ["ghcomment:100"]);
+}
+
+/// PRO-503: a comment written before the trigger started and edited since to
+/// mention the bot is news: an event is dated by its last change, on GitHub
+/// and in Linear.
+#[test]
+fn a_comment_edited_to_add_a_mention_wakes_the_duty() {
+    let started = chrono::DateTime::parse_from_rfc3339("2026-11-21T10:00:00Z").unwrap().with_timezone(&chrono::Utc);
+    let comments = json!([{"id": 7, "body": "@argus please look (edited)", "created_at": "2026-11-20T09:00:00Z", "updated_at": "2026-11-21T10:30:00Z", "issue_url": "x/12", "user": {"login": "octo"}, "author_association": "MEMBER"}]);
+    let events = github_mentions(&comments, "argus", &CommentAuthors { anyone: false, viewer: Some("me".into()) });
+    assert_eq!(events[0].at.as_deref(), Some("2026-11-21T10:30:00Z"));
+    assert!(!events[0].before(Some(started)), "after the trigger started");
+    let data = json!({"viewer": {"id": "u-me"}, "comments": {"nodes": [
+        {"id": "c1", "body": "cc @argus", "url": "u", "createdAt": "2026-11-20T09:00:00Z", "updatedAt": "2026-11-21T10:30:00Z", "user": {"id": "u-dana", "displayName": "Dana"}, "issue": {"identifier": "ENG-4", "title": "Slow"}},
+    ]}});
+    let events = parse_linear_mentions(&data, "argus");
+    assert!(!events[0].before(Some(started)));
+    // Through the poll: seen once, so a later edit does not wake it again.
+    let rig = rig();
+    let _agent = StandIn::on();
+    let bot = rig.hire("watcher", "Argus");
+    let duty = rig.add(&bot, "Answer.", json!({"kind": "githubMention", "repo": "acme/widgets", "handle": "argus"}), None);
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(Vec::new()));
+    rig.tick(&duty);
+    let now = chrono::Utc::now();
+    let edited = |at: chrono::DateTime<chrono::Utc>| BotEvent {
+        key: "ghcomment:7".into(), at: Some(at.to_rfc3339()), kind: "githubMention".into(), summary: "@argus was mentioned on #12".into(), by: "octo".into(), url: "u".into(), body: "@argus please look".into(), ..BotEvent::default()
+    };
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(vec![edited(now + chrono::TimeDelta::seconds(1))]));
+    rig.tick(&duty);
+    let run = wait_run(&duty, |run| run.session_id.is_some());
+    finish(&rig, &duty, &run, "Looked.");
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(vec![edited(now + chrono::TimeDelta::seconds(2))]));
+    rig.tick(&duty);
+    settled(&duty);
+    assert_eq!(runs(&duty).iter().filter(|run| run.session_id.is_some()).count(), 1);
+}
+
+/// PRO-503: a known wake kind with a value this build cannot read is kept as
+/// written and never read, and the rest of the automations file still loads;
+/// a save cannot bring one in new.
+#[test]
+fn a_known_kind_this_build_cannot_read_is_kept_and_breaks_no_other_automation() {
+    let rig = rig();
+    let bot = rig.hire("watcher", "Argus");
+    let duty = rig.add(&bot, "Watch it.", json!({"kind": "watch", "target": "file", "value": "/tmp/x"}), None);
+    let other = rig.add(&bot, "Another.", json!({"kind": "botMessage"}), None);
+    let path = crate::store::root().unwrap().join("automations.json");
+    let mut file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let list = file["automations"].as_array_mut().unwrap();
+    let written = json!({"kind": "watch", "target": "socket", "value": "/run/x.sock", "kinds": [7]});
+    for automation in list.iter_mut().filter(|automation| automation["id"] == duty.id) {
+        automation["eventTrigger"]["source"] = written.clone();
+    }
+    std::fs::write(&path, serde_json::to_string(&file).unwrap()).unwrap();
+    let listed = automation_store::list().unwrap();
+    let kept = listed.iter().find(|automation| automation.id == duty.id).unwrap();
+    assert_eq!(kept.event_trigger.as_ref().unwrap().source, sources::AutomationEventSource::Unsupported(written.clone()));
+    assert!(listed.iter().any(|automation| automation.id == other.id), "the others load");
+    assert_eq!(serde_json::to_value(&kept.event_trigger.as_ref().unwrap().source).unwrap(), written, "written back as it was");
+    // Kept on a save that leaves it; refused as something new.
+    let input = |source: &Value| json!({"name": "Watch it", "prompt": "Watch it.", "schedule": daily(), "reportsTo": "terminalx", "enabled": true, "wake": {"source": source, "pollIntervalMinutes": 5, "maxRunsPerTick": 1}});
+    rig.bots("dutySave", json!({"id": bot.id, "dutyId": duty.id, "input": input(&written)})).unwrap();
+    let refused = rig.bots("dutySave", json!({"id": bot.id, "dutyId": other.id, "input": input(&written)})).unwrap_err().to_string();
+    assert!(refused.contains("needs a newer TerminalX"), "{refused}");
+    // An ordinary automation's known kind too.
+    let pr = json!({"kind": "githubPullRequest", "repo": "acme/widgets", "events": ["opened"], "draft": "sometimes"});
+    let source: sources::AutomationEventSource = serde_json::from_value(pr.clone()).unwrap();
+    assert!(sources::unreadable_known(&source));
+}
+
+/// PRO-503: a duty's wake changed while its bot is paused starts at the save,
+/// as switching it on does: a message left after the save, while still
+/// paused, wakes it on resume and is not let go of meanwhile.
+#[test]
+fn a_wake_changed_while_its_bot_is_paused_starts_at_the_save() {
+    let rig = rig();
+    let _agent = StandIn::on();
+    let atlas = rig.hire("cto", "Atlas");
+    let argus = rig.hire("watcher", "Argus");
+    let duty = rig.add(&argus, "Take it.", json!({"kind": "botMessage", "from": [atlas.id]}), None);
+    rig.tick(&duty);
+    rig.bots("pause", json!({"id": argus.id})).unwrap();
+    let input = json!({"name": "Take hand-offs", "prompt": "Take it.", "schedule": daily(), "reportsTo": "terminalx", "enabled": true,
+        "wake": {"source": {"kind": "botMessage", "from": [atlas.id], "kinds": ["handoff"]}, "pollIntervalMinutes": 5, "maxRunsPerTick": 1}});
+    rig.bots("dutySave", json!({"id": argus.id, "dutyId": duty.id, "input": input})).unwrap();
+    post(rig.sink.as_ref(), &atlas, &argus, MessageKind::Handoff, "After the save", 1).unwrap();
+    for _ in 0..2 {
+        crate::automations::evaluate(&rig.host()).unwrap();
+    }
+    assert_eq!(messages(&argus.id).unwrap().len(), 1, "kept for the duty, not let go");
+    rig.bots("resume", json!({"id": argus.id})).unwrap();
+    rig.tick(&duty);
+    let run = wait_run(&duty, |run| run.session_id.is_some());
+    assert!(sent(&rig.manager, &run).contains("After the save"));
+    finish(&rig, &duty, &run, "Taken.");
+}
+
+/// PRO-503: a hand-off's work chat carries the passes of the work it was
+/// handed from, so a message sent from it counts on from them.
+#[test]
+fn a_hand_offs_work_chat_counts_the_passes_of_what_it_was_handed_from() {
+    let rig = rig();
+    let _agent = StandIn::on();
+    let atlas = rig.hire("cto", "Atlas");
+    let argus = rig.hire("watcher", "Argus");
+    rig.bots("update", json!({"id": argus.id, "patch": {"reportsTo": atlas.id}})).unwrap();
+    let duty = rig.add(&atlas, "Take problems.", json!({"kind": "botMessage"}), None);
+    rig.tick(&duty);
+    post(rig.sink.as_ref(), &argus, &atlas, MessageKind::Question, "Can you look?", 2).unwrap();
+    rig.tick(&duty);
+    let run = wait_run(&duty, |run| run.session_id.is_some());
+    let new = super::super::handoffs::NewHandoff { title: "Look at the build".into(), scope: "Find why it is slow.".into(), due: String::new() };
+    let handoff = super::super::handoffs::handoff(&rig.manager, &atlas, &argus, run.session_id.clone(), new).unwrap();
+    assert_eq!(handoff.hops, 2, "{handoff:?}");
+    // Its work chat, once it has one, counts them; with none yet, one made for it would.
+    let work = match handoff.to_session.as_deref() {
+        Some(session) => index::get(session).unwrap(),
+        None => {
+            let mut chat = index::get(run.session_id.as_deref().unwrap()).unwrap();
+            chat.id = "work-chat".into();
+            chat.automation = None;
+            index::update(|sessions| {
+                sessions.push(chat.clone());
+                Ok(())
+            })
+            .unwrap();
+            super::super::handoffs::edit_for_tests(|store| {
+                store.handoffs.iter_mut().filter(|value| value.number == handoff.number).for_each(|value| value.to_session = Some("work-chat".into()));
+            });
+            chat
+        }
+    };
+    assert_eq!(work.automation, None);
+    assert_eq!(hops_of_session(&work), 2);
+    finish(&rig, &duty, &run, "Handed on.");
 }

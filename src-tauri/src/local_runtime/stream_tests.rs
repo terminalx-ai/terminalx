@@ -265,8 +265,11 @@ fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
     assert_eq!(*lagged.lock().unwrap(), [r#"{"id":"flood","token":"f"}"#], "told once, naming the view that fell behind");
     assert_eq!(rig.terminals.stats().views, 1, "the runtime let go of that view alone");
     // The runtime and the desktop each record it once, naming the connection.
-    let runtime = logged("pane \"flood\" fell behind with 2.0 MiB of its output");
+    // How much it had queued depends on how the pane's output was read: a frame is up to a whole scrollback, so a view
+    // falls behind anywhere past 2 MiB less one frame (PRO-492: a loaded runner read bigger pieces, logged "1.6 MiB").
+    let runtime = logged("pane \"flood\" fell behind with ");
     assert_eq!(runtime.len(), 1, "{runtime:?}");
+    assert!(runtime[0].1.contains(" MiB of its output"), "{runtime:?}");
     assert_eq!(runtime[0].0, log::Level::Info);
     assert!(runtime[0].1.starts_with("terminal output of window \"behind\": "), "{runtime:?}");
     let desktop = logged("the view of pane \"flood\" fell behind; it is drawn again from the pane's scrollback");

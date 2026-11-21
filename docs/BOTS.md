@@ -153,34 +153,44 @@ permission system.
   into the home. Try it runs the check the same way, in a folder apart
   (`try-<duty id>`, or `new-<bot id>` for an unsaved duty), so it never
   empties a running check's (`dutyTryCheck`, which needs a person). Printing nothing ends the run as "nothing new": no
-  session, no model, nobody told. A failing check is a failed run, which
-  notifies. Its output reaches the agent labelled as information, not
+  session, no model, nobody told. A failing check is a failed run, which is
+  reported as the duty reports and notifies the owner outside the bot's quiet
+  hours; the window raises no failure notice of its own for a duty (PRO-492). Its output reaches the agent labelled as information, not
   instructions.
 - **Reports to.** `terminalx`: a status line in the bot's home chat and a
   notification (`bot_duty_report`). `lead`: a status line in the lead bot's
   home chat, labelled with the sender and its access, and no notification
   (the owner when the bot reports to the owner). A reply of "Nothing new."
-  tells nobody; one that starts "URGENT:" notifies even in quiet hours. A
+  tells nobody; a run that ends with no reply at all is reported as "The run
+  ended without a reply." (PRO-492); one that starts "URGENT:" notifies even in quiet hours. A
   target this build does not know is kept and reported to TerminalX.
 - **Remembers between runs.** `duties/<duty id>.md` in the bot's home, read
   capped (8 KB) and fenced; the agent is asked to replace it, and a
   read-only bot is told it cannot.
 - **Quiet hours** are per bot, in `bot-duties.json` at the store root (not in
   the home folder, which the bot can write). Inside them only urgent reports
-  notify; every report still goes in the home chat.
+  notify (a failure is noted and not notified); every report still goes in the
+  home chat.
 - **Pause.** A paused bot's due runs are recorded as skipped (one folded row)
   and its next run moves to the schedule's next; Run now is refused. A run
-  that reaches its start while the bot is paused ends cancelled.
+  that reaches its start while the bot is paused ends cancelled, and so does
+  one whose bot is paused while its session opens: pause is checked again just
+  before the prompt is sent, and after, so no turn runs (PRO-492).
 - **One run at a time.** A due run is skipped (one folded row) while the
   duty's previous run has not finished, and Run now answers that it is
-  already running. A run that goes on past its timeout
+  already running; the duty's last run is still the one going, not the skip
+  (PRO-492). A run that goes on past its timeout
   (30 minutes unless the duty says otherwise) is ended as timed out and its
-  agent stopped. The sessions of finished runs past the newest three are
+  agent stopped, once, even when its session was deleted. The page shows the
+  model its runs use: the bot's, as it is now. The sessions of finished runs past the newest three are
   archived, except a pinned one or one with a turn in progress or waiting on
   a person.
 - **Who may change one.** Add, change, run, copy, remove, switch on and quiet
   hours carry the window's proof (`bots::enforce::needs_person`,
-  `consent::guards_request`); switching one off is open. The Automations
+  `consent::guards_request`); switching one off is open. A bot switches off
+  one of its own duties from its own session with `terminalx bots duty-off
+  "<duty name or id>"` (PRO-492), never another bot's; anyone else names the
+  bot with `--bot`. Switching one on stays the window's. The Automations
   page's own routes refuse a duty. A process in a bot's session reads its own
   bot's duties and no other's, and changes none.
 - **At hire** the role template's duties that wake on a schedule or on
@@ -207,11 +217,12 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
 
 - **Once per event.** The trigger's seen record (`source-seen.json`) keeps
   what woke it; a mention, an alert or a message from before the trigger
-  started is never news. A trigger starts when the duty is saved on or
-  switched on (`sources::switched`), paused bot or not; switched off, it
-  starts again from when it is switched back on, so nothing that came while
-  it was off wakes it. A watch and a branch's checks wake on each change
-  after the first read. A Linear issue a duty wakes on is never commented on
+  started is never news. For a mention, an alert or a message, a
+  trigger starts when the duty is saved on, switched on, or saved with a
+  changed wake (`sources::switched`, PRO-503), paused bot or not; switched
+  off, it starts again from when it is switched back on, so nothing that came
+  while it was off wakes it. A watch and a branch's checks have no "before":
+  they wake on each change after their first read. A Linear issue a duty wakes on is never commented on
   or moved: the report goes to the owner or the lead.
 - **Who can wake it.** A GitHub mention wakes a duty only from the
   repository's owner, members and collaborators (`author_association`
@@ -220,7 +231,11 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   `dutySave`, with a warning beside it; a value this build does not know is
   kept and read as members. A comment by the signed-in `gh` user, or by the
   Linear key's own user, never wakes it, so a bot quoting its own handle does
-  not wake itself. Linear mentions come from the workspace's own people,
+  not wake itself. When the bot's `gh` or Linear key is the owner's own, the
+  owner's comments do not wake it either: that is the rule, not a gap
+  (PRO-503); give the bot its own account for the owner to mention it. A
+  comment edited to add a mention wakes the duty once: a comment is dated by
+  its last change (PRO-503). Linear mentions come from the workspace's own people,
   never an integration's comment (one with no user). A `gh` that does not
   say who it is signed in as stops the read, with the status saying so.
   Whatever any of them writes can be untrusted, and the editor says so.
@@ -241,8 +256,10 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   6 times an hour and 48 a day from all its events, past which they wait and
   its status says until when; one pull request wakes at most 4 runs an hour
   (PRO-485). A read of GitHub mentions looks at the repository's comments
-  changed since the last read, oldest first, up to 1000; past that the next
-  read goes on from the last one read, and the status says so. A read of
+  changed since the last read, oldest first, up to 1000, each page starting
+  from the last comment the one before it read, so a comment edited between
+  two pages moves none past it (PRO-503); past that the next read goes on
+  from the last one read, and the status says so. A read of
   Linear mentions pages up to 1000 too, and says when it stopped there. A
   duty's event read runs on a thread of its own, as a first check does, so a
   watched command (up to 300 s) or a slow page holds up no other automation.
@@ -263,7 +280,7 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   sender is refused and told why. One bot leaves at most 30 an hour. They go
   when the bot is deleted. Each carries how many times it has passed between
   bots: a run woken by a message sends one more, as does any session started
-  from it, and one that has passed three times wakes nobody (the status and a
+  from it and the work chat of a hand-off made from it (PRO-503), and one that has passed three times wakes nobody (the status and a
   row in the duty's history say so, and so does the sender's answer), so two
   bots cannot keep waking each other. A bot does not message itself. The
   hired CTO's "Take problems from the other bots" waits for hand-offs and

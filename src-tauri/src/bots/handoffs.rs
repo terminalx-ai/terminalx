@@ -197,6 +197,10 @@ pub struct Handoff {
     /// How far down a chain of hand-offs this one is: 1 for one handed from work nobody handed.
     #[serde(default)]
     pub depth: u32,
+    /// How many times the work it was handed from had passed between bots (`wakes::hops_of_session` of its
+    /// session): its work chat carries them on, so a message sent from there counts on from them (PRO-503).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hops: u32,
     /// The failed hand-off this one tries again, and which try it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_of: Option<u64>,
@@ -749,6 +753,7 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
         return Err(refused("A bot does not hand work to itself: add an item to your own work list."));
     }
     let sink = manager.sink();
+    let hops = session.as_deref().and_then(|session| index::get(session).ok()).map_or(0, |entry| super::wakes::hops_of_session(&entry));
     let handoff = change(Some(sink.as_ref()), BOT_WRITE_BYTES, |store| {
         // The rule is judged on the records as they are under the store's lock, not as the caller read them.
         let (from, to) = match (crate::store::bots::get(&from.id)?, crate::store::bots::get(&to.id)?) {
@@ -819,6 +824,7 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             note: String::new(),
             state: HandoffState::Waiting,
             depth,
+            hops,
             retry_of,
             attempt,
             from_session: session,
@@ -969,6 +975,7 @@ pub fn hand_item(manager: &SessionManager, from: &Bot, number: u64, to: &Bot, no
             note,
             state: HandoffState::Waiting,
             depth: 1,
+            hops: 0,
             retry_of: None,
             attempt: 0,
             from_session: None,

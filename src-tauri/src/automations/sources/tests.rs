@@ -403,6 +403,15 @@ fn a_head_a_run_left_does_not_wake_the_automation_again() {
     assert_eq!(tick(&automation, 15, pulls(vec![pr(2, "ccc")])), woke_pr(pr(2, "ccc"), PullRequestEvent::Pushed));
 }
 
+/// What a run's final transition writes beside its ending (`keep_left_head`).
+fn add_left_head(automation_id: &str, run_id: &str, head: &str) {
+    automation_store::replace_run(automation_id, run_id, |run| {
+        keep_left_head(run, Some(head));
+        Ok(())
+    })
+    .unwrap();
+}
+
 fn pushes(automation: &Automation, minute: i64, number: i64, head: &str) -> Vec<WakeSubject> {
     tick(automation, minute, pulls(vec![pr(number, head)]))
 }
@@ -427,7 +436,8 @@ fn a_reviewer_automation_wakes_four_times_an_hour_and_the_fifth_push_waits_its_t
     // Ordinary polls keep the status while it is held; a newer head replaces the one waiting.
     assert!(pushes(&automation, 30, 2, "h6").is_empty());
     assert!(seen(&automation).notice.unwrap().contains("#2 until"), "not overwritten");
-    assert!(tick(&automation, 35, pulls(Vec::new())).is_empty());
+    // A read that stops at its bound and leaves it out keeps it held (PRO-490: one that covers every open pull request and leaves it out does not).
+    assert!(tick_read(&automation, 35, Read { snapshot: pulls(Vec::new()), bound: Some(PR_ACTIVITY), resume: None }).is_empty());
     assert!(public_state(&automation).notice.unwrap().contains("#2 until"), "kept while it is not read");
     // The window opens: the newest head wakes, once.
     assert_eq!(pushes(&automation, 65, 2, "h6"), woke_pr(pr(2, "h6"), PullRequestEvent::Pushed));
@@ -1046,4 +1056,110 @@ fn pruning_seen_events_never_turns_a_held_event_into_one_from_before_the_start()
     assert!(started < held, "{started} must stay before the held event at {held}");
     let event = crate::bots::wakes::BotEvent { at: Some(stamp(held)), ..Default::default() };
     assert!(!event.before(Some(started)));
+}
+
+// ------------------------------------------------------------------ PRO-490
+
+fn with_trigger(automation: &Automation, change: impl FnOnce(&mut AutomationEventTrigger)) -> Automation {
+    let mut automation = automation.clone();
+    change(automation.event_trigger.as_mut().unwrap());
+    resave(&automation);
+    automation
+}
+
+/// Four runs for pull request 2 inside the hour: it is held from the fifth.
+fn held_pr_two(automation: &Automation) {
+    tick(automation, 0, pulls(Vec::new()));
+    assert_eq!(pushes(automation, 5, 2, "h1").len(), 1);
+    for (minute, head) in [(10, "h2"), (15, "h3"), (20, "h4")] {
+        finish_runs(automation);
+        assert_eq!(pushes(automation, minute, 2, head).len(), 1, "{head}");
+    }
+    finish_runs(automation);
+}
+
+#[test]
+fn a_held_pull_request_stays_held_on_a_tick_the_cap_filled() {
+    let _home = crate::store::temp_home();
+    let automation = with_trigger(&stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed])), |trigger| trigger.max_runs_per_tick = 1);
+    held_pr_two(&automation);
+    // Pull request 3 opens first and takes the one run this tick has; 2 pushes again past its limit.
+    let woken = tick(&automation, 25, pulls(vec![pr(3, "x1"), pr(2, "h5")]));
+    assert_eq!(woken, woke_pr(pr(3, "x1"), PullRequestEvent::Opened));
+    let state = seen(&automation);
+    assert!(state.held.contains_key("pr:2"), "{:?}", state.held);
+    assert!(state.notice.as_deref().unwrap_or_default().contains("#2 until"), "{:?}", state.notice);
+}
+
+#[test]
+fn a_held_pull_request_no_longer_read_is_let_go_and_the_status_counts_runs() {
+    let _home = crate::store::temp_home();
+    let automation = stored(pr_source(&[PullRequestEvent::Opened, PullRequestEvent::Pushed]));
+    held_pr_two(&automation);
+    assert!(pushes(&automation, 25, 2, "h5").is_empty());
+    let notice = seen(&automation).notice.unwrap();
+    assert!(notice.contains(&format!("({WAKES_PER_HOUR} runs in an hour or {WAKES_PER_DAY} in a day)")), "{notice}");
+    assert!(!notice.contains("more than"), "{notice}");
+    // Closed (or no longer matching): a read that covers every open pull request leaves it out, and its hold goes.
+    assert!(tick(&automation, 30, pulls(vec![pr(4, "y1")])).len() == 1);
+    let state = seen(&automation);
+    assert!(!state.held.contains_key("pr:2"), "{:?}", state.held);
+    assert!(state.notice.is_none(), "{:?}", state.notice);
+}
+
+#[test]
+fn a_store_error_in_the_first_check_still_notes_the_poll() {
+    let _home = crate::store::temp_home();
+    let automation = stored(linear_source());
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    let failed = poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("1")]))), |_| -> Result<bool> { bail!("the run history could not be written") }, |_| unreachable!(), |_, _| unreachable!());
+    assert!(failed.is_err());
+    let state = seen(&automation);
+    assert_eq!(state.last_polled_at.as_deref(), Some(stamp(at(5)).as_str()));
+    assert!(!state.events.contains_key("linear:1"), "what was read stays unseen");
+    // So the next tick inside the interval reads nothing, rather than reading on every tick.
+    let read = Cell::new(false);
+    poll(&host(), &automation, at(6), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(Vec::new()))) }, |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    assert!(!read.get());
+    // At the next interval it is read again and wakes.
+    assert_eq!(tick(&automation, 10, Snapshot::Linear(vec![issue("1")])), vec![WakeSubject::Linear(Box::new(issue("1")))]);
+}
+
+#[test]
+fn an_event_automation_starts_at_most_its_runs_a_day_across_subjects() {
+    let _home = crate::store::temp_home();
+    // Saved before the cap: read as the default, the same as a duty's.
+    let automation = stored(linear_source());
+    assert_eq!(automation.event_trigger.as_ref().unwrap().max_runs_per_day, RUNS_PER_DAY);
+    assert_eq!(RUNS_PER_DAY as usize, crate::bots::wakes::WAKES_PER_DAY);
+    let automation = with_trigger(&automation, |trigger| trigger.max_runs_per_day = 3);
+    tick(&automation, 0, Snapshot::Linear(Vec::new()));
+    // Each run files the next issue: a chain across subjects that the per-subject limits never stop.
+    assert_eq!(tick(&automation, 5, Snapshot::Linear(vec![issue("1")])).len(), 1);
+    finish_runs(&automation);
+    assert_eq!(tick(&automation, 10, Snapshot::Linear(vec![issue("2"), issue("3"), issue("9")])).len(), 2, "room for two more today, though the tick's cap is three");
+    assert!(!seen(&automation).events.contains_key("linear:9"), "the one past the cap stays unseen");
+    finish_runs(&automation);
+    // The day's cap is met: the third waits.
+    let read_before = seen(&automation).last_read_at;
+    assert!(tick(&automation, 15, Snapshot::Linear(vec![issue("9")])).is_empty());
+    let state = seen(&automation);
+    assert!(!state.events.contains_key("linear:9"), "it stays unseen");
+    assert_eq!(state.last_read_at, read_before, "and the next read pages back to it");
+    assert!(state.notice.as_deref().unwrap_or_default().contains("it started 3 runs in a day"), "{:?}", state.notice);
+    // A day after the first run, there is room again.
+    assert_eq!(tick(&automation, 5 + 24 * 60, Snapshot::Linear(vec![issue("9")])), vec![WakeSubject::Linear(Box::new(issue("9")))]);
+    assert!(seen(&automation).notice.is_none());
+}
+
+#[test]
+fn a_days_cap_is_saved_with_the_automation_and_held_to_its_range() {
+    let source = || pr_source(&[PullRequestEvent::Opened]);
+    for (cap, ok) in [(0, false), (1, true), (MAX_RUNS_PER_DAY, true), (MAX_RUNS_PER_DAY + 1, false)] {
+        let trigger = AutomationEventTrigger { source: source(), poll_interval_minutes: 5, max_runs_per_tick: 3, max_runs_per_day: cap };
+        assert_eq!(validate(&trigger, false, AutomationWorkspace::NewWorktree).is_ok(), ok, "{cap}");
+    }
+    let trigger: AutomationEventTrigger = serde_json::from_value(json!({"source": source(), "pollIntervalMinutes": 5, "maxRunsPerTick": 3, "maxRunsPerDay": 7})).unwrap();
+    assert_eq!(trigger.max_runs_per_day, 7);
+    assert_eq!(serde_json::to_value(&trigger).unwrap()["maxRunsPerDay"], 7);
 }

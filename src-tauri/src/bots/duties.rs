@@ -19,7 +19,9 @@
 //! - its reply is reported where the duty says ([`ended`]): a note in the
 //!   bot's home chat and a notification, or a note in its lead's home chat.
 //!   Outside the bot's quiet hours, or when the reply is marked urgent, the
-//!   owner is notified. A reply of "Nothing new." tells nobody.
+//!   owner is notified. A reply of "Nothing new." tells nobody; a run that
+//!   ends with no reply at all says so. A failed run is noted and notified
+//!   the same way, held by quiet hours too (never urgent).
 //!
 //! Only the window changes a duty: every operation that adds, edits, runs or
 //! switches one on is a person's (`enforce::needs_person`), and the ordinary
@@ -71,6 +73,8 @@ const MAX_PROMPT_BYTES: usize = 16 * 1024;
 const REPORT_CHARS: usize = 1500;
 /// The reply that reports nothing.
 pub const NOTHING_NEW: &str = "Nothing new.";
+/// What is reported for a run that ended with no reply: never taken for "nothing new" (PRO-492).
+pub const NO_REPLY: &str = "The run ended without a reply.";
 /// The start of a reply that reaches the owner even in quiet hours.
 pub const URGENT: &str = "URGENT:";
 /// The event the window raises a report's notification from.
@@ -338,6 +342,27 @@ pub(crate) fn bot_paused(automation: &Automation) -> bool {
     owner(automation).is_some_and(|owner| matches!(bot_store::get(&owner.id), Ok(Some(bot)) if bot.paused.is_some()))
 }
 
+/// Why a run of the duty may not go ahead now (its bot paused, gone, or Bots
+/// off), checked again right before and right after its prompt is sent: a
+/// pause that lands while the session opens sends nothing (PRO-492).
+pub fn held(automation: &Automation) -> Option<String> {
+    match bind(automation) {
+        Bound::Refused(why) => Some(why),
+        Bound::Ordinary | Bound::Duty(_) => None,
+    }
+}
+
+#[cfg(test)]
+pub static BEFORE_SEND: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// A test's moment between a duty run's session opening and its prompt being sent.
+pub fn before_send() {
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_SEND.lock().unwrap_or_else(|error| error.into_inner()).as_ref() {
+        hook();
+    }
+}
+
 /// The duty's owner and its bot, when that bot may work now.
 fn working_bot(automation: &Automation) -> std::result::Result<(DutyOwner, Bot), String> {
     if !super::enabled() {
@@ -443,7 +468,8 @@ fn time_out(app: &impl AutomationHost, automation: &Automation, run: &Automation
     if now.signed_duration_since(started) < chrono::TimeDelta::minutes(i64::from(limit)) {
         return false;
     }
-    automations::time_out_run(app, session, tab, &format!("Timed out: it ran for more than {limit} minutes, and its agent was stopped."));
+    // By the run's own id: a session deleted meanwhile still lets the run end, once (PRO-492).
+    automations::time_out_run(app, &automation.id, &run.run_id, &format!("Timed out: it ran for more than {limit} minutes, and its agent was stopped."));
     if let Ok(sessions) = app.sessions() {
         if let Err(error) = sessions.stop(session, tab) {
             log::warn!("duty {}: stop its timed-out run: {error:#}", automation.id);
@@ -639,10 +665,11 @@ pub fn prompt(automation: &Automation, run: &AutomationRun, prompt: String) -> R
     Ok(text)
 }
 
-/// Whether a reply says there is nothing to report.
+/// Whether a reply says there is nothing to report. An empty reply does not:
+/// the run said nothing, which is reported as such ([`NO_REPLY`]).
 fn nothing_new(text: &str) -> bool {
     let text = text.trim().trim_end_matches('.').trim();
-    text.is_empty() || text.eq_ignore_ascii_case("nothing new")
+    text.eq_ignore_ascii_case("nothing new")
 }
 
 fn is_urgent(text: &str) -> bool {
@@ -693,10 +720,12 @@ fn note_in_home_chat(app: &impl AutomationHost, bot_id: &str, text: &str) -> Opt
     }
 }
 
-/// A duty's run ended with its turn: report it where the duty says. A reply
-/// of nothing new tells nobody. A failure is noted in the home chat (the
-/// window already notifies every failed automation run). The run records
-/// what was reported, to whom, and whether the owner was notified.
+/// A duty's run ended: report it where the duty says. A reply of nothing new
+/// tells nobody; no reply at all is reported as [`NO_REPLY`]. A failure (its
+/// agent's, its first check's, or a start that did not happen) is noted and
+/// notified as a report is, outside quiet hours only: the window does not
+/// notify a duty's failure itself (PRO-492). The run records what was
+/// reported, to whom, and whether the owner was notified.
 pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     // With Bots off an ordinary automation's ending reads nothing more.
     if !super::enabled_cached() {
@@ -711,7 +740,7 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
         super::builtins::ended(kind, &bot, run);
     }
     let (text, failed) = match run.status {
-        AutomationRunStatus::Completed => (run.final_message.clone().unwrap_or_default(), false),
+        AutomationRunStatus::Completed => (run.final_message.clone().filter(|text| !text.trim().is_empty()).unwrap_or_else(|| NO_REPLY.into()), false),
         AutomationRunStatus::Failed | AutomationRunStatus::TimedOut => (run.error.clone().unwrap_or_else(|| "The run did not finish.".into()), true),
         _ => return,
     };
@@ -743,7 +772,8 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     }
     // During quiet hours only an urgent report reaches the owner; one for the lead reaches them only when urgent.
     // A built-in's report is kept in the home chat and tells no one unless it is urgent: its suggestions are on the Home tab.
-    let notify = !failed && (urgent || (lead.is_none() && !quiet && builtin.is_none()));
+    // A failure reaches the owner, wherever the report goes, outside quiet hours.
+    let notify = if failed { !quiet } else { urgent || (lead.is_none() && !quiet && builtin.is_none()) };
     let record = json!({"reportedTo": to, "urgent": urgent, "quiet": quiet, "notified": notify, "note": noted});
     if let Err(error) = automations::amend_run(app, &automation.id, &run.run_id, |run| {
         run.unknown.insert(RUN_KEY.into(), record);
@@ -753,7 +783,7 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     if notify {
         app.sink().emit(REPORT_EVENT, &json!({
             "botId": bot.id, "botName": bot.name, "dutyId": automation.id, "dutyName": automation.name,
-            "runId": run.run_id, "sessionId": run.session_id, "tabId": run.tab_id, "text": body, "urgent": urgent,
+            "runId": run.run_id, "sessionId": run.session_id, "tabId": run.tab_id, "text": body, "urgent": urgent, "failed": failed,
         }));
     }
 }
@@ -985,9 +1015,10 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, mut inpu
         None => automation_store::insert(automation)?,
     };
     // A wake added, removed or reading something else starts from now (`docs/AUTOMATION-SOURCES.md`).
-    automations::sources::saved(&saved.id, existing.and_then(|existing| existing.event_trigger.as_ref()), saved.event_trigger.as_ref())?;
-    // Off now, or on where it was off (or new): it starts from then, whatever a poll has had the chance to do.
-    if !saved.enabled || existing.is_none_or(|existing| !existing.enabled) {
+    let restarted = automations::sources::saved(&saved.id, existing.and_then(|existing| existing.event_trigger.as_ref()), saved.event_trigger.as_ref())?;
+    // Off now, on where it was off (or new), or on with a wake that reads something else: it starts from then,
+    // whatever a poll has had the chance to do, its bot paused or not (PRO-503).
+    if !saved.enabled || existing.is_none_or(|existing| !existing.enabled) || restarted {
         automations::sources::switched(&saved, saved.enabled)?;
     }
     announce(sink);
@@ -1050,6 +1081,27 @@ fn switch(sink: &dyn EventSink, duty: &Automation, on: bool) -> Result<Automatio
     Ok(saved)
 }
 
+/// Switch off a duty of `bot` named by its id or its name (any letter case),
+/// for `terminalx bots duty-off` (PRO-492). Switching off gives the bot
+/// nothing, so its own sessions may do it; a name two duties share is refused.
+pub fn switch_off_named(sink: &dyn EventSink, bot: &Bot, selector: &str) -> Result<Automation> {
+    super::require_enabled()?;
+    let selector = selector.trim();
+    let duties = duties_of(&bot.id)?;
+    let duty = match duties.iter().find(|duty| duty.id == selector) {
+        Some(duty) => duty.clone(),
+        None => {
+            let named: Vec<&Automation> = duties.iter().filter(|duty| duty.name.trim().eq_ignore_ascii_case(selector)).collect();
+            match named.as_slice() {
+                [duty] => (*duty).clone(),
+                [] => return Err(refused(format!("{} has no duty {selector}.", bot.name))),
+                _ => return Err(refused(format!("{} has {} duties named {selector}: name one by its id.", bot.name, named.len()))),
+            }
+        }
+    };
+    switch(sink, &duty, false)
+}
+
 /// The owner's time zone: this computer's, UTC when it cannot be told.
 pub(crate) fn local_timezone() -> String {
     let known = |name: &str| name.parse::<chrono_tz::Tz>().is_ok();
@@ -1085,6 +1137,7 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
                 }),
                 poll_interval_minutes: 1,
                 max_runs_per_tick: 1,
+                max_runs_per_day: crate::automations::sources::RUNS_PER_DAY,
             })),
             DutyWake::Github { .. } | DutyWake::Linear { .. } | DutyWake::Message => continue,
         };

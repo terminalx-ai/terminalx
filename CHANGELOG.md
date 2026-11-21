@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Automations: an automation that runs on a Linear issue or a pull request
+  starts at most 48 runs in any 24 hours, across everything it wakes on, so a
+  chain of runs that each make the next event stops there. The editor shows
+  "Runs a day, at most" (1 to 1000) beside "New runs per tick", saved per
+  automation; ones saved before read as 48. Past it, what was read waits and
+  the status says until when (PRO-490). A pull request held by its own rate
+  limit stays held on a tick the per-tick cap filled, and lets go once it is
+  closed; a run's last head is written with its ending.
+- Bots (experimental): a bot switches off one of its own duties from its own
+  session with `terminalx bots duty-off "<duty>"`. A failed duty run reports
+  as the duty does and keeps to the bot's quiet hours; a run with no reply is
+  reported, not dropped; a pause while a run's session opens sends it nothing;
+  the duty page shows the model its runs use and stays open after Save or
+  Duplicate (PRO-492). A comment edited to add a mention wakes a duty, a
+  hand-off's work chat counts the passes it was handed with, and a duty's wake
+  changed while its bot is paused starts at the save (PRO-503).
 - Bots (experimental): a lead bot plans and starts orchestration runs. It leads
   a run from a session it starts in the project, then `terminalx bots items
   plan` asks "Approve the plan and start the run?" with a run plan card in its

@@ -8,7 +8,8 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => {};
   }),
 }));
-vi.mock("@/lib/notify", () => ({ noteAutomationFailure: vi.fn() }));
+const noteAutomationFailure = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/notify", () => ({ noteAutomationFailure }));
 const runNow = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", () => ({
   automationsApi: { list: vi.fn(async () => []), issueStates: vi.fn(async () => []), runNow },
@@ -48,5 +49,20 @@ describe("automation run history", () => {
     });
     await runAutomationNow("a1");
     expect(getAutomationStore().runs.a1.some((value) => value.runId === "folded")).toBe(false);
+  });
+});
+
+describe("a failed run's notice (PRO-492)", () => {
+  it("is raised for an automation, and left to a bot's duty, which reports within its bot's quiet hours", async () => {
+    await bootAutomations();
+    handlers.get("automations_changed")!({ payload: [
+      { id: "a1", name: "Nightly" },
+      { id: "d1", name: "Watch CI", bot: { id: "b1", reportsTo: "terminalx" } },
+    ] });
+    noteAutomationFailure.mockClear();
+    handlers.get("automation_run")!({ payload: { ...run("r1", 1), status: "failed" } });
+    expect(noteAutomationFailure).toHaveBeenCalledTimes(1);
+    handlers.get("automation_run")!({ payload: { ...run("r2", 1), automationId: "d1", status: "failed" } });
+    expect(noteAutomationFailure).toHaveBeenCalledTimes(1);
   });
 });

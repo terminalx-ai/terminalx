@@ -56,6 +56,20 @@ pub struct AutomationEventTrigger {
     pub poll_interval_minutes: u32,
     #[serde(default = "super::default_max_runs")]
     pub max_runs_per_tick: u32,
+    /// The most runs the trigger starts in any day, from all it reads (PRO-490): a run that makes what wakes the
+    /// next (a pull request that opens another, an issue that files another) is bounded across subjects too.
+    /// An automation saved before it reads as [`RUNS_PER_DAY`].
+    #[serde(default = "default_runs_per_day")]
+    pub max_runs_per_day: u32,
+}
+
+/// Runs an event trigger starts in a day unless its automation says otherwise: as many as a bot's duty (`bots::wakes::WAKES_PER_DAY`).
+pub const RUNS_PER_DAY: u32 = 48;
+/// The most an automation may be set to.
+pub const MAX_RUNS_PER_DAY: u32 = 1000;
+
+fn default_runs_per_day() -> u32 {
+    RUNS_PER_DAY
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,15 +107,18 @@ impl Serialize for AutomationEventSource {
 impl<'de> Deserialize<'de> for AutomationEventSource {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
+        // A known kind with a field this build cannot read (a value a newer build wrote) is kept as written and
+        // never polled, as an unknown kind is: one such trigger never fails the whole automations file (PRO-503).
         if let Some(source) = crate::bots::wakes::BotSource::from_value(value.clone()) {
-            return source.map(Self::Bot).map_err(serde::de::Error::custom);
+            return Ok(source.map_or_else(|_| Self::Unsupported(value), Self::Bot));
         }
         if !value.get("kind").and_then(Value::as_str).is_some_and(|kind| KNOWN_KINDS.contains(&kind)) {
             return Ok(Self::Unsupported(value));
         }
-        Ok(match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
-            KnownSource::LinearIssue(source) => Self::LinearIssue(source),
-            KnownSource::GithubPullRequest(source) => Self::GithubPullRequest(source),
+        Ok(match serde_json::from_value(value.clone()) {
+            Ok(KnownSource::LinearIssue(source)) => Self::LinearIssue(source),
+            Ok(KnownSource::GithubPullRequest(source)) => Self::GithubPullRequest(source),
+            Err(_) => Self::Unsupported(value),
         })
     }
 }
@@ -252,6 +269,13 @@ pub(super) fn trigger_after_save(given: Option<Option<AutomationEventTrigger>>, 
     }
 }
 
+/// Whether `source` is of a kind this build reads that it could not read: kept
+/// as it is when it was stored so, never taken in new from a save (PRO-503).
+pub(crate) fn unreadable_known(source: &AutomationEventSource) -> bool {
+    let AutomationEventSource::Unsupported(value) = source else { return false };
+    value.get("kind").and_then(Value::as_str).is_some_and(|kind| KNOWN_KINDS.contains(&kind) || crate::bots::wakes::KINDS.contains(&kind))
+}
+
 /// The `next_run_at` an event automation is saved with. This build never
 /// reads it; a build without event triggers takes the automation for a
 /// schedule and must never find it due.
@@ -287,6 +311,9 @@ pub(super) fn validate(trigger: &AutomationEventTrigger, has_issue_trigger: bool
     }
     if trigger.max_runs_per_tick < 1 {
         bail!("Runs per tick must be at least one.");
+    }
+    if !(1..=MAX_RUNS_PER_DAY).contains(&trigger.max_runs_per_day) {
+        bail!("Runs a day must be from 1 to {MAX_RUNS_PER_DAY}.");
     }
     if workspace != AutomationWorkspace::NewWorktree {
         bail!("Event automations need a new worktree per run.");
@@ -395,10 +422,11 @@ fn fingerprint(source: &AutomationEventSource) -> String {
 /// After a definition is saved: a trigger added, removed or reading something
 /// else starts afresh, so a trigger switched back on never replays what
 /// happened while it was off. Any other save retries a failing read at once.
-pub(crate) fn saved(automation_id: &str, before: Option<&AutomationEventTrigger>, after: Option<&AutomationEventTrigger>) -> Result<()> {
+/// Whether it started afresh.
+pub(crate) fn saved(automation_id: &str, before: Option<&AutomationEventTrigger>, after: Option<&AutomationEventTrigger>) -> Result<bool> {
     let print = |trigger: Option<&AutomationEventTrigger>| trigger.map(|trigger| fingerprint(&trigger.source));
     if print(before) != print(after) {
-        return clear_seen(automation_id);
+        return clear_seen(automation_id).map(|_| true);
     }
     if let Ok(Some(mut state)) = load_seen(automation_id) {
         if state.retry_after.is_some() || state.last_poll_error.is_some() {
@@ -408,7 +436,7 @@ pub(crate) fn saved(automation_id: &str, before: Option<&AutomationEventTrigger>
             save_seen(automation_id, &state)?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// A duty switched off or on (PRO-472), by the owner, whether or not its bot
@@ -922,13 +950,14 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                 if waiting.is_empty() {
                     continue;
                 }
-                if out.wakes.len() >= context.cap {
-                    out.pending.push(pr.updated_at.clone());
-                    continue;
-                }
+                // The rate limit before the per-tick cap: a pull request it holds stays held on a tick the cap filled (PRO-490).
                 if let Some(resume) = resumes_at(state.pr_wakes.get(&subject).map_or(&[][..], Vec::as_slice), context.now) {
                     // Held, unseen: it wakes when the window opens, on what it shows then.
                     out.held.push((pr.number, resume));
+                    out.pending.push(pr.updated_at.clone());
+                    continue;
+                }
+                if out.wakes.len() >= context.cap {
                     out.pending.push(pr.updated_at.clone());
                     continue;
                 }
@@ -1048,6 +1077,8 @@ fn still_current(automation: &Automation) -> bool {
 
 /// The key under which a duty's wakes, from every source, are counted and held (PRO-472).
 const DUTY_SUBJECT: &str = "duty";
+/// The key under which an ordinary event automation's runs, from every subject, are counted and held for its daily cap (PRO-490).
+const DAY_SUBJECT: &str = "automation";
 
 fn when(resume: &str) -> String {
     parse(Some(resume)).map_or_else(|| resume.to_owned(), |at| at.format("%Y-%m-%d %H:%M UTC").to_string())
@@ -1056,7 +1087,7 @@ fn when(resume: &str) -> String {
 fn duty_notice(held: &BTreeMap<String, String>) -> Option<String> {
     held.get(DUTY_SUBJECT).map(|resume| {
         format!(
-            "Holding its events until {}: it woke more than {} times in an hour or {} in a day. They are kept and wake it then.",
+            "Holding its events until {}: it woke {} times in an hour or {} in a day. They are kept and wake it then.",
             when(resume),
             crate::bots::wakes::WAKES_PER_HOUR,
             crate::bots::wakes::WAKES_PER_DAY,
@@ -1084,17 +1115,23 @@ fn prune_seen(state: &mut SourceSeen, unseen: Option<DateTime<Utc>>) {
     }
 }
 
+fn day_notice(held: &BTreeMap<String, String>, cap: u32) -> Option<String> {
+    held.get(DAY_SUBJECT).map(|resume| {
+        format!("Holding what it read until {}: it started {cap} runs in a day, the most this automation starts. They are kept and start then.", when(resume))
+    })
+}
+
 fn held_notice(held: &BTreeMap<String, String>) -> Option<String> {
     let list = held
         .iter()
-        .filter(|(subject, _)| subject.as_str() != DUTY_SUBJECT)
+        .filter(|(subject, _)| subject.starts_with("pr:"))
         .map(|(subject, resume)| {
             let when = parse(Some(resume)).map_or_else(|| resume.clone(), |at| at.format("%Y-%m-%d %H:%M UTC").to_string());
             format!("#{} until {when}", subject.trim_start_matches("pr:"))
         })
         .collect::<Vec<_>>();
     (!list.is_empty()).then(|| {
-        format!("Holding pull request {} (more than {WAKES_PER_HOUR} runs in an hour or {WAKES_PER_DAY} in a day); its events wake then.", list.join(", "))
+        format!("Holding pull request {} ({WAKES_PER_HOUR} runs in an hour or {WAKES_PER_DAY} in a day); its events wake then.", list.join(", "))
     })
 }
 
@@ -1219,10 +1256,39 @@ fn poll<G: Into<Gated>>(
             duty_held = true;
         }
     }
-    // The rate limit's holds: those read now as planned, the others kept until they resume.
+    // An ordinary event automation starts at most so many runs a day from all it reads (PRO-490): past that what
+    // it read waits, unseen, and the status says until when. A duty is bounded by its own limit above.
+    let mut day_held = false;
+    if !duty {
+        state.held.retain(|subject, resume| subject != DAY_SUBJECT || parse(Some(resume)).is_some_and(|resume| resume > now));
+        let cap = trigger.max_runs_per_day.max(1) as usize;
+        let mut started: Vec<String> = state.pr_wakes.get(DAY_SUBJECT).cloned().unwrap_or_default();
+        started.retain(|at| parse(Some(at)).is_some_and(|at| now - at < chrono::TimeDelta::days(1)));
+        let room = cap.saturating_sub(started.len());
+        if plan.wakes.len() > room {
+            plan.wakes.truncate(room);
+            started.extend(std::iter::repeat_n(stamp(now), room));
+            if let Some(resume) = limited(&started, now, usize::MAX, cap) {
+                state.held.insert(DAY_SUBJECT.into(), stamp(resume));
+            }
+            day_held = true;
+        } else {
+            state.held.remove(DAY_SUBJECT);
+        }
+    }
+    // The rate limit's holds: those read now as planned, the others kept until they resume. A read that covered
+    // every open pull request (no bound) shows each one still held, since what is held stays unseen and the read
+    // pages back to it: one it no longer shows was closed or stopped matching, and its hold goes (PRO-490).
     if let Snapshot::PullRequests { pulls, .. } = &snapshot {
         let read_now: BTreeSet<String> = pulls.iter().map(|pr| pr_subject(pr.number)).collect();
-        state.held.retain(|subject, resume| !read_now.contains(subject) && parse(Some(resume)).is_some_and(|resume| resume > now));
+        let complete = bound.is_none();
+        state.held.retain(|subject, resume| {
+            let current = parse(Some(resume)).is_some_and(|resume| resume > now);
+            if !subject.starts_with("pr:") {
+                return current;
+            }
+            current && !read_now.contains(subject) && !complete
+        });
         for (number, resume) in &plan.held {
             state.held.insert(pr_subject(*number), stamp(*resume));
         }
@@ -1237,6 +1303,7 @@ fn poll<G: Into<Gated>>(
         )),
         held_notice(&state.held),
         duty_notice(&state.held),
+        day_notice(&state.held, trigger.max_runs_per_day.max(1)),
         (plan.looped > 0).then(|| format!(
             "{} message{} had passed between bots {} times and woke nobody, so two bots cannot keep waking each other.",
             plan.looped,
@@ -1248,7 +1315,22 @@ fn poll<G: Into<Gated>>(
     .flatten()
     .collect();
     state.notice = (!notices.is_empty()).then(|| notices.join(" "));
-    let gated = if plan.wakes.is_empty() { Gated::Go } else { gate(&plan.wakes)?.into() };
+    let gated = if plan.wakes.is_empty() {
+        Gated::Go
+    } else {
+        match gate(&plan.wakes) {
+            Ok(gated) => gated.into(),
+            Err(error) => {
+                // A store error in the first check's gate (PRO-490): the poll is noted, with everything read left
+                // unseen, so the next read is at the next interval and not on every tick.
+                if still_current(automation) {
+                    save_seen(&automation.id, &state)?;
+                    emit_state(app, &automation.id, &state);
+                }
+                return Err(error);
+            }
+        }
+    };
     if gated == Gated::Quiet && duty {
         // A duty's check found nothing new in what it was given (PRO-472): those
         // events are seen, so the one behind them is read and checked next.
@@ -1287,8 +1369,8 @@ fn poll<G: Into<Gated>>(
     state.initialized = true;
     // The next read pages back to the oldest match left for later, so none is starved.
     let oldest_pending = plan.pending.iter().filter_map(|at| parse(Some(at))).min();
-    if !duty_held {
-        // Held back by the duty's limit: the next read pages back as far as this one did.
+    if !duty_held && !day_held {
+        // Held back by the duty's limit or the day's cap: the next read pages back as far as this one did.
         let next = match oldest_pending {
             Some(oldest) if oldest < now => oldest - chrono::TimeDelta::seconds(1),
             _ => now,
@@ -1341,6 +1423,8 @@ fn poll<G: Into<Gated>>(
         }
         if duty {
             state.pr_wakes.entry(DUTY_SUBJECT.into()).or_default().push(at.clone());
+        } else {
+            state.pr_wakes.entry(DAY_SUBJECT.into()).or_default().push(at.clone());
         }
         save_seen(&automation.id, &state)?;
         start(wake, run)?;
@@ -1542,30 +1626,26 @@ pub(super) fn wake_events(automation: &Automation, wakes: &[Wake]) -> Value {
 /// When a pull request run ends: keep the head it left, its worktree's HEAD,
 /// so that head does not wake the automation again. Nothing else counts as
 /// the run's: a push by the same login from elsewhere (the owner's own) wakes.
-pub(super) fn run_ended(automation_id: &str, run_id: &str, cwd: &Path) {
-    let Some(run) = automation_store::list_runs(automation_id).ok().and_then(|runs| runs.into_iter().find(|run| run.run_id == run_id)) else {
-        return;
-    };
-    let Some(number) = run.unknown.get(PULL_REQUEST).and_then(|pr| pr["number"].as_i64()) else {
-        return;
-    };
-    if let Ok(head) = crate::git::run(cwd, &["rev-parse", "HEAD"]) {
-        add_left_head(automation_id, run_id, &format!("{number}@{}", head.trim()));
-    }
+/// The head a pull request run leaves (`<number>@<sha>`), read from its folder
+/// before its final transition, which writes it in the same update
+/// ([`keep_left_head`], PRO-490): no poll sees the run ended without it, and a
+/// run ended by recovery after a restart records it too. `None` for any other
+/// run, and when the folder has no HEAD to read.
+pub(super) fn left_head(automation_id: &str, run_id: &str, cwd: Option<&Path>) -> Option<String> {
+    let run = automation_store::list_runs(automation_id).ok()?.into_iter().find(|run| run.run_id == run_id)?;
+    let number = run.unknown.get(PULL_REQUEST)?["number"].as_i64()?;
+    let head = crate::git::run(cwd?, &["rev-parse", "HEAD"]).ok()?;
+    Some(format!("{number}@{}", head.trim()))
 }
 
-fn add_left_head(automation_id: &str, run_id: &str, head: &str) {
-    let result = automation_store::replace_run(automation_id, run_id, |run| {
-        let heads = run.unknown.entry(LEFT_HEADS.to_string()).or_insert_with(|| json!([]));
-        if let Some(list) = heads.as_array_mut() {
-            if !list.iter().any(|value| value.as_str() == Some(head)) {
-                list.push(json!(head));
-            }
+/// Add `head` (from [`left_head`]) to the heads `run` left.
+pub(super) fn keep_left_head(run: &mut AutomationRun, head: Option<&str>) {
+    let Some(head) = head else { return };
+    let heads = run.unknown.entry(LEFT_HEADS.to_string()).or_insert_with(|| json!([]));
+    if let Some(list) = heads.as_array_mut() {
+        if !list.iter().any(|value| value.as_str() == Some(head)) {
+            list.push(json!(head));
         }
-        Ok(())
-    });
-    if let Err(error) = result {
-        log::warn!("automation {automation_id}: keep the head a run left: {error:#}");
     }
 }
 

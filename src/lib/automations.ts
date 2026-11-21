@@ -30,7 +30,8 @@ function upsertRun(run: AutomationRun) {
   set({ runs: { ...state.runs, [run.automationId]: next } });
   if (run.status === "failed" && previous?.status !== "failed") {
     const automation = state.automations.find((value) => value.id === run.automationId);
-    if (automation) noteAutomationFailure(automation.name, run);
+    // A bot's duty reports its own failure, within its bot's quiet hours (`bot_duty_report`, PRO-492).
+    if (automation && !automation.bot) noteAutomationFailure(automation.name, run);
   }
 }
 

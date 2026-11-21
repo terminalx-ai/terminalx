@@ -1,7 +1,7 @@
 //! Saved prompts and the times at which they should become ordinary sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -356,6 +356,11 @@ pub fn definition_from_input(
         }
     }
     let event_trigger = sources::trigger_after_save(input.event_trigger.clone(), existing, input.issue_trigger.is_some());
+    if let Some(trigger) = event_trigger.as_ref().filter(|trigger| sources::unreadable_known(&trigger.source)) {
+        if existing.and_then(|existing| existing.event_trigger.as_ref()).is_none_or(|stored| stored.source != trigger.source) {
+            bail!("This trigger's settings cannot be read. Check each field and save again.");
+        }
+    }
     if let Some(trigger) = event_trigger.as_ref() {
         sources::validate(trigger, input.issue_trigger.is_some(), input.workspace)?;
     }
@@ -822,7 +827,10 @@ fn end_pending(app: &impl AutomationHost, automation_id: &str, run: AutomationRu
 /// A scheduled time that passes without a run, as one history row: the same
 /// reason again counts as a repeat of the newest row (as missed runs do).
 pub(crate) fn record_skipped(app: &impl AutomationHost, automation: &Automation, scheduled_for: DateTime<Utc>, status: AutomationRunStatus, message: &str) -> Result<()> {
-    if let Some(previous) = automation_store::list_runs(&automation.id)?.into_iter().next() {
+    let runs = automation_store::list_runs(&automation.id)?;
+    // A run still going stays the last outcome: a time skipped beside it does not say it was cancelled (PRO-492).
+    let going = runs.iter().any(|run| !run.status.is_terminal());
+    if let Some(previous) = runs.into_iter().next() {
         if previous.status == status && previous.session_id.is_none() && previous.error.as_deref() == Some(message) {
             let run = automation_store::replace_run(&automation.id, &previous.run_id, |run| {
                 run.repeat_count += 1;
@@ -837,8 +845,10 @@ pub(crate) fn record_skipped(app: &impl AutomationHost, automation: &Automation,
     run.error = Some(message.into());
     let run = automation_store::insert_run(run)?;
     emit_run(app, &run);
-    let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
-    update_summary(app, &automation.id, run.status, &ended_at);
+    if !going {
+        let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+        update_summary(app, &automation.id, run.status, &ended_at);
+    }
     Ok(())
 }
 
@@ -1043,6 +1053,8 @@ fn start_run(
         }
     }
 
+    // A duty whose bot was paused (or Bots switched off) while its session opened: why it sent nothing, or stopped.
+    let mut held: Option<(index::SessionEntry, String, bool)> = None;
     let result = (|| -> Result<()> {
         let available = if duty {
             crate::bots::duties::agent_ready(&automation.harness)
@@ -1065,7 +1077,17 @@ fn start_run(
             emit_run(app, &run);
             crate::store::environment::prepare_unattended(&entry.cwd, None)?;
             let prompt = crate::bots::duties::prompt(automation, &run, prompt)?;
+            // Paused once more just before the send, and just after it: a pause that landed while the session
+            // opened found no turn to stop, so none starts here, or the one that just started stops (PRO-492).
+            crate::bots::duties::before_send();
+            if let Some(why) = crate::bots::duties::held(automation) {
+                held = Some((entry, why, false));
+                return Ok(());
+            }
             app.sessions()?.send(&entry.id, &tab.id, prompt, Vec::new())?;
+            if let Some(why) = crate::bots::duties::held(automation) {
+                held = Some((entry, why, true));
+            }
             return Ok(());
         }
         let cwd = match automation.workspace {
@@ -1135,6 +1157,17 @@ fn start_run(
         Ok(())
     })();
 
+    if let Some((entry, why, sent)) = held {
+        let session = entry.id.clone();
+        end_run(app, &automation.id, &run.run_id, Some(entry), &why, AutomationRunStatus::Cancelled);
+        // Ended first, so the stop's own ending finds it ended and changes nothing.
+        if let (true, Some(tab), Ok(manager)) = (sent, run.tab_id.clone(), app.sessions()) {
+            if let Err(error) = manager.stop(&session, &tab) {
+                log::warn!("duty {}: stop the run its bot's pause held: {error:#}", automation.id);
+            }
+        }
+        return Ok(automation_store::list_runs(&automation.id)?.into_iter().find(|value| value.run_id == run.run_id).unwrap_or(run));
+    }
     if let Err(error) = result {
         let message = format!("{error:#}");
         run = automation_store::replace_run(&automation.id, &run.run_id, |value| {
@@ -1150,6 +1183,8 @@ fn start_run(
         emit_run(app, &run);
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &automation.id, run.status, &ended_at);
+        // A duty's failure is reported as its duty says, within its bot's quiet hours (PRO-492).
+        crate::bots::duties::ended(app, &run);
     }
     Ok(run)
 }
@@ -1558,6 +1593,7 @@ fn finish_from_hook(
         return;
     };
     let changed_files = changed_file_count(&entry);
+    let head = sources::left_head(&stamp.id, &stamp.run_id, Some(Path::new(&entry.cwd)));
     let mut transitioned = false;
     // The tab lock holds turn admission through the durable transition. A
     // check made before taking it is not enough: another turn can open then.
@@ -1572,6 +1608,7 @@ fn finish_from_hook(
             run.final_message = final_message.clone();
             run.deferred_completion = None;
             run.changed_files = changed_files;
+            sources::keep_left_head(run, head.as_deref());
         }
         Ok(())
     }));
@@ -1599,7 +1636,6 @@ fn finish_from_hook(
         update_summary(app, &stamp.id, run.status, &ended_at);
         archive_finished_run(app, &run);
         crate::bots::duties::ended(app, &run);
-        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
         }
@@ -1680,9 +1716,17 @@ pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Failed);
 }
 
-/// End a run that has gone on past its time (a bot's duty, PRO-471). Its agent is stopped by the caller.
-pub(crate) fn time_out_run(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
-    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::TimedOut);
+/// End a run that has gone on past its time (a bot's duty, PRO-471), found by
+/// its own id: its session may be gone (deleted by hand), and the run must
+/// still end, or every tick would find it going and time it out again
+/// (PRO-492). Its agent is stopped by the caller.
+pub(crate) fn time_out_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, message: &str) {
+    let entry = automation_store::list_runs(automation_id)
+        .ok()
+        .and_then(|runs| runs.into_iter().find(|run| run.run_id == run_id))
+        .and_then(|run| run.session_id)
+        .and_then(|session| index::get(&session).ok());
+    end_run(app, automation_id, run_id, entry, message, AutomationRunStatus::TimedOut);
 }
 
 pub fn cancel_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
@@ -1693,9 +1737,15 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
+    end_run(app, &stamp.id, &stamp.run_id, Some(entry), message, status);
+}
+
+/// End run `run_id` of `automation_id` with `status`, when it is still going. `entry` is its session, when it has one.
+pub(crate) fn end_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, entry: Option<index::SessionEntry>, message: &str, status: AutomationRunStatus) {
     let message = message.to_string();
+    let head = sources::left_head(automation_id, run_id, entry.as_ref().map(|entry| Path::new(&entry.cwd)));
     let mut transitioned = false;
-    let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+    let Ok(run) = automation_store::replace_run(automation_id, run_id, |run| {
         if matches!(
             run.status,
             AutomationRunStatus::Pending | AutomationRunStatus::Running
@@ -1705,6 +1755,7 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
             run.deferred_completion = None;
             run.ended_at = Some(index::now());
             run.error = Some(message);
+            sources::keep_left_head(run, head.as_deref());
         }
         Ok(())
     }) else {
@@ -1713,11 +1764,10 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     emit_run(app, &run);
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
-        update_summary(app, &stamp.id, run.status, &ended_at);
+        update_summary(app, automation_id, run.status, &ended_at);
         crate::bots::duties::ended(app, &run);
-        sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
-            spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, true);
+            spawn_issue_report(app, entry, automation_id.to_string(), run_id.to_string(), true);
         }
     }
 }
@@ -2037,6 +2087,9 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
         let ended = |run: &AutomationRun| !run.status.is_terminal() && !run.session_id.as_ref().is_some_and(|session| going_on.contains(session));
         for open in runs.into_iter().filter(ended) {
             let mut transitioned = false;
+            // The head its pull request run left, from its session's folder, written with the ending (PRO-490).
+            let folder = open.session_id.as_deref().and_then(|id| index::get(id).ok()).map(|entry| PathBuf::from(entry.cwd));
+            let head = sources::left_head(&automation.id, &open.run_id, folder.as_deref());
             let Ok(run) = automation_store::replace_run(&automation.id, &open.run_id, |run| {
                 if run.status.is_terminal() { return Ok(()); }
                 transitioned = true;
@@ -2044,6 +2097,7 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
                 run.deferred_completion = None;
                 run.ended_at = Some(index::now());
                 run.error = Some("The app closed before this automation run finished.".into());
+                sources::keep_left_head(run, head.as_deref());
                 Ok(())
             }) else {
                 continue;
@@ -2052,6 +2106,7 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
             emit_run(app, &run);
             let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
             update_summary(app, &automation.id, run.status, &ended_at);
+            crate::bots::duties::ended(app, &run);
             if run.issue.is_some() {
                 let entry = run.session_id.as_deref().and_then(|id| index::get(id).ok());
                 spawn_issue_report(
@@ -2498,6 +2553,46 @@ mod tests {
 
     fn end_host() -> EndHost {
         EndHost(Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(AtomicBool::new(false)), Arc::default(), Arc::new(AtomicBool::new(false)), Arc::default())
+    }
+
+    /// PRO-490: the head a pull request run leaves is written with its ending,
+    /// in the same update, whether its turn ended it, it failed, or recovery
+    /// after a restart did: no poll sees it ended without its head.
+    #[test]
+    fn a_pull_request_runs_head_is_written_with_its_ending() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@example.com"]).args(args).current_dir(repo.path()).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let head = format!("7@{}", git(&["rev-parse", "HEAD"]));
+        for ending in ["turn", "failure", "recovery"] {
+            let (run, session, tab) = running_run(&automation);
+            automation_store::replace_run(&automation.id, &run.run_id, |value| {
+                value.unknown.insert("pullRequest".into(), serde_json::json!({"number": 7}));
+                Ok(())
+            })
+            .unwrap();
+            index::update(|sessions| {
+                sessions.iter_mut().filter(|entry| entry.id == session).for_each(|entry| entry.cwd = repo.path().to_string_lossy().into_owned());
+                Ok(())
+            })
+            .unwrap();
+            match ending {
+                "turn" => complete_from_turn(&host, &session, &tab, Some("Reviewed.".into()), 0),
+                "failure" => fail_from_hook(&host, &session, &tab, "It broke."),
+                _ => recover_open_runs_except(&host, &std::collections::HashSet::new()),
+            }
+            let ended = automation_store::list_runs(&automation.id).unwrap().into_iter().find(|value| value.run_id == run.run_id).unwrap();
+            assert!(ended.status.is_terminal(), "{ending}: {ended:?}");
+            assert_eq!(ended.unknown["leftHeads"], serde_json::json!([head]), "{ending}");
+        }
     }
 
     #[test]

@@ -487,10 +487,13 @@ fn quiet_hours_cross_midnight_and_a_reply_is_read_as_people_write_it() {
     let lunch = QuietHours { from: "12:00".into(), to: "13:00".into(), unknown: BTreeMap::new() };
     assert!(lunch.contains(12 * 60 + 30) && !lunch.contains(13 * 60));
     assert!(!QuietHours { from: "late".into(), to: "07:00".into(), unknown: BTreeMap::new() }.contains(0));
-    for quiet in ["Nothing new.", "nothing new", "  Nothing New  ", ""] {
+    for quiet in ["Nothing new.", "nothing new", "  Nothing New  "] {
         assert!(nothing_new(quiet), "{quiet:?}");
     }
-    assert!(!nothing_new("Nothing new on main, but lint is slow."));
+    // No reply at all is not "nothing new": it is reported (PRO-492).
+    for said in ["Nothing new on main, but lint is slow.", "", "  \n "] {
+        assert!(!nothing_new(said), "{said:?}");
+    }
     assert!(is_urgent("urgent: main is red") && is_urgent("  URGENT: x") && !is_urgent("Not urgent: x"));
     assert_eq!(capped(&format!("a\u{7}b\n{}", "x".repeat(2000))).chars().count(), REPORT_CHARS + 1);
     assert!(note_path("bot", "../escape").is_err());
@@ -611,12 +614,14 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     let duty = rig.add(&bot, Some("pwd -P"), false);
     std::fs::create_dir_all(root.join(CHECKS_DIR)).unwrap();
     let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(&duty.id));
+    // The link, and what is asserted of it, only where links are made (PRO-492).
     #[cfg(unix)]
     std::os::unix::fs::symlink(&home, root.join(CHECKS_DIR).join(&duty.id)).unwrap();
     run_now(&rig, &bot, &duty);
     let run = wait_run(&duty, |run| run.precheck.is_some());
     let printed = run.precheck.as_ref().unwrap().stdout_tail.trim().to_owned();
     assert_eq!(printed, canonical(&root.join(CHECKS_DIR).join(&duty.id)));
+    #[cfg(unix)]
     assert!(home.is_dir() && home.join("check.sh").is_file(), "the link was removed, not what it pointed at");
     // Try it on a saved duty uses a folder apart: a run's check running at the same moment keeps its own.
     std::fs::write(root.join(CHECKS_DIR).join(&duty.id).join("run.marker"), "").unwrap();
@@ -624,14 +629,16 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
     assert_eq!(trial["result"]["stdoutTail"].as_str().unwrap().trim(), canonical(&root.join(CHECKS_DIR).join(format!("try-{}", duty.id))));
     assert!(root.join(CHECKS_DIR).join(&duty.id).join("run.marker").is_file());
     // A link or a file in place of the folder that holds them all: refused, never followed.
-    std::fs::remove_dir_all(root.join(CHECKS_DIR)).unwrap();
-    let elsewhere = tempfile::tempdir().unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(elsewhere.path(), root.join(CHECKS_DIR)).unwrap();
-    let refused = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap_err().to_string();
-    assert!(refused.contains("is not a folder"), "{refused}");
-    assert!(std::fs::read_dir(elsewhere.path()).unwrap().next().is_none(), "nothing was made through the link");
-    std::fs::remove_file(root.join(CHECKS_DIR)).unwrap();
+    {
+        std::fs::remove_dir_all(root.join(CHECKS_DIR)).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.join(CHECKS_DIR)).unwrap();
+        let refused = rig.bots("dutyTryCheck", json!({"id": bot.id, "precheck": {"command": "true", "timeoutSeconds": 5}})).unwrap_err().to_string();
+        assert!(refused.contains("is not a folder"), "{refused}");
+        assert!(std::fs::read_dir(elsewhere.path()).unwrap().next().is_none(), "nothing was made through the link");
+        std::fs::remove_file(root.join(CHECKS_DIR)).unwrap();
+    }
     // Not a bot's to ask: Try it needs a person, as a run does.
     assert!(crate::bots::enforce::needs_person("dutyTryCheck", &json!({})));
 }
@@ -661,6 +668,8 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
         let newest = runs(&duty).into_iter().next().unwrap();
         assert_eq!((newest.status, newest.error.as_deref(), newest.repeat_count), (AutomationRunStatus::Cancelled, Some(BUSY_SKIP), repeat));
         assert!(DateTime::parse_from_rfc3339(&automation_store::get(&duty.id).unwrap().next_run_at).unwrap() > Utc::now());
+        // Its last outcome is still the run going, not the skip beside it (PRO-492).
+        assert_ne!(automation_store::get(&duty.id).unwrap().last_outcome, Some(AutomationRunStatus::Cancelled));
     }
     assert_eq!(index::load().unwrap().len(), sessions);
     // Past its time: ended as timed out at the next tick, and the next wake may run.
@@ -742,4 +751,118 @@ fn a_bots_duties_go_with_it_even_when_their_copy_cannot_be_kept() {
     assert!(format!("{error:#}").contains("not all of its duties could be removed") || format!("{error:#}").contains("could not be kept"), "{error:#}");
     assert!(duties_of(&bot.id).unwrap().is_empty());
     assert!(automation_store::get(&duty.id).is_err());
+}
+
+/// PRO-492: a run past its time whose session was deleted (by hand, or with
+/// its project) still ends, once: the next tick does not time it out again.
+#[test]
+fn a_run_whose_session_is_gone_times_out_once() {
+    let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
+    let _ready = AgentReady::on();
+    let bot = rig.hire("cto", "Atlas");
+    let duty = rig.add(&bot, Some("echo found"), true);
+    run_now(&rig, &bot, &duty);
+    let run = wait_run(&duty, |run| run.session_id.is_some());
+    wait_sent(run.session_id.as_deref().unwrap());
+    let session = run.session_id.clone().unwrap();
+    index::update(|entries| {
+        entries.retain(|entry| entry.id != session);
+        Ok(())
+    })
+    .unwrap();
+    automation_store::replace_run(&duty.id, &run.run_id, |value| {
+        value.started_at = Some((Utc::now() - chrono::TimeDelta::minutes(i64::from(RUN_TIMEOUT_MINUTES) + 1)).to_rfc3339());
+        Ok(())
+    })
+    .unwrap();
+    crate::automations::evaluate(&rig.host()).unwrap();
+    let ended = runs(&duty).into_iter().find(|value| value.run_id == run.run_id).unwrap();
+    assert_eq!(ended.status, AutomationRunStatus::TimedOut, "{ended:?}");
+    let once = ended.ended_at.clone();
+    crate::automations::evaluate(&rig.host()).unwrap();
+    assert_eq!(runs(&duty).into_iter().find(|value| value.run_id == run.run_id).unwrap().ended_at, once, "not timed out again");
+}
+
+/// PRO-492: a run that ends with no reply is reported as such, never taken for "nothing new".
+#[test]
+fn a_run_with_no_reply_is_reported_not_dropped() {
+    let mut rig = rig();
+    let (_dir, _claude) = stand_in_claude();
+    let _ready = AgentReady::on();
+    let bot = rig.hire("watcher", "Argus");
+    let duty = rig.add(&bot, Some("echo found"), true);
+    for reply in [None, Some("   ".to_string())] {
+        run_now(&rig, &bot, &duty);
+        let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
+        wait_sent(started.session_id.as_deref().unwrap());
+        crate::automations::complete_from_turn(&rig.host(), started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), reply.clone(), 1);
+        let ended = wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
+        assert_eq!(ended.unknown[RUN_KEY]["reportedTo"], super::super::OWNER, "{reply:?}");
+        assert_eq!(ended.unknown[RUN_KEY]["notified"], true, "{reply:?}");
+    }
+    assert_eq!(status_lines(&rig.manager, &home_chat(&bot).id), [format!("Watch CI reported:\n{NO_REPLY}"), format!("Watch CI reported:\n{NO_REPLY}")]);
+    let reports = rig.named(REPORT_EVENT);
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0]["text"], NO_REPLY);
+}
+
+/// PRO-492: a pause that lands while a duty run's session opens sends it
+/// nothing: the run ends cancelled, and no turn runs, not even in plan mode.
+#[test]
+fn a_pause_while_the_session_opens_sends_nothing() {
+    let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
+    let _ready = AgentReady::on();
+    let bot = rig.hire("cto", "Atlas");
+    let duty = rig.add(&bot, Some("echo found"), true);
+    struct Hook;
+    impl Drop for Hook {
+        fn drop(&mut self) {
+            *BEFORE_SEND.lock().unwrap_or_else(|error| error.into_inner()) = None;
+        }
+    }
+    let _hook = Hook;
+    let (sink, id) = (rig.sink.clone(), bot.id.clone());
+    *BEFORE_SEND.lock().unwrap() = Some(Box::new(move || {
+        super::super::pause_from(sink.as_ref(), &id, super::super::OWNER, super::super::pause::FROM_APP).unwrap();
+    }));
+    run_now(&rig, &bot, &duty);
+    let ended = wait_run(&duty, |run| run.status.is_terminal());
+    assert_eq!(ended.status, AutomationRunStatus::Cancelled, "{ended:?}");
+    assert!(ended.error.as_deref().unwrap_or_default().contains("Atlas is paused"), "{ended:?}");
+    let session = ended.session_id.as_deref().expect("its session opened");
+    let entry = index::get(session).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let sent = rig.manager.load_events(session, &entry.tabs[0].id).unwrap().into_iter().any(|event| matches!(event.payload, Payload::UserMessage { .. }));
+    assert!(!sent, "no prompt was sent");
+    assert!(entry.tabs.iter().all(|tab| tab.status != index::TabStatus::InProgress));
+}
+
+/// PRO-492: a failed duty run is noted and notified as its duty reports, and
+/// held by its bot's quiet hours like any report; the window does not raise
+/// its own notice for it.
+#[test]
+fn a_failed_run_is_reported_within_quiet_hours() {
+    let mut rig = rig();
+    let bot = rig.hire("watcher", "Argus");
+    let failing = rig.add(&bot, Some("echo 'gh: not logged in' >&2; exit 4"), false);
+    run_now(&rig, &bot, &failing);
+    // Its report is written just after its ending, on the check's own thread.
+    let failed = wait_run(&failing, |run| run.status.is_terminal() && run.unknown.contains_key(RUN_KEY));
+    assert_eq!(failed.status, AutomationRunStatus::Failed);
+    assert_eq!((failed.unknown[RUN_KEY]["reportedTo"].as_str(), failed.unknown[RUN_KEY]["notified"].as_bool()), (Some(super::super::OWNER), Some(true)));
+    let reports = rig.named(REPORT_EVENT);
+    assert_eq!(reports.len(), 1);
+    assert_eq!((reports[0]["failed"].as_bool(), reports[0]["urgent"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(status_lines(&rig.manager, &home_chat(&bot).id), ["Watch CI failed:\nThe first check exited with status 4."]);
+    // In quiet hours: noted, not notified.
+    let now = chrono::Local::now();
+    let clock = |at: chrono::DateTime<chrono::Local>| at.format("%H:%M").to_string();
+    rig.bots("quietHours", json!({"id": bot.id, "quietHours": {"from": clock(now - chrono::TimeDelta::hours(1)), "to": clock(now + chrono::TimeDelta::hours(1))}})).unwrap();
+    let other = rig.add(&bot, Some("exit 5"), false);
+    run_now(&rig, &bot, &other);
+    let failed = wait_run(&other, |run| run.status.is_terminal() && run.unknown.contains_key(RUN_KEY));
+    assert_eq!((failed.unknown[RUN_KEY]["quiet"].as_bool(), failed.unknown[RUN_KEY]["notified"].as_bool()), (Some(true), Some(false)));
+    assert!(rig.named(REPORT_EVENT).is_empty());
 }
