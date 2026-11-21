@@ -213,7 +213,8 @@ fn first_time(run: &AutomationRun) -> Option<DateTime<Utc>> {
 /// `None` while nothing was dropped.
 fn kept_from(runs: &[AutomationRun]) -> Option<DateTime<Utc>> {
     let finished: Vec<&AutomationRun> = runs.iter().filter(|run| run.status.is_terminal()).collect();
-    let dropped = finished.len() >= automation_store::RUN_RETENTION && runs.iter().map(|run| run.run_number).min().is_some_and(|lowest| lowest > 1);
+    // Over finished runs only: a run #1 stuck pending is kept past compaction and says nothing of what was dropped.
+    let dropped = finished.len() >= automation_store::RUN_RETENTION && finished.iter().map(|run| run.run_number).min().is_some_and(|lowest| lowest > 1);
     dropped.then(|| finished.iter().filter_map(|run| first_time(run)).min()).flatten()
 }
 

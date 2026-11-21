@@ -244,6 +244,11 @@ fn days_the_log_no_longer_covers_are_not_kept_never_empty() {
     // Nor did a log holding exactly its first 100 runs (numbers 1 … 100).
     let whole = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, kept(1))]);
     assert!(whole.often.iter().all(|day| day.not_kept == 0) && !whole.totals.at_least && whole.logs.is_empty());
+    // A run #1 left pending is kept through compaction; the cut log is still cut.
+    let mut stuck = kept(101);
+    stuck.push(run("stalled", 1, "pending", "2026-11-01T09:00:00Z", json!({})));
+    let cut = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, stuck)]);
+    assert_eq!(cut.logs.first().and_then(|log| log.kept_from.as_deref()), Some("2026-11-18T10:00:00Z"));
 }
 
 #[test]
@@ -262,30 +267,40 @@ fn an_unreadable_log_is_said_on_its_duty_and_its_days_are_not_kept() {
     assert_eq!(states(&week, "status").first(), Some(&(2, 1080, BlockState::Next)));
 }
 
-/// L3: a schedule with more times in the week than are looked at says so. A week in which the clocks go back has
-/// 10,140 minutes, one more hour than the cap.
+/// L3 and N1: the scheduler fires a repeated local time once, so an every-minute duty has exactly 10,080 times even in
+/// the week the clocks go back, and is not capped; a schedule with more times than are looked at says so.
 #[test]
 fn a_schedule_past_the_cap_says_its_count_is_a_floor() {
     let argus = bot("argus", false);
     let every = duty("every", "argus", json!({"kind": "cron", "cron": "* * * * *", "timezone": "Europe/London", "dtstart": "2026-01-01T00:00:00Z"}), json!({}));
     let london: Tz = "Europe/London".parse().unwrap();
     let inputs = [DutyWeek { duty: &every, bot: &argus, runs: &[], unreadable: None }];
-    let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-    let week = week(london, monday, utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
-    assert!(week.often.iter().all(|day| day.capped), "{:?}", week.often);
-    assert!(week.logs.iter().any(|log| log.duty_id == "every" && log.capped));
-    assert_eq!(week.often.iter().map(|day| day.planned).sum::<u32>(), MAX_OCCURRENCES as u32);
-    // A week of ordinary length is not capped.
-    let ordinary = super::week(london, monday + Duration::days(14), utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
-    assert!(ordinary.often.iter().all(|day| !day.capped) && ordinary.logs.is_empty());
+    let back = week(london, NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(), utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
+    assert_eq!(back.often.iter().map(|day| day.planned).sum::<u32>(), MAX_OCCURRENCES as u32);
+    assert!(back.often.iter().all(|day| !day.capped) && back.logs.is_empty(), "{:?}", back.logs);
+
+    // The cap itself, on the helper: more times than asked for say so, exactly as many do not.
+    let schedule: automations::AutomationSchedule = serde_json::from_value(cron("*/30 * * * *")).unwrap();
+    let (from, until) = (utc("2026-11-16T00:00:00Z"), utc("2026-11-16T05:00:00Z"));
+    let (ten, capped) = automations::occurrences_between(&schedule, from, until, 9).unwrap();
+    assert_eq!((ten.len(), capped), (9, true));
+    let (all, capped) = automations::occurrences_between(&schedule, from, until, 10).unwrap();
+    assert_eq!((all.len(), capped), (10, false));
 }
 
 /// L3: the shared helper gives the same times as asking `next_run_after` again and again.
 #[test]
 fn occurrences_between_agrees_with_next_run_after() {
-    for schedule in [cron("0 10,14 * * 1-5"), cron("*/45 * * * *"), daily(9, "America/New_York"), json!({"kind": "preset", "preset": "hourly", "minute": 15, "timezone": "Asia/Kolkata", "dtstart": "2026-01-01T00:00:00Z"})] {
+    let new_york = |expression: &str| json!({"kind": "cron", "cron": expression, "timezone": "America/New_York", "dtstart": "2026-01-01T00:00:00Z"});
+    let ordinary = [cron("0 10,14 * * 1-5"), cron("*/45 * * * *"), daily(9, "America/New_York"), json!({"kind": "preset", "preset": "hourly", "minute": 15, "timezone": "Asia/Kolkata", "dtstart": "2026-01-01T00:00:00Z"})]
+        .map(|schedule| (schedule, "2026-11-16T00:00:00Z", "2026-11-23T00:00:00Z"));
+    // N1: the weeks New York's clocks go back (1 November) and forward (8 March), from local midnight to midnight.
+    let changes = ["30 1 * * *", "*/30 * * * *", "30 2 * * *"]
+        .into_iter()
+        .flat_map(|expression| [(new_york(expression), "2026-10-26T04:00:00Z", "2026-11-02T05:00:00Z"), (new_york(expression), "2026-03-02T05:00:00Z", "2026-03-09T04:00:00Z")]);
+    for (schedule, from, until) in ordinary.into_iter().chain(changes) {
         let schedule: automations::AutomationSchedule = serde_json::from_value(schedule).unwrap();
-        let (from, until) = (utc("2026-11-16T00:00:00Z"), utc("2026-11-23T00:00:00Z"));
+        let (from, until) = (utc(from), utc(until));
         let (shared, capped) = automations::occurrences_between(&schedule, from, until, MAX_OCCURRENCES).unwrap();
         let mut one_by_one = Vec::new();
         let mut at = from;
