@@ -103,7 +103,13 @@ const ROLES_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// asks at once, unless an answer arrived this recently: a burst of refusals
 /// is one question.
 const ROLES_REFRESH_FLOOR: Duration = Duration::from_secs(2);
-const REFRESH_NOT_SAVED: &str = "The account session refreshed, but macOS Keychain could not save it.";
+/// Where the account session is kept, as a message names it.
+#[cfg(not(windows))]
+macro_rules! secret_store { () => { "macOS Keychain" } }
+#[cfg(windows)]
+macro_rules! secret_store { () => { "the Windows secret store" } }
+
+const REFRESH_NOT_SAVED: &str = concat!("The account session refreshed, but ", secret_store!(), " could not save it.");
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1069,7 +1075,7 @@ impl AccountManager {
         log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
         // A sign-in begun meanwhile owns the account now.
         if inner.generation == generation {
-            inner.last_error = Some("Sign-out could not remove the account session from macOS Keychain.".into());
+            inner.last_error = Some(concat!("Sign-out could not remove the account session from ", secret_store!(), ".").into());
             if inner.session.is_none() && session.is_some() {
                 inner.set_session(session);
             }
@@ -1170,7 +1176,7 @@ impl AccountManager {
         }
         // Signed in as soon as the exchange answers; the Keychain follows.
         self.emit(app);
-        if self.persist(generation, Some("Signed in for this run, but macOS Keychain could not save the session.")) {
+        if self.persist(generation, Some(concat!("Signed in for this run, but ", secret_store!(), " could not save the session."))) {
             self.emit(app);
         }
         self.sync_runtime_copy();
@@ -1491,7 +1497,7 @@ impl AccountManager {
                 log::warn!("could not read TerminalX account session from Keychain: {error:#}");
                 inner.session_unreadable = true;
                 inner.last_error = Some(
-                    "The saved TerminalX account session could not be read from macOS Keychain."
+                    concat!("The saved TerminalX account session could not be read from ", secret_store!(), ".")
                         .into(),
                 );
             }
@@ -2161,7 +2167,7 @@ mod tests {
     #[test]
     fn a_saved_session_that_could_not_be_read_is_reported_as_unreadable_not_as_a_sign_out() {
         // What `ensure_loaded` leaves when the Keychain read fails.
-        let unreadable = Inner { loaded: true, session_unreadable: true, last_error: Some("The saved TerminalX account session could not be read from macOS Keychain.".into()), ..Default::default() };
+        let unreadable = Inner { loaded: true, session_unreadable: true, last_error: Some(concat!("The saved TerminalX account session could not be read from ", secret_store!(), ".").into()), ..Default::default() };
         let status = serde_json::to_value(snapshot(&unreadable)).unwrap();
         assert_eq!(status["state"], "signed-out");
         assert_eq!(status["sessionUnreadable"], true);
@@ -2752,7 +2758,7 @@ mod tests {
         assert!(manager.settled_scope().is_some_and(|scope| scope.is_some()), "settled, and signed in");
         let status = serde_json::to_value(manager.snapshot()).unwrap();
         assert_eq!(status["state"], "signed-in");
-        assert_eq!(status["lastError"], "Sign-out could not remove the account session from macOS Keychain.");
+        assert_eq!(status["lastError"], concat!("Sign-out could not remove the account session from ", secret_store!(), "."));
         assert_eq!(manager.context().unwrap().access_token, "rotated-access");
         // Once the Keychain answers again the sign-out goes through.
         store.fail_writes(false);

@@ -218,6 +218,8 @@ export interface SessionEntry {
   botStarted?: { id: string } | null;
   /** A run of one of its bot's duties (PRO-471): the duty's automation id. Listed under its bot apart from its chats. */
   botDuty?: { id: string } | null;
+  /** A chat of its bot that a mention on GitHub or Linear started (PRO-480): where it came from. */
+  botChannel?: import("@/types/botChannels").SessionBotChannel | null;
   /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
   orchestrateStart?: boolean;
   /**

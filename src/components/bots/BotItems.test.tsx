@@ -104,6 +104,8 @@ function route(command: string, args: Record<string, unknown> = {}) {
     case "bot_item_resend":
     case "bot_item_reopen":
       return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: true, sessionId: "home" } });
+    case "bot_suggestions":
+      return Promise.resolve({ suggestions: [], unreadable: 0, status: { lookAround: null, tidyMemory: null, paused: false, readOnly: false } });
     default:
       return Promise.reject(new Error(`unexpected ${command}`));
   }
@@ -259,6 +261,14 @@ describe("a work item's page, after the review", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_resend", { id: "b1", number: 12 }));
     // The bot marks its own lines: the page says so, and that you can reopen.
     expect(screen.getByTestId("bot-item-done-means").textContent).toContain("Atlas marks each line met itself and closes the item once all are; you can reopen it");
+  });
+
+  it("for a paused bot, says what waits is kept until its resume and offers no Send again (PRO-474)", async () => {
+    list.items = list.items.map((value) => (value.number === 12 ? { ...value, undelivered: [{ id: "m1", at: now, kind: "answer", text: "About item #12: Now" }] } : value));
+    render(<BotItemPage bot={{ ...atlas, paused: { at: now, by: "owner" } }} number={12} onBack={() => {}} />);
+    const waiting = await screen.findByTestId("bot-item-undelivered");
+    expect(waiting.textContent).toContain("Kept while paused: Atlas gets this when you resume it.");
+    expect(within(waiting).queryByRole("button", { name: /Send again/ })).toBeNull();
   });
 
   it("shows a chosen answer that waits as your choice, with the label as the bot's wording, not the fenced message", async () => {

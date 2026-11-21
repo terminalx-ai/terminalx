@@ -1,5 +1,6 @@
 //! Agent review annotations use the same authenticated control service as
 //! other CLI calls, on both desktop and headless owners.
+use crate::paths::Canonical;
 use super::*;
 use crate::events::{Payload, ToolResult, ToolType};
 use crate::store::review_comments::{self, Action, Anchor, Author, AuthorKind, Side};
@@ -79,7 +80,7 @@ impl ControlService {
                 .ok_or_else(|| ControlError::invalid(format!("Missing {key}.")))
         };
         let root = Path::new(&session.cwd)
-            .canonicalize()
+            .canonical()
             .map_err(|error| ControlError::invalid(error.to_string()))?;
         let body = required("body")?;
         let mut anchor = prepare_anchor(&root, required("file")?, required("line")?, body)
@@ -227,7 +228,7 @@ fn prepare_anchor(root: &Path, path: &str, lines: &str, body: &str) -> anyhow::R
             .any(|part| part == Component::ParentDir),
         "--file cannot contain '..'."
     );
-    let resolved = root.join(path).canonicalize()?;
+    let resolved = root.join(path).canonical()?;
     let relative = resolved
         .strip_prefix(root)
         .map_err(|_| anyhow::anyhow!("--file resolves outside the workspace."))?;

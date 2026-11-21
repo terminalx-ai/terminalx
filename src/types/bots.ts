@@ -15,10 +15,53 @@ export function effectiveAccess(access: BotAccess): KnownBotAccess {
 const KNOWN_ACCESS = ["full", "askOutward", "readReport"] as const;
 type KnownBotAccess = (typeof KNOWN_ACCESS)[number];
 
+/** Where a pause came from (PRO-474). A place a newer app wrote arrives as its own string and is shown as the app's. */
+export type BotPauseFrom = "app" | "shortcut" | "phone" | "cli" | (string & {});
+
+/** What a pause stopped, as it was when the bot was paused (PRO-474). Written once, right after the pause. */
+export interface BotPauseStopped {
+  /** What it was doing, as the page says it after "Paused · ": "was working on “…”", "was quiet". */
+  was: string;
+  /** Its chats, and sessions it started, that were in a turn: stopped there. */
+  chats?: number;
+  /** Its runs' workers that were in a turn: each finishes the step it is on, then stops. */
+  workers?: number;
+  /** Its duty runs that were going. */
+  duties?: number;
+  /** What it had spent today when it was paused. */
+  spent?: { day: string; usd: number };
+}
+
 /** When a bot was paused and by whom: `owner`, or the id of the bot whose own session paused it. */
 export interface BotPause {
   at: string;
   by: string;
+  /** Absent for a pause an older app recorded. */
+  from?: BotPauseFrom;
+  /** Absent until the pause has been enforced, and for a pause an older app recorded. */
+  stopped?: BotPauseStopped;
+}
+
+/** One entry of "Held while paused" (23.12), as the runtime read it where it is kept. */
+export type PauseHeldEntry =
+  /** A scheduled duty run that fell due while its bot was paused: skipped, not run late. `count` folds repeats. */
+  | { kind: "skipped"; source: "duty"; botId: string; dutyId: string; name: string; at: string; count: number }
+  /** A duty that wakes on events: they are not read while paused, so they wait and wake it on resume. */
+  | { kind: "kept"; source: "events"; botId: string; dutyId: string; name: string; at: string }
+  /** Work handed to the paused bot: it starts on resume. */
+  | { kind: "kept"; source: "handoff"; botId: string; fromId: string; by: string; number: number; title: string; at: string }
+  /** A message (an answer, a status, a stop) sent to the paused bot: sent on resume. */
+  | { kind: "kept"; source: "message"; botId: string; fromId: string; messageKind: string; handoff?: number | null; at: string }
+  /** The owner's answer, comment or work given on one of its items: sent on resume. */
+  | { kind: "kept"; source: "answer"; botId: string; number: number; messageKind: "answer" | "comment" | "work" | (string & {}); at: string };
+
+/** What the paused bots hold (PRO-474): every bot's turns still going and its open questions, and the held list. */
+export interface PauseHeld {
+  /** `inTurn`: its run workers in a turn (a paused bot's, finishing their step); its chats answering you are not counted. */
+  bots: { id: string; inTurn: number; needsYou: number }[];
+  entries: PauseHeldEntry[];
+  /** A part that could not be read: said, never shown as nothing held. */
+  errors: string[];
 }
 
 /**
@@ -35,6 +78,10 @@ export interface BotAsker {
   may: BotAskerMay;
   /** The organisation a person was added from. They are inactive while the bot does not work there. */
   org?: string;
+  /** A person's email, as their organisation lists them: their comments on Linear are known by it (PRO-480). */
+  email?: string;
+  /** A person's GitHub login, as the owner gave it: their comments on GitHub are known by it (PRO-480). */
+  github?: string;
 }
 
 /** Ask and approve (a person only), ask, or hand off work (another bot only). */

@@ -655,6 +655,9 @@ fn substitutions(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use crate::paths::Canonical;
+    #[cfg(unix)]
     #[test]
     fn a_verifier_cannot_edit_files_whatever_tool_it_reaches_for() {
         use super::VerifierCall;
@@ -675,7 +678,7 @@ mod tests {
         }
         // A shell command is held to reading too, in whatever mode the tab is in: one that reads goes ahead.
         let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
+        let cwd = dir.path().canonical().unwrap();
         crate::git::run(&cwd, &["init", "-q", "-b", "lead"]).unwrap();
         let call = |tool: &str, command: &str| super::verifier_call(&serde_json::json!({"tool_name": tool, "tool_input": {"command": command}, "cwd": cwd}));
         let shell = |tool: &str, command: &str| match call(tool, command) {
@@ -708,6 +711,7 @@ mod tests {
         assert_eq!(crate::harness::codex::stance(super::VERIFIER_MODE).1, "read-only");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_verifier_s_read_only_command_is_refused_where_read_only_commands_are_off_or_its_agent_s_sandbox_may_narrow_reads() {
         use super::VerifierCall;
@@ -715,7 +719,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("worktree");
         std::fs::create_dir(&cwd).unwrap();
-        let cwd = cwd.canonicalize().unwrap();
+        let cwd = cwd.canonical().unwrap();
         crate::git::run(&cwd, &["init", "-q", "-b", "lead"]).unwrap();
         // This machine's settings stay out of it: every source is under the scratch directory.
         let config = dir.path().join("claude");
@@ -995,6 +999,7 @@ mod tests {
         no_upstream(&worker, "piece").unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_workers_git_sends_every_push_nowhere_and_still_fetches() {
         let _home = crate::store::temp_home();

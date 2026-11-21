@@ -17,7 +17,7 @@ fn privacy_actions_entrypoints_keep_authority_and_drain_logs() {
             .args(["--exact", "github_process::tests::checks::actions_privacy_child", "--nocapture"])
             .env("TERMINALX_TEST_ACTIONS_PRIVACY", kind)
             .env_remove("TERMINALX_TEST_MANAGED_PRIVACY")
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "{kind}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }

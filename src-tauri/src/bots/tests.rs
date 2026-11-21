@@ -198,7 +198,7 @@ fn pausing_records_when_and_by_whom_and_resuming_clears_it() {
     let first = paused.paused.clone().unwrap();
     assert_eq!(first.by, OWNER);
     assert!(chrono::DateTime::parse_from_rfc3339(&first.at).is_ok(), "{}", first.at);
-    assert_eq!(serde_json::to_value(&paused).unwrap()["paused"], json!({"at": first.at, "by": "owner"}));
+    assert_eq!(serde_json::to_value(&paused).unwrap()["paused"], json!({"at": first.at, "by": "owner", "from": "app"}));
     // Pausing a paused bot keeps the first record, whoever asks.
     assert_eq!(pause(sink.as_ref(), &iris.id, &atlas.id).unwrap().paused, Some(first.clone()));
 

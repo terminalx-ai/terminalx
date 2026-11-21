@@ -57,7 +57,7 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
-mod sources;
+pub(crate) mod sources;
 pub use sources::{AutomationEventSource, AutomationEventTrigger, SourceMatch};
 
 /// What a Linear issue or pull request source would wake on now (PRO-485).
@@ -421,6 +421,8 @@ pub enum AutomationTrigger {
     Issue,
     LinearIssue,
     PullRequest,
+    /// A bot's duty woken by a mention, an alert, a branch's checks, another bot or a watched change (PRO-472).
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -585,11 +587,60 @@ pub fn next_run_after(
     }
 }
 
-fn next_cron(
+/// A schedule's times in `(after, until]`, oldest first, at most `cap` of
+/// them, and whether more were left: what [`next_run_after`] gives again and
+/// again, with the expression and time zone read once (the week of duties,
+/// PRO-473).
+pub fn occurrences_between(
     schedule: &AutomationSchedule,
-    timezone: Tz,
     after: DateTime<Utc>,
-) -> Result<DateTime<Utc>> {
+    until: DateTime<Utc>,
+    cap: usize,
+) -> Result<(Vec<DateTime<Utc>>, bool)> {
+    let timezone: Tz = schedule
+        .timezone
+        .parse()
+        .with_context(|| format!("unknown timezone {}", schedule.timezone))?;
+    let dtstart = DateTime::parse_from_rfc3339(&schedule.dtstart)
+        .context("dtstart must be RFC3339")?
+        .with_timezone(&Utc);
+    let mut at = after.max(dtstart - chrono::TimeDelta::nanoseconds(1));
+    let mut found = Vec::new();
+    match (schedule.kind, schedule.preset) {
+        (ScheduleKind::Cron, _) => {
+            // A fresh `after` for each step, as `next_cron` asks: a kept iterator would also give the second of a
+            // local time the clocks repeat, which the scheduler never fires.
+            let parsed = cron_of(schedule)?;
+            while let Some(next) = parsed.after(&at.with_timezone(&timezone)).next() {
+                let next = next.with_timezone(&Utc);
+                if next > until || next <= at {
+                    break;
+                }
+                if found.len() == cap {
+                    return Ok((found, true));
+                }
+                found.push(next);
+                at = next;
+            }
+        }
+        (ScheduleKind::Preset, Some(preset)) => loop {
+            let next = next_preset(schedule, preset, timezone, dtstart, at)?;
+            if next > until || next <= at {
+                break;
+            }
+            if found.len() == cap {
+                return Ok((found, true));
+            }
+            found.push(next);
+            at = next;
+        },
+        (ScheduleKind::Preset, None) => bail!("schedule preset is required"),
+    }
+    Ok((found, false))
+}
+
+/// A cron schedule's expression, read as the scheduler reads it.
+fn cron_of(schedule: &AutomationSchedule) -> Result<cron::Schedule> {
     let expression = schedule
         .cron
         .as_deref()
@@ -600,8 +651,15 @@ fn next_cron(
         bail!("cron must have five fields");
     }
     // `cron` includes seconds; the product contract deliberately does not.
-    let parsed =
-        cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")?;
+    cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")
+}
+
+fn next_cron(
+    schedule: &AutomationSchedule,
+    timezone: Tz,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let parsed = cron_of(schedule)?;
     parsed
         .after(&after.with_timezone(&timezone))
         .next()
@@ -800,6 +858,10 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
     // A bot's duty is changed on its bot's Duties tab, where giving it more needs a person (PRO-471).
     if id.is_some_and(|id| automation_store::get(id).is_ok_and(|existing| crate::bots::duties::is_duty(&existing))) {
         bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
+    // What only a bot has (a mention of it, another bot's message, a watch) wakes only a bot's duty (PRO-472).
+    if matches!(input.event_trigger.as_ref().and_then(Option::as_ref).map(|trigger| &trigger.source), Some(sources::AutomationEventSource::Bot(_))) {
+        bail!("This trigger wakes a bot's duty. Add it on the bot's Duties tab.");
     }
     input.project_path = crate::store::projects::canonical(&input.project_path)?;
     if input.workspace == AutomationWorkspace::NewWorktree && !crate::git::is_repo(Path::new(&input.project_path)) {
@@ -1898,6 +1960,12 @@ pub(crate) fn evaluate(app: &impl AutomationHost) -> Result<()> {
     }
     let _guard = EvaluationGuard;
     let now = Utc::now();
+    // A bot's check-backs on its work items (PRO-476) keep this clock: nothing runs for them until one is due.
+    if crate::bots::enabled_cached() {
+        if let Ok(manager) = app.sessions() {
+            crate::bots::runs::check_backs_due(&manager, now);
+        }
+    }
     for automation in automation_store::list()? {
         // A bot's duty wakes only while Bots is on and its bot is listed and
         // not paused; a paused bot's due runs are skipped, not run late (PRO-471).
@@ -2008,6 +2076,12 @@ pub(crate) fn start_recovered_scheduler(app: impl AutomationHost) {
                 if ticks == 0 {
                     if let Err(error) = evaluate(&app) {
                         log::warn!("automation scheduler: {error:#}");
+                    }
+                    // Bots' GitHub and Linear channels (PRO-480): read when due, on a thread of their own.
+                    if crate::bots::enabled() {
+                        if let Ok(manager) = app.sessions() {
+                            crate::bots::channels::tick(manager);
+                        }
                     }
                 }
                 if let Err(error) = reconcile_deferred(&app, Utc::now()) {

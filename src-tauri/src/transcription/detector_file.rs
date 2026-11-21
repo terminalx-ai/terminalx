@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::Path;
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum Readiness {

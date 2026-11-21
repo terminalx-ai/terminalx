@@ -4,7 +4,7 @@ import type { Bot, BotList, BotPatch } from "@/types/bots";
 import { mouseClick } from "@/test/press";
 
 const mocks = vi.hoisted(() => ({
-  api: { list: vi.fn(), update: vi.fn(), remove: vi.fn(), pause: vi.fn(), resume: vi.fn(), pauseAll: vi.fn(), resumeAll: vi.fn(), templates: vi.fn() },
+  api: { list: vi.fn(), update: vi.fn(), remove: vi.fn(), pause: vi.fn(), resume: vi.fn(), pauseAll: vi.fn(), resumeAll: vi.fn(), templates: vi.fn(), channels: vi.fn() },
   github: vi.fn(),
   linear: vi.fn(),
   roster: vi.fn(),
@@ -73,6 +73,7 @@ const lastPatch = () => mocks.api.update.mock.calls.at(-1)?.[1] as BotPatch;
 
 beforeEach(() => {
   for (const mock of Object.values(mocks.api)) mock.mockReset();
+  mocks.api.channels.mockResolvedValue({ mentions: [], posts: [], handle: "@sentry" });
   mocks.github.mockReset().mockResolvedValue({ state: "connected", details: null });
   mocks.linear.mockReset().mockResolvedValue({ connected: false });
   mocks.roster.mockReset();
@@ -205,7 +206,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(people.map((item) => item.textContent?.trim())).toEqual(["AK Avery Kim"]);
     expect(mocks.roster).toHaveBeenCalledWith("org-1");
     fireEvent.click(people[0]);
-    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "team", id: "t1", may: "triage" }, { kind: "person", id: "u-ak", name: "Avery Kim", may: "ask", org: "org-1" }], ifModified: SEEN }));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "team", id: "t1", may: "triage" }, { kind: "person", id: "u-ak", name: "Avery Kim", may: "ask", org: "org-1", email: "ak@example.com" }], ifModified: SEEN }));
     const person = (await page.findAllByTestId("bot-asker"))[1];
     mouseClick(within(person).getByTestId("bot-asker-may"));
     expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual(["Can ask and approve", "Can ask"]);
@@ -362,5 +363,44 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(page.getByTestId("bot-settings-missing").textContent).toBe("This bot is no longer here.");
     fireEvent.click(page.getByTestId("bot-settings-back"));
     expect(getBotsPage().page).toBe("team");
+  });
+
+  it("GitHub and Linear as channels (PRO-480): how to mention it, what reached it and what it posted, newest first", async () => {
+    mocks.linear.mockResolvedValue({ connected: true, viewer: "Paula" });
+    mocks.api.channels.mockResolvedValue({
+      handle: "@sentry",
+      mentions: [
+        { id: "github:acme/app:12", thread: { kind: "github", repo: "acme/app", number: 7, title: "Move CI", url: "https://github.com/acme/app/pull/7#c12" }, by: "@stranger", from: "", at: "2026-11-21T10:06:00Z", state: "notAccepted", why: "@stranger is not in Sentry's Who can ask", session: null },
+        { id: "linear:c2", thread: { kind: "linear", issue: "PRO-9", title: "Runner", url: "https://linear.app/x/issue/PRO-9#c2" }, by: "Ann", from: "person", at: "2026-11-21T10:00:00Z", state: "delivered", why: "", session: "s1" },
+      ],
+      posts: [{ bot: "b1", kind: "review", thread: { kind: "github", repo: "acme/app", number: 7, url: "https://github.com/acme/app/pull/7#r1" }, at: "2026-11-21T10:08:00Z", url: "https://github.com/acme/app/pull/7#r1" }],
+    });
+    const page = await open([bot("b1", "Sentry")], "b1");
+    await waitFor(() => expect(page.getByTestId("bot-channel-github").textContent).toContain("Mention @sentry on a pull request or issue"));
+    await waitFor(() => expect(page.getByTestId("bot-channel-linear").textContent).toContain("As Paula · comments on issues it is mentioned in, signed as Sentry's"));
+    const activity = within(await page.findByTestId("bot-channel-activity"));
+    const rows = activity.getAllByRole("listitem").map((row) => row.textContent);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toContain("Posted a review");
+    expect(rows[0]).toContain("On your behalf");
+    expect(rows[1]).toContain("Not accepted");
+    expect(rows[1]).toContain("@stranger is not in Sentry's Who can ask");
+    expect(rows[2]).toContain("PRO-9 · Runner");
+    expect(rows[2]).toContain("In a chat");
+    expect(mocks.api.channels).toHaveBeenCalledWith("b1");
+  });
+
+  it("a person's GitHub login is given from their row, and saved with the list", async () => {
+    const page = await open([bot("b1", "Sentry", { whoCanAsk: [{ kind: "person", id: "u1", name: "Ann", may: "ask", org: "org-1", email: "ann@example.com" }], worksIn: ["personal", "org-1"] })], "b1");
+    const row = page.getByTestId("bot-asker");
+    expect(row.textContent).toContain("Member");
+    mouseClick(within(row).getByTestId("bot-asker-may"));
+    fireEvent.click(await screen.findByTestId("bot-asker-github"));
+    const input = await screen.findByTestId("bot-asker-github-input");
+    fireEvent.change(input, { target: { value: "ann k" } });
+    expect((screen.getByTestId("bot-asker-github-save") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(input, { target: { value: "@ann-k" } });
+    fireEvent.click(screen.getByTestId("bot-asker-github-save"));
+    await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "person", id: "u1", name: "Ann", may: "ask", org: "org-1", email: "ann@example.com", github: "ann-k" }], ifModified: SEEN }));
   });
 });

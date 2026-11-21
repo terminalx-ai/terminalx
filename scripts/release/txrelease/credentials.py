@@ -139,7 +139,11 @@ def local_secrets(runner: Runner, env: Mapping[str, str] = os.environ, *,
     password = updater_key_password(env)
     if password:
         needles['updater key password'] = password
-    token = runner.out('gh', 'auth', 'token', check=False)
+    try:
+        token = runner.out('gh', 'auth', 'token', check=False)
+    except OSError:
+        # No GitHub CLI here: there is no token of its own to look for.
+        token = ''
     if token and ' ' not in token:
         needles['GitHub token'] = token
     settings = _home(SETTINGS, env)

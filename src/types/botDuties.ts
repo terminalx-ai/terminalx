@@ -1,4 +1,4 @@
-import type { AutomationPrecheck, AutomationSchedule } from "@/types/automations";
+import type { AutomationEventSource, AutomationPrecheck, AutomationSchedule } from "@/types/automations";
 
 /**
  * Where a duty's result goes (PRO-471): a note in the bot's home chat and a notification, or a note in its lead's
@@ -14,6 +14,51 @@ export interface DutyOwner {
   reportsTo: DutyReportsTo;
   /** The role template's duty it was made from at hire, if it was. */
   template?: string | null;
+  /**
+   * A built-in every bot has (PRO-477): `lookAround` or `tidyMemory`, or one a newer app made. Its name and prompt are
+   * TerminalX's; it is switched off, never removed or copied.
+   */
+  builtin?: "lookAround" | "tidyMemory" | (string & {}) | null;
+  /** A built-in Look around's focus line: what to look at first. */
+  focus?: string | null;
+}
+
+/** What a message from one bot to another is (PRO-472). */
+export type BotMessageKind = "handoff" | "question" | "status";
+
+/** The kinds of event only a bot's duty wakes on (PRO-472, `bots/wakes.rs`). */
+export type BotWakeKind = "githubMention" | "githubSecurityAlert" | "githubBranchCheck" | "linearMention" | "botMessage" | "watch";
+
+/** A source only a bot's duty has. Each kind reads the fields it needs; fields a newer app wrote are kept. */
+export interface BotWakeSource {
+  kind: BotWakeKind;
+  /** `owner/name`, for the GitHub kinds. */
+  repo?: string | null;
+  /** What people write after `@` to mention the bot. */
+  handle?: string | null;
+  branch?: string | null;
+  teamId?: string | null;
+  teamName?: string | null;
+  /** The bots (by id) whose messages wake it; any of yours when empty. */
+  from?: string[];
+  /** The kinds of message that wake it; every kind when empty. */
+  kinds?: BotMessageKind[];
+  target?: "url" | "file" | "command" | null;
+  /** The URL, the file's full path, or the command. */
+  value?: string | null;
+  timeoutSeconds?: number | null;
+  /** Whose GitHub mentions wake it: the repository's owner, members and collaborators when absent, or `anyone`. */
+  onlyFrom?: string | null;
+  [unknown: string]: unknown;
+}
+
+/** What a duty wakes on besides a schedule: a pull request or Linear issue source (PRO-485) or one of a bot's own. */
+export type DutyWakeSource = AutomationEventSource | BotWakeSource;
+
+export interface DutyWake {
+  source: DutyWakeSource;
+  pollIntervalMinutes: number;
+  maxRunsPerTick: number;
 }
 
 /** A new or changed duty. Its agent, model, access and folder are its bot's. */
@@ -24,6 +69,10 @@ export interface DutyInput {
   precheck: AutomationPrecheck | null;
   reportsTo: DutyReportsTo;
   enabled: boolean;
+  /** What wakes it instead of its schedule; `null` for a duty on a schedule. */
+  wake: DutyWake | null;
+  /** A built-in Look around's focus line; ignored for any other duty. */
+  focus?: string | null;
 }
 
 /** A bot's quiet hours, local wall time `HH:MM`; across midnight when `to` is earlier. */

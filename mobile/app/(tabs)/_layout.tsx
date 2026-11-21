@@ -3,6 +3,8 @@ import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { TabBarInset, tabBarHeight } from "@mobile/ui/tab-bar-inset";
 import { useTheme } from "@mobile/ui/theme";
+import { useApp } from "@mobile/state/AppProvider";
+import { useBotsOffered } from "@mobile/state/bots";
 
 // The system tab bar, Liquid Glass on iOS 26 and later: the tabs on the left and, set apart on the
 // right where iOS sets its one special tab, a new session. Outline marks throughout, the filled ones
@@ -11,6 +13,9 @@ export default function TabLayout() {
   const { palette } = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const app = useApp();
+  // Bots only while the connected Mac offers them, which it does with Bots on (PRO-479): otherwise the bar is as it was.
+  const bots = useBotsOffered(app.api, app.activeHost?.id) === true;
   // The bar floats over the content: a tab's last row scrolls clear of it.
   return <TabBarInset.Provider value={tabBarHeight(insets.bottom)}><NativeTabs tintColor={palette.ink} minimizeBehavior="onScrollDown">
     <NativeTabs.Trigger name="index" testID="machines-tab">
@@ -20,6 +25,10 @@ export default function TabLayout() {
     <NativeTabs.Trigger name="sessions" testID="sessions-tab">
       <NativeTabs.Trigger.Icon sf="rectangle.stack" />
       <NativeTabs.Trigger.Label>Sessions</NativeTabs.Trigger.Label>
+    </NativeTabs.Trigger>
+    <NativeTabs.Trigger name="bots" hidden={!bots} testID="bots-tab">
+      <NativeTabs.Trigger.Icon sf="person.2.badge.gearshape" />
+      <NativeTabs.Trigger.Label>Bots</NativeTabs.Trigger.Label>
     </NativeTabs.Trigger>
     <NativeTabs.Trigger name="cloud">
       <NativeTabs.Trigger.Icon sf="cloud" />

@@ -142,7 +142,7 @@ fn validate_preview_urls(urls: &[PreviewUrlEntry]) -> Result<()> {
 
 /// Only this store; the hooks use `configuration::setup_script` and `configuration::archive_script` for every layer.
 pub fn scripts(path: &Path) -> Result<RepositoryScripts> {
-    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = |path: &Path| crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     Ok(load()?.projects.into_iter().find(|project| canonical(Path::new(&project.path)) == canonical(path))
         .and_then(|project| project.scripts).unwrap_or_default())
 }
@@ -534,7 +534,7 @@ fn save(f: &ProjectsFile) -> Result<()> {
 /// project or the sidebar splits one repo into two groups.
 pub fn canonical(path: &str) -> Result<String> {
     let p = Path::new(path);
-    let c = std::fs::canonicalize(p).with_context(|| format!("resolve {path}"))?;
+    let c = crate::paths::canonicalize(p).with_context(|| format!("resolve {path}"))?;
     Ok(c.to_string_lossy().into_owned())
 }
 
@@ -555,7 +555,7 @@ pub enum Refusal {
 
 /// Validate before persisting projects or choosing a process working directory.
 pub fn canonical_directory(path: &str) -> Result<String> {
-    let canonical = match std::fs::canonicalize(path) {
+    let canonical = match crate::paths::canonicalize(path) {
         Ok(canonical) => canonical.to_string_lossy().into_owned(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Refusal::Missing(path.to_string()).into()),
         Err(error) => return Err(anyhow::Error::new(error).context(format!("resolve {path}"))),

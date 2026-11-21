@@ -20,7 +20,8 @@ it("names the worktree, local base and main checkout, and keeps conflict reporti
   expect(prompt).toContain("report the main checkout's final branch");
 });
 
-it("the prompt's commands protect local files, merge the named branch, and abort conflicts", () => {
+// POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+it.skipIf(process.platform === "win32")("the prompt's commands protect local files, merge the named branch, and abort conflicts", () => {
   const root = mkdtempSync(join(tmpdir(), "pro204-"));
   const main = join(root, "main's $(false) checkout");
   const worktree = join(root, "worktree");

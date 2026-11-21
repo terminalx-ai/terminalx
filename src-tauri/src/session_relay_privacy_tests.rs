@@ -1,4 +1,6 @@
 //! Actual relay dispatch, files, SessionManager FIFO delivery and loopback ports.
+#[cfg(unix)]
+use crate::paths::Canonical;
 use super::*;
 use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
 use std::future::Future;
@@ -34,7 +36,7 @@ fn privacy_relay_child() {
     let managed = kind == "managed";
     let mut rig = Rig::of(CliKind::Claude, "");
     policy(false, managed);
-    let root = rig._dir.path().canonicalize().unwrap();
+    let root = rig._dir.path().canonical().unwrap();
     index::save(&[serde_json::from_value(json!({"id":SESSION,"projectPath":root,"cwd":root,
         "title":"Relay privacy","created":index::now(),"modified":index::now(),
         "tabs":[{"id":TAB,"harness":"claude","permissionMode":"default","created":index::now()}]})).unwrap()]).unwrap();

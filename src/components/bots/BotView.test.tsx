@@ -108,6 +108,17 @@ describe("a bot's view (PRO-468)", () => {
     expect(mocks.homeChat).not.toHaveBeenCalled();
   });
 
+  it("lists a chat a mention started under Chats with the bot, with where it came from (PRO-480)", () => {
+    const mentioned = session("mentioned", { bot: { id: "b1" }, title: "acme/app#7: Move CI", botChannel: { kind: "github", label: "acme/app#7", url: "https://github.com/acme/app/pull/7#c1" } });
+    mocks.sessions = { ...mocks.sessions, sessions: [home, other, mentioned] };
+    view();
+    const chats = within(screen.getByRole("region", { name: "Chats with Atlas" }));
+    const source = chats.getByTestId("bot-chat-source");
+    expect(source.textContent).toMatch(/^GitHub · acme\/app#7 · /);
+    expect(chats.getByText("acme/app#7: Move CI")).toBeTruthy();
+    expect(chats.getAllByTestId("bot-chat-source")).toHaveLength(1);
+  });
+
   it("selects a chat of the bot, and opens a session one started here", () => {
     const { rerender } = view();
     fireEvent.click(screen.getByText("Chat with Atlas"));
@@ -149,7 +160,7 @@ describe("a bot's view (PRO-468)", () => {
     mocks.bots = { ...mocks.bots, bots: [{ ...atlas, paused: { at: new Date().toISOString(), by: "owner" } }] };
     view();
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Paused. Atlas still answers you here, in plan mode: it changes nothing and starts no sessions or runs");
+    expect(banner.textContent).toContain("Atlas still answers you here, in plan mode, and says it is paused: it changes nothing and starts no sessions or runs");
     expect(screen.getByTestId("session-view").textContent).toContain("home");
     fireEvent.click(within(banner).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(mocks.resumeBot).toHaveBeenCalledWith("b1"));

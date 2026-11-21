@@ -120,6 +120,7 @@ fn truncate(mut text: String) -> String {
 }
 
 /// A directory is sent whole or not at all: a cut path names another one.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn directory(path: String) -> Option<String> {
     (!path.is_empty() && path.len() <= MAX_PROCESS_TEXT).then_some(path)
 }

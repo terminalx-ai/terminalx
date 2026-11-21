@@ -39,6 +39,7 @@ import { holdSend, releaseSend, showConversation, takeHeldSend, useConversationS
 import { addPasteImageListener } from "../../modules/paste-image";
 import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
+import { BotQuestionOver } from "@mobile/ui/BotQuestionSheet";
 import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
 import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
 import { ScreenHistory } from "@mobile/terminal/history";
@@ -56,7 +57,8 @@ interface MobileAttachment extends AttachmentInput {
 interface TranscriptNotice { text: string; action: string; onPress(): void }
 
 export default function SessionScreen() {
-  const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string }>();
+  // `botId` and `item`: a bot's question to show as a sheet over this chat, its home chat (PRO-479).
+  const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string; botId?: string; item?: string }>();
   const router = useRouter();
   const sessionId = params.sessionId;
   const app = useApp();
@@ -108,6 +110,7 @@ export default function SessionScreen() {
   };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
+    {params.botId && params.item && Number.isSafeInteger(Number(params.item)) ? <BotQuestionOver botId={params.botId} number={Number(params.item)} onClose={() => router.setParams({ botId: undefined, item: undefined })} /> : null}
     <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} muted={override === "mute"} onNotifications={() => setNotifying(true)} />
     {/* Named by the session's own title, as its notifications name it (22.07), not by the branch the header shows. */}
     <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={summary?.title?.trim() || named} onClose={() => setNotifying(false)} />

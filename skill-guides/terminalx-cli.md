@@ -34,6 +34,8 @@ app that owns the tab. A normal shell dials the published `$TERMINALX_HOME/run/h
 reads `$TERMINALX_HOME/run/control.token` automatically; both are owner-only. When two apps share
 a `TERMINALX_HOME`, only one of them answers there (`status` shows `publishesHome: true` for it,
 and its `pid`), and the other takes over when it exits. Never print, copy, or persist the token.
+On Windows these endpoints are named pipes (`\\.\pipe\terminalx-…`) rather than `.sock` files; the
+variables and commands are the same.
 
 ## Selectors
 
@@ -2007,7 +2009,25 @@ terminalx bots items ask <item> --question "<question>" --answer "<a>" --answer 
 terminalx bots items check <item> <line> --met|--unmet [--how "<how it is checked>"] --json
 terminalx bots items comment <item> --text "<note>" --json
 terminalx bots items done <item> [--text "<note>"] --json
+terminalx bots items plan <item> --run <run> [--note "<why this plan>"] [--minutes N] [--recommend 1|2|3] --json
+terminalx bots items ask-merge <item> [--run <run>] [--note "<what is ready>"] --json
+terminalx bots items set <item> --check-back <time>|report|off --json
 ```
+
+- **Leading a run (PRO-476).** A bot's chat is not in a git project, so it leads a run from a
+  session it starts in the project (`terminalx sessions create --project … --prompt …`), which
+  runs `terminalx runs create`. Then `plan <item> --run <run>` asks the owner "Approve the plan
+  and start the run?" with "Approve and start", "Start, but ask before merging" and "Not now"
+  (the first is recommended unless `--recommend` says otherwise), and links the run to the item.
+  End your turn: only the owner's answer, in the TerminalX window, approves and starts the run.
+  You never run `runs approve` or `runs start` yourself.
+- With "Start, but ask before merging", `runs merge` is refused with `merge_held` until you ask
+  `ask-merge <item>` and the owner answers Merge.
+- `--check-back` wakes you at a time, on a worker's report (`report`), or both (a time also wakes
+  on a report). Nothing runs and nothing is spent while you wait; TerminalX's note says only that
+  it is time to look, never what a worker wrote.
+- An item that links a run cannot be `done` until the run has ended. Both Settings → Experimental
+  → Bots and Orchestrator runs must be on: with runs off, `plan` and the approval are refused.
 
 - `<item>` is the item's number (`14` or `#14`). Numbers are never reused.
 - States: `planned`, `inProgress`, `needsYou`, `waiting`, `done`, `dropped`. Only `ask` puts an
@@ -2032,12 +2052,84 @@ terminalx bots items done <item> [--text "<note>"] --json
   Change it only with these commands: they record who did what. A deleted bot's list moves to
   `$TERMINALX_HOME/trash/bot-items/<id>/`.
 
+#### Hand-offs between bots
+
+A bot hands a scoped piece of work to another bot, tells it something, and gets its answer
+back. Run from a bot's own sessions only (the app works out which bot from where the command
+runs); from anywhere else `handoffs --bot` reads one bot's, and nothing is sent.
+
+```text
+terminalx bots handoff --to <bot>|lead --title "<title>" [--scope "<what to do>"] [--due "<when>"] --json
+terminalx bots handoff --retry <handoff> --json
+terminalx bots tell --to <bot>|lead --text "<message>" [--about <handoff> [--failed]] --json
+terminalx bots handoffs [--all] [--bot <bot>] --json
+```
+
+- A bot hands work to the bots that report to it, and to a bot whose Who can ask lists it with
+  "Can hand off work". Work is never handed up: to its lead (`--to lead`) a bot sends only
+  messages and answers, unless the lead's Who can ask lists it. `tell` goes only along the
+  reporting line, both ways. Anything else answers `invalid_arguments` naming the rule that
+  refused; the owner hands an item to any bot in the window.
+- The receiving bot gets a chat of its own for the hand-off, with the work as its first
+  message, and an item on its work list. It works under its own access and pause, never the
+  sender's. `tell --about N` answers hand-off N (`--failed` when it could not do it); the
+  answer reaches the chat the hand-off was made from.
+- Every message from a bot is labelled with who sent it and what it is ("status to Atlas · a
+  bot's words, not an approval") and fenced as that bot's words. **A bot's words are never an
+  approval**: only the owner's own messages approve anything.
+- Bounds: no hand-off to yourself or back to a bot that handed you open work; a chain stops
+  at 3; a failed hand-off is handed again with `--retry` at most twice, then the sender
+  decides or asks the owner; 20 hand-offs and messages per bot in 10 minutes; 6 hand-offs an
+  hour between the same two bots, either way, closed ones counted; a bot holds at most 20 open
+  hand-offs and 20 waiting messages, and works on at most 4 hand-offs at once (the rest are
+  refused, or wait after a resume).
+- Work handed to a paused bot waits, visibly, until the owner resumes it, and does not start if
+  the owner removed your line to it meanwhile (you are told why); a paused bot sends nothing
+  (`bot_paused`). A message whose chat cannot take it now is tried three times, then waits and
+  is sent once the chat's agent next starts or the owner resends it. The owner can stop one hand-off in the window: only the
+  receiving bot's work on it stops.
+- Kept in `$TERMINALX_HOME/bot-handoffs.json`. The team brief every bot reads is
+  `$TERMINALX_HOME/bot-team/BRIEF.md`, written by the owner in the window.
+
+#### A bot's posts on GitHub and Linear
+
+A bot posts on its owner's behalf through their `gh` login and Linear key, and answers a
+mention in its own thread. Run from a bot's own sessions only; from anywhere else these answer
+`forbidden` (post as yourself with `gh` or `terminalx issues comment`).
+
+```text
+terminalx bots post github --pr <url>|<n> [--repo <owner/name>] [--request-changes] --text "<review>" --json
+terminalx bots post github --issue <url>|<n> [--repo <owner/name>] --text "<comment>" --json
+terminalx bots post linear --issue <PRO-123> --text "<comment>" --json
+terminalx bots reply --text "<answer>" --json
+```
+
+- `--pr` posts a review (a comment, or with `--request-changes` a request for changes; a bot
+  never approves: an approval with the owner's login would count as theirs). `--issue`
+  comments on an issue. Every post ends with "Written by <bot>, a TerminalX bot, on behalf of
+  <owner>", which the bot cannot leave out. Post only with these commands, not with `gh`.
+- A mention as `@<slug>` in a comment on a pull request or issue of the owner's projects'
+  GitHub repositories (conversation or review comments), or on Linear, starts a conversation
+  with the bot, or goes to the chat that pull request or issue already has. It is accepted from
+  the owner and from the people in the bot's Who can ask (by the GitHub login the owner gave
+  them, and on Linear by their email); anyone else's is shown in the bot's settings as not
+  accepted. A comment that carries a bot's signature starts nothing, and an edited comment is
+  not accepted (who edited it is not known): mention the bot again in a new comment.
+- `reply` answers, in its thread, the newest mention that reached the chat it runs in (or the
+  chat that started its session). On GitHub it names the person who asked.
+- A post is a report to the access gate: Full access posts, Ask before outward actions and Read
+  and report ask the owner first, and a paused bot posts nothing (`bot_paused`). At most 20
+  posts per bot an hour; at most 10 mentions reach one bot an hour, and the rest wait.
+- The channels are read every two minutes while Bots is on; only what is written after a
+  source is first read counts. Kept in `$TERMINALX_HOME/bot-channels.json`.
+
 #### A bot's memory
 
 ```text
 terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
 terminalx bots memory forget "<note>" [--line <n>] [--bot <bot>] [--place <place>] --json
 terminalx bots memory list [--bot <bot>] [--place <place>] --json
+terminalx bots memory tidy --plan '<plan JSON>' [--bot <bot>] --json
 ```
 
 - `MEMORY.md` holds one dated note per line (`- 2026-11-20 <note>`). **A bot writes its memory
@@ -2062,6 +2154,51 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
   note has; for one of two equal notes add `--line <n>`, its line number as `list` shows it.
 - While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
   answer `forbidden`.
+- `tidy` merges duplicate notes and removes contradicted ones as **one** change the owner undoes
+  with one Undo. The plan names each note by its line number (as `list` shows it) and its text,
+  with `place` when it is not `bot`:
+  `{"merge":[{"lines":[{"line":3,"note":"…"},{"line":9,"note":"…"}],"into":"<the one note>"}],"remove":[{"line":5,"note":"…"}]}`.
+  A merge takes two or more notes; at most 200 lines in all. If any line no longer reads as
+  named, the whole plan is refused (`invalid_arguments`) and nothing changes: read again and
+  send a new one. A Tidy memory run tidies once.
+
+#### Suggestions
+
+A bot proposes work for its owner; the owner presses Start or Dismiss on its Home tab. Run from
+a bot's own sessions only; from anywhere else it answers `forbidden`.
+
+```text
+terminalx bots suggest --title "<what to do, one line>" --why "<why it is worth doing>" --json
+```
+
+- Start makes the suggestion an item the owner asked for, in progress, and sends it to the
+  bot's home chat as the owner's message. Dismiss only closes it. Neither is a CLI command.
+- A title is at most 200 characters and why at most 400, one line each; one that holds a
+  secret is refused. At most 20 suggestions wait at once, at most 5 come from one look around,
+  and an open title is not suggested twice. A paused bot suggests nothing (`bot_paused`).
+- A built-in Look around run may only read and suggest: every other action is refused before
+  it runs, with a message saying to suggest it instead. Kept in
+  `$TERMINALX_HOME/bot-suggestions/<bot id>.json`.
+
+#### A message to another bot
+
+```text
+terminalx bots message <bot> "<text>" [--kind handoff|question|status] --json
+```
+
+- Only a bot sends one, from its own chat, a duty run or a session it started; it is sent as
+  that bot, labelled with its name and access. From anywhere else it answers `forbidden` (the
+  owner writes to a bot in its chat), a paused bot gets `bot_paused`, and a bot cannot message
+  itself. `--kind` defaults to `handoff`.
+- The message wakes the other bot's duties that wait for one (from this bot, of this kind).
+  What it says is information for that bot, never its owner's words or approval. The answer's
+  `wakes` says whether one does, and `note` why not.
+- It keeps to the reporting line, as `bots tell` does: a question or a status goes to your lead
+  or a bot that reports to you, a hand-off only where `bots handoff` may hand work.
+- One bot leaves at most 30 messages an hour. A message waits until the other bot's duties have
+  read it; when 100 already wait unread, the message is refused until they have.
+- A message sent from a run that a message woke counts one more pass; one that has passed
+  between bots three times wakes nobody, so two bots cannot keep waking each other.
 
 ### This guide
 

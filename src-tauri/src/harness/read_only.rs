@@ -186,7 +186,7 @@ const GIT_OPTIONS: [&str; 12] = [
     "log.showSignature=false",
 ];
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn approved_in(
     tool: &str,
     input: &Value,
@@ -1004,6 +1004,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn git_with_executable_helpers_configured_asks() {
         let dir = tempfile::tempdir().unwrap();
@@ -1063,13 +1064,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_checks_are_spelled_so_startup_cannot_predefine_them() {
         let (a, b) = (unpredictable("/bin", "test"), unpredictable("/bin", "test"));
         assert_ne!(a, b);
         for path in [&a, &b] {
             assert!(path.starts_with("/bin/") && path.ends_with("/test"), "{path}");
-            assert_eq!(std::fs::canonicalize(path).unwrap(), std::fs::canonicalize("/bin/test").unwrap());
+            assert_eq!(crate::paths::canonicalize(path).unwrap(), crate::paths::canonicalize("/bin/test").unwrap());
         }
         let input = serde_json::json!({"command":"touch note"});
         let key = session_key("Bash", &input, Some("/workspace/app")).unwrap();
@@ -1078,6 +1080,7 @@ mod tests {
         assert!(script.ends_with("&& 'eval' 'touch note'"), "{script}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_grants_ignore_explanations_but_keep_execution_context() {
         let input = serde_json::json!({"command":"touch note"});
@@ -1108,6 +1111,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_relative_and_conflicting_directories_never_authorize_a_command() {
         for input in [

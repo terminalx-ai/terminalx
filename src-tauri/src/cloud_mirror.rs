@@ -356,7 +356,7 @@ impl Mirror {
             bail!("invalid workspace");
         }
         // Canonical, so a link in the way of the home itself is resolved once, here.
-        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        let home = crate::paths::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
         Ok(Self { dir: home.join(DIR).join(organization_id).join(workspace_id), organization_id: organization_id.into(), workspace_id: workspace_id.into() })
     }
 
@@ -956,8 +956,8 @@ impl Mirror {
     /// The disk's own spelling of a file the mirror wrote: the folder it
     /// landed in may be an existing one under another case or Unicode form.
     fn real_relative(&self, relative: &str) -> Option<String> {
-        let real = std::fs::canonicalize(self.local_path_unchecked(relative).ok()?).ok()?;
-        let root = std::fs::canonicalize(self.files()).ok()?;
+        let real = crate::paths::canonicalize(self.local_path_unchecked(relative).ok()?).ok()?;
+        let root = crate::paths::canonicalize(self.files()).ok()?;
         Some(real.strip_prefix(&root).ok()?.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
     }
 
@@ -1060,7 +1060,7 @@ pub fn existing(home: &Path) -> Vec<(String, String)> {
             .filter(|(name, _)| valid_id(name))
             .collect()
     };
-    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let home = crate::paths::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let mirrors = home.join(DIR);
     if std::fs::symlink_metadata(&mirrors).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Vec::new();
@@ -1125,7 +1125,7 @@ pub fn claim_owner(home: &Path, account: &str, legacy: Option<&str>) -> Result<u
 
 fn claim_owner_at(home: &Path, account: &str, legacy: Option<&str>, now: std::time::SystemTime) -> Result<usize> {
     let mirrors = existing(home);
-    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let home = crate::paths::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let file = home.join(DIR).join(OWNER);
     let wanted = owner_record(account);
     let known = std::fs::read_to_string(&file).ok();
@@ -1160,7 +1160,7 @@ fn claim_owner_at(home: &Path, account: &str, legacy: Option<&str>, now: std::ti
 /// the first, every mirror is removed. Returns how many were.
 pub fn note_unreadable(home: &Path, now_ms: u64) -> Result<usize> {
     let mirrors = existing(home);
-    let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let home = crate::paths::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     let file = home.join(DIR).join(UNREADABLE);
     if mirrors.is_empty() {
         let _ = std::fs::remove_file(&file);
@@ -1185,8 +1185,8 @@ pub fn note_unreadable(home: &Path, now_ms: u64) -> Result<usize> {
 /// Is `path` inside the directory that holds every mirror? A mirror is for
 /// reading: it is never a project or an agent's working directory.
 pub fn holds(home: &Path, path: &Path) -> bool {
-    let mirrors = std::fs::canonicalize(home.join(DIR)).unwrap_or_else(|_| home.join(DIR));
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mirrors = crate::paths::canonicalize(home.join(DIR)).unwrap_or_else(|_| home.join(DIR));
+    let path = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     path.starts_with(mirrors)
 }
 

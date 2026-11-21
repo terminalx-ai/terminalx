@@ -64,6 +64,8 @@
 //! a save refused after an agent's edit and made after a reconnect, a staged
 //! large write, bounded search, symlink escapes and a participant's limits.
 
+#![cfg(unix)]
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

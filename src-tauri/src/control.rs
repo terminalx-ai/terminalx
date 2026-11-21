@@ -293,7 +293,6 @@ impl WindowControl {
         Self { sink, computer, browser, pairing: None, questions: None, machines: None }
     }
 
-    #[cfg(unix)]
     pub(crate) fn serve(mut self, app: tauri::AppHandle, endpoint: ControlEndpoint, pairing: Arc<crate::pairing::PairingManager>, ask: crate::issue_control::Ask) -> anyhow::Result<()> {
         use tauri::Manager;
         self.pairing = Some(pairing);
@@ -333,7 +332,6 @@ impl WindowControl {
         Ok(())
     }
 
-    #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         if command == "environment.snapshot" {
             let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
@@ -526,7 +524,6 @@ impl ControlService {
         {
             Caller::of(&self.manager, &params).gate(command, &params)?;
         }
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == crate::serve_cli::consent::WINDOW_REGISTER {
                 // While Bots is on, a runtime whose window's key is pinned
@@ -558,6 +555,8 @@ impl ControlService {
                 // The registrant is the window from now on: the process that
                 // proved it, when it is the one that asked; else one that
                 // runs in no pane and not under this runtime (PRO-468).
+                // Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
+                #[cfg(unix)]
                 if let Some(pid) = crate::hooks::caller_pid() {
                     let window = match proven { Some(witness) => witness == pid, None => self.may_be_the_window(pid) };
                     match crate::serve_cli::consent::started_at(pid) {
@@ -579,12 +578,15 @@ impl ControlService {
                     // Only a person makes a pairing code or lets a computer
                     // in: never an agent or terminal this runtime started
                     // (docs/MACHINES.md, "Who may answer"; `consent`).
-                    #[cfg(unix)]
                     let params = {
                         let mut params = params;
                         if crate::serve_cli::consent::guards(command) {
-                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                            crate::serve_cli::consent::verify(run, &mut params)?;
+                            #[cfg(unix)]
+                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?.to_owned();
+                            // A pipe has no directory: the witness belongs to this home's `run`.
+                            #[cfg(windows)]
+                            let run = crate::store::root().map_err(ControlError::internal)?.join("run");
+                            crate::serve_cli::consent::verify(&run, &mut params)?;
                         }
                         params
                     };
@@ -637,6 +639,14 @@ impl ControlService {
                         if command == crate::serve_cli::consent::BOTS_COMMAND {
                             let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
                             bots_from_a_person(run, &mut params, &crate::serve_cli::consent::Window::current())?;
+                        }
+                        params
+                    };
+                    #[cfg(not(unix))]
+                    let params = {
+                        let mut params = params;
+                        if command == crate::serve_cli::consent::BOTS_COMMAND {
+                            bots_without_a_window(&mut params)?;
                         }
                         params
                     };
@@ -1014,8 +1024,12 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
-            "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
-            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" | "bots.memory.tidy" => self.bot_memory(command, params),
+            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.plan" | "bots.items.ask-merge" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
+            "bots.suggest" => self.bot_suggest(params),
+            "bots.post" | "bots.reply" => self.bot_channels(command, params),
+            "bots.message" => self.bot_message(params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1080,7 +1094,8 @@ impl ControlService {
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
                 json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?})
             }
-            "bots.pause" => json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?}),
+            // What it stopped is said on the pause (PRO-474), as the window's Pause says it.
+            "bots.pause" => json!({"bot": bots::enforce::pause(&self.manager, Some(&named()?.id), &by, bots::pause::FROM_CLI).map_err(failed)?}),
             // Never applied from here: the owner answers in the app.
             "bots.resume" => {
                 caller.person_only("resume bots")?;
@@ -1102,9 +1117,10 @@ impl ControlService {
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
                 bots::enforce::after_delete(sink, &bot.id);
+                bots::handoffs::deliver_waiting_all(&self.manager);
                 json!({"deleted": bot.id, "name": bot.name})
             }
-            "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
+            "bots.pauseAll" => bots::enforce::pause(&self.manager, None, &by, bots::pause::FROM_CLI).map_err(failed)?,
             _ => {
                 caller.person_only("resume bots")?;
                 if !confirmable {
@@ -1126,11 +1142,9 @@ impl ControlService {
                 listing
             }
         };
-        // A pause or a delete reaches that bot's running sessions now.
-        match command {
-            "bots.pause" | "bots.delete" => bots::enforce::reconcile(&self.manager, answer["bot"]["id"].as_str().or(answer["deleted"].as_str())),
-            "bots.pauseAll" => bots::enforce::reconcile(&self.manager, None),
-            _ => {}
+        // A delete reaches that bot's running sessions now (a pause did, in `enforce::pause`).
+        if command == "bots.delete" {
+            bots::enforce::reconcile(&self.manager, answer["deleted"].as_str());
         }
         Ok(answer)
     }
@@ -1176,7 +1190,8 @@ impl ControlService {
             (Some(own), _) => {
                 // The session it runs in: where the kernel placed it, else the one its proved claim names.
                 let entry = caller.session.as_deref().and_then(|session| index::get(session).ok());
-                let duty = entry.as_ref().and_then(|entry| entry.unknown.get("botDuty")).and_then(Value::as_str).map(str::to_owned);
+                // The duty's id, under `botDuty` (`{"id"}`, PRO-471).
+                let duty = entry.as_ref().and_then(|entry| entry.unknown.get("botDuty")).and_then(|duty| duty.get("id").or(Some(duty))).and_then(Value::as_str).map(str::to_owned);
                 let source = crate::bots::changes::Source {
                     kind: if duty.is_some() { "duty".into() } else { "chat".into() },
                     session: caller.session.clone(),
@@ -1216,6 +1231,29 @@ impl ControlService {
             "bots.memory.add" => {
                 let recorded = memory::add(sink, &bot, &place, &required_string(&params, "text")?, &by, source).map_err(failed)?;
                 Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
+            }
+            "bots.memory.tidy" => {
+                let plan: memory::TidyPlan = serde_json::from_value(params["plan"].clone()).map_err(|error| {
+                    ControlError::invalid(format!("The tidy plan is not one TerminalX reads: {error}. It is {{\"merge\": [{{\"lines\": [{{\"line\": N, \"note\": TEXT}}, …], \"into\": TEXT}}], \"remove\": [{{\"line\": N, \"note\": TEXT}}]}}."))
+                })?;
+                // The owner may tidy every place; a bot, its own notes and its working place's.
+                let places = if by == bots::OWNER { memory::places(&bot) } else { memory::conversation_places(&bot) };
+                // One tidy is one change: a run of the built-in Tidy memory makes one (PRO-477). Said as forbidden here
+                // when it plainly already tidied; `memory::tidy` judges it again under the history's lock, so two tidies
+                // sent at once still record one.
+                let tidy_run = caller
+                    .session
+                    .as_deref()
+                    .filter(|_| by != bots::OWNER)
+                    .filter(|session| index::get(session).ok().as_ref().and_then(crate::bots::builtins::of_session).is_some_and(|run| run.kind == crate::bots::builtins::Builtin::TidyMemory));
+                if let Some(session) = tidy_run {
+                    let tidied = crate::bots::changes::read_log(&bot.id).map_err(ControlError::internal)?.changes.iter().any(|change| change.kind == memory::TIDY_KIND && change.source.session.as_deref() == Some(session));
+                    if tidied {
+                        return Err(ControlError::new("forbidden", "This run already tidied your memory: one tidy is one change. Reply with what you merged and removed.", None::<String>));
+                    }
+                }
+                let recorded = memory::tidy(sink, &bot, &plan, &places, &by, source, tidy_run).map_err(failed)?;
+                Ok(json!({"bot": bot.id, "changes": memory::shown(&recorded)}))
             }
             "bots.memory.forget" => {
                 // `--line N` counts from 1, as the list shows the lines.
@@ -1301,6 +1339,67 @@ impl ControlService {
         crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), action, &params).map_err(failed)
     }
 
+    /// A message from one bot to another (`terminalx bots message`, PRO-472):
+    /// a hand-off, a question or a status, which wakes the other bot's duties
+    /// that wait for one. The sender is the [`Caller`]: only a caller placed
+    /// in a bot's session (or proving its claim to one) sends, and as that
+    /// bot; the owner talks to a bot in its chat. What it says reaches the
+    /// other bot as information from this one, never as the owner's words.
+    fn bot_message(&self, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, wakes, BotError, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
+        let caller = Caller::of(&self.manager, &params);
+        caller.refuse_gone()?;
+        let Some(own) = caller.verified_bot() else {
+            return Err(ControlError::new(
+                "forbidden",
+                "Only a bot leaves another bot a message, from its own chat or duty run. To give a bot work, write to it in its chat.",
+                None::<String>,
+            ));
+        };
+        caller.refuse_while_paused("leave another bot a message")?;
+        let to = match bots::named(&required_string(&params, "bot")?).map_err(failed)? {
+            Named::One(bot) => *bot,
+            Named::Several => return Err(ControlError::new("ambiguous_selector", bots::several_named(&required_string(&params, "bot")?), Some("Use the id from `terminalx bots list --json`.".into()))),
+            Named::Nobody => return Err(ControlError::not_found(bots::nobody_named(&required_string(&params, "bot")?))),
+        };
+        let from = bots::get(&own).map_err(failed)?;
+        let kind = wakes::MessageKind::parse(optional_string(&params, "kind").as_deref().unwrap_or("handoff"));
+        if matches!(kind, wakes::MessageKind::Other(_)) {
+            return Err(ControlError::invalid("--kind is handoff, question or status."));
+        }
+        // The reporting line, as `bots handoff` and `bots tell` judge it (PRO-475): a hand-off goes where work may be
+        // handed, a question or a status stays on the line.
+        if from.id != to.id {
+            let allowed = match kind {
+                wakes::MessageKind::Handoff => bots::handoffs::may_hand_off(&from, &to),
+                _ if bots::handoffs::on_line(&from, &to) => Ok(()),
+                _ => Err(format!("{} is not on your reporting line (your lead or a bot that reports to you), so it is not sent. Ask your owner to set the line in its settings.", to.name)),
+            };
+            allowed.map_err(ControlError::invalid)?;
+        }
+        // One hop more than the message that woke the duty run it is sent from, so two bots cannot wake each other for ever.
+        let hops = caller.session.as_deref().and_then(|session| index::get(session).ok()).map_or(0, |entry| wakes::hops_of_session(&entry)).saturating_add(1);
+        let (message, waits) = wakes::post(self.sink.as_ref(), &from, &to, kind, &required_string(&params, "text")?, hops).map_err(failed)?;
+        // Whether a duty of the other bot waits for it, and if not, why it wakes nothing.
+        let note = if hops >= wakes::MAX_HOPS {
+            Some(wakes::looped_text())
+        } else if !waits {
+            Some(format!("{} has no duty that waits for this message, so it wakes nothing; it goes unread.", to.name))
+        } else {
+            None
+        };
+        Ok(json!({"to": to.id, "toName": to.name, "message": message, "wakes": waits, "note": note}))
+    }
+
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
     /// workers started for them. There is no command to approve a run: the
     /// lead runs this CLI, and a person approves its plan in the app.
@@ -1358,6 +1457,27 @@ impl ControlService {
         // A bot's session steers only the runs led for the same bot.
         if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
             placement.may_steer(&run)?;
+        }
+        // PRO-476: a run a bot asked its owner about starts only on their answer, and with "Start, but ask before
+        // merging" merges only once they said Merge. Judged by the run, whoever calls: a process a bot starts outside
+        // its sessions is not placed in one. The owner's own Start and Merge are the window's and do not come here.
+        if command == "runs.start" {
+            if let Some(number) = crate::bots::runs::start_awaits_owner(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "awaits_owner",
+                    format!("Run {} starts only on your owner's answer to item #{number}.", run.id),
+                    Some("End your turn: their Approve and start, in the TerminalX window, starts it.".into()),
+                ));
+            }
+        }
+        if command == "runs.merge" {
+            if let Some(number) = crate::bots::runs::merge_held_for(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "merge_held",
+                    format!("Your owner asked to be asked before run {} merges (item #{number}).", run.id),
+                    Some(format!("Ask them with `terminalx bots items ask-merge {number}`, end your turn, and merge once they answer Merge.")),
+                ));
+            }
         }
         match command {
             "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
@@ -1468,7 +1588,6 @@ impl ControlService {
     /// from the webview when there is one and it answers in time.
     fn terminal_status(&self) -> Value {
         let mut terminals = json!({ "backend": self.manager.terminals().stats() });
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             terminals["webview"] = if lifetime.window.available() {
                 lifetime.window.call("window.terminalCounters", json!({})).unwrap_or(Value::Null)
@@ -1548,11 +1667,10 @@ impl ControlService {
 
     /// A window service from the control socket: the attached desktop's.
     fn window_call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             return lifetime.window.call(command, params);
         }
-        #[cfg(all(feature = "desktop", unix))]
+        #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             return desktop.execute(command, params, "");
         }
@@ -2450,7 +2568,7 @@ impl ControlService {
             return Err(refuse(&orphans, &[]));
         }
         if !force {
-            let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
             let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
             if !landed.safe {
                 let losses = if landed.losses.is_empty() { "It is not known to be clean and merged.".to_string() } else { landed.losses.join("\n") };
@@ -2484,7 +2602,7 @@ impl ControlService {
     /// What deleting `worktree` would do: the sessions it holds, with what
     /// each still runs, and its git state checked as the delete checks it.
     fn worktree_delete_preview(&self, project: &Project, worktree: crate::workspaces::Workspace, held: &[SessionEntry]) -> crate::worktree_control::DeletePreview {
-        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
         let terminals = self.manager.terminals();
         let sessions = held
@@ -3053,7 +3171,8 @@ fn refuse_other_bots_items(manager: &SessionManager, params: &Value, window: Opt
 /// Whether a call reads bot `bot`'s own duties. The window and a person's
 /// terminal read any bot's; a process in a bot's session reads only its own.
 fn own_duties_read(command: &str, params: &Value, bot: Option<&str>) -> bool {
-    command == "runtime.session.bots" && params["operation"] == "duties" && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
+    // The week of duties (PRO-473) likewise, for its own bot only: never every bot's.
+    command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("duties" | "dutyWeek")) && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
 }
 
 /// The `runtime.session.*` and `runtime.pty.*` calls that only read, which
@@ -3095,6 +3214,19 @@ fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli:
             if crate::bots::enforce::needs_person(&operation, &params["params"]) {
                 return Err(bots_refusal(&operation, error, window));
             }
+        }
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
+        }
+        return Ok(());
+    }
+    if operation == "itemAnswer" {
+        // PRO-476: whether the answer approves a run is judged again under the list's lock (`items::answer_as`),
+        // so the question cannot change into one that does after this check: it is told whether a person asked.
+        let mut proved = witnessed && consent::verify_for(run, params, window).is_ok();
+        if !proved && crate::bots::enforce::needs_person(&operation, &params["params"]) {
+            consent::verify_for(run, params, window).map_err(|error| bots_refusal(&operation, error, window))?;
+            proved = true;
         }
         if let Some(inner) = params["params"].as_object_mut() {
             inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
@@ -3151,7 +3283,6 @@ fn resume_confirmable() -> bool {
 }
 
 /// What a Bots action is called where it is refused.
-#[cfg(unix)]
 fn bots_action(operation: &str) -> &'static str {
     match operation {
         "resume" => "resume a bot",
@@ -3168,8 +3299,43 @@ fn bots_action(operation: &str) -> &'static str {
         "dutyRun" => "run a bot's duty",
         "dutyTryCheck" => "try a duty's first check",
         "quietHours" => "change a bot's quiet hours",
+        "itemHand" => "hand a bot's item to another bot",
+        "suggestionStart" => "start a bot's suggestion",
+        "briefWrite" => "change the team brief",
+        "itemAnswer" => "approve a bot's run",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
+}
+
+/// [`bots_from_a_person`] where no window can sign, as on Linux
+/// (`window_can_confirm`): what needs a person is refused, and an `update`
+/// is never a person's, so `bots::update_as` gives the bot nothing more.
+#[cfg(not(unix))]
+fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
+    let operation = params["operation"].as_str().unwrap_or_default().to_owned();
+    if let Some(object) = params.as_object_mut() {
+        object.remove(crate::serve_cli::consent::PARAM);
+    }
+    if operation == "update" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
+        return Ok(());
+    }
+    if operation == "itemAnswer" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
+    }
+    if crate::bots::enforce::needs_person(&operation, &params["params"]) {
+        let action = bots_action(&operation);
+        return Err(ControlError::new(
+            "pairing_unavailable",
+            format!("To {action} needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none that can."),
+            Some("Use TerminalX on a Mac for this.".into()),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a person can confirm a Bots action here at all: only the TerminalX
@@ -3767,7 +3933,7 @@ fn optional_string(params: &Value, name: &str) -> Option<String> {
 }
 
 fn canonical_or_original(path: &str) -> String {
-    std::fs::canonicalize(path)
+    crate::paths::canonicalize(path)
         .unwrap_or_else(|_| PathBuf::from(path))
         .to_string_lossy()
         .into_owned()
@@ -4389,6 +4555,59 @@ mod tests {
         (home, service, sink, id, chat, owners, pid)
     }
 
+    /// `terminalx bots message` (PRO-472): only a bot sends, as the bot its
+    /// session proves it is, never as the owner; it does not message itself;
+    /// what it leaves is the other bot's to read, labelled with the sender;
+    /// and it stays on the reporting line as `bots tell` does (PRO-475).
+    #[test]
+    fn a_bot_leaves_another_bot_a_message_only_as_itself() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == atlas && bot.home)).expect("a hire makes the home chat");
+        service.manager.install_review_test_cli(&chat.id, &chat.tabs[0].id, "atlas-launch-token");
+        let from_chat = |params: Value, token: Option<&str>| {
+            let mut params = params;
+            params["caller"] = json!({"session": chat.id, "tab": chat.tabs[0].id});
+            if let Some(token) = token {
+                params["hookToken"] = json!(token);
+            }
+            ask("bots.message", params)
+        };
+        // Off the reporting line (both report to the owner), as `bots tell` judges it: refused, and nothing is left.
+        let off_line = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap_err();
+        assert_eq!(off_line.code, "invalid_arguments");
+        assert!(off_line.message.contains("not on your reporting line"), "{}", off_line.message);
+        let handed = from_chat(json!({"bot": "iris", "text": "Take this.", "kind": "handoff"}), Some("atlas-launch-token")).unwrap_err();
+        assert!(handed.message.contains("does not report to Atlas"), "{}", handed.message);
+        assert!(crate::bots::wakes::messages(&iris).unwrap().is_empty());
+        crate::bots::update(service.sink.as_ref(), &iris, crate::bots::BotPatch { reports_to: Some(atlas.clone()), ..Default::default() }).unwrap();
+        let sent = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap();
+        assert_eq!(sent["to"], iris.as_str());
+        let left = crate::bots::wakes::messages(&iris).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].from.as_str(), left[0].from_name.as_str(), left[0].kind.as_str(), left[0].hops), (atlas.as_str(), "Atlas", "question", 1));
+
+        // Not to itself; not with a claim it cannot prove; not as the owner; not while paused; not with Bots off.
+        assert_eq!(from_chat(json!({"bot": "atlas", "text": "Me"}), Some("atlas-launch-token")).unwrap_err().code, "invalid_arguments");
+        assert_eq!(from_chat(json!({"bot": "iris", "text": "x", "kind": "order"}), Some("atlas-launch-token")).unwrap_err().code, "invalid_arguments");
+        for token in [None, Some("forged")] {
+            assert_eq!(from_chat(json!({"bot": "iris", "text": "Spoofed"}), token).unwrap_err().code, "forbidden", "{token:?}");
+        }
+        assert_eq!(ask("bots.message", json!({"bot": "iris", "text": "From the owner"})).unwrap_err().code, "forbidden");
+        ask("bots.pause", json!({"bot": "atlas"})).unwrap();
+        assert_eq!(from_chat(json!({"bot": "iris", "text": "Paused"}), Some("atlas-launch-token")).unwrap_err().code, "bot_paused");
+        assert_eq!(crate::bots::wakes::messages(&iris).unwrap().len(), 1);
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(ask("bots.message", json!({"bot": "iris", "text": "Off"})).unwrap_err().code, "bots_off");
+    }
+
     /// `terminalx bots memory …` (PRO-470): who asks is the `Caller`. A
     /// claim of a bot's session is that bot's only when the tab's launch
     /// secret proves it, and refused otherwise, never taken for the owner; a
@@ -4622,6 +4841,29 @@ mod tests {
         assert_eq!(crate::bots::duties::duties_of(&id).unwrap().len(), before, "nothing was added");
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
         let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+    }
+
+    /// PRO-473: a process in a bot's session, through the dispatch, reads its
+    /// own bot's week of duties, and neither another bot's nor every bot's.
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_session_reads_its_own_week_of_duties_only() {
+        let marker = format!("72.{}", std::process::id());
+        let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let bots = |params: Value| service.execute("runtime.session.bots", json!({"operation": "dutyWeek", "params": params}), "r");
+        let own = bots(json!({"id": id, "timezone": "UTC"}));
+        let other_week = bots(json!({"id": other, "timezone": "UTC"}));
+        let every = bots(json!({"timezone": "UTC"}));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+        let own = own.unwrap();
+        assert!(own["days"].as_array().is_some_and(|days| days.len() == 7), "{own}");
+        assert_eq!(other_week.unwrap_err().code, "forbidden", "another bot's week");
+        assert_eq!(every.unwrap_err().code, "forbidden", "every bot's week");
     }
 
     /// F1: after a handover the runtime that took over adopts the bot's
@@ -5264,7 +5506,8 @@ mod tests {
         assert_eq!(ask("bots.delete", json!({"bot": "kestrel"})).unwrap(), json!({"deleted": id, "name": "Kestrel"}));
         assert!(!home.exists() && crate::store::root().unwrap().join("trash").join("bots").join(&id).join("ROLE.md").is_file());
         assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 1);
-        assert_eq!(changes(&mut heard), 11);
+        // Each pause is told twice: once paused, once with what it stopped (PRO-474).
+        assert_eq!(changes(&mut heard), 13);
 
         // Refusals name what was wrong.
         assert_eq!(ask("bots.show", json!({"bot": "kestrel"})).unwrap_err().code, "not_found");
@@ -5308,7 +5551,7 @@ mod tests {
         let add = |path: &Path| service.execute("projects.add", json!({"path": path, "refuseExisting": true}), "r");
 
         let added = add(&repository).unwrap();
-        let path = std::fs::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
+        let path = crate::paths::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
         assert_eq!((added["project"]["path"].as_str(), added["project"]["name"].as_str(), added["project"]["kind"].as_str()), (Some(path.as_str()), Some("api"), Some("git")));
         assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
         assert_eq!(add(&gateway).unwrap()["project"]["kind"], "folder");
@@ -6327,3 +6570,19 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+#[cfg(test)]
+#[path = "control_bot_runs_tests.rs"]
+mod bot_runs_tests;
+
+// Bots hand-offs from the command line (PRO-475).
+#[path = "control_bot_handoffs.rs"]
+mod bot_handoffs;
+
+// A bot's suggestions from the command line (PRO-477).
+#[path = "control_bot_suggestions.rs"]
+mod bot_suggestions;
+
+// Bots' posts on GitHub and Linear from the command line (PRO-480).
+#[path = "control_bot_channels.rs"]
+mod bot_channels;

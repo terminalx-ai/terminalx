@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { AppWindow, CalendarClock, ChevronLeft, Copy, Loader2, Pause, Pencil, Play, Sparkles, Trash2, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
+import { Chip } from "@/components/ui/chip";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { errorMessage } from "@/lib/api";
 import { describeSchedule, nextWallTime, relativeNext } from "@/lib/automationSchedule";
@@ -17,7 +18,11 @@ import {
   runTook,
   todayCounts,
   tookText,
+  wakeOf,
+  wakesOn,
 } from "@/lib/botDuties";
+import { useAutomationStore } from "@/lib/automations";
+import { builtinOf } from "@/lib/botSuggestions";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
 import { formatCost } from "@/lib/stats";
@@ -66,6 +71,8 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
   const note = state?.notes[duty.id] ?? null;
   const reportsTo = reportsToLabel(duty.bot?.reportsTo, bot, bots);
   const status = !duty.enabled ? "Off" : bot.paused ? "Paused with its bot" : "On";
+  // A built-in (PRO-477) is switched off, never removed or copied.
+  const builtin = builtinOf(duty);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5 scrollbar-thin" data-testid="bot-duty">
@@ -74,11 +81,11 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
           <ChevronLeft className="size-3.5" /> Duties
         </button>
         <div className="flex flex-wrap items-center gap-1.5" data-testid="duty-actions">
-          <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void remove()} aria-label={`Remove ${duty.name}`}><Trash2 /></Button>
+          {!builtin && <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void remove()} aria-label={`Remove ${duty.name}`}><Trash2 /></Button>}
           <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("switch", () => dutiesApi.switch(bot.id, duty.id, !duty.enabled))} data-testid="duty-switch">
             {duty.enabled ? <><Pause /> Pause</> : <><Play /> Switch on</>}
           </Button>
-          <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("duplicate", () => dutiesApi.duplicate(bot.id, duty.id).then((copy) => onOpenDuty(copy.id)))}><Copy /> Duplicate</Button>
+          {!builtin && <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("duplicate", () => dutiesApi.duplicate(bot.id, duty.id).then((copy) => onOpenDuty(copy.id)))}><Copy /> Duplicate</Button>}
           <Button size="sm" disabled={!!busy || !!bot.paused} title={bot.paused ? `${bot.name} is paused` : undefined} onClick={() => act("run", () => dutiesApi.run(bot.id, duty.id))} data-testid="duty-run">
             {busy === "run" ? <Loader2 className="animate-spin" /> : <Play />} Run now
           </Button>
@@ -86,13 +93,18 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
       </div>
       <h2 className="mt-3 flex min-w-0 items-baseline gap-2 text-[17px] font-semibold text-foreground">
         <span className="truncate" title={duty.name}>{duty.name}</span>
+        {builtin && <Chip title="Every bot has it. Switch it off to stop it." data-testid="duty-builtin">Built in</Chip>}
         <span className={cn("shrink-0 text-[12.5px] font-normal", duty.enabled && !bot.paused ? "text-success" : "text-faint")} data-testid="duty-status">· {status}</span>
       </h2>
       {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed.name, failed.action); }} onFailed={setError} className="mt-3" />}
 
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2" data-testid="duty-stats">
         <Card label="Last run" value={last ? clockOf(runAt(last)) || "–" : "Never"} detail={last ? runOutcome(last, leadName) : "It has not run yet"} />
-        <Card label="Next run" value={duty.enabled && !bot.paused ? nextWallTime(duty.nextRunAt, duty.schedule.timezone) || "–" : "–"} detail={duty.enabled ? (bot.paused ? "Not while paused" : relativeNext(duty.nextRunAt)) : "Switched off"} />
+        {wakeOf(duty) ? (
+          <Card label="Next run" value={duty.enabled && !bot.paused ? "On event" : "–"} detail={duty.enabled ? (bot.paused ? "Events wait until you resume" : "When something it waits for happens") : "Switched off"} />
+        ) : (
+          <Card label="Next run" value={duty.enabled && !bot.paused ? nextWallTime(duty.nextRunAt, duty.schedule.timezone) || "–" : "–"} detail={duty.enabled ? (bot.paused ? "Not while paused" : relativeNext(duty.nextRunAt)) : "Switched off"} />
+        )}
         <Card label="Today" value={`${today.checks} checks`} detail={`${today.reports} reported · ${today.nothingNew} nothing new`} />
         <Card label="Spend" value={`${formatCost(spend.today)} today`} detail={`${formatCost(spend.month)} this month`} />
       </div>
@@ -101,9 +113,16 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
         <div className="min-w-0 flex-[1_1_520px]">
           <h3 className="text-[11px] font-medium tracking-[.06em] text-faint uppercase">What happens each time</h3>
           <ol className="mt-2 flex flex-col gap-2" data-testid="duty-steps">
-            <Step n={1} icon={<CalendarClock />} title="Wakes on a schedule" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
-              <p className="text-muted-foreground">{describeSchedule(duty.schedule)}{duty.schedule.kind === "cron" && duty.schedule.cron ? <span className="ml-1.5 font-mono text-faint">{duty.schedule.cron}</span> : null}</p>
-            </Step>
+            {wakeOf(duty) ? (
+              <Step n={1} icon={<CalendarClock />} title="Wakes on an event" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
+                <p className="text-muted-foreground">{wakesOn(duty, leadName)}</p>
+                <WakeStatus duty={duty} />
+              </Step>
+            ) : (
+              <Step n={1} icon={<CalendarClock />} title="Wakes on a schedule" action={<Button size="xs" variant="ghost" onClick={onEdit} data-testid="duty-edit"><Pencil /> Edit</Button>}>
+                <p className="text-muted-foreground">{describeSchedule(duty.schedule)}{duty.schedule.kind === "cron" && duty.schedule.cron ? <span className="ml-1.5 font-mono text-faint">{duty.schedule.cron}</span> : null}</p>
+              </Step>
+            )}
             <Step n={2} icon={<Zap />} title="First checks" tag="a script · no model · free">
               {duty.precheck ? (
                 <>
@@ -116,7 +135,15 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
               )}
             </Step>
             <Step n={3} icon={<Sparkles />} title={`Then ${bot.name} looks`} tag={duty.precheck ? "the model · only when the check found something" : "the model"}>
-              <p className="line-clamp-4 whitespace-pre-wrap text-muted-foreground">{duty.prompt}</p>
+              {builtin ? (
+                <p className="text-muted-foreground">
+                  {builtin === "tidyMemory"
+                    ? "Merges duplicate notes and removes the ones newer notes contradict, as one change you can undo in Memory."
+                    : <>Reads what changed and suggests work on its Home tab. It may only read: TerminalX refuses anything else and tells it to suggest it instead.{duty.bot?.focus ? <span className="mt-1 block text-foreground">Focus: {duty.bot.focus}</span> : null}</>}
+                </p>
+              ) : (
+                <p className="line-clamp-4 whitespace-pre-wrap text-muted-foreground">{duty.prompt}</p>
+              )}
             </Step>
             <Step n={4} icon={<AppWindow />} title="Reports to">
               <p className="text-muted-foreground">{reportsTo}</p>
@@ -245,5 +272,18 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
       <dt className="text-faint">{label}</dt>
       <dd className="min-w-0 truncate text-muted-foreground">{children}</dd>
     </>
+  );
+}
+
+/** How an event duty's source last read: when, why it could not, and what it holds back (`automation_issue_state`). */
+function WakeStatus({ duty }: { duty: Automation }) {
+  const status = useAutomationStore().issueStates[duty.id];
+  if (!status) return null;
+  return (
+    <div className="mt-1 flex flex-col gap-0.5 text-[11.5px]" data-testid="duty-wake-status">
+      {status.lastPolledAt && <span className="text-faint">Last looked at {clockOf(status.lastPolledAt)}</span>}
+      {status.lastPollError && <span className="text-destructive">{status.lastPollError}</span>}
+      {status.notice && <span className="text-muted-foreground">{status.notice}</span>}
+    </div>
   );
 }

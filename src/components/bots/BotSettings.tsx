@@ -1,18 +1,22 @@
 import { useEffect, useState, type ComponentType, type KeyboardEvent, type ReactNode } from "react";
 import { AppWindow, Building2, ChevronDown, Cloud, Eye, Github, Laptop, Loader2, Plus, Send, Server, ShieldAlert, ShieldOff, Hash, SquareKanban, UserRound } from "@/icons";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useAccount } from "@/lib/account";
-import { errorMessage, gh, issues, type GitHubConnectionStatus, type LinearStatus, type OrganizationSummary } from "@/lib/api";
+import { botsApi, errorMessage, gh, issues, type GitHubConnectionStatus, type LinearStatus, type OrganizationSummary } from "@/lib/api";
 import { updateBot, useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { readOrganizationRoster } from "@/lib/organizationRoster";
 import type { OrganizationMember } from "@/lib/organizationMembers";
 import { openSettingRow } from "@/lib/settingsLinks";
+import { relativeTime } from "@/lib/time";
+import type { BotChannelsView, BotMention, BotPost } from "@/types/botChannels";
 import { effectiveAccess, type Bot, type BotAccess, type BotAsker, type BotAskerMay, type BotPatch } from "@/types/bots";
 import { BotAvatar } from "./BotAvatar";
 
@@ -56,8 +60,9 @@ export function BotSettings({ bot }: { bot: Bot }) {
       </Section>
       <Section title="Channels" note={`Where you can reach ${bot.name} and where it reports.`}>
         <Channels bot={bot} />
+        <ChannelActivity bot={bot} />
       </Section>
-      <Section title="Who can ask" note={`People and bots that may give ${bot.name} work. ${bot.name} acts with your accounts.`}>
+      <Section title="Who can ask" note={`People and bots that may give ${bot.name} work. ${bot.name} acts with your accounts. Its lead hands it work anyway; any other bot, a report of ${bot.name} included, hands it work only when listed here with "Can hand off work".`}>
         <WhoCanAsk bot={bot} busy={busy.has("whoCanAsk")} onChange={(whoCanAsk) => saveList("whoCanAsk", { whoCanAsk })} />
       </Section>
     </div>
@@ -314,7 +319,7 @@ function Channels({ bot }: { bot: Bot }) {
         name="GitHub"
         state={CONNECTION_LABEL[github]}
         on={github === "connected"}
-        detail={github === "connected" ? "Through your GitHub CLI login on this Mac" : "Connect the GitHub CLI to let it read and comment"}
+        detail={github === "connected" ? `Mention @${bot.slug} on a pull request or issue · reviews and comments with your GitHub CLI login, signed as ${bot.name}'s` : "Connect the GitHub CLI to let it read and comment"}
         action={manage("integrations.github", "Manage the GitHub connection", github === "connected")}
         testId="bot-channel-github"
       />
@@ -323,13 +328,72 @@ function Channels({ bot }: { bot: Bot }) {
         name="Linear"
         state={CONNECTION_LABEL[linear.state]}
         on={linear.state === "connected"}
-        detail={linear.state === "connected" ? `As ${linear.viewer ?? "you"}, with your API key` : "Add a Linear API key to let it read and comment"}
+        detail={linear.state === "connected" ? `As ${linear.viewer ?? "you"} · comments on issues it is mentioned in, signed as ${bot.name}'s` : "Add a Linear API key to let it read and comment"}
         action={manage("integrations.linear", "Manage the Linear connection", linear.state === "connected")}
         testId="bot-channel-linear"
       />
       <ListRow icon={Hash} name="Slack" state="Not connected" on={false} detail={`Message ${bot.name} in Slack`} action={later("Slack")} testId="bot-channel-slack" />
       <ListRow icon={Send} name="Telegram or WhatsApp" state="Not connected" on={false} detail={`Message ${bot.name} from your phone's chat app`} action={later("Telegram or WhatsApp")} testId="bot-channel-chat-app" />
     </ListBox>
+  );
+}
+
+/** The channels view of `id`, read now and every minute while shown: mentions arrive between reads of the page. */
+function useChannelsView(id: string): BotChannelsView | null {
+  const [view, setView] = useState<BotChannelsView | null>(null);
+  useEffect(() => {
+    let live = true;
+    setView(null);
+    // A runtime that does not know the call yet answers with an error: the list is then not shown.
+    const read = () => Promise.resolve().then(() => botsApi.channels(id)).then((value) => live && setView(value), () => live && setView(null));
+    void read();
+    const timer = window.setInterval(() => void read(), 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [id]);
+  return view;
+}
+
+const MENTION_STATE: Record<string, string> = { waiting: "Waiting", delivered: "In a chat", notAccepted: "Not accepted", failed: "Didn't reach it" };
+const POST_KIND: Record<string, string> = { review: "Posted a review", changesRequested: "Asked for changes", comment: "Commented", reply: "Answered" };
+
+function threadName(thread: BotMention["thread"]): string {
+  const label = thread.kind === "linear" ? thread.issue ?? "" : `${thread.repo ?? ""}#${thread.number ?? ""}`;
+  return thread.title ? `${label} · ${thread.title}` : label;
+}
+
+/**
+ * What reached the bot from GitHub and Linear, and what it posted there on the owner's behalf, newest first. Built
+ * from the Channels list's own rows: no screen of the design shows it. A mention from someone not in Who can ask is
+ * shown here with why, so the owner can add them.
+ */
+function ChannelActivity({ bot }: { bot: Bot }) {
+  const view = useChannelsView(bot.id);
+  if (!view) return null;
+  type Row = { at: string; mention?: BotMention; post?: BotPost };
+  const rows: Row[] = [...view.mentions.map((mention) => ({ at: mention.at, mention })), ...view.posts.map((post) => ({ at: post.at, post }))]
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, 6);
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3 min-w-0" data-testid="bot-channel-activity">
+      <h3 className="mb-1.5 text-[12px] font-medium text-muted-foreground">Lately on GitHub and Linear</h3>
+      <ListBox label="Lately on GitHub and Linear">
+        {rows.map(({ mention, post }) => {
+          const thread = (mention ?? post)!.thread;
+          const icon = thread.kind === "linear" ? SquareKanban : Github;
+          const open = thread.url ? <Button variant="ghost" size="xs" onClick={() => void openUrl(thread.url)} aria-label={`Open ${threadName(thread)}`}>Open</Button> : undefined;
+          if (post) {
+            return <ListRow key={`post:${post.at}:${post.url}`} icon={icon} name={<span title={threadName(thread)}>{threadName(thread)}</span>} state={POST_KIND[post.kind] ?? post.kind} on detail={`On your behalf · ${relativeTime(post.at)}`} action={open} testId="bot-channel-post" />;
+          }
+          const m = mention!;
+          const detail = m.state === "notAccepted" || m.state === "failed" ? `${m.by} · ${m.why}` : `${m.by} mentioned ${view.handle} · ${relativeTime(m.at)}`;
+          return <ListRow key={`mention:${m.id}`} icon={icon} name={<span title={threadName(thread)}>{threadName(thread)}</span>} state={MENTION_STATE[m.state] ?? m.state} on={m.state === "delivered"} detail={detail} action={open} testId="bot-channel-mention" />;
+        })}
+      </ListBox>
+    </div>
   );
 }
 
@@ -361,7 +425,22 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
   const ownerName = status.state === "signed-in" ? status.identity?.name || status.identity?.email || "You" : "You";
   const set = (index: number, may: BotAskerMay) => onChange(askers.map((asker, at) => (at === index ? { ...asker, may } : asker)));
   const remove = (index: number) => onChange(askers.filter((_, at) => at !== index));
+  // The person whose GitHub login is being given (PRO-480): their comments that mention the bot reach it.
+  const [login, setLogin] = useState<number | null>(null);
+  const editing = login === null ? undefined : askers[login];
   return (
+    <>
+    {editing && (
+      <GithubLoginDialog
+        bot={bot}
+        asker={editing}
+        onClose={() => setLogin(null)}
+        onSave={(github) => {
+          onChange(askers.map((asker, at) => (at === login ? { ...asker, github: github || undefined } : asker)));
+          setLogin(null);
+        }}
+      />
+    )}
     <ul aria-label="Who can ask" className="min-w-0 rounded-lg border border-hairline bg-card/60 px-3.5" data-testid="bot-who-can-ask">
       <AskerRow mark={<PersonMark name={ownerName} owner />} name={ownerName} role="Owner" testId="bot-asker-owner">
         <span className="text-[12.5px] text-muted-foreground">{MAY_LABEL.askApprove}</span>
@@ -371,7 +450,7 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
         const name = asker.kind === "bot" ? other?.name ?? (store.unreadable > 0 ? "A bot this version can't read" : "A removed bot") : asker.name || asker.id;
         // A person added from an organisation the bot no longer works in is kept, inactive, until it works there again.
         const inactive = asker.kind === "person" && !!asker.org && !bot.worksIn.includes(asker.org);
-        const role = inactive ? "Inactive · the bot no longer works in their organisation" : asker.kind === "person" ? "Member" : asker.kind === "bot" ? (other ? `${other.roleTitle}${bot.reportsTo === other.id ? " · its lead" : ""}` : "Bot") : asker.kind;
+        const role = inactive ? "Inactive · the bot no longer works in their organisation" : asker.kind === "person" ? (asker.github ? `Member · @${asker.github} on GitHub` : "Member") : asker.kind === "bot" ? (other ? `${other.roleTitle}${bot.reportsTo === other.id ? " · its lead" : ""}` : "Bot") : asker.kind;
         const choices = MAY_FOR[asker.kind];
         const mark = asker.kind === "bot" ? <BotAvatar roleTemplateId={other?.roleTemplateId ?? ""} size="xs" className="size-[22px]! rounded-md!" /> : <PersonMark name={name} />;
         return (
@@ -389,6 +468,9 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
                   </DropdownMenuRadioGroup>
                 )}
                 {choices && <DropdownMenuSeparator />}
+                {asker.kind === "person" && (
+                  <DropdownMenuItem onSelect={() => setLogin(index)} data-testid="bot-asker-github">{asker.github ? "Change GitHub login…" : "Add GitHub login…"}</DropdownMenuItem>
+                )}
                 <DropdownMenuItem destructive onSelect={() => remove(index)} data-testid="bot-asker-remove">Remove</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -397,6 +479,35 @@ function WhoCanAsk({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange:
       })}
       <AddAsker bot={bot} busy={busy} onAdd={(asker) => onChange([...askers, asker])} />
     </ul>
+    </>
+  );
+}
+
+const FIELD = "h-8 w-full min-w-0 rounded-md border border-hairline bg-transparent px-2 text-[13px] outline-none focus:border-ring";
+
+/** A person's GitHub login: a comment of theirs that mentions the bot on GitHub reaches it. Saved with the list. */
+function GithubLoginDialog({ bot, asker, onClose, onSave }: { bot: Bot; asker: BotAsker; onClose: () => void; onSave: (github: string) => void }) {
+  const [value, setValue] = useState(asker.github ?? "");
+  const clean = value.trim().replace(/^@/, "");
+  const valid = clean === "" || /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(clean);
+  const name = asker.name || asker.id;
+  return (
+    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent width="max-w-[26rem]" className="p-4">
+        <DialogTitle className="mr-8 truncate text-sm font-semibold" title={`${name}'s GitHub login`}>{name}'s GitHub login</DialogTitle>
+        <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
+          {`When ${name} mentions @${bot.slug} on a pull request or issue, ${bot.name} takes it as theirs. On Linear they are known by their email.`}
+        </DialogDescription>
+        <form className="mt-3 flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (valid) onSave(clean); }}>
+          <input autoFocus spellCheck={false} maxLength={40} value={value} placeholder="octocat" onChange={(event) => setValue(event.target.value)} aria-label="GitHub login" className={FIELD} data-testid="bot-asker-github-input" />
+          {!valid && <p className="text-xs text-destructive">A GitHub login is letters, digits and dashes.</p>}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+            <Button type="submit" size="sm" disabled={!valid} data-testid="bot-asker-github-save">Save</Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -480,7 +591,7 @@ function OrganizationPeople({ org, listed, onAdd }: { org: OrganizationSummary; 
         people.map((member) => {
           const name = member.displayName || member.email;
           return (
-            <DropdownMenuItem key={member.userId} onSelect={() => onAdd({ kind: "person", id: member.userId, name, may: "ask", org: org.id })} data-testid="bot-asker-add-person">
+            <DropdownMenuItem key={member.userId} onSelect={() => onAdd({ kind: "person", id: member.userId, name, may: "ask", org: org.id, email: member.email })} data-testid="bot-asker-add-person">
               <PersonMark name={name} /> <span className="truncate">{name}</span>
             </DropdownMenuItem>
           );

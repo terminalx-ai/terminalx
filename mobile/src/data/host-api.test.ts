@@ -397,3 +397,59 @@ describe("answering an agent's question (#979)", () => {
     await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: false, message: "The host did not answer this question." });
   });
 });
+
+// PRO-479: the bots, only from a Mac that names them; a person's answer goes as `bots.answer`.
+describe("bots", () => {
+  const overview = { bots: { revision: 1, bots: [{ id: "b1", name: "Atlas", roleTitle: "CTO", roleTemplateId: "cto" }], unreadable: 0 }, needsYou: { entries: [], counts: [] }, team: [] };
+  const mac = (features: Record<string, number>, answer: (method: string, params: unknown) => unknown) => {
+    const listeners = new Set<(event: { method: string }) => void>();
+    const request = vi.fn(async (method: string, params?: unknown) => method === "sync.capabilities" ? { ok: true, value: features } : answer(method, params));
+    const api = new HostApi({ request, onEvent: (listener: (event: { method: string }) => void) => { listeners.add(listener); return () => listeners.delete(listener); }, reassemblesFragments: async () => false } as unknown as HostConnection);
+    return { api, request, emit: (method: string) => { for (const listener of listeners) listener({ method }); } };
+  };
+
+  it("reads nothing from a Mac that does not name bots", async () => {
+    const { api, request } = mac({}, () => ({ ok: true, value: overview }));
+    await expect(api.botsOverview()).resolves.toBeNull();
+    await expect(api.answerBot("b1", 4, { answer: 0 }, "q1")).rejects.toThrow("Bots are off on this Mac");
+    expect(request.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
+  });
+
+  it("reads the team and a bot's home, and refuses what it cannot read", async () => {
+    const { api } = mac({ bots: 1 }, (method) => method === "bots.list" ? { ok: true, value: overview } : { ok: true, value: { bot: {} } });
+    await expect(api.botsOverview()).resolves.toMatchObject({ bots: { bots: [{ id: "b1" }] } });
+    await expect(api.botHome("b1")).rejects.toThrow("cannot read");
+  });
+
+  it("answers by index or in words, to the question shown, and passes the Mac's refusal on", async () => {
+    const { api, request } = mac({ bots: 1 }, (method, params) => {
+      if ((params as { number?: number }).number === 9) return { ok: false, refusal: { code: "refused", message: "Atlas no longer asks this on item #9." } };
+      return method === "bots.answer" ? { ok: true, value: { item: null, delivery: { sent: true } } } : { ok: true, value: null };
+    });
+    await expect(api.answerBot("b1", 4, { answer: 1 }, "q1")).resolves.toEqual({ item: null, delivery: { sent: true } });
+    await api.answerBot("b1", 4, { text: "File it" }, "q1");
+    await expect(api.answerBot("b1", 9, { answer: 0 }, "q1")).rejects.toThrow("no longer asks");
+    await api.pauseBot("b1");
+    await api.resumeBot("b1");
+    await api.pauseAllBots();
+    expect(request.mock.calls.filter(([method]) => method !== "sync.capabilities")).toEqual([
+      ["bots.answer", { id: "b1", number: 4, answer: 1, question: "q1" }],
+      ["bots.answer", { id: "b1", number: 4, text: "File it", question: "q1" }],
+      ["bots.answer", { id: "b1", number: 9, answer: 0, question: "q1" }],
+      ["bots.pause", { id: "b1" }],
+      ["bots.resume", { id: "b1" }],
+      ["bots.pauseAll", {}],
+    ]);
+  });
+
+  it("tells what is on screen to read again when the Mac says the bots changed", () => {
+    const { api, emit } = mac({ bots: 1 }, () => ({ ok: true, value: null }));
+    const heard = vi.fn();
+    const stop = api.onBotsChanged(heard);
+    emit("bots.changed");
+    emit("sessions.changed");
+    stop();
+    emit("bots.changed");
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+});

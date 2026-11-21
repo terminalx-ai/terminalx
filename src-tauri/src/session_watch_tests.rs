@@ -173,6 +173,7 @@ struct Rig {
     _home: store::TempHome,
 }
 
+#[cfg(unix)]
 #[test]
 fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     struct StopBeforeGuards<'a>(&'a SessionManager);
@@ -274,6 +275,7 @@ impl Rig {
     }
 
     /// Wait until the pane's program has read everything written into it.
+    #[cfg(unix)]
     fn pane_has_read_it_all(&self) {
         let deadline = Instant::now() + Duration::from_secs(60);
         while self.manager.terminals.unread_input(&self.pane) != Some(0) {
@@ -283,6 +285,7 @@ impl Rig {
     }
 
     /// From now on, each stage the tab tells a continuation's dialog.
+    #[cfg(unix)]
     fn hear_deliveries(&self) -> Arc<Mutex<Vec<String>>> {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let into = heard.clone();
@@ -330,6 +333,7 @@ impl Rig {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
             acting_bot: None,
+            bot_builtin: None,
             harness: match kind {
                 CliKind::Claude => "claude".into(),
                 CliKind::Codex => "codex".into(),
@@ -651,6 +655,8 @@ fn withheld_mobile_reply(reason: Withhold) {
     assert!(rig.observer.answered.lock().unwrap().is_empty());
 }
 
+// Its hook directories are POSIX paths, which only read as absolute on Unix.
+#[cfg(unix)]
 #[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
@@ -674,16 +680,20 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
 /// command. Each hook has a start record with its stdin and an end record
 /// with what it printed, so hooks that waited at once are replayed that way.
 /// Only paths are rewritten.
+#[cfg(unix)]
 const FIRST_COMMAND: &str = include_str!("harness/codex/fixtures/permission_gates_first_command.jsonl");
 /// The same, with the command denied, and the model running it once more.
+#[cfg(unix)]
 const DENIED: &str = include_str!("harness/codex/fixtures/permission_gates_denied.jsonl");
 /// The same, with the card left for a while: `exec` hands the turn back to
 /// the model after its yield time while the call waits on the card, and
 /// the model runs the same command again. The hook that recorded it turned
 /// the repeat away as TerminalX now does.
+#[cfg(unix)]
 const REPEATED_WHILE_WAITING: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_waiting.jsonl");
 /// The same, with the command allowed and its card to leave the sandbox left
 /// for a while: the model's repeat reaches `PreToolUse`, the other gate.
+#[cfg(unix)]
 const REPEATED_WHILE_LEAVING_SANDBOX: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_leaving_sandbox.jsonl");
 /// In auto mode, where only the sandbox asks: the model's repeat reaches
 /// `PermissionRequest` with its justification reworded.
@@ -763,9 +773,11 @@ fn stale_clicks_do_nothing(rig: &Rig, cards: &[String]) {
 /// Why a Codex card in Ask every time is up when the hook names no workdir,
 /// as code-mode calls never do: the session allowance it offers is held to
 /// the directory Codex reports (PRO-198).
+#[cfg(unix)]
 const ASK_IN_REPORTED_DIRECTORY: &str = "Session allowances are limited to /workspace/app. Commands executing in another directory are blocked and need a separate one-time approval.";
 const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
 
+#[cfg(unix)]
 /// PRO-160 as it was seen: a reader takes a while over a session's first
 /// card, the model's `exec` yields while the call waits, and the model runs
 /// the same command again. Before, the repeat filed a second, identical
@@ -785,6 +797,7 @@ fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// A repeat is the same command whichever gate it reaches and whichever gate
 /// the first call waits at: here the first waits to leave the sandbox and
 /// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
@@ -815,6 +828,7 @@ fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// Allowing the command at `PreToolUse` does not let it out of the sandbox:
 /// Codex then asks for that at `PermissionRequest`, on its own card, which
 /// says so and carries the model's justification.
@@ -831,6 +845,7 @@ fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowe
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// A denied command is blocked at `PreToolUse`, and Codex does not ask about
 /// it again. When the model runs it once more, that run is asked about too:
 /// an earlier answer stands for nothing but the call it was given to.
@@ -849,6 +864,7 @@ fn a_denied_codex_command_run_again_is_asked_about_again() {
 
 /// The status and output of a read-only command TerminalX ran itself, from
 /// the hook reply that answers for it in the provider's place.
+#[cfg(unix)]
 fn ran_by_terminalx(reply: &HookReply, kind: CliKind) -> Option<(i32, String)> {
     let output = &reply.output.as_ref()?["hookSpecificOutput"];
     let (decision, report) = match kind {
@@ -913,7 +929,7 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir(&app).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let app_path = app.to_str().unwrap();
@@ -946,7 +962,7 @@ fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
     for kind in [CliKind::Codex, CliKind::Claude] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap();
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let mut frame = command_frame(&rig, gate, "grep hello file", app.to_str().unwrap());
         frame.payload["tool_use_id"] = json!("call_ran");
@@ -996,8 +1012,10 @@ fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
 }
 
 /// The rig's tab as a run's verifier, until dropped: every rig shares its ids.
+#[cfg(unix)]
 struct AsVerifier;
 
+#[cfg(unix)]
 impl AsVerifier {
     fn noted() -> Self {
         // Read the runs first, so that noting it is not lost to a later first read.
@@ -1008,6 +1026,7 @@ impl AsVerifier {
     }
 }
 
+#[cfg(unix)]
 impl Drop for AsVerifier {
     fn drop(&mut self) {
         crate::orchestration::store::forget_verifier(SESSION, TAB);
@@ -1020,7 +1039,7 @@ fn verifier_lookups_keep_actionable_model_visible_outcomes() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
         let _verifier = AsVerifier::noted();
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir_all(app.join("src")).unwrap();
         let lines: String = (1..=70).map(|n| format!("line{n}\n")).collect();
         std::fs::write(app.join("file"), &lines).unwrap();
@@ -1121,7 +1140,7 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
         let _verifier = AsVerifier::noted();
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir(&app).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let frame = || command_frame(&rig, "PreToolUse", "cat file", app.to_str().unwrap());
@@ -1166,6 +1185,7 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1192,6 +1212,7 @@ fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
 /// Captured with Codex 0.164.0 and a loopback Responses provider requesting
 /// exec_command({cmd:"pwd", workdir:B}) from session A. Only paths and IDs
 /// are anonymized: the hook omits B, and calls the tool Bash.
+#[cfg(unix)]
 fn codex_0164_frame(rig: &Rig, cwd: &std::path::Path, command: &str) -> HookFrame {
     let mut payload: Value = serde_json::from_str(include_str!("harness/codex/fixtures/pre_tool_use_0164.json")).unwrap();
     assert_eq!(payload["tool_input"], json!({"command":"pwd"}));
@@ -1236,6 +1257,7 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
     assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
 }
 
+#[cfg(unix)]
 #[test]
 fn execution_directory_never_falls_back_to_a_codex_session_directory() {
     let mut payload = json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":{"command":"git diff"}});
@@ -1262,6 +1284,7 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1299,6 +1322,7 @@ fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", "/workspace/app"), "deny", false);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1798,6 +1822,7 @@ fn a_silent_live_turn_keeps_counting_after_the_warning() {
     assert_eq!(rig.counts(), (0, 0), "completion releases compute even though the CLI stays alive");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_silent_live_turn_has_a_separate_one_hour_cloud_budget() {
     let rig = Rig::with_live_pane();
@@ -2900,6 +2925,7 @@ fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
 
 /// The same for a continuation: its echo carries a receipt, and the tab
 /// sets it no deadline of its own.
+#[cfg(unix)]
 fn continuation_entered_unacknowledged(rig: &Rig, seq: u64) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
     enter_written_unacknowledged(rig, seq);
     let (receipt, heard) = std::sync::mpsc::channel();
@@ -2918,6 +2944,7 @@ fn delivery_stages(rig: &Rig) -> Vec<String> {
         .filter(|v| v["type"] == "prompt_delivery").filter_map(|v| v["stage"].as_str().map(String::from)).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     let rig = Rig::running("cat >/dev/null");
@@ -2947,6 +2974,7 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     assert_eq!(delivery_stages(&rig), ["nudged", "nudged", "unconfirmed"]);
 }
 
+#[cfg(unix)]
 /// The handoff whose Enter was lost: nothing ever wrote it again, because a
 /// continuation was kept out of the nudge along with the banner (#662). It
 /// is nudged like any prompt, and the dialog that sent it hears each one;
@@ -2979,6 +3007,7 @@ fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
     assert!(delivery_stages(&rig).ends_with(&["accepted".to_string()]));
 }
 
+#[cfg(unix)]
 /// A CLI that has not read what it was given is not taking input at all. An
 /// Enter written after it says nothing new, and once its input queue is full
 /// the write never returns, holding the tab (#661). The nudge stands back
@@ -3008,6 +3037,7 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
     assert_eq!(rig.manager.terminals.unread_input(&rig.pane), unread, "nothing was added to it");
 }
 
+#[cfg(unix)]
 /// The reader's own Enter, from the dialog: held to what a nudge is held to,
 /// and only for the prompt still awaited.
 #[test]
@@ -3279,6 +3309,7 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     assert!(rig.manager.pending_permissions().is_empty());
 }
 
+#[cfg(unix)]
 /// #765 review: what a handover reads, every tab held, of the cards hooks
 /// wait on. A card is one from when its hook asks until it is answered, which
 /// happens under the tab's lock: answered, it is none a hook waits on, though
@@ -3307,6 +3338,7 @@ fn a_handover_reads_which_cards_hooks_still_wait_on() {
     assert_eq!(reply.output, Some(codex::pty::permission_decision(true)), "the answer reaches the agent");
 }
 
+#[cfg(unix)]
 #[test]
 fn handover_keeps_handled_background_reports_from_becoming_pending_again() {
     use std::io::Write;
@@ -3333,6 +3365,7 @@ fn handover_keeps_handled_background_reports_from_becoming_pending_again() {
     rig.manager.terminals.kill_all();
 }
 
+#[cfg(unix)]
 #[test]
 fn handover_keeps_its_deadline_when_background_work_is_being_read() {
     let rig = Rig::with_live_pane();
@@ -3345,6 +3378,7 @@ fn handover_keeps_its_deadline_when_background_work_is_being_read() {
     rig.manager.terminals.kill_all();
 }
 
+#[cfg(unix)]
 #[test]
 fn handover_keeps_a_completion_callback_from_being_lost() {
     let rig = Rig::with_live_pane();
@@ -3441,6 +3475,7 @@ fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
     assert!(index::get(SESSION).is_err(), "confirmed retry should complete deletion");
 }
 
+#[cfg(unix)]
 #[test]
 fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     let rig = Rig::with_live_pane();
@@ -3469,6 +3504,7 @@ fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     assert!(!rig.rt.lock().unwrap().stopping);
 }
 
+#[cfg(unix)]
 #[test]
 fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     let rig = Rig::with_live_pane();
@@ -3497,6 +3533,7 @@ fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     assert!(index::get(SESSION).unwrap().worktree_name.is_none());
 }
 
+#[cfg(unix)]
 /// An earlier launch whose exit cannot be confirmed refuses only the start
 /// that found it (#467 review): the tab is not left stopping, and Stop still
 /// finds the launch by its pane and ends it.
@@ -3528,6 +3565,7 @@ fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
     rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
 }
 
+#[cfg(unix)]
 /// #467 review: the CLI exits into a #437 shell, whose respawn lets go of
 /// the old process with a terminate that waits up to two seconds for it.
 /// A prompt in that window waits for it and starts the CLI, and the tab is
@@ -3594,6 +3632,7 @@ fn restartable(rig: &Rig) {
     index::save(&[entry]).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
     for complete_failure in [false, true] {
@@ -3661,6 +3700,7 @@ fn restart_completion_retires_only_its_exact_current_handle() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
     let rig = Rig::with_live_pane();

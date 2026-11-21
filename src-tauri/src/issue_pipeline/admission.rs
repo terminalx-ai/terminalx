@@ -221,7 +221,7 @@ pub fn closed(path: &Path) -> bool {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Refused when a fence covers the session, or the tab when one is named.

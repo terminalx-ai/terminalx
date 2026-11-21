@@ -90,7 +90,7 @@ pub(crate) fn fingerprint(path: &Path, script: &str) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn canonical(path: &Path) -> PathBuf { std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) }
+fn canonical(path: &Path) -> PathBuf { crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) }
 fn checkout_identity(path: &Path) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
     #[cfg(unix)]
@@ -244,10 +244,14 @@ impl<'a> ScriptRun<'a> {
                 if exit.id == watched { let _ = send.send(exit.code); }
             }
         }));
+        #[cfg(unix)]
+        let sh = std::path::PathBuf::from("/bin/sh");
+        #[cfg(windows)]
+        let sh = crate::binpath::posix_sh().ok_or_else(|| anyhow::anyhow!(crate::binpath::POSIX_SH_MISSING))?;
         let run = Self { privacy, _privacy_lease: privacy_lease, runner, id: id.into(), _file: file, listener, exits };
         runner.terminals.spawn_program(runner.sink.clone(), id,
             PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env },
-            std::ffi::OsStr::new("/bin/sh"), &[run._file.path().as_os_str()], started)?;
+            sh.as_os_str(), &[run._file.path().as_os_str()], started)?;
         Ok(run)
     }
 

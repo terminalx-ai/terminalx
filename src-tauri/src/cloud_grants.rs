@@ -2887,6 +2887,7 @@ mod tests {
         assert!(store.agent_env(Provider::Claude, t0 + 15 * MINUTE).is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_gets_an_isolated_auth_file_and_revocation_removes_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -2933,6 +2934,7 @@ mod tests {
         assert!(managed.path().join("auth.json").symlink_metadata().is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_regular_auth_file_in_the_managed_home_is_replaced_or_removed() {
         let managed = tempfile::tempdir().unwrap();
@@ -3620,6 +3622,7 @@ mod tests {
         assert!(unsets(&env, CLAUDE_AUTH_TOKEN_ENV));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_helper_route_hands_claude_code_its_helper_and_no_credential() {
         let server = FakeServer::new();
@@ -3655,6 +3658,7 @@ mod tests {
         assert_eq!(sets(&store.agent_env(Provider::Claude, t0), CLAUDE_OAUTH_ENV), Some("fake-oauth-1"), "back to the organization's login");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_codex_route_defines_its_own_provider_and_keeps_the_auth_file_away() {
         let dir = tempfile::tempdir().unwrap();

@@ -107,8 +107,10 @@ fn read_capped(mut reader: impl Read, cap: usize, into: &Mutex<Vec<u8>>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
+    #[cfg(unix)]
     fn plain_env() -> ProcessEnvironment {
         ProcessEnvironment { vars: Vec::new(), socket_dir: None, owns_socket_directory: false }
     }

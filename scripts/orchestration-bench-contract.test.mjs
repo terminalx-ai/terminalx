@@ -192,7 +192,8 @@ describe("task loader", () => {
     expect(loadTasks(join(dir, "missing")).tasks).toEqual([]);
   });
 
-  it("catches what one file cannot: folder, file name, duplicate ids, missing patches", () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("catches what one file cannot: folder, file name, duplicate ids, missing patches", () => {
     const dir = tempDir("tasks");
     writeTask(dir, task(), { shape: "chain" });
     writeTask(dir, task({ id: "other" }), { name: "renamed.json" });
@@ -242,7 +243,8 @@ describe("dispatcher", () => {
 });
 
 describe("check-task", () => {
-  it("passes a task whose check fails at start and passes at the solution, with a commit or a patch", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("passes a task whose check fails at start and passes at the solution, with a commit or a patch", async () => {
     const { repo, start, fix } = makeRepo();
     const tasksDir = tempDir("tasks");
     writeTask(tasksDir, task({ startCommit: start, solution: fix }));
@@ -257,7 +259,8 @@ describe("check-task", () => {
     expect(worktreesOf(repo)).toBe(1);
   });
 
-  it("fails a task whose check already passes, never passes, or hangs, and still removes every worktree", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("fails a task whose check already passes, never passes, or hangs, and still removes every worktree", async () => {
     const { repo, start, fix } = makeRepo();
     const tasksDir = tempDir("tasks");
     // The test is copied in, but the fix is already there: the check passes at start.
@@ -279,7 +282,8 @@ describe("check-task", () => {
     expect(worktreesOf(repo)).toBe(1);
   });
 
-  it("selects by shape and task, and enforces --min", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("selects by shape and task, and enforces --min", async () => {
     const { repo, start, fix } = makeRepo();
     const tasksDir = tempDir("tasks");
     writeTask(tasksDir, task({ startCommit: start, solution: fix }));
@@ -304,7 +308,8 @@ describe("check-task", () => {
 });
 
 describe("worktree helper", () => {
-  it("installs once per lockfile and reuses the tree in the next worktree", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("installs once per lockfile and reuses the tree in the next worktree", async () => {
     // A local package as the one dependency: a real install, with no network.
     const { repo, start } = makeRepo({
       extra: {
@@ -352,7 +357,8 @@ describe("worktree helper", () => {
     expect(() => solutionCommit(repo, { id: "fix", startCommit: fix, solution: "fix.patch", solutionPatch: patch })).toThrow(/does not apply/);
   });
 
-  it("kills a command and everything it started when its time runs out", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("kills a command and everything it started when its time runs out", async () => {
     const dir = tempDir("cmd");
     const done = await runCommand("sleep 30 & sleep 30; echo never", { cwd: dir, timeoutSeconds: 1 });
     expect(done.timedOut).toBe(true);

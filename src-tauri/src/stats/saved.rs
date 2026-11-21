@@ -25,7 +25,7 @@ struct Scope {
 impl Scope {
     fn current() -> Result<Self> {
         Ok(Self {
-            root: std::fs::canonicalize(crate::store::root()?)?,
+            root: crate::paths::canonicalize(crate::store::root()?)?,
             home: dirs::home_dir().context("no home directory")?,
             predecessor: super::predecessor_data_root(),
             claude_home: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),

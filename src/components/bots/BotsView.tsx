@@ -6,15 +6,18 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
 import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
-import { focusTaken, showBotRoleMemory, showBotSettings, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { focusTaken, showBotRoleMemory, showBotSettings, showBotsDuties, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
+import { heldLine, usePauseHeld, usePauseHeldError, wasLine } from "@/lib/botPause";
 import { openBot } from "@/lib/sessions";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
 import { BotRoleMemory } from "./BotRoleMemory";
+import { BotsDuties } from "./BotsDuties";
+import { BotsPaused, HeldList } from "./BotsPaused";
 import { BotsHeader } from "./BotsHeader";
 import { BotSettingsPage } from "./BotSettingsPage";
 import { FirstBot } from "./FirstBot";
@@ -39,6 +42,7 @@ export function BotsView() {
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
   if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
   if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
+  if (page.page === "duties") return <BotsDuties />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -68,27 +72,39 @@ function BotsTeam({ focus }: { focus: boolean }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="bots-team">
-      <BotsHeader title="Bots" note="Your AI team. The bots are yours and go with you across organisations." focus={focus} onFocused={focusTaken}>
-        {allPaused ? (
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => run(resumeAllBots)} data-testid="bots-resume-all">
-            {busy ? <Loader2 className="animate-spin" /> : <Play />} Resume all
-          </Button>
-        ) : (
+      <BotsHeader
+        title={
+          allPaused ? (
+            <span className="inline-flex items-center gap-3">
+              Bots
+              <span className="inline-flex h-[22px] items-center gap-1.5 rounded-full bg-warning/15 px-2 text-[11.5px] font-medium text-warning" data-testid="bots-all-paused">
+                <Pause className="size-[11px]" /> All paused
+              </span>
+            </span>
+          ) : "Bots"
+        }
+        note={allPaused ? undefined : "Your AI team. The bots are yours and go with you across organisations."}
+        focus={focus}
+        onFocused={focusTaken}
+      >
+        {!allPaused && (
           <Button variant="outline" size="sm" disabled={busy || bots.length === 0} onClick={() => run(pauseAllBots)} data-testid="bots-pause-all">
             {busy ? <Loader2 className="animate-spin" /> : <Pause />} Pause all
           </Button>
         )}
-        {/* Filled by the calendar ticket. */}
-        <WithTooltip label="The bots' calendar comes in a later build">
-          <span>
-            <Button variant="outline" size="sm" disabled aria-label="Calendar (coming later)">
-              <Calendar /> Calendar
-            </Button>
-          </span>
-        </WithTooltip>
-        <Button variant="accent" size="sm" onClick={() => showHireBot()} data-testid="bots-hire">
+        {/* The week of every bot's duties (PRO-473). */}
+        <Button variant="outline" size="sm" disabled={bots.length === 0} onClick={() => showBotsDuties()} data-testid="bots-calendar">
+          <Calendar /> Calendar
+        </Button>
+        {/* All paused (23.12): Hire a bot steps back, and Resume all is the way out. */}
+        <Button variant={allPaused ? "outline" : "accent"} size="sm" onClick={() => showHireBot()} data-testid="bots-hire">
           <Plus /> Hire a bot
         </Button>
+        {allPaused && (
+          <Button variant="accent" size="sm" disabled={busy} onClick={() => run(resumeAllBots)} data-testid="bots-resume-all">
+            {busy ? <Loader2 className="animate-spin" /> : <Play />} Resume all
+          </Button>
+        )}
       </BotsHeader>
 
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -108,13 +124,13 @@ function BotsTeam({ focus }: { focus: boolean }) {
           )}
           {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="rounded-md bg-destructive/10 px-3 py-2" />}
           {store.unreadable > 0 && <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bots-unreadable">{unreadableText(store.unreadable)}</p>}
-          {allPaused && (
-            <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bots-all-paused">
-              Every bot is paused. A paused bot stays paused until you resume it.
-            </p>
+          {known && allPaused && (
+            <BotsPaused bots={bots} busy={busy} onResumeAll={() => run(resumeAllBots)} onError={setError}>
+              <NeedsYouQueue bots={bots} needs={needs} error={needsError} />
+            </BotsPaused>
           )}
 
-          {known && (
+          {known && !allPaused && (
           <>
           <div className="grid grid-cols-2 gap-3 @4xl/editor-host:grid-cols-4" data-testid="bots-stats">
             <StatCard
@@ -133,6 +149,8 @@ function BotsTeam({ focus }: { focus: boolean }) {
             <h2 id="bots-team-heading" className="mb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Team</h2>
             <TeamTable bots={bots} unreadable={store.unreadable} onError={setError} />
           </section>
+          {/* Some bots paused (PRO-474): what their pause holds, as the paused page lists it. */}
+          {paused > 0 && <SomePausedHeld bots={bots} />}
           </>
           )}
         </div>
@@ -209,8 +227,22 @@ function TeamTable({ bots, unreadable, onError }: { bots: Bot[]; unreadable: num
   );
 }
 
+/** "Held while paused" under the team, while some bots (not all) are paused. */
+function SomePausedHeld({ bots }: { bots: Bot[] }) {
+  const held = usePauseHeld();
+  const error = usePauseHeldError();
+  return (
+    <section aria-labelledby="bots-held-heading">
+      <h2 id="bots-held-heading" className="mb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Held while paused</h2>
+      <HeldList entries={held?.entries ?? []} bots={bots} held={held} error={error} />
+    </section>
+  );
+}
+
 function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot; bots: Bot[]; unreadable: number; onError: (error: string | null) => void; asking: number; trouble: string | null }) {
   const [busy, setBusy] = useState(false);
+  const held = usePauseHeld();
+  const holding = bot.paused ? heldLine(bot, held) : "";
   const lead = bot.reportsTo === "owner" ? null : bots.find((other) => other.id === bot.reportsTo) ?? null;
   const toggle = () => {
     setBusy(true);
@@ -240,7 +272,13 @@ function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot
       </td>
       <td className="px-2 py-2.5">
         {bot.paused ? (
-          <span className="inline-flex items-center gap-1.5 text-warning" data-testid="bot-doing-now"><Pause className="size-3.5" /> {statusLine(bot)}</span>
+          <span className="flex max-w-[320px] min-w-0 items-start gap-1.5" data-testid="bot-doing-now">
+            <Pause className="mt-px size-3.5 shrink-0 text-warning" />
+            <span className="min-w-0">
+              <span className="block truncate text-warning" title={wasLine(bot)}>{bot.resumeRequest ? statusLine(bot) : wasLine(bot)}</span>
+              {holding !== "Nothing held" && <span className="block truncate text-[11.5px] text-faint" title={holding} data-testid="bot-paused-held">{holding}</span>}
+            </span>
+          </span>
         ) : (
           <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-testid="bot-doing-now"><Moon className="size-3.5" /> Quiet</span>
         )}

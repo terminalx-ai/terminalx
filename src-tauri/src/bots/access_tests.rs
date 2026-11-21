@@ -344,6 +344,7 @@ fn only_known_reads_go_unasked() {
         "terminalx bots items",
         "terminalx bots items needsYou 3",
         "terminalx bots pause atlas",
+        "terminalx bots handoffstop 4",
         "terminalx memory add x",
         "./terminalx bots memory add x",
     ] {
@@ -384,12 +385,20 @@ fn only_known_reads_go_unasked() {
         // PRO-469: its own work list, kept as its rules say.
         "terminalx bots items list", "terminalx bots items show 3", "terminalx bots items add --title 'Fix the build' --done 'CI green | gh run view'",
         "terminalx bots items set 3 --state doing", "terminalx bots items ask 3 --question 'Ship?' --answer Yes --answer No", "terminalx bots items check 3 1 --met",
-        "terminalx bots items comment 3 'Halfway'", "terminalx bots items done 3"] {
+        "terminalx bots items comment 3 'Halfway'", "terminalx bots items done 3",
+        // PRO-475: a hand-off is answered at any level, a read-and-report bot's too.
+        "terminalx bots handoff --to sentry --title 'Check the runner' --scope 'Read only.'", "terminalx bots handoff --retry 4",
+        "terminalx bots tell --to lead --text 'Queue is long'", "tnx --json bots tell --to atlas --about 4 --failed --text 'No access'", "terminalx bots handoffs --all",
+        // PRO-472: a message to another bot, which its rules tell it to leave this way.
+        "terminalx bots message atlas 'The build is green again.' --kind status", "terminalx bots message b2 'Can you review #12?' --kind question --json"] {
         for access in [BotAccess::Full, ask.clone(), read.clone(), BotAccess::Other("someday".into())] {
             assert_eq!(gate(&access, &shell(command, &cwd)), Gate::Leave, "{command} at {access:?}");
         }
     }
     assert!(is_refused(&gate(&read, &shell("terminalx bots memory add x && git push", &cwd))), "joined to anything, it is no note");
+    assert!(is_refused(&gate(&read, &shell("terminalx bots message atlas hi; git push", &cwd))), "joined to anything, it is no message");
+    // Nothing else under `bots` is its own: changing a bot is the owner's.
+    assert!(is_refused(&gate(&read, &shell("terminalx bots resume atlas", &cwd))));
     // A `terminalx` read joined to anything else is not a read.
     assert!(is_ask(&gate(&ask, &shell("terminalx sessions list; git push", &cwd))));
 

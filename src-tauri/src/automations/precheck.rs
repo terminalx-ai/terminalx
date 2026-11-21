@@ -8,7 +8,8 @@
 //! - Any other exit, a timeout, or a command that cannot start: a failed run
 //!   with the reason. Never a silent skip, never a model call.
 //!
-//! The command runs through `/bin/sh -c` in the folder the run would use
+//! The command runs through `/bin/sh -c` (Git for Windows' `sh` on Windows)
+//! in the folder the run would use
 //! (never a new worktree), with the environment a session pane gets
 //! ([`crate::pty::session_environment`]).
 //!
@@ -226,15 +227,24 @@ fn stop(child: &mut std::process::Child) {
             }
         }
     }
+    // On Windows the check's job holds everything it started (see `execute`).
+    #[cfg(windows)]
+    crate::win::process::kill_tree(child.id());
     let _ = child.kill();
 }
 
-/// Run `command` once through `/bin/sh` in `dir`, with `set` added to and
-/// `unset` removed from this process's environment, and say what an
-/// automation run would do.
+/// Run `command` once through `/bin/sh` (Git for Windows' `sh` on Windows)
+/// in `dir`, with `set` added to and `unset` removed from this process's
+/// environment, and say what an automation run would do.
 pub fn execute(command: &str, timeout: Duration, dir: &Path, set: &[(String, String)], unset: &[&str]) -> PrecheckTrial {
     let started = Instant::now();
+    #[cfg(unix)]
     let mut process = Command::new("/bin/sh");
+    #[cfg(windows)]
+    let mut process = match crate::binpath::posix_sh() {
+        Some(sh) => Command::new(sh),
+        None => return failed(crate::binpath::POSIX_SH_MISSING.into(), started.elapsed().as_millis() as u64),
+    };
     process
         .arg("-c")
         .arg(command)
@@ -251,10 +261,20 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, set: &[(String, Str
         use std::os::unix::process::CommandExt;
         process.process_group(0);
     }
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut process, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => return failed(format!("The first check could not start in {}: {error}", dir.display()), started.elapsed().as_millis() as u64),
     };
+    // Windows has no process group to signal: a job stands in for it, so
+    // `stop` ends whatever the check left running in the background.
+    #[cfg(windows)]
+    if let Err(error) = crate::win::process::tie_to_this_process(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return failed(format!("The first check could not be tied to TerminalX: {error}"), started.elapsed().as_millis() as u64);
+    }
     let stdout = capture(child.stdout.take(), STDOUT_CAP, true);
     let stderr = capture(child.stderr.take(), STDERR_CAP, false);
     let (Some((stdout, stdout_done)), Some((stderr, stderr_done))) = (stdout, stderr) else {
@@ -391,9 +411,14 @@ pub fn prompt_with_output(prompt: &str, command: &str, output: &str, truncated: 
 /// Run `precheck` for `automation` as a run would. A check that cannot be
 /// run at all (no folder, no environment) is a failed check.
 fn check(automation: &Automation, precheck: &AutomationPrecheck) -> PrecheckTrial {
+    check_with(automation, precheck, None)
+}
+
+/// [`check`], with the events a read would wake a bot's duty on, which its check is given (PRO-472).
+fn check_with(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&serde_json::Value>) -> PrecheckTrial {
     // A bot's duty never runs its check in the bot's home, which the bot can write.
     if crate::bots::duties::is_duty(automation) {
-        return crate::bots::duties::run_check(automation, precheck).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
+        return crate::bots::duties::run_check(automation, precheck, events).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
     }
     run_in(&automation.project_path, automation.workspace, automation.session_id.as_deref(), precheck)
         .unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0))
@@ -432,6 +457,12 @@ static CHECKING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 struct Claim(String);
 
+/// Whether an automation's evaluation is still going on its own thread: tests wait for it to end.
+#[cfg(test)]
+pub(crate) fn evaluating(automation_id: &str) -> bool {
+    CHECKING.lock().unwrap_or_else(|error| error.into_inner()).contains(automation_id)
+}
+
 impl Claim {
     fn take(automation_id: &str) -> Option<Self> {
         CHECKING
@@ -453,7 +484,9 @@ impl Drop for Claim {
 /// next tick is skipped while its check is still going. False, and nothing
 /// done, for an automation without a check: the scheduler evaluates it in turn.
 pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation, now: chrono::DateTime<chrono::Utc>) -> bool {
-    if configured(automation.precheck.as_ref()).is_none() {
+    // A duty's event read (a watched command of up to 300 s, a page, `gh` or Linear) is as slow as a check (PRO-472).
+    let reads_slowly = automation.event_trigger.is_some() && crate::bots::duties::is_duty(automation);
+    if configured(automation.precheck.as_ref()).is_none() && !reads_slowly {
         return false;
     }
     if !due(automation, now) {
@@ -716,32 +749,35 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
 /// quiet or failing check, which writes its one (folded) history row; the
 /// caller then marks nothing seen. False, with nothing written, when the
 /// automation changed while its check ran.
-pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger) -> Result<bool> {
+pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<super::sources::Gated> {
+    use super::sources::Gated;
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
-        return Ok(true);
+        return Ok(Gated::Go);
     };
     if !agent_available(automation) {
-        return Ok(true);
+        return Ok(Gated::Go);
     }
-    let trial = check(automation, precheck);
+    // Only a duty's check is given the events; an ordinary automation's runs as it always has.
+    let events = crate::bots::duties::is_duty(automation).then(|| super::sources::wake_events(automation, wakes));
+    let trial = check_with(automation, precheck, events.as_ref());
     let Ok(current) = automation_store::get(&automation.id) else {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     };
     if !current.enabled || current.event_trigger != automation.event_trigger || current.precheck != automation.precheck {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     }
     match trial.outcome {
         PrecheckOutcome::Proceed => {
             POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial }));
-            Ok(true)
+            Ok(Gated::Go)
         }
         PrecheckOutcome::NothingNew => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::SkippedPrecheck, None, trial.result)?;
-            Ok(false)
+            Ok(Gated::Quiet)
         }
         PrecheckOutcome::Failed => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::Failed, trial.reason, trial.result)?;
-            Ok(false)
+            Ok(Gated::Stopped)
         }
     }
 }

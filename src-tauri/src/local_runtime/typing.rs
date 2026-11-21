@@ -136,9 +136,12 @@ fn deliver_all(queue: &Mutex<HashMap<String, Waiting>>, mobile: &Registry, termi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::pty::PaneSpec;
+    #[cfg(unix)]
     use std::time::Instant;
 
+    #[cfg(unix)]
     fn pane(terminals: &Terminals, dir: &tempfile::TempDir, id: &str, command: &str) {
         let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
         terminals.spawn(sink, id, PaneSpec { cwd: dir.path().to_str().unwrap(), cols: 80, rows: 24, command: Some(command), env: &[] }).unwrap();
@@ -146,6 +149,7 @@ mod tests {
 
     /// A program in raw mode, so typing past the input queue waits for it
     /// instead of being thrown away as a cooked line's overflow is.
+    #[cfg(unix)]
     fn raw(terminals: &Terminals, dir: &tempfile::TempDir, id: &str, then: &str) {
         let ready = dir.path().join(format!("{id}.ready"));
         let _ = std::fs::remove_file(&ready);
@@ -153,6 +157,7 @@ mod tests {
         until("the program never set its terminal up", || ready.exists());
     }
 
+    #[cfg(unix)]
     fn until(what: &str, done: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(60);
         while !done() {

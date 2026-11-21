@@ -672,12 +672,16 @@ pub fn actor(params: &Value) -> Result<Actor> {
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct ApprovalPhone {
     lifetime: Arc<Lifetime>,
     actor: Actor,
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 impl ApprovalPhone {
     pub(crate) fn register(manager: &crate::session::SessionManager) -> Self {
         use serde_json::json;
@@ -709,6 +713,13 @@ impl ApprovalPhone {
             "actor": self.actor, "connection": "approval-connection", "sessionId": session, "tabId": tab,
             "requestId": request, "answers": {"Which branch?": "main"},
         })).unwrap();
+    }
+
+    /// The phone's `bots` operation (PRO-479), with `params` beside its operation.
+    pub(crate) fn bots(&self, manager: &crate::session::SessionManager, mut params: Value) -> Result<Value> {
+        params["actor"] = serde_json::to_value(&self.actor)?;
+        params["connection"] = serde_json::json!("approval-connection");
+        execute(manager, &self.lifetime, "bots", params)
     }
 
     pub(crate) fn send(&self, manager: &crate::session::SessionManager, session: &str, tab: &str, text: &str) {
@@ -746,8 +757,10 @@ impl ApprovalPhone {
 /// - `sessionAccounts`: `create` takes an `account` and starts the session on it (#980).
 /// - `layeredConfiguration`: 1 resolves repository and managed settings; 2 also
 ///   resolves setup and archive scripts and the archive timeout from them.
+/// - `bots`: `bots`, the reads and the owner's acts a phone makes on the bots
+///   (`bots::phone`, PRO-479). The desktop names it only while Bots is on.
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1, "bots": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -894,6 +907,14 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             Ok(serde_json::to_value(resolved)?)
         }
         "settings" => Ok(phone_settings(&crate::store::settings::load())),
+        // The bots (PRO-479): reads, and the owner's acts through the window's own
+        // operations. Only a phone that may drive sessions acts.
+        "bots" => {
+            let operation = string("operation")?;
+            if !crate::bots::phone::OPERATIONS.contains(&operation) { bail!(UNSUPPORTED); }
+            if crate::bots::phone::acts(operation) { grant.driver()?; }
+            crate::bots::phone::call(manager, operation, &params)
+        }
         "setSettings" => {
             grant.driver()?;
             let native_codex = params["nativeCodex"].as_bool().context("nativeCodex must be true or false")?;
@@ -1287,7 +1308,8 @@ mod repeat_tests {
 /// against real grants: a read-only phone is refused, and a driver's moves a
 /// native Codex tab to Codex's terminal and starts it there. A stand-in Codex
 /// on the lookup path is what launches; runs in a child process.
-#[cfg(test)]
+// A stand-in Codex written as a POSIX shell script.
+#[cfg(all(test, unix))]
 mod open_terminal_tests {
     use super::*;
     use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
@@ -1323,6 +1345,7 @@ mod open_terminal_tests {
         assert!(log.contains("1 passed"), "the fixture did not run: {log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_terminal_child() {
         use std::os::unix::fs::PermissionsExt;
@@ -1458,7 +1481,7 @@ mod create_tests;
 thread_local! {
     static CONTROL_ADMITTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn observe_control_admission(callback: Box<dyn FnOnce()>) {
     CONTROL_ADMITTED.with(|slot| *slot.borrow_mut() = Some(callback));
 }

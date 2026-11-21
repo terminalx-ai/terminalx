@@ -24,6 +24,7 @@
 //!   token for that repository. `TERMINALX_SERVE_GH` replaces the `gh` run
 //!   (tests use `scripts/remote-runtime/fake-gh`).
 
+use crate::paths::Canonical;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -795,7 +796,8 @@ impl WorkspaceGit {
                         truncated = true;
                         continue;
                     }
-                    found.push(path.strip_prefix(&self.root).unwrap_or(&path).to_string_lossy().into_owned());
+                    let relative = path.strip_prefix(&self.root).unwrap_or(&path);
+                    found.push(relative.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"));
                 } else if depth + 1 < MAX_DEPTH {
                     frontier.push((path, depth + 1));
                 }
@@ -1599,14 +1601,14 @@ impl WorkspaceGit {
     fn pr_creation_checkout(&self, session: &str, repo: &Repo) -> Result<CheckoutIdentity, RpcError> {
         let refused = || RpcError::new("conflict", "Select this session's checkout before creating a pull request.");
         let entry = self.project_session(session)?;
-        let path = repo.dir.canonicalize().map_err(|_| refused())?;
+        let path = repo.dir.canonical().map_err(|_| refused())?;
         let authorized = super::machine::session_checkout(&self.root, &self.files, &entry, || self.project_has_git())
             .and_then(|(_, name)| name);
         if authorized.as_deref() != Some(repo.name.as_str()) || !crate::git::is_own_worktree(&path) {
             return Err(refused());
         }
         let git_dir = self.git(repo, &["rev-parse", "--absolute-git-dir"]).map_err(|_| refused())?;
-        let git_dir = Path::new(git_dir.trim()).canonicalize().map_err(|_| refused())?;
+        let git_dir = Path::new(git_dir.trim()).canonical().map_err(|_| refused())?;
         let directory = directory_identity(&path).map_err(|_| refused())?;
         let admin = directory_identity(&git_dir).map_err(|_| refused())?;
         Ok(CheckoutIdentity { path, git_dir, directory, admin })
@@ -1633,14 +1635,14 @@ impl WorkspaceGit {
     fn checkout_contains(root: &Path, cwd: &Path) -> bool {
         cwd == root || (cwd.starts_with(root)
             && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
-                .and_then(|top| Path::new(top.trim()).canonicalize().ok()).as_deref() == Some(root))
+                .and_then(|top| Path::new(top.trim()).canonical().ok()).as_deref() == Some(root))
     }
 
     /// A prior branch may have contained the directory the link saved.
     /// Walk back only through missing paths and verify the surviving directory.
     fn existing_link_directory(cwd: &Path) -> Option<(PathBuf, bool)> {
         for ancestor in cwd.ancestors() {
-            match ancestor.canonicalize() {
+            match ancestor.canonical() {
                 Ok(path) if path.is_dir() => return Some((path, ancestor != cwd)),
                 Ok(_) => {}
                 Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {}
@@ -1656,11 +1658,11 @@ impl WorkspaceGit {
         }
         let session = self.project_session(required_str(params, "sessionId")?)?;
         let repo = self.repo(params)?;
-        let repo_root = repo.dir.canonicalize().map_err(RpcError::internal)?;
-        let matches_checkout = match Path::new(&session.cwd).canonicalize() {
+        let repo_root = repo.dir.canonical().map_err(RpcError::internal)?;
+        let matches_checkout = match Path::new(&session.cwd).canonical() {
             Ok(cwd) => Self::checkout_contains(&repo_root, &cwd),
             Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => {
-                session.checkout_root().and_then(|root| Path::new(root).canonicalize().ok()).as_ref() == Some(&repo_root)
+                session.checkout_root().and_then(|root| Path::new(root).canonical().ok()).as_ref() == Some(&repo_root)
             }
             Err(_) => false,
         };
@@ -1700,7 +1702,7 @@ impl WorkspaceGit {
             .max_by_key(|(_, root)| root.components().count())?;
         // A vanished worktree must never resolve to the enclosing project's checkout.
         if missing && (session.worktree_removed || match session.checkout_root() {
-            Some(saved) => Path::new(saved).canonicalize().ok().as_ref() != Some(root),
+            Some(saved) => Path::new(saved).canonical().ok().as_ref() != Some(root),
             None => name.as_str() == "." && (session.worktree_name.is_some() || cwd != session.cwd),
         }) {
             return None;
@@ -1719,7 +1721,7 @@ impl WorkspaceGit {
             url_targets || association.url.starts_with("https://github.com/") || (self.project && association.linked)
         };
         let linked_checkouts = if self.project && associations.iter().any(|association| association.linked) {
-            names.iter().filter_map(|name| Some((name, self.dir(name).canonicalize().ok()?))).collect()
+            names.iter().filter_map(|name| Some((name, self.dir(name).canonical().ok()?))).collect()
         } else {
             Vec::new()
         };
@@ -2132,7 +2134,7 @@ impl WorkspaceGit {
             .map_err(|_| RpcError::invalid("Give the pull request's URL."))?;
         let repo = Repo { name: ".".into(), dir: self.root.clone() };
         let common = self.git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let common = Path::new(common.trim()).canonicalize().map_err(RpcError::internal)?;
+        let common = Path::new(common.trim()).canonical().map_err(RpcError::internal)?;
         let owned = |entry: &PendingPrCreation| entry.url == url && entry.checkout.git_dir.starts_with(&common);
         let evidence = pending_pr_creations(|entries| (entries.iter().filter(|entry| owned(entry)).cloned().collect::<Vec<_>>(), false))?;
         if evidence.is_empty() {
@@ -2173,9 +2175,9 @@ impl WorkspaceGit {
 
     /// Whether the recorded checkout is still the very directory it was.
     fn same_checkout(checkout: &CheckoutIdentity) -> bool {
-        let Ok(path) = checkout.path.canonicalize() else { return false };
+        let Ok(path) = checkout.path.canonical() else { return false };
         let git_dir = crate::git::run(&path, &["rev-parse", "--absolute-git-dir"]).ok()
-            .and_then(|dir| Path::new(dir.trim()).canonicalize().ok());
+            .and_then(|dir| Path::new(dir.trim()).canonical().ok());
         path == checkout.path && git_dir.as_deref() == Some(checkout.git_dir.as_path())
             && directory_identity(&path).ok() == Some(checkout.directory)
             && directory_identity(&checkout.git_dir).ok() == Some(checkout.admin)

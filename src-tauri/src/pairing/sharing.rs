@@ -678,6 +678,8 @@ mod tests {
         let blocked = share_listener(Err(std::io::ErrorKind::PermissionDenied.into()), false).unwrap_err().to_string();
         assert!(blocked.contains("firewall"), "another failure is still the firewall's: {blocked}");
     }
+
+    #[cfg(unix)]
     #[test]
     fn delayed_sensitive_reply_is_not_sent_after_guest_removal() {
         use std::os::unix::process::CommandExt;

@@ -32,7 +32,7 @@ thread_local! {
     static TEST_LINEAR_API: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn with_linear_api<T>(url: String, test: impl FnOnce() -> T) -> T {
     struct Reset(Option<String>);
     impl Drop for Reset {
@@ -544,7 +544,7 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
 
 // ------------------------------------------------------------------ Linear
 
-fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
+pub(crate) fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
     let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
     let resp = agent
         .post(linear_api().as_ref())

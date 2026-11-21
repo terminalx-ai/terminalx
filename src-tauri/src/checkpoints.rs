@@ -412,7 +412,7 @@ pub fn keep(session: &str, tab: &str, seq: u64) -> Result<()> {
 }
 
 fn in_workspace(candidate: &str, cwd: &str) -> bool {
-    std::fs::canonicalize(candidate).is_ok_and(|p| p.starts_with(cwd)) && root(candidate).ok().as_deref() == Some(cwd)
+    crate::paths::canonicalize(candidate).is_ok_and(|p| p.starts_with(cwd)) && root(candidate).ok().as_deref() == Some(cwd)
 }
 fn idle(cwd: &str, allow_waiting: bool) -> Result<()> {
     for session in index::load()? {

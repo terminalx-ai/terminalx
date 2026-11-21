@@ -13,11 +13,27 @@ export interface HostNotification {
   sessionTitle?: string;
   question?: { requestId: string; options: { label: string }[] };
   approval?: { requestId: string };
+  /** A bot's question on one of its items (`bot_question`, PRO-479): `sessionId`/`tabId` are then its home chat. */
+  botQuestion?: BotQuestionNotice;
 }
+
+/** What a `bot_question` notice carries to open its question or answer it (`bots.answer`). */
+export interface BotQuestionNotice {
+  botId: string;
+  number: number;
+  /** The question's id (`bots.answer`'s `question`). */
+  question: string;
+  answers: string[];
+  recommended?: number;
+}
+
+/** A bot's question (PRO-479): sent and shown under the "questions" choice, and never held to a session's scope. */
+export const BOT_QUESTION = "bot_question";
 
 /** What `notifications.subscribe` and `notifications.missedSince` take as `filter` from a Mac with `notificationFilters`. */
 export interface SubscribeFilter {
-  kinds: NotificationKind[];
+  /** The kinds switched on, and `bot_question` with questions. A Mac ignores a kind it does not know. */
+  kinds: string[];
   sessions: { scope: "all" } | { scope: "only"; ids: string[] };
   overrides: Record<string, "needsMe" | "everything" | "mute">;
 }
@@ -45,12 +61,23 @@ export interface NotificationPresentation {
     detailsHidden: boolean;
     requestId?: string;
     options?: { label: string }[];
+    /** A bot's question: which bot and item, and its answers for the notification's buttons. */
+    botId?: string;
+    number?: number;
+    question?: string;
+    answers?: string[];
+    recommended?: number;
   };
 }
 
-/** Each Mac's subscribe filter: what the phone asks it to send. Quiet hours and the lock screen stay on the phone. */
-export function subscribeFilter(settings: NotificationSettings, hostId: string): SubscribeFilter {
-  const kinds = (Object.keys(settings.kinds) as NotificationKind[]).filter((kind) => settings.kinds[kind]);
+/**
+ * Each Mac's subscribe filter: what the phone asks it to send. Quiet hours and the lock screen stay on the phone.
+ * `botQuestions`: the Mac offers its bots (`bots`, only while Bots is on there), so its bots' questions are asked
+ * for with the agents' (PRO-479).
+ */
+export function subscribeFilter(settings: NotificationSettings, hostId: string, botQuestions = false): SubscribeFilter {
+  const kinds: string[] = (Object.keys(settings.kinds) as NotificationKind[]).filter((kind) => settings.kinds[kind]);
+  if (botQuestions && settings.kinds.question) kinds.push(BOT_QUESTION);
   const overrides: SubscribeFilter["overrides"] = { ...(settings.perSession[hostId] ?? {}) };
   return {
     kinds,
@@ -65,7 +92,7 @@ export function inQuietHours(quiet: QuietHours, now: Date): boolean {
   return quiet.start < quiet.end ? minute >= quiet.start && minute < quiet.end : minute >= quiet.start || minute < quiet.end;
 }
 
-const needsMe = (kind: string | undefined) => kind === "question" || kind === "approval";
+const needsMe = (kind: string | undefined) => kind === "question" || kind === "approval" || kind === BOT_QUESTION;
 
 /**
  * Whether the phone shows a notification. Applied to every notification,
@@ -81,8 +108,13 @@ export function shouldShow(settings: NotificationSettings, hostId: string, event
   if (override === "mute") return false;
   if (override === "needsMe" && event.kind !== undefined && !needsMe(event.kind)) return false;
   if (override === "default") {
-    if (settings.sessions === "mine" && event.sessionId && !followedSessions(settings, hostId).includes(event.sessionId)) return false;
-    if (isNotificationKind(event.kind) && !settings.kinds[event.kind]) return false;
+    // A bot's question is the bot's, not one session's: "Sessions I started or follow" does not hold it back.
+    if (event.kind === BOT_QUESTION) {
+      if (!settings.kinds.question) return false;
+    } else {
+      if (settings.sessions === "mine" && event.sessionId && !followedSessions(settings, hostId).includes(event.sessionId)) return false;
+      if (isNotificationKind(event.kind) && !settings.kinds[event.kind]) return false;
+    }
   }
   if (inQuietHours(settings.quietHours, now) && !(settings.quietHours.stillNotifyNeedsMe && needsMe(event.kind))) return false;
   return true;
@@ -99,7 +131,10 @@ const GENERIC: Record<NotificationKind, { title: string; body: string }> = {
 };
 const GENERIC_OTHER = { title: "TerminalX", body: "Open TerminalX to see what happened." };
 
+const GENERIC_BOT = { title: "A bot needs your answer", body: "Open TerminalX to see the question." };
+
 export function genericText(kind: string | undefined): { title: string; body: string } {
+  if (kind === BOT_QUESTION) return GENERIC_BOT;
   return isNotificationKind(kind) ? GENERIC[kind] : GENERIC_OTHER;
 }
 
@@ -107,17 +142,21 @@ export function genericText(kind: string | undefined): { title: string; body: st
 export function present(settings: NotificationSettings, hostId: string, machineName: string, event: HostNotification): NotificationPresentation {
   const show = settings.lockScreen.show;
   const generic = genericText(event.kind);
-  const answer = event.question ? { requestId: event.question.requestId, options: event.question.options } : event.approval ? { requestId: event.approval.requestId } : {};
+  const bot = event.botQuestion;
+  const answer = event.question ? { requestId: event.question.requestId, options: event.question.options } : event.approval ? { requestId: event.approval.requestId }
+    : bot ? { question: bot.question, answers: bot.answers, ...(bot.recommended !== undefined ? { recommended: bot.recommended } : {}) } : {};
   const data: NotificationPresentation["data"] = {
     hostId,
     sessionId: event.sessionId ?? "",
     tabId: event.tabId ?? "",
     kind: event.kind ?? "",
     detailsHidden: show === "nothing",
+    // Which bot and item is no detail: a tap opens the question in the app, which shows it there.
+    ...(bot ? { botId: bot.botId, number: bot.number } : {}),
     ...(show === "nothing" ? {} : answer),
   };
   const sound = settings.lockScreen.sound;
-  const thread = event.sessionId ? `${hostId}:${event.sessionId}` : hostId;
+  const thread = bot ? `${hostId}:bot:${bot.botId}` : event.sessionId ? `${hostId}:${event.sessionId}` : hostId;
   if (show === "everything") return { title: event.title, body: event.body, subtitle: machineName, thread, sound, data };
   if (show === "sessionName") return { title: event.title, body: generic.body, thread, sound, data };
   return { title: generic.title, body: generic.body, thread, sound, data };

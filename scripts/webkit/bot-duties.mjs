@@ -2,10 +2,11 @@
 // PRO-471: a bot's Duties tab (design 23.05) and a duty's page (23.10) in real WebKit, at 1440×900 and at the scaled
 // 1280×800, dark and light. On the tab: the duties table, the "Add a duty" tiles and, beside them, Today, the log and
 // quiet hours. On a duty's page: Back, the actions on one band, the four stat cards, the four steps, the runs and the
-// right column. Nothing overlaps, nothing leaves the window, and no page error.
+// right column. In the editor (PRO-472): what wakes the duty (a schedule, GitHub, another bot, wait until) and each
+// one's fields. Nothing overlaps, nothing leaves the window, and no page error.
 // Run after pnpm build: node scripts/webkit/bot-duties.mjs
 // BOT_DUTIES_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve } from "./harness.mjs";
+import { launch, open, openSession, report, serve } from "./harness.mjs";
 
 const shots = process.env.BOT_DUTIES_SHOTS;
 const server = await serve();
@@ -37,6 +38,7 @@ const fixture = `
     duty("d1", "Watch pull requests that have been waiting for a review for a long time", {}),
     duty("d2", "Watch stalled sessions", { schedule: { kind: "cron", cron: "*/15 * * * *", weekdays: [], timezone: "UTC", dtstart: "2026-01-01T00:00:00Z" } }),
     duty("d3", "Release readiness", { enabled: false, precheck: null, bot: { id: "b1", reportsTo: "lead", template: "release-readiness" } }),
+    duty("d4", "Review each pull request", { nextRunAt: "9999-01-01T00:00:00.000Z", eventTrigger: { source: { kind: "githubPullRequest", repo: "terminalx-ai/terminalx", events: ["opened", "pushed"], labels: [] }, pollIntervalMinutes: 5, maxRunsPerTick: 1 } }),
   ];
   const quiet = { exitCode: 0, stdoutTail: "", stderrTail: "", truncated: false, timedOut: false, durationMs: 400 };
   const found = { ...quiet, stdoutTail: "#1432 Bots: settings and access\\n#1435 Bots: role and memory\\n", durationMs: 1300 };
@@ -49,6 +51,7 @@ const fixture = `
     ],
     d2: [run("d2", 1, { status: "skippedPrecheck", startedAt: clock(13, 15), endedAt: clock(13, 15), lastRepeatAt: clock(13, 15), precheck: quiet })],
     d3: [],
+    d4: [],
   };
   backend.answers.automation_runs = ({ automationId }) => runs[automationId] ?? [];
   backend.answers.bot_duties = { quietHours: { from: "22:00", to: "07:00" }, notes: { d1: { text: "Reported #1432 and #1435 at 13:00.", cut: false } }, home: "/home/.raccoon/bots/b1" };
@@ -75,9 +78,7 @@ try {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "bot-home" }));
-      const view = page.getByRole("main", { name: "Argus, Watcher" });
-      await view.waitFor();
+      const view = await openSession(page, "bot-home", "Argus, Watcher");
       await view.getByRole("tab", { name: "Duties" }).click();
       const duties = view.getByTestId("bot-duties");
       const table = duties.getByTestId("duties-table");
@@ -145,6 +146,24 @@ try {
         "Save is inside the editor": saveBox.right <= editorBox.right + 0.5,
         "no page errors": errors.length === 0,
       }, { editorBox, saveBox, reportsBox, errors });
+
+      // What wakes it: each choice's fields stay inside the editor, in its two columns, without overlapping.
+      for (const [choice, ready] of [["GitHub", "duty-wake-kind"], ["Another bot", "duty-wake-note"], ["Wait until", "duty-wake-note"]]) {
+        await editor.getByRole("radiogroup", { name: "Wakes on" }).getByRole("radio", { name: choice }).click();
+        await editor.getByTestId(ready).waitFor();
+        if (choice === "Wait until") await editor.getByRole("radio", { name: "A check's output" }).click();
+        const groups = await Promise.all((await editor.getByRole("radiogroup", { name: "Wakes on" }).getByRole("radio").all()).map(box));
+        const fields = await editor.evaluate((root) => [...root.querySelectorAll(".grid > *")].map((element) => {
+          const rect = element.getBoundingClientRect();
+          return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+        }).filter((rect) => rect.width > 0 && rect.height > 0));
+        const editorNow = await box(editor);
+        failed += report(`bot duty editor ${name} wakes on ${choice}`, {
+          "the five choices do not overlap and stay inside the editor": groups.length === 5 && disjoint(groups) && groups.every((group) => group.right <= editorNow.right + 0.5),
+          "the fields stay inside the editor and do not overlap": fields.length > 4 && fields.every((field) => field.right <= editorNow.right + 0.5 && field.left >= editorNow.left - 0.5) && disjoint(fields),
+          "no page errors": errors.length === 0,
+        }, { groups, fields, editorNow, errors });
+      }
       await page.close();
     }
   }

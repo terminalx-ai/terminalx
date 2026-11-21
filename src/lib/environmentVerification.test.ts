@@ -134,7 +134,9 @@ describe("verifyProposal, with a scripted runner", () => {
 // repository is a directory served as a file:// address; the agent's
 // checkout is a clone of it. Nothing is mocked but the terminal: each script
 // runs with a non-interactive bash from the "workspace root".
-const bash = spawnSync("bash", ["-c", "git --version"]).status === 0;
+// On Windows, `bash` may be WSL's, which runs on another machine: only Git for Windows' bash is this one.
+const bash = spawnSync("bash", ["-c", "git --version"]).status === 0
+  && (process.platform !== "win32" || /MINGW|MSYS/.test(spawnSync("bash", ["-c", "uname -s"]).stdout?.toString() ?? ""));
 describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const base = mkdtempSync(join(tmpdir(), "tx-verify-"));
   // The sudo install step must traverse this synthetic fixture even when Linux
@@ -144,7 +146,8 @@ describe.skipIf(!bash)("verifyProposal, in a real shell", () => {
   const root = join(base, "workspace");
   mkdirSync(github);
   mkdirSync(root);
-  afterAll(() => rmSync(base, { recursive: true, force: true }));
+  // Windows refuses to remove a folder a just-stopped process still has open; retry briefly.
+  afterAll(() => rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" }).toString().trim();
   /** A repository on "GitHub" and the agent's clone of it in the workspace; returns the remote's commit. */
   const repository = (name: string, files: Record<string, string>) => {

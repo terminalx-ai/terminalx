@@ -1,3 +1,4 @@
+use crate::paths::Canonical;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -16,7 +17,7 @@ pub(crate) fn owns_project(root: &Path, project: &str) -> bool {
     let path = Path::new(project);
     if path == root { return true; }
     path.starts_with(root) && !path.components().any(|part| matches!(part, Component::ParentDir))
-        && path.canonicalize().is_ok_and(|canonical| canonical.starts_with(root) && canonical.join(".git").exists())
+        && path.canonical().is_ok_and(|canonical| canonical.starts_with(root) && canonical.join(".git").exists())
 }
 
 /// The client names an advertised directory, not an arbitrary CWD. Verify it locally
@@ -25,11 +26,13 @@ pub(crate) fn resolve(root: &Path, target: Option<&RepositoryTarget>) -> Result<
     let Some(target) = target else { return Ok(root.to_path_buf()) };
     let refused = || RpcError::new("repository_checkout_unavailable", "The selected repository checkout is missing or does not match. Finish repository setup before starting a session.");
     let advertised = Path::new(&target.directory);
-    if target.directory.is_empty() || advertised.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir | Component::RootDir)) {
+    // A drive (`C:`) only begins an absolute Windows path, never a drive-relative one.
+    let drive_relative = matches!(advertised.components().next(), Some(Component::Prefix(_))) && !advertised.is_absolute();
+    if target.directory.is_empty() || drive_relative || advertised.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir | Component::RootDir | Component::Prefix(_))) {
         return Err(refused());
     }
     let candidate = if advertised.is_absolute() { advertised.to_path_buf() } else { root.join(advertised) };
-    let path = candidate.canonicalize().map_err(|_| refused())?;
+    let path = candidate.canonical().map_err(|_| refused())?;
     if !path.starts_with(root) {
         return Err(RpcError::new("repository_checkout_scope_unsupported", "This checkout is outside the runtime workspace scope. Environment session routing for this layout is not supported."));
     }
@@ -42,8 +45,8 @@ pub(crate) fn resolve(root: &Path, target: Option<&RepositoryTarget>) -> Result<
         return Err(refused());
     }
     let origin = crate::git::remote_url(&path).and_then(|url| crate::issues::github_repo_from_url(&url));
-    let top = crate::git::run(&path, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| Path::new(top.trim()).canonicalize().ok());
-    let common = crate::git::run(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().and_then(|dir| Path::new(dir.trim()).canonicalize().ok());
+    let top = crate::git::run(&path, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| Path::new(top.trim()).canonical().ok());
+    let common = crate::git::run(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().and_then(|dir| Path::new(dir.trim()).canonical().ok());
     if !origin.is_some_and(|origin| origin.eq_ignore_ascii_case(expected))
         || top.as_ref() != Some(&path)
         || !common.is_some_and(|dir| dir.starts_with(root))
@@ -56,6 +59,7 @@ pub(crate) fn resolve(root: &Path, target: Option<&RepositoryTarget>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
 
     #[test]
@@ -65,7 +69,7 @@ mod tests {
         let outside = dir.path().join("outside");
         std::fs::create_dir(&root).unwrap();
         std::fs::create_dir(&outside).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = root.canonical().unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
         for directory in ["../outside", ""] {

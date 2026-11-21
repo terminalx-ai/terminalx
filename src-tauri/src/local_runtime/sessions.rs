@@ -152,7 +152,7 @@ impl Sessions {
 
     /// [`Self::bots`] with the whole request, as `window_consent::guarded` sends it again.
     pub fn bots_request<T: DeserializeOwned>(&self, request: Value) -> Result<T> {
-        if matches!(request["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "items" | "item" | "needsYou")) {
+        if request["operation"].as_str().is_some_and(bots_read) {
             self.quick(crate::serve_cli::consent::BOTS_COMMAND, request)
         } else {
             self.call(crate::serve_cli::consent::BOTS_COMMAND, request)
@@ -472,9 +472,21 @@ fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
     }})
 }
 
+/// The `bots` operations that only read, and so fail fast on a wedged owner.
+fn bots_read(operation: &str) -> bool {
+    matches!(operation, "list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "dutyWeek" | "items" | "item" | "needsYou")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRO-497: the week of duties is a read, as a duty's tab is; a change still waits for its answer.
+    #[test]
+    fn the_week_of_duties_is_a_fast_read_and_a_change_is_not() {
+        assert!(bots_read("dutyWeek") && bots_read("duties"));
+        assert!(!bots_read("dutySave") && !bots_read("dutyRun") && !bots_read("dutyDelete"));
+    }
 
     #[test]
     fn a_new_tab_reaches_the_runtime_with_its_transport() {

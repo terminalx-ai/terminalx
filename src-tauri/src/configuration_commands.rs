@@ -1,4 +1,5 @@
 //! Desktop writes and explicit native consent. CLI/phone expose only reads.
+use crate::paths::Canonical;
 use crate::store::configuration::{self, Layer, Resolution, Store};
 use serde_json::Value;
 
@@ -36,7 +37,7 @@ pub(crate) fn editor_program(editor: Option<&str>) -> Result<Option<&'static str
 fn settings_file(path: &std::path::Path, user: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
     let path = crate::files::existing_local_path(path)?;
     anyhow::ensure!(path.is_file(), "{} is not a settings file", path.display());
-    let canonical = |known: &std::path::Path| known.canonicalize().ok();
+    let canonical = |known: &std::path::Path| known.canonical().ok();
     let known = user.and_then(canonical).is_some_and(|user| user == path)
         || crate::store::managed_configuration::path().and_then(canonical).is_some_and(|managed| managed == path)
         || (path.parent().and_then(|dir| dir.file_name()).is_some_and(|dir| dir == ".terminalx")

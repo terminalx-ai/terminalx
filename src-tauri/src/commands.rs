@@ -1945,7 +1945,7 @@ pub fn chats_dir() -> CmdResult<String> {
         log::warn!("write the chats' agent note: {error:#}");
     }
     // Canonical, as a session's project path is, so the sidebar can match them.
-    Ok(std::fs::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+    Ok(crate::paths::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -3319,8 +3319,8 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 // ------------------------------------------------------------------ git actions & PRs
 
 fn branch_neighbors(session: &index::SessionEntry) -> anyhow::Result<Vec<index::SessionEntry>> {
-    let cwd = std::fs::canonicalize(&session.cwd)?;
-    Ok(index::load()?.into_iter().filter(|neighbor| std::fs::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
+    let cwd = crate::paths::canonicalize(&session.cwd)?;
+    Ok(index::load()?.into_iter().filter(|neighbor| crate::paths::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
 }
 
 fn neighbors_working(sessions: &crate::local_runtime::sessions::Sessions, neighbors: &[index::SessionEntry]) -> anyhow::Result<bool> {
@@ -4595,6 +4595,7 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    use crate::paths::Canonical;
     #[test]
     fn turn_fork_preserves_subdirectory_or_reports_root_fallback() {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
@@ -4755,7 +4756,7 @@ mod command_tests {
         use crate::{git, session_ops, store};
         let _home = store::temp_home();
         let repo = tempfile::tempdir().unwrap();
-        let project = std::fs::canonicalize(repo.path()).unwrap();
+        let project = crate::paths::canonicalize(repo.path()).unwrap();
         git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial", "--allow-empty"]).unwrap();
 
@@ -4824,7 +4825,7 @@ mod command_tests {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
         let repo = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(repo.path()).unwrap();
+        let root = crate::paths::canonicalize(repo.path()).unwrap();
         git::run(&root, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&root, &["config", "user.email", "test@example.com"]).unwrap();
         git::run(&root, &["config", "user.name", "Test"]).unwrap();
@@ -4989,7 +4990,7 @@ mod command_tests {
         git::run(root, &["commit", "-qm", "initial"]).unwrap();
         let wt = git::create_worktree(root, "missing-source", Some("main")).unwrap();
         let worktree = std::path::Path::new(&wt.path);
-        let recorded_root = std::fs::canonicalize(worktree).unwrap();
+        let recorded_root = crate::paths::canonicalize(worktree).unwrap();
         let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
             cwd: Some(worktree.join("sub").to_str().unwrap().into()),
             tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
@@ -5052,7 +5053,7 @@ mod command_tests {
         use crate::{git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
         let temp = tempfile::tempdir().unwrap();
-        let project = std::fs::canonicalize(temp.path()).unwrap().join("project");
+        let project = crate::paths::canonicalize(temp.path()).unwrap().join("project");
         std::fs::create_dir(&project).unwrap();
         git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
@@ -5497,7 +5498,7 @@ mod command_tests {
         })
         .unwrap();
 
-        assert_eq!(session.cwd, external.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(session.cwd, external.canonical().unwrap().to_string_lossy());
         assert_eq!(session.branch.as_deref(), Some("feature/external"));
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());
@@ -6236,9 +6237,10 @@ pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()>
     bots_call(state, "delete", serde_json::json!({"id": id})).await
 }
 
+/// `from`: where in the window it was paused (`app`, or `shortcut` for Pause all's keys), said on the pause (PRO-474).
 #[tauri::command]
-pub async fn bot_pause(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
-    bots_call(state, "pause", serde_json::json!({"id": id})).await
+pub async fn bot_pause(state: State<'_, AppState>, id: String, from: Option<String>) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "pause", serde_json::json!({"id": id, "from": from})).await
 }
 
 #[tauri::command]
@@ -6247,8 +6249,15 @@ pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<cra
 }
 
 #[tauri::command]
-pub async fn bots_pause_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
-    bots_call(state, "pauseAll", serde_json::json!({})).await
+pub async fn bots_pause_all(state: State<'_, AppState>, from: Option<String>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "pauseAll", serde_json::json!({"from": from})).await
+}
+
+/// What the paused bots hold (PRO-474, 23.12): what each is still finishing, every entry of "Held while paused",
+/// and what was spent today and since the pause.
+#[tauri::command]
+pub async fn bots_pause_held(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "pauseHeld", serde_json::json!({})).await
 }
 
 #[tauri::command]
@@ -6361,6 +6370,69 @@ pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64
     bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
 }
 
+// A bot's suggestions and its look around (PRO-477).
+
+/// A bot's open suggestions, newest first, and the status of its look around and memory tidy.
+#[tauri::command]
+pub async fn bot_suggestions(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestions", serde_json::json!({"id": id})).await
+}
+
+/// Start a suggestion: it becomes an item, sent to the bot as the owner's message, and the bot begins.
+#[tauri::command]
+pub async fn bot_suggestion_start(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionStart", serde_json::json!({"id": id, "number": number})).await
+}
+
+#[tauri::command]
+pub async fn bot_suggestion_dismiss(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionDismiss", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// A bot's newest mentions on GitHub and Linear, and what it posted there (PRO-480).
+#[tauri::command]
+pub async fn bot_channels(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "channels", serde_json::json!({"id": id})).await
+}
+
+// Hand-offs between bots and the team brief (PRO-475).
+
+/// The hand-offs a bot gave or was given (every bot's with no `id`).
+#[tauri::command]
+pub async fn bot_handoffs(state: State<'_, AppState>, id: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffs", serde_json::json!({"id": id})).await
+}
+
+/// Stop one hand-off: only the receiving bot's work on it stops.
+#[tauri::command]
+pub async fn bot_handoff_stop(state: State<'_, AppState>, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffStop", serde_json::json!({"number": number})).await
+}
+
+/// Send again, now, a bots' message that could not reach its chat (its count of tries starts again).
+#[tauri::command]
+pub async fn bot_handoff_resend(state: State<'_, AppState>, message: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffResend", serde_json::json!({"message": message})).await
+}
+
+/// Hand a bot's item to another bot, with the owner's own note.
+#[tauri::command]
+pub async fn bot_item_hand(state: State<'_, AppState>, id: String, number: u64, to: String, note: String, due: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemHand", serde_json::json!({"id": id, "number": number, "to": to, "note": note, "due": due})).await
+}
+
+/// The team brief every bot reads.
+#[tauri::command]
+pub async fn bot_brief(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "brief", serde_json::json!({})).await
+}
+
+/// `expected` is the hash of the brief the editor started from: one changed since is not written over.
+#[tauri::command]
+pub async fn bot_brief_write(state: State<'_, AppState>, text: String, expected: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "briefWrite", serde_json::json!({"text": text, "expected": expected})).await
+}
+
 /// What a bot's sessions spent today, at Stats' prices (PRO-468).
 #[tauri::command]
 pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
@@ -6375,6 +6447,12 @@ pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResul
 #[tauri::command]
 pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
     bots_call(state, "duties", serde_json::json!({"id": id})).await
+}
+
+/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`).
+#[tauri::command]
+pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week})).await
 }
 
 /// Add a duty (`duty_id` absent) or change one.

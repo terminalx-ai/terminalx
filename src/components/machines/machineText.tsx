@@ -28,7 +28,7 @@ export function FingerprintBox({ fingerprint, caption, className }: { fingerprin
   );
 }
 
-const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux" };
+const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 
 /** "macOS 26.1". */
 export function osLabel(os: MachineOs): string {

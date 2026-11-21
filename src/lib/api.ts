@@ -44,7 +44,7 @@ import type {
 import type { DiscoveredSkill, SkillDetail } from "@/types/skills";
 import type { AgentConfigChange, AgentConfigComparison, AgentConfigPreview, AgentConfigWritten } from "@/types/agentConfigs";
 import type { Automation, AutomationInput, AutomationIssueState, AutomationRun, AutomationRef, AutomationEventSource, PrecheckTrial, PrecheckTryInput, SourceMatch } from "@/types/automations";
-import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
+import type { Bot, BotList, BotPatch, BotPauseFrom, BotRoleTemplate, PauseHeld } from "@/types/bots";
 import type { CloudMerge, IssuePipeline, IssuePipelineSettings, PipelineAction, StartedIssuePipeline } from "@/types/issuePipeline";
 import type { MachineName, PairingConnectionMode, PairingStatus } from "@/types/pairing";
 import type { RepositoryFilesPreview } from "@/types/repositorySettings";
@@ -2151,9 +2151,12 @@ export const botsApi = {
   update: (id: string, patch: BotPatch) => invoke<Bot>("bot_update", { id, patch }),
   /** The bot's home folder goes to the app's trash. */
   remove: (id: string) => invoke<void>("bot_delete", { id }),
-  pause: (id: string) => invoke<Bot>("bot_pause", { id }),
+  /** `from`: where in the window it was paused, said on the pause (PRO-474). */
+  pause: (id: string, from: BotPauseFrom = "app") => invoke<Bot>("bot_pause", { id, from }),
   resume: (id: string) => invoke<Bot>("bot_resume", { id }),
-  pauseAll: () => invoke<BotList>("bots_pause_all"),
+  pauseAll: (from: BotPauseFrom = "app") => invoke<BotList>("bots_pause_all", { from }),
+  /** What the paused bots hold (23.12). */
+  pauseHeld: () => invoke<PauseHeld>("bots_pause_held"),
   resumeAll: () => invoke<BotList>("bots_resume_all"),
   /** The bot's standing instructions, its `ROLE.md`. */
   roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
@@ -2166,6 +2169,8 @@ export const botsApi = {
   /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
   dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
   spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
+  /** Its newest mentions on GitHub and Linear (none of their text) and what it posted there (PRO-480). */
+  channels: (id: string) => invoke<import("@/types/botChannels").BotChannelsView>("bot_channels", { id }),
 };
 
 export function errorMessage(e: unknown): string {
@@ -2657,6 +2662,8 @@ export const files = {
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
   droppedText: () => invoke<string | null>("dropped_text"),
+  /** How a path dropped on a terminal is quoted: as the shell its terminals run reads it. */
+  terminalQuoteStyle: () => invoke<"posix" | "powershell" | "cmd">("terminal_quote_style"),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
 

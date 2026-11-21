@@ -41,8 +41,19 @@ function Navigation() {
     const content = response.notification.request.content;
     const intent = intentOf(response.actionIdentifier, content.data ?? undefined, content.body);
     if (!intent) return;
-    const open = () => router.push({ pathname: "/session/[sessionId]", params: { sessionId: intent.sessionId, tabId: intent.tabId, ...(intent.hostId ? { hostId: intent.hostId } : {}) } });
-    if (intent.type === "open") {
+    const hostParam = intent.hostId ? { hostId: intent.hostId } : {};
+    // A bot's question (PRO-479): over the chat it came from, its home chat; on the bot's page when that is not known.
+    const openBot = (sheet: boolean) => {
+      if (intent.type !== "botQuestion" && intent.type !== "botAnswer") return;
+      const question = sheet ? { botId: intent.botId, item: String(intent.number) } : {};
+      if (intent.sessionId && intent.tabId) router.push({ pathname: "/session/[sessionId]", params: { sessionId: intent.sessionId, tabId: intent.tabId, ...hostParam, ...question } });
+      else router.push({ pathname: "/bot/[botId]", params: { botId: intent.botId, ...(sheet ? { item: String(intent.number) } : {}) } });
+    };
+    const open = () => {
+      if (intent.type === "botQuestion" || intent.type === "botAnswer") return openBot(intent.type === "botQuestion");
+      router.push({ pathname: "/session/[sessionId]", params: { sessionId: intent.sessionId, tabId: intent.tabId, ...hostParam } });
+    };
+    if (intent.type === "open" || intent.type === "botQuestion") {
       const host = intent.hostId ? app.hosts.find((item) => item.id === intent.hostId) : undefined;
       // The session's own Mac first, when it is another than the one connected.
       if (host && app.activeHost?.id !== host.id) void app.connectHost(host).then(open);
@@ -58,8 +69,11 @@ function Navigation() {
       },
       respondPermission: (...args) => app.api.respondPermission(...args),
       answerQuestions: (...args) => app.api.answerQuestions(...args),
+      answerBot: (...args) => app.api.answerBot(...args),
     }).then((refusal) => {
-      open();
+      // A bot's question that was not answered opens again as its sheet, to answer there.
+      if (intent.type === "botAnswer") openBot(refusal !== null);
+      else open();
       if (refusal) Alert.alert("Could not answer", refusal);
     });
   }, [app, response, router]);
@@ -76,5 +90,5 @@ function Navigation() {
     const route = Platform.OS === "ios" ? Settings.get("openRoute") : undefined;
     if (typeof route === "string" && route.startsWith("/")) router.navigate(route as Href);
   }, [navigationReady, router]);
-  return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /><Stack.Screen name="account" options={{ title: "Account", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="organization/[orgId]" options={{ title: "Organization", headerLargeTitle: false, headerBackTitle: "Account" }} /><Stack.Screen name="notifications" options={{ title: "Notifications", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="privacy" options={{ title: "Your data", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="connection-log" options={{ title: "Connection log", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="support-report" options={{ title: "Support report", headerLargeTitle: false, headerBackTitle: "Settings" }} /></Stack></>;
+  return <><StatusBar style={lightText ? "light" : "dark"} /><Stack screenOptions={{ headerLargeTitle: true, headerTransparent: false, headerStyle: { backgroundColor: palette.page }, headerTintColor: palette.ink, headerShadowVisible: false, contentStyle: { backgroundColor: palette.page } }}><Stack.Screen name="(tabs)" options={{ headerShown: false }} /><Stack.Screen name="session/[sessionId]" options={{ title: "Session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="bot/[botId]" options={{ title: "Bot", headerShown: false }} /><Stack.Screen name="session/new" options={{ title: "New session", headerLargeTitle: false, headerBackTitle: "Sessions" }} /><Stack.Screen name="cloud/[workspaceId]" options={{ title: "Workspace", headerLargeTitle: false, headerBackTitle: "Cloud" }} /><Stack.Screen name="cloud/shares" options={{ title: "Sharing", headerLargeTitle: false }} /><Stack.Screen name="account" options={{ title: "Account", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="organization/[orgId]" options={{ title: "Organization", headerLargeTitle: false, headerBackTitle: "Account" }} /><Stack.Screen name="notifications" options={{ title: "Notifications", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="privacy" options={{ title: "Your data", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="connection-log" options={{ title: "Connection log", headerLargeTitle: false, headerBackTitle: "Settings" }} /><Stack.Screen name="support-report" options={{ title: "Support report", headerLargeTitle: false, headerBackTitle: "Settings" }} /></Stack></>;
 }

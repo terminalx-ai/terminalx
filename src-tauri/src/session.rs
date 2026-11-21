@@ -1234,6 +1234,9 @@ pub struct TabRuntime {
     /// so a bot's gate needs no index read per tool call, and cannot lose
     /// the bot to an index that cannot be read (PRO-478).
     pub(crate) acting_bot: Option<String>,
+    /// The bot's built-in duty this tab runs, when it runs one (PRO-477): its
+    /// tool calls meet that built-in's allow-list first. Read with `acting_bot`.
+    pub(crate) bot_builtin: Option<crate::bots::builtins::Run>,
     pub harness: String,
     pub seq: u64,
     /// Set only while applying a source transcript record; empty means unknown.
@@ -2702,6 +2705,7 @@ impl SessionManager {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
                 acting_bot: crate::bots::chat::acting_bot(&entry),
+                bot_builtin: crate::bots::builtins::of_session(&entry),
                 harness: tab.harness.clone(),
                 seq,
                 status: TabStatus::Idle,
@@ -3933,6 +3937,13 @@ impl SessionManager {
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
         self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+    }
+
+    /// A message one bot sends another (PRO-475): its agent gets `text`, and the transcript names `author`, the
+    /// sending bot, so the message is never shown as the owner's words. A stopped tab starts, as any send starts it.
+    pub(crate) fn send_from_bot(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person) -> Result<SendOutcome> {
+        let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
+        self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: None }, Vec::new(), None, crate::recovery_log::Origin::Programmatic)
     }
 
     #[cfg(test)]
@@ -8320,8 +8331,12 @@ impl SessionManager {
             // A session acting for a bot (PRO-478: its chats and what they started) is held to
             // the bot's access as it is now, on top of the mode `bots::chat` holds it to: the
             // frame showed this launch's token, so its session is its own.
-            let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
-            match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+            // A built-in duty's run (PRO-477) meets its allow-list first.
+            let (acting_bot, builtin) = {
+                let rt = rt_arc.lock().unwrap();
+                (rt.acting_bot.clone(), rt.bot_builtin.clone())
+            };
+            match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
                 crate::bots::access::Gate::Leave => {}
                 crate::bots::access::Gate::Refuse(reason) => {
                     log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
@@ -8466,8 +8481,11 @@ impl SessionManager {
             "PermissionRequest" => {
                 // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
                 // what it asks about is asked on a card that says why.
-                let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
-                let because = match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+                let (acting_bot, builtin) = {
+                    let rt = rt_arc.lock().unwrap();
+                    (rt.acting_bot.clone(), rt.bot_builtin.clone())
+                };
+                let because = match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
                     crate::bots::access::Gate::Refuse(reason) => {
                         log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
                         return HookReply { output: Some(crate::bots::access::permission_refusal(&reason)), refused: None };
@@ -8938,6 +8956,7 @@ impl SessionManager {
         let answer = if local_owner {
             crate::local_runtime::permissions::wait(rx, crate::local_runtime::permissions::WAIT, crate::hooks::caller_connected)
         } else { wait_for_decision(rx, wait) };
+        #[cfg_attr(not(unix), allow(clippy::drop_non_drop))]
         drop(parked);
         let mut rt = rt_arc.lock().unwrap();
         if !mine(&rt) {
@@ -9060,7 +9079,7 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) { self.on_line_from(rt_arc, line, None); }
 
     fn on_line_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str, epoch: Option<&std::sync::atomic::AtomicU64>) {
@@ -9407,7 +9426,8 @@ mod watch_tests;
 #[path = "session_mobile_admission_tests.rs"]
 mod mobile_admission_tests;
 
-#[cfg(test)]
+// Their agents are stand-in `#!/bin/sh` CLIs.
+#[cfg(all(test, unix))]
 #[path = "session_mobile_controls_tests.rs"]
 mod mobile_controls_tests;
 
@@ -10515,6 +10535,7 @@ while True:
         fn stderr_line(&self, _: String) {}
         fn exited(&self, _: u32, _: Option<i32>) {}
     }
+    #[cfg_attr(not(unix), allow(dead_code))]
     struct Rig {
         manager: SessionManager,
         rt: Arc<Mutex<TabRuntime>>,
@@ -10531,6 +10552,7 @@ while True:
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    #[cfg_attr(not(unix), allow(dead_code))]
     impl Rig {
         fn new() -> Self {
             let home = store::temp_home();
@@ -10555,7 +10577,7 @@ while True:
             rig
         }
         fn spawn(manager: &SessionManager, path: &Path) -> (Arc<LiveChild>, mpsc::Receiver<String>) {
-            let program = crate::binpath::resolve("python3").expect("real ACP fixture requires python3");
+            let program = crate::binpath::python3_path().expect("real ACP fixture requires python3");
             let args = vec!["-u".into(), "-c".into(), AGENT.into(), path.to_string_lossy().into_owned()];
             let (tx, rx) = mpsc::channel();
             let child = manager.host.spawn(&uuid::Uuid::new_v4().to_string(), SpawnSpec { program: &program, args: &args,
@@ -10630,6 +10652,7 @@ while True:
     }
     impl Drop for Rig { fn drop(&mut self) { self.manager.host.kill_all(); } }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_whole_batch_deferred_and_duplicate_opening() {
         let rig = Rig::new();
@@ -10650,6 +10673,7 @@ while True:
         assert_eq!(rig.requests().iter().filter(|v| v["method"] == "session/prompt").count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_exact_model_and_mode_ack_do_not_settle_newer_intent() {
         let rig = Rig::new(); rig.ready();
@@ -10683,6 +10707,7 @@ while True:
             "provider-confirmed no-wire mode must not enqueue another RPC");
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_attempt_new_deny_retires_old_allow_on_real_writer() {
         let rig = Rig::new(); rig.ready();
@@ -10707,6 +10732,7 @@ while True:
         assert_eq!(answers[0]["result"]["outcome"]["optionId"], "deny");
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_opaque_ids_publish_option_kind_after_real_delivery() {
         for (choice, kind, allowed) in [("opaque-allow-42", "reject_once", false), ("opaque-42", "allow_once", true),
@@ -10739,6 +10765,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_unknown_mapping_refuses_without_wire_or_decision() {
         for options in [json!([{"optionId":"opaque-allow","kind":"future_kind"}]),
@@ -10766,6 +10793,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_actual_partial_frame_wouldblock_revoke_stop_and_replacement() {
         for change in ["revision", "stop", "replacement"] {
@@ -10820,6 +10848,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_queue_restore_missing_remote_and_explicit_local_under_other_tls() {
         let rig = Rig::new(); rig.ready();
@@ -10866,6 +10895,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_revoked_opening_keeps_queued_local_successor_independent() {
         let rig = Rig::new();
@@ -10920,9 +10950,12 @@ while True:
 
 #[cfg(test)]
 mod provider_integration_d_stream_lifecycle {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use provider_authority::{Attempt, Correlation, OperationContext, ProviderBinding, RequiredAction, SenderAuthority, StreamOutcome};
 
+    #[cfg(unix)]
     /// Real Host/pipe, SAME operation reservation across byte-by-byte writes.
     /// The manager partial-frame test separately forces actual WouldBlock.
     #[test]
@@ -10935,9 +10968,9 @@ mod provider_integration_d_stream_lifecycle {
         }
         let host = Host::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let program = crate::binpath::resolve("python3").unwrap();
+        let program = crate::binpath::python3_path().unwrap();
         let args = vec!["-u".into(), "-c".into(), "import sys; print(sys.stdin.readline().strip(), flush=True)".into()];
-        let child = host.spawn("provider-integration-d-stream", SpawnSpec { program:&program,args:&args,cwd:Path::new("/tmp"),env:&[],unset:&[] }, Arc::new(Lines(tx))).unwrap();
+        let child = host.spawn("provider-integration-d-stream", SpawnSpec { program:&program,args:&args,cwd:&std::env::temp_dir(),env:&[],unset:&[] }, Arc::new(Lines(tx))).unwrap();
         let binding = ProviderBinding::owned("stream", "tab", &child);
         let context = OperationContext::new(SenderAuthority::capture(None, RequiredAction::Drive, None, None, None), RequiredAction::Drive,
             binding.clone(), Correlation::Prompt { seq:1,request:"exact".into() });

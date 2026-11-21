@@ -76,12 +76,16 @@ pub fn session_gate(bot: Option<&str>, payload: &Value) -> Gate {
 /// so its requests to run a command or change files are where its calls meet
 /// the gate. Plan mode's read-only sandbox runs the rest without asking.
 pub fn approval_gate(bot: Option<&str>, method: &str, params: &Value, cwd: Option<&str>) -> Gate {
-    let payload = match method {
+    session_gate(bot, &approval_payload(method, params, cwd))
+}
+
+/// A native Codex approval request as the hooks' payload says a tool call.
+pub(crate) fn approval_payload(method: &str, params: &Value, cwd: Option<&str>) -> Value {
+    match method {
         "item/commandExecution/requestApproval" => json!({"tool_name": "Bash", "tool_input": {"command": params["command"]}, "cwd": cwd}),
         "item/fileChange/requestApproval" => json!({"tool_name": "apply_patch", "tool_input": params, "cwd": cwd}),
         other => json!({"tool_name": other, "tool_input": params, "cwd": cwd}),
-    };
-    session_gate(bot, &payload)
+    }
 }
 
 /// A paused bot, or one that cannot be read: it reads, and nothing else runs, nor is asked.
@@ -145,7 +149,7 @@ const READ_TOOLS: &[&str] = &[
 ];
 
 /// Whether a call only reads.
-fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
+pub(crate) fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
     if READ_TOOLS.contains(&tool) {
         return true;
     }
@@ -161,7 +165,7 @@ fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
 }
 
 /// A shell call's program, as written, and its arguments when it is one plain command.
-fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> bool {
+pub(crate) fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> bool {
     let Some(words) = shell_command(tool, input).as_deref().and_then(guard::single_command) else { return false };
     let Some((program, args)) = words.split_first() else { return false };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -208,7 +212,7 @@ const TERMINALX_READS: &[(&str, &str)] = &[
 /// paired machine its `--machine NAME`, from wherever it is. `None` when it is
 /// not the bare `terminalx` or `tnx` the app puts on the path (a path to one
 /// may be any program), or when `--machine` has no name after it.
-fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
+pub(crate) fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
     if !matches!(program, "terminalx" | "tnx") {
         return None;
     }
@@ -263,20 +267,28 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 
 /// A bot's own notes and work list, kept with the commands its rules tell it
 /// to use: `terminalx bots memory add|forget|list` (PRO-470) and
-/// `terminalx bots items list|show|add|set|ask|check|comment|done` (PRO-469).
-/// They pass at every level and while paused, with no card. Exactly those,
-/// and nothing else under `bots`: the runtime takes the bot from the caller
-/// (`control::Caller`), refuses a `--bot` or `--place` that is not its own,
-/// and refuses a paused bot's changes to its work list.
+/// `terminalx bots items list|show|add|set|ask|plan|ask-merge|check|comment|done` (PRO-469, PRO-476),
+/// and its hand-offs with other bots, which it answers at any level:
+/// `terminalx bots handoff|tell|handoffs` (PRO-475), its suggestions and its
+/// memory tidy, `terminalx bots suggest` and `terminalx bots memory tidy`
+/// (PRO-477). They pass at every level
+/// and while paused, with no card. Exactly those, and nothing else under
+/// `bots`: the runtime takes the bot from the caller (`control::Caller`),
+/// refuses a `--bot` or `--place` that is not its own, holds a hand-off to
+/// the bots that report to it and those whose Who can ask lets it hand them
+/// work (`handoffs::may_hand_off`), holds a message to the reporting line,
+/// and refuses a paused bot's changes and messages. And `terminalx bots
+/// message` (PRO-472): a hand-off, question or status for another of the
+/// owner's bots that wakes only a duty its owner set to wait for one.
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "check" | "comment" | "done", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message", ..])
     })
 }
 
 /// A call as the card and the agent are told it.
-fn describe(tool: &str, input: &Value) -> String {
+pub(crate) fn describe(tool: &str, input: &Value) -> String {
     match shell_command(tool, input) {
         Some(command) => {
             let short: String = command.chars().take(120).collect();
@@ -301,6 +313,8 @@ fn report_command(program: &str, args: &[&str]) -> Option<String> {
         ("gh", ["pr" | "issue", "comment", ..] | ["issue", "create", ..]) => Some(format!("gh {} {}", plain[0], plain[1])),
         ("terminalx" | "tnx", ["send", ..]) => Some(format!("{program} send")),
         ("terminalx" | "tnx", ["issues", "comment" | "create", ..]) => Some(format!("{program} issues {}", plain[1])),
+        // A bot's post or reply on GitHub or Linear, signed as its own (PRO-480).
+        ("terminalx" | "tnx", ["bots", "post" | "reply", ..]) => Some(format!("{program} bots {}", plain[1])),
         _ => None,
     }
 }
@@ -346,7 +360,7 @@ struct Guarded {
 
 impl Guarded {
     fn new(root: &Path) -> Self {
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = crate::paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let key = |name: &str| root.join(name).to_string_lossy().to_lowercase();
         Self { files: [(key("bots.json"), "bots.json"), (key("settings.json"), "TerminalX's settings.json")] }
     }
@@ -389,21 +403,21 @@ fn resolved(path: &Path, cwd: Option<&str>) -> PathBuf {
         Some(cwd) if path.is_relative() => Path::new(cwd).join(path),
         _ => path.to_path_buf(),
     };
-    if let Ok(real) = std::fs::canonicalize(&joined) {
+    if let Ok(real) = crate::paths::canonicalize(&joined) {
         return real;
     }
     let mut out = PathBuf::new();
     for part in joined.components() {
         match part {
             Component::ParentDir => {
-                out = std::fs::canonicalize(&out).unwrap_or(out);
+                out = crate::paths::canonicalize(&out).unwrap_or(out);
                 out.pop();
             }
             Component::CurDir => {}
             other => out.push(other),
         }
     }
-    match (out.parent().and_then(|parent| std::fs::canonicalize(parent).ok()), out.file_name()) {
+    match (out.parent().and_then(|parent| crate::paths::canonicalize(parent).ok()), out.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => out,
     }

@@ -1,5 +1,7 @@
 //! Real ACP stdio replies held across owner acknowledgement. The first input
 //! uses the actual paired-phone entry point, not adapter.start in a fixture.
+#[cfg(unix)]
+use crate::paths::Canonical;
 use super::*;
 
 const SERVER: &str = r#"#!/usr/bin/env python3
@@ -237,7 +239,7 @@ fn startup_child() {
     let rig = Rig::on(CliKind::Claude, "original-model", None);
     if case.starts_with("relay-queued-") {
         // WorkspaceRpc scopes visibility to the canonical workspace root.
-        let root = rig._dir.path().canonicalize().unwrap().to_string_lossy().into_owned();
+        let root = rig._dir.path().canonical().unwrap().to_string_lossy().into_owned();
         index::update_session(SESSION, |session| { session.project_path = root.clone(); session.cwd = root; Ok(()) }).unwrap();
     }
     index::update_tab(SESSION, TAB, |tab| {

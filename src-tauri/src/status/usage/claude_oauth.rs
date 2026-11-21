@@ -1,7 +1,7 @@
 //! Read-only access to the usage endpoint Claude Code already authenticates.
 
 use std::path::Path;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::process::Command;
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ const KEYCHAIN_SERVICE: &str = KEYCHAIN_SERVICE_PERSON;
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// What `security find-generic-password` exits with when there is no such
 /// item: the low byte of `errSecItemNotFound` (-25300).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 const SECURITY_NOT_FOUND: i32 = 44;
 
 /// Why Claude Code's OAuth access token could not be read. No variant carries
@@ -100,7 +100,7 @@ fn parse_token(raw: &str) -> Option<String> {
 /// exits, and the item grows with every MCP server Claude Code signs in to;
 /// its output is drained while it runs, or a payload larger than the pipe
 /// buffer would block it until the deadline.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn read_command_token(command: Command, timeout: Duration) -> Result<String, CredentialError> {
     let output = crate::git::capture_within(command, timeout).map_err(|error| match error.kind() {
         std::io::ErrorKind::TimedOut => CredentialError::TimedOut(timeout),

@@ -78,13 +78,13 @@ fn pulls(list: Vec<PullRequest>) -> Snapshot {
 }
 
 fn complete(snapshot: Snapshot) -> Read {
-    Read { snapshot, bound: None }
+    Read { snapshot, bound: None, resume: None }
 }
 
 /// One tick with `read` as the source's answer; returns what woke.
 fn tick_read(automation: &Automation, minute: i64, read: Read) -> Vec<WakeSubject> {
     let mut woken = Vec::new();
-    poll(&host(), automation, at(minute), |_, _, _, _| Ok(read), || Ok(true), |wake| insert_run(automation, wake), |wake, run| {
+    poll(&host(), automation, at(minute), |_, _, _, _| Ok(read), |_| Ok(true), |wake| insert_run(automation, wake), |wake, run| {
         woken.push(wake.what.clone());
         Ok(run)
     })
@@ -128,7 +128,7 @@ fn a_new_linear_issue_wakes_exactly_one_run_and_what_matched_at_the_start_wakes_
     assert!(tick(&automation, 0, Snapshot::Linear(vec![issue("1"), issue("2")])).is_empty(), "switching on starts from now");
     // Inside the interval nothing is read.
     let read = Cell::new(false);
-    poll(&host(), &automation, at(2), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(Vec::new()))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(2), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(Vec::new()))) }, |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(!read.get(), "one request per interval");
 
     let woken = tick(&automation, 5, Snapshot::Linear(vec![issue("3"), issue("1"), issue("2")]));
@@ -159,7 +159,7 @@ fn something_old_that_comes_to_match_later_wakes_once() {
 fn a_baseline_that_cannot_be_read_completely_wakes_nothing_and_tries_again() {
     let _home = crate::store::temp_home();
     let automation = stored(linear_source());
-    let woken = tick_read(&automation, 0, Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000) });
+    let woken = tick_read(&automation, 0, Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000), resume: None });
     assert!(woken.is_empty());
     let state = seen(&automation);
     assert!(!state.initialized && state.events.is_empty(), "nothing is recorded from a part of the baseline");
@@ -172,7 +172,7 @@ fn a_baseline_that_cannot_be_read_completely_wakes_nothing_and_tries_again() {
     poll(&host(), &automation, at(5), |_, _, state, since| {
         read_as.set(Some((state.initialized, since)));
         Ok(complete(Snapshot::Linear(vec![issue("1"), issue("2")])))
-    }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    }, |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(read_as.get(), Some((false, None)), "a baseline reads everything, not back to a time");
     assert_eq!(seen(&automation).last_poll_error, None);
     assert_eq!(tick(&automation, 10, Snapshot::Linear(vec![issue("3"), issue("2")])).len(), 1);
@@ -184,11 +184,11 @@ fn later_reads_page_back_to_the_last_read_and_say_when_they_could_not() {
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     let since = Cell::new(None);
-    poll(&host(), &automation, at(5), |_, _, _, value| { since.set(value); Ok(complete(Snapshot::Linear(Vec::new()))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, value| { since.set(value); Ok(complete(Snapshot::Linear(Vec::new()))) }, |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(since.get(), Some(at(0) - READ_OVERLAP), "back to the last read, with an overlap for clocks");
 
     // A read that hit its bound still wakes on what it read, and says so.
-    let woken = tick_read(&automation, 10, Read { snapshot: Snapshot::Linear(vec![issue("4")]), bound: Some(500) });
+    let woken = tick_read(&automation, 10, Read { snapshot: Snapshot::Linear(vec![issue("4")]), bound: Some(500), resume: None });
     assert_eq!(woken.len(), 1);
     assert!(seen(&automation).notice.as_deref().is_some_and(|notice| notice.contains("More than 500 changed")));
     assert_eq!(public_state(&automation).notice, seen(&automation).notice);
@@ -259,7 +259,7 @@ fn removing_and_restoring_a_trigger_starts_it_from_now_again() {
     assert!(tick(&automation, 60 * 24 * 30, Snapshot::Linear(vec![issue("2"), issue("3"), issue("1")])).is_empty(), "the month in between does not replay");
 
     // Saving the same source keeps the record and retries a failing read at once.
-    poll(&host(), &automation, at(60 * 24 * 31), |_, _, _, _| Err(SourceError::plain("boom")), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(60 * 24 * 31), |_, _, _, _| Err(SourceError::plain("boom")), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(seen(&automation).retry_after.is_some());
     saved(&automation.id, Some(&trigger), Some(&trigger)).unwrap();
     let state = seen(&automation);
@@ -279,7 +279,7 @@ fn switching_off_and_on_or_changing_the_source_starts_from_now() {
     let mut automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     automation.enabled = false;
-    poll(&host(), &automation, at(5), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| unreachable!(), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     automation.enabled = true;
     resave(&automation);
     assert!(tick(&automation, 10, Snapshot::Linear(vec![issue("4")])).is_empty(), "made while it was off");
@@ -311,7 +311,7 @@ fn a_first_check_on_its_own_thread_still_knows_when_a_source_is_due() {
     assert!(due(&automation, at(5)));
     automation.enabled = false;
     assert!(due(&automation, at(2)), "switched off: its record is reset");
-    poll(&host(), &automation, at(2), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(2), |_, _, _, _| unreachable!(), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(!due(&automation, at(3)));
 }
 
@@ -319,10 +319,10 @@ fn a_first_check_on_its_own_thread_still_knows_when_a_source_is_due() {
 fn switching_off_clears_a_back_off_so_switching_on_reads_at_once() {
     let _home = crate::store::temp_home();
     let mut automation = stored(linear_source());
-    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(seen(&automation).retry_after.is_some());
     automation.enabled = false;
-    poll(&host(), &automation, at(1), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(1), |_, _, _, _| unreachable!(), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     let state = seen(&automation);
     assert_eq!((state.retry_after, state.last_poll_error), (None, None));
 }
@@ -335,7 +335,7 @@ fn the_run_row_is_written_before_the_record_and_a_restart_does_not_start_it_agai
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     // The start fails after the run row and the record were written, as a crash would leave them.
-    let result = poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), || Ok(true), |wake| {
+    let result = poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), |_| Ok(true), |wake| {
         assert!(!seen(&automation).events.contains_key("linear:9"), "no record before the run row");
         insert_run(&automation, wake)
     }, |_, _| bail!("the app quit"));
@@ -529,15 +529,15 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     let AutomationEventSource::LinearIssue(source) = linear_source() else { unreachable!() };
     assert_eq!(read_linear(&source, None, 1).err().unwrap().message, NO_LINEAR_KEY);
 
-    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(public_state(&automation).last_poll_error.as_deref(), Some(NO_LINEAR_KEY));
     let runs = automation_store::list_runs(&automation.id).unwrap();
     assert_eq!((runs.len(), runs[0].status, runs[0].trigger), (1, AutomationRunStatus::SkippedUnavailable, AutomationTrigger::LinearIssue));
 
     // The second failure doubles the wait.
-    poll(&host(), &automation, at(5), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| Err(SourceError::plain(NO_LINEAR_KEY)), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(15)).as_str()));
-    poll(&host(), &automation, at(12), |_, _, _, _| unreachable!("backing off"), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(12), |_, _, _, _| unreachable!("backing off"), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].repeat_count, 2, "the same error is one row");
 
     // A Linear key put in Settings is read at once, back-off or not.
@@ -545,7 +545,7 @@ fn an_unreadable_source_says_why_backs_off_and_recovers() {
     settings.linear_api_key = Some("new-key".into());
     crate::store::settings::save(&settings).unwrap();
     let read = Cell::new(false);
-    poll(&host(), &automation, at(13), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(vec![issue("1")]))) }, || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(13), |_, _, _, _| { read.set(true); Ok(complete(Snapshot::Linear(vec![issue("1")]))) }, |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert!(read.get(), "another key retries now");
     let state = seen(&automation);
     assert_eq!((state.last_poll_error, state.failures, state.retry_after), (None, 0, None));
@@ -558,7 +558,7 @@ fn a_signed_out_gh_forgets_the_login_it_read() {
     let automation = stored(pr_source(&[PullRequestEvent::ReviewRequested]));
     tick(&automation, 0, pulls(Vec::new()));
     assert_eq!(seen(&automation).viewer.as_deref(), Some("me"));
-    poll(&host(), &automation, at(5), |_, _, _, _| Err(gh_error(&anyhow::anyhow!("To get started with GitHub CLI, please run:  gh auth login"))), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(5), |_, _, _, _| Err(gh_error(&anyhow::anyhow!("To get started with GitHub CLI, please run:  gh auth login"))), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     let state = seen(&automation);
     assert_eq!((state.viewer, state.last_poll_error.as_deref()), (None, Some(GH_SIGNED_OUT)));
 }
@@ -867,7 +867,7 @@ fn a_kind_or_event_this_build_does_not_know_is_kept_as_written_and_never_polled(
     // The file round-trips through the store and is still read whole.
     let listed = automation_store::list().unwrap();
     assert_eq!(serde_json::to_value(&listed[0].event_trigger.as_ref().unwrap().source).unwrap(), webhook);
-    poll(&host(), &automation, at(0), |_, _, _, _| unreachable!(), || Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
+    poll(&host(), &automation, at(0), |_, _, _, _| unreachable!(), |_| Ok(true), |_| unreachable!(), |_, _| unreachable!()).unwrap();
     assert_eq!(public_state(&automation).notice.as_deref(), Some(NEEDS_NEWER));
     assert!(preview(Path::new("/project"), &automation.event_trigger.as_ref().unwrap().source).is_err());
 
@@ -903,7 +903,7 @@ fn checked_tick(automation: &Automation, minute: i64, issues: Vec<crate::issues:
     let app = host();
     let mut woken = Vec::new();
     poll(&app, automation, at(minute), |_, _, _, _| Ok(complete(Snapshot::Linear(issues))),
-        || crate::automations::precheck::gate_wakes(&app, automation, AutomationTrigger::LinearIssue),
+        |wakes| crate::automations::precheck::gate_wakes(&app, automation, AutomationTrigger::LinearIssue, wakes),
         |wake| insert_run(automation, wake), |wake, run| { woken.push(wake.what.clone()); Ok(run) }).unwrap();
     woken
 }
@@ -977,7 +977,7 @@ fn a_read_that_finishes_after_its_trigger_was_removed_writes_nothing_back() {
         automation_store::save(std::slice::from_ref(&changed)).unwrap();
         saved(&current.id, current.event_trigger.as_ref(), None).unwrap();
         Ok(complete(Snapshot::Linear(vec![issue("9")])))
-    }, || Ok(true), |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
+    }, |_| Ok(true), |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
     assert!(load_seen(&automation.id).unwrap().is_none(), "the old record is not written back");
 }
 
@@ -993,7 +993,7 @@ fn a_draft_filter_is_part_of_the_search_so_a_full_page_counts_only_what_can_matc
 fn an_incomplete_baseline_backs_off_longer_each_time() {
     let _home = crate::store::temp_home();
     let automation = stored(linear_source());
-    let partial = || Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000) };
+    let partial = || Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000), resume: None };
     tick_read(&automation, 0, partial());
     assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(5)).as_str()));
     tick_read(&automation, 5, partial());
@@ -1011,7 +1011,7 @@ fn a_first_check_that_outlasts_its_trigger_writes_nothing_back() {
     let automation = stored(linear_source());
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     let before = seen(&automation);
-    poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), || {
+    poll(&host(), &automation, at(5), |_, _, _, _| Ok(complete(Snapshot::Linear(vec![issue("9")]))), |_| {
         // While the check runs the automation is switched off and its record reset.
         let mut off = automation.clone();
         off.enabled = false;
@@ -1019,4 +1019,31 @@ fn a_first_check_that_outlasts_its_trigger_writes_nothing_back() {
         Ok(false)
     }, |_| unreachable!("nothing starts"), |_, _| unreachable!()).unwrap();
     assert_eq!(seen(&automation), before, "the poll's state is not saved over it");
+}
+
+/// PRO-472 review 1: pruning a bot source's seen events moves its start on
+/// past what they were, but never past an event read and still unseen (held
+/// back by the duty's limit, or waiting its turn), which must still wake it.
+#[test]
+fn pruning_seen_events_never_turns_a_held_event_into_one_from_before_the_start() {
+    let base = chrono::DateTime::parse_from_rfc3339("2026-11-21T10:00:00Z").unwrap().with_timezone(&Utc);
+    let full = || {
+        let mut state = SourceSeen { initialized: true, started_at: Some(stamp(base)), ..SourceSeen::default() };
+        for n in 0..=crate::bots::wakes::SEEN_LIMIT {
+            state.events.insert(format!("msg:{n}"), SeenEvent { value: String::new(), at: stamp(base + chrono::TimeDelta::seconds(60 + n as i64)), run_id: None });
+        }
+        state
+    };
+    let mut state = full();
+    prune_seen(&mut state, None);
+    assert_eq!(state.events.len(), crate::bots::wakes::SEEN_LIMIT);
+    assert_eq!(state.started_at, Some(stamp(base + chrono::TimeDelta::seconds(60))), "on to when the pruned one was seen");
+
+    let held = base + chrono::TimeDelta::seconds(30);
+    let mut state = full();
+    prune_seen(&mut state, Some(held));
+    let started = parse(state.started_at.as_deref()).unwrap();
+    assert!(started < held, "{started} must stay before the held event at {held}");
+    let event = crate::bots::wakes::BotEvent { at: Some(stamp(held)), ..Default::default() };
+    assert!(!event.before(Some(started)));
 }

@@ -19,7 +19,7 @@ use crate::store::index::SessionEntry;
 /// matches only itself, as written.
 pub(crate) fn same_folder(a: &str, b: &str) -> bool {
     a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        || match (crate::paths::canonicalize(a), crate::paths::canonicalize(b)) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,
         }

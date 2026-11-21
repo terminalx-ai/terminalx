@@ -147,6 +147,15 @@ fn wait_run(duty: &Automation, ready: impl Fn(&AutomationRun) -> bool) -> Automa
     }
 }
 
+/// Once the prompt of the run in `session` is sent: the send marks its tab in progress.
+fn wait_sent(session: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !index::get(session).unwrap().tabs.iter().any(|tab| tab.status == index::TabStatus::InProgress) {
+        assert!(Instant::now() < deadline, "the run's prompt was never sent: {:?}", index::get(session).unwrap().tabs);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn due_now(duty: &Automation) {
     automation_store::update(&duty.id, |value| {
         value.next_run_at = (Utc::now() - chrono::TimeDelta::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -172,8 +181,10 @@ fn home_chat(bot: &Bot) -> index::SessionEntry {
 fn a_roles_scheduled_duties_arrive_switched_off_at_hire() {
     let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
-    let duties = duties_of(&bot.id).unwrap();
-    // The two that wake on a schedule; the one that wakes on a GitHub event comes with the triggers ticket.
+    // Its built-in Look around and Tidy memory come with every bot, switched on (PRO-477, `builtins_tests`).
+    let (builtin, duties): (Vec<Automation>, Vec<Automation>) = duties_of(&bot.id).unwrap().into_iter().partition(super::super::builtins::marked);
+    assert_eq!(builtin.iter().map(|duty| (duty.name.as_str(), duty.enabled)).collect::<Vec<_>>(), [("Look around", true), ("Tidy memory", true)]);
+    // The two that wake on a schedule; the one that wakes on a GitHub event needs its repository, named on the Duties tab.
     let names: Vec<&str> = duties.iter().map(|duty| duty.name.as_str()).collect();
     assert_eq!(names, ["Watch pull requests", "Watch stalled sessions"]);
     for duty in &duties {
@@ -222,6 +233,7 @@ fn a_quiet_check_spends_nothing_tells_nobody_and_is_logged_as_nothing_new() {
 
 #[test]
 fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where_told() {
+    let mut rig = rig();
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("claude");
     std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\nstty -icanon\nexec cat\n").unwrap();
@@ -231,7 +243,6 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     }
     let _claude = crate::harness::claude::pty::claude_program_for_tests(program);
     let _ready = AgentReady::on();
-    let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
     let home = super::super::home(&bot).unwrap();
     let duty = rig.add(&bot, Some("echo '2 failures on main'"), true);
@@ -288,6 +299,8 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     for (reply, notified) in [("Still failing on main.", Some(false)), ("URGENT: main has been red for an hour.", Some(true)), ("Nothing new.", None)] {
         run_now(&rig, &bot, &duty);
         let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
+        // The run names its session before its prompt is sent; the send marks the tab in progress, and would undo the settle below if it came after it (PRO-497).
+        wait_sent(started.session_id.as_deref().unwrap());
         crate::automations::complete_from_turn(&host, started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), Some(reply.into()), 1);
         let ended = wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
         match notified {
@@ -418,7 +431,7 @@ fn only_a_person_adds_runs_or_switches_on_a_duty_and_switching_off_is_open() {
         assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": operation, "params": params})), "the window witnesses {operation}");
         assert_eq!(ask(operation, params.clone()).unwrap_err().code, "person_required", "{operation} {params}");
     }
-    assert_eq!(duties_of(&bot.id).unwrap().len(), 2, "the hire's one and this one, nothing added");
+    assert_eq!(duties_of(&bot.id).unwrap().iter().filter(|duty| !super::super::builtins::marked(duty)).count(), 3, "the hire's two and this one, nothing added");
     assert!(runs(&duty).is_empty());
     let off = json!({"id": bot.id, "dutyId": duty.id, "on": false});
     assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "dutySwitch", "params": off})));
@@ -486,8 +499,8 @@ fn quiet_hours_cross_midnight_and_a_reply_is_read_as_people_write_it() {
 #[test]
 fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_be_removed() {
     // No run here reaches an agent; the stand-in is held so none could start a real one.
-    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
     let argus = rig.hire("watcher", "Argus");
     let atlas = rig.hire("cto", "Atlas");
     let mine = rig.add(&argus, Some("true"), true);
@@ -511,7 +524,7 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     let stored: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("bot-duties.json")).unwrap()).unwrap();
     assert!(stored["bots"].get(&argus.id).is_none());
     assert_eq!(stored["bots"][&atlas.id]["quietHours"]["from"], "23:00");
-    assert_eq!(duties_of(&atlas.id).unwrap().len(), 2);
+    assert_eq!(duties_of(&atlas.id).unwrap().iter().filter(|duty| !super::super::builtins::marked(duty)).count(), 3);
     // Kept with its home in the trash: the definitions, the settings and the run log.
     let trashed = crate::store::root().unwrap().join("trash").join("bots").join(&argus.id);
     let kept: Value = serde_json::from_str(&std::fs::read_to_string(trashed.join(REMOVED_FILE)).unwrap()).unwrap();
@@ -549,6 +562,7 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     assert!(delete(&held.id).unwrap_err().to_string().contains(ELSEWHERE));
 }
 
+/// Take it after [`rig`]: the temp home first and the stand-in second, as every other test does, or two deadlock.
 fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestProgram) {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("claude");
@@ -567,8 +581,8 @@ fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestPro
 #[test]
 fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_home() {
     // The run below prints, so it would go on to the agent: only ever the stand-in.
-    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
     let bot = rig.hire("cto", "Atlas");
     let home = super::super::home(&bot).unwrap();
     std::fs::write(home.join("check.sh"), "echo planted by the bot\n").unwrap();
@@ -627,14 +641,15 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
 /// the bot's list.
 #[test]
 fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
+    let rig = rig();
     let (_dir, _claude) = stand_in_claude();
     let _ready = AgentReady::on();
-    let rig = rig();
     let bot = rig.hire("cto", "Atlas");
     let duty = rig.add(&bot, Some("echo found"), true);
     assert_eq!(duty.run_timeout_minutes, Some(RUN_TIMEOUT_MINUTES));
     run_now(&rig, &bot, &duty);
     let first = wait_run(&duty, |run| run.session_id.is_some());
+    wait_sent(first.session_id.as_deref().unwrap());
     let sessions = index::load().unwrap().len();
     // Run now while it runs: refused, no second session.
     let refused = rig.bots("dutyRun", json!({"id": bot.id, "dutyId": duty.id})).unwrap_err().to_string();
@@ -673,6 +688,8 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     for _ in 0..5 {
         run_now(&rig, &bot, &duty);
         let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
+        // The run names its session before its prompt is sent; the send marks the tab in progress, and would undo the settle below if it came after it (PRO-497).
+        wait_sent(started.session_id.as_deref().unwrap());
         crate::automations::complete_from_turn(&host, started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), Some("Nothing new.".into()), 1);
         wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
         settle(started.session_id.as_deref().unwrap(), if finished.len() == 2 { index::TabStatus::Waiting } else { index::TabStatus::Completed });

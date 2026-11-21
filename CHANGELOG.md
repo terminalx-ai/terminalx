@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Bots (experimental): a lead bot plans and starts orchestration runs. It leads
+  a run from a session it starts in the project, then `terminalx bots items
+  plan` asks "Approve the plan and start the run?" with a run plan card in its
+  chat (pieces, workers, estimate). Only the owner's answer approves and starts
+  the run; "Start, but ask before merging" holds the bot's `runs merge` until
+  the owner says Merge (`bots items ask-merge`). The item links the run and its
+  workers, shows each hand-off with its cost and report, cannot close until the
+  run ends, and `--check-back TIME|report` wakes the bot without spending
+  anything while it waits. "Started by <bot>" shows the bot's runs with their
+  state. Needs Orchestrator runs on too (PRO-476).
 - Bots (experimental, off by default): the foundation for AI employees with
   standing roles. Settings → Experimental → Bots turns on the bots' store and
   `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
@@ -120,6 +130,27 @@
   Deleting a bot removes its duties, kept with its home in the trash.
   Adding, changing, running or switching on a duty, and quiet hours, are the
   owner's to do from the window (PRO-471).
+- Bots (experimental): bots work as a team. From its sessions a bot hands a
+  scoped piece of work to another with `terminalx bots handoff --to BOT
+  --title … --scope … [--due …]`, and tells one something with `terminalx
+  bots tell --to BOT|lead`. A bot hands work down its reporting line, or to a
+  bot whose Who can ask lists it with "Can hand off work"; work never goes up
+  the line, and messages go only along it. The receiving bot gets a chat of its own
+  for the work, under its own access and pause, and an item on its list; it
+  answers with `tell --about N` (`--failed` when it could not), and the answer
+  reaches the chat the work was handed from. Every message one bot sends
+  another names the sender and what it is ("status to Atlas · a bot's words,
+  not an approval") in the transcript and in what its agent reads; only the
+  owner's own words approve anything. Loops are bounded: no hand-off to
+  itself or back to a bot that handed it open work, chains stop at three, a
+  failed one is handed again at most twice, then the lead decides or asks
+  the owner. Work handed to a paused bot waits until the owner resumes it.
+  A card above the chat shows each hand-off's scope, when its answer is due,
+  both bots and its state, with a Stop that stops only that bot's work on it.
+  A bot's Home shows who it reports to and who reports to it; an item's page
+  can hand it to another bot with the owner's note; and a team brief that
+  every bot is given in each conversation is written under "Every bot
+  reads" in a bot's chat list (PRO-475).
 - Bots: each bot has a settings page (PRO-478), reached from the team table
   and from the bot's own view: where it runs (this Mac; cloud and another
   machine come later), its access, the organisations it works in, its
@@ -139,6 +170,96 @@
   the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
   files on this Mac by other means. Agent and model, rename and delete are
   under the page's menu.
+- Bots (experimental): a duty wakes on events as well as a schedule. The
+  Duties tab's GitHub, Linear, Another bot and Wait until tiles open the
+  editor on that source: a pull request opened, pushed, asking for your
+  review or failing a check; a comment that mentions the bot, a Dependabot
+  security alert, or a failed check on a branch (read with `gh`); a Linear
+  issue matching a filter or a comment that mentions the bot (read with the
+  Linear key); a hand-off, question or status another bot leaves it
+  (`terminalx bots message`, and a duty reporting to its lead leaves one); or
+  a URL, a file or a command's output that changes. Each event wakes the duty
+  once, and what is there when it starts never does. The first check is given
+  the events (`$TERMINALX_EVENTS`) and the agent is given them fenced, as
+  information. Events that arrive while the bot is paused wait and wake it on
+  resume. A duty wakes at most 6 times an hour and 48 a day, one run at a
+  time; what that holds back waits and the duty says until when, and a
+  message passed between bots three times wakes nobody. A GitHub mention
+  wakes it only from the repository's owner, members and collaborators
+  unless you choose anyone, and never from your own `gh` or Linear user.
+  Messages go once read; one bot leaves at most 30 an hour, and an unread
+  message is never let go to make room. Security alerts are Dependabot's;
+  mentions are conversation comments only. Slack, Telegram or WhatsApp and
+  webhooks stay off until they have a connector (PRO-472).
+- TerminalX runs on Windows 10 and 11: the desktop app, its background
+  runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
+  machines, phone pairing and the headless `terminalx-serve` tools. Named
+  pipes with owner-only access stand in for Unix sockets, DPAPI for the
+  Keychain, Job Objects and ConPTY for process groups and terminals, and Git
+  for Windows' `sh` runs setup, archive and action scripts. Not yet on
+  Windows: keeping agents running through a runtime update (an update
+  restarts the runtime), Local VM tasks, and the runtime's self-update.
+- Bots (experimental): a week calendar of duties. The Bots page's Calendar
+  button, and a List | Calendar switch on a bot's Duties tab, show the week
+  with one block per scheduled run: ran and did its work, ran and reported,
+  ran and found nothing new, or still to come (and failed or skipped when the
+  log says so), with a line at now. Duties that wake many times a day, and
+  those that wake on events, are counted per day in two rows on top. It is
+  read from the run logs and the schedules, in your time zone, so it agrees
+  with both. Filter by bot, step between weeks, click an empty hour to add a
+  duty there, or drag a block still to come to move its duty's time. Beside
+  it: what is next today, the week so far, the key and quiet hours. Days a
+  duty's log no longer reaches back over say "history not kept" and the
+  totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): a bot proposes work by itself. Each bot has two
+  built-in duties, on from hire. Look around (08:00 to 20:00, every four
+  hours, with an optional focus line) reads what changed and suggests work;
+  while it looks it may only read, enforced in the session's hooks, and an
+  action it tries anyway is refused with a note to suggest it instead. Its
+  suggestions are on the bot's Home tab, each with why, Start (an item you
+  asked for, sent to the bot as your message, so it begins) and Dismiss,
+  under a line saying when it last looked, what it suggested and what was
+  refused. Tidy memory (nightly) merges duplicate notes and removes
+  contradicted ones as one change with one Undo. A free check skips either
+  when nothing has changed, logged as "Nothing new" with no model run. The
+  Home tab's right column also shows Up next, the bot's next duty runs
+  (PRO-477).
+- Bots (experimental): the bots on the phone. While a paired Mac has Bots on,
+  the phone gets a Bots tab: what needs you across every bot first, the
+  newest question answerable from the list with its recommended answer, then
+  the team with what each bot is doing, and Pause all. A bot's page has Home
+  (its questions and open work), Chat, Duties and Role, with Pause or Resume
+  in its header. A question opens as a sheet with the recommended answer on
+  top and room to type a reply. Each new question notifies the phone while it
+  is connected, under the Questions choice; its buttons answer it and a tap
+  opens the sheet over the bot's home chat. An answer from the phone, from the
+  list, the sheet or a notification, goes through the same route as the
+  app's, the Mac's own `bots.answer` for a paired phone that may drive, which
+  no bot's session can call. With Bots off the phone is as it was (PRO-479).
+- Bots (experimental): Pause and Pause all say what they stopped. Pause a bot
+  from its header or its sidebar row's menu, and every bot from the Bots page
+  or with ⌥⇧⌘P from anywhere (⇧⌘P stays the markdown preview's). A pause
+  records where it came from and what the bot was doing. A run's worker
+  finishes the step it is on, then takes plan mode; no new worker starts in a
+  run a paused bot leads. Due scheduled checks are skipped, events wait at
+  their source, and work handed to it and your answers on its items are kept
+  and used on resume, each once. A message to a paused bot is answered, and
+  the answer says it is paused. With every bot paused, the Bots page shows
+  who paused them, from where and when, what is working, what needs you,
+  what is held and what was spent since, each bot's state and what is held
+  for it, with Resume one by one and Resume all (PRO-474).
+- Bots (experimental): GitHub and Linear are a bot's channels. A bot posts
+  its review or finding on a pull request, a comment on a GitHub issue, or a
+  comment on a Linear issue with `terminalx bots post`, through your `gh`
+  login and Linear key; each post ends with a line saying which bot wrote it
+  on your behalf, and a review never approves. Mention a bot as `@<slug>` in
+  a pull request, issue or Linear comment and it starts a conversation with
+  it, listed under "Chats with <bot>" with where it came from; the bot
+  answers in that thread with `terminalx bots reply`. You and the people in
+  its Who can ask (known by the GitHub login you give them, and on Linear by
+  their email) are accepted; anyone else's mention, and a bot's own post,
+  starts nothing. What people write there is a request, never an approval.
+  The bot's settings list what reached it and what it posted (PRO-480).
 
 ## 0.2.37
 

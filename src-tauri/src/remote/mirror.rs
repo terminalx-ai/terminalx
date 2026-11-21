@@ -101,7 +101,7 @@ impl WorkspaceMirror {
         // The state directory holds the runtime credential and agent logins.
         // It is deployed outside the workspace; if it is not, it is still
         // never part of a mirror.
-        let state = crate::store::state_home_env().map(PathBuf::from).and_then(|dir| std::fs::canonicalize(dir).ok());
+        let state = crate::store::state_home_env().map(PathBuf::from).and_then(|dir| crate::paths::canonicalize(dir).ok());
         Self::with_protected(root, state.into_iter().collect())
     }
 

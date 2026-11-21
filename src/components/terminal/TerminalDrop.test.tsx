@@ -17,7 +17,7 @@ vi.mock("@/lib/api", () => {
   const quiet = () => vi.fn(async () => {});
   return {
     pty: { write, resize: quiet(), attach: quiet(), detach: quiet(), detachAll: quiet(), ack: quiet() },
-    files: { readImage, droppedText },
+    files: { readImage, droppedText, terminalQuoteStyle: vi.fn(async () => "posix") },
     attachments: { inspect },
   };
 });

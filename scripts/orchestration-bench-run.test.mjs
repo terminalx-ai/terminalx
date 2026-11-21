@@ -333,7 +333,8 @@ describe("budget and plan", () => {
     expect(ACTIVE_RUN_STATES.has("awaitingApproval")).toBe(true);
   });
 
-  it("quotes commands so a shell reads them back exactly", () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("quotes commands so a shell reads them back exactly", () => {
     for (const text of ["plain", "it's here", 'say "hi"\nnext line', "$HOME `x` \\ !", ""]) {
       expect(execFileSync("/bin/sh", ["-c", `printf %s ${shellQuote(text)}`], { encoding: "utf8" })).toBe(text);
     }
@@ -341,7 +342,8 @@ describe("budget and plan", () => {
 });
 
 describe("plan approval", () => {
-  it("takes the project's own setting, then the app-wide one, then the default of on", () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("takes the project's own setting, then the app-wide one, then the default of on", () => {
     const project = tempDir("project");
     const linked = join(tempDir("link"), "project");
     execFileSync("ln", ["-s", project, linked]);
@@ -357,7 +359,8 @@ describe("plan approval", () => {
     expect(approvalRequired(app(true, { [project]: { pieceLimit: 12 } }), project)).toEqual({ required: true, source: "the app-wide setting" });
   });
 
-  it("reads the settings file where the CLI guide puts it", () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("reads the settings file where the CLI guide puts it", () => {
     const home = tempDir("tx-home");
     const project = tempDir("project");
     expect(settingsFile({ TERMINALX_HOME: home, RACCOON_HOME: "/elsewhere", HOME: "/h" })).toBe(join(home, "settings.json"));
@@ -439,7 +442,8 @@ describe("dry run", () => {
     expect(text).toContain(join(realpathSync(repo), "bench/orchestration/results.jsonl"));
   });
 
-  it("names the project as the main checkout when run from another worktree", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("names the project as the main checkout when run from another worktree", async () => {
     const { repo, start, tasks } = makeRepo();
     const other = join(tempDir("linked"), "wt");
     git(repo, "worktree", "add", "--quiet", "--detach", other, start);
@@ -462,7 +466,8 @@ describe("dry run", () => {
 });
 
 describe("the worktree and the check", () => {
-  it("moves a session's worktree and branch to the start commit, keeping ignored files", () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("moves a session's worktree and branch to the start commit, keeping ignored files", () => {
     const { repo, start, fix } = makeRepo();
     const dir = join(tempDir("session"), "wt");
     git(repo, "worktree", "add", "--quiet", "-b", "raccoon/bench-top-abc123", dir, "main");
@@ -478,7 +483,8 @@ describe("the worktree and the check", () => {
     expect(git(repo, "rev-parse", "main")).not.toBe(fix);
   });
 
-  it("runs the check on the agent's work with the solution's check files, never the agent's", async () => {
+  // POSIX shell, pnpm and `/` paths: run on macOS and Linux.
+  it.skipIf(process.platform === "win32")("runs the check on the agent's work with the solution's check files, never the agent's", async () => {
     const { repo, start, fix, task } = makeRepo();
     const dir = join(tempDir("session"), "wt");
     git(repo, "worktree", "add", "--quiet", "--detach", dir, start);
