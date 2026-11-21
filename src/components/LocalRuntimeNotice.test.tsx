@@ -6,6 +6,8 @@ const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart:
 const terminals = vi.hoisted(() => ({ reattachLocalTerminals: vi.fn() }));
 vi.mock("@/lib/api", async (actual) => ({ localRuntime: native, errorMessage: (await actual<typeof import("@/lib/api")>()).errorMessage }));
 vi.mock("@/lib/terminal", () => terminals);
+const machines = vi.hoisted(() => ({ restartRuntimeForWindow: vi.fn() }));
+vi.mock("@/lib/machines", async (actual) => ({ ...(await actual<typeof import("@/lib/machines")>()), machinesApi: machines }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, callback: () => void) => {
     native.listeners.set(event, callback);
@@ -356,5 +358,24 @@ it("says when the runtime was started without the window's key, and hides on req
   expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hide" })); });
   expect(screen.queryByTestId("local-runtime-unpinned")).toBeNull();
+  expect(native.proveWindow).not.toHaveBeenCalled();
+});
+
+// PRO-507: the notice says that terminalx commands needing this window fail too, not only session and terminal changes.
+// A runtime that pinned another key than the one Keychain holds now cannot be repaired by Try again: Restart runtime
+// is offered instead, with what it stops, and only the restart offered is asked for.
+it("names the commands that fail too, and offers Restart runtime when the runtime pinned another key", async () => {
+  await mounted();
+  await changed({ ...connected, unproven: { why: "no proof", pinned: true } });
+  expect(screen.getByTestId("local-runtime-unproven-services").textContent).toContain("browser, computer, cloud, share and machine");
+  const offer = "runtime_restart_required:owner: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restart runtime starts a new one that can. Restarting stops its agents and terminals. Each agent picks up its conversation again when its tab next starts.";
+  await changed({ ...connected, unproven: { why: "Only the TerminalX window registers as the window, and it proved it with a key other than the one this runtime was started with.", pinned: true, restart: offer } });
+  const notice = screen.getByTestId("local-runtime-unproven");
+  expect(notice.textContent).toContain("was replaced after this runtime started");
+  expect(notice.textContent).toContain("Restarting stops its agents and terminals");
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  machines.restartRuntimeForWindow.mockReset().mockResolvedValue(undefined);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Restart runtime/ })); });
+  expect(machines.restartRuntimeForWindow).toHaveBeenCalledExactlyOnceWith("owner", offer);
   expect(native.proveWindow).not.toHaveBeenCalled();
 });
