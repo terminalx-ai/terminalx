@@ -983,6 +983,7 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
+            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1194,6 +1195,63 @@ impl ControlService {
                 }))
             }
         }
+    }
+
+    /// A bot's work items (`terminalx bots items`, PRO-469). Only a bot edits
+    /// its list, and only its own: the bot is the one `Caller` places the
+    /// command in (its session, or a claim its tab's launch secret proves),
+    /// never one the command names. A paused bot changes nothing. Anyone else
+    /// (the owner's terminal) reads a list by naming the bot with `--bot`;
+    /// the owner answers and gives work in the app.
+    fn bot_items(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, BotError, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
+        let action = command.trim_start_matches("bots.items.");
+        let reads = matches!(action, "list" | "show");
+        let caller = Caller::of(&self.manager, &params);
+        caller.refuse_gone()?;
+        let named = match optional_string(&params, "bot") {
+            Some(selector) => Some(match bots::named(&selector).map_err(failed)? {
+                Named::One(bot) => *bot,
+                Named::Several => return Err(ControlError::new("ambiguous_selector", bots::several_named(&selector), Some("Use the id from `terminalx bots list --json`.".into()))),
+                Named::Nobody => return Err(ControlError::not_found(bots::nobody_named(&selector))),
+            }),
+            None => None,
+        };
+        let bot = match (caller.verified_bot(), caller.bot.as_deref(), named) {
+            // Held to its own bot, whatever it names.
+            (Some(own), _, Some(bot)) if bot.id != own => return Err(caller.forbidden("read or change another bot's work items")),
+            (Some(own), _, _) => bots::get(&own).map_err(failed)?,
+            // It says it works for a bot, and cannot prove it: neither that bot nor the owner.
+            (None, Some(_), _) => {
+                return Err(ControlError::new(
+                    "unauthorized",
+                    "This command says it runs in a bot's session, but its tab could not prove it.",
+                    Some("Run it from the bot's own session as TerminalX started it.".into()),
+                ))
+            }
+            (None, None, Some(bot)) if reads => bot,
+            (None, None, Some(_)) => {
+                return Err(ControlError::new(
+                    "forbidden",
+                    "Only a bot changes its own work list, from its own sessions. Answer, comment, give work or stop an item in TerminalX.",
+                    Some("Open the bot in TerminalX.".into()),
+                ))
+            }
+            (None, None, None) => return Err(ControlError::invalid("Name the bot with --bot BOT, or run this from one of the bot's sessions.")),
+        };
+        if !reads {
+            caller.refuse_while_paused("change its work items")?;
+        }
+        crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), action, &params).map_err(failed)
     }
 
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
@@ -2795,7 +2853,15 @@ impl ControlService {
 /// from a bot's session or one a bot started, when the caller is gone, and
 /// when it could not be placed. With Bots off nothing is looked at.
 fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
-    if !crate::bots::enabled_cached() || runtime_read(command, params) {
+    if !crate::bots::enabled_cached() {
+        return Ok(());
+    }
+    // A caller in a bot's session reads its own bot's work list here and no other, as `terminalx bots items` does;
+    // `needsYou` holds every bot's questions, so it is the window's.
+    if command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("items" | "item" | "needsYou")) {
+        refuse_other_bots_items(manager, params, window)?;
+    }
+    if runtime_read(command, params) {
         return Ok(());
     }
     let pid = match crate::hooks::caller() {
@@ -2831,6 +2897,30 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     Ok(())
 }
 
+/// A process placed in a bot's session asks for a work list through the runtime: only its own bot's.
+/// The window's own reads are not placed; a caller that cannot be placed is refused, never let through.
+fn refuse_other_bots_items(manager: &SessionManager, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
+    let pid = match crate::hooks::caller() {
+        crate::hooks::Peer::InProcess => return Ok(()),
+        crate::hooks::Peer::Unreadable => return Err(gone()),
+        crate::hooks::Peer::Pid(pid) => pid,
+    };
+    #[cfg(unix)]
+    if window.is_some_and(|(window, started)| window == pid && crate::serve_cli::consent::started_at(pid) == Some(started)) {
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    let _ = window;
+    let caller = Caller::of_process(manager, &json!({}), Some(pid));
+    caller.refuse_gone()?;
+    let Some(bot) = caller.bot.as_deref() else { return Ok(()) };
+    let own = params["operation"].as_str() != Some("needsYou") && params["params"]["id"].as_str() == Some(bot);
+    if own {
+        return Ok(());
+    }
+    Err(caller.forbidden("read another bot's work list, or every bot's questions: `terminalx bots items list` shows its own"))
+}
+
 /// Whether a call reads bot `bot`'s own duties. The window and a person's
 /// terminal read any bot's; a process in a bot's session reads only its own.
 fn own_duties_read(command: &str, params: &Value, bot: Option<&str>) -> bool {
@@ -2843,7 +2933,7 @@ fn runtime_read(command: &str, params: &Value) -> bool {
     if let Some(method) = command.strip_prefix("runtime.session.") {
         return match method {
             // `memoryView` and `memoryLook` record edits found outside the app: not reads.
-            "bots" => matches!(params["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "memoryText" | "roleDiff")),
+            "bots" => matches!(params["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "memoryText" | "roleDiff" | "items" | "item" | "needsYou")),
             "list" | "log" | "automations" | "automationRuns" | "automationIssues" | "paneAgents" | "resourceOverview" | "resourceSample" | "usage"
             | "activity" | "events" | "eventsOpen" | "eventsChunk" | "eventsClose" | "status" | "pane" | "queued" | "rowStatuses" | "accountSupport" => true,
             // `questions` answers pending requests and `heldQueue` sends to an idle tab: neither is a read.
@@ -3979,7 +4069,7 @@ mod tests {
     /// A bot with its home chat, an ordinary session of the owner's, and a
     /// process `script` started in the chat's terminal, found by `marker`.
     #[cfg(unix)]
-    fn bot_with_a_process(script: &str, marker: &str) -> (crate::store::TempHome, ControlService, Arc<crate::sink::BroadcastSink>, String, SessionEntry, SessionEntry, i32) {
+    pub(super) fn bot_with_a_process(script: &str, marker: &str) -> (crate::store::TempHome, ControlService, Arc<crate::sink::BroadcastSink>, String, SessionEntry, SessionEntry, i32) {
         let home = crate::store::temp_home();
         let mut settings = crate::store::settings::load();
         settings.experimental.bots = true;
@@ -5740,3 +5830,7 @@ mod issue_tests;
 #[cfg(test)]
 #[path = "control_wait_tests.rs"]
 mod wait_tests;
+
+#[cfg(test)]
+#[path = "control_bot_items_tests.rs"]
+mod bot_items_tests;
