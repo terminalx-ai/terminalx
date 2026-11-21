@@ -86,9 +86,10 @@ pub fn guards(command: &str) -> bool {
 /// bot more (`bots::enforce::needs_person`), or turns its memory back on.
 /// The owner's writes to a bot's role and memory (PRO-470) are a person's
 /// too: what a bot is told comes from them. Starting a suggestion (PRO-477)
-/// gives the bot work as the owner's message.
+/// gives the bot work as the owner's message. A chat-app link code (PRO-481)
+/// lets the chat that sends it give the bot work.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 21] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart"];
+pub const GUARDED_BOTS: [&str; 22] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart", "chatAppLink"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -129,6 +130,8 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
         // A chosen answer may approve a bot's run (PRO-476): witnessed always, as the runtime judges whether it
         // does under the item list's lock (`bots::items::answer_as`). Typed words never approve.
         Some("itemAnswer") => !params["params"]["answer"].is_null(),
+        // "Also sends to" (PRO-481): choosing a chat app sends the owner's home chat there; choosing none gives nothing.
+        Some("chatAppAlsoSends") => crate::bots::chat_apps::also_sends_adds(&params["params"]),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }

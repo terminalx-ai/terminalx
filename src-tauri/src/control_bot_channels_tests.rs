@@ -146,3 +146,28 @@ fn the_access_gate_asks_before_a_post_at_the_lower_levels() {
     let reply = json!({"tool_name": "Bash", "tool_input": {"command": "terminalx bots reply --text done"}});
     assert!(matches!(gate(&BotAccess::ReadReport, &reply), Gate::Ask(_)));
 }
+
+/// PRO-481: a chat-app link code and "Also sends to" a chat app are a person's acts. The window witnesses them
+/// (`guards_request`, which it asks before it signs) and the control socket's route without that proof is refused;
+/// unlinking a chat and choosing no chat app give nothing, and need none.
+#[test]
+fn a_chat_app_link_code_and_also_sends_to_need_the_windows_proof() {
+    let _home = crate::store::temp_home();
+    bots_on();
+    let (service, _sink) = headless_service();
+    let bot = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let request = |operation: &str, params: Value| json!({"operation": operation, "params": params});
+    let link = request("chatAppLink", json!({"id": bot, "service": "telegram"}));
+    let also = request("chatAppAlsoSends", json!({"id": bot, "services": ["telegram"]}));
+    let none = request("chatAppAlsoSends", json!({"id": bot, "services": []}));
+    let unlink = request("chatAppUnlink", json!({"id": bot, "service": "telegram", "chat": "7"}));
+    for (shown, guarded) in [(&link, true), (&also, true), (&none, false), (&unlink, false)] {
+        assert_eq!(crate::serve_cli::consent::guards_request("runtime.session.bots", shown), guarded, "the window signs {shown}");
+        assert_eq!(crate::bots::enforce::needs_person(shown["operation"].as_str().unwrap(), &shown["params"]), guarded, "the runtime asks a person for {shown}");
+    }
+    let socket = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    for refused in [link, also] {
+        assert_eq!(socket.execute_for_tests("runtime.session.bots", refused.clone()).unwrap_err().code, "person_required", "{refused}");
+    }
+    assert!(crate::bots::chat_apps::read().unwrap().codes.is_empty(), "no code was made without the proof");
+}

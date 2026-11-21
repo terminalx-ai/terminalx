@@ -1120,6 +1120,13 @@ pub fn set_also(store: &mut Store, bot: &str, services: &[String]) -> Vec<String
     chosen
 }
 
+/// Whether a "Also sends to" request names any service: one that does sends the home chat's replies out of the
+/// app, so it is a person's act; one that names none only stops that. Whether it adds to what is chosen now is not
+/// asked: the window could not know it without a read the request would race.
+pub fn also_sends_adds(params: &Value) -> bool {
+    params["services"].as_array().is_none_or(|services| !services.is_empty())
+}
+
 /// The services "Also sends to" sends to for `bot`, with a direct chat still linked.
 pub fn also_sends(store: &Store, bot: &str) -> Vec<String> {
     store.also.get(bot).map(|services| services.iter().filter(|service| store.links().any(|link| link.bot == bot && link.direct && link.service == **service)).cloned().collect()).unwrap_or_default()

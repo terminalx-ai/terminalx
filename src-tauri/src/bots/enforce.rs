@@ -386,6 +386,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "suggestionStart" => true,
         // PRO-481: a link code lets the chat that sends it give the bot work.
         "chatAppLink" => true,
+        // PRO-481: "Also sends to" a chat app sends the home chat's replies out of the app.
+        "chatAppAlsoSends" => super::chat_apps::also_sends_adds(params),
         // PRO-476: an answer that approves a run's plan starts its workers, or lets it merge.
         "itemAnswer" => super::runs::answer_starts_run(params),
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
