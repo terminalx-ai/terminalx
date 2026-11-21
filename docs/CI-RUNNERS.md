@@ -6,73 +6,53 @@ or activate Hetzner. No repository settings, rulesets or variables are changed.
 The latency target and both ten-run comparisons remain unproven; see
 [measurements](CI-RUNNERS-MEASUREMENTS.md).
 
-## Linux jobs run on Instabox (21 November 2026)
+## Instabox was tried and dropped (21 November 2026)
 
-By the owner's decision on 21 November 2026, every Linux job of `ci.yml` and the
-nightly `machines-e2e-breaks` workflow runs on Instabox, under the runner label
-`instabox-medium`, on pull requests as well as on `main`. The macOS jobs stay on
-GitHub's runners, and so does the runtime release workflow
-(`release-serve.yml`): it has a job with a write token and builds against a
-fixed glibc, and it is not CI.
+For a few hours on 21 November 2026 every Linux job ran on Instabox machines
+(`runs-on: instabox-medium`, 4 vCPU and 8 GiB; pull requests #1448 and #1458).
+It was taken back the same day, for cost and because it was not faster:
 
-This replaces the rule the rest of this document was written around, that pull
-requests run only on GitHub-hosted runners. The sections from "Threat model"
-on describe an owner-managed Hetzner pool that was planned and never built.
-Read them as that plan; where Instabox changes what they say, a note says so.
-`ci.yml` no longer reads the `CI_LINUX_RUNNER` variable.
+- GitHub's runners cost nothing for a public repository. Instabox bills compute
+  by the second ($0.004 a vCPU-hour and $0.00225 a GiB-hour when this was
+  written); at that week's volume, about 1,100 CI runs of some 79
+  machine-minutes each, that came to roughly $200 a month.
+- Jobs started within 10 seconds of being queued, against a median of 15
+  seconds and a worst case of 9 minutes on GitHub's runners, and the four
+  Vitest parts took about 2 minutes against 3. The Rust jobs were slower on
+  `instabox-medium`: the longest, `linux-rust-tests (rest)`, took 17.4 and 21.1
+  minutes in two runs against a hosted median of 14.5, and Clippy 6.1 and 6.2
+  against 4.1.
+- On `instabox-large`, at twice the price a minute, Clippy took 4.8 minutes in
+  the one run made (#1458): still not faster than GitHub's runner.
 
-What is known about the Instabox runners, from this repository's own runs:
-
-- A machine is started for each queued job, named `instabox-gh-job-<job id>`,
-  and registers a runner in the organisation's **Default** runner group. A
-  runner takes whichever queued job reaches it first, not always the one it is
-  named after. Jobs start within seconds of being queued.
-- The image is Ubuntu 24.04 on x64, with Docker: `machines-e2e` runs its
-  container there. The job's user has passwordless `sudo`: the workflow
-  installs its build packages with `apt-get`, as it does on GitHub's runners.
-  `zsh` and `ripgrep` are not in the image and are installed by the jobs that
-  need them.
-- The first full run there (pull request #1448, 21 November 2026, cargo caches
-  restored from `main`) passed all fourteen Linux jobs. Every job started within
-  10 seconds of being queued; on GitHub's runners the five `main` runs before
-  it had a median of 15 seconds and a worst case of 9 minutes. The four Vitest
-  parts took 1.9 to 2.5 minutes against a median of 2.8 to 3.5. The Rust jobs
-  were slower: the longest, `linux-rust-tests (rest)`, took 17.4 minutes
-  against a median of 14.5 (range 11.6 to 18.2), and Clippy 6.1 against 4.1.
-  One run is not a measurement; it says the move does not shorten the longest
-  job at this machine size.
-
-What is not verified from here, and is the owner's to confirm with Instabox:
-
-- that a machine is destroyed after its job and nothing on disk reaches the
-  next one;
-- that no credential of the provider, of the organisation or of another
-  customer is on the machine or reachable from its network;
-- what the machines may reach on the network;
-- the limits on how many run at once, and what a job costs.
+Instabox's larger sizes are `instabox-large` (8 vCPU, 16 GiB), `instabox-xlarge`
+(16, 32) and `instabox-2xlarge` (32, 64), on its paid plans. Its machines are
+Ubuntu 24.04 with Docker and passwordless `sudo`, one fresh machine a job. The
+`instabox-cloud` GitHub App is installed on the organisation, not in this
+repository: while it is, a workflow that names an Instabox label gets a
+machine, a pull request's edited workflow included.
 
 ## What runs where
 
 | Job | Runner | Checks |
 | --- | --- | --- |
-| `frontend` | Instabox | Desktop/mobile TypeScript, frontend build, portable icon tests, CI policy/selector/measurement tests. |
-| `vitest` | Instabox, four at once | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
+| `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, frontend build, portable icon tests, CI policy/selector/measurement tests. |
+| `vitest` | GitHub-hosted Ubuntu, four at once | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
 | `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks, permission-details among them, after the frontend build. `scripts/webkit/run-all.mjs` runs several at once. |
-| `linux-rust` | Instabox, on **every PR** | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. |
-| `linux-rust-tests` | Instabox, three at once, on **every PR** | Full default-feature `cargo test --locked` in three exact parts (below). |
+| `linux-rust` | GitHub-hosted Ubuntu on **every PR** | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
+| `linux-rust-tests` | GitHub-hosted Ubuntu, three at once, on **every PR** | Full default-feature `cargo test --locked` in three exact parts (below). |
 | `macos-native` | GitHub-hosted macOS, **when selected** | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and the full macOS Rust suite. |
 | `machine-compat` | GitHub-hosted macOS, **when selected** | This build against the previous two released runtimes (PRO-354). |
-| `desktop-platforms` | Instabox | Off-macOS helper build, local UI control, Linux renderer/launcher tests. The platform build, computer contract and input safety steps run off Linux only: on Linux they are `linux-rust`'s Clippy and full suite and `frontend`'s Vitest run. Disabled Windows steps retained. |
-| `headless-serve` | Instabox | Existing headless build, dependency exclusions, Clippy, integration tests and self-test. |
-| `legacy-runtime-probe` | Instabox | Existing legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
-| `macos-rust-changes` / `check` | Instabox | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or a skipped dependency fails `check`; the two macOS jobs alone may be skipped, and only when the selector succeeded and did not select them. |
+| `desktop-platforms` | GitHub-hosted Ubuntu | Off-macOS helper build, local UI control, Linux renderer/launcher tests. The platform build, computer contract and input safety steps run off Linux only: on Linux they are `linux-rust`'s Clippy and full suite and `frontend`'s Vitest run. Disabled Windows steps retained. |
+| `headless-serve` | GitHub-hosted Ubuntu | Existing headless build, dependency exclusions, Clippy, integration tests and self-test. |
+| `legacy-runtime-probe` | GitHub-hosted Ubuntu | Existing legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
+| `macos-rust-changes` / `check` | GitHub-hosted Ubuntu | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or a skipped dependency fails `check`; the two macOS jobs alone may be skipped, and only when the selector succeeded and did not select them. |
 
 Every command from main's split is retained. `check` becomes the aggregate so
 its existing required status still gates Rust and native checks. The separate
 required `frontend` and `webkit-layout` names stay unchanged; no ruleset edit is
-needed. When this split was made the auxiliary Linux jobs moved from
-`instabox-medium` to GitHub-hosted runners; since 21 November 2026 every Linux
-job is on `instabox-medium` (above). No tests are dropped or newly ignored. Portable source icon
+needed. All auxiliary Linux jobs also use GitHub-hosted runners, replacing
+`instabox-medium`. No tests are dropped or newly ignored. Portable source icon
 tests run on Linux; macOS retains all source and Apple decoder checks.
 
 The Linux build also exposed unused macOS-only secure-dialog and dictation
@@ -258,22 +238,6 @@ review and required checks. A runner is disposable hostile compute once a job
 starts. Public source is not confidential; controller credentials, production
 access, future jobs and repository integrity are the assets to protect.
 
-With Linux on Instabox, a pull request's code runs on Instabox machines. A
-pull request can also name any runner label the repository can reach by editing
-its own copy of the workflow, so the checked-in labels were never what kept a
-fork off a runner: the Instabox runners are in the Default group, and that was
-already so while `ci.yml` named only GitHub's. What limits the harm on any
-runner is unchanged and is what `test_workflow_security.py` holds: the job has
-a read-only token, no secret is referenced, no checkout keeps its credentials,
-and a pull request cannot write a cache `main` reads. What a job could reach
-beyond that depends on how Instabox isolates a machine, which is listed above
-as not verified. A first-time contributor's fork still waits for approval
-before any job runs; a returning contributor's does not.
-
-The table is the Hetzner plan's. Its first, second, fifth and ninth rows
-describe controls that no longer exist in `ci.yml`: pull requests are not kept
-on GitHub's labels, and `linux-rust` has no preflight against `sudo`.
-
 | Risk | Control in this change | External control required before activation |
 | --- | --- | --- |
 | Fork edits YAML to target a private runner | Every PR uses literal GitHub-hosted labels; the sole custom-runner expression accepts only main push/schedule/dispatch. Regression tests reject unguarded labels, including matrices. | **GitHub runner-group workflow access restriction**, detailed below. YAML guards, obscure labels and maintainer approval alone cannot enforce this routing against an edited workflow. |
@@ -292,9 +256,6 @@ code can compromise them. Read-only tokens and ephemeral VMs reduce impact;
 they do not make arbitrary code safe. See [GitHub secure-use guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
 ### The external admission boundary is mandatory
-
-*For an owner-managed pool. Instabox is used without this boundary, by the
-decision recorded at the top; nothing below was set up.*
 
 Do **not** register repository-level runners under the original Free-plan
 proposal. Before any self-hosted CI use, the owner must have a GitHub plan and
@@ -352,9 +313,6 @@ approval still `first_time_contributors`. The last setting does not meet the
 activation prerequisite. No setting was changed.
 
 ## Owner procedure: from no runners to a measured pilot
-
-*The Hetzner plan, not carried out. Its last step sets `CI_LINUX_RUNNER`, which
-`ci.yml` no longer reads.*
 
 These are **owner-only actions**, not actions performed by this PR. Infrastructure
 implementation and its pinned controller/image configuration still need a
@@ -452,14 +410,6 @@ separate change. Do not treat this checklist as a deployed or certified setup.
   must not be presented as a PR speedup.
 
 ## Rotate credentials or turn the pool off
-
-**Instabox.** To take CI off Instabox, change `instabox-medium` back to
-`ubuntu-latest` in `ci.yml` and `machines-e2e-breaks.yml`, and `LINUX` in
-`infra/ci-runners/test_workflow_security.py` with it. That stops this
-repository's own workflow from asking for an Instabox machine; it does not stop
-a pull request's edited workflow from asking. Only removing Instabox's access
-in the organisation's settings does that. The rest of this section is the
-Hetzner plan's.
 
 Owner: delete or empty `CI_LINUX_RUNNER` in Actions variables first. New main jobs
 fall back to Ubuntu without a code change. Already queued/running jobs retain

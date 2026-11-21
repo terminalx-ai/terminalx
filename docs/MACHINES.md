@@ -2708,7 +2708,7 @@ and the dev-server:
   `machine_routes.rs` checks the terminal keeps working through the relay and
   a resent write is dropped.
 
-**The job.** `machines-e2e` in `.github/workflows/ci.yml`, on Instabox,
+**The job.** `machines-e2e` in `.github/workflows/ci.yml`, on ubuntu-latest,
 required by `check`. `check` fails on a skipped job, so it always runs and
 decides in a step (`scripts/machine-e2e/relevant.py`): every push, schedule
 and dispatch, and a pull request whose files (from the API, else the merge

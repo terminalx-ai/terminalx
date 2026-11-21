@@ -1,9 +1,7 @@
 """Guard the public-repository CI contract, including negative policy fixtures.
 
-This checks the checked-in workflow, not fork-controlled copies of it. Every
-Linux job runs on Instabox, pull requests included (CI-RUNNERS.md "Threat
-model"): what keeps a pull request's code harmless there is that the job holds
-no secret and a read-only token, which is what most of this file checks.
+This checks the checked-in workflow, not fork-controlled copies of it. Access
+to registered runners still needs the external boundary in CI-RUNNERS.md.
 """
 from copy import deepcopy
 import json
@@ -17,11 +15,8 @@ import yaml
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
-# Every Linux job's runner: Instabox, a fresh machine for each job. macOS stays GitHub-hosted.
-LINUX = "instabox-medium"
-MACOS = "macos-latest"
-# A matrix may also name the Windows leg desktop-platforms keeps its steps for.
-MATRIX = {LINUX, "windows-latest"}
+HOSTED = {"ubuntu-latest", "macos-latest", "windows-latest"}
+MAIN_RUNNER = "${{ github.ref == 'refs/heads/main' && contains(fromJSON('[\"push\",\"schedule\",\"workflow_dispatch\"]'), github.event_name) && vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}"
 CACHE_SCOPE = "${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.ref == 'refs/heads/main' && 'main') || format('run-{0}', github.run_id) }}"
 
 
@@ -94,14 +89,14 @@ def validate(workflow):
         elif name != "check":
             assert "if" not in job, "a job the aggregate would see skipped"
             assert "concurrency" not in job, "a job another run could cancel"
-        # A literal label, or a matrix of literal labels: never a variable or an expression that picks one.
         runner = job["runs-on"]
-        if runner == "${{ matrix.os }}":
-            assert set(job["strategy"]["matrix"]["os"]) <= MATRIX, "a matrix runner that is neither Instabox nor the Windows leg"
-        elif name in SELECTED or name == "webkit-layout":
-            assert runner == MACOS, "the macOS jobs run on GitHub's macOS runner"
+        if name == "linux-rust":
+            assert runner == MAIN_RUNNER, "PRs must ignore the custom runner variable"
+        elif runner == "${{ matrix.os }}":
+            assert set(job["strategy"]["matrix"]["os"]) <= HOSTED - {"macos-latest"}, "custom or unselected macOS matrix runner"
         else:
-            assert runner == LINUX, "a Linux job off Instabox, or macOS runner time outside the selected jobs and the WebKit checks"
+            assert runner in HOSTED, "custom PR runner"
+            assert (runner == "macos-latest") == (name in SELECTED or name == "webkit-layout"), "macOS runner time outside the selected jobs and the WebKit checks"
         restored = None
         for step in job["steps"]:
             action = step.get("uses", "")
@@ -141,9 +136,10 @@ def validate(workflow):
     assert vitest["strategy"]["matrix"] == {"part": VITEST_PARTS}, "every part of the Vitest run"
     assert vitest["strategy"]["fail-fast"] == "false", "every part reports"
     assert any(s.get("run") == "pnpm vitest run --shard=${{ matrix.part }}/4" and "if" not in s for s in vitest["steps"]), "full Vitest run"
+    install = next(s for s in rust if s.get("name") == "Install Linux build dependencies")
+    assert install["if"] == "runner.environment == 'github-hosted'", "sudo on the private pool"
     for steps in [rust, tests["steps"]]:
         install = next(s for s in steps if s.get("name") == "Install Linux build dependencies")
-        assert "if" not in install, "the build dependencies are installed on every run"
         assert "ripgrep" in install["run"] and "zsh" in install["run"], "security fixture dependencies"
     native = jobs["macos-native"]
     for steps in [rust, tests["steps"], native["steps"]]:
@@ -164,28 +160,11 @@ class WorkflowSecurity(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate(changed)
 
-    def test_runner_chosen_by_a_variable_is_rejected(self):
-        self.rejects(lambda w: w["jobs"]["linux-rust"].update({"runs-on": "${{ vars.CI_LINUX_RUNNER || 'instabox-medium' }}"}))
+    def test_unguarded_runner_variable_is_rejected(self):
+        self.rejects(lambda w: w["jobs"]["linux-rust"].update({"runs-on": "${{ vars.CI_LINUX_RUNNER || 'ubuntu-latest' }}"}))
 
     def test_custom_matrix_runner_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["legacy-runtime-probe"]["strategy"]["matrix"].update(os=["self-hosted"]))
-
-    def test_linux_job_off_instabox_is_rejected(self):
-        # GitHub's Ubuntu runner, another label of the same provider, a bare self-hosted one.
-        for runner in ["ubuntu-latest", "instabox-large", "self-hosted"]:
-            with self.subTest(runner=runner):
-                self.rejects(lambda w: w["jobs"]["linux-rust-tests"].update({"runs-on": runner}))
-        self.rejects(lambda w: w["jobs"]["desktop-platforms"]["strategy"]["matrix"].update(os=["ubuntu-latest"]))
-
-    def test_macos_job_off_githubs_runner_is_rejected(self):
-        self.rejects(lambda w: w["jobs"]["webkit-layout"].update({"runs-on": "instabox-medium"}))
-        self.rejects(lambda w: w["jobs"]["macos-native"].update({"runs-on": "self-hosted"}))
-
-    def test_conditional_build_dependencies_are_rejected(self):
-        def change(w):
-            install = next(s for s in w["jobs"]["linux-rust"]["steps"] if s.get("name") == "Install Linux build dependencies")
-            install["if"] = "runner.environment == 'github-hosted'"
-        self.rejects(change)
 
     def test_privileged_trigger_is_rejected(self):
         self.rejects(lambda w: w["on"].update(pull_request_target={}))
@@ -283,7 +262,7 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_macos_runner_outside_the_selected_jobs_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["frontend"].update({"runs-on": "macos-latest"}))
-        self.rejects(lambda w: w["jobs"]["legacy-runtime-probe"]["strategy"]["matrix"].update(os=["instabox-medium", "macos-latest"]))
+        self.rejects(lambda w: w["jobs"]["legacy-runtime-probe"]["strategy"]["matrix"].update(os=["ubuntu-latest", "macos-latest"]))
 
     def test_unselected_job_condition_is_rejected(self):
         self.rejects(lambda w: w["jobs"]["linux-rust-tests"].update({"if": "github.event_name != 'pull_request'"}))
