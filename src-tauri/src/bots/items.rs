@@ -942,7 +942,7 @@ pub(super) fn ask_as(sink: &dyn EventSink, bot: &Bot, number: u64, question: &st
         Purpose::MergeRun(run) => (PURPOSE_MERGE_RUN.to_string(), run.to_string()),
     };
     let who = bot.id.clone();
-    change(sink, &bot.id, |items, _| {
+    let asked = change(sink, &bot.id, |items, _| {
         let item = find(items, number)?;
         refuse_closed(item)?;
         before(item)?;
@@ -955,7 +955,10 @@ pub(super) fn ask_as(sink: &dyn EventSink, bot: &Bot, number: u64, question: &st
         item.state = ItemState::NeedsYou;
         item.snoozed_until = None;
         Ok(item.clone())
-    })
+    })?;
+    // It also goes to the owner's linked Slack and Telegram chats, its answers as buttons (PRO-481).
+    super::chat_apps::asked(bot, &asked);
+    Ok(asked)
 }
 
 /// Mark line `line` (counted from 1) of an item's done means met or not.

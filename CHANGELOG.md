@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Bots (experimental): message a bot from Slack or Telegram. Connect your own
+  Slack app (Socket Mode) or Telegram bot in Settings → the bot → Channels,
+  then link a chat by sending it the one-time code shown there; messages from
+  any other chat are refused. The owner's direct messages reach the bot's home
+  chat, a group's or channel's its own chat, and the bot's reply goes back
+  where it was asked. Duty reports and "Needs you" questions go to your linked
+  direct chats, the answers as buttons (a run's approval stays in TerminalX).
+  "Also sends to" beside the home chat's send button forwards its replies
+  there too. Tokens are kept in the store, readable by you alone, never in the
+  bot's settings. WhatsApp needs a relay and stays off (PRO-481).
 - Bots (experimental): the week calendar of duties starts on the first day of
   the week of the system's region. Too many duties at one time to read side
   by side show "+N more", which lists the rest. The grid is keyboard-driven:

@@ -19,6 +19,9 @@ import { relativeTime } from "@/lib/time";
 import type { BotChannelsView, BotMention, BotPost } from "@/types/botChannels";
 import { effectiveAccess, type Bot, type BotAccess, type BotAsker, type BotAskerMay, type BotPatch } from "@/types/bots";
 import { BotAvatar } from "./BotAvatar";
+import { ChatAppDialog, chatAppRow } from "./BotChatApps";
+import { useChatApps } from "@/lib/botChatApps";
+import type { ChatAppService } from "@/types/botChatApps";
 
 /**
  * A bot's settings (PRO-478, design 23.07): where it runs, its access, where it works, its channels and who may ask
@@ -321,6 +324,17 @@ const CONNECTION_LABEL: Record<Connection, string> = { checking: "Checking…", 
 function Channels({ bot }: { bot: Bot }) {
   const github = useGithubConnection();
   const linear = useLinearConnection();
+  // Slack and Telegram (PRO-481): null while the runtime cannot say, when their rows wait as before.
+  const apps = useChatApps(bot.id);
+  const [open, setOpen] = useState<ChatAppService | null>(null);
+  const appRow = (service: ChatAppService, label: string, testId: string, icon: typeof Hash) => {
+    const shown = apps?.services.find((entry) => entry.service === service);
+    const row = chatAppRow(bot, service, shown);
+    const action = apps
+      ? <Button variant="ghost" size="xs" onClick={() => setOpen(service)} aria-label={`${shown?.connected ? "Manage" : "Connect"} ${label}`}>{shown?.connected ? "Manage" : "Connect"}</Button>
+      : later(label);
+    return <ListRow icon={icon} name={label} state={row.state} on={row.on} detail={row.detail} action={action} testId={testId} />;
+  };
   const manage = (row: "integrations.github" | "integrations.linear", label: string, connected: boolean) => (
     <Button variant="ghost" size="xs" onClick={() => openSettingRow(row)} aria-label={label}>{connected ? "Manage" : "Connect"}</Button>
   );
@@ -352,8 +366,11 @@ function Channels({ bot }: { bot: Bot }) {
         action={manage("integrations.linear", "Manage the Linear connection", linear.state === "connected")}
         testId="bot-channel-linear"
       />
-      <ListRow icon={Hash} name="Slack" state="Not connected" on={false} detail={`Message ${bot.name} in Slack`} action={later("Slack")} testId="bot-channel-slack" />
-      <ListRow icon={Send} name="Telegram or WhatsApp" state="Not connected" on={false} detail={`Message ${bot.name} from your phone's chat app`} action={later("Telegram or WhatsApp")} testId="bot-channel-chat-app" />
+      {appRow("slack", "Slack", "bot-channel-slack", Hash)}
+      {appRow("telegram", "Telegram", "bot-channel-chat-app", Send)}
+      {/* WhatsApp's Cloud API delivers only by webhook to a public address: it needs a relay, which this build has not. */}
+      <ListRow icon={Send} name="WhatsApp" state="Not connected" on={false} detail={`Message ${bot.name} on WhatsApp`} action={later("WhatsApp")} testId="bot-channel-whatsapp" />
+      {open && <ChatAppDialog bot={bot} service={open} onClose={() => setOpen(null)} />}
     </ListBox>
   );
 }

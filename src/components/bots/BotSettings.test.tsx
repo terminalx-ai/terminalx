@@ -4,7 +4,7 @@ import type { Bot, BotList, BotPatch } from "@/types/bots";
 import { mouseClick } from "@/test/press";
 
 const mocks = vi.hoisted(() => ({
-  api: { list: vi.fn(), update: vi.fn(), remove: vi.fn(), pause: vi.fn(), resume: vi.fn(), pauseAll: vi.fn(), resumeAll: vi.fn(), templates: vi.fn(), channels: vi.fn() },
+  api: { list: vi.fn(), update: vi.fn(), remove: vi.fn(), pause: vi.fn(), resume: vi.fn(), pauseAll: vi.fn(), resumeAll: vi.fn(), templates: vi.fn(), channels: vi.fn(), chatApps: vi.fn(), chatAppConnect: vi.fn(), chatAppLink: vi.fn(), chatAppUnlink: vi.fn(), chatAppDisconnect: vi.fn(), chatAppAlsoSends: vi.fn() },
   github: vi.fn(),
   linear: vi.fn(),
   roster: vi.fn(),
@@ -38,6 +38,7 @@ const { resetBotsPageForTests, showBotSettings, showBotsTeam, getBotsPage } = aw
 const { BotsView } = await import("./BotsView");
 const { getSessionStore, openAgents } = await import("@/lib/sessions");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
+const { resetChatAppsForTests } = await import("@/lib/botChatApps");
 
 const bot = (id: string, name: string, extra: Partial<Bot> = {}): Bot => ({
   id, slug: name.toLowerCase(), name, roleTitle: "Security auditor", roleTemplateId: "security-auditor", harness: "claude", model: "", access: "full", runsOn: "thisMac",
@@ -85,6 +86,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   resetBotsForTests();
+  resetChatAppsForTests();
 });
 
 describe("Bot settings (PRO-478, design 23.07)", () => {
@@ -445,5 +447,42 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     fireEvent.change(input, { target: { value: "@ann-k" } });
     fireEvent.click(screen.getByTestId("bot-asker-github-save"));
     await waitFor(() => expect(lastPatch()).toEqual({ whoCanAsk: [{ kind: "person", id: "u1", name: "Ann", may: "ask", org: "org-1", email: "ann@example.com", github: "ann-k" }], ifModified: SEEN }));
+  });
+
+  it("Slack and Telegram (PRO-481): a connected Slack says where it is linked; Telegram connects with its token and links a chat by a code", async () => {
+    const slack = { service: "slack", connected: true, state: "connected", why: "", account: { name: "Kestrel Studio" }, code: null,
+      links: [{ chat: "C1", name: "#security", direct: false, by: "Paula", linked: SEEN }, { chat: "C2", name: "#eng", direct: false, by: "Paula", linked: SEEN }] };
+    const telegramOff = { service: "telegram", connected: false, state: "off", why: "", account: null, links: [], code: null };
+    const telegramOn = { ...telegramOff, connected: true, state: "connected", account: { name: "@sentry_tx_bot" } };
+    let telegram: object = telegramOff;
+    mocks.api.chatApps.mockImplementation(async () => ({ services: [slack, telegram], alsoSendsTo: [], activity: [] }));
+    mocks.api.chatAppConnect.mockImplementation(async () => {
+      telegram = telegramOn;
+      return { service: "telegram", account: { name: "@sentry_tx_bot" } };
+    });
+    mocks.api.chatAppLink.mockImplementation(async () => ({
+      services: [slack, { ...telegramOn, code: { code: "ABC234", expires: SEEN, link: "https://t.me/sentry_tx_bot?start=ABC234" } }], alsoSendsTo: [], activity: [],
+    }));
+    const page = await open([bot("b1", "Sentry")], "b1");
+
+    await waitFor(() => expect(page.getByTestId("bot-channel-slack-state").textContent).toBe("Connected"));
+    expect(page.getByTestId("bot-channel-slack").textContent).toContain("#security, #eng · replies in the thread it was asked in");
+    expect(page.getByTestId("bot-channel-chat-app-state").textContent).toBe("Not connected");
+    expect(page.getByTestId("bot-channel-chat-app").textContent).toContain("Message Sentry from your phone's chat app");
+    // WhatsApp needs a relay: its row stays off.
+    expect((within(page.getByTestId("bot-channel-whatsapp")).getByRole("button", { name: /Connect/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(within(page.getByTestId("bot-channel-chat-app")).getByRole("button", { name: "Connect Telegram" }));
+    const dialog = within(await screen.findByTestId("bot-chat-app-dialog-telegram"));
+    expect((dialog.getByTestId("bot-chat-app-connect") as HTMLButtonElement).disabled).toBe(true);
+    const token = dialog.getByTestId("bot-chat-app-telegram-token") as HTMLInputElement;
+    expect(token.type).toBe("password");
+    fireEvent.change(token, { target: { value: " 123456789:AAE-token " } });
+    fireEvent.click(dialog.getByTestId("bot-chat-app-connect"));
+    await waitFor(() => expect(mocks.api.chatAppConnect).toHaveBeenCalledWith("b1", "telegram", { token: "123456789:AAE-token" }));
+    fireEvent.click(await dialog.findByTestId("bot-chat-app-link"));
+    await waitFor(() => expect(dialog.getByTestId("bot-chat-app-code").textContent).toContain("ABC234"));
+    expect(mocks.api.chatAppLink).toHaveBeenCalledWith("b1", "telegram");
+    expect(dialog.getByRole("button", { name: "Open in Telegram" })).toBeTruthy();
   });
 });
