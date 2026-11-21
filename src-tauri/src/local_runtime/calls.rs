@@ -216,7 +216,8 @@ pub(crate) fn session(manager: &SessionManager, method: &str, params: Value) -> 
         }
         "orchestration" => return manager.orchestration(string(&params, "operation")?, params["params"].clone()),
         // Bots (PRO-466): the runtime owns `bots.json` and the homes, and announces each change.
-        "bots" => return crate::bots::call(manager.sink().as_ref(), string(&params, "operation")?, &params["params"]),
+        // A change that narrows what a bot may do reaches its running sessions too (PRO-468).
+        "bots" => return crate::bots::enforce::call(manager, string(&params, "operation")?, &params["params"]),
         "deleteSession" => { manager.delete_session(string(&params, "sessionId")?)?; return Ok(Value::Null); }
         "automations" => return Ok(serde_json::to_value(crate::store::automations::list()?)?),
         "automationRuns" => return Ok(serde_json::to_value(crate::store::automations::list_runs(string(&params, "id")?)?)?),

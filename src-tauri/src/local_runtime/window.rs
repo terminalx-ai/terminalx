@@ -105,7 +105,15 @@ fn private_endpoint(socket: &std::path::Path) -> anyhow::Result<()> {
 }
 
 #[derive(Default)]
-pub(crate) struct Registry(Mutex<Option<Arc<Service>>>);
+pub(crate) struct Registry(Mutex<Option<Arc<Service>>>, Mutex<Option<(i32, u64)>>);
+
+/// The window's process this runtime last knew, for a handover to carry (PRO-468).
+static KNOWN_WINDOW: Mutex<Option<(i32, u64)>> = Mutex::new(None);
+
+/// The window's process as this runtime knows it now: for the handover record.
+pub(crate) fn known_window() -> Option<(i32, u64)> {
+    *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 impl Registry {
     pub(crate) fn register(&self, lifetime: &Lifetime, params: Value) -> Result<Value, ControlError> {
@@ -132,6 +140,32 @@ impl Registry {
             token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0) }));
         drop(registered);
         Ok(json!({"registered":true}))
+    }
+
+    /// The window's process (pid and start time, PRO-468): the last one to
+    /// register here, or the one the runtime this one replaced knew. Kept
+    /// until the next registration, so the window's frames held across a
+    /// handover, and those between its new attachment and its register
+    /// reply, are its own; the guard checks the start time against the
+    /// live process, so one that ended, or a later one given its pid, is not it.
+    pub(crate) fn window_process(&self) -> Option<(i32, u64)> {
+        *self.1.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Recognise `process` as the window, after it registered. The caller
+    /// leaves out a registrant that runs in a pane or under this runtime.
+    pub(crate) fn recognise(&self, process: (i32, u64)) {
+        *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+        *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+    }
+
+    /// The window's process the runtime this one replaced knew, until a window registers here.
+    pub(crate) fn handed_over(&self, process: Option<(i32, u64)>) {
+        let mut known = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        if known.is_none() {
+            *known = process;
+            *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = process;
+        }
     }
 
     pub(crate) fn available(&self) -> bool {

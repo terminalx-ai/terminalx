@@ -64,6 +64,9 @@ const SUMMARY_BREAK: &str = "\n\n";
 
 pub struct Stdio {
     pub(crate) actual_stance: Option<crate::harness::settings::Stance>,
+    /// The secret this launch's app server was given (`RACCOON_HOOK_TOKEN`),
+    /// which proves a `terminalx` call comes from this tab. Empty before launch.
+    pub(crate) hook_token: String,
     pub launch: Arc<()>,
     pub thread: Option<String>,
     pub exited: bool,
@@ -161,7 +164,7 @@ impl Stdio {
     }
 
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
-        Self { actual_stance: None, launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
+        Self { actual_stance: None, hook_token: String::new(), launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             usage: Default::default(), usage_model: None, prompt_model: None,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
             streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }

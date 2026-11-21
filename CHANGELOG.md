@@ -13,6 +13,74 @@
   page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
   no bots it offers three roles to hire in one click, and Hire a bot lists
   every role with its duties and skills and asks only for a name (PRO-467).
+- Bots (experimental): each bot has a home chat, made at hire, that runs in its
+  home folder; its agent is given the bot's role, the newest 200 lines of its
+  memory and a few fixed rules each time it starts, so an edited `ROLE.md`
+  reaches the next conversation. A bot's view has its header and tabs, with
+  Chat filled: its chats and the sessions they started beside the transcript.
+  Its chats leave the sidebar's lists, and are never archived for being quiet
+  or removed by retention. A bot's sessions, and what they start, run in no
+  wider a permission mode than its access allows, and in plan mode while it is
+  paused; a paused bot still answers. A resume from the `terminalx` CLI waits
+  for the owner to confirm it in the app (shown on the team page and the
+  sidebar for a day), and a bot's own sessions cannot hire, delete or resume
+  bots, start cloud, pipeline or other-computer work, approve permissions, or
+  change sessions through the runtime's calls while they run in its tabs. The
+  app places a command in the pane that started it where it can (by its
+  process, its session and its terminal) and then ignores the session it
+  names; a command it cannot place counts as the owner's only from a terminal
+  of the person's own, one whose process has already exited or closed its
+  connection is refused, and one that has made itself a terminal of its own
+  (`script`, tmux) is not placed. While Bots is on, the runtime's own calls
+  that change sessions or terminals are taken from the window (by its
+  process and start time, carried across a runtime update), from a session
+  no bot works for, or from a terminal of the person's own, and refused
+  otherwise. Not held (PRO-489): a bot's process that has left its tab and
+  runs code of its own choosing, such as one with a terminal of its own. A bot's work on an agent that cannot
+  be given its rules (ACP, OpenCode) is refused at launch.
+  Hiring, resuming, deleting and raising access are confirmed by the
+  TerminalX window on a Mac, which restarts its runtime to do so when needed,
+  as pairing does. A resume or more access gives each tab back its own mode,
+  within the bot's limit, unless it was set by hand since. Deleting a bot
+  stops every session that works for it and archives its chats; turning Bots
+  off stops them. A bot's memory reaches its agent as its own notes, read safely
+  and capped (PRO-468).
+- Bots (experimental): a bot's Role and memory. The owner edits its job title,
+  who it reports to and its standing instructions (`ROLE.md`, with a saved
+  state, Open in editor, every earlier version and the role it was built from).
+  Memory is one dated note per line, kept with the bot, in each organisation it
+  works in, or as personal notes; a conversation is given the bot's own and its
+  place's, 200 lines in all, and older notes move to `memory/archive.md`. The
+  bot writes memory with `terminalx bots memory add|forget|list` from its own
+  chat or a session it started (a read-and-report bot too), notes that look
+  like secrets are refused, and memory can be switched off per bot. The
+  owner's changes to a role or memory, and turning memory back on, need the
+  TerminalX window. The screen is the bot's Role and memory tab, and is
+  reached from its row on the team page too. Every change, the bot's own and
+  edits made to the files outside the app included (found when the Bots page
+  or the bot's page opens and before each of its chats starts, one change per
+  file), is recorded with where it came from in a change log kept outside the
+  bot's home folder, each with Undo (PRO-470).
+- Bots (experimental): duties. A duty is an automation a bot owns, listed on
+  its bot's Duties tab rather than on the Automations page, and run as the
+  bot: on its agent, model and access, in its home folder, with its role and
+  memory. Its first check runs before the model, as you, in an empty folder
+  of the duty's own rather than in the bot's home; when the check prints
+  nothing the run is logged as "nothing new", with no session, no spend and
+  no notification. A duty runs once at a time, a run past its timeout is
+  stopped, and older run sessions are archived. Otherwise the bot looks, and its reply is reported where
+  the duty says: a note in the bot's home chat and a notification, or a note
+  in its lead's home chat (Slack, Telegram and a pull request are shown, off).
+  A reply of "Nothing new." tells nobody; one that starts "URGENT:" reaches
+  the owner's notifications even in the bot's quiet hours. Each duty keeps a
+  small note between runs (`duties/<id>.md` in the bot's home). A paused bot's
+  duties do not run, and runs that fall due meanwhile are skipped, not run
+  late. The Duties tab has the table, today's counts, the log and quiet
+  hours; a duty's page has its four steps, its runs, Run now, Pause and
+  Duplicate. At hire, the role's scheduled duties arrive switched off.
+  Deleting a bot removes its duties, kept with its home in the trash.
+  Adding, changing, running or switching on a duty, and quiet hours, are the
+  owner's to do from the window (PRO-471).
 - TerminalX runs on Windows 10 and 11: the desktop app, its background
   runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
   machines, phone pairing and the headless `terminalx-serve` tools. Named

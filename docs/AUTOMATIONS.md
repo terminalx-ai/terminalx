@@ -48,6 +48,17 @@ agent, workspace) are not looked at: the run goes ahead with the definition
 it started from. A run left pending without a session when its thread ends
 (a store error after the check) is ended as failed.
 
+### A bot's duties (PRO-471)
+
+An automation that names a bot (`bot` on its definition) is that bot's duty:
+it is listed on the bot's Duties tab, not on the Automations page, and
+`automationSave`, `automationDelete` and `automationRun` refuse it, except
+that `automationDelete` removes one whose bot is gone. It runs through this
+same scheduler, as its bot; its first check runs as the owner in a folder of
+the duty's own (`duty-checks/<id>` under the store root), never in the bot's
+home. While Bots is off it does not wake. See [BOTS.md](BOTS.md#duties-pro-471). Automations that
+name no bot run exactly as before.
+
 ### Issue automations
 
 For an issue automation the check gates the poll, not each issue:

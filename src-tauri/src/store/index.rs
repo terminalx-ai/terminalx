@@ -753,7 +753,15 @@ fn file_path() -> Result<PathBuf> {
     Ok(super::sessions_dir()?.join("index.json"))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often this thread read the index, for tests of what must not (PRO-468).
+    pub(crate) static TEST_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn load_file() -> Result<IndexFile> {
+    #[cfg(test)]
+    TEST_READS.with(|reads| reads.set(reads.get() + 1));
     Ok(super::read_json::<IndexFile>(&file_path()?)?.unwrap_or_default())
 }
 

@@ -106,7 +106,7 @@ fn blocked_pipe_child() {
     executable(&program, SERVER);
     std::fs::write(rig._dir.path().join("block-read"), b"").unwrap();
     let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
-    rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+    rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &index::get(SESSION).unwrap(), &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
     let other_dir = rig._dir.path().join("other-provider");
     std::fs::create_dir(&other_dir).unwrap();
     let other_program = other_dir.join("acp-server");
@@ -115,7 +115,7 @@ fn blocked_pipe_child() {
     other_tab.id = "other-tab".into();
     index::update_session(SESSION, |session| { session.tabs.push(other_tab.clone()); Ok(()) }).unwrap();
     let other_runtime = rig.manager.runtime(SESSION, &other_tab.id).unwrap();
-    rig.manager.start_acp(&mut other_runtime.lock().unwrap(), &other_runtime, &other_tab, other_dir.to_str().unwrap(), other_program.to_str().unwrap()).unwrap();
+    rig.manager.start_acp(&mut other_runtime.lock().unwrap(), &other_runtime, &index::get(SESSION).unwrap(), &other_tab, other_dir.to_str().unwrap(), other_program.to_str().unwrap()).unwrap();
     let (observed, full_pipe) = mpsc::channel();
     *ACP_FULL_PIPE.lock().unwrap() = Some(observed);
     let text = "x".repeat(2 * 1024 * 1024);
@@ -265,7 +265,7 @@ fn startup_child() {
     if case == "phone-init-error" { std::fs::write(rig._dir.path().join("fail-init"), b"").unwrap(); }
     let launch = || {
         let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
-        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &index::get(SESSION).unwrap(), &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
     };
     launch();
     let relay = case.starts_with("relay-queued-");

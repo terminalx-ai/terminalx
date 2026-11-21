@@ -38,10 +38,10 @@ pub(crate) fn file_id(file: &File) -> io::Result<(u64, u64)> {
     Ok((u64::from(info.dwVolumeSerialNumber), (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
 }
 
-/// Create `path` as a new file only this user (and SYSTEM) can open, or, when
-/// it already exists and is a plain file, take its access down to that.
-/// `truncate` empties an existing file. Links are refused, never followed.
-pub(crate) fn create_private(path: &Path, truncate: bool) -> io::Result<File> {
+/// Create `path` as a new file only this user (and SYSTEM) can open. Anything
+/// already at `path`, a link included, is an `AlreadyExists` error: it is
+/// never opened, so never followed. What `O_CREAT | O_EXCL` gives on Unix.
+pub(crate) fn create_new_private(path: &Path) -> io::Result<File> {
     let descriptor = Descriptor::owner_only()?;
     let attributes = descriptor.attributes();
     let name = wide_path(path);
@@ -58,14 +58,22 @@ pub(crate) fn create_private(path: &Path, truncate: bool) -> io::Result<File> {
             std::ptr::null_mut(),
         )
     };
-    if handle != INVALID_HANDLE_VALUE {
-        // SAFETY: a fresh handle nobody else owns.
-        return Ok(unsafe { File::from_raw_handle(handle as RawHandle) });
+    if handle == INVALID_HANDLE_VALUE {
+        // Read right after the failed call, before anything else can set it.
+        return Err(io::Error::last_os_error());
     }
-    // SAFETY: reads this thread's last error right after the failed call.
-    let error = unsafe { GetLastError() };
-    if error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS {
-        return Err(io::Error::from_raw_os_error(error as i32));
+    // SAFETY: a fresh handle nobody else owns.
+    Ok(unsafe { File::from_raw_handle(handle as RawHandle) })
+}
+
+/// Create `path` as a new file only this user (and SYSTEM) can open, or, when
+/// it already exists and is a plain file, take its access down to that.
+/// `truncate` empties an existing file. Links are refused, never followed.
+pub(crate) fn create_private(path: &Path, truncate: bool) -> io::Result<File> {
+    match create_new_private(path) {
+        Ok(file) => return Ok(file),
+        Err(error) if matches!(error.raw_os_error(), Some(code) if code == ERROR_FILE_EXISTS as i32 || code == ERROR_ALREADY_EXISTS as i32) => {}
+        Err(error) => return Err(error),
     }
     // Opened without following a link, then judged and restricted through
     // this handle: nothing can be swapped in at the path meanwhile.

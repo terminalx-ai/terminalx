@@ -15,6 +15,7 @@ import { getFloating, showFloatingWindow, subscribeFloating } from "@/lib/floati
 import { bootLocalSharing, onJoinRequest, openSessionShare, shownShareDialog, type JoinRequest } from "@/lib/localSharing";
 import { sessionStatus, type SessionEntry, type TabEntry, type TabStatus } from "@/types/session";
 import type { AutomationRun } from "@/types/automations";
+import type { DutyReportEvent } from "@/types/botDuties";
 import type { IssuePipeline } from "@/types/issuePipeline";
 import { noticesDeferred, subscribeNoticeDeferral } from "./noticeDeferral";
 import { isMac } from "./shortcuts";
@@ -333,6 +334,8 @@ export function noteStatusChange(session: SessionEntry, tab: TabEntry, prev: Tab
   // Helpers report through their parent, not directly to the reader. This also
   // covers retry workers and verifier tabs, without waiting for run metadata.
   if (session.parent) return;
+  // A duty's run tells its owner through its report (PRO-471): "nothing new" tells nobody, quiet hours hold the rest.
+  if (session.botDuty && kind === "done") return;
   // A tab the reader muted raises nothing: no banner, no notice, no tone. Its row and the dock badge still show its state.
   if (isTabMuted(session, tab.id, getSessions().chatsPath)) return;
   const { title, body } = summarise(session, tab, kind);
@@ -388,6 +391,29 @@ export function noteAccountSwitch(notice: AccountSwitchNotice) {
   const kind: NoticeKind = notice.outcome === "switched" ? "done" : "waiting";
   const id = `account-switch:${session.id}:${notice.tabId}:${Date.now()}`;
   notices = [...notices.filter((n) => !(n.sessionId === session.id && n.tabId === notice.tabId)), { id, sessionId: session.id, tabId: notice.tabId, kind, title, body, at: Date.now() }];
+  emit();
+  expireNotice(id);
+}
+
+/**
+ * A bot's duty reported something to its owner (PRO-471). The app sends this only when the owner is to be told:
+ * not for "nothing new", not in quiet hours unless urgent, and not when the report went to the bot's lead.
+ */
+export function noteDutyReport(report: DutyReportEvent) {
+  const title = `${report.botName}: ${report.dutyName}${report.urgent ? " (urgent)" : ""}`;
+  const body = report.text.length > 240 ? `${report.text.slice(0, 239)}…` : report.text;
+  if (!looking()) {
+    if (!sendsBanner()) return;
+    if (report.sessionId && report.tabId) raised = { sessionId: report.sessionId, tabId: report.tabId };
+    void canNotify().then((ok) => ok && sendNotification({ title, body }));
+    return;
+  }
+  playSound(report.urgent ? "waiting" : "done");
+  if (!report.sessionId || !report.tabId || getSessions().selectedSessionId === report.sessionId) return;
+  const id = `duty:${report.runId}:${Date.now()}`;
+  notices = [...notices.filter((notice) => !(notice.sessionId === report.sessionId && notice.tabId === report.tabId)), {
+    id, sessionId: report.sessionId, tabId: report.tabId, kind: report.urgent ? "waiting" : "done", title, body, at: Date.now(),
+  }];
   emit();
   expireNotice(id);
 }
@@ -583,6 +609,7 @@ export function startNotifications() {
   subscribeFloating(publishPresence);
   // Each window hears each switch and decides for itself, as for a status change.
   void Promise.resolve().then(() => listen<AccountSwitchNotice>("account_switch", ({ payload }) => noteAccountSwitch(payload))).catch(() => {});
+  void Promise.resolve().then(() => listen<DutyReportEvent>("bot_duty_report", ({ payload }) => noteDutyReport(payload))).catch(() => {});
   // Cloud and machine sessions and the badge are the main window's: the floating window shows none of them.
   if (appWindow() !== "main") return;
   // Secondary windows are made by this run. Discard presence from a previous

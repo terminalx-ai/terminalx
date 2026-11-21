@@ -95,6 +95,10 @@ pub struct Record {
     /// way is counted once, for its whole time.
     #[serde(default)]
     pub activity: Vec<crate::store::activity::CarriedTab>,
+    /// The window's process (pid, start time) this runtime knew (PRO-468):
+    /// its frames held across the exec are answered as the window's.
+    #[serde(default)]
+    pub window: Option<(i32, u64)>,
 }
 
 /// The launch's hook and control sockets.
@@ -468,7 +472,8 @@ impl Record {
         // Read with every tab held: no transition is recorded meanwhile.
         let activity = crate::store::activity::carried();
         let record = Self { format: FORMAT, from: env!("CARGO_PKG_VERSION").into(), pid: std::process::id(), owner, control, frames, decisions,
-            panes, retained: terminals.retained, groups: terminals.groups, #[cfg(target_os = "linux")] supervised, tabs, activity };
+            panes, retained: terminals.retained, groups: terminals.groups, #[cfg(target_os = "linux")] supervised, tabs, activity,
+            window: crate::local_runtime::window::known_window() };
         Ok((record, kept))
     }
 }

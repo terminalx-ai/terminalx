@@ -150,6 +150,8 @@ pub fn read_role(id: &str) -> Result<String> {
     }
 }
 
+/// Only the tests write a role here: the app writes it through the bot's history (`bots::memory`).
+#[cfg(test)]
 pub fn write_role(id: &str, text: &str) -> Result<()> {
     let home = super::ensure_dir(home_dir(id)?)?;
     super::write_atomic(&home.join(ROLE_FILE), text.as_bytes())

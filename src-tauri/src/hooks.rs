@@ -443,6 +443,50 @@ thread_local! {
     static CALLER: std::cell::RefCell<Option<std::sync::Arc<std::os::unix::net::UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The caller a test's in-process control request stands for.
+    pub(crate) static TEST_CALLER_PID: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Who sent the frame being answered on this thread, as the kernel says (PRO-468).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// No transport: a direct call inside this process.
+    InProcess,
+    /// The process at the other end, whatever it claims.
+    Pid(i32),
+    /// A transport whose other end cannot be read: on macOS, one the client
+    /// closed after sending. Who sent it cannot be told.
+    Unreadable,
+}
+
+/// The sender of the frame being answered on this thread.
+pub(crate) fn caller() -> Peer {
+    #[cfg(test)]
+    if let Some(pid) = TEST_CALLER_PID.with(std::cell::Cell::get) {
+        return Peer::Pid(pid);
+    }
+    #[cfg(unix)]
+    {
+        let Some(stream) = CALLER.with(|caller| caller.borrow().clone()) else { return Peer::InProcess };
+        match crate::serve_cli::consent::peer_pid(&stream) {
+            Ok(pid) => Peer::Pid(pid),
+            Err(_) => Peer::Unreadable,
+        }
+    }
+    #[cfg(not(unix))]
+    Peer::InProcess
+}
+
+/// [`caller`]'s process, when the kernel names one.
+pub(crate) fn caller_pid() -> Option<i32> {
+    match caller() {
+        Peer::Pid(pid) => Some(pid),
+        Peer::InProcess | Peer::Unreadable => None,
+    }
+}
+
 /// Inspect the hook transport without consuming bytes or spawning a watcher.
 /// No transport is installed for direct in-process calls and unit tests.
 #[derive(Clone, Default)]

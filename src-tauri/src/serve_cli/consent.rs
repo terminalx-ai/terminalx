@@ -80,6 +80,45 @@ pub fn guards(command: &str) -> bool {
     GUARDED.contains(&command)
 }
 
+/// The bots operations of `runtime.session.bots` that give a bot more than
+/// it has (PRO-468): only the window, a person, sends them. An `update` is
+/// witnessed always; the runtime asks for the proof only when it raises
+/// access, changes the reporting line or turns memory back on
+/// (`bots::enforce::needs_person`). The owner's writes to a bot's role and
+/// memory (PRO-470) are a person's too: what a bot is told comes from them.
+pub const BOTS_COMMAND: &str = "runtime.session.bots";
+pub const GUARDED_BOTS: [&str; 18] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours"];
+
+/// The field of a bots request where the window says an `update` gives the
+/// bot nothing more (less access, the same reporting line), so it sends no
+/// proof. The runtime judges that again itself (`bots::update_as`).
+pub const GIVES_MORE: &str = "givesMore";
+
+/// Whether this request needs a person's consent: a guarded command, or a
+/// guarded bots operation; an `update` only when it sets access or the
+/// reporting line, and the window did not find it gives nothing more.
+pub fn guards_request(command: &str, params: &Value) -> bool {
+    if guards(command) {
+        return true;
+    }
+    if command != BOTS_COMMAND {
+        return false;
+    }
+    match params["operation"].as_str() {
+        Some("update") => {
+            let patch = &params["params"]["patch"];
+            let widens = ["access", "reportsTo"].iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null()));
+            // Memory turned back on: a conversation is given notes again.
+            let memory_on = patch.get("memoryOff").and_then(Value::as_bool) == Some(false);
+            memory_on || (widens && params[GIVES_MORE].as_bool() != Some(false))
+        }
+        // Switching a duty off gives its bot nothing (PRO-471).
+        Some("dutySwitch") => params["params"]["on"].as_bool() != Some(false),
+        Some(operation) => GUARDED_BOTS.contains(&operation),
+        None => false,
+    }
+}
+
 /// Why a process that asks may not: it is this runtime, descends from it, or
 /// sits in one of its terminals. `None` lets it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,7 +191,7 @@ pub enum Window {
 pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_KEY";
 
 impl Window {
-    fn current() -> Self {
+    pub fn current() -> Self {
         if headless() {
             return Self::Headless;
         }
@@ -369,7 +408,7 @@ fn witness_with_window_key(
     params: &mut Value,
     provider: Option<&WindowKey>,
 ) -> Result<Option<Witness>> {
-    if !guards(command) {
+    if !guards_request(command, params) {
         return Ok(None);
     }
     // Fail locally if this window cannot read its key. A caller without a
@@ -379,7 +418,7 @@ fn witness_with_window_key(
 }
 
 fn witness_proving(command: &str, run: &Path, params: &mut Value, key: Option<&Ed25519KeyPair>) -> Result<Option<Witness>> {
-    if !guards(command) {
+    if !guards_request(command, params) {
         return Ok(None);
     }
     let witness = Witness::open(run)?;
@@ -530,6 +569,32 @@ pub fn descends_from(pid: libc::pid_t, ancestor: libc::pid_t) -> bool {
         }
     }
     false
+}
+
+/// Whether `pid` still runs: not gone, and not a zombie waiting to be reaped.
+pub fn alive(pid: libc::pid_t) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // SZOMB, from <sys/proc.h>.
+        bsd_info(pid).is_some_and(|info| info.pbi_status != 5)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stat_field(pid, 0).is_some_and(|state| !matches!(state.as_str(), "Z" | "X" | "x"))
+    }
+}
+
+/// When `pid` started, in the kernel's own units: with its pid, what tells a
+/// process from a later one given the same pid.
+pub fn started_at(pid: libc::pid_t) -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        bsd_info(pid).map(|info| info.pbi_start_tvsec.saturating_mul(1_000_000).saturating_add(info.pbi_start_tvusec))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stat_field(pid, 19)?.parse().ok()
+    }
 }
 
 /// The session `pid` is in: the pid of its leader.

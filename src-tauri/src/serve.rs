@@ -682,6 +682,11 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
         Some(adopted) => Some(take_over(adopted, &sink, &terminals, &manager)?),
         None => None,
     };
+    // The window the runtime this one replaced knew, until a window registers here (PRO-468).
+    #[cfg(unix)]
+    if let (Some(adopted), Some(lifetime)) = (adopted.as_ref(), &lifetime) {
+        lifetime.window.handed_over(adopted.record.window);
+    }
     crate::workspace_setup::recover(&manager);
     let hooked = manager.clone();
     let mut service = crate::control::ControlService::headless(

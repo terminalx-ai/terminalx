@@ -134,6 +134,8 @@ pub enum Kept {
     /// Written in within the limit, or brought back from the archive since.
     Recent,
     Pinned,
+    /// A bot's chat (PRO-468): it stands as long as its bot does.
+    Bot,
     /// Open in a window.
     Shown,
     /// A tab in a turn, waiting on work its agent left running, or a
@@ -205,6 +207,9 @@ pub struct Sweep<'a> {
 pub fn kept(session: &SessionEntry, sweep: &Sweep) -> Option<Kept> {
     if session.pinned {
         return Some(Kept::Pinned);
+    }
+    if crate::bots::chat::session_bot(session).is_some() {
+        return Some(Kept::Bot);
     }
     if sweep.shown.contains(&session.id) {
         return Some(Kept::Shown);
