@@ -5,7 +5,7 @@
 // overlap, and the page never scrolls sideways.
 // Run after pnpm build: node scripts/webkit/bot-items.mjs
 // BOT_ITEMS_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve, sidebar } from "./harness.mjs";
+import { launch, open, report, serve, sidebar, emitHeard } from "./harness.mjs";
 
 const shots = process.env.BOT_ITEMS_SHOTS;
 const server = await serve();
@@ -102,7 +102,7 @@ try {
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
       const rail = await sidebar(page);
-      await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "bot-home" }));
+      await emitHeard(page, "open_session", { sessionId: "bot-home" });
       const view = page.getByRole("main", { name: "Kestrel, CTO" });
       await view.waitFor();
       const selector = "main[aria-label='Kestrel, CTO']";

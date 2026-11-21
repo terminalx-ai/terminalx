@@ -8,7 +8,7 @@
 // columns do not overlap, and every change keeps its Undo inside its row.
 //
 //   pnpm build && node scripts/webkit/bot-role-memory.mjs
-import { launch, open, report, serve, sidebar } from "./harness.mjs";
+import { launch, open, report, serve, sidebar, emitHeard } from "./harness.mjs";
 
 const extra = `(() => {
   const stub = window.__PW_STUB__;
@@ -173,7 +173,7 @@ try {
 
   // The same screen as the bot's own Role and memory tab, in its view (PRO-468).
   await page.setViewportSize(viewports[0]);
-  await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "atlas-home" }));
+  await emitHeard(page, "open_session", { sessionId: "atlas-home" });
   const view = page.getByRole("main", { name: "Atlas, CTO" });
   await view.waitFor();
   await view.getByRole("tab", { name: "Role and memory" }).click();

@@ -69,6 +69,16 @@ export async function open(browser, url, fixture, viewport, { extra = "", colorS
   return page;
 }
 
+/**
+ * Emit a native event once the app listens for it. A page just loaded may not
+ * have subscribed yet on a slow runner, and the stub, like Tauri, drops an
+ * event no one hears (PRO-497: `open_session` lost, the bot's view never opened).
+ */
+export async function emitHeard(page, event, payload) {
+  await page.waitForFunction((name) => window.__PW_STUB__.heard(name), event);
+  await page.evaluate(([name, value]) => window.__PW_STUB__.emit(name, value), [event, payload]);
+}
+
 /** Print each check and return how many failed. */
 export function report(name, checks, detail) {
   let failed = 0;

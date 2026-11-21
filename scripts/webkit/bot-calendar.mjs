@@ -6,7 +6,7 @@
 // stands right of the grid; nothing leaves the window, and no page error.
 // Run after pnpm build: node scripts/webkit/bot-calendar.mjs
 // BOT_CALENDAR_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve, sidebar } from "./harness.mjs";
+import { launch, open, report, serve, sidebar, emitHeard } from "./harness.mjs";
 
 const shots = process.env.BOT_CALENDAR_SHOTS;
 const server = await serve();
@@ -184,7 +184,7 @@ try {
       await choose.getByRole("button", { name: "Cancel" }).click();
 
       // One bot's week, on its Duties tab.
-      await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "bot-home" }));
+      await emitHeard(page, "open_session", { sessionId: "bot-home" });
       const view = page.getByRole("main", { name: "Atlas, CTO" });
       await view.waitFor();
       await view.getByRole("tab", { name: "Duties" }).click();
