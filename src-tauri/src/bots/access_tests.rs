@@ -483,6 +483,9 @@ fn a_repository_flag_or_a_query_from_a_file_does_not_get_past_the_gate() {
         "gh issue --repo=acme/app comment 7 --body-file note.md",
         "gh pr -Racme/app review 12 --comment -b LGTM",
         "gh pr comment -R acme/app 12 -b hi",
+        // As `gh` reads them: `-R` takes the next word whatever it is, and is inherited when it stands before `pr`.
+        "gh -R acme/app pr comment 12 -b hi",
+        "gh issue -R -b comment 7 --body hi",
         "cd /tmp && gh pr -R acme/app comment 12 -b hi",
         "gh api graphql -F query=@add.graphql",
         "gh api graphql --field=query=@add.graphql -F subject=I_1",
