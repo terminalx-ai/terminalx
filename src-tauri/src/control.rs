@@ -475,6 +475,12 @@ impl ControlService {
         None
     }
 
+    /// A request as the control socket hands it on, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn execute_for_tests(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        self.execute(command, params, "test")
+    }
+
     pub(crate) fn with_local_lifetime(mut self, lifetime: Arc<crate::local_runtime::Lifetime>) -> Self {
         self.local_lifetime = Some(lifetime);
         self
@@ -2805,6 +2811,10 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
         }
         let caller = Caller::of_process(manager, &json!({}), Some(pid));
         caller.refuse_gone()?;
+        // A bot reads its own duties, and no other bot's (PRO-471).
+        if caller.bot.is_some() && own_duties_read(command, params, caller.bot.as_deref()) {
+            return Ok(());
+        }
         if caller.bot.is_some() {
             return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
         }
@@ -2819,6 +2829,12 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     #[cfg(not(unix))]
     let _ = (manager, window, pid);
     Ok(())
+}
+
+/// Whether a call reads bot `bot`'s own duties. The window and a person's
+/// terminal read any bot's; a process in a bot's session reads only its own.
+fn own_duties_read(command: &str, params: &Value, bot: Option<&str>) -> bool {
+    command == "runtime.session.bots" && params["operation"] == "duties" && bot.is_some_and(|bot| params["params"]["id"].as_str() == Some(bot))
 }
 
 /// The `runtime.session.*` and `runtime.pty.*` calls that only read, which
@@ -2908,6 +2924,13 @@ fn bots_action(operation: &str) -> &'static str {
         "delete" => "delete a bot",
         "roleWrite" | "roleRestore" => "change a bot's role",
         "memoryAdd" | "memoryForget" | "memoryUndo" => "change a bot's memory",
+        "dutySave" => "add or change a bot's duty",
+        "dutySwitch" => "switch a bot's duty on",
+        "dutyDelete" => "remove a bot's duty",
+        "dutyDuplicate" => "copy a bot's duty",
+        "dutyRun" => "run a bot's duty",
+        "dutyTryCheck" => "try a duty's first check",
+        "quietHours" => "change a bot's quiet hours",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -4181,6 +4204,31 @@ mod tests {
         TEST_WINDOW_PROCESS.with(|window| window.set(None));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
         service.manager.terminals().kill(&pane);
+    }
+
+    /// L9 (PRO-471 review 1): a process in a bot's session, through the
+    /// dispatch, reads its own bot's duties and no other's, and changes none.
+    #[cfg(unix)]
+    #[test]
+    fn a_bots_session_reads_its_own_duties_and_changes_none() {
+        let marker = format!("71.{}", std::process::id());
+        let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+        let before = crate::bots::duties::duties_of(&id).unwrap().len();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let bots = |operation: &str, params: Value| service.execute("runtime.session.bots", json!({"operation": operation, "params": params}), "r");
+        let own = bots("duties", json!({"id": id})).unwrap();
+        assert!(own["notes"].is_object(), "{own}");
+        assert!(bots("duties", json!({"id": other})).is_err(), "another bot's duties");
+        let input = json!({"name": "Mine now", "prompt": "Look.", "enabled": true,
+            "schedule": {"kind": "preset", "preset": "hourly", "minute": 0, "weekdays": [], "timezone": "UTC", "dtstart": "2026-01-01T00:00:00Z"}});
+        let refused = bots("dutySave", json!({"id": id, "input": input})).unwrap_err();
+        assert_ne!(refused.code, "ok");
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        assert_eq!(crate::bots::duties::duties_of(&id).unwrap().len(), before, "nothing was added");
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
     }
 
     /// F1: after a handover the runtime that took over adopts the bot's

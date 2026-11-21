@@ -76,3 +76,18 @@ describe("a bot's chats (PRO-468)", () => {
     expect(botChats([older, newer], "b1").chats.map((chat) => chat.id)).toEqual(["newer", "older"]);
   });
 });
+
+describe("a bot's duty runs (PRO-471)", () => {
+  it("are its sessions too, listed apart from its chats, newest first", () => {
+    const home = session("home", { bot: { id: "b1", home: true } });
+    const chat = session("chat", { bot: { id: "b1" } });
+    const early = session("early", { bot: { id: "b1" }, botDuty: { id: "d1" }, modified: "2026-11-20T08:00:00Z" });
+    const late = session("late", { bot: { id: "b1" }, botDuty: { id: "d2" }, modified: "2026-11-20T11:00:00Z" });
+    const elsewhere = session("elsewhere", { bot: { id: "b2" }, botDuty: { id: "d3" } });
+    const { chats, dutyRuns } = botChats([early, home, chat, late, elsewhere], "b1");
+    expect(chats.map((entry) => entry.id)).toEqual(["home", "chat"]);
+    expect(dutyRuns.map((entry) => entry.id)).toEqual(["late", "early"]);
+    // Still the bot's: the sidebar leaves them to its view.
+    expect(listedUnderBot(late, [{ id: "b1" }])).toBe(true);
+  });
+});

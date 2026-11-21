@@ -61,6 +61,26 @@
   or the bot's page opens and before each of its chats starts, one change per
   file), is recorded with where it came from in a change log kept outside the
   bot's home folder, each with Undo (PRO-470).
+- Bots (experimental): duties. A duty is an automation a bot owns, listed on
+  its bot's Duties tab rather than on the Automations page, and run as the
+  bot: on its agent, model and access, in its home folder, with its role and
+  memory. Its first check runs before the model, as you, in an empty folder
+  of the duty's own rather than in the bot's home; when the check prints
+  nothing the run is logged as "nothing new", with no session, no spend and
+  no notification. A duty runs once at a time, a run past its timeout is
+  stopped, and older run sessions are archived. Otherwise the bot looks, and its reply is reported where
+  the duty says: a note in the bot's home chat and a notification, or a note
+  in its lead's home chat (Slack, Telegram and a pull request are shown, off).
+  A reply of "Nothing new." tells nobody; one that starts "URGENT:" reaches
+  the owner's notifications even in the bot's quiet hours. Each duty keeps a
+  small note between runs (`duties/<id>.md` in the bot's home). A paused bot's
+  duties do not run, and runs that fall due meanwhile are skipped, not run
+  late. The Duties tab has the table, today's counts, the log and quiet
+  hours; a duty's page has its four steps, its runs, Run now, Pause and
+  Duplicate. At hire, the role's scheduled duties arrive switched off.
+  Deleting a bot removes its duties, kept with its home in the trash.
+  Adding, changing, running or switching on a duty, and quiet hours, are the
+  owner's to do from the window (PRO-471).
 
 ## 0.2.37
 
