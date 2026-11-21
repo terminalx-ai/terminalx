@@ -61,6 +61,8 @@ pub const MAX_OPEN_TO: usize = 20;
 /// Hand-offs between the same two bots, either way and closed ones counted, in [`PAIR_WINDOW`].
 pub const PAIR_LIMIT: usize = 6;
 pub const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// How long after the owner stops a hand-off its sender may not hand the same work on again.
+pub const STOPPED_HOLD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 /// Chats for hand-offs one bot runs at once.
 pub const MAX_RUNNING_WORK: usize = 4;
 /// Open hand-offs across the bots.
@@ -771,11 +773,22 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             return Err(refused(why));
         }
         // Work the owner stopped is not handed on again as a new hand-off, to that bot or another (PRO-498): the same
-        // title from the same sender, for as long as the stopped one is kept. The owner hands it again themselves.
-        if let Some(stopped) = store.handoffs.iter().find(|handoff| handoff.from == from.id && handoff.state == HandoffState::Stopped && handoff.stopped_by.as_deref() == Some(OWNER) && work_key(&handoff.title) == same_work) {
+        // title from the same sender, for [`STOPPED_HOLD`] after the stop, so recurring work (a daily duty's) goes on
+        // the next day. A title with no letters or digits names no work, and is not matched.
+        let held_since = chrono::Utc::now() - chrono::Duration::from_std(STOPPED_HOLD).unwrap_or_default();
+        let stopped = store.handoffs.iter().filter(|_| !same_work.is_empty()).find(|handoff| {
+            handoff.from == from.id
+                && handoff.state == HandoffState::Stopped
+                && handoff.stopped_by.as_deref() == Some(OWNER)
+                && work_key(&handoff.title) == same_work
+                && handoff.closed.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).is_some_and(|at| at >= held_since)
+        });
+        if let Some(stopped) = stopped {
             return Err(refused(format!(
-                "Your owner stopped hand-off {} (\"{}\"), and work they stopped is not handed on again unless they ask. Ask them with `terminalx bots items ask` if it should go on; they hand it on themselves from your page in the window.",
-                stopped.number, stopped.title
+                "Your owner stopped hand-off {} (\"{}\") less than {} hours ago, and work they stopped is not handed on again within that time unless they ask. Ask them in your chat if it should go on; they can hand it on themselves from your page in the window.",
+                stopped.number,
+                stopped.title,
+                STOPPED_HOLD.as_secs() / 3600
             )));
         }
         // Back and forth between two bots is bounded over time, closed hand-offs counted too. What the owner handed

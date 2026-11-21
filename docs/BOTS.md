@@ -367,10 +367,12 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   hand-off is open, then stops the receiving bot's chat for that hand-off
   and the sessions it started for its item, drops the item, and tells the
   sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
-  Work the owner stopped is not handed on again: a new hand-off from the
-  same sender with the same title (case, spacing and punctuation aside), to
-  any bot, is refused while the stopped one is kept, and its sender is told
-  to ask the owner, who hands it on from the window (PRO-498).
+  Work the owner stopped is not handed on again for 24 hours after the
+  stop: a new hand-off from the same sender with the same title (case,
+  spacing and punctuation aside; a title with no letters or digits is never
+  matched), to any bot, is refused, and its sender is told to ask the owner,
+  who can hand it on from the window. After that, recurring work (a daily
+  duty's hand-off) goes on (PRO-498).
 - **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
   (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
   most. Every launch of a bot's chat is given it as the owner's standing
