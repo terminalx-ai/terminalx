@@ -37,7 +37,7 @@ import {
 } from "@/components/ui/menu";
 import { openSessionShare } from "@/lib/localSharing";
 import { showFloatingWindow } from "@/lib/floating";
-import { isQuickChat } from "@/lib/quickChats";
+import { inScratch, isQuickChat, quickChatPlace } from "@/lib/quickChats";
 import { listedUnderBot } from "@/lib/botChats";
 import { useBotStore } from "@/lib/bots";
 import { useShortcutKeys } from "@/lib/hotkeys";
@@ -123,6 +123,8 @@ export function conversationLink(
   chatsPath: string | null,
   workspaces: Record<string, Workspace[]> = {},
 ): { path: string; project: Project | null; name: string; branch: string | null } | null {
+  // A quick chat has no project: its path is its scratch folder, named by its own id (#1464).
+  if (isQuickChat(session)) return quickChatLink(session, projects, chatsPath, workspaces);
   // The branch is named the same way the tab strip groups a branch's sessions by (`conversationBranch`).
   const branch = conversationBranch(session, chatsPath, workspaces);
   if (canon(session.projectPath) === chatsPath) {
@@ -135,6 +137,39 @@ export function conversationLink(
   const path = canon(session.projectPath);
   const project = projects.find((entry) => canon(entry.path) === path) ?? null;
   return { path: session.projectPath, project, name: project?.name ?? (path.split("/").pop() || path), branch };
+}
+
+const holds = (dir: string, path: string) => path === dir || path.startsWith(`${dir}/`);
+
+/**
+ * A quick chat is linked to the listed project it was pointed into, its
+ * folder or one of its worktrees, as a chat is to the repository its agent
+ * works in; the folder never becomes a project. In its scratch folder, or
+ * pointed anywhere else, it is linked to nothing and listed under Chats. The
+ * deepest folder that holds it wins, so a worktree kept inside its project's
+ * folder names its own branch.
+ */
+function quickChatLink(
+  session: SessionEntry,
+  projects: Project[],
+  chatsPath: string | null,
+  workspaces: Record<string, Workspace[]>,
+): { path: string; project: Project; name: string; branch: string | null } | null {
+  if (inScratch(session)) return null;
+  const cwd = canon(session.cwd);
+  let best: { depth: number; project: Project; branch: string | null } | null = null;
+  for (const project of projects) {
+    const root = canon(project.path);
+    if (project.archived || root === chatsPath) continue;
+    const checkouts = workspaces[project.path] ?? workspaces[root] ?? [];
+    const places = [{ path: root, branch: checkouts.find((checkout) => checkout.isMain)?.branch ?? null }, ...checkouts.map((checkout) => ({ path: canon(checkout.path), branch: checkout.branch }))];
+    for (const place of places) {
+      if (!place.path || !holds(place.path, cwd) || (best && best.depth >= place.path.length)) continue;
+      best = { depth: place.path.length, project, branch: place.branch };
+    }
+  }
+  if (!best) return null;
+  return { path: best.project.path, project: best.project, name: best.project.name, branch: best.branch ?? session.branch ?? null };
 }
 
 /** Where a row out of its project lives, for its tooltip: the project, then the branch by the label it was given. */
@@ -174,12 +209,31 @@ export function groupConversations(
   showArchived = false,
   sort: SidebarSort = "updated",
   order?: SidebarOrder,
+  /**
+   * The sidebar nests a session another started under it (orchestration, PRO-281): a quick chat started by a
+   * session in the same list then joins its parent's project, where it can nest, rather than being listed apart.
+   */
+  nestChildren = false,
 ): { groups: ConversationGroup[]; chats: SessionEntry[]; archivedChats: SessionEntry[] } {
   const groups = new Map<string, ConversationGroup>();
   const chats: SessionEntry[] = [];
   const archivedChats: SessionEntry[] = [];
+  const listed = new Map(sessions.map((session) => [session.id, session]));
+  const linkOf = (session: SessionEntry) => {
+    const own = conversationLink(session, projects, chatsPath, workspaces);
+    if (!nestChildren || !isQuickChat(session)) return own;
+    // Up through quick chats to the first session that is not one; a loop in the records follows nothing.
+    const seen = new Set([session.id]);
+    let parent = session.parent?.sessionId ? listed.get(session.parent.sessionId) : undefined;
+    while (parent && isQuickChat(parent) && !seen.has(parent.id)) {
+      seen.add(parent.id);
+      parent = parent.parent?.sessionId ? listed.get(parent.parent.sessionId) : undefined;
+    }
+    const lead = parent && !seen.has(parent.id) ? conversationLink(parent, projects, chatsPath, workspaces) : null;
+    return lead ? { ...lead, branch: own?.project === lead.project ? own.branch : lead.branch } : own;
+  };
   const add = (session: SessionEntry, archived: boolean) => {
-    const link = conversationLink(session, projects, chatsPath, workspaces);
+    const link = linkOf(session);
     if (!link) {
       (archived ? archivedChats : chats).push(session);
       return;
@@ -280,9 +334,11 @@ export function SessionSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch
   const pinned = useMemo(() => listed.filter((session) => session.pinned && !session.archived), [listed]);
   const unpinned = useMemo(() => (pinned.length ? listed.filter((session) => !session.pinned || session.archived) : listed), [listed, pinned]);
   const sectionedSessions = useMemo(() => groupLocalSessions(unpinned, localSections), [unpinned, localSections]);
+  // Where a project nests the sessions others started (orchestration), a quick chat goes to its parent's project too.
+  const nestChildren = useExperimentalSettings()?.orchestratorRuns === true;
   const { groups: allGroups, chats, archivedChats } = useMemo(
-    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort, order),
-    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort, order],
+    () => groupConversations(sectionedSessions.ungrouped, store.projects, chatsPath, store.workspaces, store.selectedSessionId, !filter.active, showArchived, sidebarSort, order, nestChildren),
+    [sectionedSessions, store.projects, chatsPath, store.workspaces, store.selectedSessionId, filter.active, showArchived, sidebarSort, order, nestChildren],
   );
 
   // Hide project (02.14): out of the sidebar, its sessions still running. A filter that a hidden project's session
@@ -1461,7 +1517,8 @@ export function ConversationRow({
   // One status for all the sessions the row stands for: the mark leads the row, its label is the mark's name (02.04).
   const rowStatus = useSessionRowStatus(peers);
   // A row is its name and its age: which agent runs it is in the chat, and where it works is in its tooltip.
-  const branchName = locationLabel ?? label ?? branch;
+  // A quick chat under Chats says where it runs: its scratch folder, or the folder it was pointed at (#1464).
+  const branchName = locationLabel ?? label ?? branch ?? (isQuickChat(session) ? quickChatPlace(session) : null);
   // The visible title belongs to the session, even when this row represents a branch.
   const rename = () => openRenameSession(session.id);
   return (

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Sidebar: a quick chat is no longer a project of its own named by its
+  session id. It is listed under Chats by its title, saying in its tooltip
+  where it runs (its scratch folder, or the folder it was pointed at); one
+  pointed into a listed project's folder or one of its worktrees is listed
+  under that project, and with orchestration on, one another session started
+  joins its parent's project, where it nests (#1464).
+
 - Bots (experimental): a bot's Claude Code sessions run no inline `!` command
   of a skill or custom slash command, which runs as it loads with no tool call
   the access gate could see; the command is replaced by a placeholder and the
