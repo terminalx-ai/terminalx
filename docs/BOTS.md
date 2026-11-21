@@ -812,8 +812,8 @@ minute they fall on.
   it show "history not kept", never "none ran", and the totals say "at
   least". A log that cannot be read is said on its duty's row
   (`logs[].unreadable`) and its past days are not kept either.
-- **Which weeks.** Weeks from 3 January 2000 to the end of 2199 can be shown;
-  others are refused, and the arrows stop there. A day whose midnight does not
+- **Which weeks.** Weeks whose first day is from 1 January 2000 to the end
+  of 2199 can be shown; others are refused, and the arrows stop there. A day whose midnight does not
   exist (clocks moved forward over it) starts at the first valid instant.
 - **Changing from the calendar** uses the duties' own guarded routes: a
   click on an empty hour opens the duty editor with a weekly schedule at that
@@ -827,6 +827,18 @@ minute they fall on.
 - **Who may read it.** The window and a person's terminal read any bot's
   week or every bot's. A process in a bot's session reads its own bot's week
   only (`control.rs`, `own_duties_read`).
+
+### Decisions after the follow-up (PRO-499)
+
+Each was a default taken to start the work; the owner may change any of them.
+
+| Item | Built |
+|---|---|
+| Many duties at one time | Side by side while each stays at least 48 pixels wide; past that, the last lane of the group is a "+N more" that opens a list of the rest, each opening its duty (`fitLanes`) |
+| First day of the week | The system's region (`Intl.Locale` week info for the window's locale, `firstWeekday`); no new setting. `dutyWeek` takes `firstDay` (0 Monday … 6 Sunday, Monday when absent) and a block's `day` counts from it. Stored weekdays and cron days keep their meaning; the screen reads each column's weekday from its date, so an older runtime's Monday week still adds and moves on the right days |
+| Keyboard | The hours are an ARIA grid under the blocks with one tab stop: the arrow keys move between hours and days, Home and End to the week's ends, Page Up and Down by six hours, Enter or Space adds a duty at the hour. On a block still to come, Alt (Option) and the arrows move it by 15 minutes or a day, shown where it would go; Enter saves it, Escape or leaving it puts it back |
+| A deleted duty's past runs | `dutyDelete` keeps the run log, with the definition and when it was deleted beside it (`automations/<id>/deleted.json`); one that never ran leaves nothing. A run still going ends then, as stopped ("Its duty was deleted before this run finished."): recovery and a run's own ending read only the duties there are, so nothing would close it after, and a run the log gets after the delete is read as ended at it. Its past runs are drawn dimmed with a bin mark and "(deleted)", never moved, nothing of it is to come, and it is named from `deleted[]`. Clicking one opens its kept log (`dutyKeptLog`, a read), whose runs open their sessions on a bot's Duties tab. Deleting the bot takes its deleted duties' logs to its home in the trash |
+| A run past midnight | Drawn again from each later midnight of the week it covers, as a block marked `continued` whose `minutes` run from there; one begun the week before is drawn from the week's first midnight and counted in the week it began |
 
 ## Look around, suggestions and the memory tidy (PRO-477)
 

@@ -6481,10 +6481,17 @@ pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<ser
     bots_call(state, "duties", serde_json::json!({"id": id})).await
 }
 
-/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`).
+/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`); `first_day` the
+/// weekday it starts on, 0 for Monday … 6 for Sunday (PRO-499).
 #[tauri::command]
-pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>) -> CmdResult<serde_json::Value> {
-    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week})).await
+pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>, first_day: Option<u8>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week, "firstDay": first_day})).await
+}
+
+/// What is kept of bot `id`'s deleted duty `duty_id` (PRO-499): its name, when it was deleted, and its run log.
+#[tauri::command]
+pub async fn bot_duty_kept_log(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyKeptLog", serde_json::json!({"id": id, "dutyId": duty_id})).await
 }
 
 /// Add a duty (`duty_id` absent) or change one.

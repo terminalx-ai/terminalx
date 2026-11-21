@@ -1,3 +1,4 @@
+import type { AutomationRun } from "@/types/automations";
 import type { QuietHours } from "@/types/botDuties";
 
 /**
@@ -10,7 +11,7 @@ export type BlockState = "done" | "reported" | "quiet" | "next" | "running" | "f
 export interface CalendarBlock {
   dutyId: string;
   botId: string;
-  /** 0 for Monday … 6 for Sunday. */
+  /** The column: 0 for the week's first day (`days[0]`, Monday unless asked for another) … 6. */
   day: number;
   /** Minutes after midnight, in the owner's time zone. */
   minute: number;
@@ -23,6 +24,27 @@ export interface CalendarBlock {
   runId?: string;
   sessionId?: string;
   note?: string;
+  /** Its duty was deleted: its run is kept in the duty's log (PRO-499). */
+  deleted?: boolean;
+  /** Its run began on an earlier day and goes on over this day's midnight; `minutes` is from there (PRO-499). */
+  continued?: boolean;
+}
+
+/** A deleted duty drawn this week, by its name (PRO-499). */
+export interface DeletedDuty {
+  dutyId: string;
+  botId: string;
+  name: string;
+  deletedAt: string;
+}
+
+/** What is kept of a deleted duty: its name, when it went, and its run log, newest first (PRO-499). */
+export interface KeptLog {
+  dutyId: string;
+  botId: string;
+  name: string;
+  deletedAt: string;
+  runs: AutomationRun[];
 }
 
 /** One day of a counted row. */
@@ -65,7 +87,7 @@ export interface NextRun {
 /** A week of duties, as `dutyWeek` reads it from the run logs and the schedules. */
 export interface DutyWeek {
   timezone: string;
-  /** Monday first, `YYYY-MM-DD`. */
+  /** From the week's first day, `YYYY-MM-DD`: Monday unless another was asked for (PRO-499). */
   days: string[];
   today: number | null;
   nowMinute: number | null;
@@ -82,4 +104,6 @@ export interface DutyWeek {
   notKept: NotKept[][];
   /** The duties whose log is cut, unreadable or capped this week. */
   logs: DutyLog[];
+  /** The deleted duties drawn this week; absent from an older runtime. */
+  deleted?: DeletedDuty[];
 }

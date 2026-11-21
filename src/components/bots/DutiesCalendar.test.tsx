@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   runtime: { state: { state: "connected", epoch: "e7" } } as { state: Record<string, unknown> | null },
   runtimeListeners: new Set<() => void>(),
   replace: vi.fn(async (_epoch: string, _stop: unknown[]) => undefined),
+  // The weekday the system's region starts the week on: Monday unless a test says otherwise.
+  firstDay: 0,
 }));
 
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: (error: unknown) => String(error), automationsApi: { tryPrecheck: vi.fn() } }));
@@ -42,6 +44,7 @@ const attach = (state: Record<string, unknown>) => {
   mocks.runtime = { state };
   mocks.runtimeListeners.forEach((listener) => listener());
 };
+vi.mock("@/lib/botCalendar", async (importOriginal) => ({ ...(await importOriginal<object>()), firstWeekday: () => mocks.firstDay }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { DutiesCalendar } = await import("./DutiesCalendar");
@@ -108,6 +111,7 @@ const RESTART = "runtime_restart_required:e1: The TerminalX runtime that is runn
 
 beforeEach(() => {
   mocks.runtime = { state: { state: "connected", epoch: "e7" } };
+  mocks.firstDay = 0;
   mocks.replace.mockReset();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-20T13:24:00Z"));
@@ -150,7 +154,7 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
   it("draws one block per run in the state its run left it, and the rest of the week still to come", async () => {
     calendar();
     await screen.findAllByTestId("calendar-block");
-    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_week", { id: null, week: null });
+    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_week", { id: null, week: null, firstDay: 0 });
     const shown = blocks().map((block) => [block.dataset.duty, block.dataset.state, block.textContent]);
     expect(shown).toEqual([
       ["d3", "reported", "Audit of main"],
@@ -226,20 +230,20 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     calendar();
     await screen.findAllByTestId("calendar-block");
     fireEvent.click(screen.getAllByTestId("calendar-filter-bot")[1]);
-    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: null }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: null, firstDay: 0 }));
     await waitFor(() => expect(blocks().every((block) => block.dataset.duty === "d3")).toBe(true));
     expect(screen.getAllByTestId("calendar-filter-bot")[1].getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "The week after" }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: "2026-11-23" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: "2026-11-23", firstDay: 0 }));
     fireEvent.click(screen.getByRole("button", { name: "This week" }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: null }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenLastCalledWith("bot_duty_week", { id: "b2", week: null, firstDay: 0 }));
   });
 
   it("adds a duty at a clicked empty hour, and opens a duty from its block", async () => {
     const { onAdd, onOpenDuty } = calendar({ single: atlas });
     await screen.findAllByTestId("calendar-block");
-    // Thursday, 15:20 on the grid: the hour from 15:00.
-    fireEvent.click(screen.getAllByTestId("calendar-day")[3], { clientX: 350, clientY: 15 * 46 + 15 });
+    // Thursday, the hour from 15:00.
+    fireEvent.click(screen.getByRole("gridcell", { name: "Thu 19, 15:00" }));
     expect(onAdd).toHaveBeenCalledWith(atlas, { day: 3, minute: 15 * 60, timezone: "UTC" });
     const block = blocks()[0];
     fireEvent.pointerDown(block, { button: 0, pointerId: 1, clientX: 50, clientY: 500 });
@@ -527,7 +531,7 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     render(<BotsDuties />);
     await screen.findAllByTestId("calendar-block");
     expect(screen.getByRole("radio", { name: "Calendar" }).getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(screen.getAllByTestId("calendar-day")[0], { clientX: 50, clientY: 9 * 46 + 4 });
+    fireEvent.click(screen.getByRole("gridcell", { name: "Mon 16, 09:00" }));
     const choose = screen.getByTestId("bots-duties-choose");
     expect(choose.textContent).toContain("Add a duty on Mon at 09:00 for");
     fireEvent.click(within(choose).getByRole("button", { name: /Argus/ }));
@@ -548,14 +552,204 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     render(<BotDuties bot={atlas} onOpenSession={() => {}} />);
     fireEvent.click(screen.getByRole("radio", { name: "Calendar" }));
     await screen.findAllByTestId("calendar-block");
-    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_week", { id: "b1", week: null });
+    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_week", { id: "b1", week: null, firstDay: 0 });
     expect(screen.queryByTestId("calendar-filter")).toBeNull();
-    fireEvent.click(screen.getAllByTestId("calendar-day")[2], { clientX: 250, clientY: 7 * 46 + 30 });
+    fireEvent.click(screen.getByRole("gridcell", { name: "Wed 18, 07:00" }));
     expect(screen.getByTestId("duty-editor").textContent).toContain("Wednesdays at 07:00 · UTC");
     fireEvent.click(within(screen.getByTestId("duty-editor")).getByRole("button", { name: "Cancel" }));
     // Back on the calendar, which stays the tab's view.
     await screen.findByTestId("duties-calendar");
     fireEvent.click(screen.getByRole("radio", { name: "List" }));
     expect(screen.getByTestId("duties-table")).toBeTruthy();
+  });
+});
+
+describe("the decisions left after the follow-up (PRO-499)", () => {
+  /** The week as the runtime answers with `extra` blocks and fields. */
+  const answering = (change: (value: DutyWeek, args: Record<string, unknown>) => DutyWeek, more: Record<string, (args: Record<string, unknown>) => unknown> = {}) => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_week") return change(week(), args);
+      if (more[command]) return more[command](args);
+      return answer(command, args);
+    });
+  };
+
+  it("starts the week on the region's first day, and a column's weekday is still its own", async () => {
+    mocks.firstDay = 6;
+    const saturday = { ...audit, schedule: { ...audit.schedule, weekdays: ["SA"] } };
+    mocks.automations.automations = [status, look, saturday, stalled];
+    // A week from Sunday 15 November, as this runtime reads it when asked: Saturday's audit is its last column.
+    answering((value) => ({
+      ...value,
+      days: ["2026-11-15", ...DAYS.slice(0, 6)],
+      today: 5,
+      blocks: [{ dutyId: "d3", botId: "b2", day: 6, minute: 660, at: "2026-11-21T11:00:00Z", state: "next", count: 1 }],
+    }));
+    const { onAdd } = calendar();
+    await screen.findAllByTestId("calendar-block");
+    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_week", { id: null, week: null, firstDay: 6 });
+    expect(screen.getAllByTestId("calendar-day-head").map((head) => head.textContent)).toEqual(["Sun15", "Mon16", "Tue17", "Wed18", "Thu19", "Fri20", "Sat21"]);
+    expect(screen.getByRole("group", { name: "The week of 15–21 Nov, by day" })).toBeTruthy();
+    // Monday is the second column, and a duty added there is on Mondays.
+    fireEvent.click(screen.getByRole("gridcell", { name: "Mon 16, 09:00" }));
+    expect(onAdd).toHaveBeenLastCalledWith(null, { day: 0, minute: 9 * 60, timezone: "UTC" });
+    // Moved a day back by the keyboard, Saturday's duty is on Fridays: the days between, never the column's place.
+    const block = blocks()[0];
+    act(() => block.focus());
+    fireEvent.keyDown(block, { key: "ArrowLeft", altKey: true });
+    expect(screen.getByTestId("calendar-key-move").textContent).toBe("Moving Audit of main to Fri 11:00: Enter saves it there, Escape puts it back.");
+    fireEvent.keyDown(block, { key: "Enter" });
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.objectContaining({ id: "b2", dutyId: "d3", input: expect.objectContaining({ schedule: expect.objectContaining({ preset: "weekly", weekdays: ["FR"], hour: 11, minute: 0 }) }) })));
+  });
+
+  it("names each column by its date when an older runtime starts the week on Monday whatever was asked", async () => {
+    mocks.firstDay = 6;
+    const { onAdd } = calendar();
+    await screen.findAllByTestId("calendar-block");
+    expect(screen.getAllByTestId("calendar-day-head")[0].textContent).toBe("Mon16");
+    fireEvent.click(screen.getByRole("gridcell", { name: "Sun 22, 09:00" }));
+    expect(onAdd).toHaveBeenLastCalledWith(null, { day: 6, minute: 9 * 60, timezone: "UTC" });
+  });
+
+  it("moves between hours and days with the arrow keys, and Enter adds a duty at the hour", async () => {
+    const { onAdd } = calendar({ single: atlas });
+    await screen.findAllByTestId("calendar-block");
+    expect(screen.getByRole("grid", { name: "Hours of the week of 16–22 Nov" }).getAttribute("aria-rowcount")).toBe("24");
+    // One stop on the grid: now's hour, Friday 13:00.
+    const stops = screen.getAllByTestId("calendar-cell").filter((cell) => cell.tabIndex === 0);
+    expect(stops.map((cell) => cell.getAttribute("aria-label"))).toEqual(["Fri 20, 13:00"]);
+    const focused = () => document.activeElement?.getAttribute("aria-label");
+    act(() => stops[0].focus());
+    for (const [key, name] of [["ArrowRight", "Sat 21, 13:00"], ["ArrowUp", "Sat 21, 12:00"], ["Home", "Mon 16, 12:00"], ["ArrowUp", "Mon 16, 11:00"], ["ArrowUp", "Mon 16, 10:00: Look around"], ["End", "Sun 22, 10:00"], ["PageDown", "Sun 22, 16:00"], ["ArrowLeft", "Sat 21, 16:00"]] as const) {
+      fireEvent.keyDown(document.activeElement!, { key });
+      expect(focused()).toBe(name);
+    }
+    expect(screen.getAllByTestId("calendar-cell").filter((cell) => cell.tabIndex === 0)).toHaveLength(1);
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(onAdd).toHaveBeenCalledWith(atlas, { day: 5, minute: 16 * 60, timezone: "UTC" });
+  });
+
+  it("moves a focused block still to come with Alt and the arrows, saves it with Enter and puts it back with Escape", async () => {
+    const { onOpenDuty } = calendar({ single: atlas });
+    await screen.findAllByTestId("calendar-block");
+    const block = () => blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
+    act(() => block().focus());
+    fireEvent.keyDown(block(), { key: "ArrowDown", altKey: true });
+    fireEvent.keyDown(block(), { key: "ArrowDown", altKey: true });
+    expect(screen.getByTestId("calendar-drop").textContent).toBe("18:30 Daily status");
+    expect(screen.getByTestId("calendar-key-move").textContent).toContain("Moving Daily status to Fri 18:30");
+    fireEvent.keyDown(block(), { key: "Escape" });
+    expect(screen.queryByTestId("calendar-drop")).toBeNull();
+    expect(screen.queryByTestId("calendar-key-move")).toBeNull();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(false);
+    // Up a step and saved.
+    fireEvent.keyDown(block(), { key: "ArrowUp", altKey: true });
+    fireEvent.keyDown(block(), { key: "Enter" });
+    expect(await screen.findByTestId("calendar-moved")).toBeTruthy();
+    expect(screen.getByTestId("calendar-moved").textContent).toContain("Daily status moved: Daily at 18:00 → Daily at 17:45.");
+    // One that has run is not moved, and says so; Enter opens it.
+    const ran = blocks().find((value) => value.dataset.state === "done")!;
+    fireEvent.keyDown(ran, { key: "ArrowUp", altKey: true });
+    expect(screen.getByTestId("calendar-notice").textContent).toBe("Look around is not moved: only a block still to come moves.");
+    fireEvent.keyDown(ran, { key: "Enter" });
+    expect(onOpenDuty).toHaveBeenCalledWith(atlas, "d2");
+  });
+
+  it("keeps blocks side by side while each is readable, and lists the rest from a \"+N more\"", async () => {
+    // Saturday 10:00 has four; a column is 100 pixels wide here, room for two side by side.
+    answering((value) => ({
+      ...value,
+      blocks: [
+        ...value.blocks,
+        { dutyId: "d1", botId: "b1", day: 5, minute: 600, at: "2026-11-21T10:00:00Z", state: "next", count: 1 },
+        { dutyId: "d4", botId: "b2", day: 5, minute: 610, at: "2026-11-21T10:10:00Z", state: "next", count: 1 },
+      ],
+    }));
+    const { onOpenDuty } = calendar();
+    await screen.findAllByTestId("calendar-block");
+    const saturday = within(screen.getByRole("group", { name: "Sat 21" }));
+    expect(saturday.getAllByTestId("calendar-block")).toHaveLength(1);
+    const more = saturday.getByTestId("calendar-more");
+    expect(more.textContent).toBe("+3 more");
+    expect(more.getAttribute("aria-label")).toBe("3 more at 10:00: Look around, Daily status, Stalled sessions");
+    fireEvent.click(more);
+    const items = await screen.findAllByTestId("calendar-more-item");
+    expect(items.map((item) => item.textContent)).toEqual(["10:00Look aroundAtlas", "10:00Daily statusAtlas", "10:10Stalled sessionsArgus"]);
+    fireEvent.click(items[1]);
+    expect(onOpenDuty).toHaveBeenCalledWith(atlas, "d1");
+    // Monday's two still fit side by side.
+    expect(within(screen.getByRole("group", { name: "Mon 16" })).queryByTestId("calendar-more")).toBeNull();
+  });
+
+  it("keeps a deleted duty's past runs, dimmed, by its name, and opens its kept log", async () => {
+    const onOpenSession = vi.fn();
+    answering(
+      (value) => ({
+        ...value,
+        blocks: [...value.blocks, { dutyId: "d8", botId: "b1", day: 1, minute: 540, at: "2026-11-17T09:00:00Z", state: "reported", count: 1, runId: "r8", sessionId: "s8", deleted: true }],
+        deleted: [{ dutyId: "d8", botId: "b1", name: "Old digest", deletedAt: "2026-11-18T12:00:00Z" }],
+      }),
+      {
+        bot_duty_kept_log: () => ({
+          dutyId: "d8", botId: "b1", name: "Old digest", deletedAt: "2026-11-18T12:00:00Z",
+          runs: [{ runId: "r8", runNumber: 1, automationId: "d8", trigger: "scheduled", status: "completed", scheduledFor: "2026-11-17T09:00:00Z", startedAt: "2026-11-17T09:00:00Z", endedAt: "2026-11-17T09:04:00Z", sessionId: "s8", repeatCount: 1, duty: { reportedTo: "owner" } }],
+        }),
+      },
+    );
+    const { onOpenDuty } = calendar({ onOpenSession });
+    await screen.findAllByTestId("calendar-block");
+    const gone = blocks().find((block) => block.dataset.duty === "d8")!;
+    expect(gone.dataset.deleted).toBe("true");
+    expect(gone.textContent).toBe("Old digest");
+    expect(within(gone).getByTestId("calendar-block-deleted")).toBeTruthy();
+    expect(gone.className).toContain("opacity-55");
+    expect(gone.getAttribute("title")).toBe("Old digest (deleted) · Atlas · 09:00 · Ran and reported something");
+    // Not moved, by pointer or keys.
+    fireEvent.pointerDown(gone, { button: 0, pointerId: 9, clientX: 150, clientY: 9 * 46 + 5 });
+    fireEvent.pointerMove(gone, { button: 0, pointerId: 9, clientX: 150, clientY: 11 * 46 });
+    expect(screen.queryByTestId("calendar-drop")).toBeNull();
+    fireEvent.pointerUp(gone, { button: 0, pointerId: 9, clientX: 150, clientY: 9 * 46 + 5 });
+    // Its log opens, never its duty's page: it has none.
+    expect(onOpenDuty).not.toHaveBeenCalled();
+    const dialog = await screen.findByTestId("calendar-kept-log");
+    expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_kept_log", { id: "b1", dutyId: "d8" });
+    expect(within(dialog).getByText("Old digest (deleted)")).toBeTruthy();
+    expect(await within(dialog).findAllByTestId("calendar-kept-run")).toHaveLength(1);
+    expect(dialog.textContent).toContain("deleted Wed 18 Nov, 12:00");
+    // When it ended, as the duty page says it.
+    expect(dialog.textContent).toContain("Tue 17 Nov, 09:04");
+    expect(dialog.textContent).toContain("4m");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Reported" }));
+    expect(onOpenSession).toHaveBeenCalledWith("s8");
+    await waitFor(() => expect(screen.queryByTestId("calendar-kept-log")).toBeNull());
+    fireEvent.keyDown(gone, { key: "ArrowDown", altKey: true });
+    expect(screen.getByTestId("calendar-notice").textContent).toBe("Old digest is not moved: only a block still to come moves.");
+  });
+
+  it("goes on with a run past midnight on the next day, as a second block", async () => {
+    answering((value) => ({
+      ...value,
+      blocks: [
+        ...value.blocks,
+        { dutyId: "d1", botId: "b1", day: 2, minute: 23 * 60, at: "2026-11-18T23:00:00Z", state: "done", count: 1, runId: "r9", minutes: 150 },
+        { dutyId: "d1", botId: "b1", day: 3, minute: 0, at: "2026-11-19T00:00:00Z", state: "done", count: 1, runId: "r9", minutes: 90, continued: true },
+      ],
+    }));
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const wednesday = within(screen.getByRole("group", { name: "Wed 18" })).getAllByTestId("calendar-block").find((block) => block.dataset.state === "done")!;
+    const thursday = within(screen.getByRole("group", { name: "Thu 19" })).getAllByTestId("calendar-block").find((block) => block.dataset.continued === "true")!;
+    expect(wednesday.getAttribute("title")).toBe("Daily status · Atlas · 23:00 · Ran and did its work · ran 2 h 30 min, on past midnight");
+    expect(wednesday.className).toContain("rounded-b-none");
+    expect(thursday.textContent).toBe("↳ Daily status");
+    expect(thursday.getAttribute("title")).toBe("Daily status · Atlas · on from the day before, until 01:30 · Ran and did its work");
+    expect(thursday.className).toContain("rounded-t-none");
+    // From midnight, as tall as its hour and a half.
+    expect(thursday.style.top).toBe("1px");
+    expect(thursday.style.height).toBe(`${Math.round(1.5 * 46) - 2}px`);
+    // The hour it begins in names only the run that began there.
+    expect(screen.getByRole("gridcell", { name: "Wed 18, 23:00: Daily status" })).toBeTruthy();
+    expect(screen.getByRole("gridcell", { name: "Thu 19, 00:00" })).toBeTruthy();
   });
 });

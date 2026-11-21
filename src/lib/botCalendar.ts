@@ -2,7 +2,7 @@ import { invoke } from "@/lib/api";
 import { CRON_WEEKDAYS, cronWeekdayCode, describeSchedule } from "@/lib/automationSchedule";
 import { newDutyInput } from "@/lib/botDuties";
 import type { AutomationSchedule } from "@/types/automations";
-import type { CalendarBlock, DayCount, DutyLog, DutyWeek } from "@/types/botCalendar";
+import type { CalendarBlock, DayCount, DutyLog, DutyWeek, KeptLog } from "@/types/botCalendar";
 import type { DutyInput } from "@/types/botDuties";
 
 /**
@@ -11,8 +11,14 @@ import type { DutyInput } from "@/types/botDuties";
  * in a bot's session may read its own bot's week only.
  */
 export const calendarApi = {
-  /** Bot `id`'s week, or every bot's; `week` is any day in it, `YYYY-MM-DD` (this week when null). */
-  week: (id: string | null, week: string | null) => invoke<DutyWeek>("bot_duty_week", { id, week }),
+  /**
+   * Bot `id`'s week, or every bot's; `week` is any day in it, `YYYY-MM-DD` (this week when null); `firstDay` the weekday
+   * it starts on, 0 for Monday … 6 for Sunday. A runtime older than PRO-499 starts it on Monday whatever is asked, so
+   * the screen reads each column's weekday from its date (`weekdayOf`), never from its place.
+   */
+  week: (id: string | null, week: string | null, firstDay: number) => invoke<DutyWeek>("bot_duty_week", { id, week, firstDay }),
+  /** What is kept of bot `id`'s deleted duty `dutyId`: its name, when it went, and its run log (PRO-499). */
+  keptLog: (id: string, dutyId: string) => invoke<KeptLog>("bot_duty_kept_log", { id, dutyId }),
 };
 
 /** How tall an hour is on the grid, in pixels. */
@@ -21,21 +27,46 @@ export const HOUR_PX = 46;
 export const BLOCK_PX = 22;
 /** A drag moves a block in steps of this many minutes. */
 export const SNAP_MINUTES = 15;
+/** The narrowest a block side by side with others is drawn and still read; past it, the rest are "+N more". */
+export const MIN_LANE_PX = 48;
 
 export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 const CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** `YYYY-MM-DD` plus `days`. */
-/** The Mondays of the first and last weeks the runtime shows (`bots::calendar`); the arrows stop there. */
-export const FIRST_WEEK = "2000-01-03";
-export const LAST_WEEK = "2199-12-30";
+/** The first days of the first and last weeks the runtime shows (`bots::calendar`); the arrows stop there. */
+export const FIRST_WEEK = "2000-01-01";
+export const LAST_WEEK = "2199-12-31";
 
-/** Whether the week starting `monday` may be asked for. */
-export function weekShown(monday: string): boolean {
-  return monday >= FIRST_WEEK && monday <= LAST_WEEK;
+/** Whether the week starting `first` may be asked for. */
+export function weekShown(first: string): boolean {
+  return first >= FIRST_WEEK && first <= LAST_WEEK;
 }
 
+/**
+ * The weekday a week starts on in the system's region (PRO-499), 0 for Monday … 6 for Sunday: what `Intl` says of the
+ * locale this window runs in (or `locale`), Monday when it cannot say. Only the screen's weeks start there; a stored
+ * weekday (`MO`, a cron's day) means the same day whatever it is.
+ */
+export function firstWeekday(locale?: string): number {
+  try {
+    const tag = locale ?? new Intl.DateTimeFormat().resolvedOptions().locale;
+    // `getWeekInfo()` is the standard's; `weekInfo` the getter WebKit and older engines shipped first.
+    const value = new Intl.Locale(tag) as Intl.Locale & { getWeekInfo?: () => { firstDay?: number }; weekInfo?: { firstDay?: number } };
+    const first = (value.getWeekInfo?.() ?? value.weekInfo)?.firstDay;
+    return typeof first === "number" && first >= 1 && first <= 7 ? first - 1 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** The weekday of `YYYY-MM-DD`, 0 for Monday … 6 for Sunday. */
+export function weekdayOf(ymd: string): number {
+  const [year, month, day] = ymd.split("-").map(Number);
+  return (new Date(Date.UTC(year, month - 1, day)).getUTCDay() + 6) % 7;
+}
+
+/** `YYYY-MM-DD` plus `days`. */
 export function addDays(ymd: string, days: number): string {
   const [year, month, day] = ymd.split("-").map(Number);
   const at = new Date(Date.UTC(year, month - 1, day + days));
@@ -126,7 +157,10 @@ export function eventsText(count: DayCount, phase: DayPhase, any: boolean, first
   return `${count.notKept > 0 ? "at least " : ""}${count.ran}${unit} · ${reportsText(count)}`;
 }
 
-/** The minutes a block covers on the grid: its run's length, or at least a block's height; never past midnight. */
+/**
+ * The minutes a block covers on the grid: its run's length, or at least a block's height; never past midnight. A run
+ * that goes on past it is drawn again from the next midnight (`continued`, from the runtime).
+ */
 export function blockSpan(block: Pick<CalendarBlock, "minute" | "minutes">): number {
   const least = (BLOCK_PX / HOUR_PX) * 60;
   return Math.max(least, Math.min(block.minutes ?? 0, 1440 - block.minute));
@@ -179,7 +213,111 @@ export function lanes(blocks: readonly CalendarBlock[]): Map<number, { lane: num
   return placed;
 }
 
-/** A new duty at a clicked hour: weekly, on that day, at that time, in the week's time zone. */
+/** Whether a block's run goes on past its day's midnight: drawn again, continued, on the next day. */
+export function goesOn(block: Pick<CalendarBlock, "minute" | "minutes">): boolean {
+  return (block.minutes ?? 0) > 1440 - block.minute;
+}
+
+/** A "+N more" in a day's column: the blocks of an hour too crowded to draw side by side and still read. */
+export interface MoreBlocks {
+  day: number;
+  top: number;
+  height: number;
+  lane: number;
+  of: number;
+  /** Indexes in `blocks`, earliest first. */
+  members: number[];
+}
+
+/**
+ * Side by side while each stays readable (PRO-499): a group of blocks needing more lanes than `maxLanes` draws its
+ * first `maxLanes - 1` lanes, and the rest, by hour, as "+N more" in the last lane. Groups that fit are as `lanes` put
+ * them. `maxLanes` is at least two: one block and its "+N more".
+ */
+export function fitLanes(blocks: readonly CalendarBlock[], placed: Map<number, { lane: number; of: number }>, maxLanes: number): { shown: Map<number, { lane: number; of: number }>; more: MoreBlocks[] } {
+  const most = Math.max(2, Math.floor(maxLanes));
+  const shown = new Map<number, { lane: number; of: number }>();
+  const hidden: { index: number; day: number; top: number; bottom: number }[] = [];
+  blocks.forEach((block, index) => {
+    const lane = placed.get(index) ?? { lane: 0, of: 1 };
+    if (lane.of <= most) shown.set(index, lane);
+    else if (lane.lane < most - 1) shown.set(index, { lane: lane.lane, of: most });
+    else {
+      const box = blockBox(block);
+      hidden.push({ index, day: block.day, top: box.top, bottom: box.top + box.height });
+    }
+  });
+  hidden.sort((a, b) => a.day - b.day || a.top - b.top || a.index - b.index);
+  const more: MoreBlocks[] = [];
+  for (const block of hidden) {
+    const last = more[more.length - 1];
+    // Those whose boxes meet share one "+N more", as tall as all of them.
+    if (last && last.day === block.day && block.top < last.top + last.height) {
+      last.members.push(block.index);
+      last.height = Math.max(last.height, block.bottom - last.top);
+    } else {
+      more.push({ day: block.day, top: block.top, height: block.bottom - block.top, lane: most - 1, of: most, members: [block.index] });
+    }
+  }
+  return { shown, more };
+}
+
+/** How many blocks fit side by side in a day's column `width` pixels wide; no limit while it is not laid out. */
+export function lanesThatFit(width: number): number {
+  return width > 0 ? Math.max(2, Math.floor(width / MIN_LANE_PX)) : Infinity;
+}
+
+/** An hour of the week's grid: a column (0 for the week's first day) and an hour. */
+export type Cell = { day: number; hour: number };
+
+/** Where a key moves the grid's focused hour (PRO-499): arrows by an hour or a day, Home and End to the week's ends. */
+export function stepCell(cell: Cell, key: string): Cell | null {
+  const clamp = (value: number, most: number) => Math.min(most, Math.max(0, value));
+  switch (key) {
+    case "ArrowUp":
+      return { ...cell, hour: clamp(cell.hour - 1, 23) };
+    case "ArrowDown":
+      return { ...cell, hour: clamp(cell.hour + 1, 23) };
+    case "ArrowLeft":
+      return { ...cell, day: clamp(cell.day - 1, 6) };
+    case "ArrowRight":
+      return { ...cell, day: clamp(cell.day + 1, 6) };
+    case "Home":
+      return { ...cell, day: 0 };
+    case "End":
+      return { ...cell, day: 6 };
+    case "PageUp":
+      return { ...cell, hour: clamp(cell.hour - 6, 23) };
+    case "PageDown":
+      return { ...cell, hour: clamp(cell.hour + 6, 23) };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Where a key moves a block still to come (PRO-499), from `at`: the modifier's arrows up and down by a drag's step, left
+ * and right by a day, inside the week and its days, as a drag keeps it.
+ */
+export function stepMove(at: { day: number; minute: number }, key: string): { day: number; minute: number } | null {
+  switch (key) {
+    case "ArrowUp":
+      return { ...at, minute: Math.max(0, at.minute - SNAP_MINUTES) };
+    case "ArrowDown":
+      return { ...at, minute: Math.min(1440 - SNAP_MINUTES, at.minute + SNAP_MINUTES) };
+    case "ArrowLeft":
+      return { ...at, day: Math.max(0, at.day - 1) };
+    case "ArrowRight":
+      return { ...at, day: Math.min(6, at.day + 1) };
+    default:
+      return null;
+  }
+}
+
+/**
+ * A new duty at a clicked hour: weekly, on that day, at that time, in the week's time zone. `day` is the weekday,
+ * 0 for Monday … 6 for Sunday, whatever day the shown week starts on.
+ */
 export function dutyAt(day: number, minute: number, timezone: string): DutyInput {
   const input = newDutyInput();
   return {
@@ -222,7 +360,8 @@ const CRON_HINT = "Change its cron schedule on the duty's page.";
 
 /**
  * The schedule a duty has once one of its blocks is dragged from `from` to `to` (day 0–6, minutes after midnight in
- * the week's time zone). The move is applied to the schedule as a shift, so a schedule kept in another time zone moves
+ * the week's time zone). Only the days between them count, so the days may be the shown week's columns, whatever
+ * weekday it starts on. The move is applied to the schedule as a shift, so a schedule kept in another time zone moves
  * by the same amount. Daily and weekday schedules change their time only; a weekly one its day too; a cron schedule
  * only when its minute and hour are plain numbers (one hour, or a list where the block's hour is found).
  */
