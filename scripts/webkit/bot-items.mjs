@@ -121,7 +121,7 @@ try {
       failed += report(`bot home ${name}`, {
         "fits the view": homeProblems.length === 0,
         "Needs you, then In progress, then Planned, without overlap": needsBox.bottom <= progressBox.top + 0.5 && progressBox.bottom <= plannedBox.top + 0.5,
-        "the recommended answer first": answers[0]?.startsWith("Approve and start"),
+        "the answers in the bot's own order and numbered, the recommended one marked": answers.length === 3 && answers.every((text, index) => text.startsWith(String(index + 1))) && answers[1]?.includes("recommended"),
         "the Home tab and the sidebar row count it": homeCount?.trim() === "1" && railCount === 1,
         "the header says what it works on": (await view.getByTestId("bot-work-line").textContent()) === "Working on 2 things · 1 needs you",
         "no page errors": errors.length === 0,
