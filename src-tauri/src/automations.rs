@@ -57,7 +57,7 @@ impl AutomationHost for RuntimeHost {
 
 use crate::store::{automations as automation_store, index};
 
-mod sources;
+pub(crate) mod sources;
 pub use sources::{AutomationEventSource, AutomationEventTrigger, SourceMatch};
 
 /// What a Linear issue or pull request source would wake on now (PRO-485).
@@ -421,6 +421,8 @@ pub enum AutomationTrigger {
     Issue,
     LinearIssue,
     PullRequest,
+    /// A bot's duty woken by a mention, an alert, a branch's checks, another bot or a watched change (PRO-472).
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -856,6 +858,10 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
     // A bot's duty is changed on its bot's Duties tab, where giving it more needs a person (PRO-471).
     if id.is_some_and(|id| automation_store::get(id).is_ok_and(|existing| crate::bots::duties::is_duty(&existing))) {
         bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
+    // What only a bot has (a mention of it, another bot's message, a watch) wakes only a bot's duty (PRO-472).
+    if matches!(input.event_trigger.as_ref().and_then(Option::as_ref).map(|trigger| &trigger.source), Some(sources::AutomationEventSource::Bot(_))) {
+        bail!("This trigger wakes a bot's duty. Add it on the bot's Duties tab.");
     }
     input.project_path = crate::store::projects::canonical(&input.project_path)?;
     if input.workspace == AutomationWorkspace::NewWorktree && !crate::git::is_repo(Path::new(&input.project_path)) {

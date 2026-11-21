@@ -512,7 +512,7 @@ pub(crate) fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     }
     // Unicode's own line and paragraph separators break a line as a newline does; bidirectional overrides and
     // isolates, and zero-width characters, make a line read other than it is.
-    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}')) {
+    if value.chars().any(super::chat::breaks_line) {
         return Err(refused(format!("{what} is one line.")));
     }
     if value.chars().count() > max {
@@ -1232,7 +1232,8 @@ pub fn needs_you(manager: &crate::session::SessionManager) -> Result<Value> {
             }
         }
     }
-    for ask in manager.pending_permissions().into_iter().filter(|ask| is_agent_question(&ask.tool_name)) {
+    // Read without waiting on a tab's lock: a slow launch holds one for seconds, and the window waits on this read.
+    for ask in manager.pending_permissions_now().into_iter().filter(|ask| is_agent_question(&ask.tool_name)) {
         let Some(entry) = sessions.iter().find(|entry| entry.id == ask.session_id) else { continue };
         let Some(bot) = super::chat::acting_bot(entry).filter(|id| counts.contains_key(id)) else { continue };
         counts.entry(bot.clone()).or_default().0 += 1;

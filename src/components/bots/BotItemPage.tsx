@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { errorMessage } from "@/lib/api";
 import { useBotStore } from "@/lib/bots";
-import { commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
+import { commentDraftKey, commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem, useBotItemDraft } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
 import { conversationTitle, selectSession, useSessionStore } from "@/lib/sessions";
@@ -383,7 +383,7 @@ function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
 }
 
 function CommentBox({ bot, item }: { bot: Bot; item: BotItem }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useBotItemDraft(commentDraftKey(bot.id, item.number));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const submit = (event: FormEvent) => {

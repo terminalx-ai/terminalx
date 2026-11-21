@@ -37,7 +37,7 @@ extend automations or orchestration runs instead.
 | History of role and memory | `bot-changes/<id>/` outside the home folder: `changes.jsonl`, `known.json`, `texts/` (`src-tauri/src/bots/changes.rs`) |
 | Work items and "Needs you" questions | `bot-items/<id>/items.json`, beside the home folder rather than in it (`src-tauri/src/bots/items.rs`; TypeScript `src/types/botItems.ts`, `src/lib/botItems.ts`). That is no wall: a Full access bot can write the file with its own file tools, the direct-edit class PRO-489 deals with |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done / plan / ask-merge` (PRO-476), and its `terminalx bots post / reply` (PRO-480) |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, `terminalx bots memory add / forget / list` and `terminalx bots message`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done / plan / ask-merge` (PRO-476), and its `terminalx bots post / reply` (PRO-480) |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
@@ -183,9 +183,11 @@ permission system.
   `consent::guards_request`); switching one off is open. The Automations
   page's own routes refuse a duty. A process in a bot's session reads its own
   bot's duties and no other's, and changes none.
-- **At hire** the role template's duties that wake on a schedule are created
-  switched off; the ones that wake on events wait for PRO-472. The built-in
-  Look around and Tidy memory (PRO-477) are created switched on.
+- **At hire** the role template's duties that wake on a schedule or on
+  another bot's message are created switched off; one that wakes on a pull
+  request or a Linear issue needs its repository or team, and is added on the
+  Duties tab. The built-in Look around and Tidy memory (PRO-477) are
+  created switched on.
 - **With Bots off** a duty does not wake, nothing about it is read, and every
   duty call is refused.
 - **Deleting a bot** removes its duties and its quiet hours. Their definitions
@@ -193,6 +195,84 @@ permission system.
   its home, which goes to the trash; when that copy cannot be kept they are
   removed all the same and the delete says so. A duty left behind when its bot is gone
   for certain is listed on the Automations page, which can remove it.
+
+## What wakes a duty (PRO-472)
+
+A duty wakes on its schedule or on one event source: the automation's
+`eventTrigger` (`docs/AUTOMATION-SOURCES.md`), read by the same poll. Pull
+requests and Linear issues are PRO-485's sources. The ones only a bot has are
+in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
+`githubSecurityAlert`, `githubBranchCheck`, `linearMention`, `botMessage`,
+`watch`); the Automations page refuses them.
+
+- **Once per event.** The trigger's seen record (`source-seen.json`) keeps
+  what woke it; a mention, an alert or a message from before the trigger
+  started is never news. A trigger starts when the duty is saved on or
+  switched on (`sources::switched`), paused bot or not; switched off, it
+  starts again from when it is switched back on, so nothing that came while
+  it was off wakes it. A watch and a branch's checks wake on each change
+  after the first read. A Linear issue a duty wakes on is never commented on
+  or moved: the report goes to the owner or the lead.
+- **Who can wake it.** A GitHub mention wakes a duty only from the
+  repository's owner, members and collaborators (`author_association`
+  `OWNER`, `MEMBER`, `COLLABORATOR`) unless the owner chooses "Anyone who can
+  comment" (`onlyFrom: "anyone"`) in the editor, saved through the guarded
+  `dutySave`, with a warning beside it; a value this build does not know is
+  kept and read as members. A comment by the signed-in `gh` user, or by the
+  Linear key's own user, never wakes it, so a bot quoting its own handle does
+  not wake itself. Linear mentions come from the workspace's own people,
+  never an integration's comment (one with no user). A `gh` that does not
+  say who it is signed in as stops the read, with the status saying so.
+  Whatever any of them writes can be untrusted, and the editor says so.
+- **What it is given.** The first check gets the events a read would wake on
+  as a JSON file named in `TERMINALX_EVENTS`, in its own folder. The agent
+  gets them after the duty's prompt, under "What woke this duty", with what
+  others wrote capped and fenced (`chat::fenced`) as information. One-line
+  fields keep no control character, line or paragraph separator,
+  bidirectional override or zero-width character (`chat::breaks_line`). A
+  watched URL is shown without its name, password, query or fragment.
+- **A quiet first check.** When a duty's check finds nothing new in the event
+  it was given, that event is seen, so the next read checks the one behind
+  it. A check that fails leaves it unseen, to be tried again.
+- **Paused.** A paused bot's duties are not read, so what arrives waits and
+  wakes them on resume. A bot paused while a read was under way records
+  nothing from it, so what it found wakes the duty on resume too. A schedule's due runs are still skipped, not run late.
+- **Bounded.** One run at a time (a read wakes one); a duty wakes at most
+  6 times an hour and 48 a day from all its events, past which they wait and
+  its status says until when; one pull request wakes at most 4 runs an hour
+  (PRO-485). A read of GitHub mentions looks at the repository's comments
+  changed since the last read, oldest first, up to 1000; past that the next
+  read goes on from the last one read, and the status says so. A read of
+  Linear mentions pages up to 1000 too, and says when it stopped there. A
+  duty's event read runs on a thread of its own, as a first check does, so a
+  watched command (up to 300 s) or a slow page holds up no other automation.
+  A watched command runs as the owner in `duty-checks/watch-<id>`, `gh` reads
+  in `duty-checks/read-<id>`, never in the bot's home, and a watched file
+  that is a link is not followed.
+- **Another bot.** `terminalx bots message <bot> "<text>" --kind
+  handoff|question|status` runs only from a bot's own session (who sends is
+  `Caller`), and a duty that reports to its lead leaves the lead a status.
+  It keeps to the reporting line as `bots tell` does (PRO-475): a question or
+  a status goes to the sender's lead or a bot that reports to it, a
+  `--kind handoff` only where `handoffs::may_hand_off` lets work go.
+  Messages are kept in `bot-messages.json` at the store root and go once
+  every duty of the receiving bot that may wake on them has seen them; one no
+  duty waits for goes with the next message, and the sender's answer says it
+  wakes nothing. A message no duty has read is never let go to make room:
+  when 100 (or 256 KB) wait unread for one bot, or the file is full, the
+  sender is refused and told why. One bot leaves at most 30 an hour. They go
+  when the bot is deleted. Each carries how many times it has passed between
+  bots: a run woken by a message sends one more, as does any session started
+  from it, and one that has passed three times wakes nobody (the status and a
+  row in the duty's history say so, and so does the sender's answer), so two
+  bots cannot keep waking each other. A bot does not message itself. The
+  hired CTO's "Take problems from the other bots" waits for hand-offs and
+  questions only, not the status every reporting duty sends.
+- **Not covered.** Security alerts are Dependabot's only, not code scanning
+  or secret scanning. Mentions are conversation comments only, not review
+  comments, reviews or a pull request's or issue's own text.
+- **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
+  connector (PRO-480, PRO-481); their tiles stay off.
 
 ## Hand-offs, the reporting line and the team brief (PRO-475)
 
@@ -219,7 +299,8 @@ permission system.
   tells its lead and the bots that report to it, and answers whoever handed
   it work. Who can ask lets a bot hand work, not send messages off the line.
   The line is judged under the store's lock when the tell is recorded, and a
-  tell still waiting whose line is gone by delivery is dropped.
+  tell still waiting whose line is gone by delivery is dropped, and its
+  sender is told so by TerminalX, in its home chat (PRO-498).
 - **Labels.** Each bot's message is sent with the sending bot as its
   author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
   answer to / status to / message to <Name> · a bot's words, not an
@@ -239,13 +320,15 @@ permission system.
   hand-offs and 20 waiting messages per bot, 200 open overall, and 20
   hand-offs and messages per bot in 10 minutes, reserved under the rate's
   lock. Between the same two bots, either way and closed ones counted, at
-  most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
+  most 6 hand-offs an hour; items the owner handed on in the window are not
+  counted (PRO-498). A bot works on at most 4 hand-offs at once,
   counted under the lock from its open working ones (claimed ones whose chat
   is not made yet included, and, for a bot that is not paused, the waiting
   ones about to be claimed): a fifth is refused, and on a resume the rest
   wait and start as those are answered or their sender is deleted. When a
   hand-off closes, the chat made for it (never a home chat or another of
-  the bot's chats) is stopped once its turn has ended and its agent left
+  the bot's chats) has its own agent tab stopped (never another agent tab
+  the owner added to it, PRO-498) once its turn has ended and its agent left
   nothing running in the background (`SessionManager::stop_if_idle`, as
   the idle sweep does); its conversation stays.
   Closed hand-offs are trimmed to 300, the bots' before the owner's;
@@ -256,7 +339,9 @@ permission system.
   (the owner's go to 6 MB; reads stop at 8 MB).
 - **Pause.** A paused bot sends nothing. Work handed to it is recorded as
   waiting, with no chat or item, and starts when the owner resumes it; what
-  is sent to it waits too. It is never started by a bot.
+  is sent to it waits too. It is never started by a bot. The resume answers
+  at once: what waited starts after it, on a thread of its own
+  (`handoffs::resumed_later`, PRO-498).
 - **Start.** A hand-off is claimed (waiting to working) under the store's
   lock before its chat and item are made; a Stop that lands meanwhile
   archives that chat and drops the item, so nothing is left behind. The
@@ -282,6 +367,10 @@ permission system.
   hand-off is open, then stops the receiving bot's chat for that hand-off
   and the sessions it started for its item, drops the item, and tells the
   sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
+  Work the owner stopped is not handed on again: a new hand-off from the
+  same sender with the same title (case, spacing and punctuation aside), to
+  any bot, is refused while the stopped one is kept, and its sender is told
+  to ask the owner, who hands it on from the window (PRO-498).
 - **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
   (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
   most. Every launch of a bot's chat is given it as the owner's standing
@@ -336,13 +425,21 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   and names the question the owner read. "Start, but ask before merging" sets the merge hold
   first: `runs merge` from the bot is then refused with `merge_held` until the
   bot asks `ask-merge` and the owner answers Merge.
-- **Only the owner's answer starts it.** A run an item asked about is refused
-  `runs start` (`awaits_owner`) until the owner chose a start, and a held run
-  is refused `runs merge` (`merge_held`) until they said Merge. Both are judged
-  by the run, whoever calls the control socket, so a process a bot starts
-  outside its sessions is held too; the owner's own Start and Merge are the
-  window's and do not come that way. The window witnesses every chosen answer
-  (`consent::guards_request`), so its proof reaches the runtime.
+- **Only the owner starts it.** A run an item asked about is refused
+  `runs start` (`awaits_owner`) while it has not started (`AwaitingApproval`
+  or `Planned`) and the owner chose no start, "Not now" included, and a held
+  run is refused `runs merge` (`merge_held`) until they said Merge. Both are
+  judged by the run, whoever calls the control socket, so a process a bot
+  starts outside its sessions is held too; the owner's own Start and Merge are
+  the window's and do not come that way. The window witnesses every chosen
+  answer (`consent::guards_request`), so its proof reaches the runtime.
+- **Started from the Run view.** The owner may approve or start the run from
+  its Run view instead of the item's question. The item is then settled as
+  "Approve and start" there would settle it (`runs::started_from_run_view`):
+  the start is recorded with no merge hold, since the Run view's start holds
+  none, and the item's question about the run is closed. Once the run has
+  started by any route, the lead's `runs start` goes through, to launch pieces
+  that became ready or to go on after a stop (PRO-501).
 - **Done means the run ended.** An item that links a run that is not done or
   stopped cannot be closed with `done`. A failed run counts as open: its pieces
   may still merge, so it also keeps its merge hold and its place on the item.
@@ -698,7 +795,7 @@ issue.
 | PRO-469 | Work items and "Needs you" questions | 23.01, 23.02, 23.09 | In review |
 | PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Merged |
-| PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
+| PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | In review |
 | PRO-473 | Week calendar of duties | 23.13 | In review |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | In review |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |

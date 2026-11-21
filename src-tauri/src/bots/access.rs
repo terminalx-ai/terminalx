@@ -285,11 +285,13 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// refuses a `--bot` or `--place` that is not its own, holds a hand-off to
 /// the bots that report to it and those whose Who can ask lets it hand them
 /// work (`handoffs::may_hand_off`), holds a message to the reporting line,
-/// and refuses a paused bot's changes and messages.
+/// and refuses a paused bot's changes and messages. And `terminalx bots
+/// message` (PRO-472): a hand-off, question or status for another of the
+/// owner's bots that wakes only a duty its owner set to wait for one.
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message", ..])
     })
 }
 

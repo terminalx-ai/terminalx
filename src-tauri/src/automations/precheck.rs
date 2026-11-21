@@ -411,9 +411,14 @@ pub fn prompt_with_output(prompt: &str, command: &str, output: &str, truncated: 
 /// Run `precheck` for `automation` as a run would. A check that cannot be
 /// run at all (no folder, no environment) is a failed check.
 fn check(automation: &Automation, precheck: &AutomationPrecheck) -> PrecheckTrial {
+    check_with(automation, precheck, None)
+}
+
+/// [`check`], with the events a read would wake a bot's duty on, which its check is given (PRO-472).
+fn check_with(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&serde_json::Value>) -> PrecheckTrial {
     // A bot's duty never runs its check in the bot's home, which the bot can write.
     if crate::bots::duties::is_duty(automation) {
-        return crate::bots::duties::run_check(automation, precheck).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
+        return crate::bots::duties::run_check(automation, precheck, events).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
     }
     run_in(&automation.project_path, automation.workspace, automation.session_id.as_deref(), precheck)
         .unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0))
@@ -452,6 +457,12 @@ static CHECKING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 struct Claim(String);
 
+/// Whether an automation's evaluation is still going on its own thread: tests wait for it to end.
+#[cfg(test)]
+pub(crate) fn evaluating(automation_id: &str) -> bool {
+    CHECKING.lock().unwrap_or_else(|error| error.into_inner()).contains(automation_id)
+}
+
 impl Claim {
     fn take(automation_id: &str) -> Option<Self> {
         CHECKING
@@ -473,7 +484,9 @@ impl Drop for Claim {
 /// next tick is skipped while its check is still going. False, and nothing
 /// done, for an automation without a check: the scheduler evaluates it in turn.
 pub(super) fn evaluate_apart(app: &impl AutomationHost, automation: &Automation, now: chrono::DateTime<chrono::Utc>) -> bool {
-    if configured(automation.precheck.as_ref()).is_none() {
+    // A duty's event read (a watched command of up to 300 s, a page, `gh` or Linear) is as slow as a check (PRO-472).
+    let reads_slowly = automation.event_trigger.is_some() && crate::bots::duties::is_duty(automation);
+    if configured(automation.precheck.as_ref()).is_none() && !reads_slowly {
         return false;
     }
     if !due(automation, now) {
@@ -736,32 +749,35 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
 /// quiet or failing check, which writes its one (folded) history row; the
 /// caller then marks nothing seen. False, with nothing written, when the
 /// automation changed while its check ran.
-pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger) -> Result<bool> {
+pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<super::sources::Gated> {
+    use super::sources::Gated;
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
-        return Ok(true);
+        return Ok(Gated::Go);
     };
     if !agent_available(automation) {
-        return Ok(true);
+        return Ok(Gated::Go);
     }
-    let trial = check(automation, precheck);
+    // Only a duty's check is given the events; an ordinary automation's runs as it always has.
+    let events = crate::bots::duties::is_duty(automation).then(|| super::sources::wake_events(automation, wakes));
+    let trial = check_with(automation, precheck, events.as_ref());
     let Ok(current) = automation_store::get(&automation.id) else {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     };
     if !current.enabled || current.event_trigger != automation.event_trigger || current.precheck != automation.precheck {
-        return Ok(false);
+        return Ok(Gated::Stopped);
     }
     match trial.outcome {
         PrecheckOutcome::Proceed => {
             POLL.with(|poll| *poll.borrow_mut() = Some(PollMemo { automation_id: automation.id.clone(), trial }));
-            Ok(true)
+            Ok(Gated::Go)
         }
         PrecheckOutcome::NothingNew => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::SkippedPrecheck, None, trial.result)?;
-            Ok(false)
+            Ok(Gated::Quiet)
         }
         PrecheckOutcome::Failed => {
             record_ending(app, automation, None, trigger, AutomationRunStatus::Failed, trial.reason, trial.result)?;
-            Ok(false)
+            Ok(Gated::Stopped)
         }
     }
 }

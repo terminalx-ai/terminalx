@@ -379,3 +379,82 @@ fn a_message_that_waited_for_the_home_chat_is_sent_once_its_agent_starts() {
     service.manager.closing();
     service.manager.terminals().kill_all();
 }
+
+/// PRO-493: what the owner sent waits for the bot's current home chat, and only that chat's own agent tab starting
+/// sends it. An older home chat, or another agent tab the owner added to the chat, starting sends nothing.
+#[test]
+fn only_the_home_chats_own_tab_starting_sends_what_waits() {
+    let _home = crate::store::temp_home();
+    bots_on();
+    let _switches = Switches;
+    let (service, _sink) = headless_service();
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    let ask = |command: &str, params: Value| service.execute(command, params, "r");
+    let runtime = |operation: &str, params: Value| ask("runtime.session.bots", json!({"operation": operation, "params": params}));
+    let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let chat = home_chat(&atlas);
+    let waiting = || crate::bots::items::read(&atlas).unwrap().items.iter().map(|item| item.undelivered.len()).sum::<usize>();
+    crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(true));
+    runtime("itemGive", json!({"id": atlas, "title": "Rotate the deploy keys"})).unwrap();
+    crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(false));
+    assert_eq!(waiting(), 1);
+
+    // An older home chat of the same bot, and a second agent tab the owner added to the current one.
+    let mut older = chat.clone();
+    older.id = "older-home-chat".into();
+    older.created = "2000-01-01T00:00:00Z".into();
+    let mut added = chat.tabs.iter().find(|tab| !tab.is_terminal()).unwrap().clone();
+    added.id = "owners-added-tab".into();
+    index::update(|sessions| {
+        sessions.push(older.clone());
+        sessions.iter_mut().find(|entry| entry.id == chat.id).unwrap().tabs.push(added.clone());
+        Ok(())
+    })
+    .unwrap();
+    let chat = index::get(&chat.id).unwrap();
+    let own = chat.tabs.iter().find(|tab| !tab.is_terminal()).unwrap().id.clone();
+    assert_ne!(own, added.id);
+
+    for (entry, tab) in [(&older, older.tabs[0].id.clone()), (&chat, added.id.clone())] {
+        crate::bots::chat::launched(&service.manager, entry, &tab, true);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(waiting(), 1, "{} / {tab} starting sent nothing", entry.id);
+    }
+    // The current home chat's own tab starting sends it.
+    crate::bots::chat::launched(&service.manager, &chat, &own, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while waiting() != 0 {
+        assert!(std::time::Instant::now() < deadline, "the home chat's own tab starting sends what waits");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// PRO-493: Needs you is read without waiting on a tab whose lock a slow launch holds.
+#[test]
+fn needs_you_does_not_wait_behind_a_launching_tab() {
+    let _home = crate::store::temp_home();
+    bots_on();
+    let (service, _sink) = headless_service();
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    let ask = |command: &str, params: Value| service.execute(command, params, "r");
+    let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    // A Read and report bot asks with its agent's own question tool (it runs in plan mode): shown in Needs you.
+    let sentry = ask("bots.create", json!({"role": "security-auditor", "name": "Sentry"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    crate::bots::update(service.manager.sink().as_ref(), &sentry, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::ReadReport), ..Default::default() }).unwrap();
+    let sentry_chat = home_chat(&sentry);
+    service.manager.put_question_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id, "AskUserQuestion", json!({"questions": [{"question": "File the finding?", "options": [{"label": "Yes"}, {"label": "No"}]}]}));
+    let chat = home_chat(&atlas);
+    let release = service.manager.hold_tab_for_tests(&chat.id, &chat.tabs[0].id);
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            done.send(ask("runtime.session.bots", json!({"operation": "needsYou", "params": {}}))).ok();
+        });
+        let needs = finished.recv_timeout(std::time::Duration::from_secs(5)).expect("Needs you answers while a tab's lock is held");
+        let needs = needs.unwrap();
+        let entries = needs["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "{needs}");
+        assert_eq!((entries[0]["kind"].as_str(), entries[0]["botId"].as_str(), entries[0]["questions"][0]["question"].as_str()), (Some("agentQuestion"), Some(sentry.as_str()), Some("File the finding?")));
+        drop(release);
+    });
+}

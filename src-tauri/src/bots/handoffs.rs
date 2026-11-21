@@ -248,7 +248,8 @@ pub struct Message {
     pub from: String,
     #[serde(default)]
     pub to: String,
-    /// `handoff`, `tell`, `answer`, `stopped` or `failed`; a newer kind is kept and delivered as it is.
+    /// `handoff`, `tell`, `answer`, `stopped`, `failed` or `dropped` (a tell not given, told to its sender); a newer
+    /// kind is kept and delivered as it is.
     #[serde(default)]
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -647,6 +648,9 @@ fn tell_sender(store: &mut Store, handoff: &Handoff, kind: &str, text: String) {
 /// What was asked to stop in tests, by [`release_work_chat`]: the session ids.
 #[cfg(test)]
 pub static RELEASED_FOR_TESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The tabs [`release_work_chat`] stops, in tests: (session, tab).
+#[cfg(test)]
+pub static RELEASED_TABS_FOR_TESTS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// How long a closed hand-off's chat may go on with its turn before it is left as it is.
 const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
@@ -654,7 +658,8 @@ const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60
 const RELEASE_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// After `handoff` closed: the chat made for it (never a home chat, never another of the bot's chats) is stopped
-/// once its turn has ended, outside every lock, on a thread of its own. Its conversation stays.
+/// once its turn has ended, outside every lock, on a thread of its own. Its conversation stays. Only the bot's own
+/// agent tab of it is stopped: another agent tab the owner added to the chat is theirs, and goes on (PRO-498).
 fn release_work_chat(manager: &SessionManager, handoff: &Handoff) {
     let Some(session) = handoff.to_session.clone() else { return };
     let Ok(entry) = index::get(&session) else { return };
@@ -662,24 +667,29 @@ fn release_work_chat(manager: &SessionManager, handoff: &Handoff) {
     if !made_for_it {
         return;
     }
+    let Some(tab) = entry.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| tab.id.clone()) else { return };
     #[cfg(test)]
-    RELEASED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push(entry.id.clone());
+    {
+        RELEASED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push(entry.id.clone());
+        RELEASED_TABS_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((entry.id.clone(), tab.clone()));
+    }
     let manager = manager.clone();
     let number = handoff.number;
     std::thread::spawn(move || {
         let note = format!("Hand-off {number} is closed, so TerminalX stopped this chat's agent. Its conversation stays.");
         let deadline = std::time::Instant::now() + RELEASE_WAIT;
-        for tab in &entry.tabs {
+        {
+            let tab = &tab;
             loop {
                 // Work its agent left running (a background command, a monitor) keeps it, as the idle sweep does.
-                if manager.background_work(&entry.id, &tab.id).is_some() {
+                if manager.background_work(&entry.id, tab).is_some() {
                     if std::time::Instant::now() >= deadline {
                         break;
                     }
                     std::thread::sleep(RELEASE_QUIET);
                     continue;
                 }
-                match manager.stop_if_idle(&entry.id, &tab.id, &note, RELEASE_QUIET) {
+                match manager.stop_if_idle(&entry.id, tab, &note, RELEASE_QUIET) {
                     Ok(crate::session::AgentStop::Busy) if std::time::Instant::now() < deadline => std::thread::sleep(RELEASE_QUIET),
                     Ok(_) => break,
                     Err(error) => {
@@ -748,6 +758,7 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
     if from.id == to.id {
         return Err(refused("A bot does not hand work to itself: add an item to your own work list."));
     }
+    let same_work = work_key(&title);
     let sink = manager.sink();
     let handoff = change(Some(sink.as_ref()), BOT_WRITE_BYTES, |store| {
         // The rule is judged on the records as they are under the store's lock, not as the caller read them.
@@ -759,11 +770,21 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
         if let Err(why) = may_hand_off(from, to) {
             return Err(refused(why));
         }
-        // Back and forth between two bots is bounded over time, closed hand-offs counted too.
+        // Work the owner stopped is not handed on again as a new hand-off, to that bot or another (PRO-498): the same
+        // title from the same sender, for as long as the stopped one is kept. The owner hands it again themselves.
+        if let Some(stopped) = store.handoffs.iter().find(|handoff| handoff.from == from.id && handoff.state == HandoffState::Stopped && handoff.stopped_by.as_deref() == Some(OWNER) && work_key(&handoff.title) == same_work) {
+            return Err(refused(format!(
+                "Your owner stopped hand-off {} (\"{}\"), and work they stopped is not handed on again unless they ask. Ask them with `terminalx bots items ask` if it should go on; they hand it on themselves from your page in the window.",
+                stopped.number, stopped.title
+            )));
+        }
+        // Back and forth between two bots is bounded over time, closed hand-offs counted too. What the owner handed
+        // in the window is theirs, not the bots' back and forth (PRO-498).
         let since = chrono::Utc::now() - chrono::Duration::from_std(PAIR_WINDOW).unwrap_or_default();
         let between = store
             .handoffs
             .iter()
+            .filter(|handoff| handoff.by != OWNER)
             .filter(|handoff| (handoff.from == from.id && handoff.to == to.id) || (handoff.from == to.id && handoff.to == from.id))
             .filter(|handoff| chrono::DateTime::parse_from_rfc3339(&handoff.created).is_ok_and(|at| at >= since))
             .count();
@@ -841,6 +862,11 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
     })?;
     let line = format!("{} asked {}: {}", from.name, to.name, handoff.title);
     Ok(start_and_deliver(manager, handoff.number, &line).unwrap_or(handoff))
+}
+
+/// A title as the same work: case, spacing and punctuation aside.
+fn work_key(title: &str) -> String {
+    title.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect::<String>().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A failed hand-off handed again, at most [`MAX_RETRIES`] times. Only its sender retries it.
@@ -1310,6 +1336,49 @@ fn start_waiting(manager: &SessionManager, bot: &str) -> bool {
     any
 }
 
+/// [`resumed`] on a thread of its own, so the owner's resume returns at once: starting what waited makes chats and
+/// sends to them, which can launch their agents (PRO-498).
+pub fn resumed_later(manager: &SessionManager, bot: Option<&str>) {
+    if !super::enabled() {
+        return;
+    }
+    let (manager, bot) = (manager.clone(), bot.map(str::to_owned));
+    let handle = std::thread::spawn(move || resumed(&manager, bot.as_deref()));
+    // In tests the resume is waited for, so it never acts in the next test's home, unless a test leaves it running.
+    #[cfg(test)]
+    if RESUME_IN_BACKGROUND_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+        RESUMES_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push(handle);
+    } else {
+        handle.join().unwrap();
+    }
+    #[cfg(not(test))]
+    drop(handle);
+}
+
+/// Set in a test (under its temp home's lock) to leave [`resumed_later`]'s thread running, for
+/// [`settle_resumes_for_tests`] to wait for.
+#[cfg(test)]
+pub static RESUME_IN_BACKGROUND_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The resumes [`resumed_later`] left running, in tests.
+#[cfg(test)]
+static RESUMES_FOR_TESTS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Wait for every resume [`resumed_later`] left running, in tests.
+#[cfg(test)]
+pub fn settle_resumes_for_tests() {
+    loop {
+        let Some(handle) = RESUMES_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).pop() else { return };
+        handle.join().unwrap();
+    }
+}
+
+/// Hold every start of a hand-off, as a slow one would, in tests.
+#[cfg(test)]
+pub fn hold_starts_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    STARTING.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 /// The bot's hand-offs that waited while it was paused start, and what waited for it is sent (after a resume).
 pub fn resumed(manager: &SessionManager, bot: Option<&str>) {
     if !super::enabled() {
@@ -1466,8 +1535,20 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
     if !dropped.is_empty() {
         log::info!("dropped {} messages to bot {id} whose reporting line is gone", dropped.len());
     }
+    // Its sender is told it was not given (PRO-498), once, by TerminalX: never the dropped text again.
+    let mut told: BTreeSet<String> = BTreeSet::new();
     let marked = change(Some(sink.as_ref()), usize::MAX, |store| {
+        let gone: Vec<Message> = store.messages.iter().filter(|message| message.pending && dropped.contains(&message.id)).cloned().collect();
         store.messages.retain(|message| !(message.pending && dropped.contains(&message.id)));
+        for message in gone {
+            let to = bots.iter().find(|bot| bot.id == message.to).map(|bot| bot.name.clone()).unwrap_or_else(|| "the other bot".into());
+            let text = format!(
+                "TerminalX did not give {to} your message sent at {}: since you sent it, your owner changed the reporting line, and {to} is no longer your lead or one of your reports. Nothing of it was delivered; tell your lead or your owner if it still matters.",
+                message.at
+            );
+            store.messages.push(new_message("terminalx", &message.from, "dropped", None, text, "TerminalX".into(), None));
+            told.insert(message.from.clone());
+        }
         for message in store.messages.iter_mut() {
             if let Some((_, session)) = sent.iter().find(|(sent, _)| *sent == message.id) {
                 message.pending = false;
@@ -1511,11 +1592,16 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
         }
         Ok(())
     });
-    if let Err(error) = marked {
+    if let Err(error) = &marked {
         log::warn!("mark the messages sent to bot {id}: {error:#}");
     }
     // Out of this bot's delivery lock: what is let go or started next sends to it again.
     drop(_delivering);
+    if marked.is_ok() {
+        for from in told.iter().filter(|from| *from != id) {
+            deliver(manager, from);
+        }
+    }
     closed_now(manager, &gave_up);
     for handoff in gave_up {
         status_lines(manager, &handoff, &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
