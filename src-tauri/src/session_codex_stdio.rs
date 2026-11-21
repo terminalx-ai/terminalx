@@ -571,11 +571,12 @@ impl SessionManager {
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
         // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`),
         // and in a bot's chat the bot's rules, role and memory (`bots::chat`).
-        let (computer, bot) = {
+        let (computer, bot, chat) = {
             let entry = index::get(session)?;
             let retained = entry.tab(tab).context("This tab no longer exists")?;
             crate::bots::chat::look_before_launch(self.sink().as_ref(), &entry);
-            (crate::computer_targets::launch_args(session, retained)?, crate::bots::chat::launch_note(&entry, retained))
+            let computer = crate::computer_targets::launch_args(session, retained)?;
+            (computer, crate::bots::chat::launch_note(&entry, retained), entry)
         };
         let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
         let mut native = native_launch(&grant, &config, &computer, note.as_deref());
@@ -622,7 +623,10 @@ impl SessionManager {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { Self::check_collaboration_permit(permit, &rt_arc.lock().unwrap())?; }
-        let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
+        let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink);
+        let Ok(child) = child else {
+            return child.map(|_| ());
+        };
         let cancelled = {
             let mut rt = rt_arc.lock().unwrap();
             // Stop retains the launch until startup has settled. Even a late
@@ -635,6 +639,7 @@ impl SessionManager {
             rt.child = Some(child.clone());
             cancelled
         };
+        crate::bots::chat::launched(self, &chat, !cancelled);
         if cancelled {
             crate::harness::host::terminate(child.pid);
             bail!("Codex startup cancelled; no input was sent");

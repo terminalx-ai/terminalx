@@ -175,6 +175,14 @@ Usage:
   terminalx bots memory add NOTE [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory forget NOTE [--line N] [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory list [--bot BOT] [--place PLACE] [--json]
+  terminalx bots items list [--all] [--bot BOT] [--json]
+  terminalx bots items show ITEM [--bot BOT] [--json]
+  terminalx bots items add --title TITLE [--summary TEXT] [--done "TEXT | HOW"]... [--start] [--asked-by WHO] [--json]
+  terminalx bots items set ITEM [--title TITLE] [--summary TEXT] [--state planned|inProgress|waiting|dropped] [--done "TEXT | HOW"]... [--link KIND:TARGET[=TITLE]]... [--snooze TIME|off] [--json]
+  terminalx bots items ask ITEM --question TEXT --answer TEXT --answer TEXT [--answer TEXT]... [--recommend N] [--json]
+  terminalx bots items check ITEM LINE --met|--unmet [--how TEXT] [--json]
+  terminalx bots items comment ITEM --text TEXT [--json]
+  terminalx bots items done ITEM [--text NOTE] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -1626,9 +1634,100 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
             rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
         }
         "memory" => parse_bot_memory(tokens),
+        "items" => parse_bot_items(tokens),
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
 }
+
+/// A bot's work items (PRO-469). From one of a bot's sessions they are that
+/// bot's own, which the app works out from where the command runs; from
+/// anywhere else `--bot` names the bot, to read only.
+fn parse_bot_items(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    const ITEM_COMMANDS: &str = "list, show, add, set, ask, check, comment or done";
+    let action = tokens.required_front(&format!("bots items command ({ITEM_COMMANDS})"))?;
+    let mut params = json!({});
+    if let Some(bot) = tokens.option("--bot")? {
+        params["bot"] = json!(bot);
+    }
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    let text_option = |tokens: &mut Tokens, params: &mut Value, option: &str, key: &str| -> Result<(), ControlError> {
+        if let Some(value) = tokens.option(option)? {
+            params[key] = json!(value);
+        }
+        Ok(())
+    };
+    let item = |tokens: &mut Tokens| -> Result<Value, ControlError> {
+        let item = tokens.required_front("item number")?;
+        let number: u64 = item.trim().trim_start_matches('#').parse().ok().filter(|number| *number > 0).ok_or_else(|| invalid(format!("{item} is not an item's number.")))?;
+        Ok(json!(number))
+    };
+    match action.as_str() {
+        "list" => {
+            params["all"] = json!(tokens.flag("--all")?);
+        }
+        "show" => {
+            params["item"] = item(tokens)?;
+        }
+        "add" => {
+            match tokens.option("--title")? {
+                Some(title) if !title.trim().is_empty() => params["title"] = json!(title),
+                _ => return Err(invalid("bots items add needs --title TITLE.")),
+            }
+            text_option(tokens, &mut params, "--summary", "summary")?;
+            text_option(tokens, &mut params, "--asked-by", "askedBy")?;
+            params["done"] = json!(tokens.options("--done")?);
+            params["start"] = json!(tokens.flag("--start")?);
+        }
+        "set" => {
+            for (option, key) in [("--title", "title"), ("--summary", "summary"), ("--state", "state"), ("--snooze", "snooze")] {
+                text_option(tokens, &mut params, option, key)?;
+            }
+            params["done"] = json!(tokens.options("--done")?);
+            params["link"] = json!(tokens.options("--link")?);
+            params["item"] = item(tokens)?;
+        }
+        "ask" => {
+            match tokens.option("--question")? {
+                Some(question) if !question.trim().is_empty() => params["question"] = json!(question),
+                _ => return Err(invalid("bots items ask needs --question TEXT.")),
+            }
+            params["answers"] = json!(tokens.options("--answer")?);
+            if let Some(recommend) = tokens.option("--recommend")? {
+                let number: u64 = recommend.trim().parse().ok().filter(|number| *number > 0).ok_or_else(|| invalid("--recommend is the recommended answer's number, counted from 1."))?;
+                params["recommend"] = json!(number);
+            }
+            params["item"] = item(tokens)?;
+        }
+        "check" => {
+            let (met, unmet) = (tokens.flag("--met")?, tokens.flag("--unmet")?);
+            if met == unmet {
+                return Err(invalid("bots items check needs --met or --unmet."));
+            }
+            params["met"] = json!(met);
+            text_option(tokens, &mut params, "--how", "how")?;
+            params["item"] = item(tokens)?;
+            let line = tokens.required_front("line of done means")?;
+            let line: u64 = line.trim().parse().ok().filter(|line| *line > 0).ok_or_else(|| invalid(format!("{line} is not a line's number; lines are counted from 1.")))?;
+            params["line"] = json!(line);
+        }
+        "comment" => {
+            match tokens.option("--text")? {
+                Some(text) if !text.trim().is_empty() => params["text"] = json!(text),
+                _ => return Err(invalid("bots items comment needs --text TEXT.")),
+            }
+            params["item"] = item(tokens)?;
+        }
+        "done" => {
+            text_option(tokens, &mut params, "--text", "text")?;
+            params["item"] = item(tokens)?;
+        }
+        other => return Err(invalid(format!("Unknown bots items command {other}. Use {ITEM_COMMANDS}."))),
+    }
+    rpc(&format!("bots.items.{action}"), params, tokens)
+}
+
 
 /// A bot's memory (PRO-470): one dated note per line. From a bot's own chat
 /// it is that bot's, and the app records each write as the bot's from that
@@ -3324,3 +3423,7 @@ mod tests {
         assert_eq!((calls, offline.unwrap_err().code.as_str()), (1, "machine_offline"));
     }
 }
+
+#[cfg(test)]
+#[path = "cli_bot_items_tests.rs"]
+mod bot_items_tests;

@@ -7,6 +7,7 @@ import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
 import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
 import { focusTaken, showBotRoleMemory, showBotsDuties, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { openBot } from "@/lib/sessions";
 import type { Bot } from "@/types/bots";
@@ -17,6 +18,7 @@ import { BotRoleMemory } from "./BotRoleMemory";
 import { BotsDuties } from "./BotsDuties";
 import { BotsHeader } from "./BotsHeader";
 import { FirstBot } from "./FirstBot";
+import { NeedsYouQueue, needsYouNote } from "./NeedsYouQueue";
 import { HireBot } from "./HireBot";
 
 /**
@@ -53,6 +55,11 @@ function BotsTeam({ focus }: { focus: boolean }) {
   // Until the list is read, or when it could not be and nothing was read before, there is no team to count.
   const known = store.loaded && !(store.error && bots.length === 0);
   const team = bots.length + store.unreadable;
+  // One answer for every count on the page, the sidebar and the destination (PRO-469).
+  const needs = useNeedsYou();
+  const needsError = useNeedsYouError();
+  const asking = needsYouCount(needs, null);
+  const trouble = needsYouTrouble(needs, needsError, null);
 
   const run = (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -111,20 +118,12 @@ function BotsTeam({ focus }: { focus: boolean }) {
               value={team === 1 ? "1 bot" : `${team} bots`}
               note={[`${onMac} on this Mac`, elsewhere ? `${elsewhere} elsewhere` : "", store.unreadable ? `${store.unreadable} cannot be read by this version` : ""].filter(Boolean).join(" · ")}
             />
-            <StatCard label="Needs you" value="0" note="Nothing waiting" accent />
+            <StatCard label="Needs you" value={needsError ? "—" : trouble ? `${asking}+` : String(asking)} note={needsError ? "Couldn't be read" : trouble ? "A bot's list can't be read" : needsYouNote(needs)} accent />
             <StatCard label="Working now" value={`${bots.length - paused} ready`} note={paused ? `${paused} paused` : "None paused"} />
             <StatCard label="Spent today" value="—" note="Model and cloud time · shown, never capped" />
           </div>
 
-          {/* Filled by the work-items ticket. */}
-          <section aria-labelledby="bots-needs-you" data-testid="bots-needs-you">
-            <h2 id="bots-needs-you" className="mb-2 text-[11px] font-medium uppercase tracking-[.08em] text-accent">
-              Needs you <span className="ml-1">0</span>
-            </h2>
-            <p className="rounded-lg border border-dashed border-hairline-strong px-4 py-3 text-[12.5px] text-faint">
-              Nothing needs you. A bot's questions and approvals wait here.
-            </p>
-          </section>
+          <NeedsYouQueue bots={bots} needs={needs} error={needsError} />
 
           <section aria-labelledby="bots-team-heading">
             <h2 id="bots-team-heading" className="mb-1 text-[11px] font-medium uppercase tracking-[.08em] text-faint">Team</h2>
@@ -184,6 +183,8 @@ const COLUMNS = ["Bot", "Doing now", "Needs you", "Runs on", "Reports to", "Work
 
 /** The team table (23.02). It scrolls sideways inside its own box when the window is narrow. */
 function TeamTable({ bots, unreadable, onError }: { bots: Bot[]; unreadable: number; onError: (error: string | null) => void }) {
+  const needs = useNeedsYou();
+  const needsError = useNeedsYouError();
   return (
     <div className="min-w-0 overflow-x-auto scrollbar-thin" data-testid="bots-table-scroll">
       <table className="w-full min-w-[860px] border-collapse text-[12.5px]" aria-label="Team" data-testid="bots-table">
@@ -197,14 +198,14 @@ function TeamTable({ bots, unreadable, onError }: { bots: Bot[]; unreadable: num
           </tr>
         </thead>
         <tbody>
-          {bots.map((bot) => <TeamRow key={bot.id} bot={bot} bots={bots} unreadable={unreadable} onError={onError} />)}
+          {bots.map((bot) => <TeamRow key={bot.id} bot={bot} bots={bots} unreadable={unreadable} onError={onError} asking={needsYouCount(needs, bot.id)} trouble={needsYouTrouble(needs, needsError, bot.id)} />)}
         </tbody>
       </table>
     </div>
   );
 }
 
-function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; unreadable: number; onError: (error: string | null) => void }) {
+function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot; bots: Bot[]; unreadable: number; onError: (error: string | null) => void; asking: number; trouble: string | null }) {
   const [busy, setBusy] = useState(false);
   const lead = bot.reportsTo === "owner" ? null : bots.find((other) => other.id === bot.reportsTo) ?? null;
   const toggle = () => {
@@ -240,7 +241,11 @@ function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; un
           <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-testid="bot-doing-now"><Moon className="size-3.5" /> Quiet</span>
         )}
       </td>
-      <td className="px-2 py-2.5 text-faint">–</td>
+      <td className="px-2 py-2.5 text-faint" data-testid="bot-needs-you">
+        {trouble ? (
+          <span className="inline-flex size-5 items-center justify-center rounded-full bg-destructive/15 text-[11px] font-medium text-destructive" title={`Couldn't read: ${trouble}`} aria-label="Couldn't read what needs you">!</span>
+        ) : asking > 0 ? <span className="inline-flex size-5 items-center justify-center rounded-full bg-accent/15 text-[11px] font-medium text-accent">{asking}</span> : "–"}
+      </td>
       <td className="px-2 py-2.5">
         <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-muted-foreground">
           <RunsOnIcon runsOn={bot.runsOn} className="size-3.5" />
