@@ -149,7 +149,7 @@ export function useSidebarFilter(): SidebarFilterState {
     let count = 0;
     const machines = machineRows.map(machineDashboardSession);
     for (const session of [...store.sessions, ...cloud.filter((session) => visibleIds.has(session.orgId)), ...machines] as DashboardSession[]) {
-      const projectPath = sidebarProjectOf(session, store.chatsPath);
+      const projectPath = sidebarProjectOf(session, store.chatsPath, store);
       const passes = (!project || projectPath === project) && sessionPassesFilter(filter, session);
       if (passes && (!session.archived || store.showArchived)) count++;
       if (!passes && session.id !== selected) continue;
@@ -199,5 +199,5 @@ export function useSidebarFilter(): SidebarFilterState {
       count,
       empty: SIDEBAR_FILTERS.find((entry) => entry.id === filter)?.empty || "No sessions in this project.",
     };
-  }, [filter, project, selected, store.sessions, store.chatsPath, store.showArchived, cloud, catalog, status, visibleIds, machineRows]);
+  }, [filter, project, selected, store.sessions, store.chatsPath, store.projects, store.workspaces, store.showArchived, cloud, catalog, status, visibleIds, machineRows]);
 }

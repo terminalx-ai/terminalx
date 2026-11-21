@@ -3,7 +3,7 @@ import { captureReviewSend, markReviewsSent, pendingReviewCount, restoreReviewSe
 import { SetupCheckCoach } from "@/components/cloudSetup/SetupCheckCoach";
 import { ContextPopover } from "./UsagePopovers";
 import type { Turn } from "@/lib/transcript";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { getPrefs, subscribePrefs } from "@/lib/prefs";
 import { ArrowUp, AtSign, Bookmark, ChevronDown, CircleAlert, FileText, MessageSquare, Shield, ShieldAlert, ShieldCheck, SlashSquare, Square } from "@/icons";
 import { showError } from "@/lib/errorToasts";
@@ -140,6 +140,7 @@ export function Composer({
   stopMode = "stop",
   autoFocus,
   onOpenCodexTab,
+  beforeSend,
 }: {
   tab: TabEntry;
   /** Stable backend/tab identity; pending sends survive view replacement. */
@@ -229,6 +230,8 @@ export function Composer({
   autoFocus?: boolean;
   /** Opens a Codex tab beside this one: offered when a `/goal` is typed to an agent without goals (PRO-380). */
   onOpenCodexTab?: () => void;
+  /** Shown beside the send button: a bot's home chat says where else its replies go (PRO-481, design 23.04). */
+  beforeSend?: ReactNode;
 }) {
   const { models: listed, refresh: refreshPickerModels, loaded: modelsLoaded } = usePickerModels(useModels(tab.harness), !modelsAreLocal, modelClient, tab.harness);
   const model = modelForTab(listed, tab.model);
@@ -859,6 +862,7 @@ export function Composer({
             {/* Nothing can be sent: attaching and dictating into it are off too. */}
             <AttachButton attach={attach} disabled={disabled} />
             <MicButton dictation={dictation} disabled={disabled} />
+            {beforeSend}
             {/* One button: Stop while the agent works and nothing is typed, Send (a queued message while it works) once something is. Stop's shortcut works either way. */}
             {/* What is on its way is drawn in the chat, as sending (#727); the button waits for it. */}
             {!sending && busy && canStop && !draft.trim() && !sendable.length ? (

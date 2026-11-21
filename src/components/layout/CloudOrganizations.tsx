@@ -41,6 +41,7 @@ import {
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs, type CloudSidebarSection } from "@/lib/prefs";
+import { useCloudPins } from "@/lib/cloudPins";
 import { workspaceUsage } from "@/lib/runningLimit";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -173,6 +174,7 @@ function OrganizationSection({
 }) {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
   const store = useSessionStore();
   const { status } = useAccount();
   const filter = useSidebarFilter();
@@ -185,8 +187,8 @@ function OrganizationSection({
   const name = sectionName(org);
   const cached = catalog.orgs[org.id];
   const placed = useMemo(
-    () => placeCloudProjects(cached ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, { pinned: prefs.cloudPinned[org.id], added: prefs.cloudProjects[org.id], blank: prefs.cloudBlankProjects[org.id] }),
-    [cached, org.id, catalog.createMemory, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects],
+    () => placeCloudProjects(cached ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, { pinned: cloudPins[org.id], added: prefs.cloudProjects[org.id], blank: prefs.cloudBlankProjects[org.id] }),
+    [cached, org.id, catalog.createMemory, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects],
   );
   // Creating a workspace is the API's owner-or-admin action, the same rule as
   // a project's "+": true for them, false for a member, null while this

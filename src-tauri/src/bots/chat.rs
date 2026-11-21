@@ -568,6 +568,8 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
     let sections = [
         // PRO-480: where people mention it, and how it posts there: rules, so first.
         Some(("how you post on GitHub and Linear", super::channels::launch_note(&bot))),
+        // PRO-481: where its replies to a chat app go.
+        super::chat_apps::launch_note(&bot).map(|apps| ("note on Slack and Telegram", apps)),
         super::items::launch_note(&bot.id).map(|items| ("work items (`terminalx bots items list` shows them)", items)),
         // PRO-475: the reporting line, hand-offs, and the team brief every bot reads.
         super::handoffs::launch_note(&bot, in_plan).map(|team| ("note on working with other bots, with open hand-offs and the team brief (`terminalx bots handoffs` shows the hand-offs)", team)),

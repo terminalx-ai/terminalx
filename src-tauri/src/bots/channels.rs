@@ -255,14 +255,14 @@ pub enum Kept<T> {
 }
 
 impl<T> Kept<T> {
-    fn known(&self) -> Option<&T> {
+    pub(crate) fn known(&self) -> Option<&T> {
         match self {
             Self::Known(value) => Some(value),
             Self::Other(_) => None,
         }
     }
 
-    fn known_mut(&mut self) -> Option<&mut T> {
+    pub(crate) fn known_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Known(value) => Some(value),
             Self::Other(_) => None,

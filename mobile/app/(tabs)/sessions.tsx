@@ -1,9 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import { AppState, Pressable, RefreshControl, SectionList, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, MoreHorizontal, Search, X } from "lucide-react-native";
-import { chatRows, filterCounts, LIST_FILTERS, listSections, type ChatRow, type ListFilter } from "@mobile/data/session-list";
+import { ChevronDown, MoreHorizontal, Pin, Search, X } from "lucide-react-native";
+import { chatRows, filterCounts, isCloudRow, LIST_FILTERS, listSections, PINNED_SECTION, withPinnedCloud, type ChatRow, type CloudPinRow, type ListFilter } from "@mobile/data/session-list";
+import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
+import { pinnedCloudRows } from "@mobile/cloud/pins";
 import { useApp } from "@mobile/state/AppProvider";
+import { useMacPins } from "@mobile/state/mac-pins";
 import { connectionUsable, connectionWords, useConnectionState } from "@mobile/state/connection-view";
 import { Button, EmptyState } from "@mobile/ui/primitives";
 import { ConnectionLine } from "@mobile/ui/ConnectionLine";
@@ -14,6 +17,7 @@ import { requestPairing } from "@mobile/state/pairing-request";
 import type { PairedMachine } from "@mobile/state/machines";
 import { GlassIconButton } from "@mobile/ui/glass";
 import { SessionListRow } from "@mobile/ui/SessionListRow";
+import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -55,15 +59,26 @@ export default function SessionsScreen() {
     onPairAgain: openPairing,
     onDisconnect: () => { app.disconnectHost(); router.navigate("/(tabs)"); },
   });
+  // What the Mac pinned (#1403): its sessions, and the cloud projects whose workspaces this phone's account can see.
+  const pins = useMacPins();
+  const catalog = useCloudCatalog();
+  const snapshot = useCatalogSnapshot(catalog);
+  const anyCloudPinned = Object.keys(pins.cloud).length > 0;
+  // The cloud list is read when the Sessions list shows pinned cloud projects, as the Cloud tab reads it when it opens.
+  useFocusEffect(useCallback(() => { if (anyCloudPinned) void catalog?.refresh(); }, [anyCloudPinned, catalog]));
+  // Words typed in the search: results stay by project, pinned ones among them with their pin.
+  const querying = query.trim().length > 0;
   const rows = useMemo(() => chatRows(app.sessions, query), [app.sessions, query]);
+  const cloudRows = useMemo(() => pinnedCloudRows(snapshot, pins.cloud), [pins.cloud, snapshot]);
   const counts = useMemo(() => filterCounts(rows), [rows]);
-  const sections = useMemo(() => listSections(rows, filter), [filter, rows]);
+  const sections = useMemo(() => withPinnedCloud(listSections(rows, filter, querying), cloudRows, filter, querying), [cloudRows, filter, querying, rows]);
 
   if (!app.activeHost) return <View style={[styles.page, { backgroundColor: palette.page }]}><EmptyState title="Choose a Mac" detail="Connect to a paired Mac before opening its sessions." /><Button label="Open Machines" onPress={() => router.navigate("/(tabs)")} /></View>;
 
   const host = app.activeHost;
   const connected = connectionUsable(state);
   const open = (row: ChatRow, tabId = row.tabId) => router.push({ pathname: "/session/[sessionId]", params: { sessionId: row.session.id, tabId, hostId: host.id, title: row.title } });
+  const openCloud = (row: CloudPinRow) => router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: row.item.workspace.id, orgId: row.orgId, title: row.title } });
   const closeSearch = () => { setQuery(""); setSearching(false); };
   const hostName = menu.nameOf(host);
   const current = menu.machines.paired.find((machine) => machine.id === host.id);
@@ -139,9 +154,14 @@ export default function SessionsScreen() {
     contentContainerStyle={{ paddingTop: headerHeight + 4, paddingBottom: bar + 24 }}
     scrollIndicatorInsets={{ top: headerHeight, bottom: bar }}
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={headerHeight} />}
-    renderSectionHeader={({ section }) => section.title ? <Text accessibilityRole="header" numberOfLines={1} style={[styles.section, { color: palette.muted }]}>{section.title}</Text> : null}
+    renderSectionHeader={({ section }) => section.key === PINNED_SECTION
+      // Pinned, with a pin as the Mac's sidebar draws it (02.04).
+      ? <View accessibilityRole="header" accessibilityLabel="Pinned" style={styles.sectionLine}><Pin size={12} color={palette.muted} strokeWidth={2} /><Text numberOfLines={1} style={[styles.section, styles.sectionText, { color: palette.muted }]}>{section.title}</Text></View>
+      : section.title ? <Text accessibilityRole="header" numberOfLines={1} style={[styles.section, { color: palette.muted }]}>{section.title}</Text> : null}
     renderSectionFooter={() => <View style={styles.sectionGap} />}
-    renderItem={({ item, index, section }) => <SessionListRow row={item} hostId={host.id} first={index === 0} last={index === section.data.length - 1} onOpen={(tabId) => open(item, tabId)} />}
+    renderItem={({ item, index, section }) => isCloudRow(item)
+      ? <CloudWorkspaceRow item={item.item} title={item.title} cloud first={index === 0} last={index === section.data.length - 1} onPress={() => openCloud(item)} actions={pins.cloudActions(item.orgId, item.identity, item.title)} style={styles.cloudRow} />
+      : <SessionListRow row={item} hostId={host.id} first={index === 0} last={index === section.data.length - 1} inPinned={section.key === PINNED_SECTION} actions={pins.sessionActions(item)} onOpen={(tabId) => open(item, tabId)} />}
     ListFooterComponent={waiting}
     ListEmptyComponent={empty}
   />{header}</View>;
@@ -169,6 +189,10 @@ const styles = StyleSheet.create({
   retry: { minHeight: 34, paddingHorizontal: 14 },
   // A section's name over its card, as 22.04: small capitals, quiet.
   section: { fontSize: 12, fontWeight: "600", letterSpacing: 0.8, textTransform: "uppercase", marginTop: 8, marginBottom: 8, marginHorizontal: 20 },
+  sectionLine: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, marginBottom: 8, marginHorizontal: 20 },
+  sectionText: { marginTop: 0, marginBottom: 0, marginHorizontal: 0, flexShrink: 1 },
+  // A cloud row sits in the card its section's other rows do.
+  cloudRow: { marginHorizontal: 16 },
   sectionGap: { height: 10 },
   footnote: { fontSize: 14, textAlign: "center", marginTop: 8 },
 });

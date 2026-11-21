@@ -86,9 +86,10 @@ pub fn guards(command: &str) -> bool {
 /// bot more (`bots::enforce::needs_person`), or turns its memory back on.
 /// The owner's writes to a bot's role and memory (PRO-470) are a person's
 /// too: what a bot is told comes from them. Starting a suggestion (PRO-477)
-/// gives the bot work as the owner's message.
+/// gives the bot work as the owner's message. A chat-app link code (PRO-481)
+/// lets the chat that sends it give the bot work.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 21] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart"];
+pub const GUARDED_BOTS: [&str; 22] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart", "chatAppLink"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -129,6 +130,8 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
         // A chosen answer may approve a bot's run (PRO-476): witnessed always, as the runtime judges whether it
         // does under the item list's lock (`bots::items::answer_as`). Typed words never approve.
         Some("itemAnswer") => !params["params"]["answer"].is_null(),
+        // "Also sends to" (PRO-481): choosing a chat app sends the owner's home chat there; choosing none gives nothing.
+        Some("chatAppAlsoSends") => crate::bots::chat_apps::also_sends_adds(&params["params"]),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }
@@ -157,6 +160,10 @@ pub enum Refusal {
     /// A registration as the window that did not prove it with the
     /// window's key, whatever terminal it has ([`verify_window_for`]).
     Unproven,
+    /// A registration as the window proved with a key other than the one
+    /// this runtime pinned: one the window's Keychain holds now, replaced
+    /// while this runtime lived on. Only a restart pins it (PRO-507).
+    OtherKey,
 }
 
 impl Refusal {
@@ -169,6 +176,7 @@ impl Refusal {
             Self::NotWindow => "it was asked by a process with no terminal that is not the TerminalX window",
             Self::UnsupportedDesktop => "this desktop cannot verify its window's identity; pairing is unavailable",
             Self::Unproven => "it did not prove with the window's key that it is the TerminalX window",
+            Self::OtherKey => "it proved it with a key other than the one this runtime was started with",
         }
     }
 }
@@ -577,6 +585,9 @@ fn verify_peer(run: &Path, params: &mut Value, window: &Window, registering: boo
     let refusal = judge(peer, runtime, &runtime_terminals(runtime)).or_else(|| {
         let proven = window.proven(consent[WINDOW_FIELD].as_str(), &socket, nonce);
         if registering {
+            if window.keyed() && !proven && consent[WINDOW_FIELD].is_string() {
+                return Some(Refusal::OtherKey);
+            }
             return (!(window.keyed() && proven)).then_some(Refusal::Unproven);
         }
         terminal_rule(window, controlling_terminal(peer).is_some(), proven)
@@ -914,7 +925,10 @@ pub(crate) mod tests {
     #[test]
     fn the_runtime_learns_who_listens_and_refuses_a_borrowed_witness() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        // In /tmp, as the other witness tests are: the caller's TMPDIR (an
+        // agent session's may be long) can take the witness's socket past
+        // what a Unix socket's path may be (PRO-507).
+        let dir = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
         let run = dir.path().join("run");
         std::fs::create_dir(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1279,6 +1293,12 @@ pub(crate) mod tests {
         assert!(error.message.contains("window's key"), "{}", error.message);
         let (pid, _, mut params) = detached_request_with(&run, WINDOW_REGISTER, Some(&key), true);
         assert_eq!(verify_window_for(&run, &mut params, &desktop).unwrap(), pid);
+        // PRO-507: proved with another key (the Keychain's was replaced since
+        // the runtime pinned one), which only a restart repairs, and said so.
+        let (_, _, mut params) = detached_request(&run, WINDOW_REGISTER, Some(&[44u8; 32]));
+        let error = verify_window_for(&run, &mut params, &desktop).unwrap_err();
+        assert_eq!(error.code, "person_required");
+        assert!(error.message.contains(Refusal::OtherKey.says()), "{}", error.message);
         // Where no key is pinned, nothing proves the window.
         let (_, _, mut params) = detached_request_with(&run, WINDOW_REGISTER, Some(&key), true);
         assert!(verify_window_for(&run, &mut params, &Window::Headless).is_err());

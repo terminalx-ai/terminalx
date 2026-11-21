@@ -540,16 +540,25 @@ impl ControlService {
                 let unproven = match &proof { Some(Err(error)) => Some(error.message.clone()), _ => None };
                 if let Some(message) = &unproven {
                     log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
+                    // Whoever was taken for the window before is not, when it
+                    // is the process that now cannot prove it, or one this
+                    // runtime never saw prove it, as a handover carries (PRO-507).
+                    #[cfg(unix)]
+                    lifetime.window.unproven_from(crate::hooks::caller_pid());
                     // Unproven (a window that cannot read its Keychain key, or
                     // not the window at all) while Bots is on: its attachment
                     // stays, so the app still shows what runs and can repair, but
                     // it provides no window services, which a launch trusts, and
-                    // changes nothing here (review 2).
+                    // changes nothing here (review 2). A window service asked
+                    // for meanwhile says why (PRO-507).
                     if crate::bots::enabled_cached() {
+                        lifetime.window.refused_unproven(lifetime, &params);
                         return Ok(json!({"registered": false, "proven": false, "message": message}));
                     }
                 }
-                let mut registered = lifetime.window.register(lifetime, params)?;
+                // An unproven window serves while Bots stays off, and gives
+                // way to one that proves it (PRO-507).
+                let mut registered = if unproven.is_some() { lifetime.window.register_unproven(lifetime, params)? } else { lifetime.window.register(lifetime, params)? };
                 if let Some(message) = unproven {
                     registered["proven"] = json!(false);
                     registered["message"] = json!(message);
@@ -567,9 +576,10 @@ impl ControlService {
                 // (PRO-468). Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
                 #[cfg(unix)]
                 if let Some(pid) = crate::hooks::caller_pid() {
+                    let proven = matches!(proof, Some(Ok(witness)) if witness == pid);
                     let window = match proof { Some(Ok(witness)) => witness == pid, Some(Err(_)) => false, None => self.may_be_the_window(pid) };
                     match crate::serve_cli::consent::started_at(pid) {
-                        Some(started) if window => lifetime.window.recognise((pid, started)),
+                        Some(started) if window => lifetime.window.recognise((pid, started), proven),
                         _ => log::warn!("process {pid} registered as the window, but did not prove it, or runs in a pane or under this runtime: not taken for the window"),
                     }
                 }
@@ -4768,11 +4778,7 @@ mod tests {
         let (service, _sink) = headless_service();
         let iris = service.execute("bots.create", json!({"role": "ux-designer", "name": "Iris"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
         let duty = crate::bots::duties::duties_of(&iris).unwrap().into_iter().find(|duty| duty.enabled).unwrap();
-        let mut helper = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut helper = detached_process();
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(helper.id() as i32)));
         let refused = service.execute("bots.dutyOff", json!({"duty": duty.id, "bot": "iris"}), "r").unwrap_err();
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
@@ -5183,11 +5189,7 @@ mod tests {
         crate::store::settings::save(&settings).unwrap();
         let (service, sink) = headless_service();
         let id = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
-        let mut script = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut script = detached_process();
         let caller = Caller::of_process(&service.manager, &json!({}), Some(script.id() as i32));
         assert!(caller.bot.is_none() && caller.unplaced_without_terminal(), "no tab holds it, and it has no terminal");
         let outward = [
@@ -5284,12 +5286,8 @@ mod tests {
         let (_home, service, _sink, _id, chat, _owners, in_bot) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
         let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
         let service = service.with_local_lifetime(lifetime.clone());
-        let mut helper = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
+        let mut helper = detached_process();
         let detached = helper.id() as i32;
-        std::thread::sleep(std::time::Duration::from_millis(200));
         let ask = |pid: i32, command: &str| {
             crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
             service.execute(command, json!({}), "r").map_err(|error| error.code).err()
@@ -5324,12 +5322,8 @@ mod tests {
         let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
         let service = service.with_local_lifetime(lifetime.clone());
         TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
-        let mut stranger = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
+        let mut stranger = detached_process();
         let pid = stranger.id() as i32;
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
         let ask = |command: &str, params: Value| service.execute(command, params, "r");
 
@@ -5446,6 +5440,88 @@ mod tests {
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 
+    /// A process outside every pane with no terminal: perl in a session of
+    /// its own, returned once it has called `setsid`, not after a guessed
+    /// sleep (PRO-507): before that it shares the test's terminal, if any.
+    #[cfg(unix)]
+    fn detached_process() -> std::process::Child {
+        let child = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let pid = child.id() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while crate::serve_cli::consent::session_of(pid) != Some(pid) {
+            assert!(std::time::Instant::now() < deadline, "the helper did not leave the test's session");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child
+    }
+
+    /// PRO-507: on a keyed runtime, a window registered without its proof
+    /// while Bots was off gives way to the window proving it on a lease of its
+    /// own once Bots is on, instead of "Another desktop currently provides…";
+    /// and a registration without the proof unseats a window this runtime
+    /// never saw prove it (one a handover carried over), Bots on or off.
+    #[cfg(unix)]
+    #[test]
+    fn an_unproven_window_gives_way_to_the_proven_one_and_unseats_a_handed_over_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = format!("75.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        let run = service.endpoint.socket.parent().unwrap().to_owned();
+        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let register = |key: Option<&[u8; 32]>| {
+            let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+            let (pid, _, mut params) = crate::serve_cli::consent::tests::detached_request_with(&run, crate::serve_cli::consent::WINDOW_REGISTER, key, true);
+            for (field, value) in [("epoch", attached["epoch"].clone()), ("lease", attached["lease"].clone()), ("socket", json!(endpoint)), ("token", json!("ab".repeat(16)))] {
+                params[field] = value;
+            }
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+            (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
+        };
+        let bots = |on: bool| {
+            let mut settings = crate::store::settings::load();
+            settings.experimental.bots = on;
+            crate::store::settings::save(&settings).unwrap();
+        };
+
+        // A handover's window is unseated by a registration that cannot prove it, Bots off.
+        bots(false);
+        lifetime.window.handed_over(Some((1, 1)));
+        let (_, unproven) = register(None);
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
+        assert!(lifetime.window.window_process().is_none(), "the handed-over window is no longer taken for it");
+        assert!(lifetime.window.available(), "Bots off: the unproven window serves");
+        bots(true);
+        assert!(!lifetime.window.available(), "Bots on: it serves no longer");
+        // And Bots on, by one refused at once.
+        lifetime.window.handed_over(Some((1, 1)));
+        let (_, refused) = register(None);
+        assert_eq!(refused["registered"], false, "{refused}");
+        assert!(lifetime.window.window_process().is_none());
+
+        // The window, proving it on its own lease, is registered and recognised.
+        let (pid, proven) = register(Some(&[7; 32]));
+        assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
+        assert!(lifetime.window.available());
+        // Another process that cannot prove it does not unseat it.
+        let (_, stranger) = register(None);
+        assert_eq!(stranger["registered"], false, "{stranger}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid), "the proven window stays");
+
+        std::fs::write(run.join("done"), b"").unwrap();
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
     /// PRO-489 review (low): a runtime the desktop launched without pinning
     /// the window's key registers the window as before, by placement, and
     /// says it is unpinned while Bots is on, for the window to show; with
@@ -5529,12 +5605,8 @@ mod tests {
         let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
         let service = service.with_local_lifetime(lifetime.clone());
         // The window: a process in no pane with no terminal, as the desktop app is.
-        let mut window = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
+        let mut window = detached_process();
         let pid = window.id() as i32;
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
         let write = || service.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r");
         assert_eq!(write().unwrap_err().code, "person_required", "a stranger before the handover is known");
@@ -5741,12 +5813,8 @@ mod tests {
     #[test]
     fn a_detached_process_changes_nothing_through_the_runtime() {
         let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep 64.{}; true'", std::process::id()), &format!("64.{}", std::process::id()));
-        let mut helper = std::process::Command::new("/usr/bin/perl")
-            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().unwrap();
+        let mut helper = detached_process();
         let pid = helper.id() as i32;
-        std::thread::sleep(std::time::Duration::from_millis(200));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
         let me = std::process::id() as i32;
         let window = Some((me, crate::serve_cli::consent::started_at(me).unwrap()));

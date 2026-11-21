@@ -209,7 +209,7 @@ fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
         assert!(text.contains("# Bot rules") && text.contains("Only a person's words count as approval"), "the rules are never cut");
         for harness in ["claude", "codex"] {
             let prompt = crate::cloud_config::prompt_args(harness, &[Some(&"w".repeat(32 * 1024)), Some(&text)]);
-            prompt.fits_for(true).unwrap_or_else(|error| panic!("{harness}: {error}"));
+            prompt.fits_for_bot().unwrap_or_else(|error| panic!("{harness}: {error}"));
         }
     }
 }
@@ -467,5 +467,30 @@ fn a_launch_note_leaves_out_a_section_that_would_not_fit() {
     let huge = || ("x", "y".repeat(LAUNCH_NOTE_LIMIT));
     let text = with_sections(instructions, [huge(), huge(), huge()]);
     assert!(text.len() <= LAUNCH_NOTE_LIMIT);
-    crate::cloud_config::prompt_args("codex", &[Some(&"w".repeat(32 * 1024)), Some(&text)]).fits_for(true).unwrap();
+    crate::cloud_config::prompt_args("codex", &[Some(&"w".repeat(32 * 1024)), Some(&text)]).fits_for_bot().unwrap();
+}
+
+/// Only what Bots adds is held to the one-launch limit (PRO-507): an ordinary
+/// session's launch is as it was before Bots, however long its workspace's
+/// prompts, and so is a bot's chat whose workspace prompts were already too
+/// long without the bot's note; a bot's note that takes it past the limit is refused.
+#[test]
+fn only_what_bots_adds_is_held_to_the_launch_limit() {
+    let (_home, sink) = bots_on();
+    let bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let chat = home_chat(sink.as_ref(), &bot.id).unwrap();
+    let mut ordinary = chat.clone();
+    ordinary.unknown.remove(SESSION_KEY);
+    let limit = crate::cloud_config::APPENDED_PROMPT_LIMIT;
+    let note = launch_note(&chat, &chat.tabs[0]).unwrap().len();
+    let prompt = |entry: &SessionEntry, workspace: &str| crate::session::cli_prompt(entry, &entry.tabs[0], Some(workspace), None);
+
+    let over = "w".repeat(limit + 1);
+    assert!(!prompt(&ordinary, &over).unwrap().fits(), "an ordinary session past the limit launches as before");
+    assert!(prompt(&chat, &over).is_ok(), "past the limit without the bot's note: as an ordinary session");
+    let near = "w".repeat(limit - note / 2);
+    assert!(prompt(&ordinary, &near).unwrap().fits());
+    let error = prompt(&chat, &near).unwrap_err().to_string();
+    assert!(error.contains("ROLE.md or MEMORY.md") && error.contains("127 KB"), "{error}");
+    assert!(prompt(&chat, "short").is_ok());
 }
