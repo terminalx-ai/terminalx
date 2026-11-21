@@ -78,7 +78,7 @@ fn pulls(list: Vec<PullRequest>) -> Snapshot {
 }
 
 fn complete(snapshot: Snapshot) -> Read {
-    Read { snapshot, bound: None }
+    Read { snapshot, bound: None, resume: None }
 }
 
 /// One tick with `read` as the source's answer; returns what woke.
@@ -159,7 +159,7 @@ fn something_old_that_comes_to_match_later_wakes_once() {
 fn a_baseline_that_cannot_be_read_completely_wakes_nothing_and_tries_again() {
     let _home = crate::store::temp_home();
     let automation = stored(linear_source());
-    let woken = tick_read(&automation, 0, Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000) });
+    let woken = tick_read(&automation, 0, Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000), resume: None });
     assert!(woken.is_empty());
     let state = seen(&automation);
     assert!(!state.initialized && state.events.is_empty(), "nothing is recorded from a part of the baseline");
@@ -188,7 +188,7 @@ fn later_reads_page_back_to_the_last_read_and_say_when_they_could_not() {
     assert_eq!(since.get(), Some(at(0) - READ_OVERLAP), "back to the last read, with an overlap for clocks");
 
     // A read that hit its bound still wakes on what it read, and says so.
-    let woken = tick_read(&automation, 10, Read { snapshot: Snapshot::Linear(vec![issue("4")]), bound: Some(500) });
+    let woken = tick_read(&automation, 10, Read { snapshot: Snapshot::Linear(vec![issue("4")]), bound: Some(500), resume: None });
     assert_eq!(woken.len(), 1);
     assert!(seen(&automation).notice.as_deref().is_some_and(|notice| notice.contains("More than 500 changed")));
     assert_eq!(public_state(&automation).notice, seen(&automation).notice);
@@ -993,7 +993,7 @@ fn a_draft_filter_is_part_of_the_search_so_a_full_page_counts_only_what_can_matc
 fn an_incomplete_baseline_backs_off_longer_each_time() {
     let _home = crate::store::temp_home();
     let automation = stored(linear_source());
-    let partial = || Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000) };
+    let partial = || Read { snapshot: Snapshot::Linear(vec![issue("1")]), bound: Some(2000), resume: None };
     tick_read(&automation, 0, partial());
     assert_eq!(seen(&automation).retry_after.as_deref(), Some(stamp(at(5)).as_str()));
     tick_read(&automation, 5, partial());

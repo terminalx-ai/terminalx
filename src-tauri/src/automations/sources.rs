@@ -552,6 +552,8 @@ const PR_ACTIVITY: usize = 250;
 pub struct Read {
     pub snapshot: Snapshot,
     pub bound: Option<usize>,
+    /// A read that stopped at its bound and goes on next time from here (a bot's GitHub mentions).
+    pub resume: Option<DateTime<Utc>>,
 }
 
 pub(crate) fn linear_variables(source: &LinearIssueSource) -> Result<Value, SourceError> {
@@ -577,10 +579,10 @@ fn read_linear_pages(
         issues.extend(found);
         match next {
             Some(next) if !reached_since => cursor = Some(next),
-            _ => return Ok(Read { snapshot: Snapshot::Linear(issues), bound: None }),
+            _ => return Ok(Read { snapshot: Snapshot::Linear(issues), bound: None, resume: None }),
         }
     }
-    Ok(Read { snapshot: Snapshot::Linear(issues), bound: Some(pages * LINEAR_PAGE) })
+    Ok(Read { snapshot: Snapshot::Linear(issues), bound: Some(pages * LINEAR_PAGE), resume: None })
 }
 
 fn read_linear(source: &LinearIssueSource, since: Option<DateTime<Utc>>, pages: usize) -> Result<Read, SourceError> {
@@ -700,8 +702,8 @@ pub enum Snapshot {
 /// One read of the source: everything that matches for a baseline, else back to `since`.
 fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceSeen, since: Option<DateTime<Utc>>) -> Result<Read, SourceError> {
     #[cfg(test)]
-    if let Some(snapshot) = test_reads::take(&automation.id) {
-        return Ok(Read { snapshot, bound: None });
+    if let Some((snapshot, resume)) = test_reads::take(&automation.id) {
+        return Ok(Read { snapshot, bound: None, resume });
     }
     let baseline = !state.initialized;
     match source {
@@ -715,11 +717,11 @@ fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceS
                 (None, true) => Some(read_viewer(cwd)?),
                 (None, false) => None,
             };
-            Ok(Read { snapshot: Snapshot::PullRequests { pulls, viewer }, bound })
+            Ok(Read { snapshot: Snapshot::PullRequests { pulls, viewer }, bound, resume: None })
         }
         AutomationEventSource::Bot(source) => {
-            let events = crate::bots::wakes::read(automation, source, baseline, since)?;
-            Ok(Read { snapshot: Snapshot::Bot(events), bound: None })
+            let read = crate::bots::wakes::read(automation, source, baseline, since)?;
+            Ok(Read { snapshot: Snapshot::Bot(read.events), bound: read.bound, resume: read.resume })
         }
         AutomationEventSource::Unsupported(_) => Err(SourceError::plain(NEEDS_NEWER)),
     }
@@ -1109,7 +1111,7 @@ fn poll(
     let at = stamp(now);
     state.last_polled_at = Some(at.clone());
     let since = state.initialized.then(|| parse(state.last_read_at.as_deref()).map(|last| last - READ_OVERLAP)).flatten();
-    let Read { snapshot, bound } = match read(automation, &trigger.source, &state, since) {
+    let Read { snapshot, bound, resume } = match read(automation, &trigger.source, &state, since) {
         Ok(read) => read,
         Err(error) => {
             state.failures = state.failures.saturating_add(1);
@@ -1172,6 +1174,12 @@ fn poll(
     let notices: Vec<String> = [
         damaged,
         bound.map(|bound| format!("More than {bound} changed since the last check; the ones past that were not looked at.")),
+        resume.map(|_| format!(
+            "More than {} comments changed since the last check: it looked at the oldest {} and goes on from there next time.",
+            crate::bots::wakes::MENTION_READ,
+            crate::bots::wakes::MENTION_READ,
+        )),
+        message_notice(automation, &trigger.source),
         held_notice(&state.held),
         duty_notice(&state.held),
         (plan.looped > 0).then(|| format!(
@@ -1208,10 +1216,13 @@ fn poll(
     let oldest_pending = plan.pending.iter().filter_map(|at| parse(Some(at))).min();
     if !duty_held {
         // Held back by the duty's limit: the next read pages back as far as this one did.
-        state.last_read_at = Some(match oldest_pending {
-            Some(oldest) if oldest < now => stamp(oldest - chrono::TimeDelta::seconds(1)),
-            _ => at.clone(),
-        });
+        let next = match oldest_pending {
+            Some(oldest) if oldest < now => oldest - chrono::TimeDelta::seconds(1),
+            _ => now,
+        };
+        // A read that stopped at its bound: the next one goes on from where it stopped (the overlap is taken off again).
+        let next = resume.map_or(next, |resume| next.min(resume + READ_OVERLAP));
+        state.last_read_at = Some(stamp(next));
     }
     if let AutomationEventSource::Bot(_) = trigger.source {
         prune_seen(&mut state);
@@ -1240,8 +1251,23 @@ fn poll(
         save_seen(&automation.id, &state)?;
         start(wake, run)?;
     }
+    // What every duty waiting for messages has now seen is let go of.
+    if let (AutomationEventSource::Bot(source), Some(owner)) = (&trigger.source, crate::bots::duties::owner(automation)) {
+        if source.kind == "botMessage" {
+            if let Err(error) = crate::bots::wakes::release(&owner.id) {
+                log::warn!("bot messages for {}: {error:#}", owner.id);
+            }
+        }
+    }
     emit_state(app, &automation.id, &state);
     Ok(())
+}
+
+/// What a duty waiting for messages is told about messages let go unread.
+fn message_notice(automation: &Automation, source: &AutomationEventSource) -> Option<String> {
+    let AutomationEventSource::Bot(source) = source else { return None };
+    (source.kind == "botMessage").then_some(())?;
+    crate::bots::wakes::dropped_notice(&crate::bots::duties::owner(automation)?.id)
 }
 
 fn linear_ref(issue: &crate::issues::Issue) -> index::IssueRef {
@@ -1581,13 +1607,19 @@ pub(crate) mod test_reads {
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
 
-    static QUEUED: Mutex<BTreeMap<String, VecDeque<super::Snapshot>>> = Mutex::new(BTreeMap::new());
+    type Queued = (super::Snapshot, Option<chrono::DateTime<chrono::Utc>>);
+    static QUEUED: Mutex<BTreeMap<String, VecDeque<Queued>>> = Mutex::new(BTreeMap::new());
 
     pub(crate) fn queue(automation_id: &str, snapshot: super::Snapshot) {
-        QUEUED.lock().unwrap_or_else(|error| error.into_inner()).entry(automation_id.to_owned()).or_default().push_back(snapshot);
+        queue_resuming(automation_id, snapshot, None);
     }
 
-    pub(super) fn take(automation_id: &str) -> Option<super::Snapshot> {
+    /// A read that stopped at its bound, to go on from `resume` next time.
+    pub(crate) fn queue_resuming(automation_id: &str, snapshot: super::Snapshot, resume: Option<chrono::DateTime<chrono::Utc>>) {
+        QUEUED.lock().unwrap_or_else(|error| error.into_inner()).entry(automation_id.to_owned()).or_default().push_back((snapshot, resume));
+    }
+
+    pub(super) fn take(automation_id: &str) -> Option<Queued> {
         QUEUED.lock().unwrap_or_else(|error| error.into_inner()).get_mut(automation_id)?.pop_front()
     }
 }

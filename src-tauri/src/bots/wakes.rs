@@ -53,10 +53,18 @@ pub const BODY_CHARS: usize = 4000;
 const WATCH_BYTES: u64 = 1024 * 1024;
 /// The most events one read keeps.
 const READ_EVENTS: usize = 100;
+/// The most pages of [`READ_EVENTS`] one read of mentions goes through.
+const MENTION_PAGES: usize = 10;
+/// The most comments one read of GitHub mentions looks at; past that the next read goes on from where it stopped.
+pub const MENTION_READ: usize = MENTION_PAGES * READ_EVENTS;
 /// The most seen events a bot source keeps; past that the oldest go, and what is older can no longer wake it.
 pub const SEEN_LIMIT: usize = 2000;
 /// The most messages kept for one bot, and the file's size: refused well under what it is read with.
 const INBOX_PER_BOT: usize = 100;
+/// The most bytes of messages kept waiting for one bot.
+const INBOX_BYTES_PER_BOT: usize = 256 * 1024;
+/// The most messages one bot leaves in an hour.
+pub const SENT_PER_HOUR: usize = 30;
 const INBOX_WRITE_LIMIT: usize = 2 * 1024 * 1024;
 const INBOX_READ_LIMIT: u64 = 8 * 1024 * 1024;
 const INBOX_BOTS: usize = 1000;
@@ -317,39 +325,85 @@ pub fn mentions(body: &str, handle: &str) -> bool {
 
 // ------------------------------------------------------------------ reading
 
+/// What one read of a bot source found.
+#[derive(Debug, Default)]
+pub struct BotRead {
+    pub events: Vec<BotEvent>,
+    /// A read that stopped at its bound with more to go: the next one goes on from here.
+    pub resume: Option<DateTime<Utc>>,
+    /// A read that stopped at its bound and cannot go on: how many it looked at.
+    pub bound: Option<usize>,
+}
+
+impl From<Vec<BotEvent>> for BotRead {
+    fn from(events: Vec<BotEvent>) -> Self {
+        Self { events, ..Self::default() }
+    }
+}
+
 /// Read `source` for `automation`'s duty: what it shows since `since` (and
 /// nothing for a first read of a source that wakes only on what happens
 /// after it starts, since nothing before can wake it).
-pub fn read(automation: &Automation, source: &BotSource, first: bool, since: Option<DateTime<Utc>>) -> Result<Vec<BotEvent>, SourceError> {
+pub fn read(automation: &Automation, source: &BotSource, first: bool, since: Option<DateTime<Utc>>) -> Result<BotRead, SourceError> {
     if !super::duties::is_duty(automation) {
         return Err(plain("Only a bot's duty wakes on this."));
     }
     if first && source.only_after_start() {
-        return Ok(Vec::new());
+        return Ok(BotRead::default());
     }
     let cwd = Path::new(&automation.project_path);
+    if source.kind == "githubMention" {
+        return github_mention_read(cwd, source, since);
+    }
     let since = since.map(|since| since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     match source.kind.as_str() {
-        "githubMention" => {
-            let path = format!("repos/{}/issues/comments?sort=updated&direction=desc&per_page={READ_EVENTS}{}", source.repo(), since.map(|since| format!("&since={since}")).unwrap_or_default());
-            Ok(github_mentions(&gh_json(cwd, &path)?, &source.handle()))
-        }
         "githubSecurityAlert" => {
             let path = format!("repos/{}/dependabot/alerts?state=open&sort=created&direction=desc&per_page={READ_EVENTS}", source.repo());
-            Ok(security_alerts(&gh_json(cwd, &path)?))
+            Ok(security_alerts(&gh_json(cwd, &path)?).into())
         }
         "githubBranchCheck" => {
             let branch = source.text(&source.fields.branch);
             let path = format!("repos/{}/commits/{}/check-runs?per_page={READ_EVENTS}", source.repo(), url_part(&branch));
-            Ok(branch_checks(&gh_json(cwd, &path)?, &branch))
+            Ok(branch_checks(&gh_json(cwd, &path)?, &branch).into())
         }
         "linearMention" => linear_mentions(source, since.as_deref()),
         "botMessage" => {
             let owner = super::duties::owner(automation).map(|owner| owner.id).ok_or_else(|| plain("The duty names no bot."))?;
-            Ok(messages_for(&owner, source).map_err(|error| plain(format!("{error:#}")))?)
+            Ok(messages_for(&owner, source).map_err(|error| plain(format!("{error:#}")))?.into())
         }
-        _ => watch(automation, source).map(|event| vec![event]),
+        _ => watch(automation, source).map(|event| vec![event].into()),
     }
+}
+
+/// The repository's comments changed since `since`, oldest first, a page of
+/// [`READ_EVENTS`] at a time and at most [`MENTION_PAGES`] pages: GitHub has no
+/// search for a mention in comments, so each is looked at here. When more
+/// changed than one read looks at, the next read goes on from the last one
+/// read, so a mention left during a pause or a long run is never passed over.
+fn github_mention_read(cwd: &Path, source: &BotSource, since: Option<DateTime<Utc>>) -> Result<BotRead, SourceError> {
+    let handle = source.handle();
+    let Some(since) = since else {
+        // Only a first read has no `since`, and it reads nothing.
+        return Ok(BotRead::default());
+    };
+    let from = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut events = Vec::new();
+    for page in 1..=MENTION_PAGES {
+        let path = format!("repos/{}/issues/comments?sort=updated&direction=asc&since={from}&per_page={READ_EVENTS}&page={page}", source.repo());
+        let value = gh_json(cwd, &path)?;
+        let comments = value.as_array().map_or(&[][..], Vec::as_slice);
+        events.extend(github_mentions(&value, &handle));
+        if comments.len() < READ_EVENTS {
+            return Ok(BotRead { events, ..BotRead::default() });
+        }
+        if page == MENTION_PAGES {
+            let last = comments.last().and_then(|comment| comment["updated_at"].as_str()).and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
+            // Always a step on, even when a whole read changed in one second.
+            let resume = last.filter(|last| *last > since).unwrap_or(since + chrono::TimeDelta::seconds(1));
+            return Ok(BotRead { events, resume: Some(resume), bound: None });
+        }
+    }
+    Ok(BotRead { events, ..BotRead::default() })
 }
 
 fn plain(message: impl Into<String>) -> SourceError {
@@ -454,7 +508,9 @@ pub fn branch_checks(value: &Value, branch: &str) -> Vec<BotEvent> {
     }]
 }
 
-fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<Vec<BotEvent>, SourceError> {
+/// Comments that mention the bot, found by Linear itself, newest first and at
+/// most [`MENTION_PAGES`] pages; past that the read says how many it looked at.
+fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, SourceError> {
     let key = crate::store::settings::load()
         .linear_api_key
         .filter(|key| !key.trim().is_empty())
@@ -467,9 +523,19 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<Vec<BotEve
     if let Some(team) = source.fields.team_id.as_deref().map(str::trim).filter(|team| !team.is_empty()) {
         filter["issue"] = json!({"team": {"id": {"eq": team}}});
     }
-    let query = "query($first: Int!, $filter: CommentFilter) { comments(first: $first, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { displayName name } botActor { name } issue { identifier title } } } }";
-    let data = crate::issues::graphql(&key, query, json!({"first": READ_EVENTS, "filter": filter})).map_err(|error| linear_error(&error))?;
-    Ok(parse_linear_mentions(&data, &handle))
+    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { displayName name } botActor { name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
+    let mut events = Vec::new();
+    let mut after = Value::Null;
+    for _ in 0..MENTION_PAGES {
+        let data = crate::issues::graphql(&key, query, json!({"first": READ_EVENTS, "after": after, "filter": filter})).map_err(|error| linear_error(&error))?;
+        events.extend(parse_linear_mentions(&data, &handle));
+        let info = &data["comments"]["pageInfo"];
+        match info["endCursor"].as_str() {
+            Some(cursor) if info["hasNextPage"].as_bool() == Some(true) => after = json!(cursor),
+            _ => return Ok(events.into()),
+        }
+    }
+    Ok(BotRead { events, resume: None, bound: Some(MENTION_READ) })
 }
 
 /// Comments that mention `handle`, from a Linear `comments` query.
@@ -590,6 +656,12 @@ struct Inbox {
     /// By the receiving bot's id; an entry this build cannot read is kept as it is.
     #[serde(default)]
     bots: BTreeMap<String, Vec<Value>>,
+    /// By the receiving bot's id: how many of its messages were let go unread (the oldest, past its budget).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dropped: BTreeMap<String, u64>,
+    /// By the sending bot's id: when it left its messages in the last hour.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sent: BTreeMap<String, Vec<String>>,
     #[serde(flatten, default)]
     unknown: BTreeMap<String, Value>,
 }
@@ -611,7 +683,7 @@ fn read_inbox() -> Result<Inbox> {
 fn write_inbox(inbox: &Inbox) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(inbox)?;
     if bytes.len() > INBOX_WRITE_LIMIT {
-        return Err(refused("The bots' messages are full: no more can be left until older ones are read."));
+        return Err(refused("The bots' messages file is full."));
     }
     crate::store::write_atomic(&inbox_path()?, &bytes)
 }
@@ -623,8 +695,7 @@ pub fn messages(bot_id: &str) -> Result<Vec<BotMessage>> {
 
 fn messages_for(bot_id: &str, source: &BotSource) -> Result<Vec<BotEvent>> {
     let mut list = messages(bot_id)?;
-    list.retain(|message| source.fields.from.is_empty() || source.fields.from.contains(&message.from));
-    list.retain(|message| source.fields.kinds.is_empty() || source.fields.kinds.contains(&message.kind));
+    list.retain(|message| source.takes(message));
     Ok(list
         .into_iter()
         .rev()
@@ -643,9 +714,125 @@ fn messages_for(bot_id: &str, source: &BotSource) -> Result<Vec<BotEvent>> {
         .collect())
 }
 
-/// Leave bot `to` a message from bot `from`. A bot does not message itself.
-/// The newest [`INBOX_PER_BOT`] are kept for each bot.
-pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: MessageKind, text: &str, hops: u32) -> Result<BotMessage> {
+/// A duty of a bot that waits for messages, and what it has seen.
+struct Waiting {
+    source: BotSource,
+    seen: crate::automations::sources::SourceSeen,
+}
+
+/// The bot's duties that are on and wait for messages. One whose record cannot
+/// be read is taken to have seen nothing, so nothing it might want goes.
+fn waiting(bot_id: &str) -> Vec<Waiting> {
+    super::duties::duties_of(bot_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|duty| duty.enabled)
+        .filter_map(|duty| {
+            let Some(crate::automations::sources::AutomationEventSource::Bot(source)) = duty.event_trigger.map(|trigger| trigger.source) else { return None };
+            (source.kind == "botMessage").then_some(())?;
+            let seen = match crate::automations::sources::load_seen(&duty.id) {
+                // Not started yet: what is left before it starts is never news to it.
+                Ok(Some(seen)) if seen.initialized => seen,
+                Ok(_) => return None,
+                Err(_) => Default::default(),
+            };
+            Some(Waiting { source, seen })
+        })
+        .collect()
+}
+
+impl BotSource {
+    /// Whether a message is one this source wakes on (from whom, of what kind).
+    fn takes(&self, message: &BotMessage) -> bool {
+        (self.fields.from.is_empty() || self.fields.from.contains(&message.from)) && (self.fields.kinds.is_empty() || self.fields.kinds.contains(&message.kind))
+    }
+}
+
+/// Whether some duty waiting for messages has still to read `message`: one it
+/// takes, has not seen, and that came after it started. A message passed on
+/// too often is read too, so the duty can say it woke nobody.
+fn needed(message: &BotMessage, waiting: &[Waiting]) -> bool {
+    let at = DateTime::parse_from_rfc3339(&message.at).ok().map(|at| at.with_timezone(&Utc));
+    waiting.iter().any(|duty| {
+            let started = duty.seen.started_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
+        duty.source.takes(message) && !duty.seen.events.contains_key(&format!("msg:{}", message.id)) && started.is_none_or(|started| at.is_some_and(|at| at > started))
+    })
+}
+
+/// Let go of the messages left for `bot_id` that no duty of it may still wake on.
+/// An entry this build cannot read is kept as it is. Whether anything went.
+fn release_in(inbox: &mut Inbox, bot_id: &str, waiting: &[Waiting]) -> bool {
+    let Some(list) = inbox.bots.get_mut(bot_id) else { return false };
+    let before = list.len();
+    list.retain(|value| serde_json::from_value::<BotMessage>(value.clone()).map_or(true, |message| needed(&message, waiting)));
+    let changed = list.len() != before;
+    if list.is_empty() {
+        // Read up: what was let go unread before is no longer news.
+        inbox.bots.remove(bot_id);
+        inbox.dropped.remove(bot_id);
+    }
+    changed
+}
+
+/// Once its duties have read them, the messages left for `bot_id` go.
+pub fn release(bot_id: &str) -> Result<()> {
+    let waiting = waiting(bot_id);
+    let _lock = INBOX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut inbox = read_inbox()?;
+    let had_dropped = inbox.dropped.contains_key(bot_id);
+    if release_in(&mut inbox, bot_id, &waiting) || had_dropped != inbox.dropped.contains_key(bot_id) {
+        write_inbox(&inbox)?;
+    }
+    Ok(())
+}
+
+/// What a duty waiting for `bot_id`'s messages says when some were let go unread.
+pub fn dropped_notice(bot_id: &str) -> Option<String> {
+    let dropped = read_inbox().ok()?.dropped.get(bot_id).copied().filter(|count| *count > 0)?;
+    Some(format!(
+        "{dropped} message{} left for this bot went unread: at most {INBOX_PER_BOT} wait for one bot, the oldest going first.",
+        if dropped == 1 { "" } else { "s" },
+    ))
+}
+
+fn entry_at(value: &Value) -> &str {
+    value["at"].as_str().unwrap_or_default()
+}
+
+/// Keep `inbox` within its budgets: per bot, then the whole file. The oldest
+/// go first and are counted, so the duties waiting for them say so.
+fn trim(inbox: &mut Inbox) {
+    for (bot, list) in &mut inbox.bots {
+        let mut bytes: usize = list.iter().map(|value| value.to_string().len()).sum();
+        let mut over = list.len().saturating_sub(INBOX_PER_BOT);
+        while over < list.len() && bytes > INBOX_BYTES_PER_BOT {
+            bytes -= list[over].to_string().len();
+            over += 1;
+        }
+        if over > 0 {
+            list.drain(..over);
+            *inbox.dropped.entry(bot.clone()).or_default() += over as u64;
+        }
+    }
+    inbox.bots.retain(|_, list| !list.is_empty());
+    let mut size = serde_json::to_vec_pretty(&*inbox).map_or(0, |bytes| bytes.len());
+    while size > INBOX_WRITE_LIMIT {
+        let Some(bot) = inbox.bots.iter().filter_map(|(bot, list)| list.first().map(|value| (entry_at(value).to_owned(), bot.clone()))).min().map(|(_, bot)| bot) else { break };
+        let list = inbox.bots.get_mut(&bot).expect("chosen above");
+        size = size.saturating_sub(list.remove(0).to_string().len());
+        *inbox.dropped.entry(bot.clone()).or_default() += 1;
+        if list.is_empty() {
+            inbox.bots.remove(&bot);
+        }
+    }
+}
+
+/// Leave bot `to` a message from bot `from`, and whether a duty of `to` waits
+/// for it. A bot does not message itself, and leaves at most
+/// [`SENT_PER_HOUR`] an hour. Messages wait until every duty that may wake on
+/// them has seen them; one no duty waits for goes with the next message. At
+/// most [`INBOX_PER_BOT`] wait for one bot, the oldest going first.
+pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: MessageKind, text: &str, hops: u32) -> Result<(BotMessage, bool)> {
     if from.id == to.id {
         return Err(refused("A bot does not leave itself a message."));
     }
@@ -664,27 +851,40 @@ pub fn post(sink: &dyn crate::sink::EventSink, from: &Bot, to: &Bot, kind: Messa
         hops,
         unknown: BTreeMap::new(),
     };
+    let waiting = waiting(&to.id);
+    let waits = message.hops < MAX_HOPS && needed(&message, &waiting);
     {
         let _lock = INBOX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let mut inbox = read_inbox()?;
+        release_in(&mut inbox, &to.id, &waiting);
+        let hour_ago = Utc::now() - chrono::TimeDelta::hours(1);
+        let recent = |at: &String| DateTime::parse_from_rfc3339(at).is_ok_and(|at| at.with_timezone(&Utc) > hour_ago);
+        inbox.sent.retain(|_, times| {
+            times.retain(recent);
+            !times.is_empty()
+        });
+        let sent = inbox.sent.get(&from.id).map_or(0, Vec::len);
+        if sent >= SENT_PER_HOUR {
+            return Err(refused(format!("{} has left {SENT_PER_HOUR} messages in the last hour, the most one bot leaves. Say the rest in fewer, later.", from.name)));
+        }
         if !inbox.bots.contains_key(&to.id) && inbox.bots.len() >= INBOX_BOTS {
             return Err(refused("Too many bots have messages waiting."));
         }
-        let list = inbox.bots.entry(to.id.clone()).or_default();
-        list.push(serde_json::to_value(&message)?);
-        let over = list.len().saturating_sub(INBOX_PER_BOT);
-        list.drain(..over);
+        inbox.bots.entry(to.id.clone()).or_default().push(serde_json::to_value(&message)?);
+        inbox.sent.entry(from.id.clone()).or_default().push(message.at.clone());
+        trim(&mut inbox);
         write_inbox(&inbox)?;
     }
     sink.emit("bot_message", &json!({"to": to.id, "from": from.id, "kind": message.kind, "id": message.id}));
-    Ok(message)
+    Ok((message, waits))
 }
 
 /// A deleted bot's messages go with it.
 pub fn forget_bot(bot_id: &str) -> Result<()> {
     let _lock = INBOX_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let mut inbox = read_inbox()?;
-    if inbox.bots.remove(bot_id).is_some() {
+    let gone = [inbox.bots.remove(bot_id).is_some(), inbox.dropped.remove(bot_id).is_some(), inbox.sent.remove(bot_id).is_some()];
+    if gone.contains(&true) {
         write_inbox(&inbox)?;
     }
     Ok(())

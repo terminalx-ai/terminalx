@@ -1306,8 +1306,9 @@ impl ControlService {
         }
         // One hop more than the message that woke the duty run it is sent from, so two bots cannot wake each other for ever.
         let hops = caller.session.as_deref().and_then(|session| index::get(session).ok()).map_or(0, |entry| wakes::hops_of_session(&entry)).saturating_add(1);
-        let message = wakes::post(self.sink.as_ref(), &from, &to, kind, &required_string(&params, "text")?, hops).map_err(failed)?;
-        Ok(json!({"to": to.id, "toName": to.name, "message": message}))
+        let (message, waits) = wakes::post(self.sink.as_ref(), &from, &to, kind, &required_string(&params, "text")?, hops).map_err(failed)?;
+        // Whether a duty of the other bot waits for it: none does, and it wakes nothing.
+        Ok(json!({"to": to.id, "toName": to.name, "message": message, "wakes": waits}))
     }
 
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
