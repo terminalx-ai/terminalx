@@ -190,6 +190,7 @@ exports[`settings registry > keeps a reviewable inventory of stable, unique row 
   "shortcuts.app.stats",
   "shortcuts.app.automations",
   "shortcuts.app.bots",
+  "shortcuts.app.pauseAllBots",
   "shortcuts.app.runView",
   "shortcuts.app.skills",
   "shortcuts.app.settings",

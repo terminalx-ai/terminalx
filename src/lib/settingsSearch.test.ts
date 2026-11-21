@@ -171,14 +171,14 @@ describe("settings row search", () => {
 
   it("offers every row behind a switch only while that switch is on, and every other row always", () => {
     const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
-    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.bots"]);
+    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
     expect(behind.every((row) => !settingOffered(row))).toBe(true);
     orchestratorRuns(true);
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["repositories.orchestrator"]);
     openCode(true);
     expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["agents.opencodeProviders"]);
     bots(true);
-    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.bots"]);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
     expect(searchSettings("bots").map((match) => match.id)).toContain("shortcuts.app.bots");
     bots(false);
     expect(searchSettings("bots").map((match) => match.id)).not.toContain("shortcuts.app.bots");

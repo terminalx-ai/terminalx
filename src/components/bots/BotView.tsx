@@ -11,12 +11,13 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
 import { botChats, botSpentToday, chatSource, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
+import { heldLine, pausedBySentence, pausedStatus, usePauseHeld } from "@/lib/botPause";
 import { showBotsTeam } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
-import { effectiveAccess, type Bot } from "@/types/bots";
+import { effectiveAccess, type Bot, type PauseHeld } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
@@ -243,8 +244,15 @@ function workLine(working: number, asking: number): string {
   return parts.length ? parts.join(" · ") : "Ready";
 }
 
+/** "Paused 18 minutes ago · 2 workers stopped": when, and what it holds, as its sidebar row says it (PRO-474). */
+function pausedWorkLine(bot: Bot, held: PauseHeld | null): string {
+  const status = pausedStatus(bot, held).replace(/^Paused( · )?/, "");
+  return [`Paused ${relativeTime(bot.paused!.at)}`, status].filter(Boolean).join(" · ");
+}
+
 function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, onResume }: { bot: Bot; working: number; asking: number; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
   const full = effectiveAccess(bot.access) === "full";
+  const held = usePauseHeld();
   return (
     <div data-tauri-drag-region="deep" className="flex shrink-0 flex-wrap items-center gap-3 px-5 pt-4 pb-3">
       <span aria-hidden className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-well text-primary hairline"><BotIcon className="size-5" /></span>
@@ -255,7 +263,7 @@ function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, on
         </div>
         <p className={cn("flex min-w-0 items-center gap-1.5 text-[12.5px]", bot.paused || asking > 0 ? "text-warning" : "text-muted-foreground")}>
           {bot.paused ? <Pause className="size-3.5 shrink-0" /> : working > 0 ? <Loader2 className="size-3.5 shrink-0" /> : <CircleDot className="size-3.5 shrink-0" />}
-          <span className="truncate" data-testid="bot-work-line">{bot.paused ? `Paused ${relativeTime(bot.paused.at)}` : workLine(working, asking)}</span>
+          <span className="truncate" data-testid="bot-work-line">{bot.paused ? pausedWorkLine(bot, held) : workLine(working, asking)}</span>
         </p>
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -280,6 +288,12 @@ function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, on
  */
 function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: boolean; onResume: () => void; onDismiss: () => void }) {
   const asked = !!bot.resumeRequest;
+  const bots = useBotStore().bots;
+  const held = usePauseHeld();
+  // Who paused it, from where and when, and what it held (PRO-474): "You paused it from your phone at 13:42, …".
+  const by = pausedBySentence([bot], bots);
+  const was = bot.paused?.stopped?.was;
+  const holding = heldLine(bot, held);
   return (
     <div role="status" className="mx-4 mt-3 flex shrink-0 items-center gap-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2">
       <Pause className="size-4 shrink-0 text-warning" />
@@ -290,8 +304,10 @@ function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: bool
           </>
         ) : (
           <>
-            <span className="font-medium">Paused.</span> {bot.name} still answers you here, in plan mode: it changes nothing and starts no sessions or runs
-            until you resume it.
+            <span className="font-medium">Paused.</span> <span data-testid="bot-paused-by">{by}</span>
+            {was && was !== "was quiet" ? ` It ${was}.` : ""}
+            {holding !== "Nothing held" ? <span data-testid="bot-paused-held"> {holding}.</span> : null} {bot.name} still answers you here, in plan mode, and
+            says it is paused: it changes nothing and starts no sessions or runs until you resume it.
           </>
         )}
       </p>
