@@ -431,3 +431,14 @@ fn a_pipeline_keeps_its_sessions_until_its_pull_request_merges_or_closes() {
     assert_eq!(open, ["unopened-author", "unopened-reviewer"]);
     assert!(!pipelines.keep("nobody", &|_, _| true), "a session in no pipeline");
 }
+
+/// A bot's chat stands as long as its bot (PRO-468): never archived for being quiet.
+#[test]
+fn a_bots_chat_is_never_archived_for_being_quiet() {
+    let facts = Facts::default();
+    for home in [true, false] {
+        let mut chat = session("bot", Some(90), now());
+        crate::bots::chat::set_session_bot(&mut chat, &crate::bots::chat::BotRef { id: "b".into(), home });
+        assert_eq!(facts.kept(&chat, 7), Some(Kept::Bot));
+    }
+}

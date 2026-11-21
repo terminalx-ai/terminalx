@@ -434,12 +434,15 @@ fn a_role_has_one_limit_and_the_editor_saves_only_over_what_it_started_from() {
     let (_home, sink, bot) = hired();
     // Writing past the limit a conversation reads is refused, with a message.
     let long = "a line of the role that is long enough\n".repeat(2_000);
-    assert!(long.len() as u64 > READ_LIMIT);
-    assert!(super::super::role_write(sink.as_ref(), &bot.id, &long, None).unwrap_err().to_string().contains("at most 64 KB"));
+    assert!(long.len() as u64 > ROLE_LIMIT);
+    assert!(super::super::role_write(sink.as_ref(), &bot.id, &long, None).unwrap_err().to_string().contains("at most 32 KB"));
+    // The same limit as the launch reads (PRO-468), so what is saved is what the bot is told.
+    assert_eq!(ROLE_LIMIT, super::super::chat::ROLE_READ_LIMIT);
+    assert!(super::super::role_write(sink.as_ref(), &bot.id, &"x".repeat(ROLE_LIMIT as usize), None).is_ok());
     // A file already past it is shown read-only, as a conversation reads it.
     std::fs::write(home_of(&bot).join("ROLE.md"), &long).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert!(shown.role.read.over_limit && !shown.role.editable && shown.role.text.len() as u64 <= READ_LIMIT);
+    assert!(shown.role.read.over_limit && !shown.role.editable && shown.role.text.len() as u64 <= ROLE_LIMIT && shown.role.limit == ROLE_LIMIT);
 
     // The editor names the text it started from: a role changed since is not written over.
     std::fs::write(home_of(&bot).join("ROLE.md"), "Mine.\n").unwrap();

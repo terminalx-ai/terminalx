@@ -1899,7 +1899,11 @@ for them.
 
 A bot is a standing role with a name: a record in `$TERMINALX_HOME/bots.json` and a home folder
 `$TERMINALX_HOME/bots/<id>/` holding `ROLE.md` (its standing instructions), `MEMORY.md` and
-`memory/`. These commands keep the records; they start no session and schedule nothing.
+`memory/`. These commands keep the records and schedule nothing. `create` also makes the bot's
+home chat: a quick chat that runs in its home folder, whose agent is given the bot's `ROLE.md`,
+the newest 200 lines of its memory (its own and its place's, as its own notes, never
+instructions) and a few fixed rules each time it starts. A bot's chats are never archived for being quiet nor removed by
+quick-chat retention.
 
 ```text
 terminalx bots list --json
@@ -1926,11 +1930,50 @@ terminalx bots delete <bot> --json
   `resume-all` answer `{"revision": N, "bots": […], "unreadable": N}`: `revision` grows by one
   with every change, and `unreadable` counts records in `bots.json` this app cannot read (a
   newer app's). Those are kept as they are and never overwritten.
-- `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`); `resume` clears
-  it. Pausing a paused bot keeps the first record. `pause-all` pauses every bot not already
-  paused and `resume-all` resumes every bot. Today every caller is recorded as `owner`.
-- `delete` removes the record and moves the home folder to `$TERMINALX_HOME/trash/bots/<id>/`,
-  with the record beside it as `bot.json`. Nothing in it is erased.
+- `pause` records when the bot was paused and by whom (`paused: {"at", "by"}`). Pausing a
+  paused bot keeps the first record. `pause-all` pauses every bot not already paused. Anyone
+  may pause.
+- `resume` and `resume-all` never resume a bot from the command line. They ask the owner,
+  in TerminalX, and answer at once with `"waiting": true` and a message saying so; the bot
+  stays paused until the owner presses Resume in the app (or says no). The request shows on the
+  team page and the bot's sidebar row, and is dropped after a day. Tell the person it is
+  waiting for them; do not repeat the command.
+- **Who is asking** is worked out by the app where it can: a command run from a bot's chat, a
+  session one started, or anything those terminals started (found by its process, its session
+  and its terminal), works for that bot whatever session it names. A command placed in a tab is
+  that tab's: `RACCOON_SESSION_ID` is not read. A session that works for a bot is refused
+  `create`, `delete`, `resume` and `resume-all` with `forbidden`, for any bot. Its `pause` is
+  recorded as that bot (its id in `by`). A command no tab holds is the owner's only from a
+  terminal of the person's own, or a TerminalX pane: with neither it is refused those four with
+  `person_required`, and while any bot is paused it starts no work (`bot_paused`; reads such as
+  `machine list` still answer). A command whose process exits, or closes its connection, before
+  the app looks at it is refused with `person_required` (on macOS and Linux alike): let
+  `terminalx` wait for its answer. While Bots is on, the runtime's own calls that change sessions
+  or terminals are taken from the TerminalX window (its process, checked by pid and start time,
+  and carried across a runtime update) and otherwise only from a session no bot works for or a
+  terminal of the person's own; everything else is refused. The limit (PRO-489): a bot's process
+  that has left its tab and runs code of its own choosing, such as one that gives itself a
+  terminal (`script`, an existing tmux server), is not held by this; nor are the runtime's
+  `mobile` and `sharing` calls. The fix is a credential only the window holds.
+  Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
+  person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
+  `resume` says so with `person_required` rather than waiting.
+- A session that works for a bot runs in no wider a permission mode than the bot's access
+  allows (full: bypass; ask before acting: Ask every time, or Plan on native Codex, which cannot
+  ask; read and report: Plan), and in Plan while the bot is paused. A tab the limit cannot
+  reach while it runs is stopped. A resume or more access gives each tab back as much of its own
+  mode as the bot allows now, unless its mode was set by hand since. With Bots off it is an
+  ordinary session; deleting the bot stops it first, and it keeps the mode it was held to.
+  `sessions create` from it records it as the parent (`--parent` and `--no-parent` are refused)
+  and the new session works for the same bot, under the same limit. It may not start an issue
+  pipeline, a cloud session or anything on another computer, approve a permission, lead or
+  steer a run whose lead does not work for the same bot, or `send` to a session that does not
+  work for the same bot (`forbidden`). While the bot is paused, `sessions create`, `runs
+  create`, `runs start`, `runs send-back`, `runs widen`, `runs check-failed`, `runs take-over`
+  and `send` from it are refused with `bot_paused`; it still answers in its own chat.
+- `delete` stops the bot's running chats, removes the record, moves the home folder to
+  `$TERMINALX_HOME/trash/bots/<id>/` with the record beside it as `bot.json`, and archives the
+  bot's chats. Nothing in it is erased.
 - Refusals: `invalid_arguments` for a role, name or value the app does not accept;
   `not_found` for no such bot (also when it was deleted while the command ran);
   `ambiguous_selector` when several bots share the name (use the id); `internal` when the app
@@ -1948,10 +1991,13 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
   with these commands, not by editing the file**: each write is recorded in the bot's change log
   with where it came from, and the owner can undo it. Edits made to the files directly are found
   and recorded as "edited outside the app".
-- Run from a bot's own chat, the commands act on that bot's memory and no other's (naming
-  another bot answers `forbidden`); the app checks the chat's tab by its launch token, and a
-  command that names a bot's chat it cannot prove answers `unauthorized`. From anywhere else
-  they are the owner's, and `--bot` names the bot.
+- Run from a bot's own chat, or a session it started, the commands act on that bot's memory
+  and no other's (naming another bot answers `forbidden`). The app works out where the command
+  runs from the process that sent it; a command that only says it runs in a bot's session, and
+  whose tab's launch token does not prove it, answers `unauthorized`. From anywhere else they
+  are the owner's, and `--bot` names the bot.
+- A bot in plan mode (read and report, or paused) changes no file, but may still keep notes
+  with `add` and `forget`: they are the one exception.
 - `<place>` is `bot` (the default: notes that go with the bot), `personal`, or the id of an
   organisation the bot works in. A conversation is given the newest of the bot's own notes and
   of those of the place it works in, 200 lines in all; past that, the oldest notes move to

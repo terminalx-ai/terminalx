@@ -3,7 +3,8 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { ListSection } from "@/components/layout/SessionSidebar";
 import { reloadBots, useBotStore } from "@/lib/bots";
-import { showBotsTeam, showHireBot } from "@/lib/botsPage";
+import { showHireBot } from "@/lib/botsPage";
+import { openBot, useSessionStore } from "@/lib/sessions";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { cn } from "@/lib/cn";
 import type { Bot } from "@/types/bots";
@@ -74,16 +75,20 @@ function BotsList() {
   );
 }
 
+/** A bot's row opens its own view, on its home chat (PRO-468). */
 function BotRow({ bot }: { bot: Bot }) {
+  const store = useSessionStore();
+  const open = store.view === "bot" ? store.selectedBotId === bot.id : !!store.selectedSessionId && store.sessions.find((session) => session.id === store.selectedSessionId)?.bot?.id === bot.id;
   const place = runsOnLabel(bot.runsOn);
   const status = statusLine(bot);
   return (
     <li>
       <button
         type="button"
-        onClick={() => showBotsTeam()}
+        onClick={() => openBot(bot.id)}
+        aria-current={open ? "page" : undefined}
         aria-label={`${bot.name}, ${bot.roleTitle}, ${status}, runs on ${place}`}
-        className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40"
+        className={cn("flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40", open && "bg-selected")}
         data-testid="bot-row"
         data-bot={bot.id}
       >

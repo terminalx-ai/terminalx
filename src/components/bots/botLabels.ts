@@ -28,9 +28,13 @@ export function accessLabel(access: BotAccess): string {
   return known === "full" ? "Full access" : known === "askOutward" ? "Asks before acting outside" : "Read and report";
 }
 
-/** The one status line under a bot's name. */
+/**
+ * The one status line under a bot's name. A resume asked for from the `terminalx` CLI waits on the owner's answer in
+ * the bot's view (PRO-468); the runtime stops listing it after a day.
+ */
 export function statusLine(bot: Bot): string {
-  return bot.paused ? "Paused" : "Quiet";
+  if (!bot.paused) return "Quiet";
+  return bot.resumeRequest ? "Paused · asks to resume" : "Paused";
 }
 
 /** What wakes a duty, as the line after its title. */

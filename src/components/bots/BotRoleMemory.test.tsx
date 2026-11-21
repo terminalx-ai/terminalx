@@ -45,7 +45,7 @@ const change = (id: string, extra: Partial<BotChange> = {}): BotChange => ({
 });
 const view = (extra: Partial<BotRoleMemory> = {}): BotRoleMemory => ({
   role: {
-    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", hash: "h-now", editable: true, bytes: 17, overLimit: false, templateTitle: "CTO",
+    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", hash: "h-now", editable: true, limit: 32768, bytes: 17, overLimit: false, templateTitle: "CTO",
     versions: [
       { change: "c-role", at: "2026-11-18T10:00:00Z", by: "owner", kind: "role", source: { kind: "app" }, hash: "h-now" },
       { change: null, at: "2026-11-01T10:00:00Z", by: "owner", kind: "template", source: { kind: "template" }, hash: "h-template" },
@@ -188,7 +188,7 @@ describe("Role and memory (PRO-470)", () => {
     show();
     const editor = (await screen.findByTestId("bot-role-text")) as HTMLTextAreaElement;
     expect(editor.readOnly).toBe(true);
-    expect(screen.getByTestId("bot-role-read-only").textContent).toContain("ROLE.md is 293 KB, more than the 64 KB a role may be");
+    expect(screen.getByTestId("bot-role-read-only").textContent).toContain("ROLE.md is 293 KB, more than the 32 KB a role may be");
     expect((screen.getByTestId("bot-role-save") as HTMLButtonElement).disabled).toBe(true);
   });
 

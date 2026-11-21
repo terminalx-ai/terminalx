@@ -15,7 +15,7 @@ export function effectiveAccess(access: BotAccess): KnownBotAccess {
 const KNOWN_ACCESS = ["full", "askOutward", "readReport"] as const;
 type KnownBotAccess = (typeof KNOWN_ACCESS)[number];
 
-/** When a bot was paused and by whom: `owner` (every caller today), or the id of the bot that paused it. */
+/** When a bot was paused and by whom: `owner`, or the id of the bot whose own session paused it. */
 export interface BotPause {
   at: string;
   by: string;
@@ -42,6 +42,8 @@ export interface Bot {
   paused?: BotPause;
   /** The owner turned its memory off: a conversation is given none, and the bot writes none. */
   memoryOff?: boolean;
+  /** A resume asked for from the `terminalx` CLI, waiting for the owner's answer in the app (PRO-468). */
+  resumeRequest?: { at: string; by: string };
   created: string;
   modified: string;
 }

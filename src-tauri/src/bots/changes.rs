@@ -839,6 +839,11 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
     Ok((out, recorded))
 }
 
+/// Look for outside edits to one bot's files, as its chat launches an agent: what it is told is then on record.
+pub fn look(sink: &dyn EventSink, id: &str) -> Result<usize> {
+    Ok(commit(sink, id, |_| Ok(()))?.1.len())
+}
+
 /// Look for outside edits to every bot's files, as the Bots page opens. A bot whose files cannot be read is skipped.
 pub fn look_all(sink: &dyn EventSink) -> Result<usize> {
     let mut found = 0;

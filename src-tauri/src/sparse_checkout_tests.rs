@@ -366,11 +366,9 @@ fn an_agent_in_a_sparse_workspace_is_told_which_folders_it_has() {
 }
 
 /// The words of `args`, which hold one flag and its single-quoted value.
-fn flag_and_value(args: &str) -> (String, String) {
-    let (flag, value) = args.trim_start().split_once(' ').unwrap();
-    let value = value.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')).unwrap();
-    assert!(!value.replace("'\\''", "").contains('\''), "one quoted word: {args}");
-    (flag.to_string(), value.replace("'\\''", "'"))
+fn flag_and_value(argv: &[String]) -> (String, String) {
+    assert_eq!(argv.len(), 2, "one flag and one value: {argv:?}");
+    (argv[0].clone(), argv[1].clone())
 }
 
 #[test]
@@ -378,18 +376,19 @@ fn every_note_reaches_the_agent_in_one_appended_prompt() {
     let note = note_text(true, &["apps/web".into()]);
     let vm = crate::container_vm::agent_note("claude");
     assert!(vm.is_some());
-    let claude = crate::cloud_config::prompt_args("claude", &[Some("Org rules."), vm, Some(&note)]);
-    assert_eq!(claude.matches("--append-system-prompt").count(), 1, "Claude Code honours only one: {claude}");
+    let claude = crate::cloud_config::prompt_argv("claude", &[Some("Org rules."), vm, Some(&note)]);
+    assert_eq!(claude.iter().filter(|word| *word == "--append-system-prompt").count(), 1, "Claude Code honours only one: {claude:?}");
     let (flag, value) = flag_and_value(&claude);
     assert_eq!(flag, "--append-system-prompt");
     assert_eq!(value, format!("Org rules.\n\n{}\n\n{note}", vm.unwrap()));
-    let codex = crate::cloud_config::prompt_args("codex", &[Some("Org rules."), crate::container_vm::agent_note("codex"), Some(&note)]);
-    assert_eq!(codex.matches("developer_instructions=").count(), 1, "{codex}");
+    let codex = crate::cloud_config::prompt_argv("codex", &[Some("Org rules."), crate::container_vm::agent_note("codex"), Some(&note)]);
+    assert_eq!(codex.iter().filter(|word| word.starts_with("developer_instructions=")).count(), 1, "{codex:?}");
     let (flag, value) = flag_and_value(&codex);
     assert_eq!(flag, "-c");
     let table: toml::Table = toml::from_str(&value).unwrap();
     assert_eq!(table["developer_instructions"].as_str().unwrap(), format!("Org rules.\n\n{note}"));
     // Nothing to tell, no flag; a harness that takes no prompt gets none.
-    assert_eq!(crate::cloud_config::prompt_args("claude", &[None, None, Some("  ")]), "");
-    assert_eq!(crate::cloud_config::prompt_args("cursor", &[Some(&note)]), "");
+    assert!(crate::cloud_config::prompt_argv("claude", &[None, None, Some("  ")]).is_empty());
+    assert!(crate::cloud_config::prompt_argv("cursor", &[Some(&note)]).is_empty());
+    assert_eq!(crate::cloud_config::prompt_args("cursor", &[Some(&note)]), crate::cloud_config::AppendedPrompt::default());
 }

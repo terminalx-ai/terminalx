@@ -19,7 +19,8 @@
 //! What is read for a conversation is read with limits: a regular file
 //! only, opened without following a link, at most [`READ_LIMIT`] bytes,
 //! decoded lossily. It is the bot's own notes, never instructions or
-//! approval. A role is at most that size too: one limit for reading and writing.
+//! approval. A role has one limit for reading and writing, [`ROLE_LIMIT`],
+//! the most a launch reads of it (`chat::ROLE_READ_LIMIT`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
@@ -38,8 +39,14 @@ use crate::store::bots as bot_store;
 
 /// How many lines of memory a conversation is given: the bot's own and its place's together.
 pub const BUDGET: usize = 200;
-/// How much of a role or memory file is read for a conversation, and the most a role may be.
+/// How much of a memory file is read for a conversation.
 pub const READ_LIMIT: u64 = 64 * 1024;
+/// The most a role may be, and what a conversation reads of it.
+pub const ROLE_LIMIT: u64 = super::chat::ROLE_READ_LIMIT;
+/// The most of each memory file's lines a conversation is given, in bytes,
+/// so the role, both files and the rules stay well under the 128 KB one
+/// argument may be on Linux.
+pub const SHOWN_BYTES: usize = 30 * 1024;
 /// An archive this large is rolled to `memory/archive-<date>.md` before more is added to it.
 pub const ARCHIVE_ROLL_BYTES: u64 = 768 * 1024;
 pub const ARCHIVE_FILE: &str = "archive.md";
@@ -156,7 +163,13 @@ pub struct Limited {
 /// Read a file the way a conversation is given it: a regular file only,
 /// opened without following a link, at most [`READ_LIMIT`] bytes, decoded
 /// lossily. A missing file reads as empty.
+#[cfg(test)]
 pub fn read_limited(path: &Path) -> Limited {
+    read_limited_to(path, READ_LIMIT)
+}
+
+/// [`read_limited`] to at most `limit` bytes.
+pub fn read_limited_to(path: &Path, limit: u64) -> Limited {
     let not_regular = || Limited { problem: Some("It is not a regular file, so it is not read.".into()), ..Default::default() };
     let file = match changes::open_no_follow(path) {
         Ok(file) => file,
@@ -172,11 +185,11 @@ pub fn read_limited(path: &Path) -> Limited {
         return not_regular();
     }
     let mut bytes = Vec::new();
-    let read = file.take(READ_LIMIT).read_to_end(&mut bytes);
+    let read = file.take(limit).read_to_end(&mut bytes);
     if let Err(error) = read {
         return Limited { bytes: meta.len(), problem: Some(format!("It cannot be read: {error}")), ..Default::default() };
     }
-    let over_limit = meta.len() > READ_LIMIT;
+    let over_limit = meta.len() > limit;
     if over_limit {
         // A line cut in half is not read.
         let whole = bytes.iter().rposition(|byte| *byte == b'\n').map_or(0, |at| at + 1);
@@ -188,8 +201,9 @@ pub fn read_limited(path: &Path) -> Limited {
 /// [`read_limited`] for a file of the home, by its path there: one reached
 /// through a link the home does not own reads as nothing, and says why.
 pub fn read_in_home(home: &Path, rel: &str) -> Limited {
+    let limit = if rel == bot_store::ROLE_FILE { ROLE_LIMIT } else { READ_LIMIT };
     match changes::no_links(home, rel) {
-        Ok(()) => read_limited(&home.join(rel)),
+        Ok(()) => read_limited_to(&home.join(rel), limit),
         Err(error) => Limited { problem: Some(format!("{error:#}")), ..Default::default() },
     }
 }
@@ -427,8 +441,8 @@ fn place_label(place: &Place) -> String {
 /// same text records nothing. `expected` is the hash of the text the editor
 /// started from: a role changed since is not written over.
 pub fn write_role(sink: &dyn EventSink, bot: &Bot, text: &str, by: &str, source: Source, kind: &str, expected: Option<&str>) -> Result<Vec<Change>> {
-    if text.len() as u64 > READ_LIMIT {
-        return Err(refused(format!("A role is at most {} KB, the most a conversation reads. Move the rest to a topic file under memory/.", READ_LIMIT / 1024)));
+    if text.len() as u64 > ROLE_LIMIT {
+        return Err(refused(format!("A role is at most {} KB, the most a conversation reads. Move the rest to a topic file under memory/.", ROLE_LIMIT / 1024)));
     }
     let ((), recorded) = changes::commit(sink, &bot.id, |files| {
         let before = files.get(bot_store::ROLE_FILE)?;
@@ -499,36 +513,75 @@ pub fn undo(sink: &dyn EventSink, bot: &Bot, change_id: &str, by: &str, source: 
     recorded.into_iter().find(|change| change.undoes.as_deref() == Some(change_id)).ok_or_else(|| anyhow::anyhow!("the undo was recorded"))
 }
 
-/// What a conversation with `bot` is given of its memory: the bot's own
-/// notes, then its place's, [`BUDGET`] lines in all. `None` when the
-/// owner turned its memory off.
-// The bot chat's launch note (PRO-468, bots/chat.rs) gives this to the agent once it is on main.
-#[cfg_attr(not(test), allow(dead_code))]
+/// What a conversation with `bot` is given of its memory (the launch note,
+/// `chat::launch_note`): the bot's own notes, then its place's, [`BUDGET`]
+/// lines in all, the newest of each. Each file is read as a launch reads one
+/// (`chat::read_capped_to`: a regular file, at most [`READ_LIMIT`] bytes,
+/// lossy, no link followed in the home) and fenced, with any line that looks
+/// like a heading made plain text, so nothing in a note passes for a section
+/// of the instructions. `None` when the owner turned its memory off.
 pub fn for_conversation(bot: &Bot) -> Option<String> {
+    use super::chat::{fenced, read_capped_to, Read};
     if bot.memory_off {
         return None;
     }
-    let home = super::home(bot)?;
+    let Some(home) = super::home(bot) else {
+        return Some("(Your memory could not be read: your home folder is not known. Do not write to it; tell your owner.)\n".into());
+    };
     let place = working_place(bot);
-    let own = read_in_home(&home, &Place::Bot.memory_file());
-    let theirs = read_in_home(&home, &place.memory_file());
-    let (own_lines, place_lines) = (changes::lines_of(&own.text), changes::lines_of(&theirs.text));
-    let (own_read, place_read) = read_split(own_lines.len(), place_lines.len());
-    // The newest lines of each: a file past its share loses its oldest, which the archive keeps.
-    let section = |title: String, file: &Limited, lines: &[String], read: usize| {
-        let mut text = format!("## {title}\n\n{}\n", if read == 0 { "(empty)".to_string() } else { lines[lines.len() - read..].join("\n") });
-        let left = lines.len() - read;
-        if left > 0 || file.over_limit {
-            text.push_str(&format!("\n({} not read: past the {BUDGET}-line budget or the {} KB limit.)\n", if left > 0 { format!("{left} older lines are") } else { "The rest of the file is".into() }, READ_LIMIT / 1024));
+    let read = |place: &Place| {
+        let rel = place.memory_file();
+        match changes::no_links(&home, &rel) {
+            Ok(()) => read_capped_to(&home.join(&rel), READ_LIMIT),
+            Err(error) => Read::Unreadable(format!("{error:#}")),
         }
-        text
     };
-    let own_title = format!("Notes that go with you ({})", bot_store::MEMORY_FILE);
+    let (own, theirs) = (read(&Place::Bot), read(&place));
+    let count = |read: &Read| if let Read::Text(text, _) = read { text.lines().count() } else { 0 };
+    let (own_read, place_read) = read_split(count(&own), count(&theirs));
+    let section = |title: String, file: String, read: &Read, take: usize, empty: &str| {
+        let body = match read {
+            Read::Text(text, cut) if !text.trim().is_empty() => {
+                let lines: Vec<&str> = text.lines().collect();
+                // The newest `take` lines, fewer when they pass the bytes a file may take.
+                let mut bytes = 0;
+                let take = lines[lines.len() - take..].iter().rev().take_while(|line| {
+                    bytes += line.len() + 1;
+                    bytes <= SHOWN_BYTES
+                }).count();
+                let shown = lines[lines.len() - take..].iter().map(|line| plain_line(line)).collect::<Vec<_>>().join("\n");
+                let mut body = if take == 0 { "(none read: the budget went to the notes above)".to_string() } else { fenced("memory", &shown) };
+                let left = lines.len() - take;
+                if left > 0 {
+                    body.push_str(&format!("\n\n({left} older lines in {file} are not shown here.)"));
+                }
+                if *cut {
+                    body.push_str(&format!("\n\n(More lines in {file} are not shown here: it is past the {} KB limit.)", READ_LIMIT / 1024));
+                }
+                body
+            }
+            Read::Text(..) | Read::Missing => empty.to_string(),
+            Read::Unreadable(why) => format!("({file} could not be read: {why}. Do not write over it; tell your owner.)"),
+        };
+        format!("## {title}\n\n{body}\n")
+    };
+    let own_file = Place::Bot.memory_file();
+    let place_file = place.memory_file();
     let place_title = match &place {
-        Place::Org(id) => format!("Notes kept in organisation {id} ({})", place.memory_file()),
-        _ => format!("Personal notes ({})", place.memory_file()),
+        Place::Org(id) => format!("Notes kept in organisation {} ({place_file})", plain_line(id)),
+        _ => format!("Personal notes ({place_file})"),
     };
-    Some(format!("{}\n{}", section(own_title, &own, &own_lines, own_read), section(place_title, &theirs, &place_lines, place_read)))
+    Some(format!(
+        "{}\n{}",
+        section(format!("Notes that go with you ({own_file})"), own_file.clone(), &own, own_read, "(empty: nothing written yet)"),
+        section(place_title, place_file.clone(), &theirs, place_read, "(nothing kept here yet)")
+    ))
+}
+
+/// A line of a note as the launch note shows it: one that would read as a
+/// Markdown heading is escaped, so it is never taken for a section.
+fn plain_line(line: &str) -> String {
+    if line.trim_start().starts_with('#') { format!("\\{}", line.trim_start()) } else { line.to_owned() }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -548,8 +601,10 @@ pub struct RoleVersion {
 #[serde(rename_all = "camelCase")]
 pub struct RoleView {
     pub path: String,
-    /// What a conversation reads: at most [`READ_LIMIT`] bytes.
+    /// What a conversation reads: at most [`ROLE_LIMIT`] bytes.
     pub text: String,
+    /// The most a role may be ([`ROLE_LIMIT`]).
+    pub limit: u64,
     /// The hash of the file as read, for the editor's save to name what it started from.
     pub hash: String,
     /// Whether the editor may save it: read whole, so a save never cuts it short.
@@ -673,7 +728,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     }
     // One limit everywhere: a role over it is shown as read, and not saved from here.
     let editable = role.problem.is_none() && !role.over_limit;
-    let role = RoleView { path: shown(bot_store::ROLE_FILE), hash: changes::hash_of(&role.text), text: role.text.clone(), editable, read: role, template_title: template.map(|template| template.title.to_string()), versions };
+    let role = RoleView { path: shown(bot_store::ROLE_FILE), hash: changes::hash_of(&role.text), text: role.text.clone(), limit: ROLE_LIMIT, editable, read: role, template_title: template.map(|template| template.title.to_string()), versions };
 
     let working = working_place(bot);
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();

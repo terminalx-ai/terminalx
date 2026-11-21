@@ -249,7 +249,7 @@ fn a_role_is_read_and_replaced_through_its_bot() {
     assert_eq!(role_read(&bot.id).unwrap(), "Keep the changelog current.\n");
     assert!(written.modified >= bot.modified);
     assert_eq!(changes(&mut events), 1);
-    assert!(role_write(sink.as_ref(), &bot.id, &"x".repeat(memory::READ_LIMIT as usize + 1), None).is_err());
+    assert!(role_write(sink.as_ref(), &bot.id, &"x".repeat(memory::ROLE_LIMIT as usize + 1), None).is_err());
     for id in ["missing", "../settings", ""] {
         assert!(role_read(id).is_err() && role_write(sink.as_ref(), id, "x", None).is_err(), "{id:?}");
     }
@@ -445,4 +445,70 @@ fn refusals_are_told_apart_from_failures() {
     settings.experimental.bots = false;
     crate::store::settings::save(&settings).unwrap();
     assert_eq!(kind(list().unwrap_err()), Some(BotError::Off));
+}
+
+/// A resume asked for from the CLI is shown for a day, then forgotten.
+#[test]
+fn a_resume_request_is_dropped_after_a_day() {
+    let (_home, sink, _events) = bots_on();
+    let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    pause(sink.as_ref(), &bot.id, OWNER).unwrap();
+    request_resume(sink.as_ref(), &bot.id, "cli").unwrap();
+    assert!(get(&bot.id).unwrap().unknown.contains_key(RESUME_REQUEST_KEY), "shown while fresh");
+    assert!(listing().unwrap().bots[0].unknown.contains_key(RESUME_REQUEST_KEY));
+
+    let mut stale = get(&bot.id).unwrap();
+    let day_ago = (chrono::Utc::now() - RESUME_REQUEST_LASTS - chrono::Duration::minutes(1)).to_rfc3339();
+    stale.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": day_ago, "by": "cli"}));
+    forget_stale_request(&mut stale, chrono::Utc::now());
+    assert!(!stale.unknown.contains_key(RESUME_REQUEST_KEY), "a day old: gone");
+    let mut unreadable = get(&bot.id).unwrap();
+    unreadable.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": "yesterday"}));
+    forget_stale_request(&mut unreadable, chrono::Utc::now());
+    assert!(!unreadable.unknown.contains_key(RESUME_REQUEST_KEY));
+}
+
+/// L4: the change events carry no resume request older than a day either.
+#[test]
+fn a_stale_resume_request_is_not_announced() {
+    let (_home, sink, mut events) = bots_on();
+    let bot = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    pause(sink.as_ref(), &bot.id, OWNER).unwrap();
+    let day_ago = (chrono::Utc::now() - RESUME_REQUEST_LASTS - chrono::Duration::minutes(1)).to_rfc3339();
+    bot_store::change(
+        |bots| {
+            bots[0].unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": day_ago, "by": "cli"}));
+            Ok(())
+        },
+        |_| {},
+    )
+    .unwrap();
+    while events.try_recv().is_ok() {}
+    update(sink.as_ref(), &bot.id, BotPatch { name: Some("Atlas II".into()), ..Default::default() }).unwrap();
+    let announced: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).filter(|published| &*published.event == "bots_changed").collect();
+    assert_eq!(announced.len(), 1);
+    let list: serde_json::Value = serde_json::from_str(&announced[0].payload).unwrap();
+    assert_eq!(list["bots"][0]["name"], "Atlas II");
+    assert!(list["bots"][0].get(RESUME_REQUEST_KEY).is_none(), "{list}");
+}
+
+/// L2: an update no person was shown to ask for is judged under the store's
+/// lock: less access and a rename go through, more access or another
+/// reporting line do not.
+#[test]
+fn an_update_no_person_asked_for_gives_nothing_more() {
+    let (_home, sink, _events) = bots_on();
+    let atlas = create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let argus = create(sink.as_ref(), "watcher", "Argus").unwrap();
+    let lower = BotPatch { access: Some(BotAccess::AskOutward), name: Some("Atlas II".into()), ..Default::default() };
+    assert_eq!(update_as(sink.as_ref(), &atlas.id, lower, false).unwrap().access, BotAccess::AskOutward);
+    for patch in [
+        BotPatch { access: Some(BotAccess::Full), ..Default::default() },
+        BotPatch { reports_to: Some(argus.id.clone()), ..Default::default() },
+    ] {
+        let refused = update_as(sink.as_ref(), &atlas.id, patch, false).unwrap_err().to_string();
+        assert!(refused.contains(PERSON_REQUIRED), "{refused}");
+    }
+    assert_eq!(get(&atlas.id).unwrap().access, BotAccess::AskOutward);
+    assert_eq!(update_as(sink.as_ref(), &atlas.id, BotPatch { access: Some(BotAccess::Full), ..Default::default() }, true).unwrap().access, BotAccess::Full);
 }

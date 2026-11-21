@@ -281,6 +281,8 @@ pub(crate) fn fork_session_contents(session_id: &str, tab_id: &str, at: Option<u
                 parent: None,
                 unknown: BTreeMap::new(),
             };
+            // A fork of a bot's chat, or of what a bot started, still works for the bot (PRO-468).
+            crate::bots::chat::keep_on_fork(&src, &mut entry);
             let mut note = fork_workspace(&src, &tab, &mut entry, at, &mut allocation)?;
             if at.is_some() && entry.worktree_name.is_none() {
                 note = Some(non_worktree_fork_note(scratch_copy.as_ref()));

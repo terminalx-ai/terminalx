@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // WebKit layout check for a bot's Role and memory (PRO-470, design 23.06),
 // with Settings → Experimental → Bots on. Opens it from a bot's row on the
-// team page with a full fixture (a long role, three places with a long
+// team page, and as the Role and memory tab of the bot's view, with a full fixture (a long role, three places with a long
 // organisation name, topics, a line budget overrun and a change log), then
 // measures it at the designed 1440×900 and at narrower windows: nothing
 // spills past the main slot or sideways off the page, the role and memory
@@ -24,6 +24,14 @@ const extra = `(() => {
     bot("bot-3", "Sentry the very thorough reviewer of every pull request and upgrade", "Security auditor", "security-auditor", "bot-1", ["personal"]),
   ];
   answers.bot_list = () => ({ revision: 1, bots: structuredClone(bots), unreadable: 0 });
+  // Atlas's home chat, so its view (PRO-468) opens with the Role and memory tab.
+  const homeChat = { id: "atlas-home", kind: "quick", projectPath: "/scratch/atlas-home", cwd: "/home/bots/bot-1", title: "Home chat", created: now, modified: now,
+    archived: false, pinned: false, worktreeRemoved: false, tabs: [{ id: "atlas-home-t", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: now, modified: now }],
+    activeTab: "atlas-home-t", bot: { id: "bot-1", home: true } };
+  answers.list_sessions = [homeChat];
+  answers.load_tab_events = () => [];
+  answers.bot_home_chat = () => homeChat;
+  answers.bot_spent_today = { usd: 0, day: now.slice(0, 10) };
   answers.bot_templates = [];
   const role = ["You are Atlas, the CTO. You own engineering throughput: what gets built next, how it is split, and whether it is safe to merge.", "", "## You answer for", "",
     ...Array.from({ length: 30 }, (_, n) => "- A standing instruction that is long enough to wrap in the editor, number " + n + ", with a path like src-tauri/src/bots/memory.rs:120 in it.")].join("\\n") + "\\n";
@@ -39,7 +47,7 @@ const extra = `(() => {
     if (operation === "memoryLook") return { found: 0 };
     if (operation !== "memoryView") return [];
     return {
-      role: { path: home + "ROLE.md", text: role, hash: "h-9", editable: true, bytes: role.length, overLimit: false, templateTitle: "CTO",
+      role: { path: home + "ROLE.md", text: role, hash: "h-9", editable: true, limit: 32768, bytes: role.length, overLimit: false, templateTitle: "CTO",
         versions: [
           { change: "c-9", at: now, by: "bot-1", kind: "outside", source: { kind: "outside" }, hash: "h-9" },
           { change: "c-8", at: now, by: "owner", kind: "role", source: { kind: "app" }, hash: "h-8" },
@@ -162,6 +170,26 @@ try {
   await main.getByTestId("bot-role-template-diff").waitFor();
   const diffProblems = await measure(page);
   failed += report("template changes 760x520", { "fits the main slot": diffProblems.length === 0 }, diffProblems);
+
+  // The same screen as the bot's own Role and memory tab, in its view (PRO-468).
+  await page.setViewportSize(viewports[0]);
+  await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "atlas-home" }));
+  const view = page.getByRole("main", { name: "Atlas, CTO" });
+  await view.waitFor();
+  await view.getByRole("tab", { name: "Role and memory" }).click();
+  await view.locator("[data-testid=bot-role-text]").waitFor();
+  await view.locator("[data-testid=bot-change]").nth(4).waitFor();
+  failed += report("bot view's Role and memory tab", {
+    "the tab is selected": (await view.getByRole("tab", { name: "Role and memory" }).getAttribute("aria-selected")) === "true",
+    "three places": (await view.locator("[data-testid=bot-memory-place]").count()) === 3,
+    "below the tabs": (await view.getByRole("tabpanel", { name: "Role and memory" }).boundingBox()).y >= (await view.getByRole("tablist").boundingBox()).y,
+  });
+  for (const viewport of [viewports[0], viewports[3]]) {
+    await page.setViewportSize(viewport);
+    const problems = await measure(page);
+    failed += report(`bot view's Role and memory ${viewport.width}x${viewport.height}`, { "fits the main slot": problems.length === 0 }, problems);
+  }
+  await shot(page, "2306-role-memory-in-bot-view");
   await page.close();
 } finally {
   await browser.close();

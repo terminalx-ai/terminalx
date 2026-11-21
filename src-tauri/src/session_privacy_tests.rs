@@ -546,7 +546,7 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     let requests = || store::read_lines::<serde_json::Value>(&requests_path).unwrap_or_default();
     let launch = || {
         let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
-        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &index::get(SESSION).unwrap(), &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
     };
     let begin = || {
         let mut rt = rig.rt.lock().unwrap();
