@@ -76,12 +76,16 @@ pub fn session_gate(bot: Option<&str>, payload: &Value) -> Gate {
 /// so its requests to run a command or change files are where its calls meet
 /// the gate. Plan mode's read-only sandbox runs the rest without asking.
 pub fn approval_gate(bot: Option<&str>, method: &str, params: &Value, cwd: Option<&str>) -> Gate {
-    let payload = match method {
+    session_gate(bot, &approval_payload(method, params, cwd))
+}
+
+/// A native Codex approval request as the hooks' payload says a tool call.
+pub(crate) fn approval_payload(method: &str, params: &Value, cwd: Option<&str>) -> Value {
+    match method {
         "item/commandExecution/requestApproval" => json!({"tool_name": "Bash", "tool_input": {"command": params["command"]}, "cwd": cwd}),
         "item/fileChange/requestApproval" => json!({"tool_name": "apply_patch", "tool_input": params, "cwd": cwd}),
         other => json!({"tool_name": other, "tool_input": params, "cwd": cwd}),
-    };
-    session_gate(bot, &payload)
+    }
 }
 
 /// A paused bot, or one that cannot be read: it reads, and nothing else runs, nor is asked.
@@ -145,7 +149,7 @@ const READ_TOOLS: &[&str] = &[
 ];
 
 /// Whether a call only reads.
-fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
+pub(crate) fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
     if READ_TOOLS.contains(&tool) {
         return true;
     }
@@ -161,7 +165,7 @@ fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
 }
 
 /// A shell call's program, as written, and its arguments when it is one plain command.
-fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> bool {
+pub(crate) fn single(tool: &str, input: &Value, check: impl Fn(&str, &[&str]) -> bool) -> bool {
     let Some(words) = shell_command(tool, input).as_deref().and_then(guard::single_command) else { return false };
     let Some((program, args)) = words.split_first() else { return false };
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -208,7 +212,7 @@ const TERMINALX_READS: &[(&str, &str)] = &[
 /// paired machine its `--machine NAME`, from wherever it is. `None` when it is
 /// not the bare `terminalx` or `tnx` the app puts on the path (a path to one
 /// may be any program), or when `--machine` has no name after it.
-fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
+pub(crate) fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<&'a str>)> {
     if !matches!(program, "terminalx" | "tnx") {
         return None;
     }
@@ -265,7 +269,9 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// to use: `terminalx bots memory add|forget|list` (PRO-470) and
 /// `terminalx bots items list|show|add|set|ask|plan|ask-merge|check|comment|done` (PRO-469, PRO-476),
 /// and its hand-offs with other bots, which it answers at any level:
-/// `terminalx bots handoff|tell|handoffs` (PRO-475). They pass at every level
+/// `terminalx bots handoff|tell|handoffs` (PRO-475), its suggestions and its
+/// memory tidy, `terminalx bots suggest` and `terminalx bots memory tidy`
+/// (PRO-477). They pass at every level
 /// and while paused, with no card. Exactly those, and nothing else under
 /// `bots`: the runtime takes the bot from the caller (`control::Caller`),
 /// refuses a `--bot` or `--place` that is not its own, holds a hand-off to
@@ -275,12 +281,12 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest", ..])
     })
 }
 
 /// A call as the card and the agent are told it.
-fn describe(tool: &str, input: &Value) -> String {
+pub(crate) fn describe(tool: &str, input: &Value) -> String {
     match shell_command(tool, input) {
         Some(command) => {
             let short: String = command.chars().take(120).collect();

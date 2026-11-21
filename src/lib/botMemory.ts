@@ -167,6 +167,9 @@ export function changeHeadline(change: BotChange): string {
       return `Removed: “${change.text}”`;
     case "archived":
       return change.text;
+    // A nightly tidy (PRO-477): its merges and removals, one change one Undo puts back.
+    case "tidied":
+      return change.text || "Tidied memory";
     case "role":
       return "Changed the standing instructions";
     case "restored":

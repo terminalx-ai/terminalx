@@ -391,6 +391,8 @@ describe("Role and memory (PRO-470)", () => {
     expect(changeTime(new Date(2026, 10, 20, 13, 2).toISOString(), now)).toMatch(/13:02|1:02/);
     expect(changeTime("not a time", now)).toBe("");
     expect(changeHeadline(change("x", { kind: "archived", text: "Moved 3 older notes to the archive" }))).toBe("Moved 3 older notes to the archive");
+    // A nightly tidy (PRO-477) is one change, said as what it did.
+    expect(changeHeadline(change("x", { kind: "tidied", text: "Tidied memory: merged 2 notes into 1 note, removed 1 note" }))).toBe("Tidied memory: merged 2 notes into 1 note, removed 1 note");
     expect(changeSource(change("x", { source: { kind: "duty", duty: "nightly-tidy" } }), [ATLAS])).toBe("From a duty · nightly-tidy");
     expect(changeSource(change("x", { by: "gone", source: { kind: "chat" } }), [ATLAS])).toBe("From a removed bot's chat");
     expect(changeSource(change("x", { by: "owner", source: { kind: "cli" } }), [])).toBe("By you from the terminal");

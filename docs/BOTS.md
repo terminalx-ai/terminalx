@@ -184,7 +184,8 @@ permission system.
   page's own routes refuse a duty. A process in a bot's session reads its own
   bot's duties and no other's, and changes none.
 - **At hire** the role template's duties that wake on a schedule are created
-  switched off; the ones that wake on events wait for PRO-472.
+  switched off; the ones that wake on events wait for PRO-472. The built-in
+  Look around and Tidy memory (PRO-477) are created switched on.
 - **With Bots off** a duty does not wake, nothing about it is read, and every
   duty call is refused.
 - **Deleting a bot** removes its duties and its quiet hours. Their definitions
@@ -533,6 +534,81 @@ minute they fall on.
   week or every bot's. A process in a bot's session reads its own bot's week
   only (`control.rs`, `own_duties_read`).
 
+## Look around, suggestions and the memory tidy (PRO-477)
+
+Every bot has two built-in duties (`src-tauri/src/bots/builtins.rs`). They
+are ordinary duties, so they are scheduled, paused, timed out and logged as
+any duty is; the duty's owner record marks them (`bot.builtin`:
+`lookAround` or `tidyMemory`), and that mark changes what a run may do, its
+free check, its prompt and its report.
+
+- **Look around** wakes at 08:00, 12:00, 16:00 and 20:00 in the owner's time
+  zone (`0 8,12,16,20 * * *`), with an optional focus line the editor keeps
+  (200 characters). It reads what changed and proposes work with
+  `terminalx bots suggest --title … --why …`; it changes nothing.
+- **Tidy memory** wakes at 02:00 (`0 2 * * *`). It reads the notes with
+  `terminalx bots memory list` and sends one plan to
+  `terminalx bots memory tidy --plan JSON`: notes to merge into one, and notes
+  a newer one contradicts. The plan names each note by its line and its text;
+  when a line no longer reads as named (memory changed since it was read), a
+  line is named twice, a merge has fewer than two notes or its new note holds
+  a secret, the whole plan is refused and nothing is written. A plan that
+  passes is one change in the memory's history (`tidied`), so one Undo on the
+  Changes list puts every note back. A tidy run tidies once; the owner may
+  tidy too. A bot tidies only the places its conversations read.
+- **Read-only by the hooks, not the prompt.** A built-in run's session is
+  marked (`botDuty: {id, builtin}`), and its tab's runtime holds that mark
+  (`TabRuntime::bot_builtin`). Every tool call passes
+  `builtins::session_gate` in the PreToolUse and PermissionRequest hooks (and
+  `approval_gate` for app-server Codex) before the bot's own access gate: a
+  read (`access::reads`) or the built-in's own commands pass, and anything
+  else is refused before it runs, with a message telling the agent to suggest
+  it instead. So a Full access bot's look around cannot write, even in bypass
+  mode. Asking a person (`AskUserQuestion`, `ExitPlanMode`) is refused too:
+  nobody is there. Each refusal is counted against its run
+  (`bot-suggestions/<bot id>.json`, `looks`). Native Codex has no hooks, so
+  its built-in runs start in plan mode, whose read-only sandbox is the
+  barrier (`builtins::run_mode`).
+- **A free check before the model** (`builtins::nothing_to_do`, from
+  `duties::may_wake` when a run is due). A look around is skipped while five
+  of its suggestions wait on the owner, or when nothing it can see has changed
+  since its last finished look: a SHA-256 over the projects' `.git` state
+  files, its own prompt and focus line, the person's sessions (not any
+  bot's) by what lasts in them (made, renamed, archived, tabs opened or
+  closed; not their tabs' states), its open items and its open suggestions. A
+  look is never skipped this way more than 24 hours after the last one that
+  ran (`LOOK_QUIET_MAX`): what it reads beyond this computer, such as pull
+  requests and CI, is not in the fingerprint. A tidy is skipped when memory is off, holds fewer than two
+  notes, or is as the last tidy left it. A skipped run is logged as "Nothing
+  new" (one folded row) and starts no session; the Home tab says why.
+- **Suggestions** are kept at the store root, `bot-suggestions/<bot id>.json`,
+  not in the home, which the bot writes with its own tools. A suggestion is a
+  title (one line, 200 characters) and why (one line, 400), checked for secrets. At
+  most 20 wait at once, at most 5 come from one look, and an open title is
+  not suggested twice; the newest 50 closed ones are kept. Only a bot
+  suggests, from its own sessions (`control_bot_suggestions.rs`, placed by
+  `Caller`), never while paused. Records a newer build wrote are kept as
+  they are and counted as not shown.
+- **Start and Dismiss** are the window's (`suggestionStart`,
+  `suggestionDismiss` in the runtime's `bots` call). Start needs the window's
+  proof (`enforce::needs_person`, `consent::GUARDED_BOTS`): it is closed as
+  started first, under the file's lock, so a second Start finds it closed; it
+  makes an item the
+  owner asked for, in progress, and sends it to the bot's home chat as the
+  owner's message, which tells it to begin, and opens again if that fails.
+  Dismiss only closes it.
+- **The Home tab's right column** (23.01): who it reports to (PRO-475), Up
+  next (the bot's duties that are on, soonest first), and Suggestions with a
+  line saying when it last looked, how many it suggested, what was refused
+  and why a look did no work, or that Look around is off, with a switch.
+- **At hire** both are made switched on. A bot hired before this build gets
+  them switched off the first time the window reads its Home tab
+  (`suggestions` is the window's: a bot's own process may not read it). The
+  Duties tab marks them Built in; they cannot be removed or copied, and their
+  name and prompt stay TerminalX's. Their report goes in the bot's home chat
+  and notifies no one unless it is urgent.
+- **Deleting a bot** moves its suggestions file to `trash/bot-suggestions/`.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -556,7 +632,7 @@ issue.
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | In review |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
 | PRO-476 | A bot plans and starts orchestration runs | 23.01, 23.04, 23.09 | In review |
-| PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |
+| PRO-477 | Look around, suggestions, nightly memory tidy | 23.01 | In review |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |
 | PRO-480 | GitHub and Linear as channels | 23.07 | In review |
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |

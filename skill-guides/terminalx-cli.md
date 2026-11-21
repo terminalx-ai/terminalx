@@ -2119,6 +2119,7 @@ terminalx bots reply --text "<answer>" --json
 terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
 terminalx bots memory forget "<note>" [--line <n>] [--bot <bot>] [--place <place>] --json
 terminalx bots memory list [--bot <bot>] [--place <place>] --json
+terminalx bots memory tidy --plan '<plan JSON>' [--bot <bot>] --json
 ```
 
 - `MEMORY.md` holds one dated note per line (`- 2026-11-20 <note>`). **A bot writes its memory
@@ -2143,6 +2144,31 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
   note has; for one of two equal notes add `--line <n>`, its line number as `list` shows it.
 - While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
   answer `forbidden`.
+- `tidy` merges duplicate notes and removes contradicted ones as **one** change the owner undoes
+  with one Undo. The plan names each note by its line number (as `list` shows it) and its text,
+  with `place` when it is not `bot`:
+  `{"merge":[{"lines":[{"line":3,"note":"…"},{"line":9,"note":"…"}],"into":"<the one note>"}],"remove":[{"line":5,"note":"…"}]}`.
+  A merge takes two or more notes; at most 200 lines in all. If any line no longer reads as
+  named, the whole plan is refused (`invalid_arguments`) and nothing changes: read again and
+  send a new one. A Tidy memory run tidies once.
+
+#### Suggestions
+
+A bot proposes work for its owner; the owner presses Start or Dismiss on its Home tab. Run from
+a bot's own sessions only; from anywhere else it answers `forbidden`.
+
+```text
+terminalx bots suggest --title "<what to do, one line>" --why "<why it is worth doing>" --json
+```
+
+- Start makes the suggestion an item the owner asked for, in progress, and sends it to the
+  bot's home chat as the owner's message. Dismiss only closes it. Neither is a CLI command.
+- A title is at most 200 characters and why at most 400, one line each; one that holds a
+  secret is refused. At most 20 suggestions wait at once, at most 5 come from one look around,
+  and an open title is not suggested twice. A paused bot suggests nothing (`bot_paused`).
+- A built-in Look around run may only read and suggest: every other action is refused before
+  it runs, with a message saying to suggest it instead. Kept in
+  `$TERMINALX_HOME/bot-suggestions/<bot id>.json`.
 
 ### This guide
 

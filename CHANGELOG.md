@@ -172,6 +172,19 @@
   it: what is next today, the week so far, the key and quiet hours. Days a
   duty's log no longer reaches back over say "history not kept" and the
   totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): a bot proposes work by itself. Each bot has two
+  built-in duties, on from hire. Look around (08:00 to 20:00, every four
+  hours, with an optional focus line) reads what changed and suggests work;
+  while it looks it may only read, enforced in the session's hooks, and an
+  action it tries anyway is refused with a note to suggest it instead. Its
+  suggestions are on the bot's Home tab, each with why, Start (an item you
+  asked for, sent to the bot as your message, so it begins) and Dismiss,
+  under a line saying when it last looked, what it suggested and what was
+  refused. Tidy memory (nightly) merges duplicate notes and removes
+  contradicted ones as one change with one Undo. A free check skips either
+  when nothing has changed, logged as "Nothing new" with no model run. The
+  Home tab's right column also shows Up next, the bot's next duty runs
+  (PRO-477).
 - Bots (experimental): Pause and Pause all say what they stopped. Pause a bot
   from its header or its sidebar row's menu, and every bot from the Bots page
   or with ⌥⇧⌘P from anywhere (⇧⌘P stays the markdown preview's). A pause
