@@ -12,6 +12,7 @@ pub mod memory;
 pub mod chat;
 pub mod duties;
 pub mod enforce;
+pub mod items;
 pub mod templates;
 pub mod wakes;
 

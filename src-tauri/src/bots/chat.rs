@@ -441,6 +441,12 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: Option<&str>, fi
         // PRO-472: the one thing a bot does to another bot is leave it a message, which wakes only a duty its owner set to wait for one.
         "To hand another of your owner's bots work, a question or a status, run `terminalx bots message <bot> \"<text>\" --kind handoff|question|status`. It reaches that bot as your words, labelled with your name and access, and wakes only a duty set to wait for it; a bot does not message itself, and a message passed on too many times wakes nobody.".to_string(),
     ];
+    // PRO-469: the work list, kept through the app; in plan mode the agent can run nothing, so it reports instead.
+    rules.push(if writes_nothing {
+        "You cannot change your work list in plan mode (its open items, if any, are shown below). Tell your owner in the chat what you would add, ask or finish.".into()
+    } else {
+        "Keep your work list with `terminalx bots items` (`list`, `show`, `add`, `set`, `ask`, `check`, `comment`, `done`): add an item for each piece of work you take on, with what done means (`--done \"text | how it is checked\"`), and keep its state and links current. When you need a decision, ask once with `terminalx bots items ask ITEM --question \"…\" --answer \"…\" --answer \"…\" [--recommend N]` and wait: your owner's answer arrives here as their message. An item is done (`terminalx bots items done ITEM`) only once every line of its done means is checked met.".into()
+    });
     match bot.access.effective() {
         BotAccess::AskOutward => rules.push("Ask your owner before anything that leaves this computer: a push, a message, a post, a deploy or a purchase.".into()),
         BotAccess::ReadReport | BotAccess::Other(_) => rules.push("You read and report only: change no files, run nothing that changes anything (keeping notes with `terminalx bots memory add` and `forget` aside), and report what you find.".into()),
@@ -479,7 +485,26 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
     // The home chat's first conversation: a fresh tab, not one carried on from another.
     let first_run = reference.home && tab.provider_session_id.is_none() && tab.fork_from.is_none() && tab.continuation.is_none() && entry.tabs.first().is_some_and(|first| first.id == tab.id);
     let in_plan = tab_limit(entry, tab).is_some_and(|limit| limit.mode == "plan");
-    Some(instructions(&bot, &home, &role, memory.as_deref(), first_run, in_plan))
+    let mut text = instructions(&bot, &home, &role, memory.as_deref(), first_run, in_plan);
+    if let Some(items) = super::items::launch_note(&bot.id) {
+        text.push('\n');
+        text.push_str(&items);
+        text.push('\n');
+    }
+    Some(text)
+}
+
+/// A launch of `entry`'s tab settled. In a bot's home chat whose agent `started`, the owner's messages that did not
+/// reach it are sent now, as messages (`bots::items::deliver_waiting`), and cleared only once sent: a launch prompt
+/// would hold them only until the next relaunch. On a thread of its own, after this launch lets go of its tab. Nothing
+/// is read for any other session.
+pub fn launched(manager: &crate::session::SessionManager, entry: &SessionEntry, started: bool) {
+    let Some(reference) = session_bot(entry).filter(|reference| reference.home) else { return };
+    if !started || !super::enabled() {
+        return;
+    }
+    let (manager, id) = (manager.clone(), reference.id.clone());
+    std::thread::spawn(move || super::items::deliver_waiting(&manager, &id));
 }
 
 /// Before a launch of a bot's chat (PRO-470): edits made to the bot's files

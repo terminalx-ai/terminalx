@@ -11,6 +11,7 @@ import { githubAvatarUrl, useGithubIdentity } from "@/lib/githubIdentity";
 import { ariaKeyShortcut, useKeymap, type ShortcutId } from "@/lib/shortcuts";
 import { runShortcut, useShortcutKeycaps } from "@/lib/hotkeys";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
+import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { Kbd } from "@/components/ui/tooltip";
 import { setProjectLogo, updateProject, useSessionStore } from "@/lib/sessions";
 import { useSessionRowFacts } from "@/lib/sessionRowStatus";
@@ -95,7 +96,11 @@ export function AppDestinations({
   };
   // Bots (PRO-467) only while Settings → Experimental → Bots is on; it opens as its shortcut does.
   const botsOn = useExperimentalSettings()?.bots === true;
-  const bots = { id: "bots", label: "Bots", shortcut: "app.bots", icon: <BotIcon />, onOpen: () => runShortcut("app.bots") } satisfies Destination;
+  // What waits on you from the bots (PRO-469), shown while another page is open: the Bots page lists it.
+  const botsNeeds = useNeedsYou();
+  const botsWaiting = needsYouCount(botsNeeds, null);
+  const botsTrouble = needsYouTrouble(botsNeeds, useNeedsYouError(), null);
+  const bots = { id: "bots", label: "Bots", shortcut: "app.bots", icon: <BotIcon />, onOpen: () => runShortcut("app.bots"), count: botsOn && active !== "bots" && botsWaiting > 0 ? botsWaiting : undefined, dot: botsOn && active !== "bots" && botsTrouble ? { tone: "warning" as const, label: "Couldn't read what needs you" } : null } satisfies Destination;
   // Skills and Usage are reached from Settings (and their shortcuts), not from here.
   return <DestinationList active={active} destinations={[home, overview, newSession, search, ...(botsOn ? [bots] : []), automations, issues]} />;
 }
