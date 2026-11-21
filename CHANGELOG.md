@@ -46,11 +46,18 @@
   asks once, with two to four answers and the one it recommends; the owner
   answers from the bot's Home tab, the item's page or the Bots page's Needs
   you queue, by choice or in their own words, and the answer is recorded as
-  the owner's and sent to the bot's home chat. A question card open in a bot's
-  session waits there too. The Home tab lists what needs you, what is in
-  progress and planned, with Give work; an item's page has Take it over and
-  Stop this item. Needs you counts show on the Bots page, each sidebar row and
-  the Bots destination (PRO-469).
+  the owner's and sent to the bot's home chat: the item's number and the
+  owner's words, never the bot's own title or question. An answer, comment or
+  piece of work that cannot be sent waits on the item, is shown as not
+  delivered yet with Send again, and reaches the home chat as it next starts,
+  once. A question card open in a bot's session waits there too. The Home tab
+  lists what needs you, what is in progress and planned, with Give work; an
+  item's page has Take it over, Stop this item and, once it is closed, Reopen.
+  Needs you counts show on the Bots page, each sidebar row and the Bots
+  destination, and a list that cannot be read is shown as an error there. A
+  list is bounded in size, its history keeps the owner's entries before the
+  bot's, and a bot may add, ask and change states 40 times in 10 minutes
+  (PRO-469).
   Hiring, resuming, deleting and raising access are confirmed by the
   TerminalX window on a Mac, which restarts its runtime to do so when needed,
   as pairing does. A resume or more access gives each tab back its own mode,

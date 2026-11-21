@@ -1,10 +1,10 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, Square, SquareTerminal } from "@/icons";
+import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, RotateCcw, Square, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
-import { commentOnBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
+import { commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
 import { conversationTitle, selectSession, useSessionStore } from "@/lib/sessions";
@@ -13,7 +13,7 @@ import { effectiveAccess, type Bot } from "@/types/bots";
 import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
 import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
-import { ItemQuestionCard, UndeliveredNotes } from "./NeedsYou";
+import { ItemQuestionCard } from "./NeedsYou";
 
 const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
 
@@ -86,6 +86,11 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
     stopBotItem(bot.id, item.number).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
 
+  const reopen = () => {
+    setBusy(true);
+    reopenBotItem(bot.id, item.number).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+  };
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-item-page">
       <div className="flex min-w-0 flex-wrap items-start gap-x-8 gap-y-6 px-5 py-4 sm:px-6">
@@ -101,9 +106,15 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
                   <Button size="sm" variant="outline" disabled aria-label="Hand to another bot (coming later)"><ArrowLeftRight /> Hand to another bot</Button>
                 </span>
               </WithTooltip>
-              <Button size="sm" variant="outline" disabled={busy || closed} onClick={() => void stop()} data-testid="bot-item-stop">
-                <Square /> Stop this item
-              </Button>
+              {closed ? (
+                <Button size="sm" variant="outline" disabled={busy} onClick={reopen} data-testid="bot-item-reopen">
+                  <RotateCcw /> Reopen
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => void stop()} data-testid="bot-item-stop">
+                  <Square /> Stop this item
+                </Button>
+              )}
             </div>
           </div>
 
@@ -123,7 +134,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
 
           {item.summary && <p className="text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground" data-testid="bot-item-summary">{item.summary}</p>}
           {error && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{error}</p>}
-          <UndeliveredNotes bots={[bot]} botId={bot.id} />
+          <NotDelivered bot={bot} item={item} />
 
           {item.question && (
             <section aria-label="Needs you" className="overflow-hidden rounded-lg border border-accent/40 bg-card">
@@ -134,7 +145,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
           <section aria-label="Done means" className="flex min-w-0 flex-col gap-2" data-testid="bot-item-done-means">
             <div className="flex items-baseline gap-2">
               <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">Done means</h2>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{bot.name} cannot close this item until each line is true</span>
+              <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{bot.name} marks each line met itself and closes the item once all are; you can reopen it</span>
               {lines.length > 0 && <span className="shrink-0 text-[12px] text-muted-foreground">{met} of {lines.length}</span>}
             </div>
             {lines.length > 0 ? (
@@ -286,6 +297,41 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
         {entry.detail && <p className="mt-0.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground">{entry.detail}</p>}
       </div>
     </li>
+  );
+}
+
+const SAID: Record<string, string> = { answer: "Your answer", comment: "Your comment", work: "The work you gave" };
+
+/**
+ * The owner's messages about this item that have not reached the bot yet, as the app keeps them: each is given to the
+ * home chat when it next starts, once, or now with Send again.
+ */
+function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const waiting = item.undelivered ?? [];
+  if (waiting.length === 0) return null;
+  const again = () => {
+    setBusy(true);
+    setError(null);
+    resendBotItem(bot.id, item.number).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+  };
+  const why = waiting[waiting.length - 1]?.error;
+  return (
+    <section aria-label="Not delivered yet" role="alert" className="flex min-w-0 flex-col gap-2 rounded-lg bg-warning/10 px-4 py-3 text-[12.5px] text-warning" data-testid="bot-item-undelivered">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <p className="min-w-0 flex-1 font-medium">Not delivered yet: {bot.name} gets {waiting.length === 1 ? "this" : "these"} when its home chat next starts{why ? ` (${why})` : ""}.</p>
+        <Button size="xs" variant="outline" disabled={busy} onClick={again}>{busy ? <Loader2 className="animate-spin" /> : null} Send again</Button>
+      </div>
+      <ul className="flex flex-col gap-1">
+        {waiting.map((message) => (
+          <li key={message.id} className="min-w-0 break-words whitespace-pre-wrap text-muted-foreground">
+            <span className="text-warning">{SAID[message.kind] ?? "Your message"}, {relativeTime(message.at)}:</span> {message.text}
+          </li>
+        ))}
+      </ul>
+      {error && <p className="text-destructive">{error}</p>}
+    </section>
   );
 }
 

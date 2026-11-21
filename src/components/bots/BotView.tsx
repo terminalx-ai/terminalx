@@ -10,7 +10,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
 import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
-import { needsYouCount, tookOpening, useNeedsYou, useOpeningItem } from "@/lib/botItems";
+import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
@@ -82,6 +82,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   }, [opening]);
   const needs = useNeedsYou();
   const asking = needsYouCount(needs, botId);
+  const trouble = needsYouTrouble(needs, useNeedsYouError(), botId);
   const working = needs?.counts.find((count) => count.botId === botId)?.inProgress ?? 0;
 
   // The home chat is made at hire; a bot hired before, or whose home chat was archived, gets one when it is opened.
@@ -159,7 +160,8 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             className={cn("-mb-px flex h-9 items-center gap-1.5 border-b-2 px-2 text-[13px]", tab === id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
           >
             <Icon className="size-3.5" /> {label}
-            {id === "home" && asking > 0 && <span className="text-[11px] font-medium text-accent" aria-label={`${asking} need you`} data-testid="bot-home-count">{asking}</span>}
+            {id === "home" && trouble && <span className="text-[11px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-home-count-error">!</span>}
+            {id === "home" && !trouble && asking > 0 && <span className="text-[11px] font-medium text-accent" aria-label={`${asking} need you`} data-testid="bot-home-count">{asking}</span>}
           </button>
         ))}
       </div>

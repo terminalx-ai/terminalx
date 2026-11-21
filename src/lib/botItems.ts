@@ -2,7 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
 import { actingBotOf } from "@/lib/botChats";
-import type { BotItem, BotItemAct, BotItemList, NeedsYou, NeedsYouEntry } from "@/types/botItems";
+import type { BotItem, BotItemAct, BotItemList, BotItemQuestion, NeedsYou, NeedsYouEntry } from "@/types/botItems";
 import type { SessionEntry } from "@/types/session";
 
 /**
@@ -11,21 +11,32 @@ import type { SessionEntry } from "@/types/session";
  *
  * Every count (the Bots page, a bot's sidebar row, the Bots destination, a bot's Home tab) is read from the one
  * `needsYou` answer kept here, so they always agree. It is read again when a bot's list changes (`bot_items_changed`),
- * after the live connection comes back, and when a session working for a bot changes its tabs' states (a question
- * card opens or is answered there).
+ * when the bots change (`bots_changed`), after the live connection comes back, and when a session working for a bot
+ * changes its tabs' states (a question card opens or is answered there). Those reads are gathered for a moment, so
+ * a bot that changes its list often costs one read, not one per change. A read that fails is kept and shown as an
+ * error, never as nothing waiting.
  */
 
 export const botItemsApi = {
   items: (id: string) => invoke<BotItemList>("bot_items", { id }),
   item: (id: string, number: number) => invoke<BotItem>("bot_item", { id, number }),
   needsYou: () => invoke<NeedsYou>("bots_needs_you"),
-  /** One of the question's answers (counted from 0), or the owner's own words. `asked` names the question answered. */
-  answer: (id: string, number: number, choice: { answer: number } | { text: string }, asked: string | null) =>
-    invoke<BotItemAct>("bot_item_answer", { id, number, answer: "answer" in choice ? choice.answer : null, text: "text" in choice ? choice.text : null, asked }),
+  /** One of the question's answers (counted from 0), or the owner's own words. `question` names the question answered. */
+  answer: (id: string, number: number, choice: { answer: number } | { text: string }, question: string | null) =>
+    invoke<BotItemAct>("bot_item_answer", { id, number, answer: "answer" in choice ? choice.answer : null, text: "text" in choice ? choice.text : null, question }),
   comment: (id: string, number: number, text: string) => invoke<BotItemAct>("bot_item_comment", { id, number, text }),
   give: (id: string, title: string, summary: string) => invoke<BotItemAct>("bot_item_give", { id, title, summary: summary || null }),
   stop: (id: string, number: number) => invoke<BotItemAct>("bot_item_stop", { id, number }),
+  /** Send again what the owner said about an item that did not reach the bot's home chat. */
+  resend: (id: string, number: number) => invoke<BotItemAct>("bot_item_resend", { id, number }),
+  /** The owner reopens a done or dropped item. */
+  reopen: (id: string, number: number) => invoke<BotItemAct>("bot_item_reopen", { id, number }),
 };
+
+/** What names a question when it is answered: its id, or when it was asked for one an older runtime asked. */
+export function questionKey(question: BotItemQuestion): string {
+  return question.id || question.asked;
+}
 
 interface State {
   /** What needs the owner across the bots; null until read. */
@@ -38,26 +49,11 @@ interface State {
   error: string | null;
   /** An item the next bot view should open: `openBotItem` sets it, the bot's view takes it. */
   opening: { botId: string; number: number } | null;
-  /**
-   * What the owner did that was recorded but did not reach the bot's home chat. Kept here, not on the card that was
-   * answered: answering takes the question away, and its card with it. Shown until the owner dismisses it.
-   */
-  undelivered: Undelivered[];
+  /** Why the last read of what needs the owner failed: shown as an error, never as nothing waiting. */
+  needsError: string | null;
 }
 
-/** A recorded answer, comment or piece of work that could not be sent to the bot's home chat. */
-export interface Undelivered {
-  id: number;
-  botId: string;
-  number: number;
-  what: "answer" | "comment" | "work";
-  error?: string;
-}
-
-const MAX_UNDELIVERED = 20;
-let undeliveredId = 0;
-
-const EMPTY: State = { needs: null, lists: {}, items: {}, error: null, opening: null, undelivered: [] };
+const EMPTY: State = { needs: null, lists: {}, items: {}, error: null, opening: null, needsError: null };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
 
@@ -81,9 +77,9 @@ let unlisten: (() => void)[] = [];
 async function readNeeds(mine: number) {
   try {
     const needs = await botItemsApi.needsYou();
-    if (mine === generation && needs && Array.isArray(needs.entries)) set({ needs, error: null });
+    if (mine === generation && needs && Array.isArray(needs.entries)) set({ needs, needsError: null });
   } catch (error) {
-    if (mine === generation) set({ error: reason(error) });
+    if (mine === generation) set({ needsError: reason(error) });
   }
 }
 
@@ -105,15 +101,35 @@ async function readItem(botId: string, number: number, mine = generation) {
   }
 }
 
-/** Read again what is shown of bot `botId` (every bot's when null). */
+/** How long reads asked for together are gathered into one. */
+export const REFRESH_MS = 300;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+/** The bots whose lists are to be read again; "all" for every one. */
+let refreshing: Set<string> | "all" | null = null;
+
+/** Read again what is shown of bot `botId` (every bot's when null), once the changes of the moment are in. */
 function refresh(botId: string | null) {
+  if (!booted) return;
+  refreshing = botId === null || refreshing === "all" ? "all" : new Set([...(refreshing ?? []), botId]);
+  if (refreshTimer !== undefined) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined;
+    const which = refreshing;
+    refreshing = null;
+    readNow(which === "all" ? null : which ?? new Set());
+  }, REFRESH_MS);
+}
+
+/** One read of what needs the owner, and of the lists and items shown of `bots` (every bot when null). */
+function readNow(bots: Set<string> | null) {
   if (!booted) return;
   const mine = generation;
   void readNeeds(mine);
-  for (const id of Object.keys(state.lists)) if (!botId || id === botId) void readList(id, mine);
+  const shown = (id: string) => bots === null || bots.has(id);
+  for (const id of Object.keys(state.lists)) if (shown(id)) void readList(id, mine);
   for (const key of Object.keys(state.items)) {
     const [id, number] = key.split("#");
-    if (!botId || id === botId) void readItem(id, Number(number), mine);
+    if (shown(id)) void readItem(id, Number(number), mine);
   }
 }
 
@@ -127,6 +143,10 @@ export async function bootBotItems() {
         if (mine === generation) refresh(typeof event.payload?.botId === "string" ? event.payload.botId : null);
       }),
       listen("local_runtime_reattached", () => {
+        if (mine === generation) refresh(null);
+      }),
+      // A bot hired, paused, renamed or removed changes the counts.
+      listen("bots_changed", () => {
         if (mine === generation) refresh(null);
       }),
     ]);
@@ -146,6 +166,9 @@ export function shutBotItems() {
   for (const stop of unlisten) stop();
   unlisten = [];
   clearTimeout(sessionsTimer);
+  clearTimeout(refreshTimer);
+  refreshTimer = undefined;
+  refreshing = null;
   sessionsKey = "";
   set(EMPTY);
 }
@@ -191,10 +214,30 @@ export function useNeedsYou(): NeedsYou | null {
   return useStore().needs;
 }
 
+/** Why what needs the owner could not be read, if the last read failed. */
+export function useNeedsYouError(): string | null {
+  return useStore().needsError;
+}
+
 /** How many things wait on the owner from bot `botId` (every bot when null). */
 export function needsYouCount(needs: NeedsYou | null, botId: string | null): number {
   if (!needs) return 0;
   return needs.counts.filter((count) => !botId || count.botId === botId).reduce((sum, count) => sum + count.needsYou, 0);
+}
+
+/**
+ * Why a count cannot be trusted: the read of what needs the owner failed, or bot `botId`'s list (any bot's when null)
+ * could not be read. Shown as an error where the count would be, never as zero.
+ */
+export function needsYouTrouble(needs: NeedsYou | null, failed: string | null, botId: string | null): string | null {
+  if (failed) return failed;
+  const broken = (needs?.counts ?? []).find((count) => count.error && (!botId || count.botId === botId));
+  return broken?.error ?? null;
+}
+
+/** An older runtime that does not know the work lists answers this way: only restarting it helps. */
+export function olderRuntime(error: string | null): boolean {
+  return !!error && /Unknown bots operation (needsYou|items|item)\b/.test(error);
 }
 
 /** The entries of `needs` for bot `botId`, newest first. */
@@ -220,35 +263,46 @@ export function useBotItem(botId: string, number: number): BotItem | null {
   return store.items[itemKey(botId, number)] ?? store.lists[botId]?.items.find((item) => item.number === number) ?? null;
 }
 
-/** Take an act's answer at once; its `bot_items_changed` follows. A send that failed is kept to be shown. */
-function took(botId: string, act: BotItemAct, what: Undelivered["what"]): BotItemAct {
+/** Take an act's answer at once; its `bot_items_changed` follows. */
+function took(botId: string, act: BotItemAct): BotItemAct {
   const item = act.item;
+  if (!item) {
+    void readNeeds(generation);
+    return act;
+  }
   const list = state.lists[botId];
   const items = { ...state.items };
   if (items[itemKey(botId, item.number)]) items[itemKey(botId, item.number)] = item;
   const lists = list
     ? { ...state.lists, [botId]: { ...list, items: list.items.some((value) => value.number === item.number) ? list.items.map((value) => (value.number === item.number ? { ...value, ...item } : value)) : [item, ...list.items] } }
     : state.lists;
-  const failed = act.delivery && !act.delivery.sent ? [{ id: ++undeliveredId, botId, number: item.number, what, error: act.delivery.error }] : [];
-  set({ items, lists, undelivered: [...state.undelivered, ...failed].slice(-MAX_UNDELIVERED) });
+  set({ items, lists });
   void readNeeds(generation);
   return act;
 }
 
-export async function answerBotItem(botId: string, number: number, choice: { answer: number } | { text: string }, asked: string | null) {
-  return took(botId, await botItemsApi.answer(botId, number, choice, asked), "answer");
+export async function answerBotItem(botId: string, number: number, choice: { answer: number } | { text: string }, question: string | null) {
+  return took(botId, await botItemsApi.answer(botId, number, choice, question));
+}
+
+export async function reopenBotItem(botId: string, number: number) {
+  return took(botId, await botItemsApi.reopen(botId, number));
+}
+
+export async function resendBotItem(botId: string, number: number) {
+  return took(botId, await botItemsApi.resend(botId, number));
 }
 
 export async function commentOnBotItem(botId: string, number: number, text: string) {
-  return took(botId, await botItemsApi.comment(botId, number, text), "comment");
+  return took(botId, await botItemsApi.comment(botId, number, text));
 }
 
 export async function giveBotWork(botId: string, title: string, summary: string) {
-  return took(botId, await botItemsApi.give(botId, title, summary), "work");
+  return took(botId, await botItemsApi.give(botId, title, summary));
 }
 
 export async function stopBotItem(botId: string, number: number) {
-  return took(botId, await botItemsApi.stop(botId, number), "work");
+  return took(botId, await botItemsApi.stop(botId, number));
 }
 
 /** Read what needs the owner again now (after answering a session's question card). */
@@ -272,16 +326,6 @@ export function tookOpening() {
   if (state.opening) set({ opening: null });
 }
 
-/** The sends that did not reach bot `botId`'s home chat (every bot's when null). */
-export function useUndelivered(botId: string | null): Undelivered[] {
-  const store = useStore();
-  return botId ? store.undelivered.filter((entry) => entry.botId === botId) : store.undelivered;
-}
-
-export function dismissUndelivered(id: number) {
-  set({ undelivered: state.undelivered.filter((entry) => entry.id !== id) });
-}
-
 /** Whether an item is out of the way until a later time. */
 export function snoozed(item: Pick<BotItem, "snoozedUntil" | "state">, now = Date.now()): boolean {
   if (!item.snoozedUntil || item.state === "done" || item.state === "dropped" || item.state === "needsYou") return false;
@@ -299,6 +343,10 @@ export function sameDay(iso: string | undefined, now = new Date()): boolean {
 /** For tests: what was read, and the item a bot view should open. */
 export function getNeedsForTests(): NeedsYou | null {
   return state.needs;
+}
+
+export function getNeedsErrorForTests(): string | null {
+  return state.needsError;
 }
 
 export function getOpeningForTests() {

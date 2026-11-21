@@ -6349,6 +6349,12 @@ pub async fn bot_item_stop(state: State<'_, AppState>, id: String, number: u64) 
     bots_call(state, "itemStop", serde_json::json!({"id": id, "number": number})).await
 }
 
+/// Reopen a done or dropped item: the owner's act, told to the bot.
+#[tauri::command]
+pub async fn bot_item_reopen(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemReopen", serde_json::json!({"id": id, "number": number})).await
+}
+
 /// Send again the owner's messages about an item that did not reach the bot's home chat.
 #[tauri::command]
 pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {

@@ -22,12 +22,14 @@ export interface BotItemLink {
 }
 
 export interface BotItemQuestion {
+  /** Names the question: an answer says which question it answers by it. Empty on one an older runtime asked. */
+  id?: string;
   text: string;
   /** Two to four. */
   answers: string[];
   /** The one the bot recommends, counted from 0. */
   recommended?: number;
-  /** When it was asked: an answer names the question it answers by this. */
+  /** When it was asked. */
   asked: string;
 }
 
@@ -62,6 +64,19 @@ export interface BotItem {
   lastActivity?: BotItemActivity | null;
   /** What the sessions started for it spent, at Stats' prices: shown, never a cap. */
   spentUsd: number;
+  /** The owner's messages about it that have not reached the bot's home chat yet, oldest first. */
+  undelivered?: BotItemUndelivered[];
+}
+
+export interface BotItemUndelivered {
+  id: string;
+  at: string;
+  /** `answer`, `comment` or `work`; a newer kind is shown as a message. */
+  kind: string;
+  /** The message as the home chat gets it: the owner's words. */
+  text: string;
+  /** Why the last try to send it failed. */
+  error?: string;
 }
 
 export interface BotItemList {
@@ -89,17 +104,32 @@ export interface NeedsYouCount {
   botId: string;
   needsYou: number;
   inProgress: number;
+  /** The bot's list could not be read: its count is not known. */
+  error?: string;
+}
+
+/** An item whose owner's messages have not reached the bot yet. */
+export interface NeedsYouUndelivered {
+  botId: string;
+  number: number;
+  count: number;
+  kind: string;
+  error: string;
+  at: string;
 }
 
 /** Everything waiting on the owner, across the bots, newest first. */
 export interface NeedsYou {
   entries: NeedsYouEntry[];
   counts: NeedsYouCount[];
+  /** Absent from an older runtime. */
+  undelivered?: NeedsYouUndelivered[];
 }
 
 /** What an owner's act answers: the item as saved, and whether its message reached the bot's home chat. */
 export interface BotItemAct {
-  item: BotItem;
+  /** Null when the item is gone (trimmed) by the time the reply is made. */
+  item: BotItem | null;
   delivery?: { sent: boolean; sessionId?: string; error?: string };
   stopped?: string[];
 }

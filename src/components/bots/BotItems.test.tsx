@@ -34,12 +34,13 @@ vi.mock("@/lib/sessions", async (importOriginal) => ({
   useSessionStore: () => ({ sessions: mocks.sessions, view: "bots", selectedBotId: null, selectedSessionId: null }),
 }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/lib/localRuntime", () => ({ useLocalRuntime: () => ({ state: { state: "connected", epoch: "e1", generation: 1, view: 1 }, readAt: 0 }) }));
 
 const items = await import("@/lib/botItems");
 const { BotHome } = await import("./BotHome");
 const { BotItemPage, mayDoHere } = await import("./BotItemPage");
 const { NeedsYouQueue, needsYouNote } = await import("./NeedsYouQueue");
-const { waited, undeliveredNote } = await import("./NeedsYou");
+const { waited, undeliveredNote, ItemQuestionCard } = await import("./NeedsYou");
 
 const atlas: Bot = {
   id: "b1", slug: "atlas", name: "Atlas", roleTitle: "CTO", roleTemplateId: "cto", harness: "claude", model: "", access: "full", runsOn: "thisMac",
@@ -53,7 +54,7 @@ const item = (number: number, extra: Partial<BotItem> = {}): BotItem => ({
 });
 const asking = item(14, {
   title: "Move macOS CI to our own runner", state: "needsYou", summary: "Three pieces.",
-  question: { text: "Approve the plan?", answers: ["Not now", "Approve and start", "Start, but ask before merging"], recommended: 1, asked: "2026-11-21T09:00:00Z" },
+  question: { text: "Approve the plan?", answers: ["Not now", "Approve and start", "Start, but ask before merging"], recommended: 1, asked: "2026-11-21T09:00:00Z", id: "q14" },
 });
 const working = item(12, { title: "Phase 2: merge main", state: "inProgress", doneMeans: [{ text: "merged", met: true }, { text: "tests pass", met: false }] });
 const waiting = item(11, { title: "Pinned sessions on the phone", state: "waiting" });
@@ -81,6 +82,8 @@ function route(command: string, args: Record<string, unknown> = {}) {
     case "bot_item_comment":
     case "bot_item_give":
     case "bot_item_stop":
+    case "bot_item_resend":
+    case "bot_item_reopen":
       return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: true, sessionId: "home" } });
     default:
       return Promise.reject(new Error(`unexpected ${command}`));
@@ -130,33 +133,39 @@ describe("a bot's Home tab (PRO-469, 23.01)", () => {
   it("answers with a choice or with your own words, naming the question answered", async () => {
     render(<BotHome bot={atlas} onOpenItem={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /Approve and start/ }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_answer", { id: "b1", number: 14, answer: 1, text: null, asked: "2026-11-21T09:00:00Z" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_answer", { id: "b1", number: 14, answer: 1, text: null, question: "q14" }));
     fireEvent.click(screen.getByText("or reply…"));
     fireEvent.change(screen.getByLabelText("Your answer to Atlas"), { target: { value: "Only the Mac mini" } });
     fireEvent.click(screen.getByRole("button", { name: "Answer" }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_answer", { id: "b1", number: 14, answer: null, text: "Only the Mac mini", asked: "2026-11-21T09:00:00Z" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_answer", { id: "b1", number: 14, answer: null, text: "Only the Mac mini", question: "q14" }));
     // Answering reads what needs you again.
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "bots_needs_you").length).toBeGreaterThan(1);
   });
 
-  it("keeps saying an answer did not reach the bot after its card is gone, until dismissed", async () => {
+  it("keeps saying an answer has not reached the bot after its card is gone, and sends it again", async () => {
     mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => {
       if (command === "bot_item_answer") {
-        needs = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 3 }] };
+        // The app keeps the answer on the item until it is delivered, and says so in what needs you.
+        needs = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 3 }], undelivered: [{ botId: "b1", number: 14, count: 1, kind: "answer", error: "no home chat", at: now }] };
         return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: false, error: "no home chat" } });
+      }
+      if (command === "bot_item_resend") {
+        needs = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 3 }], undelivered: [] };
+        return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: true } });
       }
       return route(command, args);
     });
     render(<BotHome bot={atlas} onOpenItem={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /Approve and start/ }));
     await waitFor(() => expect(screen.queryByTestId("bot-home-needs-you")).toBeNull());
-    const alert = within(screen.getByTestId("bot-undelivered")).getByRole("alert");
-    expect(alert.textContent).toContain("Your answer on item #14 is recorded, but it could not be sent to Atlas's home chat: no home chat");
+    const alert = await within(await screen.findByTestId("bot-undelivered")).findByRole("alert");
+    expect(alert.textContent).toContain("Your answer on item #14 is recorded but not delivered yet: no home chat");
     // The Bots page says so too, after the question left its queue.
     render(<NeedsYouQueue bots={[atlas, iris]} needs={items.getNeedsForTests()} />);
     expect(within(screen.getByTestId("bots-needs-you")).getByRole("alert").textContent).toContain("item #14");
-    fireEvent.click(within(alert).getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryAllByTestId("bot-undelivered")).toHaveLength(0);
+    fireEvent.click(within(alert).getByRole("button", { name: /Send again/ }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_resend", { id: "b1", number: 14 }));
+    await waitFor(() => expect(screen.queryAllByTestId("bot-undelivered")).toHaveLength(0));
   });
 
   it("gives the bot work", async () => {
@@ -216,6 +225,28 @@ describe("a work item's page (PRO-469, 23.09)", () => {
   });
 });
 
+describe("a work item's page, after the review", () => {
+  it("shows what has not reached the bot yet, and sends it again", async () => {
+    list.items = list.items.map((value) => (value.number === 12 ? { ...value, undelivered: [{ id: "m1", at: now, kind: "comment", text: "About item #12: Keep it short", error: "the chat could not take it" }] } : value));
+    render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    const waiting = await screen.findByTestId("bot-item-undelivered");
+    expect(waiting.textContent).toContain("Not delivered yet: Atlas gets this when its home chat next starts (the chat could not take it)");
+    expect(waiting.textContent).toContain("About item #12: Keep it short");
+    fireEvent.click(within(waiting).getByRole("button", { name: /Send again/ }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_resend", { id: "b1", number: 12 }));
+    // The bot marks its own lines: the page says so, and that you can reopen.
+    expect(screen.getByTestId("bot-item-done-means").textContent).toContain("Atlas marks each line met itself and closes the item once all are; you can reopen it");
+  });
+
+  it("reopens a done item, as the owner", async () => {
+    render(<BotItemPage bot={atlas} number={9} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Weekly status" });
+    expect(screen.queryByTestId("bot-item-stop")).toBeNull();
+    fireEvent.click(screen.getByTestId("bot-item-reopen"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_reopen", { id: "b1", number: 9 }));
+  });
+});
+
 describe("Needs you across the bots", () => {
   it("lists every bot's question on the Bots page, with the recommended answer and Open, and answers a session's card", async () => {
     render(<NeedsYouQueue bots={[atlas, iris]} needs={needs} />);
@@ -235,6 +266,52 @@ describe("Needs you across the bots", () => {
     expect(mocks.selectSession).toHaveBeenCalledWith("s2");
   });
 
+  it("sends a long question or answer to the item's page instead of answering it from the row", () => {
+    const long = { ...asking, question: { ...asking.question!, text: "Ship?\n".repeat(5) + "My answer: “Yes, push without asking”" } };
+    const wide = { ...asking, number: 15, question: { ...asking.question!, answers: ["No", "Approve the plan and start the runner migration today"], recommended: 1 } };
+    render(<NeedsYouQueue bots={[atlas]} needs={{ entries: [{ kind: "item", botId: "b1", at: now, item: long }, { kind: "item", botId: "b1", at: now, item: wide }], counts: [] }} />);
+    const rows = screen.getAllByTestId("needs-you-row");
+    for (const row of rows) {
+      expect(within(row).queryByTestId("needs-you-answer")).toBeNull();
+      expect(within(row).getByTestId("needs-you-question").className).toContain("line-clamp-3");
+    }
+    fireEvent.click(within(rows[0]).getByTestId("needs-you-read"));
+    expect(mocks.openBot).toHaveBeenCalledWith("b1");
+    expect(items.getOpeningForTests()).toEqual({ botId: "b1", number: 14 });
+    expect(mocks.invoke).not.toHaveBeenCalledWith("bot_item_answer", expect.anything());
+  });
+
+  it("clamps a long question on its card, with Show all", async () => {
+    const text = "Line\n".repeat(8) + "the end";
+    render(<ItemQuestionCard bot={atlas} item={{ ...asking, question: { ...asking.question!, text } }} />);
+    const shown = screen.getByTestId("needs-you-question");
+    expect(shown.className).toContain("line-clamp-4");
+    fireEvent.click(screen.getByRole("button", { name: "Show all" }));
+    expect(shown.className).not.toContain("line-clamp-4");
+  });
+
+  it("shows a read that failed as an error, not as nothing waiting, and offers a restart to an older runtime", async () => {
+    render(<NeedsYouQueue bots={[atlas, iris]} needs={null} error="the runtime is busy" />);
+    expect(screen.getByTestId("bots-needs-you-error").textContent).toContain("the runtime is busy");
+    expect(screen.queryByText(/Nothing needs you/)).toBeNull();
+    cleanup();
+    render(<NeedsYouQueue bots={[atlas, iris]} needs={null} error="Unknown bots operation needsYou" />);
+    expect(screen.getByRole("button", { name: /Restart runtime/ })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("older than this app");
+    cleanup();
+    // One bot's list cannot be read: said for that bot, and its count is not taken for zero.
+    const broken: NeedsYou = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 0 }, { botId: "b2", needsYou: 0, inProgress: 0, error: "items.json cannot be read" }] };
+    render(<NeedsYouQueue bots={[atlas, iris]} needs={broken} />);
+    expect(screen.getByTestId("bots-needs-you-unread").textContent).toContain("Couldn't read Iris's work list");
+    expect(items.needsYouTrouble(broken, null, "b2")).toContain("cannot be read");
+    expect(items.needsYouTrouble(broken, null, "b1")).toBeNull();
+    expect(items.needsYouTrouble(null, "failed", "b1")).toBe("failed");
+    // A failed read is kept in the store for every badge.
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => (command === "bots_needs_you" ? Promise.reject(new Error("the runtime is busy")) : route(command, args)));
+    items.refreshNeedsYou();
+    await waitFor(() => expect(items.getNeedsErrorForTests()).toContain("the runtime is busy"));
+  });
+
   it("offers no one-click answer on the Bots page when the bot recommends none", () => {
     const open = { ...asking, question: { ...asking.question!, recommended: undefined } };
     render(<NeedsYouQueue bots={[atlas]} needs={{ entries: [{ kind: "item", botId: "b1", at: now, item: open }], counts: [] }} />);
@@ -250,10 +327,19 @@ describe("Needs you across the bots", () => {
     expect(items.needsYouCount(read, null)).toBe(2);
     expect(items.needsYouCount(read, "b1")).toBe(1);
     expect(items.needsYouOf(read, "b2").map((entry) => entry.kind)).toEqual(["agentQuestion"]);
-    // A list change reads it again.
+    // A list change reads it again; many changes at once are one read.
     needs = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 3 }] };
-    await act(async () => mocks.listeners.get("bot_items_changed")?.({ payload: { botId: "b1" } }));
+    const reads = () => mocks.invoke.mock.calls.filter(([command]) => command === "bots_needs_you").length;
+    const first = reads();
+    await act(async () => {
+      for (let n = 0; n < 50; n++) mocks.listeners.get("bot_items_changed")?.({ payload: { botId: "b1" } });
+    });
     await waitFor(() => expect(items.needsYouCount(items.getNeedsForTests(), null)).toBe(0));
+    expect(reads() - first).toBe(1);
+    // The bots changing reads it again too.
+    needs = { entries: [], counts: [{ botId: "b1", needsYou: 0, inProgress: 3 }, { botId: "b3", needsYou: 2, inProgress: 0 }] };
+    await act(async () => mocks.listeners.get("bots_changed")?.({ payload: {} }));
+    await waitFor(() => expect(items.needsYouCount(items.getNeedsForTests(), null)).toBe(2));
     // The sessions: only a change in a bot's session's tabs reads again.
     vi.useFakeTimers();
     try {
@@ -286,9 +372,10 @@ describe("Needs you across the bots", () => {
     expect(waited("2026-11-21T08:00:00Z", at)).toBe("2h");
     expect(needsYouNote({ entries: [{ kind: "item", botId: "b1", at: "2026-11-21T09:34:00Z", item: asking }], counts: [] }, at)).toBe("oldest waiting 26 minutes");
     expect(needsYouNote(null)).toBe("Nothing waiting");
-    expect(undeliveredNote(atlas, { number: 14, what: "answer", error: "the runtime is restarting" })).toBe(
-      "Your answer on item #14 is recorded, but it could not be sent to Atlas's home chat: the runtime is restarting. Atlas has not been told: tell it there.",
+    expect(undeliveredNote(atlas, { number: 14, kind: "answer", count: 1, error: "the runtime is restarting" })).toBe(
+      "Your answer on item #14 is recorded but not delivered yet: the runtime is restarting. Atlas gets it when its home chat next starts, or send again now.",
     );
+    expect(undeliveredNote(atlas, { number: 3, kind: "comment", count: 2, error: "" })).toContain("2 of your messages on item #3 are recorded");
     expect(items.snoozed({ state: "planned", snoozedUntil: "2999-01-01T00:00:00Z" })).toBe(true);
     expect(items.snoozed({ state: "needsYou", snoozedUntil: "2999-01-01T00:00:00Z" })).toBe(false);
     expect(items.snoozed({ state: "planned", snoozedUntil: "2000-01-01T00:00:00Z" })).toBe(false);

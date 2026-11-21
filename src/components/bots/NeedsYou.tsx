@@ -1,13 +1,13 @@
 import { useState, type FormEvent } from "react";
-import { CircleQuestionMark, Loader2, MessageSquare, Send, TriangleAlert, X } from "@/icons";
+import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
-import { answerBotItem, dismissUndelivered, openBotItem, refreshNeedsYou, useUndelivered, type Undelivered } from "@/lib/botItems";
+import { answerBotItem, openBotItem, questionKey, refreshNeedsYou, resendBotItem, useNeedsYou } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { openBot, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
-import type { BotItem, NeedsYouEntry } from "@/types/botItems";
+import type { BotItem, NeedsYouEntry, NeedsYouUndelivered } from "@/types/botItems";
 import { BotAvatar } from "./BotAvatar";
 
 /**
@@ -27,32 +27,46 @@ export function waited(iso: string, now = Date.now()): string {
   return hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
 }
 
-const WHAT: Record<Undelivered["what"], string> = { answer: "Your answer", comment: "Your comment", work: "The work you gave" };
+const WHAT: Record<string, string> = { answer: "Your answer", comment: "Your comment", work: "The work you gave" };
 
-/** What a send that did not reach the home chat says: what the owner did is recorded, the bot was not told. */
-export function undeliveredNote(bot: Pick<Bot, "name">, entry: Pick<Undelivered, "number" | "what" | "error">): string {
-  return `${WHAT[entry.what]} on item #${entry.number} is recorded, but it could not be sent to ${bot.name}'s home chat${entry.error ? `: ${entry.error}` : ""}. ${bot.name} has not been told: tell it there.`;
+/** What a message that has not reached the home chat says: what the owner did is recorded, the bot was not told yet. */
+export function undeliveredNote(bot: Pick<Bot, "name">, entry: Pick<NeedsYouUndelivered, "number" | "kind" | "count" | "error">): string {
+  const what = entry.count > 1 ? `${entry.count} of your messages` : WHAT[entry.kind] ?? "Your message";
+  return `${what} on item #${entry.number} ${entry.count > 1 ? "are" : "is"} recorded but not delivered yet${entry.error ? `: ${entry.error}` : ""}. ${bot.name} gets ${entry.count > 1 ? "them" : "it"} when its home chat next starts, or send again now.`;
 }
 
 /**
- * The sends that did not reach a bot: shown where the owner acts (a bot's Home tab and item page, or the Bots page for
- * every bot) until dismissed. Kept in the store, not on the card answered, since answering removes the card.
+ * The owner's messages that have not reached a bot (PRO-469 review): kept on the item by the app until they are
+ * delivered (at the home chat's next start, or by Send again), so the notice outlives the card that was answered and
+ * a restart. On a bot's Home tab and item page for that bot; on the Bots page for every bot.
  */
-export function UndeliveredNotes({ bots, botId }: { bots: Bot[]; botId: string | null }) {
-  const entries = useUndelivered(botId);
+export function UndeliveredNotes({ bots, botId, number }: { bots: Bot[]; botId: string | null; number?: number }) {
+  const needs = useNeedsYou();
+  const entries = (needs?.undelivered ?? []).filter((entry) => (botId === null || entry.botId === botId) && (number === undefined || entry.number === number));
   if (entries.length === 0) return null;
   return (
     <div className="flex min-w-0 flex-col gap-1.5" data-testid="bot-undelivered">
       {entries.map((entry) => {
-        const bot = bots.find((value) => value.id === entry.botId) ?? { name: "the bot" };
-        return (
-          <div key={entry.id} role="alert" className="flex min-w-0 items-start gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
-            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
-            <p className="min-w-0 flex-1 break-words">{undeliveredNote(bot, entry)}</p>
-            <button type="button" onClick={() => dismissUndelivered(entry.id)} aria-label="Dismiss" className="shrink-0 rounded hover:text-foreground"><X className="size-3.5" /></button>
-          </div>
-        );
+        const bot = bots.find((value) => value.id === entry.botId);
+        return bot ? <UndeliveredNote key={`${entry.botId}#${entry.number}`} bot={bot} entry={entry} /> : null;
       })}
+    </div>
+  );
+}
+
+function UndeliveredNote({ bot, entry }: { bot: Bot; entry: NeedsYouUndelivered }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const again = () => {
+    setBusy(true);
+    setError(null);
+    resendBotItem(bot.id, entry.number).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+  };
+  return (
+    <div role="alert" className="flex min-w-0 items-start gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+      <p className="min-w-0 flex-1 break-words">{undeliveredNote(bot, entry)}{error ? ` ${error}` : ""}</p>
+      <Button size="xs" variant="outline" disabled={busy} onClick={again} className="shrink-0">{busy ? <Loader2 className="animate-spin" /> : <RotateCw />} Send again</Button>
     </div>
   );
 }
@@ -69,7 +83,7 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
   const send = (choice: { answer: number } | { text: string }) => {
     setBusy(true);
     setError(null);
-    answerBotItem(bot.id, item.number, choice, question.asked).then(
+    answerBotItem(bot.id, item.number, choice, questionKey(question)).then(
       () => {
         setReply("");
         setReplying(false);
@@ -136,7 +150,7 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
       <CircleQuestionMark className="mt-0.5 size-4 shrink-0 text-accent" />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
-          <p className="min-w-0 flex-1 text-[13.5px] font-medium whitespace-pre-wrap text-foreground">{item.question.text}</p>
+          <QuestionText text={item.question.text} />
           <span className="shrink-0 text-[11.5px] text-faint" title={item.question.asked}>{waited(item.question.asked)}</span>
         </div>
         {onOpen ? (
@@ -148,6 +162,28 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
         <Answers bot={bot} item={item} compact={false} />
       </div>
     </article>
+  );
+}
+
+/** Past this a question is clamped on its card, with Show all. */
+const LONG_QUESTION = { chars: 280, lines: 4 };
+
+export function longText(text: string, limit: { chars: number; lines: number }): boolean {
+  return text.length > limit.chars || text.split("\n").length > limit.lines;
+}
+
+function QuestionText({ text }: { text: string }) {
+  const [all, setAll] = useState(false);
+  const long = longText(text, LONG_QUESTION);
+  return (
+    <div className="min-w-0 flex-1">
+      <p className={cn("text-[13.5px] font-medium break-words whitespace-pre-wrap text-foreground", long && !all && "line-clamp-4")} data-testid="needs-you-question">{text}</p>
+      {long && (
+        <button type="button" onClick={() => setAll((value) => !value)} className="text-[12px] text-faint hover:text-foreground" aria-expanded={all}>
+          {all ? "Show less" : "Show all"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -208,7 +244,7 @@ export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) 
     <article className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2" data-testid="needs-you-row" data-bot={bot.id}>
       <BotAvatar roleTemplateId={bot.roleTemplateId} size="md" />
       <div className="min-w-[200px] flex-1">
-        <p className="truncate text-[13px] text-foreground" title={item.question?.text}>{item.question?.text}</p>
+        <p className="line-clamp-3 text-[13px] break-words whitespace-pre-wrap text-foreground" title={item.question?.text} data-testid="needs-you-question">{item.question?.text}</p>
         <p className="truncate text-[11.5px] text-faint">{bot.name} · #{item.number} {item.title}</p>
       </div>
       <div className="flex min-w-0 max-w-full items-center gap-2">
@@ -219,6 +255,10 @@ export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) 
     </article>
   );
 }
+
+/** What a Bots page row shows whole: three lines of its question, and an answer that fits its button. */
+const ROW_QUESTION = { chars: 180, lines: 3 };
+const ROW_ANSWER_CHARS = 36;
 
 /**
  * The row's one answer button: the answer the bot recommends, the rest on the item's page. With no recommendation
@@ -233,10 +273,19 @@ function RecommendedOnly({ bot, item }: { bot: Bot; item: BotItem }) {
   if (index == null || !question.answers[index]) {
     return <span className="shrink-0 text-[11.5px] text-faint" data-testid="needs-you-choose">{question.answers.length} answers · open to choose</span>;
   }
+  // One click answers only what the row shows whole: a question past three lines, or an answer the button cuts off,
+  // is read on the item's page first.
+  if (longText(question.text, ROW_QUESTION) || question.answers[index].length > ROW_ANSWER_CHARS) {
+    return (
+      <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-read">
+        Read and answer
+      </Button>
+    );
+  }
   const send = () => {
     setBusy(true);
     setError(null);
-    answerBotItem(bot.id, item.number, { answer: index }, question.asked).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    answerBotItem(bot.id, item.number, { answer: index }, questionKey(question)).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
   return (
     <>

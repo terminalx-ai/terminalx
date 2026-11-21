@@ -955,6 +955,22 @@ pub fn stop(sink: &dyn EventSink, bot: &Bot, number: u64) -> Result<Item> {
     })
 }
 
+/// The owner reopens a done or dropped item: it is in progress again, and the bot is told. Only the owner reopens:
+/// a bot that thinks more is needed adds a new item.
+pub fn reopen(sink: &dyn EventSink, bot: &Bot, number: u64) -> Result<Item> {
+    change_as_owner(sink, &bot.id, |items, _| {
+        let item = find(items, number)?;
+        if !item.state.closed() {
+            return Err(refused(format!("Item #{number} is open: there is nothing to reopen.")));
+        }
+        item.state = ItemState::InProgress;
+        item.closed = None;
+        log(item, OWNER, "reopened", "You reopened this item".into(), String::new());
+        queue(item, "work", format!("I reopened item #{number}: it is not done yet. Look at its done means again."));
+        Ok(item.clone())
+    })
+}
+
 // ---------------------------------------------------------------- views
 
 /// What a list shows of an item: everything but its activity, which the item's page reads.
@@ -1351,7 +1367,7 @@ fn newest_waiting(item: &Item) -> Option<String> {
 /// guarded as a message to the bot is: `control::refuse_bot_runtime_call`
 /// keeps every process in a bot's session from making them.
 pub fn runtime_call(manager: &crate::session::SessionManager, operation: &str, params: &Value) -> Option<Result<Value>> {
-    let known = matches!(operation, "items" | "item" | "needsYou" | "itemAnswer" | "itemComment" | "itemGive" | "itemStop" | "itemResend");
+    let known = matches!(operation, "items" | "item" | "needsYou" | "itemAnswer" | "itemComment" | "itemGive" | "itemStop" | "itemResend" | "itemReopen");
     if !known {
         return None;
     }
@@ -1399,6 +1415,10 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
         "itemResend" => {
             let number = number(params, "number")?;
             act(manager, &bot.id, number, None)
+        }
+        "itemReopen" => {
+            let item = reopen(sink, &bot, number(params, "number")?)?;
+            act(manager, &bot.id, item.number, newest_waiting(&item))
         }
         "itemGive" => {
             let item = add(sink, &bot, &By::Owner, NewItem {

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { ListSection } from "@/components/layout/SessionSidebar";
 import { reloadBots, useBotStore } from "@/lib/bots";
-import { needsYouCount, useNeedsYou } from "@/lib/botItems";
+import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { showHireBot } from "@/lib/botsPage";
 import { openBot, useSessionStore } from "@/lib/sessions";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
@@ -80,7 +80,9 @@ function BotsList() {
 function BotRow({ bot }: { bot: Bot }) {
   const store = useSessionStore();
   // What waits on you from this bot (PRO-469): the same count as the Bots page's.
-  const asking = needsYouCount(useNeedsYou(), bot.id);
+  const needs = useNeedsYou();
+  const asking = needsYouCount(needs, bot.id);
+  const trouble = needsYouTrouble(needs, useNeedsYouError(), bot.id);
   const open = store.view === "bot" ? store.selectedBotId === bot.id : !!store.selectedSessionId && store.sessions.find((session) => session.id === store.selectedSessionId)?.bot?.id === bot.id;
   const place = runsOnLabel(bot.runsOn);
   const status = statusLine(bot);
@@ -103,7 +105,9 @@ function BotRow({ bot }: { bot: Bot }) {
           </span>
           <span className={cn("truncate text-[11.5px]", bot.paused ? "text-warning" : "text-faint")}>{status}</span>
         </span>
-        {asking > 0 ? (
+        {trouble ? (
+          <span className="shrink-0 text-[11.5px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-row-needs-you-error">!</span>
+        ) : asking > 0 ? (
           <span className="shrink-0 text-[11.5px] font-medium text-accent" title={`${asking} need${asking === 1 ? "s" : ""} you`} data-testid="bot-row-needs-you">{asking}</span>
         ) : (
           <span title={place} className="shrink-0 text-faint [&_svg]:size-3">
