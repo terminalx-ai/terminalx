@@ -6,7 +6,7 @@
 // one's fields. Nothing overlaps, nothing leaves the window, and no page error.
 // Run after pnpm build: node scripts/webkit/bot-duties.mjs
 // BOT_DUTIES_SHOTS=<dir> saves a screenshot of each case.
-import { launch, open, report, serve } from "./harness.mjs";
+import { launch, open, openSession, report, serve } from "./harness.mjs";
 
 const shots = process.env.BOT_DUTIES_SHOTS;
 const server = await serve();
@@ -78,9 +78,7 @@ try {
       const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await page.evaluate(() => window.__PW_STUB__.emit("open_session", { sessionId: "bot-home" }));
-      const view = page.getByRole("main", { name: "Argus, Watcher" });
-      await view.waitFor();
+      const view = await openSession(page, "bot-home", "Argus, Watcher");
       await view.getByRole("tab", { name: "Duties" }).click();
       const duties = view.getByTestId("bot-duties");
       const table = duties.getByTestId("duties-table");

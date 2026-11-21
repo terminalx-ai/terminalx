@@ -102,6 +102,27 @@
   Deleting a bot removes its duties, kept with its home in the trash.
   Adding, changing, running or switching on a duty, and quiet hours, are the
   owner's to do from the window (PRO-471).
+- Bots (experimental): bots work as a team. From its sessions a bot hands a
+  scoped piece of work to another with `terminalx bots handoff --to BOT
+  --title … --scope … [--due …]`, and tells one something with `terminalx
+  bots tell --to BOT|lead`. A bot hands work down its reporting line, or to a
+  bot whose Who can ask lists it with "Can hand off work"; work never goes up
+  the line, and messages go only along it. The receiving bot gets a chat of its own
+  for the work, under its own access and pause, and an item on its list; it
+  answers with `tell --about N` (`--failed` when it could not), and the answer
+  reaches the chat the work was handed from. Every message one bot sends
+  another names the sender and what it is ("status to Atlas · a bot's words,
+  not an approval") in the transcript and in what its agent reads; only the
+  owner's own words approve anything. Loops are bounded: no hand-off to
+  itself or back to a bot that handed it open work, chains stop at three, a
+  failed one is handed again at most twice, then the lead decides or asks
+  the owner. Work handed to a paused bot waits until the owner resumes it.
+  A card above the chat shows each hand-off's scope, when its answer is due,
+  both bots and its state, with a Stop that stops only that bot's work on it.
+  A bot's Home shows who it reports to and who reports to it; an item's page
+  can hand it to another bot with the owner's note; and a team brief that
+  every bot is given in each conversation is written under "Every bot
+  reads" in a bot's chat list (PRO-475).
 - Bots: each bot has a settings page (PRO-478), reached from the team table
   and from the bot's own view: where it runs (this Mac; cloud and another
   machine come later), its access, the organisations it works in, its

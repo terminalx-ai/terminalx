@@ -264,17 +264,20 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// A bot's own notes and work list, kept with the commands its rules tell it
 /// to use: `terminalx bots memory add|forget|list` (PRO-470) and
 /// `terminalx bots items list|show|add|set|ask|check|comment|done` (PRO-469),
-/// and `terminalx bots message` (PRO-472): a hand-off, question or status for
-/// another of the owner's bots, which stays in the app, reaches that bot as
-/// information and wakes only a duty its owner set to wait for one.
-/// They pass at every level and while paused, with no card. Exactly those,
-/// and nothing else under `bots`: the runtime takes the bot from the caller
-/// (`control::Caller`), refuses a `--bot` or `--place` that is not its own,
-/// and refuses a paused bot's changes to its work list and its messages.
+/// and its hand-offs with other bots, which it answers at any level:
+/// `terminalx bots handoff|tell|handoffs` (PRO-475). They pass at every level
+/// and while paused, with no card. Exactly those, and nothing else under
+/// `bots`: the runtime takes the bot from the caller (`control::Caller`),
+/// refuses a `--bot` or `--place` that is not its own, holds a hand-off to
+/// the bots that report to it and those whose Who can ask lets it hand them
+/// work (`handoffs::may_hand_off`), holds a message to the reporting line,
+/// and refuses a paused bot's changes and messages. And `terminalx bots
+/// message` (PRO-472): a hand-off, question or status for another of the
+/// owner's bots that wakes only a duty its owner set to wait for one.
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "check" | "comment" | "done", ..] | ["message", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "message", ..])
     })
 }
 

@@ -2,8 +2,8 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, RotateCcw, Square, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
+import { useBotStore } from "@/lib/bots";
 import { commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
@@ -14,6 +14,7 @@ import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
 import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
 import { ItemQuestionCard } from "./NeedsYou";
+import { HandToBot } from "./BotHandoffs";
 
 const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
 
@@ -49,14 +50,18 @@ export function mayDoHere(bot: Bot): string {
 /**
  * A work item's page (PRO-469, design 23.09): its title, state and links, its summary, what done means, its activity
  * and a comment box; on the right, about the item, its sessions and links, and what the bot may do here. "Take it
- * over" opens the item's session; "Stop this item" stops its sessions and drops it. Handing it to another bot comes in a
- * later build.
+ * over" opens the item's session; "Stop this item" stops its sessions and drops it; "Hand to another bot" hands it on
+ * with the owner's note (PRO-475).
  */
 export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
   const item = useBotItem(bot.id, number);
   const store = useSessionStore();
+  const { bots } = useBotStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Hand to another bot" (PRO-475).
+  const [handing, setHanding] = useState(false);
+  const [handed, setHanded] = useState<number | null>(null);
 
   if (!item) {
     return (
@@ -101,11 +106,9 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               <Button size="sm" variant="outline" disabled={!takeOver} onClick={() => takeOver && selectSession(takeOver.id)} title={takeOver ? `Open ${conversationTitle(takeOver)}` : "No session works on this item"} data-testid="bot-item-take-over">
                 <SquareTerminal /> Take it over
               </Button>
-              <WithTooltip label="Handing an item to another bot comes in a later build">
-                <span>
-                  <Button size="sm" variant="outline" disabled aria-label="Hand to another bot (coming later)"><ArrowLeftRight /> Hand to another bot</Button>
-                </span>
-              </WithTooltip>
+              <Button size="sm" variant="outline" disabled={closed} aria-expanded={handing} onClick={() => { setHanding((value) => !value); setHanded(null); }} title={closed ? "Reopen it before handing it on" : undefined} data-testid="bot-item-hand">
+                <ArrowLeftRight /> Hand to another bot
+              </Button>
               {closed ? (
                 <Button size="sm" variant="outline" disabled={busy} onClick={reopen} data-testid="bot-item-reopen">
                   <RotateCcw /> Reopen
@@ -118,6 +121,9 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
             </div>
           </div>
 
+          {handing && !closed && <HandToBot bot={bot} item={item} onClose={() => setHanding(false)} onHanded={(handoff) => { setHanding(false); setHanded(handoff.number); }} />}
+          {handed !== null && <p className="text-[12.5px] text-muted-foreground" role="status" data-testid="bot-item-handed">Handed on as hand-off {handed}. Its card shows in the receiving bot's chat; the answer comes back to {bot.name}.</p>}
+
           <div className="flex min-w-0 flex-col gap-2">
             <h1 className="text-[19px] font-semibold break-words text-foreground">{item.title}</h1>
             <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] text-faint">
@@ -128,7 +134,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               {(item.links ?? []).filter((link) => link.kind === "pullRequest" || link.kind === "ticket").slice(0, 3).map((link) => (
                 <Chip key={`${link.kind}:${link.target}`} title={link.title || link.target}>{link.kind === "pullRequest" ? <GitPullRequest className="size-3" /> : <Hash className="size-3" />} {link.target}</Chip>
               ))}
-              <span className="ml-1">started {relativeTime(item.created)} · asked by {askedBy(item, bot)}</span>
+              <span className="ml-1">started {relativeTime(item.created)} · asked by {askedBy(item, bot, bots)}</span>
             </div>
           </div>
 
@@ -179,7 +185,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
         <aside className="flex w-full min-w-0 flex-col gap-6 sm:w-[280px] sm:shrink-0" aria-label="About this item" data-testid="bot-item-aside">
           <Panel label="About this item">
             <Fact label="Owner">{bot.name}</Fact>
-            <Fact label="Asked by">{askedBy(item, bot)}</Fact>
+            <Fact label="Asked by">{askedBy(item, bot, bots)}</Fact>
             <Fact label="Spend"><span className="font-mono">{usd.format(item.spentUsd || 0)}</span> so far</Fact>
             <Fact label="Started">{relativeTime(item.created)}</Fact>
             <Fact label="Updated">{relativeTime(item.modified)}</Fact>
@@ -204,9 +210,16 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
   );
 }
 
-/** Who asked for it: you when you gave the work; otherwise who the bot says asked, as the bot's word. */
-function askedBy(item: BotItem, bot: Bot): string {
+/**
+ * Who asked for it: you when you gave the work; the sending bot when another bot handed it on (PRO-475), as
+ * TerminalX recorded it; otherwise who the bot says asked, as the bot's word.
+ */
+export function askedBy(item: BotItem, bot: Bot, bots: Bot[] = []): string {
   if (item.addedBy === "owner") return "you";
+  if (item.addedBy && item.addedBy !== bot.id) {
+    const sender = bots.find((other) => other.id === item.addedBy);
+    return `${sender?.name ?? "a bot no longer here"} (a bot), through a hand-off`;
+  }
   const said = item.askedBy === "owner" ? "you" : item.askedBy;
   return `${said}, as ${bot.name} noted`;
 }

@@ -43,6 +43,7 @@ const checks = [
   "bot-chat", "bot-settings",
   "bot-items",
   "bot-duties",
+  "bot-handoffs",
   "bot-calendar",
 ];
 

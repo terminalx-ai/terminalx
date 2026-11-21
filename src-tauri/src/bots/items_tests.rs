@@ -16,7 +16,7 @@ fn as_bot() -> By {
 }
 
 fn new(title: &str, done_means: &[&str]) -> NewItem {
-    NewItem { title: title.into(), summary: String::new(), done_means: done_means.iter().map(|line| line.to_string()).collect(), start: false, asked_by: None }
+    NewItem { title: title.into(), summary: String::new(), done_means: done_means.iter().map(|line| line.to_string()).collect(), start: false, asked_by: None, added_by: None }
 }
 
 fn refusal(error: anyhow::Error) -> String {

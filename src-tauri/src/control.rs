@@ -994,6 +994,7 @@ impl ControlService {
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
             "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             "bots.message" => self.bot_message(params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
@@ -1074,6 +1075,7 @@ impl ControlService {
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
                 bots::enforce::after_delete(sink, &bot.id);
+                bots::handoffs::deliver_waiting_all(&self.manager);
                 json!({"deleted": bot.id, "name": bot.name})
             }
             "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
@@ -1303,6 +1305,16 @@ impl ControlService {
         let kind = wakes::MessageKind::parse(optional_string(&params, "kind").as_deref().unwrap_or("handoff"));
         if matches!(kind, wakes::MessageKind::Other(_)) {
             return Err(ControlError::invalid("--kind is handoff, question or status."));
+        }
+        // The reporting line, as `bots handoff` and `bots tell` judge it (PRO-475): a hand-off goes where work may be
+        // handed, a question or a status stays on the line.
+        if from.id != to.id {
+            let allowed = match kind {
+                wakes::MessageKind::Handoff => bots::handoffs::may_hand_off(&from, &to),
+                _ if bots::handoffs::on_line(&from, &to) => Ok(()),
+                _ => Err(format!("{} is not on your reporting line (your lead or a bot that reports to you), so it is not sent. Ask your owner to set the line in its settings.", to.name)),
+            };
+            allowed.map_err(ControlError::invalid)?;
         }
         // One hop more than the message that woke the duty run it is sent from, so two bots cannot wake each other for ever.
         let hops = caller.session.as_deref().and_then(|session| index::get(session).ok()).map_or(0, |entry| wakes::hops_of_session(&entry)).saturating_add(1);
@@ -3083,6 +3095,8 @@ fn bots_action(operation: &str) -> &'static str {
         "dutyRun" => "run a bot's duty",
         "dutyTryCheck" => "try a duty's first check",
         "quietHours" => "change a bot's quiet hours",
+        "itemHand" => "hand a bot's item to another bot",
+        "briefWrite" => "change the team brief",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -4202,7 +4216,8 @@ mod tests {
 
     /// `terminalx bots message` (PRO-472): only a bot sends, as the bot its
     /// session proves it is, never as the owner; it does not message itself;
-    /// what it leaves is the other bot's to read, labelled with the sender.
+    /// what it leaves is the other bot's to read, labelled with the sender;
+    /// and it stays on the reporting line as `bots tell` does (PRO-475).
     #[test]
     fn a_bot_leaves_another_bot_a_message_only_as_itself() {
         let _home = crate::store::temp_home();
@@ -4223,6 +4238,14 @@ mod tests {
             }
             ask("bots.message", params)
         };
+        // Off the reporting line (both report to the owner), as `bots tell` judges it: refused, and nothing is left.
+        let off_line = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap_err();
+        assert_eq!(off_line.code, "invalid_arguments");
+        assert!(off_line.message.contains("not on your reporting line"), "{}", off_line.message);
+        let handed = from_chat(json!({"bot": "iris", "text": "Take this.", "kind": "handoff"}), Some("atlas-launch-token")).unwrap_err();
+        assert!(handed.message.contains("does not report to Atlas"), "{}", handed.message);
+        assert!(crate::bots::wakes::messages(&iris).unwrap().is_empty());
+        crate::bots::update(service.sink.as_ref(), &iris, crate::bots::BotPatch { reports_to: Some(atlas.clone()), ..Default::default() }).unwrap();
         let sent = from_chat(json!({"bot": "iris", "text": "Check the new frames.", "kind": "question"}), Some("atlas-launch-token")).unwrap();
         assert_eq!(sent["to"], iris.as_str());
         let left = crate::bots::wakes::messages(&iris).unwrap();
@@ -6015,3 +6038,7 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+// Bots hand-offs from the command line (PRO-475).
+#[path = "control_bot_handoffs.rs"]
+mod bot_handoffs;

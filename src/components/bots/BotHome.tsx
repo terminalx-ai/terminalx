@@ -9,11 +9,12 @@ import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotItem } from "@/types/botItems";
 import { AgentQuestionCard, ItemQuestionCard, UndeliveredNotes } from "./NeedsYou";
+import { BotReportsTo } from "./BotHandoffs";
 
 /**
  * A bot's Home tab (PRO-469, design 23.01): what needs the owner, with answer buttons, what is in progress, what is
  * planned, and how much was done today or is snoozed. "Give <bot> work" adds an item the owner asked for and tells the
- * bot in its home chat. The right column of the design (Reports to, Up next, Suggestions) belongs to later tickets.
+ * bot in its home chat. Who it reports to, and who reports to it, is PRO-475's; Up next and Suggestions are later tickets'.
  */
 export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: number) => void }) {
   const needs = useNeedsYou();
@@ -38,6 +39,7 @@ export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: nu
           </p>
         )}
         <UndeliveredNotes bots={[bot]} botId={bot.id} />
+        <BotReportsTo bot={bot} />
 
         {asking.length > 0 && (
           <Section label="Needs you" count={asking.length} accent testId="bot-home-needs-you">

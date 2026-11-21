@@ -441,7 +441,7 @@ pub fn trash(id: &str) -> Result<()> {
 // ---------------------------------------------------------------- text
 
 /// One line: trimmed, at most `max` characters, nothing that is not printed.
-fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
+pub(crate) fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
         return Err(refused(format!("{what} is empty.")));
@@ -458,7 +458,7 @@ fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
 }
 
 /// Several lines: trimmed, at most `max` characters, tabs and newlines the only control characters kept.
-fn text(what: &str, value: &str, max: usize) -> Result<String> {
+pub(crate) fn text(what: &str, value: &str, max: usize) -> Result<String> {
     let value: String = value.trim().chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
     if value.chars().count() > max {
         return Err(refused(format!("{what} is at most {max} characters.")));
@@ -598,6 +598,8 @@ pub struct NewItem {
     pub done_means: Vec<String>,
     pub start: bool,
     pub asked_by: Option<String>,
+    /// Who added it, when not the one `By` names: the bot that handed it on (PRO-475).
+    pub added_by: Option<String>,
 }
 
 fn check_link(bot: &Bot, link: &Link) -> Result<()> {
@@ -687,7 +689,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             state: if new.start { ItemState::InProgress } else { ItemState::Planned },
             done_means,
             asked_by,
-            added_by: by.id(bot).into(),
+            added_by: new.added_by.clone().unwrap_or_else(|| by.id(bot).into()),
             links: Vec::new(),
             question: None,
             snoozed_until: None,
@@ -1284,6 +1286,7 @@ fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command
         }
         "show" => Ok(json!({"botId": bot.id, "item": shown(&bot.id, number(params, "item")?)?})),
         "add" => item(add(sink, bot, &by, NewItem {
+            added_by: None,
             title: optional(params, "title").unwrap_or_default().into(),
             summary: optional(params, "summary").unwrap_or_default().into(),
             done_means: strings(params, "done"),
@@ -1472,6 +1475,7 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
         }
         "itemGive" => {
             let item = add(sink, &bot, &By::Owner, NewItem {
+                added_by: None,
                 title: params["title"].as_str().unwrap_or_default().into(),
                 summary: params["summary"].as_str().unwrap_or_default().into(),
                 done_means: Vec::new(),

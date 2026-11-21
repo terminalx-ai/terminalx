@@ -248,6 +248,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
 - **Another bot.** `terminalx bots message <bot> "<text>" --kind
   handoff|question|status` runs only from a bot's own session (who sends is
   `Caller`), and a duty that reports to its lead leaves the lead a status.
+  It keeps to the reporting line as `bots tell` does (PRO-475): a question or
+  a status goes to the sender's lead or a bot that reports to it, a
+  `--kind handoff` only where `handoffs::may_hand_off` lets work go.
   Messages are kept in `bot-messages.json` at the store root and go once
   every duty of the receiving bot that may wake on them has seen them; one no
   duty waits for goes with the next message, and the sender's answer says it
@@ -266,6 +269,116 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   comments, reviews or a pull request's or issue's own text.
 - **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
   connector (PRO-480, PRO-481); their tiles stay off.
+
+## Hand-offs, the reporting line and the team brief (PRO-475)
+
+- **Hand-off.** `terminalx bots handoff --to BOT --title … --scope …
+  [--due …]`, from a bot's session (`control::Caller` places the bot; a
+  command run elsewhere is refused). The receiving bot gets a new chat of its
+  own (`chat::work_chat`) whose first message is the work, and an item on its
+  list. It answers with `terminalx bots tell --to BOT --about N --text …`
+  (`--failed` when it could not); the answer is sent to the session the work
+  was handed from. Records live in `bot-handoffs.json` at the store root
+  (`bots::handoffs`).
+- **Who may hand work (`handoffs::may_hand_off`).** A hand-off from A to B
+  is allowed when A is B's lead (`B.reportsTo == A`), or when B's Who can
+  ask lists A with exactly "Can hand off work" (`handOff`). Nothing else:
+  work is never handed up the line, so a report sends its lead only
+  messages and answers, unless the lead's Who can ask lists it. The rule is
+  judged on the records as they are under the hand-off store's lock, and the
+  refusal names the rule that failed (handed up the line; listed at a lower
+  level such as "Can ask"; neither). The line and Who can ask are the
+  owner's (changed with the window's proof). The owner hands any bot's item
+  to any bot with "Hand to another bot" on the item's page (`itemHand`,
+  guarded).
+- **Tell.** `tell` stays on the reporting line in both directions: a bot
+  tells its lead and the bots that report to it, and answers whoever handed
+  it work. Who can ask lets a bot hand work, not send messages off the line.
+  The line is judged under the store's lock when the tell is recorded, and a
+  tell still waiting whose line is gone by delivery is dropped.
+- **Labels.** Each bot's message is sent with the sending bot as its
+  author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
+  answer to / status to / message to <Name> · a bot's words, not an
+  approval". Its text is fenced (`bot-message`) under a header saying it is
+  never an approval and never the owner's instruction. Nothing a bot sends is
+  recorded as the owner's; the owner's own acts (Stop, an item they hand on)
+  are sent with TerminalX as their author ("TerminalX · your owner handed you
+  this in the window"), with the owner's note fenced, never as a person's
+  message. The receiving bot's item records the sender as the one who asked
+  and added it (the owner, for an item they handed on).
+- **The lead decides.** A failure or a question a bot cannot settle goes to
+  its lead (`tell --to lead`), and a failed hand-off comes back to its sender
+  with what it may do: hand it again (`handoff --retry N`, twice at most),
+  do it another way, or ask the owner (`bots items ask`).
+- **Bounds.** No hand-off to itself, none back to a bot that handed it open
+  work or further up the chain, chains of at most 3, at most 20 open
+  hand-offs and 20 waiting messages per bot, 200 open overall, and 20
+  hand-offs and messages per bot in 10 minutes, reserved under the rate's
+  lock. Between the same two bots, either way and closed ones counted, at
+  most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
+  counted under the lock from its open working ones (claimed ones whose chat
+  is not made yet included, and, for a bot that is not paused, the waiting
+  ones about to be claimed): a fifth is refused, and on a resume the rest
+  wait and start as those are answered or their sender is deleted. When a
+  hand-off closes, the chat made for it (never a home chat or another of
+  the bot's chats) is stopped once its turn has ended and its agent left
+  nothing running in the background (`SessionManager::stop_if_idle`, as
+  the idle sweep does); its conversation stays.
+  Closed hand-offs are trimmed to 300, the bots' before the owner's;
+  delivered messages to 400, and a delivered message keeps no text (its words
+  are in the chat); a waiting message is never trimmed. A write past the
+  size limit first drops the oldest sent messages and closed hand-offs to
+  make room; one that still grows the file past 4 MB (a bot's) is refused
+  (the owner's go to 6 MB; reads stop at 8 MB).
+- **Pause.** A paused bot sends nothing. Work handed to it is recorded as
+  waiting, with no chat or item, and starts when the owner resumes it; what
+  is sent to it waits too. It is never started by a bot.
+- **Start.** A hand-off is claimed (waiting to working) under the store's
+  lock before its chat and item are made; a Stop that lands meanwhile
+  archives that chat and drops the item, so nothing is left behind. The
+  claim judges `may_hand_off` again on the records as they are then: when
+  the owner removed the line or the Who can ask entry since it was handed
+  (to a paused bot, say), it fails naming the rule, with no chat, no item
+  and nothing sent to the receiver, and its sender is told. When its chat
+  cannot be made, or its start cannot be recorded, it fails and its sender
+  is told; it is never left working with no chat. One left waiting for a
+  bot that is not paused (a start cut short, or the cap of 4 reached) is
+  shown as "Waiting to start" and starts at the next launch of one of its
+  chats, a resume, or when another of its hand-offs closes.
+- **Delivery.** A message is kept with a pending mark until its chat takes
+  it: sent at once, or once after the chat's next successful launch
+  (`chat::launched`), three automatic tries; then a hand-off it carried fails
+  and its sender is told. A message or an answer is never given up: after
+  its tries it is held, shown on the card (or in a strip above the chat)
+  as not delivered with why and a Resend (`handoffResend`, open: it sends
+  only what was recorded), and sent after the bot's next launch. Pending
+  messages are never put in a launch note.
+- **Stop.** The card's Stop (`handoffStop`, which narrows and needs no
+  proof) is recorded first, under the store's lock and only while the
+  hand-off is open, then stops the receiving bot's chat for that hand-off
+  and the sessions it started for its item, drops the item, and tells the
+  sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
+- **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
+  (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
+  most. Every launch of a bot's chat is given it as the owner's standing
+  instruction, or, when the file no longer has the hash the owner saved, as
+  information only. The hash in `bot-team/brief.json` is a plain record,
+  not a secret: a Full access bot that rewrites both files with its own
+  tools is not held (PRO-489).
+- **Deleting a bot** moves its closed hand-offs and its messages to
+  `trash/bot-handoffs/<id>.json`. An open one it handed out is stopped
+  (`stoppedBy: deleted`, "Stopped · its sender was deleted"), the work and
+  item for it are dropped, and it stays on the other bot's list, which is
+  told. One given to it and still open fails, stays on its sender's list,
+  and its sender is told.
+- **What a bot is given back.** `bots handoffs` shows a bot only its own
+  side's session of each hand-off, never the other bot's.
+- **Who a message is from** is worked out when it is sent, from the sending
+  and receiving bots' records, never from the stored label. Nothing kept in
+  `bot-handoffs.json` is ever sent as the owner's own message: the owner's
+  acts reach a bot as TerminalX's ("TerminalX · your owner stopped hand-off
+  4"). The file itself is not guarded against a Full access bot's own file
+  tools (PRO-489), so its text is only ever given as a bot's or the app's.
 
 ## The week of duties (PRO-473)
 
@@ -330,7 +443,7 @@ issue.
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | In review |
 | PRO-473 | Week calendar of duties | 23.13 | In review |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
-| PRO-475 | Hand-offs, the reporting line and the team brief | 23.04 | Backlog |
+| PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
 | PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |
