@@ -416,13 +416,21 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   and names the question the owner read. "Start, but ask before merging" sets the merge hold
   first: `runs merge` from the bot is then refused with `merge_held` until the
   bot asks `ask-merge` and the owner answers Merge.
-- **Only the owner's answer starts it.** A run an item asked about is refused
-  `runs start` (`awaits_owner`) until the owner chose a start, and a held run
-  is refused `runs merge` (`merge_held`) until they said Merge. Both are judged
-  by the run, whoever calls the control socket, so a process a bot starts
-  outside its sessions is held too; the owner's own Start and Merge are the
-  window's and do not come that way. The window witnesses every chosen answer
-  (`consent::guards_request`), so its proof reaches the runtime.
+- **Only the owner starts it.** A run an item asked about is refused
+  `runs start` (`awaits_owner`) while it has not started (`AwaitingApproval`
+  or `Planned`) and the owner chose no start, "Not now" included, and a held
+  run is refused `runs merge` (`merge_held`) until they said Merge. Both are
+  judged by the run, whoever calls the control socket, so a process a bot
+  starts outside its sessions is held too; the owner's own Start and Merge are
+  the window's and do not come that way. The window witnesses every chosen
+  answer (`consent::guards_request`), so its proof reaches the runtime.
+- **Started from the Run view.** The owner may approve or start the run from
+  its Run view instead of the item's question. The item is then settled as
+  "Approve and start" there would settle it (`runs::started_from_run_view`):
+  the start is recorded with no merge hold, since the Run view's start holds
+  none, and the item's question about the run is closed. Once the run has
+  started by any route, the lead's `runs start` goes through, to launch pieces
+  that became ready or to go on after a stop (PRO-501).
 - **Done means the run ended.** An item that links a run that is not done or
   stopped cannot be closed with `done`. A failed run counts as open: its pieces
   may still merge, so it also keeps its merge hold and its place on the item.

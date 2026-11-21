@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot's run the owner approves or starts from its Run
+  view, rather than from the item's question, no longer refuses the lead's
+  later `runs start` with `awaits_owner`; the item records the start and
+  closes its question, as "Approve and start" there would (PRO-501).
 - Issue pipeline: an approved review carries across a merge of main again in a
   worktree with its dependencies installed. The check for a stray
   `.gitattributes` took each ignored folder `git status` names (`node_modules/`)
