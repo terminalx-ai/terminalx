@@ -33,15 +33,18 @@ const DAYS = [["MO", "Monday"], ["TU", "Tuesday"], ["WE", "Wednesday"], ["TH", "
  * editor asks only what the duty does: its name, when it wakes, its first check, what the bot looks at, and where the
  * result goes. Slack, Telegram and a pull request are shown, switched off, until their tickets land.
  */
-export function BotDutyEditor({ bot, bots, duty, home, start = "schedule", onClose }: {
+export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedule", onClose }: {
   bot: Bot;
   bots: readonly Bot[];
   duty: Automation | null;
   home: string | null;
+  /** Where a new duty starts: an hour clicked on the week's calendar (PRO-473). */
+  initial?: DutyInput;
+  /** What it wakes on, as the tile it was opened from (PRO-472). */
   start?: WakeGroup;
   onClose: (saved: string | null) => void;
 }) {
-  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : { ...newDutyInput(), wake: wakeForGroup(start, bot) }));
+  const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : initial ?? { ...newDutyInput(), wake: wakeForGroup(start, bot) }));
   const group = wakeGroupOf(input.wake);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);

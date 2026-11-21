@@ -229,6 +229,47 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   cannot keep waking each other. A bot does not message itself.
 - **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
   connector (PRO-480, PRO-481); their tiles stay off.
+## The week of duties (PRO-473)
+
+The calendar (screen 23.13) is a view of what already exists, not a store of
+its own. `dutyWeek` (`src-tauri/src/bots/calendar.rs`, a read of the
+runtime's `bots` call) reads each duty's run log and its schedule, through
+the scheduler's own `next_run_after`, for one bot or every bot, in the
+owner's time zone (this computer's), and returns each day's blocks with the
+minute they fall on.
+
+- **What ran** comes from the log. A row that folds repeats ("Nothing new"
+  again) stands for that many runs: its repeats are put at the schedule's
+  times up to its last one, and those with no time the schedule gives (Run
+  now, a changed schedule) at the last. So the week counts every run the log
+  counts, and "This week so far" agrees with the duty's own counts.
+- **What is still to come** comes from the schedule, from now to the end of
+  the week, for a duty that is on and a bot that is not paused.
+- **Counted, not drawn.** A duty due more than six times on some day, and one
+  that wakes on events (or a run an event started), go in the "Often" and
+  "Events" rows as counts per day. A schedule with more times in the week than
+  are looked at (10,080) says so, and its count is "at least".
+- **History not kept.** A log keeps its newest 100 finished runs, so a duty
+  that wakes every half hour keeps about two days. The week returns, per duty,
+  the oldest instant its log still covers (`logs[].keptFrom`); the days before
+  it show "history not kept", never "none ran", and the totals say "at
+  least". A log that cannot be read is said on its duty's row
+  (`logs[].unreadable`) and its past days are not kept either.
+- **Which weeks.** Weeks from 3 January 2000 to the end of 2199 can be shown;
+  others are refused, and the arrows stop there. A day whose midnight does not
+  exist (clocks moved forward over it) starts at the first valid instant.
+- **Changing from the calendar** uses the duties' own guarded routes: a
+  click on an empty hour opens the duty editor with a weekly schedule at that
+  day and hour, and dragging a block still to come saves its duty with the
+  schedule shifted (`dutySave`, which needs the window's proof). A block moves
+  from its own time by whole 15-minute steps of the pointer's travel, and only
+  with the main button; what changed is said with an Undo. A cron schedule
+  moves only when its minute and hours are plain numbers, its days numbered
+  as the scheduler numbers them (1 = Sunday … 7 = Saturday,
+  `CRON_WEEKDAYS`).
+- **Who may read it.** The window and a person's terminal read any bot's
+  week or every bot's. A process in a bot's session reads its own bot's week
+  only (`control.rs`, `own_duties_read`).
 
 ## Build map
 
@@ -249,7 +290,7 @@ issue.
 | PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Merged |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | In review |
-| PRO-473 | Week calendar of duties | 23.13 | Backlog |
+| PRO-473 | Week calendar of duties | 23.13 | In review |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.04 | Backlog |
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |

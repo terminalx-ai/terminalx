@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::automations::{Automation, AutomationRun};
 
-const RUN_RETENTION: usize = 100;
+/// How many finished runs each automation's log keeps; older ones are dropped.
+pub const RUN_RETENTION: usize = 100;
 static RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DEFINITION_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static SEEN_WRITE_LOCK: Mutex<()> = Mutex::new(());
