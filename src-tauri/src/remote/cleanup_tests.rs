@@ -26,7 +26,7 @@ fn git(cwd: &Path, args: &[&str]) {
 fn fixture() -> Fixture {
     let home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let seed = base.join("seed");
     std::fs::create_dir(&seed).unwrap();
     git(&seed, &["init", "-q", "-b", "main"]);
@@ -394,6 +394,7 @@ async fn the_runtime_removes_a_merged_worktree_with_its_branches_keeps_an_unsafe
     assert!(Path::new(&done.cwd).exists());
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
     for method in ["workspace.remove", "workspace.sweepMerged"] {

@@ -1,5 +1,7 @@
 //! Real relay send, SessionManager queues, and a loopback OpenCode HTTP/SSE
 //! provider. The refused opening never reaches the server and never replies.
+#[cfg(unix)]
+use crate::paths::Canonical;
 use super::*;
 use crate::remote::{protocol::{Authority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
 
@@ -44,7 +46,7 @@ fn opening_child() {
         assert_eq!(crate::data_privacy::refresh().enabled, enabled);
     };
     policy(false);
-    let root = rig._dir.path().canonicalize().unwrap();
+    let root = rig._dir.path().canonical().unwrap();
     index::save(&[serde_json::from_value(json!({"id":SESSION,"projectPath":root,"cwd":root,
         "title":"OpenCode privacy","created":index::now(),"modified":index::now(),
         "tabs":[{"id":TAB,"harness":"opencode","permissionMode":"default","created":index::now()}]})).unwrap()]).unwrap();

@@ -26,9 +26,14 @@
 //! [`Handshake`] so it can be exercised in tests against a fake helper
 //! listening on a unix socket, without any Swift code.
 
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -48,7 +53,9 @@ pub struct HelperLaunch {
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const CONNECT_RETRY: Duration = Duration::from_millis(100);
+#[cfg(unix)]
 const TERMINATE_GRACE: Duration = Duration::from_millis(1500);
 
 /// macOS 14 (Darwin 23) is the helper's floor: ScreenCaptureKit screenshots
@@ -174,6 +181,7 @@ pub struct RequestFailure {
     pub transport_failure: bool,
 }
 
+#[cfg(unix)]
 impl RequestFailure {
     fn transport(error: ComputerError) -> Self {
         Self { error, transport_failure: true }
@@ -655,6 +663,7 @@ pub fn handshake_params(allow_own_windows_for_tests: bool) -> Value {
 /// `sun_path` holds 104 bytes on macOS; a socket deeper than that cannot be
 /// bound at all, so the directory name stays short and `/tmp` is the fallback
 /// for an unusually long `TMPDIR`.
+#[cfg(unix)]
 const MAX_SOCKET_PATH_BYTES: usize = 100;
 
 /// Remove socket directories left by an app that died without running its

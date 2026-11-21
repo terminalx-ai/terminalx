@@ -310,7 +310,7 @@ struct OwnerLease { _file: fs::File, namespace: PathBuf }
 impl OwnerLease {
     fn acquire(path: &Path) -> Result<Self> {
         let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-        let namespace = fs::canonicalize(parent)?.join(path.file_name().context("journal filename required")?);
+        let namespace = crate::paths::canonicalize(parent)?.join(path.file_name().context("journal filename required")?);
         if fs::symlink_metadata(&namespace).is_ok_and(|m| m.file_type().is_symlink()) {
             bail!("journal namespace must not be a symlink");
         }

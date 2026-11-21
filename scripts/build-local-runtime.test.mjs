@@ -29,8 +29,17 @@ test('reject unsupported targets and malformed options rather than packaging the
   assert.throws(() => buildPlan(['--dev'], { TAURI_ENV_DEBUG: 'false' }, host), /match the Tauri build profile/)
   assert.throws(() => buildPlan([], { TAURI_ENV_DEBUG: 'unexpected' }, host), /Unrecognized/)
 
-  for (const args of [['--target', 'x86_64-pc-windows-msvc'], ['--profile'], ['--unknown'], ['--profile', '../release']]) {
+  for (const args of [['--target', 'i686-pc-windows-msvc'], ['--target', 'riscv64gc-unknown-linux-gnu'], ['--profile'], ['--unknown'], ['--profile', '../release']]) {
     assert.throws(() => buildPlan(args, {}, host))
+  }
+})
+
+test('Windows hooks build the 64-bit Windows runtime, unsigned', () => {
+  for (const arch of ['x86_64', 'aarch64']) {
+    const plan = buildPlan([], { TAURI_ENV_PLATFORM: 'windows', TAURI_ENV_ARCH: arch }, 'x86_64-pc-windows-msvc')
+    assert.deepEqual(plan.targets, [`${arch}-pc-windows-msvc`])
+    assert.equal(plan.windows, true)
+    assert.equal(plan.macos, false)
   }
 })
 

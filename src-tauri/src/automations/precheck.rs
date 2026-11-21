@@ -8,7 +8,8 @@
 //! - Any other exit, a timeout, or a command that cannot start: a failed run
 //!   with the reason. Never a silent skip, never a model call.
 //!
-//! The command runs through `/bin/sh -c` in the folder the run would use
+//! The command runs through `/bin/sh -c` (Git for Windows' `sh` on Windows)
+//! in the folder the run would use
 //! (never a new worktree), with the environment a session pane gets
 //! ([`crate::pty::session_environment`]).
 //!
@@ -226,15 +227,24 @@ fn stop(child: &mut std::process::Child) {
             }
         }
     }
+    // On Windows the check's job holds everything it started (see `execute`).
+    #[cfg(windows)]
+    crate::win::process::kill_tree(child.id());
     let _ = child.kill();
 }
 
-/// Run `command` once through `/bin/sh` in `dir`, with `set` added to and
-/// `unset` removed from this process's environment, and say what an
-/// automation run would do.
+/// Run `command` once through `/bin/sh` (Git for Windows' `sh` on Windows)
+/// in `dir`, with `set` added to and `unset` removed from this process's
+/// environment, and say what an automation run would do.
 pub fn execute(command: &str, timeout: Duration, dir: &Path, set: &[(String, String)], unset: &[&str]) -> PrecheckTrial {
     let started = Instant::now();
+    #[cfg(unix)]
     let mut process = Command::new("/bin/sh");
+    #[cfg(windows)]
+    let mut process = match crate::binpath::posix_sh() {
+        Some(sh) => Command::new(sh),
+        None => return failed(crate::binpath::POSIX_SH_MISSING.into(), started.elapsed().as_millis() as u64),
+    };
     process
         .arg("-c")
         .arg(command)
@@ -251,10 +261,20 @@ pub fn execute(command: &str, timeout: Duration, dir: &Path, set: &[(String, Str
         use std::os::unix::process::CommandExt;
         process.process_group(0);
     }
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut process, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => return failed(format!("The first check could not start in {}: {error}", dir.display()), started.elapsed().as_millis() as u64),
     };
+    // Windows has no process group to signal: a job stands in for it, so
+    // `stop` ends whatever the check left running in the background.
+    #[cfg(windows)]
+    if let Err(error) = crate::win::process::tie_to_this_process(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return failed(format!("The first check could not be tied to TerminalX: {error}"), started.elapsed().as_millis() as u64);
+    }
     let stdout = capture(child.stdout.take(), STDOUT_CAP, true);
     let stderr = capture(child.stderr.take(), STDERR_CAP, false);
     let (Some((stdout, stdout_done)), Some((stderr, stderr_done))) = (stdout, stderr) else {

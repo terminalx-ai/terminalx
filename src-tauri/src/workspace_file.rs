@@ -60,6 +60,8 @@ pub(crate) fn open(_root: &Path, path: &Path) -> std::io::Result<std::fs::File> 
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
+    use crate::paths::Canonical;
     use super::*;
 
     #[test]
@@ -71,8 +73,8 @@ mod tests {
         std::fs::create_dir(&parent).unwrap();
         std::fs::write(parent.join(".env"), "KEY=inside").unwrap();
         std::fs::write(outside.path().join(".env"), "KEY=outside").unwrap();
-        let path = parent.join(".env").canonicalize().unwrap();
-        let canonical_root = root.path().canonicalize().unwrap();
+        let path = parent.join(".env").canonical().unwrap();
+        let canonical_root = root.path().canonical().unwrap();
         let pinned = std::fs::File::open(&parent).unwrap();
         std::fs::rename(&parent, root.path().join("original")).unwrap();
         std::os::unix::fs::symlink(outside.path(), &parent).unwrap();

@@ -44,7 +44,7 @@ fn opt(params: &Value, name: &str) -> Option<String> {
 }
 
 pub fn canonical(path: &str) -> String {
-    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
+    crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
 }
 
 /// Every checkout of every attached project, for `--worktree` selectors.

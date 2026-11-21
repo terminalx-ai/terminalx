@@ -2,7 +2,8 @@
 //! request never silently switches to a replacement process or retries a send.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
+
+use crate::ipc::Stream as Socket;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,6 +135,9 @@ impl Build {
 
 pub struct Client {
     socket: PathBuf,
+    /// The home's private `run` directory, where a guarded request's witness
+    /// is made.
+    run: PathBuf,
     token: zeroize::Zeroizing<String>,
     epoch: String,
     event_socket: PathBuf,
@@ -185,7 +189,7 @@ impl std::fmt::Display for Stream {
 }
 
 fn request(socket: &Path, token: &str, command: &str, params: Value, timeout: Duration) -> Result<Value> {
-    let mut stream = UnixStream::connect(socket).context("connect to the local runtime")?;
+    let mut stream = crate::ipc::connect(socket).context("connect to the local runtime")?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.set_read_timeout(Some(timeout))?;
     let request = ControlRequest { id: uuid::Uuid::new_v4().to_string(), token: token.into(), command: command.into(), params };
@@ -217,33 +221,18 @@ impl Client {
     /// Read only the explicitly selected home, never an inherited CLI token
     /// that may address the installed app or a different worktree's runtime.
     pub fn connect(root: &Path) -> Result<Arc<Self>> {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let root = std::fs::canonicalize(root)?;
+        let root = crate::paths::canonicalize(root)?;
         let run = root.join("run");
-        let metadata = std::fs::symlink_metadata(&run)?;
-        // SAFETY: geteuid has no preconditions.
-        let uid = unsafe { libc::geteuid() };
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-            bail!("local runtime directory is not private");
-        }
-        let mut file = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(run.join("control.token"))?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 || metadata.len() > 256 {
-            bail!("local runtime credential file is not private or valid");
-        }
-        let mut token = zeroize::Zeroizing::new(String::new());
-        file.read_to_string(&mut token)?;
-        let token = zeroize::Zeroizing::new(token.trim().to_string());
-        if token.is_empty() { bail!("local runtime credential is empty"); }
-        let status = liveness(&run.join("hooks.sock"), &token, LIFECYCLE_TIMEOUT)?;
+        crate::private_fs::verify_dir(&run, "local runtime directory")?;
+        let token = crate::private_fs::read_secret(&run.join("control.token"), 256, "local runtime credential file")?;
+        let status = liveness(&crate::ipc::published(&root), &token, LIFECYCLE_TIMEOUT)?;
         let local = &status["localRuntime"];
         if status["runtimeKind"] != "local" || local["protocol"].as_u64() != Some(super::PROTOCOL) {
             return Err(Blocked("the running owner does not support this desktop's local runtime protocol; its work was left running".into()).into());
         }
         let socket = PathBuf::from(status["socket"].as_str().context("runtime has no control endpoint")?);
         let event_socket = PathBuf::from(local["eventSocket"].as_str().context("runtime has no event endpoint")?);
-        if socket.parent() != Some(run.as_path()) || event_socket.parent() != Some(run.as_path()) {
+        if !crate::ipc::in_home(&root, &socket) || !crate::ipc::in_home(&root, &event_socket) {
             bail!("runtime endpoints are outside the selected home");
         }
         let epoch = local["epoch"].as_str().context("runtime has no epoch")?.to_string();
@@ -253,7 +242,7 @@ impl Client {
         let pinned = liveness(&socket, &token, LIFECYCLE_TIMEOUT)?;
         if pinned["localRuntime"]["epoch"] != epoch { bail!("runtime changed during attachment"); }
         let build = Build::read(&pinned, || request(&socket, &token, "status", json!({}), LIFECYCLE_TIMEOUT));
-        let client = Arc::new(Self { socket, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
+        let client = Arc::new(Self { socket, run, event_socket, token, epoch, streams, build, ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
             local_vm: LocalVmCapability::of(&pinned) });
         // Older owners can still serve local work. No receipt means no
         // forwarded network authority; never synthesize it from a boolean.
@@ -267,8 +256,9 @@ impl Client {
     /// A client of the event socket at `event_socket` alone, as discovery
     /// would have found it: for tests that serve a stream in process.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn for_stream(event_socket: PathBuf, token: &str, epoch: &str) -> Arc<Self> {
-        Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), event_socket, token: token.to_string().into(),
+        Arc::new(Self { socket: event_socket.with_file_name("unused.sock"), run: std::env::temp_dir(), event_socket, token: token.to_string().into(),
             epoch: epoch.into(), streams: super::STREAM_VERSION, build: Build::default(), ping: PING_INTERVAL, liveness: LIVENESS_TIMEOUT,
             local_vm: LocalVmCapability::default() })
     }
@@ -276,7 +266,7 @@ impl Client {
     /// The same owner, pinged every `ping` and given up on after `liveness`
     /// of silence: a test hangs an owner without waiting the full deadline.
     pub fn with_liveness(&self, ping: Duration, liveness: Duration) -> Arc<Self> {
-        Arc::new(Self { socket: self.socket.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
+        Arc::new(Self { socket: self.socket.clone(), run: self.run.clone(), token: self.token.clone(), epoch: self.epoch.clone(),
             event_socket: self.event_socket.clone(), streams: self.streams, build: self.build.clone(), ping, liveness, local_vm: self.local_vm })
     }
 
@@ -330,8 +320,7 @@ impl Client {
         }
         // Making a pairing code and letting a computer in say who asks
         // (`serve_cli::consent`): the runtime refuses its own agents.
-        let run = self.socket.parent().context("the runtime's socket has no directory")?;
-        let witness = crate::serve_cli::consent::witness_for(command, run, &mut params)?;
+        let witness = crate::serve_cli::consent::witness_for(command, &self.run, &mut params)?;
         let answer = match request(&self.socket, &self.token, command, params.clone(), timeout) {
             // A runtime from before the guard takes no `consent` and refuses
             // the field; it has no guard to satisfy.
@@ -395,7 +384,7 @@ impl Client {
     /// A connection that carries `stream`. An owner too old to take one
     /// stream at a time sends both, and the bridge drops what it was not after.
     pub fn stream(&self, stream: &Stream) -> Result<Connection> {
-        let mut socket = UnixStream::connect(&self.event_socket)?;
+        let mut socket = crate::ipc::connect(&self.event_socket)?;
         socket.set_read_timeout(Some(Duration::from_secs(10)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
         serde_json::to_writer(&mut socket, &hello(self.token.as_str(), self.names_streams().then_some(stream)))?;
@@ -438,8 +427,8 @@ pub struct AttachmentIdentity {
 
 pub struct Connection {
     attachment: AttachmentIdentity,
-    read: BufReader<UnixStream>,
-    write: UnixStream,
+    read: BufReader<Socket>,
+    write: Socket,
     /// How long the owner may say nothing before it is taken for hung.
     silence: Duration,
 }
@@ -447,13 +436,13 @@ pub struct Connection {
 impl Connection {
     pub fn attachment(&self) -> &AttachmentIdentity { &self.attachment }
 
-    pub fn writer(&self) -> Result<UnixStream> { Ok(self.write.try_clone()?) }
+    pub fn writer(&self) -> Result<Socket> { Ok(self.write.try_clone()?) }
 
     pub fn receive(&mut self) -> Result<Value> { receive(&mut self.read, self.silence) }
 }
 
 /// One frame. Its errors say what happened, for the log of a lost connection.
-fn receive(read: &mut BufReader<UnixStream>, silence: Duration) -> Result<Value> {
+fn receive(read: &mut BufReader<Socket>, silence: Duration) -> Result<Value> {
     let mut line = String::new();
     let count = match read.take(1024 * 1024 + 1).read_line(&mut line) {
         Ok(count) => count,
@@ -472,7 +461,7 @@ mod local_vm_tests {
     #[test]
     fn older_owner_cannot_receive_guided_create_setup_or_actions() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
+            let client=Arc::new(Client {run:PathBuf::new(),socket:PathBuf::from("/nonexistent-pro114-onboarding-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:Some(crate::local_vm::provisioning::PROTOCOL),onboarding:capability}});
             let sessions=super::super::sessions::Sessions::new(client);
             for method in ["environment.create","environment.setup","environment.setupReadiness","environment.setupAction","environment.setupAuth"] {
                 let error=sessions.local_vm(method,json!({"confirm":true})).unwrap_err().to_string();
@@ -484,7 +473,7 @@ mod local_vm_tests {
     #[test]
     fn old_or_mismatched_owner_capability_is_refused_before_any_socket_send() {
         for protocol in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
+            let client=Arc::new(Client {run:PathBuf::new(),socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol,reconciliation:None,onboarding:None}});
             let error=super::super::sessions::Sessions::new(client).local_vm("configure",json!({"enabled":true})).unwrap_err().to_string();
             assert!(error.contains("no operation was sent"),"{error}");
             assert!(!error.contains("connect to the local runtime"));
@@ -493,7 +482,7 @@ mod local_vm_tests {
     #[test]
     fn existing_vm_owner_without_reconciliation_cannot_receive_preview_confirm_or_delete() {
         for capability in [None,Some(0),Some(u64::MAX)] {
-            let client=Arc::new(Client {socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
+            let client=Arc::new(Client {run:PathBuf::new(),socket:PathBuf::from("/nonexistent-pro114-test-owner.sock"),event_socket:PathBuf::new(),token:zeroize::Zeroizing::new("test-only".into()),epoch:"old-owner".into(),ping:PING_INTERVAL,liveness:LIVENESS_TIMEOUT,streams:super::super::STREAM_VERSION,build:Build::default(),local_vm:LocalVmCapability{protocol:Some(crate::local_vm::journal::PROTOCOL as u64),reconciliation:capability,onboarding:None}});
             let sessions=super::super::sessions::Sessions::new(client);
             for (method,params) in [("environment.inspect",json!({"purpose":"provisionRecovery"})),("environment.inspect",json!({"purpose":"deletion"})),("environment.reconcileProvision",json!({"confirm":true})),("environment.delete",json!({"confirm":true}))] {
                 let error=sessions.local_vm(method,params).unwrap_err().to_string();
@@ -514,13 +503,13 @@ pub(crate) static AFTER_WORKSPACE_WRITE: std::sync::Mutex<Option<Box<dyn FnOnce(
 mod tests {
     use super::*;
     use crate::control::ControlError;
-    use std::os::unix::net::UnixListener;
+    use crate::ipc::Listener as UnixListener;
     use std::sync::{Arc, Mutex};
 
     /// An owner that answers each request as `answer` says, or holds it
     /// unanswered (`None`). Returns its socket and the commands it was sent.
     fn owner(dir: &Path, answer: fn(&ControlRequest) -> Option<ControlResponse>) -> (PathBuf, Arc<Mutex<Vec<String>>>) {
-        let socket = dir.join("owner.sock");
+        let socket = crate::ipc::test_endpoint(dir, "owner.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let asked = Arc::new(Mutex::new(Vec::new()));
         let seen = asked.clone();

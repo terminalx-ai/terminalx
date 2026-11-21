@@ -340,6 +340,7 @@ pub struct Watch {
 
 /// The cursor and ledger must move together: replaying from the launch would
 /// recreate notifications that a completed turn already acknowledged.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WatchRecord {
     aimed: (PathBuf, u64),
@@ -357,10 +358,12 @@ impl Watch {
         Self { offset: aimed.1, aimed, tail, partial: Vec::new(), skip, ledger: Ledger::default() }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn handover(&self) -> WatchRecord {
         WatchRecord { aimed: self.aimed.clone(), offset: self.offset, partial: self.partial.clone(), skip: self.skip.clone(), ledger: self.ledger.clone() }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn from_handover(tail: Arc<Tail>, record: WatchRecord) -> Self {
         Self { tail, aimed: record.aimed, offset: record.offset, partial: record.partial, skip: record.skip, ledger: record.ledger }
     }

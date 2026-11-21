@@ -539,6 +539,26 @@ fn init_repository(path: &Path, template: &str) -> anyhow::Result<()> {
     // Set after `init`, so it works with every Git version, not only those with `init -b`.
     crate::git::run(path, &["symbolic-ref", "HEAD", &format!("refs/heads/{FIRST_BRANCH}")])?;
     crate::git::run(path, &["add", "-A"])?;
+    // Windows files carry no executable bit, so git would record a template's
+    // scripts as plain files; a file that starts with `#!` is committed
+    // executable, as it would be from macOS or Linux.
+    #[cfg(windows)]
+    {
+        let listed = crate::git::run(path, &["ls-files", "-z"])?;
+        let scripts: Vec<&str> = listed
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .filter(|name| {
+                let mut head = [0u8; 2];
+                std::fs::File::open(path.join(name)).and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head)).is_ok() && &head == b"#!"
+            })
+            .collect();
+        if !scripts.is_empty() {
+            let mut args = vec!["update-index", "--chmod=+x", "--"];
+            args.extend(scripts);
+            crate::git::run(path, &args)?;
+        }
+    }
     // No hooks, no signing prompt: the first commit is the template, as written.
     let message = format!("Start the project from the {template} template");
     let commit = ["-c", "commit.gpgsign=false", "commit", "--allow-empty", "--no-verify", "-q", "-m", &message];
@@ -570,7 +590,7 @@ mod tests {
     }
 
     fn file_url(path: &Path) -> String {
-        format!("file://{}", path.to_string_lossy())
+        url::Url::from_file_path(path).expect("an absolute path").to_string()
     }
 
     #[test]
@@ -846,6 +866,7 @@ mod tests {
         assert_one_commit_on_main(path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_agent_starter_has_instructions_and_scripts_that_run() {
         let dir = tempfile::tempdir().unwrap();

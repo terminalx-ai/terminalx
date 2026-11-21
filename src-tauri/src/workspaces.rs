@@ -101,14 +101,14 @@ pub fn list(project: &Path) -> Result<Vec<Workspace>> {
         }]);
     }
     let managed_root = git::worktree_root(project);
-    let managed_root = std::fs::canonicalize(&managed_root).unwrap_or(managed_root);
+    let managed_root = crate::paths::canonicalize(&managed_root).unwrap_or(managed_root);
     let mut out = Vec::new();
     let entries = git::list_worktrees(project)?;
     // Read once for the project, not once per worktree.
     let context = crate::landed::list_context(&root);
     for (path, branch) in entries {
         let p = PathBuf::from(&path);
-        let p = std::fs::canonicalize(&p).unwrap_or(p);
+        let p = crate::paths::canonicalize(&p).unwrap_or(p);
         if !p.exists() {
             continue;
         }
@@ -205,8 +205,8 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
     if !path.exists() {
         return WorkspaceDisposition::default();
     }
-    let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let p = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !git::is_worktree_of(project, &p) {
         // Git would answer for another repository here: the enclosing
         // project (and report nothing), or a clone that sits at this path.
@@ -244,8 +244,8 @@ pub fn disposition(project: &Path, path: &Path) -> WorkspaceDisposition {
 /// project is measured: its root or one of its worktrees. Symlinks are
 /// counted as links and never followed.
 pub fn size(project: &Path, path: &Path) -> Result<u64> {
-    let target = std::fs::canonicalize(path)?;
-    let known = git::list_worktrees(project)?.into_iter().any(|(worktree, _)| std::fs::canonicalize(worktree).is_ok_and(|p| p == target));
+    let target = crate::paths::canonicalize(path)?;
+    let known = git::list_worktrees(project)?.into_iter().any(|(worktree, _)| crate::paths::canonicalize(worktree).is_ok_and(|p| p == target));
     if !known {
         anyhow::bail!("{} is not a workspace of this project", path.display());
     }
@@ -280,8 +280,8 @@ pub struct DeleteOptions<'a> {
 /// as merged. It is kept and named in the result, so the commits can still
 /// be reached.
 pub fn delete(project: &Path, path: &Path, options: DeleteOptions<'_>) -> Result<git::WorktreeRemoval> {
-    let root = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let p = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if p == root {
         anyhow::bail!("the project's own checkout cannot be deleted from here");
     }

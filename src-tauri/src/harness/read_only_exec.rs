@@ -9,10 +9,14 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 /// How a list member is joined to the one before it: `;` (or a newline),
 /// `&&` or `||`. Pipelines bind tighter than all three.
@@ -31,6 +35,7 @@ const HEADER: &str = "TerminalX approved this read-only command and ran it itsel
 /// gone, the same status the earlier in-shell directory guard used.
 pub const NOT_IN_DIRECTORY: i32 = 125;
 /// `timeout(1)`'s status for a command it stopped.
+#[cfg(unix)]
 const TIMED_OUT: i32 = 124;
 
 /// Below the 600 s both CLIs give the permission hook, so the answer always
@@ -43,6 +48,7 @@ const DEFAULT_LIMIT: usize = 30_000;
 
 /// A vetted discovery command. Only `read_only::approved` builds one.
 #[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub struct Approved {
     directory: PathBuf,
     /// The directory as it was inspected. Programs start in it by
@@ -114,7 +120,7 @@ impl Approved {
     }
 
     /// A run nothing abandons. TerminalX itself always uses `run_while`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn run(&self) -> Ran {
         self.run_while(&|| true).expect("a run nothing abandons finishes")
     }
@@ -306,7 +312,7 @@ impl Approved {
 
     /// A test needs programs the read-only language never approves, such
     /// as `/usr/bin/env`, to observe exactly what a program receives.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn for_test(directory: &Path, lists: Vec<(Join, Vec<Vec<&str>>)>, input: serde_json::Value) -> Self {
         let lists = lists
             .into_iter()
@@ -407,6 +413,7 @@ pub fn ran_result(text: &str) -> Option<(i32, String)> {
 }
 
 /// The first and last half of the limit, with the total seen.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct Capture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
@@ -414,6 +421,7 @@ struct Capture {
     limit: usize,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl Capture {
     fn new(limit: usize) -> Self {
         Self { head: Vec::new(), tail: VecDeque::new(), total: 0, limit }
@@ -481,6 +489,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeouts_and_output_limits_follow_the_call_within_the_hook_deadline() {
         let at = |input| Approved::new("/".into(), open_directory(Path::new("/")).unwrap(), Vec::new(), Vec::new(), &input);

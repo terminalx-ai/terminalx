@@ -32,7 +32,11 @@ impl Holder {
             let signalled = unsafe { libc::kill(pid, 0) } == 0;
             signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            crate::win::process::is_running(*pid)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = pid;
             true
@@ -53,6 +57,10 @@ impl Holder {
 }
 
 fn classify(pid: u32) -> Holder {
+    #[cfg(windows)]
+    if let Ok(executable) = crate::local_runtime::launch::executable(pid) {
+        return of_process(&executable, &crate::stray_processes::arguments(pid), pid);
+    }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Ok(process) = libc::pid_t::try_from(pid) {
         if let Ok(executable) = crate::local_runtime::launch::executable(process) {
@@ -66,7 +74,7 @@ fn classify(pid: u32) -> Holder {
 /// processes. Their binaries also run the CLI and the agents' hooks (as
 /// `main.rs` and `serve::main` choose from the arguments): those, and
 /// anything else that opened the file, ran as a command.
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux", windows)), allow(dead_code))]
 fn of_process(executable: &Path, args: &[String], pid: u32) -> Holder {
     let invoked = args.first().and_then(|arg| Path::new(arg).file_stem()).and_then(|name| name.to_str());
     let command = matches!(invoked, Some("terminalx" | "tnx"))
@@ -167,7 +175,12 @@ fn holders(lock: &Path) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn holders(lock: &Path) -> Vec<u32> {
+    crate::win::process::openers(lock)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn holders(_lock: &Path) -> Vec<u32> {
     Vec::new()
 }

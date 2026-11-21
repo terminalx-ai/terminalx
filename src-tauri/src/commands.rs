@@ -1945,7 +1945,7 @@ pub fn chats_dir() -> CmdResult<String> {
         log::warn!("write the chats' agent note: {error:#}");
     }
     // Canonical, as a session's project path is, so the sidebar can match them.
-    Ok(std::fs::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+    Ok(crate::paths::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -3319,8 +3319,8 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 // ------------------------------------------------------------------ git actions & PRs
 
 fn branch_neighbors(session: &index::SessionEntry) -> anyhow::Result<Vec<index::SessionEntry>> {
-    let cwd = std::fs::canonicalize(&session.cwd)?;
-    Ok(index::load()?.into_iter().filter(|neighbor| std::fs::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
+    let cwd = crate::paths::canonicalize(&session.cwd)?;
+    Ok(index::load()?.into_iter().filter(|neighbor| crate::paths::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
 }
 
 fn neighbors_working(sessions: &crate::local_runtime::sessions::Sessions, neighbors: &[index::SessionEntry]) -> anyhow::Result<bool> {
@@ -4595,6 +4595,7 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    use crate::paths::Canonical;
     #[test]
     fn turn_fork_preserves_subdirectory_or_reports_root_fallback() {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
@@ -4755,7 +4756,7 @@ mod command_tests {
         use crate::{git, session_ops, store};
         let _home = store::temp_home();
         let repo = tempfile::tempdir().unwrap();
-        let project = std::fs::canonicalize(repo.path()).unwrap();
+        let project = crate::paths::canonicalize(repo.path()).unwrap();
         git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial", "--allow-empty"]).unwrap();
 
@@ -4824,7 +4825,7 @@ mod command_tests {
         use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
         let repo = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(repo.path()).unwrap();
+        let root = crate::paths::canonicalize(repo.path()).unwrap();
         git::run(&root, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&root, &["config", "user.email", "test@example.com"]).unwrap();
         git::run(&root, &["config", "user.name", "Test"]).unwrap();
@@ -4989,7 +4990,7 @@ mod command_tests {
         git::run(root, &["commit", "-qm", "initial"]).unwrap();
         let wt = git::create_worktree(root, "missing-source", Some("main")).unwrap();
         let worktree = std::path::Path::new(&wt.path);
-        let recorded_root = std::fs::canonicalize(worktree).unwrap();
+        let recorded_root = crate::paths::canonicalize(worktree).unwrap();
         let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
             cwd: Some(worktree.join("sub").to_str().unwrap().into()),
             tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
@@ -5052,7 +5053,7 @@ mod command_tests {
         use crate::{git, session_ops, store::{self, index::SessionKind}};
         let _home = store::temp_home();
         let temp = tempfile::tempdir().unwrap();
-        let project = std::fs::canonicalize(temp.path()).unwrap().join("project");
+        let project = crate::paths::canonicalize(temp.path()).unwrap().join("project");
         std::fs::create_dir(&project).unwrap();
         git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
         git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
@@ -5497,7 +5498,7 @@ mod command_tests {
         })
         .unwrap();
 
-        assert_eq!(session.cwd, external.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(session.cwd, external.canonical().unwrap().to_string_lossy());
         assert_eq!(session.branch.as_deref(), Some("feature/external"));
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());

@@ -20,6 +20,7 @@
 //!   only; agents in a cloud workspace reach this runtime through its control
 //!   socket.
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -169,6 +170,9 @@ fn parse(args: &[String]) -> Result<Command> {
 
 /// The binary's whole `main`. Returns the process exit code.
 pub fn main() -> i32 {
+    // What it starts (git, scripts) must not each flash a console window.
+    #[cfg(windows)]
+    crate::win::process::windowless_console();
     // Before anything reads stdin, a socket or the host key (#978 review).
     #[cfg(target_os = "linux")]
     crate::local_vm::guest::seal_key_holder();
@@ -283,7 +287,7 @@ fn run(options: Options) -> Result<()> {
     // anything reads it and before any thread starts.
     if let Some(dir) = &options.data_dir {
         std::fs::create_dir_all(dir).with_context(|| format!("create data dir {}", dir.display()))?;
-        let dir = std::fs::canonicalize(dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
+        let dir = crate::paths::canonicalize(dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
         std::env::set_var("TERMINALX_HOME", &dir);
     } else if crate::store::state_home_env().is_none() {
         // The default home belongs to the desktop app: its socket, control
@@ -299,7 +303,7 @@ fn run(options: Options) -> Result<()> {
         // only this user may enter it.
         crate::machine_host::private_dir(&crate::serve_cli::install_root()?)?;
         crate::machine_host::private_dir(&dir)?;
-        let dir = std::fs::canonicalize(&dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
+        let dir = crate::paths::canonicalize(&dir).with_context(|| format!("resolve data dir {}", dir.display()))?;
         std::env::set_var("TERMINALX_HOME", &dir);
     }
     let data_dir = crate::store::root().context("open the state directory")?;
@@ -637,8 +641,7 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     let settings_watcher = crate::store::settings::file::Watcher::start(sink.clone())?;
     let host = Arc::new(crate::harness::host::Host::new());
     let terminals = Arc::new(crate::pty::Terminals::new());
-    #[cfg(unix)]
-    if options.runtime_kind == RuntimeKind::Local && adopted.is_none() {
+    if options.runtime_kind == RuntimeKind::Local && !adopted_any(&adopted) {
         crate::local_runtime::scrollback::restore(&crate::store::root()?, &terminals)?;
     }
     // The same socket and token its agents were given, when handed over.
@@ -696,7 +699,6 @@ fn start(options: &Options, guest_mode: bool, adopted: Inherited, owner: Option<
     { service = service.with_guest(guest.clone()); }
     if let Some(lifetime) = &lifetime {
         service = service.with_local_lifetime(lifetime.clone());
-        #[cfg(unix)]
         lifetime.set_stream_socket(crate::local_runtime::stream::start(&control_endpoint, sink.clone(), terminals.clone(), lifetime.clone())?);
     }
     #[cfg(unix)]
@@ -1164,9 +1166,28 @@ async fn wait_for_shutdown_signal() {
             }
         }
     }
-    #[cfg(not(unix))]
+    // Best effort: these reach a runtime that runs in a console (a
+    // `terminalx-serve` started from a terminal, or the service task). One the
+    // desktop started detached has no console and hears none of them; it is
+    // stopped over its control pipe (`runtime.stopAll`) or exits when idle.
+    #[cfg(windows)]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_logoff, ctrl_shutdown};
+        match (ctrl_break(), ctrl_close(), ctrl_logoff(), ctrl_shutdown()) {
+            (Ok(mut brk), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = brk.recv() => {}
+                    _ = close.recv() => {}
+                    _ = logoff.recv() => {}
+                    _ = shutdown.recv() => {}
+                }
+            }
+            _ => {
+                log::warn!("listen for console close, logoff and shutdown failed");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
     }
     log::info!("shutting down");
 }

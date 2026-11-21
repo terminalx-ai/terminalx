@@ -215,6 +215,7 @@ fn repository(root: &Path, name: &str) -> Repository {
     Repository { owner: "acme".into(), name: name.into(), path: path.to_string_lossy().into_owned(), base_ref: None, clone: None }
 }
 
+#[cfg(unix)]
 #[test]
 fn launches_once_on_the_work_branch_of_every_repository() {
     let dir = tempfile::tempdir().unwrap();
@@ -299,6 +300,7 @@ fn a_new_receipt_store_never_gets_the_prompt() {
     assert!(starter.starts.lock().unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn failures_are_reported_with_their_category() {
     let dir = tempfile::tempdir().unwrap();
@@ -378,6 +380,7 @@ fn nothing_to_launch_without_an_intent() {
     assert!(starter.starts.lock().unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn branch_names_follow_git_rules() {
     for good in ["main", "feature/fast-launch", "terminalx/fix-login-3f9a2c1b7d4e", "release-1.2"] {
@@ -484,6 +487,7 @@ const NATIVE_LAUNCH_CASE: &str = "TERMINALX_TEST_NATIVE_LAUNCH_CASE";
 /// every launch, plays the app server (one turn per `turn/start`, each frame
 /// recorded in `received`, no hooks to list) and otherwise stays up as the
 /// terminal Codex.
+#[cfg(unix)]
 const LAUNCH_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
@@ -538,6 +542,7 @@ fn a_native_codex_launch_delivers_its_prompt_once_through_the_app_server() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn native_launch_child() {
     use crate::store::index::{self, AgentTransport};
@@ -709,6 +714,7 @@ fn cloning(dir: &Path, workspace: &str, remote: &Path, api: Arc<FakeApi>, starte
 
 const WORK_BRANCH: &str = "terminalx/fix-login-3f9a2c1b7d4e";
 
+#[cfg(unix)]
 #[test]
 fn a_workspace_without_an_image_clones_its_repositories_at_their_base_branch() {
     let dir = tempfile::tempdir().unwrap();
@@ -741,6 +747,7 @@ fn a_workspace_without_an_image_clones_its_repositories_at_their_base_branch() {
     assert_eq!(completed[0].branches[0].path, app.path);
 }
 
+#[cfg(unix)]
 #[test]
 fn two_workspaces_from_one_repository_edit_the_same_file_independently() {
     let dir = tempfile::tempdir().unwrap();
@@ -792,6 +799,7 @@ fn a_retry_keeps_the_clone_it_already_has_and_clears_its_own_leftover() {
     assert!(Path::new(&app.path).join("work.txt").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_clone_that_cannot_be_made_fails_the_launch_and_deletes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -836,6 +844,7 @@ fn a_clone_that_runs_out_of_time_is_stopped_and_leaves_nothing() {
     assert!(Path::new(&app.path).join("README.md").exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_launch_counts_as_work_while_it_runs() {
     struct Watching(Mutex<Vec<bool>>);
@@ -942,6 +951,7 @@ fn the_claim_declares_that_this_runtime_clones_and_reads_the_plan() {
     assert_eq!(claimed.repositories[1].clone, None);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_create_canceled_while_git_runs_kills_it_and_starts_nothing() {
     // Git itself: told to stop, it is killed and leaves no staging directory.
@@ -987,6 +997,7 @@ fn a_create_canceled_while_git_runs_kills_it_and_starts_nothing() {
     assert!(api.completions.lock().unwrap().is_empty(), "a canceled launch reports no outcome");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreachable_api_is_not_a_cancel() {
     struct Asking;
@@ -1050,6 +1061,7 @@ fn plan(repositories: Vec<Repository>) -> CheckoutPlan {
     CheckoutPlan { work_branch: WORK_BRANCH.into(), repositories }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_workspace_created_without_a_first_prompt_still_gets_its_repositories_on_its_own_branch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1081,6 +1093,7 @@ fn a_workspace_created_without_a_first_prompt_still_gets_its_repositories_on_its
     assert!(!lib_path.exists());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_replaced_disk_gets_its_repositories_back_without_the_prompt() {
     let dir = tempfile::tempdir().unwrap();
@@ -1102,6 +1115,7 @@ fn a_replaced_disk_gets_its_repositories_back_without_the_prompt() {
     assert_eq!(api.completions.lock().unwrap().len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_checkout_a_launch_already_made_is_left_exactly_as_it_is() {
     let dir = tempfile::tempdir().unwrap();
@@ -1126,6 +1140,7 @@ fn a_checkout_a_launch_already_made_is_left_exactly_as_it_is() {
     assert!(dir.path().join("workspace-state").join("checkout.json").exists(), "adopted and remembered");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_checkout_that_fails_is_tried_again_on_the_next_boot_and_does_not_hold_up_the_others() {
     let dir = tempfile::tempdir().unwrap();
@@ -1173,7 +1188,7 @@ fn a_checkout_plan_is_held_to_the_same_rules_as_a_launch() {
 /// server's spelling of the root.
 #[cfg(unix)]
 fn linked(dir: &Path, remote: &Path, api: Arc<FakeApi>, starter: Arc<FakeStarter>) -> (Launcher, PathBuf, PathBuf) {
-    let base = std::fs::canonicalize(dir).unwrap();
+    let base = crate::paths::canonicalize(dir).unwrap();
     let root = base.join("state").join("workspace");
     std::fs::create_dir_all(&root).unwrap();
     std::os::unix::fs::symlink(base.join("state"), base.join("var-lib")).unwrap();
@@ -1347,6 +1362,7 @@ fn the_claim_reads_a_checkout_plan_next_to_no_launch() {
     assert_eq!(serve(json!({ "v": 1, "launch": null, "checkout": { "repositories": "?" } })), Claimed::default());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_checkout_is_reported_to_the_server_and_tried_again_until_it_works() {
     let dir = tempfile::tempdir().unwrap();
@@ -1380,6 +1396,7 @@ fn a_failed_checkout_is_reported_to_the_server_and_tried_again_until_it_works() 
     assert_eq!(api.reports.lock().unwrap().len(), 3);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_checkout_only_the_person_can_mend_is_reported_once_and_not_retried() {
     let dir = tempfile::tempdir().unwrap();

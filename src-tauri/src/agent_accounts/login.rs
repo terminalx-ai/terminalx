@@ -164,6 +164,8 @@ fn kill_group(child: &mut Child) {
 
 #[cfg(not(unix))]
 fn kill_group(child: &mut Child) {
+    #[cfg(windows)]
+    crate::win::process::kill_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -195,20 +197,37 @@ fn claude_command(program: &Path, dir: &Path, path_env: &str, args: &[&str]) -> 
 
 fn start_claude(program: &Path, dir: &Path, path_env: &str) -> Result<ClaudeLogin> {
     use std::io::{BufRead, BufReader};
-    let template = claude_command(program, dir, path_env, &[]);
-    let mut command = Command::new("/bin/sh");
-    command.args(["-c", crate::codex_device_login::WATCHDOG, "claude-login"]).arg(program).args(["auth", "login", "--claudeai"]);
-    for (name, value) in template.get_envs() {
-        match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
-    command.current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    let mut child = command.spawn().context("Claude Code's sign-in could not start")?;
-    let lifeline = child.stdin.take();
+    let (mut child, lifeline) = {
+        let template = claude_command(program, dir, path_env, &[]);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", crate::codex_device_login::WATCHDOG, "claude-login"]).arg(program).args(["auth", "login", "--claudeai"]);
+        for (name, value) in template.get_envs() {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        command.current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().context("Claude Code's sign-in could not start")?;
+        let lifeline = child.stdin.take();
+        (child, lifeline)
+    };
+    // No watchdog shell: the CLI runs in a job that ends with this process.
+    #[cfg(windows)]
+    let (mut child, lifeline) = {
+        use std::os::windows::process::CommandExt;
+        let mut command = claude_command(program, dir, path_env, &["auth", "login", "--claudeai"]);
+        command.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        let mut child = command.spawn().context("Claude Code's sign-in could not start")?;
+        if let Err(error) = crate::win::process::tie_to_this_process(&child) {
+            let _ = child.kill();
+            return Err(anyhow::Error::new(error).context("Claude Code's sign-in could not start"));
+        }
+        (child, None::<std::process::ChildStdin>)
+    };
     let stdout = child.stdout.take().context("Claude Code's sign-in could not start")?;
     let inner = Arc::new(Mutex::new(ClaudeInner { phase: Phase::Waiting, child: Some(child), lifeline, page: None }));
     let reading = inner.clone();

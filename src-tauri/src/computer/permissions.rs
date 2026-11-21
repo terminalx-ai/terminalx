@@ -8,6 +8,7 @@
 //! TerminalX.app runs from its copy outside the app, since Screen Recording
 //! is charged to the outermost app around the executable.
 
+use crate::paths::Canonical;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -164,7 +165,7 @@ pub fn is_under(path: &Path, parent: &Path) -> bool {
         let mut missing = Vec::new();
         let mut existing = path;
         loop {
-            if let Ok(resolved) = existing.canonicalize() {
+            if let Ok(resolved) = existing.canonical() {
                 return missing.iter().rev().fold(resolved, |joined, part| joined.join(part));
             }
             match (existing.parent(), existing.file_name()) {

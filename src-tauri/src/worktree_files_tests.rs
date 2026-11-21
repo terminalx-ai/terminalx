@@ -46,6 +46,7 @@ fn globs_are_relative_and_distinguish_direct_and_recursive_matches() {
     assert!(validate_patterns(&vec![".env".into(); MAX_PATTERNS + 1]).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn preview_only_lists_ignored_files_and_excludes_managed_workspaces() {
     let _home = crate::store::temp_home();
@@ -340,14 +341,14 @@ fn scan_limits_discard_partial_names_without_corrupting_utf8() {
     write(repo.path(), ".env.a", "a");
     write(repo.path(), ".env.é", "b");
     let args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"];
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 1, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 1, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
     // Seven bytes for the first name + NUL, then stop inside the second é.
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 13).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 13).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a", ".env.é"]));
     assert!(!limited);
 }
@@ -502,7 +503,7 @@ fn copy_batch_keeps_validated_source_after_ancestor_swap() {
 }
 
 fn copy_path(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
-    copy_one(&safe_open::Directory::open_resolved(&fs::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+    copy_one(&safe_open::Directory::open_resolved(&crate::paths::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
         .map(|(bytes, warning, _, _, _)| (bytes, warning))
 }
 
@@ -543,7 +544,7 @@ fn git_eligibility_uses_the_bound_source_after_an_ancestor_swap() {
     let source = parent.join("repo");
     init_repo(&source);
     write(&source, ".env.original", "private");
-    let resolved = fs::canonicalize(&source).unwrap();
+    let resolved = crate::paths::canonicalize(&source).unwrap();
     let root = safe_open::Directory::open_resolved(&resolved).unwrap();
     let outside = tempfile::tempdir().unwrap();
     init_repo(&outside.path().join("repo"));

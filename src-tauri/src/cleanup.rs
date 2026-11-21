@@ -109,7 +109,7 @@ pub(crate) struct Sources<'a> {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether any session runs in `dir` or below it.
@@ -287,18 +287,18 @@ fn claude_root_of<'i>(id: &'i str, sources: &Sources<'_>) -> std::result::Result
         Some((account, folder)) => claude_account_roots()
             .into_iter()
             .find(|(id, _)| id == account)
-            .and_then(|(_, root)| std::fs::canonicalize(root).ok())
+            .and_then(|(_, root)| crate::paths::canonicalize(root).ok())
             .map(|root| (root, folder))
             .ok_or_else(|| "That account's Claude data folder is not there".to_string()),
         None => sources.claude_root
-            .and_then(|root| std::fs::canonicalize(root).ok())
+            .and_then(|root| crate::paths::canonicalize(root).ok())
             .map(|root| (root, id.strip_prefix("claude:").unwrap_or_default()))
             .ok_or_else(|| "Claude's data folder is not there".to_string()),
     }
 }
 
 fn claude_leftovers(root: &Path, account: Option<&str>, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
-    let Ok(root) = std::fs::canonicalize(root) else { return };
+    let Ok(root) = crate::paths::canonicalize(root) else { return };
     let referenced = agent_data::referenced_conversations(sessions);
     let names: Vec<String> = children(&root).iter().filter_map(|path| path.file_name()?.to_str().map(String::from)).collect();
     for folder_name in names {
@@ -353,7 +353,7 @@ fn rollout_meta(rollout: &Path) -> Option<(String, String)> {
 }
 
 fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
-    let Ok(sessions_root) = std::fs::canonicalize(home.join("sessions")) else { return };
+    let Ok(sessions_root) = crate::paths::canonicalize(home.join("sessions")) else { return };
     let referenced = agent_data::referenced_conversations(sessions);
     let mut found: Vec<Leftover> = Vec::new();
     for year in children(&sessions_root) {
@@ -481,7 +481,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             // Only the conversations the scan listed: a transcript and its
             // side folder, each a real entry directly in this folder.
             for path in leftover.paths.iter().map(Path::new) {
-                if path.parent() != Some(folder.as_path()) {
+                if !path.parent().is_some_and(|parent| crate::paths::same(parent, &folder)) {
                     continue;
                 }
                 match std::fs::symlink_metadata(path) {
@@ -496,7 +496,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(freed)
         }
         LeftoverKind::AgentData => {
-            let sessions_root = sources.codex_home.and_then(|home| std::fs::canonicalize(home.join("sessions")).ok()).ok_or("Codex's data folder is not there")?;
+            let sessions_root = sources.codex_home.and_then(|home| crate::paths::canonicalize(home.join("sessions")).ok()).ok_or("Codex's data folder is not there")?;
             let mut freed = 0;
             for path in leftover.paths.iter().map(Path::new) {
                 if agent_data::rollout_inside(&sessions_root, path) {
@@ -601,7 +601,7 @@ mod tests {
         fn new() -> Self {
             let home = crate::store::temp_home();
             let dir = tempfile::tempdir().unwrap();
-            let base = std::fs::canonicalize(dir.path()).unwrap();
+            let base = crate::paths::canonicalize(dir.path()).unwrap();
             // A bare remote, so "pushed" means something.
             let remote = base.join("remote.git");
             std::fs::create_dir_all(&remote).unwrap();
@@ -1083,7 +1083,7 @@ mod tests {
         // No remote and no repository: only the agents' data is looked at.
         let _home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
         let path = base.join("project");
         std::fs::create_dir_all(&path).unwrap();
         let project: Project = serde_json::from_value(serde_json::json!({ "path": path, "name": "project" })).unwrap();

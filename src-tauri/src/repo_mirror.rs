@@ -100,10 +100,10 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn repository(project: &Path) -> Result<(PathBuf, PathBuf)> {
-    let root = fs::canonicalize(project).context("The repository root is unavailable")?;
-    let top = fs::canonicalize(git(&root, &["rev-parse", "--show-toplevel"])?)?;
-    let common = fs::canonicalize(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
-    let own = fs::canonicalize(git(&root, &["rev-parse", "--absolute-git-dir"])?)?;
+    let root = crate::paths::canonicalize(project).context("The repository root is unavailable")?;
+    let top = crate::paths::canonicalize(git(&root, &["rev-parse", "--show-toplevel"])?)?;
+    let common = crate::paths::canonicalize(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
+    let own = crate::paths::canonicalize(git(&root, &["rev-parse", "--absolute-git-dir"])?)?;
     if root != top || own != common {
         bail!("Mirroring needs the project's main checkout as the repository root.");
     }
@@ -111,9 +111,9 @@ fn repository(project: &Path) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn source_check(root: &Path, common: &Path, source: &Path) -> Result<PathBuf> {
-    let source = fs::canonicalize(source).context("The local workspace is unavailable")?;
-    let top = fs::canonicalize(git(&source, &["rev-parse", "--show-toplevel"])?)?;
-    let source_common = fs::canonicalize(git(&source, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
+    let source = crate::paths::canonicalize(source).context("The local workspace is unavailable")?;
+    let top = crate::paths::canonicalize(git(&source, &["rev-parse", "--show-toplevel"])?)?;
+    let source_common = crate::paths::canonicalize(git(&source, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
     if source == root || source != top || source_common != common {
         bail!("Choose a local worktree of this repository to mirror.");
     }

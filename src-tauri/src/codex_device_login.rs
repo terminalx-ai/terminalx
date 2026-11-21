@@ -64,6 +64,7 @@ const PASSED_ENV: &[&str] = &["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_
 /// Runs the CLI (`"$@"`) and kills its whole process group once stdin, the
 /// app's end of the lifeline, closes: when the app lets go of it, or dies.
 /// The CLI's own stdin is /dev/null; its exit status is the watchdog's.
+#[cfg(unix)]
 pub(crate) const WATCHDOG: &str = r#"exec 3<&0
 "$@" </dev/null 3<&- &
 cli=$!
@@ -417,6 +418,7 @@ pub fn sweep_stale(parent: &Path) {
 
 /// How long a killed group may take to be gone: SIGKILL is not refused, so
 /// this is only the time to be scheduled and reaped.
+#[cfg(unix)]
 const GROUP_EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Kill the watchdog's whole group and return once none of it is left.
@@ -445,6 +447,8 @@ fn kill_group(child: &mut Child) {
 
 #[cfg(not(unix))]
 fn kill_group(child: &mut Child) {
+    #[cfg(windows)]
+    crate::win::process::kill_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -492,6 +496,7 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
         Some(account) => account.to_path_buf(),
         None => {
             let codex_home = home.path().join(".codex");
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut dir = std::fs::DirBuilder::new();
             #[cfg(unix)]
             std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
@@ -505,10 +510,14 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
     if !program.is_file() {
         return Err(DeviceLoginError::CliMissing);
     }
+    #[cfg(unix)]
     let mut command = Command::new("/bin/sh");
+    #[cfg(unix)]
+    command.args(["-c", WATCHDOG, "codex-login"]).arg(program);
+    // No watchdog shell: the CLI runs in a job that ends with this process.
+    #[cfg(windows)]
+    let mut command = Command::new(program);
     command
-        .args(["-c", WATCHDOG, "codex-login"])
-        .arg(program)
         .args(["login", "--device-auth", "-c", "cli_auth_credentials_store=\"file\""])
         .args(extra_args)
         .env_clear()
@@ -527,7 +536,14 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
     }
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     let mut child = command.spawn().map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { DeviceLoginError::CliMissing } else { DeviceLoginError::Unavailable })?;
+    #[cfg(windows)]
+    if crate::win::process::tie_to_this_process(&child).is_err() {
+        let _ = child.kill();
+        return Err(DeviceLoginError::Unavailable);
+    }
 
     let lifeline = child.stdin.take();
     let stdout = child.stdout.take().ok_or(DeviceLoginError::Unavailable)?;
@@ -627,7 +643,7 @@ fn start_with(program: &Path, extra_args: &[String], path_env: &str, parent: &Pa
 /// only one that another account on this Mac could have swapped.
 #[cfg(unix)]
 pub fn trusted_program(program: &Path) -> bool {
-    let Ok(real) = std::fs::canonicalize(program) else { return false };
+    let Ok(real) = crate::paths::canonicalize(program) else { return false };
     let checked = [Some(real.as_path()), real.parent(), program.parent()].into_iter().all(|path| path.is_some_and(owned_safely));
     checked
 }
@@ -646,7 +662,7 @@ pub fn trusted_program(_program: &Path) -> bool {
 pub fn trusted_path(path_env: &str) -> String {
     let kept: Vec<&str> = std::env::split_paths(path_env)
         .zip(path_env.split(':'))
-        .filter(|(dir, _)| dir.is_absolute() && owned_safely(dir) && std::fs::canonicalize(dir).is_ok_and(|real| owned_safely(&real)))
+        .filter(|(dir, _)| dir.is_absolute() && owned_safely(dir) && crate::paths::canonicalize(dir).is_ok_and(|real| owned_safely(&real)))
         .map(|(_, entry)| entry)
         .collect();
     kept.join(":")
@@ -686,6 +702,13 @@ fn owned_safely(path: &Path) -> bool {
 
 /// Where throwaway homes go: this user's own temporary directory.
 pub fn homes_parent() -> PathBuf {
+    // A sign-in's home holds its credential until it is moved. On Windows the
+    // homes are kept in an owner-only folder of the temp directory, whose
+    // access they inherit, as each is `0o700` on Unix.
+    #[cfg(windows)]
+    if let Ok(dir) = crate::win::fs::private_temp("terminalx-codex-login") {
+        return dir;
+    }
     std::env::temp_dir()
 }
 
@@ -852,6 +875,7 @@ echo 'Successfully logged in' >&2
         assert_eq!(settle(&login), Phase::Failed);
         assert!(!signed_in_at(other.path()));
         // A link where the account's home should be is not signed in to.
+        #[cfg(unix)]
         let link = parent.path().join("linked-home");
         #[cfg(unix)]
         std::os::unix::fs::symlink(account.path(), &link).unwrap();
@@ -1045,6 +1069,7 @@ echo 'Successfully logged in' >&2
         drop(login);
     }
 
+    #[cfg(unix)]
     #[test]
     fn links_are_never_followed_when_reading_or_wiping() {
         let home = tempfile::tempdir().unwrap();
@@ -1082,6 +1107,7 @@ echo 'Successfully logged in' >&2
         assert_eq!(read_auth(home.path()).as_deref().map(String::as_str), Some("{}"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_path_the_cli_gets_leaves_out_directories_another_account_could_write() {
         let mode = |dir: &Path, mode: u32| std::fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
@@ -1102,6 +1128,7 @@ echo 'Successfully logged in' >&2
         assert!(!trusted_path(&path).split(':').any(|dir| Path::new(dir).join("node").exists()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_node_script_codex_runs_only_with_a_node_no_one_else_can_swap() {
         let mode = |path: &Path, mode: u32| std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
@@ -1147,6 +1174,7 @@ echo 'Successfully logged in' >&2
         assert!(!orphan.exists() && live.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_codex_another_account_could_swap_is_not_run() {
         let dir = tempfile::tempdir().unwrap();

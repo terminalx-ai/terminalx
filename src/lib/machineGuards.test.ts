@@ -51,7 +51,7 @@ describe("cloud-key sites", () => {
     const found: Record<string, number> = {};
     for (const path of sources(join(ROOT, "src"))) {
       const count = (readFileSync(path, "utf8").match(/["']cloud:["']|isCloudKey\(/g) ?? []).length;
-      if (count) found[relative(ROOT, path)] = count;
+      if (count) found[relative(ROOT, path).split("\\").join("/")] = count;
     }
     expect(found).toEqual(Object.fromEntries(Object.entries(REVIEWED).map(([file, { count }]) => [file, count])));
   });

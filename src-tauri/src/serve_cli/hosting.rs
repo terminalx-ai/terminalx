@@ -105,7 +105,7 @@ fn hosting(args: &[String]) -> Result<i32> {
     std::fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
     // The settings the runtime watches are in its data directory. Set before
     // any thread of this process reads the environment.
-    let canonical = std::fs::canonicalize(&data).with_context(|| format!("resolve {}", data.display()))?;
+    let canonical = crate::paths::canonicalize(&data).with_context(|| format!("resolve {}", data.display()))?;
     std::env::set_var("TERMINALX_HOME", &canonical);
     crate::listen::choose(listen, allow_public).context("write the choice to settings.json")?;
     println!("This server listens on: {}. {}", listen.label(), listen.exposes());

@@ -199,7 +199,7 @@ enum Input {
     Ping,
 }
 
-async fn frame(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>, bytes: &mut Vec<u8>) -> Result<Vec<u8>> {
+async fn frame<R: tokio::io::AsyncRead + Unpin>(reader: &mut BufReader<R>, bytes: &mut Vec<u8>) -> Result<Vec<u8>> {
     // read_until alone would allow an unauthenticated peer to grow memory
     // without ever sending a newline.
     loop {
@@ -396,53 +396,89 @@ async fn wait_until(at: Option<Instant>) {
 }
 
 /// The stream socket beside the endpoint's: `hooks-<pid>.sock` has
-/// `local-<pid>.sock`, so each control endpoint has one of its own.
+/// `local-<pid>.sock`, so each control endpoint has one of its own. On
+/// Windows the pipe `<endpoint>-local`, which is of the same home.
 fn socket_path(endpoint: &ControlEndpoint) -> std::path::PathBuf {
-    let name = endpoint.socket.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_prefix("hooks"))
-        .map(|rest| format!("local{rest}")).unwrap_or_else(|| format!("local-{}.sock", std::process::id()));
-    endpoint.socket.with_file_name(name)
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(format!("{}-local", endpoint.socket.display()))
+    }
+    #[cfg(unix)]
+    {
+        let name = endpoint.socket.file_name().and_then(|name| name.to_str()).and_then(|name| name.strip_prefix("hooks"))
+            .map(|rest| format!("local{rest}")).unwrap_or_else(|| format!("local-{}.sock", std::process::id()));
+        endpoint.socket.with_file_name(name)
+    }
 }
 
 pub fn start(endpoint: &ControlEndpoint, sink: Arc<BroadcastSink>, terminals: Arc<Terminals>, lifetime: Arc<super::Lifetime>) -> Result<std::path::PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let path = socket_path(endpoint);
-    // The lifetime lock is held; never unlink a live or unexpected endpoint.
-    if path.exists() {
-        use std::os::unix::fs::FileTypeExt;
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_socket() || std::os::unix::net::UnixStream::connect(&path).is_ok() {
-            bail!("local event endpoint is already in use or is not a socket");
-        }
-        std::fs::remove_file(&path)?;
-    }
-    let listener = tokio::net::UnixListener::bind(&path).context("bind local event socket")?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let token = endpoint.token.clone();
     let clients = Arc::new(Semaphore::new(super::MAX_CLIENTS));
-    tokio::spawn(async move {
-        while let Ok((socket, _)) = listener.accept().await {
-            let Ok(slot) = clients.clone().try_acquire_owned() else {
-                log::warn!("a local client was turned away: {} are already connected", super::MAX_CLIENTS);
-                continue;
-            };
-            let (token, sink, terminals, lifetime) = (token.clone(), sink.clone(), terminals.clone(), lifetime.clone());
-            tokio::spawn(async move {
-                let _slot = slot;
-                let since = Instant::now();
-                let mut account = Account::default();
-                if let Err(error) = connection(socket, &token, sink, terminals, lifetime, &mut account).await {
-                    let (level, line) = ended(&account, since.elapsed(), &error);
-                    log::log!(level, "{line}");
-                }
-            });
+    let serve = move |socket, slot: OwnedSemaphorePermit| {
+        let (token, sink, terminals, lifetime) = (token.clone(), sink.clone(), terminals.clone(), lifetime.clone());
+        tokio::spawn(async move {
+            let _slot = slot;
+            let since = Instant::now();
+            let mut account = Account::default();
+            if let Err(error) = connection(socket, &token, sink, terminals, lifetime, &mut account).await {
+                let (level, line) = ended(&account, since.elapsed(), &error);
+                log::log!(level, "{line}");
+            }
+        });
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // The lifetime lock is held; never unlink a live or unexpected endpoint.
+        if path.exists() {
+            use std::os::unix::fs::FileTypeExt;
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_socket() || std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                bail!("local event endpoint is already in use or is not a socket");
+            }
+            std::fs::remove_file(&path)?;
         }
-    });
+        let listener = tokio::net::UnixListener::bind(&path).context("bind local event socket")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let Ok(slot) = clients.clone().try_acquire_owned() else {
+                    log::warn!("a local client was turned away: {} are already connected", super::MAX_CLIENTS);
+                    continue;
+                };
+                serve(socket, slot);
+            }
+        });
+    }
+    #[cfg(windows)]
+    {
+        // The first instance claims the name: a live endpoint is never shared.
+        let mut server = crate::win::pipe::server(&path, true).context("local event endpoint is already in use")?;
+        let listening = path.clone();
+        tokio::spawn(async move {
+            loop {
+                let socket = match crate::win::pipe::accept(&mut server, &listening).await {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        log::warn!("local event endpoint stopped listening: {error}");
+                        break;
+                    }
+                };
+                let Ok(slot) = clients.clone().try_acquire_owned() else {
+                    log::warn!("a local client was turned away: {} are already connected", super::MAX_CLIENTS);
+                    continue;
+                };
+                serve(socket, slot);
+            }
+        });
+    }
     Ok(path)
 }
 
-async fn connection(socket: tokio::net::UnixStream, token: &str, sink: Arc<BroadcastSink>, terminals: Arc<Terminals>,
+async fn connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static>(socket: S, token: &str, sink: Arc<BroadcastSink>, terminals: Arc<Terminals>,
     lifetime: Arc<super::Lifetime>, account: &mut Account) -> Result<()> {
-    let (read, mut write) = socket.into_split();
+    let (read, mut write) = tokio::io::split(socket);
     let mut read = BufReader::new(read);
     // Lives outside select: cancellation while a frame is partial must not
     // discard bytes already consumed when an event wins the select race.

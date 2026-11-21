@@ -1,5 +1,6 @@
 //! Read-only context preparation. Never starts or loads a source runtime, and
 //! never reads an entire transcript just to open the continuation dialog.
+use crate::paths::Canonical;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -80,7 +81,7 @@ fn readable_transcript(path: &Path) -> Result<PathBuf> {
     let mut tail = Vec::new();
     file.take(8192).read_to_end(&mut tail)?;
     if tail.contains(&0) { bail!("The saved transcript is not readable text."); }
-    Ok(path.canonicalize()?)
+    Ok(path.canonical()?)
 }
 
 fn prepare_from_paths(entry: &index::SessionEntry, tab: &index::TabEntry, native: Option<&Path>, log: &Path) -> Result<Context> {

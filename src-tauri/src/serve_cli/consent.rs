@@ -499,9 +499,9 @@ fn witness_pid(run: &Path, socket: &Path, nonce: &str) -> Result<libc::pid_t> {
 /// A Unix socket this user owns, private, directly in `run`.
 fn private_socket(run: &Path, socket: &Path) -> Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let run = std::fs::canonicalize(run)?;
+    let run = crate::paths::canonicalize(run)?;
     let parent = socket.parent().context("the witness has no directory")?;
-    if std::fs::canonicalize(parent)? != run {
+    if crate::paths::canonicalize(parent)? != run {
         bail!("the witness must be in this runtime's private directory");
     }
     let metadata = std::fs::symlink_metadata(socket)?;

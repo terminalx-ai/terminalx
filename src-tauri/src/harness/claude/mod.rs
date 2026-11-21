@@ -76,6 +76,7 @@ pub fn ask_initialize(cwd: &Path, extra: &[&str]) -> Result<Value> {
 
 /// How long a probe and what it started are given to leave on SIGTERM
 /// before SIGKILL.
+#[cfg(unix)]
 const PROBE_EXIT: Duration = Duration::from_secs(2);
 
 fn probe(program: &Path, cwd: &Path, extra: &[&str]) -> Result<Value> {

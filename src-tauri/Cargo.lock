@@ -4086,6 +4086,7 @@ dependencies = [
  "crypto_box",
  "crypto_secretbox",
  "dirs",
+ "dunce",
  "env_logger",
  "flate2",
  "futures-util",
@@ -4152,6 +4153,7 @@ dependencies = [
  "uuid",
  "vt100",
  "which",
+ "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "zeroize",
 ]
