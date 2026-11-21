@@ -206,6 +206,18 @@
   when nothing has changed, logged as "Nothing new" with no model run. The
   Home tab's right column also shows Up next, the bot's next duty runs
   (PRO-477).
+- Bots (experimental): the bots on the phone. While a paired Mac has Bots on,
+  the phone gets a Bots tab: what needs you across every bot first, the
+  newest question answerable from the list with its recommended answer, then
+  the team with what each bot is doing, and Pause all. A bot's page has Home
+  (its questions and open work), Chat, Duties and Role, with Pause or Resume
+  in its header. A question opens as a sheet with the recommended answer on
+  top and room to type a reply. Each new question notifies the phone while it
+  is connected, under the Questions choice; its buttons answer it and a tap
+  opens the sheet over the bot's home chat. An answer from the phone, from the
+  list, the sheet or a notification, goes through the same route as the
+  app's, the Mac's own `bots.answer` for a paired phone that may drive, which
+  no bot's session can call. With Bots off the phone is as it was (PRO-479).
 - Bots (experimental): Pause and Pause all say what they stopped. Pause a bot
   from its header or its sidebar row's menu, and every bot from the Bots page
   or with ⌥⇧⌘P from anywhere (⇧⌘P stays the markdown preview's). A pause

@@ -689,6 +689,44 @@ free check, its prompt and its report.
   and notifies no one unless it is urgent.
 - **Deleting a bot** moves its suggestions file to `trash/bot-suggestions/`.
 
+## Bots on the phone (PRO-479)
+
+The phone (screen 23.08) reads and acts on the bots through the paired
+phone's own calls, never a second set of bot rules.
+
+- **Offered only with Bots on.** A Mac names `bots: 1` in
+  `sync.capabilities` only while its runtime has the `bots` call and the
+  Bots setting is on; switching it tells connected phones to ask again
+  (`sync.capabilitiesChanged`). A phone shows its Bots tab only for a Mac
+  that names it, and asks for bots' questions in its notification filter
+  only then, so with Bots off nothing on the phone changes.
+- **The calls** (`src-tauri/src/phone/rpc.rs`, wire names `bots.*`): `list`
+  (every bot, Needs you across them, and each bot's current work and next
+  duty run), `home` and `items` (one bot's record, list, chats, duties and
+  role, read only: reading never makes a chat), and `answer`, `pause`,
+  `resume`, `pauseAll`. The window passes them to the runtime's paired-phone
+  call (`local_runtime/mobile.rs`, operation `bots`), which admits the phone
+  by its device record, and the four that act only for a phone allowed to
+  drive. `src-tauri/src/bots/phone.rs` then calls the bots' own routes:
+  `answer` is `itemAnswer`, as the app's Needs you answers, so the answer is
+  the owner's and reaches the bot's home chat the same way. A bot's session
+  holds no device connection, so it cannot reach these.
+- **A question** is answered by its index or in words, with the question's
+  id it was shown, so an answer to a question that has since changed is
+  refused ("no longer asks this") rather than given to the new one.
+- **Notifications.** Each new Needs you question on a bot's item, asked
+  while the phone is subscribed, is sent once as a `bot_question` notice with
+  the bot, the item, the question's id and answers, and the bot's home chat
+  as its session. It shows under the Questions choice and is not held back by
+  "Sessions I started or follow", which is about sessions. Its buttons (up
+  to four answers, the recommended one first) answer through `bots.answer`;
+  a tap opens the question as a sheet over the home chat. An older phone
+  that does not know the kind opens that chat. An agent's own question in a
+  bot's session is already sent as an ordinary question.
+- **Not on the phone.** Editing duties, the role or a bot's settings, and
+  hiring, stay on the Mac; the design's organisation switcher and search wait
+  for PRO-483.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -713,7 +751,7 @@ issue.
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
 | PRO-476 | A bot plans and starts orchestration runs | 23.01, 23.04, 23.09 | In review |
 | PRO-477 | Look around, suggestions, nightly memory tidy | 23.01 | In review |
-| PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |
+| PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | In review |
 | PRO-480 | GitHub and Linear as channels | 23.07 | In review |
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |

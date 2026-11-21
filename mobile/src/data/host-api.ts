@@ -6,6 +6,7 @@ import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache"
 import type { HostConnection } from "../transport/connection";
 import { recordStartedSessionOn } from "../notifications/store";
 import { HostRefusal } from "./host-refusal";
+import { readAnswer, readHome, readOverview, type BotAnswerResult, type BotHome, type BotsOverview } from "./bots";
 
 
 /** A computer's answer to `host.describe`. */
@@ -64,8 +65,10 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
+ * `bots`: the `bots.*` methods and `bot_question` notices (PRO-479). Named only while the Mac's Bots setting is on:
+ * without it, nothing of the bots shows on the phone.
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number; bots?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -128,6 +131,7 @@ export class HostApi {
 
   private capabilities?: Promise<HostFeatures>;
   private featureListeners = new Set<() => void>();
+  private botListeners = new Set<() => void>();
   private settingsListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
@@ -137,6 +141,7 @@ export class HostApi {
     // replaces while the phone stays connected (#730).
     connection.onEvent((event) => {
       if (event.method === "sync.capabilitiesChanged") this.featuresChanged();
+      if (event.method === "bots.changed") for (const listener of [...this.botListeners]) listener();
       if (event.method === "settings.changed") for (const listener of this.settingsListeners) listener();
     });
   }
@@ -567,6 +572,54 @@ export class HostApi {
     return result.value;
   }
 
+  /**
+   * A bot or a bot's list changed on the Mac (`bots.changed`, PRO-479): read
+   * what is on screen again. A Mac without `bots` never sends it.
+   */
+  onBotsChanged(listener: () => void): () => void {
+    this.botListeners.add(listener);
+    return () => { this.botListeners.delete(listener); };
+  }
+
+  private async bots(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if ((await this.features()).bots !== 1) throw new HostRefusal(BOTS_OFF, "bots_off");
+    const result = await this.connection.request<unknown>(method, params);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
+    return result.value;
+  }
+
+  /** The Bots tab: every bot, what needs you across them, and what each is doing. Null from a Mac without `bots`. */
+  async botsOverview(): Promise<BotsOverview | null> {
+    if ((await this.features()).bots !== 1) return null;
+    const overview = readOverview(await this.bots("bots.list"));
+    if (!overview) throw new Error("The Mac returned bots this phone cannot read.");
+    return overview;
+  }
+
+  /** A bot's home: its record, list, chats, duties and role. */
+  async botHome(botId: string): Promise<BotHome> {
+    const home = readHome(await this.bots("bots.home", { id: botId }));
+    if (!home) throw new Error("The Mac returned a bot this phone cannot read.");
+    return home;
+  }
+
+  /**
+   * Answer a bot's question as its owner, by one of its answers (`answer`, its
+   * index on the Mac) or in your own words, to the question shown (`question`,
+   * `questionKey`): the Mac records and sends it as the window does. One
+   * answered meanwhile, or asked again, comes back as the Mac's refusal.
+   */
+  async answerBot(botId: string, number: number, reply: { answer: number } | { text: string }, question: string): Promise<BotAnswerResult> {
+    const answered = readAnswer(await this.bots("bots.answer", { id: botId, number, ...reply, question }));
+    if (!answered) throw new Error("The Mac did not say how the answer went.");
+    return answered;
+  }
+
+  async pauseBot(botId: string): Promise<void> { await this.bots("bots.pause", { id: botId }); }
+  async resumeBot(botId: string): Promise<void> { await this.bots("bots.resume", { id: botId }); }
+  /** Every bot not already paused is paused now. */
+  async pauseAllBots(): Promise<void> { await this.bots("bots.pauseAll"); }
+
   async setNativeCodex(on: boolean): Promise<MacSettings> {
     const result = await this.connection.request<unknown>("mac.setSettings", { nativeCodex: on });
     if (!result.ok) throw new Error(result.refusal.message);
@@ -574,6 +627,9 @@ export class HostApi {
     return result.value;
   }
 }
+
+/** Said when the Mac stopped naming `bots` (its Bots setting was turned off, or it is older). */
+export const BOTS_OFF = "Bots are off on this Mac. Turn them on in Settings → Experimental → Bots.";
 
 function isNewSessionOptions(value: unknown): value is NewSessionOptions {
   if (!value || typeof value !== "object") return false;

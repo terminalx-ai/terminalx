@@ -141,7 +141,7 @@ impl Ended {
 }
 
 /// A change a phone reads again by itself: `sessions.changed`,
-/// `settings.changed`, `sync.capabilitiesChanged`. One pending of each says
+/// `settings.changed`, `sync.capabilitiesChanged`, `bots.changed`. One pending of each says
 /// all a hundred would, so they collapse here instead of filling the
 /// outbound queue, which an agent's every event used to do (#1282).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +149,8 @@ pub(crate) enum Invalidation {
     Capabilities = 1,
     Settings = 2,
     Sessions = 4,
+    /// `bots.changed`: a bot or a bot's work list changed (PRO-479).
+    Bots = 8,
 }
 
 #[derive(Default)]
@@ -172,6 +174,7 @@ impl Invalidations {
             (Invalidation::Capabilities, "sync.capabilitiesChanged"),
             (Invalidation::Settings, "settings.changed"),
             (Invalidation::Sessions, "sessions.changed"),
+            (Invalidation::Bots, "bots.changed"),
         ]
         .into_iter()
         .filter(|(which, _)| bits & *which as u8 != 0)

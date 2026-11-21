@@ -322,3 +322,36 @@ describe("sessions started from this phone", () => {
     expect(JSON.parse(fake.storage.get(store.SETTINGS_KEY)!).started).toEqual({ mac: ["s-new"] });
   });
 });
+
+// PRO-479: a Mac that offers its bots is asked for their questions too, and its notice keeps what answers it.
+describe("a bot's question", () => {
+  it("is asked for while the Mac offers bots, and again without when Bots is switched off", async () => {
+    fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+    const state = mac({ notificationFilters: 1, bots: 1 });
+    const { local } = await modules();
+    await local.restoreLocalNotifications(state.connection, "mac");
+    expect((live(state)[0]?.params as { filter: { kinds: string[] } }).filter.kinds).toContain("bot_question");
+    state.capabilities = { notificationFilters: 1 };
+    state.emit("sync.capabilitiesChanged");
+    await flush();
+    await flush();
+    expect(live(state)).toHaveLength(1);
+    expect((live(state)[0]?.params as { filter: { kinds: string[] } }).filter.kinds).not.toContain("bot_question");
+  });
+
+  it("reads the notice's bot, item, question and answers, and shows it", async () => {
+    fake.storage.set("terminalx:notifications-enabled:mac", "enabled");
+    const state = mac({ notificationFilters: 1, bots: 1 });
+    const { local } = await modules();
+    const notice = { seq: 7, epoch: "e", kind: "bot_question", title: "Sentry asks", body: "Fix now or file it?", sessionId: "home", tabId: "t", botQuestion: { botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue", 7], recommended: 5 } };
+    expect(local.parseNotification(notice)?.botQuestion).toEqual({ botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"] });
+    expect(local.parseNotification({ ...notice, botQuestion: { botId: "", number: 4, question: "q1" } })?.botQuestion).toBeUndefined();
+    await local.restoreLocalNotifications(state.connection, "mac");
+    live(state)[0]?.listener({ event: { ...notice, botQuestion: { ...notice.botQuestion, answers: ["Fix it now", "File an issue"], recommended: 0 } } });
+    await flush();
+    await flush();
+    const shown = fake.scheduled.at(-1) as { content: { title: string; data: Record<string, unknown> } };
+    expect(shown.content.title).toBe("Sentry asks");
+    expect(shown.content.data).toMatchObject({ kind: "bot_question", botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"], recommended: 0, sessionId: "home" });
+  });
+});
