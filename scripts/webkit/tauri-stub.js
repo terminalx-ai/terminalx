@@ -80,6 +80,21 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     status_bar_settings: { visible: false },
     // How the workspaces' tabs are arranged: nothing saved, and what a page saves is kept and announced as the backend does.
     tab_state: { workspaces: {}, closed: [] },
+    // Pinned cloud projects (#1403), kept and announced as the backend does.
+    cloud_pins: { orgs: {}, adopted: true },
+    edit_cloud_pins: ({ edit }) => {
+      const orgs = { ...answers.cloud_pins.orgs };
+      if (edit.kind === "set") {
+        const list = (orgs[edit.orgId] ?? []).filter((id) => id !== edit.identity);
+        orgs[edit.orgId] = edit.pinned ? [...list, edit.identity] : list;
+      } else if (edit.kind === "forget") {
+        for (const orgId of edit.orgIds) delete orgs[orgId];
+      }
+      for (const orgId of Object.keys(orgs)) if (!orgs[orgId].length) delete orgs[orgId];
+      answers.cloud_pins = { orgs, adopted: true };
+      setTimeout(() => window.__PW_STUB__.emit("cloud_pins_changed", answers.cloud_pins), 0);
+      return answers.cloud_pins;
+    },
     sidebar_order: { custom: false, sessions: [], projects: [], revision: 0 },
     set_sidebar_order: ({ patch }) => {
       const merge = (saved, requested) => {

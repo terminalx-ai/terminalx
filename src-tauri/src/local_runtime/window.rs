@@ -50,6 +50,10 @@ pub(crate) fn supported(command: &str) -> bool {
     ) || crate::machine_control::supported(command)
 }
 
+/// A window service asked for while the attached window has not proved it is
+/// the window and Bots is on (PRO-507).
+pub(crate) const UNPROVEN: &str = "While Bots is on, this TerminalX runtime takes window services only from a window that proves it is TerminalX with its key in Keychain, and the window attached has not.";
+
 fn unavailable(message: impl Into<String>) -> ControlError {
     ControlError::new("desktop_unavailable",message,Some("Open TerminalX. Check the result before repeating an action; it was not replayed.".into()))
 }
@@ -78,6 +82,10 @@ struct Service {
     socket: PathBuf,
     token: zeroize::Zeroizing<String>,
     calls: AtomicUsize,
+    /// Registered without the window's proof on a runtime that pins its key,
+    /// while Bots was off (PRO-489): it serves only while Bots stays off, and
+    /// gives way to a registration that proves it (PRO-507).
+    unproven: bool,
 }
 
 /// The endpoint a desktop registers must be one of this runtime's own: a
@@ -105,7 +113,13 @@ fn private_endpoint(socket: &std::path::Path) -> anyhow::Result<()> {
 }
 
 #[derive(Default)]
-pub(crate) struct Registry(Mutex<Option<Arc<Service>>>, Mutex<Option<(i32, u64)>>);
+pub(crate) struct Registry(Mutex<Option<Arc<Service>>>, Mutex<Option<Recognised>>, Mutex<Option<Arc<Attachment>>>);
+
+/// The window's process (pid, start time), and whether this runtime saw it
+/// prove it is the window; one a handover carried over, or one taken by
+/// where it runs, it did not.
+#[derive(Clone, Copy)]
+struct Recognised { process: (i32, u64), proven: bool }
 
 /// The window's process this runtime last knew, for a handover to carry (PRO-468).
 static KNOWN_WINDOW: Mutex<Option<(i32, u64)>> = Mutex::new(None);
@@ -117,6 +131,16 @@ pub(crate) fn known_window() -> Option<(i32, u64)> {
 
 impl Registry {
     pub(crate) fn register(&self, lifetime: &Lifetime, params: Value) -> Result<Value, ControlError> {
+        self.register_as(lifetime, params, false)
+    }
+
+    /// [`Self::register`], for a window that did not prove it is the window
+    /// on a runtime that pins its key, while Bots is off (PRO-489).
+    pub(crate) fn register_unproven(&self, lifetime: &Lifetime, params: Value) -> Result<Value, ControlError> {
+        self.register_as(lifetime, params, true)
+    }
+
+    fn register_as(&self, lifetime: &Lifetime, params: Value, unproven: bool) -> Result<Value, ControlError> {
         let registration: Registration = serde_json::from_value(params).map_err(|_| unavailable("Invalid desktop registration."))?;
         let attachment = lifetime.attachment(&registration.epoch,&registration.lease).map_err(|_| unavailable("The desktop attachment is no longer current."))?;
         let checked = (|| -> anyhow::Result<()> {
@@ -129,17 +153,60 @@ impl Registry {
         if checked.is_err() { return Err(unavailable("The desktop endpoint is not a private endpoint of this runtime.")); }
         let mut current = self.0.lock().unwrap();
         if let Some(previous) = current.as_ref().filter(|service| service.attachment.valid()) {
-            if previous.lease == registration.lease && previous.socket == registration.socket
-                && crate::hooks::token_matches(&previous.token,&registration.token) {
+            let same = previous.lease == registration.lease && previous.socket == registration.socket
+                && crate::hooks::token_matches(&previous.token,&registration.token);
+            // An unproven provider gives way to a registration that proves
+            // it, and to any while Bots is on, when it serves nothing (PRO-507).
+            let gives_way = previous.unproven && (!unproven || crate::bots::enabled_cached());
+            if same && (!previous.unproven || unproven) {
                 return Ok(json!({"registered":true}));
             }
-            return Err(unavailable("Another desktop currently provides this runtime's window services."));
+            if !same && !gives_way {
+                return Err(unavailable("Another desktop currently provides this runtime's window services."));
+            }
         }
         let registered = attachment.enter().map_err(|_| unavailable("The desktop detached during registration."))?;
         *current = Some(Arc::new(Service { attachment: attachment.clone(), epoch: registration.epoch, lease: registration.lease, socket: registration.socket,
-            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0) }));
+            token: zeroize::Zeroizing::new(registration.token), calls: AtomicUsize::new(0), unproven }));
         drop(registered);
+        *self.2.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(json!({"registered":true}))
+    }
+
+    /// A registration as the window, on `params`' attachment, that the
+    /// runtime refused for want of the window's proof while Bots is on: a
+    /// window service asked for meanwhile says so, and not that no window is
+    /// open (PRO-507).
+    pub(crate) fn refused_unproven(&self, lifetime: &Lifetime, params: &Value) {
+        let attachment = lifetime.attachment(params["epoch"].as_str().unwrap_or_default(), params["lease"].as_str().unwrap_or_default());
+        if let Ok(attachment) = attachment {
+            *self.2.lock().unwrap_or_else(|e| e.into_inner()) = Some(attachment);
+        }
+    }
+
+    /// The provider of window services now: none while Bots is on for one
+    /// that did not prove it is the window, which is dropped then (PRO-507).
+    fn live(&self) -> Option<Arc<Service>> {
+        let mut current = self.0.lock().unwrap();
+        let service = current.clone().filter(|service| service.attachment.valid())?;
+        if service.unproven && crate::bots::enabled_cached() {
+            log::warn!("Bots is on: the window registered without its proof no longer provides window services");
+            *self.2.lock().unwrap_or_else(|e| e.into_inner()) = Some(service.attachment.clone());
+            *current = None;
+            return None;
+        }
+        Some(service)
+    }
+
+    /// Why no window serves: an attached window that has not proved it is
+    /// the window while Bots is on, or none attached.
+    fn missing(&self) -> ControlError {
+        let unproven = self.2.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|attachment| attachment.valid());
+        if unproven && crate::bots::enabled_cached() {
+            return ControlError::new("desktop_unavailable", UNPROVEN,
+                Some("In the TerminalX window, unlock your login Keychain, then choose Try again on its notice. Check the result before repeating an action; it was not replayed.".into()));
+        }
+        unavailable("This operation needs an attached TerminalX window.")
     }
 
     /// The window's process (pid and start time, PRO-468): the last one to
@@ -154,27 +221,41 @@ impl Registry {
     /// it. Where the window's key is pinned, only a registrant that proved it
     /// is recognised (`control`, PRO-489).
     pub(crate) fn window_process(&self) -> Option<(i32, u64)> {
-        *self.1.lock().unwrap_or_else(|e| e.into_inner())
+        self.1.lock().unwrap_or_else(|e| e.into_inner()).map(|recognised| recognised.process)
     }
 
     /// Recognise `process` as the window, after it registered. The caller
     /// leaves out a registrant that runs in a pane or under this runtime.
-    pub(crate) fn recognise(&self, process: (i32, u64)) {
-        *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+    /// `proven`: it proved it with the window's key here.
+    pub(crate) fn recognise(&self, process: (i32, u64), proven: bool) {
+        *self.1.lock().unwrap_or_else(|e| e.into_inner()) = Some(Recognised { process, proven });
         *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+    }
+
+    /// A registration as the window from process `caller` did not prove it
+    /// is (PRO-507): the window as recognised before is no longer, when it is
+    /// that process, or one this runtime never saw prove it (one a handover
+    /// carried over). One that proved it here and is another process stays:
+    /// a registration it did not send does not unseat it.
+    pub(crate) fn unproven_from(&self, caller: Option<i32>) {
+        let mut recognised = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        if recognised.is_some_and(|window| !window.proven || Some(window.process.0) == caller) {
+            *recognised = None;
+            *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 
     /// The window's process the runtime this one replaced knew, until a window registers here.
     pub(crate) fn handed_over(&self, process: Option<(i32, u64)>) {
         let mut known = self.1.lock().unwrap_or_else(|e| e.into_inner());
         if known.is_none() {
-            *known = process;
+            *known = process.map(|process| Recognised { process, proven: false });
             *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = process;
         }
     }
 
     pub(crate) fn available(&self) -> bool {
-        self.0.lock().unwrap().as_ref().is_some_and(|service| service.attachment.valid())
+        self.live().is_some()
     }
 
     #[cfg(any(unix, test))]
@@ -218,8 +299,7 @@ impl Registry {
     // Internal service responses may carry secrets. They are never proxied by
     // public control commands and only travel on this private, lease-bound socket.
     fn dispatch(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        let service = self.0.lock().unwrap().clone().filter(|service| service.attachment.valid())
-            .ok_or_else(|| unavailable("This operation needs an attached TerminalX window."))?;
+        let service = self.live().ok_or_else(|| self.missing())?;
         if !super::permissions::increment_bounded(&service.calls, MAX_CALLS) {
             return Err(unavailable("The desktop is handling too many requests. No new action was sent."));
         }
@@ -404,6 +484,79 @@ mod tests {
         lifetime.window.register(&lifetime,registration(&second,&endpoint)).unwrap();
         assert!(lifetime.window.call("computer.listApps",json!({})).is_ok());
         assert_eq!(calls.load(Ordering::SeqCst),2);
+    }
+
+    /// PRO-507: a window registered without its proof while Bots was off
+    /// serves only while Bots stays off. It gives way to a registration that
+    /// proves it, Bots on or off, and to any once Bots is on, when it is
+    /// dropped; a window service asked for meanwhile says why, not that no
+    /// window is open.
+    #[test]
+    fn an_unproven_window_serves_only_with_bots_off_and_gives_way_to_a_proven_one() {
+        let _home = crate::store::temp_home();
+        let bots = |on: bool| {
+            let mut settings = crate::store::settings::load();
+            settings.experimental.bots = on;
+            crate::store::settings::save(&settings).unwrap();
+        };
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let endpoint = prepare_control().unwrap();
+        serve_private(endpoint.clone(), |_| HookReply::default(), move |request| ControlResponse::success(request.id, json!({"command":request.params["command"]}))).unwrap();
+        bots(false);
+        let unproven = attach(&lifetime);
+        lifetime.window.register_unproven(&lifetime, registration(&unproven, &endpoint)).unwrap();
+        lifetime.window.register_unproven(&lifetime, registration(&unproven, &endpoint)).unwrap();
+        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "Bots off: it serves");
+        let other = attach(&lifetime);
+        assert!(lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).is_err(), "Bots off: another unproven one does not unseat it");
+        // The window, proving it on another lease, takes over.
+        let proven = attach(&lifetime);
+        lifetime.window.register(&lifetime, registration(&proven, &endpoint)).unwrap();
+        assert!(lifetime.window.register_unproven(&lifetime, registration(&unproven, &endpoint)).is_err(), "a proven window is not unseated");
+        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok());
+        lifetime.command("runtime.detach", proven).unwrap();
+
+        // Bots on: an unproven provider is dropped, and says why.
+        lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).unwrap();
+        bots(true);
+        assert!(!lifetime.window.available(), "dropped once Bots is on");
+        let error = lifetime.window.call("computer.listApps", json!({})).unwrap_err();
+        assert_eq!(error.code, "desktop_unavailable");
+        assert!(error.message == UNPROVEN && error.recovery.as_deref().is_some_and(|hint| hint.contains("Try again")), "{error:?}");
+        bots(false);
+        assert!(!lifetime.window.available(), "dropped, it does not come back by itself");
+        lifetime.window.register(&lifetime, registration(&other, &endpoint)).unwrap();
+        bots(true);
+        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "the same window, proved, serves");
+        lifetime.command("runtime.detach", other).unwrap();
+        // A registration refused for want of proof while Bots is on says why too, while it is attached.
+        let refused = attach(&lifetime);
+        lifetime.window.refused_unproven(&lifetime, &registration(&refused, &endpoint));
+        assert_eq!(lifetime.window.call("computer.listApps", json!({})).unwrap_err().message, UNPROVEN);
+        lifetime.command("runtime.detach", refused).unwrap();
+        assert_ne!(lifetime.window.call("computer.listApps", json!({})).unwrap_err().message, UNPROVEN, "detached: no window at all");
+    }
+
+    /// PRO-507: a registration that does not prove it is the window unseats
+    /// the window recognised before when it is the same process, or one this
+    /// runtime never saw prove it (a handover's); another process that
+    /// proved it here stays.
+    #[test]
+    fn an_unproven_registration_unseats_only_a_window_it_may_be() {
+        let registry = Registry::default();
+        registry.handed_over(Some((10, 1)));
+        registry.unproven_from(Some(99));
+        assert_eq!(registry.window_process(), None, "a handover's window was never proved here");
+        registry.recognise((10, 1), true);
+        registry.unproven_from(Some(99));
+        assert_eq!(registry.window_process(), Some((10, 1)), "another process does not unseat a proven window");
+        registry.unproven_from(None);
+        assert_eq!(registry.window_process(), Some((10, 1)));
+        registry.unproven_from(Some(10));
+        assert_eq!(registry.window_process(), None, "the window that cannot prove it now is no longer taken for it");
+        registry.recognise((11, 2), false);
+        registry.unproven_from(None);
+        assert_eq!(registry.window_process(), None, "one taken by where it runs is unseated");
     }
 
     #[test]

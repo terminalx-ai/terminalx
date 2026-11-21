@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { RuntimeStartFailedDialog } from "@/components/RuntimeStartFailedDialog";
+import { MachineHostError } from "@/components/machines/MachineHostError";
 import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeUnproven, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
 import { bootLocalRuntime, proveLocalRuntimeWindow, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
@@ -91,7 +92,8 @@ export function LocalRuntimeNotice() {
  * or terminal change from it: it says so, and why, and Try again registers again with the proof once Keychain is
  * unlocked. Nothing is restarted and nothing that was refused is sent again. A runtime started without the key
  * (Keychain could not be read at its launch) holds bots by where a command comes from alone: that is said too, with
- * the way to restart it with the key, and can be hidden. */
+ * the way to restart it with the key, and can be hidden. One that pinned another key than this window's Keychain holds
+ * now (it was replaced since) cannot be repaired by Try again: Restart runtime is offered in its place (PRO-507). */
 export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnproven; onHide: () => void }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -123,12 +125,18 @@ export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnp
       <div className="min-w-0 flex-1 text-xs">
         <div className="font-medium">This window can't change sessions or terminals</div>
         <p className="mt-1 text-muted-foreground">
-          While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and this one couldn't. Unlock your login Keychain and allow TerminalX access if asked, then choose Try again. Agents and terminals keep running.
+          {unproven.restart
+            ? "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and the key in Keychain was replaced after this runtime started, so only a restart lets it check this window's. Agents and terminals keep running until then."
+            : "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and this one couldn't. Unlock your login Keychain and allow TerminalX access if asked, then choose Try again. Agents and terminals keep running."}
+        </p>
+        <p className="mt-1 text-muted-foreground" data-testid="local-runtime-unproven-services">
+          Until then, terminalx commands that need this window (browser, computer, cloud, share and machine) fail too.
         </p>
         <p className="mt-1 text-muted-foreground" data-testid="local-runtime-unproven-why">{unproven.why}</p>
+        {unproven.restart && <MachineHostError error={unproven.restart} onRestarted={() => {}} className="mt-1.5" />}
         {failure && <p role="alert" className="mt-1 text-destructive">{failure}</p>}
       </div>
-      <Button variant="outline" size="sm" className="shrink-0" disabled={busy} onClick={() => void prove()}>{busy ? "Trying…" : "Try again"}</Button>
+      {!unproven.restart && <Button variant="outline" size="sm" className="shrink-0" disabled={busy} onClick={() => void prove()}>{busy ? "Trying…" : "Try again"}</Button>}
     </aside>
   );
 }

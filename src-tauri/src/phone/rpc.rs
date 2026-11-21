@@ -320,7 +320,8 @@ impl MobileRuntime {
 
     pub(crate) fn configure(self: &Arc<Self>, sink: Arc<dyn EventSink>) -> Result<()> {
         self.sink.set(sink.clone()).map_err(|_| anyhow!("mobile runtime was already configured"))?;
-        for event in ["tab_status", "session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT] {
+        // The sidebar's order and the cloud pins: what the phone's Pinned section lists (#1403).
+        for event in ["tab_status", "session_created", "session_updated", crate::session_ops::SESSION_DELETED_EVENT, "sidebar_order_changed", store::cloud_pins::CHANGED] {
             let runtime = Arc::downgrade(self);
             sink.listen(event, Box::new(move |_| {
                 if let Some(runtime) = runtime.upgrade() { runtime.broadcast_sessions_changed(); }
@@ -1020,6 +1021,15 @@ pub(crate) fn dispatch(
         "session.continue" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: ContinueParams| {
             connection.call("continue", json!({"sessionId": params.session_id, "tabId": params.tab_id, "tab": params.tab, "prompt": params.prompt}))
         })),
+        // Pins (`pin`, #1403): a session's, and a cloud project's, as the Mac's
+        // sidebar sets them; the runtime checks this device may drive again.
+        "sessions.pin" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: PinParams| {
+            connection.call("pin", json!({"sessionId": params.session_id, "pinned": params.pinned}))
+        })),
+        "cloud.pins" => no_params(&params).and_then(|_| cloud_pins_reply()),
+        "cloud.pin" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: CloudPinParams| {
+            connection.call("cloudPin", json!({"orgId": params.org_id, "identity": params.identity, "pinned": params.pinned}))
+        })),
         "chat.list" => parse_params(params).and_then(|params| list_notes(manager, params)),
         "chat.post" => parse_params(params).and_then(|params| post_note(manager, device, params)),
         "chat.promoteToAgent" => {
@@ -1101,7 +1111,9 @@ fn capabilities_for(runtime: &crate::local_runtime::client::Build, bots_on: bool
     // `questions`: `questions.respond` answers an agent's question as the desktop's card does (#979).
     // `bots`: `bots.list`, `bots.home`, `bots.items`, `bots.answer`, `bots.pause`,
     // `bots.resume` and `bots.pauseAll`, and `bot_question` notices (PRO-479).
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1), ("questions", 1), ("bots", 1)] {
+    // `pin`: `sessions.pin`, `cloud.pins` and `cloud.pin` read and set what the
+    // sidebar pins, sessions and cloud projects (#1403).
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1), ("questions", 1), ("bots", 1), ("pin", 1)] {
         if feature == "bots" && !bots_on { continue; }
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
@@ -1204,6 +1216,29 @@ struct TabControlParams {
 }
 impl TabControlParams {
     fn into_call(self) -> Value { json!({"sessionId": self.session_id, "tabId": self.tab_id}) }
+}
+
+/// Pin or unpin a session on the Mac (`sessions.pin`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PinParams {
+    session_id: String,
+    pinned: bool,
+}
+
+/// Pin or unpin a cloud project on the Mac (`cloud.pin`): by its
+/// organization and its repository identity, as the sidebar names it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CloudPinParams {
+    org_id: String,
+    identity: String,
+    pinned: bool,
+}
+
+/// The cloud projects pinned on this Mac, per organization (`cloud.pins`).
+fn cloud_pins_reply() -> Result<Value> {
+    Ok(json!({ "orgs": store::cloud_pins::load()?.orgs }))
 }
 
 #[derive(Deserialize)]
@@ -1318,8 +1353,10 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
     // The names the reader gave branches, by project, as the Mac's project list shows them.
     let labels: HashMap<String, std::collections::BTreeMap<String, String>> =
         store::projects::list()?.0.into_iter().map(|project| (project.path, project.branch_labels)).collect();
+    let live: Vec<_> = store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived).collect();
+    let ranks = pinned_ranks(&live, &index::sidebar_order()?);
     let mut sessions = Vec::new();
-    for session in store::conversation_titles::backfill()?.into_iter().filter(|session| !session.archived) {
+    for session in live {
         let summary = snippets.get(&session.id);
         // The name made for each tab, as the Mac names it (absent for a tab the
         // reader named or one nothing has been made for); older phones ignore it.
@@ -1350,6 +1387,10 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
             "lastPrompt": summary.and_then(|row| row.last_prompt.clone()),
             "lastReply": summary.and_then(|row| row.last_reply.clone()),
             "issueRef": session.issue.as_ref().map(|issue| issue.identifier.clone()),
+            // Pinned on the Mac: the phone lists it in its Pinned section (#1403),
+            // at `pinnedRank` while the sidebar is in its custom order. Older phones ignore both.
+            "pinned": session.pinned,
+            "pinnedRank": ranks.get(&session.id),
             "rowStatus": row_statuses[&session.id],
             "tabs": session.tabs.into_iter().map(|tab| json!({
                 "id": tab.id,
@@ -1370,6 +1411,23 @@ fn summaries_with_row_statuses(row_statuses: Value) -> Result<Value> {
             .cmp(&left.get("modified").and_then(Value::as_str))
     });
     Ok(json!({ "sessions": sessions }))
+}
+
+/// Where each pinned session stands in the Mac's Pinned group while the
+/// sidebar is in its custom (dragged) order, as the sidebar places them
+/// (`customSessionOrder`): sessions the saved order does not hold yet first,
+/// newest created first, then the saved order. Empty otherwise: the phone
+/// lists them by their latest activity then (#1403).
+fn pinned_ranks(sessions: &[index::SessionEntry], order: &index::SidebarOrder) -> HashMap<String, usize> {
+    if !order.custom { return HashMap::new(); }
+    let saved: HashMap<&str, usize> = order.sessions.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
+    let mut pinned: Vec<_> = sessions.iter().filter(|session| session.pinned).collect();
+    pinned.sort_by(|a, b| {
+        let (left, right) = (saved.get(a.id.as_str()), saved.get(b.id.as_str()));
+        // `None` (not saved yet) sorts before every saved place, as on the Mac.
+        left.cmp(&right).then_with(|| b.created.cmp(&a.created)).then_with(|| a.id.cmp(&b.id))
+    });
+    pinned.into_iter().enumerate().map(|(rank, session)| (session.id.clone(), rank)).collect()
 }
 
 /// What the phone's end of the connection can do (#669). Unknown fields are
@@ -2873,6 +2931,63 @@ mod tests {
         assert_ne!(conditional(before, None).unwrap()["version"], conditional(after, None).unwrap()["version"]);
     }
 
+    /// #1403: each row says whether the Mac pinned it, and where the Pinned
+    /// group places it while the sidebar is in its custom order; a change
+    /// of either tells the phone to read the list again.
+    #[test]
+    fn the_phone_summary_carries_pins_and_the_macs_pinned_order() {
+        let _home = store::temp_home();
+        let session = |id: &str, pinned: bool, created: &str| -> SessionEntry {
+            serde_json::from_value(json!({
+                "id": id, "projectPath": "/repo", "cwd": "/repo", "title": id, "created": created, "modified": created, "pinned": pinned,
+            })).unwrap()
+        };
+        index::save(&[session("older", true, "2026-01-01T00:00:00Z"), session("loose", false, "2026-01-02T00:00:00Z"), session("newer", true, "2026-01-03T00:00:00Z")]).unwrap();
+        let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(16));
+        let runtime = Arc::new(MobileRuntime::new());
+        runtime.configure(sink.clone()).unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        let invalidations = Arc::new(crate::phone::Invalidations::default());
+        runtime.register_client("phone", tx, Arc::new(std::sync::atomic::AtomicBool::new(false)), ConnectionFilter::default(), invalidations.clone());
+        let rows = || {
+            let summaries = summaries_with_row_statuses(Value::Null).unwrap();
+            summaries["sessions"].as_array().unwrap().iter()
+                .map(|row| (row["id"].as_str().unwrap().to_string(), (row["pinned"].clone(), row["pinnedRank"].clone())))
+                .collect::<HashMap<_, _>>()
+        };
+        // By latest activity: pinned, with no place of their own.
+        let plain = rows();
+        assert_eq!(plain["older"], (json!(true), Value::Null));
+        assert_eq!(plain["newer"], (json!(true), Value::Null));
+        assert_eq!(plain["loose"], (json!(false), Value::Null));
+
+        // Custom order, as the sidebar first seeds it: pinned first, newest first.
+        let order = index::set_sidebar_order(index::SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();
+        sink.emit("sidebar_order_changed", &order);
+        assert_eq!(invalidations.take(), [json!({"method":"sessions.changed"})]);
+        let seeded = rows();
+        assert_eq!((&seeded["newer"].1, &seeded["older"].1, &seeded["loose"].1), (&json!(0), &json!(1), &Value::Null));
+        // Dragged on the Mac: the phone's Pinned section follows.
+        index::set_sidebar_order(index::SidebarOrderPatch { sessions: Some(vec!["older".into(), "newer".into()]), ..Default::default() }).unwrap();
+        let dragged = rows();
+        assert_eq!((&dragged["older"].1, &dragged["newer"].1), (&json!(0), &json!(1)));
+
+        // Unpinned on the Mac: it leaves the Pinned group, and the phone is told.
+        let patch = crate::session_ops::SessionPatch { pinned: Some(false), ..Default::default() };
+        let updated = crate::session_ops::update_session_meta("older", &patch).unwrap();
+        sink.emit("session_updated", &updated);
+        assert_eq!(invalidations.take(), [json!({"method":"sessions.changed"})]);
+        let unpinned = rows();
+        assert_eq!(unpinned["older"], (json!(false), Value::Null));
+        assert_eq!(unpinned["newer"].1, json!(0));
+
+        // Cloud pins are read by `cloud.pins`, and their change is told the same way.
+        let pins = store::cloud_pins::set("org-1", "github.com/acme/web", true).unwrap();
+        sink.emit(store::cloud_pins::CHANGED, &pins);
+        assert_eq!(invalidations.take(), [json!({"method":"sessions.changed"})]);
+        assert_eq!(cloud_pins_reply().unwrap(), json!({"orgs": {"org-1": ["github.com/acme/web"]}}));
+    }
+
     #[test]
     fn the_phone_summary_names_a_tab_by_its_generated_title_beside_its_own() {
         let _home = store::temp_home();
@@ -3920,8 +4035,9 @@ mod tests {
         every["closeTab"] = json!(1);
         every["layeredConfiguration"] = json!(1);
         every["questions"] = json!(1);
+        every["pin"] = json!(1);
         assert_eq!(capabilities(&current_runtime()), every);
-        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration and answering questions came later");
+        assert_eq!(capabilities(&runtime_of(Some("0.2.22"), None)), released, "0.2.22 serves those it brought, without naming them; closing a tab, layered configuration, answering questions and pins came later");
         let app_only = json!({ "transcript": 1, "conditionalLists": 1, "promptImages": 1, "notificationFilters": 1, "prefetch": 1, "prefetchOpen": 1, "prefetchTargets": 1 });
         assert_eq!(capabilities(&runtime_of(Some("0.2.21"), None)), app_only,
             "no terminal, session controls, new sessions, Mac settings or send ids from a 0.2.21 runtime");

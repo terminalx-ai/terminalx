@@ -453,3 +453,34 @@ describe("bots", () => {
     expect(heard).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("pins on the Mac (#1403)", () => {
+  const mac = (features: Record<string, number>, answer: (method: string, params: unknown) => unknown) => vi.fn(async (method: string, params?: unknown) => method === "sync.capabilities"
+    ? { ok: true, value: features }
+    : answer(method, params));
+
+  it("pins and unpins through a Mac that names pin, and says its refusal in its own words", async () => {
+    const request = mac({ pin: 1 }, (_method, params) => (params as { sessionId?: string }).sessionId === "gone"
+      ? { ok: false, refusal: { code: "internal", message: "This session is no longer on this Mac." } }
+      : { ok: true, value: { sessionId: "s1", pinned: true } });
+    const api = hostApi(request);
+    await expect(api.pins()).resolves.toBe(true);
+    await expect(api.setPinned("s1", true)).resolves.toEqual({ done: true });
+    expect(request).toHaveBeenCalledWith("sessions.pin", { sessionId: "s1", pinned: true });
+    await expect(api.setPinned("gone", false)).resolves.toEqual({ done: false, message: "This session is no longer on this Mac.", code: "internal" });
+    await expect(api.setCloudPinned("org-1", "github.com/acme/web", true)).resolves.toEqual({ done: true });
+    expect(request).toHaveBeenCalledWith("cloud.pin", { orgId: "org-1", identity: "github.com/acme/web", pinned: true });
+  });
+
+  it("reads the Mac's cloud pins, keeping only lists of names, and asks an older Mac for none", async () => {
+    const request = mac({ pin: 1 }, () => ({ ok: true, value: { orgs: { "org-1": ["github.com/acme/web", 7, ""], "org-2": "not a list", "org-3": [] } } }));
+    await expect(hostApi(request).cloudPins()).resolves.toEqual({ "org-1": ["github.com/acme/web"] });
+    const refused = mac({ pin: 1 }, () => ({ ok: false, refusal: { code: "internal", message: "Not now." } }));
+    await expect(hostApi(refused).cloudPins()).resolves.toBeNull();
+    const older = mac({ closeTab: 1 }, () => { throw new Error("an older Mac is never asked"); });
+    const api = hostApi(older);
+    await expect(api.pins()).resolves.toBe(false);
+    await expect(api.cloudPins()).resolves.toEqual({});
+    expect(older.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
+  });
+});
