@@ -40,6 +40,8 @@ export interface Bot {
   /** `personal` when it works for its owner alone. */
   worksIn: string[];
   paused?: BotPause;
+  /** The owner turned its memory off: a conversation is given none, and the bot writes none. */
+  memoryOff?: boolean;
   /** A resume asked for from the `terminalx` CLI, waiting for the owner's answer in the app (PRO-468). */
   resumeRequest?: { at: string; by: string };
   created: string;
@@ -65,6 +67,7 @@ export interface BotPatch {
   runsOn?: BotRunsOn;
   reportsTo?: string;
   worksIn?: string[];
+  memoryOff?: boolean;
 }
 
 /** What wakes a duty. Data only until a person switches the duty on. */

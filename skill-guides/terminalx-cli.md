@@ -1901,8 +1901,8 @@ A bot is a standing role with a name: a record in `$TERMINALX_HOME/bots.json` an
 `$TERMINALX_HOME/bots/<id>/` holding `ROLE.md` (its standing instructions), `MEMORY.md` and
 `memory/`. These commands keep the records and schedule nothing. `create` also makes the bot's
 home chat: a quick chat that runs in its home folder, whose agent is given the bot's `ROLE.md`,
-the first 200 lines of its `MEMORY.md` (as its own notes, never instructions) and a few fixed
-rules each time it starts. A bot's chats are never archived for being quiet nor removed by
+the newest 200 lines of its memory (its own and its place's, as its own notes, never
+instructions) and a few fixed rules each time it starts. A bot's chats are never archived for being quiet nor removed by
 quick-chat retention.
 
 ```text
@@ -1978,6 +1978,37 @@ terminalx bots delete <bot> --json
   `not_found` for no such bot (also when it was deleted while the command ran);
   `ambiguous_selector` when several bots share the name (use the id); `internal` when the app
   cannot read or write its store, which no change to the arguments fixes.
+
+#### A bot's memory
+
+```text
+terminalx bots memory add "<note>" [--bot <bot>] [--place <place>] --json
+terminalx bots memory forget "<note>" [--line <n>] [--bot <bot>] [--place <place>] --json
+terminalx bots memory list [--bot <bot>] [--place <place>] --json
+```
+
+- `MEMORY.md` holds one dated note per line (`- 2026-11-20 <note>`). **A bot writes its memory
+  with these commands, not by editing the file**: each write is recorded in the bot's change log
+  with where it came from, and the owner can undo it. Edits made to the files directly are found
+  and recorded as "edited outside the app".
+- Run from a bot's own chat, or a session it started, the commands act on that bot's memory
+  and no other's (naming another bot answers `forbidden`). The app works out where the command
+  runs from the process that sent it; a command that only says it runs in a bot's session, and
+  whose tab's launch token does not prove it, answers `unauthorized`. From anywhere else they
+  are the owner's, and `--bot` names the bot.
+- A bot in plan mode (read and report, or paused) changes no file, but may still keep notes
+  with `add` and `forget`: they are the one exception.
+- `<place>` is `bot` (the default: notes that go with the bot), `personal`, or the id of an
+  organisation the bot works in. A conversation is given the newest of the bot's own notes and
+  of those of the place it works in, 200 lines in all; past that, the oldest notes move to
+  `memory/archive.md`. From a bot's chat only `bot` and the place that conversation works in
+  are reachable (another place answers `forbidden`); the owner manages every place.
+- A note is one line of plain text, at most 400 characters. One that looks like a key, a token
+  or a password is refused: memory never keeps secrets, and forgetting a note that held one
+  also takes it out of the change log. `forget` takes the note's text, or a part of it only one
+  note has; for one of two equal notes add `--line <n>`, its line number as `list` shows it.
+- While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
+  answer `forbidden`.
 
 ### This guide
 

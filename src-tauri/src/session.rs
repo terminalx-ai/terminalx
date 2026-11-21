@@ -6462,6 +6462,7 @@ impl SessionManager {
         // `developer_instructions` would replace the first.
         // The text itself travels in a variable the shell expands as one
         // word, never on its command line, and the agent is not left with it.
+        crate::bots::chat::look_before_launch(self.sink().as_ref(), entry);
         let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note);
         if let Some(value) = prompt.value {
             env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));

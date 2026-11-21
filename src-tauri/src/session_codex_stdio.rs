@@ -574,6 +574,7 @@ impl SessionManager {
         let (computer, bot) = {
             let entry = index::get(session)?;
             let retained = entry.tab(tab).context("This tab no longer exists")?;
+            crate::bots::chat::look_before_launch(self.sink().as_ref(), &entry);
             (crate::computer_targets::launch_args(session, retained)?, crate::bots::chat::launch_note(&entry, retained))
         };
         let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
