@@ -1326,9 +1326,20 @@ impl ControlService {
         if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
             placement.may_steer(&run)?;
         }
-        // "Start, but ask before merging" (PRO-476): the bot's sessions merge it only once its owner said Merge.
+        // PRO-476: a run a bot asked its owner about starts only on their answer, and with "Start, but ask before
+        // merging" merges only once they said Merge. Judged by the run, whoever calls: a process a bot starts outside
+        // its sessions is not placed in one. The owner's own Start and Merge are the window's and do not come here.
+        if command == "runs.start" {
+            if let Some(number) = crate::bots::runs::start_awaits_owner(&run, placement.bot.as_deref()) {
+                return Err(ControlError::new(
+                    "awaits_owner",
+                    format!("Run {} starts only on your owner's answer to item #{number}.", run.id),
+                    Some("End your turn: their Approve and start, in the TerminalX window, starts it.".into()),
+                ));
+            }
+        }
         if command == "runs.merge" {
-            if let Some(number) = placement.bot.as_deref().and_then(|bot| crate::bots::runs::merge_held(bot, &run.id)) {
+            if let Some(number) = crate::bots::runs::merge_held_for(&run, placement.bot.as_deref()) {
                 return Err(ControlError::new(
                     "merge_held",
                     format!("Your owner asked to be asked before run {} merges (item #{number}).", run.id),

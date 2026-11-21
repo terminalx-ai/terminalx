@@ -64,6 +64,12 @@ pub fn led_for(run: &Run, bot: &str) -> bool {
     index::get(&run.lead.session_id).ok().as_ref().and_then(chat::acting_bot).as_deref() == Some(bot)
 }
 
+/// Over for good: done or stopped. A failed run is not: its pieces may still be merged (`runs merge`), so it keeps
+/// its merge hold and its place on the item, and the item stays open until it is stopped or finished.
+fn settled(state: RunState) -> bool {
+    matches!(state, RunState::Done | RunState::Stopped)
+}
+
 fn state_name(state: RunState) -> String {
     serde_json::to_value(state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default()
 }
@@ -128,7 +134,7 @@ pub fn plan(sink: &dyn EventSink, bot: &Bot, number: u64, run: &str, note: Optio
         item.runs.retain(|entry| entry.run != id);
         if item.runs.len() >= MAX_RUNS {
             // The oldest that ended makes room; one still going is never forgotten.
-            match item.runs.iter().position(|entry| runs_store::get(&entry.run).map_or(true, |run| run.state.ended())) {
+            match item.runs.iter().position(|entry| runs_store::get(&entry.run).map_or(true, |run| settled(run.state))) {
                 Some(oldest) => {
                     item.runs.remove(oldest);
                 }
@@ -204,11 +210,34 @@ pub(super) fn answered(item: &mut Item, question: &Question, answer: &Answer) {
 pub(super) fn open_run(item: &Item) -> Option<String> {
     run_ids(item).into_iter().find_map(|id| {
         let run = runs_store::get(&id).ok()?;
-        (!run.state.ended()).then(|| format!("run {id} has not ended ({}).", state_name(run.state)))
+        (!settled(run.state)).then(|| format!("run {id} has not ended ({}).", state_name(run.state)))
     })
 }
 
 /// A run held from merging by an item of `bot`'s: the item's number.
+/// The bots a run is for: the one its lead works for, and the caller's own, when it is placed in a bot's session.
+fn bots_of(run: &Run, caller_bot: Option<&str>) -> Vec<String> {
+    let lead = index::get(&run.lead.session_id).ok().as_ref().and_then(chat::acting_bot);
+    let mut bots: Vec<String> = lead.into_iter().chain(caller_bot.map(str::to_owned)).collect();
+    bots.dedup();
+    bots
+}
+
+/// The item whose owner has not approved `run` yet, or said Not now: no one but the owner's answer starts it, from
+/// the control socket or anywhere else a bot can reach (PRO-476). `None` once they chose a start.
+pub fn start_awaits_owner(run: &Run, caller_bot: Option<&str>) -> Option<u64> {
+    bots_of(run, caller_bot).iter().find_map(|bot| {
+        let list = items::read(bot).ok()?;
+        list.items.iter().find(|item| item.runs.iter().any(|entry| entry.run == run.id && !matches!(entry.decision.as_str(), "start" | "startAskMerge"))).map(|item| item.number)
+    })
+}
+
+/// [`merge_held`] for every bot `run` is for, whoever asks: a process a bot starts outside its sessions is not
+/// placed in one, and is held all the same. The owner's own Merge is the window's and does not come this way.
+pub fn merge_held_for(run: &Run, caller_bot: Option<&str>) -> Option<u64> {
+    bots_of(run, caller_bot).iter().find_map(|bot| merge_held(bot, &run.id))
+}
+
 pub fn merge_held(bot: &str, run: &str) -> Option<u64> {
     let list = items::read(bot).ok()?;
     list.items.iter().find(|item| item.runs.iter().any(|entry| entry.run == run && entry.hold_merge && entry.merge_approved.is_none())).map(|item| item.number)
@@ -537,7 +566,8 @@ fn fire(manager: &SessionManager, bot: &Bot, number: u64, why: &Why<'_>) {
         }
         let still = match (&item.check_back, why) {
             (Some(check_back), Why::Time(now)) => due(check_back, *now),
-            (Some(check_back), Why::Report { .. }) => check_back.on_report,
+            // The lead that set it was told by the run itself: nothing to wake, and its time, if any, still stands.
+            (Some(check_back), Why::Report { lead, .. }) => check_back.on_report && check_back.session.as_deref() != Some(*lead),
             (None, _) => false,
         };
         if !still {
@@ -559,12 +589,6 @@ fn fire(manager: &SessionManager, bot: &Bot, number: u64, why: &Why<'_>) {
             return;
         }
     };
-    // The lead was told by the run itself: a chat that leads the run is not told twice.
-    if let Why::Report { lead, .. } = why {
-        if check_back.session.as_deref() == Some(*lead) {
-            return;
-        }
-    }
     if let Err(error) = wake(manager, bot, check_back.session.as_deref(), wake_text(number, why)) {
         log::warn!("wake bot {} to check back on item #{number}: {error:#}", bot.id);
         let again = (Utc::now() + chrono::Duration::minutes(RETRY_MINUTES)).to_rfc3339();

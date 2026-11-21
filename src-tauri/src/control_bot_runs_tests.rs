@@ -152,6 +152,9 @@ fn a_lead_bot_plans_a_run_asks_once_and_starts_it_only_on_its_owners_approval() 
     lead.bot("bots.items.check", json!({"item": number, "line": 1, "met": true})).unwrap();
     let refused = lead.bot("bots.items.done", json!({"item": number})).unwrap_err();
     assert!(refused.message.contains("has not ended (running)"), "{}", refused.message);
+    lead.set_run_state(&run.id, crate::orchestration::RunState::Failed);
+    let failed = lead.bot("bots.items.done", json!({"item": number})).unwrap_err();
+    assert!(failed.message.contains("has not ended (failed)"), "a failed run may still merge: {}", failed.message);
     lead.set_run_state(&run.id, crate::orchestration::RunState::Done);
     assert_eq!(lead.bot("bots.items.done", json!({"item": number})).unwrap()["item"]["state"], "done");
 }
@@ -167,6 +170,14 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
     let run = lead.run("run-held", &lead.chat.id, "planned");
     lead.bot("bots.items.plan", json!({"item": 1, "run": run.id})).unwrap();
     let seen = |lead: &Lead| lead.item(1).question.unwrap().id;
+    // Asked about, the run starts only on the owner's answer: not from the bot's session, nor from a process of the
+    // bot's that is not placed in one.
+    let early = lead.bot("runs.start", json!({"run": run.id})).unwrap_err();
+    assert_eq!(early.code, "awaits_owner", "{}", early.message);
+    assert_eq!(lead.service.execute("runs.start", json!({"run": run.id}), "r").unwrap_err().code, "awaits_owner");
+    // The window witnesses a chosen answer, so its proof reaches the runtime; typed words need none.
+    assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "itemAnswer", "params": {"id": lead.atlas, "number": 1, "answer": 1}})));
+    assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "itemAnswer", "params": {"id": lead.atlas, "number": 1, "text": "Later"}})));
     // An approving answer names the question the owner read; one that names none is refused and starts nothing.
     let unnamed = lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1})).unwrap_err();
     assert!(format!("{unnamed:#}").contains("from its question card"), "{unnamed:#}");
@@ -180,6 +191,12 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
 
     let held = lead.bot("runs.merge", json!({"run": run.id})).unwrap_err();
     assert_eq!(held.code, "merge_held", "{}", held.message);
+    // Held for a caller no session places too.
+    assert_eq!(lead.service.execute("runs.merge", json!({"run": run.id}), "r").unwrap_err().code, "merge_held");
+    // A failed run may still merge: it keeps its hold and keeps the item open.
+    lead.set_run_state(&run.id, crate::orchestration::RunState::Failed);
+    assert_eq!(runs::merge_held(&lead.atlas, &run.id), Some(1));
+    lead.set_run_state(&run.id, crate::orchestration::RunState::Merging);
     assert!(held.recovery.as_deref().unwrap_or_default().contains("terminalx bots items ask-merge 1"));
 
     // The bot asks; only the owner's Merge lets it go.
@@ -301,14 +318,14 @@ fn a_bot_is_woken_to_check_back_at_its_time_or_when_its_run_reports() {
 
     // On a report: the lead was told by the run itself, so a check-back set from the lead's own chat wakes nothing more;
     // one with no chat of its own wakes the home chat.
-    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "report"})).unwrap();
+    // Its time still stands: a report the lead was told of takes nothing away.
+    lead.bot("bots.items.set", json!({"item": 1, "checkBack": "2026-11-21T12:00:00Z"})).unwrap();
     runs::lead_told(&lead.service.manager, &crate::orchestration::store::get(&run.id).unwrap());
-    let cleared = (0..100).any(|_| {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        lead.item(1).check_back.is_none()
-    });
-    assert!(cleared);
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(woken().is_empty(), "the lead's own chat is not told twice");
+    assert_eq!(lead.item(1).check_back.and_then(|check_back| check_back.at).as_deref(), Some("2026-11-21T12:00:00+00:00"), "kept for its time");
+    runs::check_backs_due(&lead.service.manager, "2026-11-21T12:00:30Z".parse().unwrap());
+    assert_eq!(woken().len(), 1, "woken at its time");
     crate::bots::items::set(lead.service.sink.as_ref(), &crate::bots::get(&lead.atlas).unwrap(), 1, crate::bots::items::ItemPatch { check_back: Some("report".into()), ..Default::default() }).unwrap();
     runs::lead_told(&lead.service.manager, &crate::orchestration::store::get(&run.id).unwrap());
     let wakes = (0..100).find_map(|_| {

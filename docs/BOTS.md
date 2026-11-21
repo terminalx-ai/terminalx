@@ -335,14 +335,22 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   and names the question the owner read. "Start, but ask before merging" sets the merge hold
   first: `runs merge` from the bot is then refused with `merge_held` until the
   bot asks `ask-merge` and the owner answers Merge.
-- **Done means the run ended.** An item that links a run whose state has not
-  ended cannot be closed with `done`.
+- **Only the owner's answer starts it.** A run an item asked about is refused
+  `runs start` (`awaits_owner`) until the owner chose a start, and a held run
+  is refused `runs merge` (`merge_held`) until they said Merge. Both are judged
+  by the run, whoever calls the control socket, so a process a bot starts
+  outside its sessions is held too; the owner's own Start and Merge are the
+  window's and do not come that way. The window witnesses every chosen answer
+  (`consent::guards_request`), so its proof reaches the runtime.
+- **Done means the run ended.** An item that links a run that is not done or
+  stopped cannot be closed with `done`. A failed run counts as open: its pieces
+  may still merge, so it also keeps its merge hold and its place on the item.
 - **Checking back.** `set ITEM --check-back TIME|report|off`. The automation
   scheduler's tick (about every 30 s) wakes a bot whose time has come, and the
   orchestrator's `tell_lead` wakes it when a worker of a linked run reports;
   nothing else runs while it waits. The wake goes to the session that set it,
   or the home chat, as TerminalX's own words, never a worker's; a lead already
-  told by the run is not woken twice. A wake that cannot be sent is tried again
+  told by the run is not woken twice, and its check-back's time still stands. A wake that cannot be sent is tried again
   five minutes later and logged.
 - **What the owner sees.** The run plan card above the chat the plan was asked
   from (or the home chat, for a plan asked from a project session): the goal,
