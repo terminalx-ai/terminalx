@@ -46,7 +46,11 @@
   Cloud tab), and the row moves once the Mac has confirmed; a phone that may
   only watch is told no. Pinned cloud projects are now kept by the app rather
   than a window's preferences, so the phone reads and changes them too; those
-  pinned before are moved over once (#1403).
+  pinned before are moved over once (#1403). A pin an older build of the app
+  sets afterwards is moved over on the next launch too, rather than dropped;
+  one entry that could never be pinned no longer stops the others moving; the
+  sidebar says when the pins could not be read, with Try again; and pins are
+  kept for at most 100 organizations (PRO-510).
 - Bots (experimental): below Full access a bot asks before it fetches a web
   page (`WebFetch`), at Read and report as it asks before a report: the
   address can carry what it read off this computer, and the card shows it. A

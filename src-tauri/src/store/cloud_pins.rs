@@ -3,8 +3,9 @@
 //! A cloud project is pinned on this computer, not on the server: it was kept
 //! in the window's preferences (`cloudPinned`), where only the window could
 //! read it. It lives here so a paired phone reads and changes the same pins
-//! as the sidebar. The window moves what its preferences held over once
-//! ([`adopt`]), so no pin set before is lost.
+//! as the sidebar. The window moves what its preferences hold over
+//! ([`adopt`]) and then clears them there, so no pin set before is lost, nor
+//! one an older build, which keeps pins in the preferences still, sets later.
 //!
 //! A project is named by its repository identity (`host/owner/name`), or
 //! `blank/<name>` for a project with no repository, as the sidebar names it.
@@ -26,13 +27,17 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// reader's choice, never a list a client may grow without end.
 const MOST_PER_ORG: usize = 500;
 const LONGEST: usize = 512;
+/// How many organizations may hold pins: any organization id is taken (a
+/// phone's `cloud.pin` names one), so their number is bounded too.
+const MOST_ORGS: usize = 100;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CloudPins {
     /// Pinned projects by organization id, in the order they were pinned.
     pub orgs: BTreeMap<String, Vec<String>>,
-    /// The window's preferences were moved here: later ones are not read again.
+    /// The window's preferences were moved here once: a later launch moves
+    /// them again only when they hold a pin (one an older build set).
     pub adopted: bool,
     /// Fields a newer build wrote, kept as they are.
     #[serde(flatten)]
@@ -70,33 +75,40 @@ fn check(org_id: &str, identity: &str) -> Result<()> {
 pub fn set(org_id: &str, identity: &str, pinned: bool) -> Result<CloudPins> {
     check(org_id, identity)?;
     update(|pins| {
-        let list = pins.orgs.entry(org_id.to_string()).or_default();
-        let present = list.iter().any(|entry| entry == identity);
-        if pinned && !present {
-            if list.len() >= MOST_PER_ORG { bail!("This organization has as many pinned projects as it can hold."); }
-            list.push(identity.to_string());
-        } else if !pinned && present {
-            list.retain(|entry| entry != identity);
-        }
+        if pinned { return add(pins, org_id, identity); }
+        if let Some(list) = pins.orgs.get_mut(org_id) { list.retain(|entry| entry != identity); }
         Ok(())
     })
 }
 
-/// Take in the pins the window's preferences held, once: the first call adds
-/// them to what is here, and every later call changes nothing. The window
-/// clears its own copy once this has answered.
-pub fn adopt(window: BTreeMap<String, Vec<String>>) -> Result<CloudPins> {
-    for (org_id, list) in &window {
-        for identity in list { check(org_id, identity)?; }
+/// Pin `identity` in `org_id`: refused past [`MOST_ORGS`] organizations or
+/// [`MOST_PER_ORG`] pins in one. One already pinned is pinned once.
+fn add(pins: &mut CloudPins, org_id: &str, identity: &str) -> Result<()> {
+    if !pins.orgs.contains_key(org_id) && pins.orgs.len() >= MOST_ORGS {
+        bail!("Projects are pinned in as many organizations as this computer keeps.");
     }
+    let list = pins.orgs.entry(org_id.to_string()).or_default();
+    if list.iter().any(|entry| entry == identity) { return Ok(()); }
+    if list.len() >= MOST_PER_ORG { bail!("This organization has as many pinned projects as it can hold."); }
+    list.push(identity.to_string());
+    Ok(())
+}
+
+/// Take in the pins a window's preferences hold, adding to what is here and
+/// never removing: the first launch's move, and a pin an older build set in
+/// the preferences since. The window clears its own copy once this has
+/// answered. An entry that could never be pinned (empty, too long, a control
+/// character), or one past the limits, is left out rather than refusing the
+/// rest: refused, the move would fail the same way on every launch.
+pub fn adopt(window: BTreeMap<String, Vec<String>>) -> Result<CloudPins> {
     update(|pins| {
-        if pins.adopted { return Ok(()); }
+        let mut left_out = 0;
         for (org_id, list) in window {
-            let saved = pins.orgs.entry(org_id).or_default();
             for identity in list {
-                if saved.len() < MOST_PER_ORG && !saved.contains(&identity) { saved.push(identity); }
+                if check(&org_id, &identity).and_then(|()| add(pins, &org_id, &identity)).is_err() { left_out += 1; }
             }
         }
+        if left_out > 0 { log::warn!("{left_out} of the window's cloud pins were not moved: not valid, or past the limits"); }
         pins.adopted = true;
         Ok(())
     })
@@ -138,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_pins_from_the_window_are_adopted_once() {
+    fn cloud_pins_from_the_window_are_moved_and_only_ever_added() {
         let _home = crate::store::temp_home();
         set("org-1", "github.com/acme/api", true).unwrap();
         let window = BTreeMap::from([("org-1".to_string(), vec!["github.com/acme/web".to_string(), "github.com/acme/api".to_string()]), ("org-2".to_string(), vec!["blank/notes".to_string()])]);
@@ -146,10 +158,39 @@ mod tests {
         assert!(pins.adopted);
         assert_eq!(pins.orgs["org-1"], ["github.com/acme/api", "github.com/acme/web"]);
         assert_eq!(pins.orgs["org-2"], ["blank/notes"]);
-        // Unpinned here after the move, a pin the window still holds does not come back.
+        // Moved again later, which the window does only with a pin an older
+        // build set in its preferences since: added, nothing taken away.
         set("org-2", "blank/notes", false).unwrap();
-        let pins = adopt(window).unwrap();
+        let pins = adopt(BTreeMap::from([("org-1".to_string(), vec!["github.com/acme/site".to_string()])])).unwrap();
+        assert_eq!(pins.orgs["org-1"], ["github.com/acme/api", "github.com/acme/web", "github.com/acme/site"]);
         assert!(!pins.orgs.contains_key("org-2"));
         assert_eq!(forget_orgs(&["org-1".to_string()]).unwrap().orgs, BTreeMap::new());
+    }
+
+    #[test]
+    fn cloud_pins_leave_out_what_could_never_be_pinned_and_are_bounded_in_organizations() {
+        let _home = crate::store::temp_home();
+        // One invalid entry is left out; the rest are moved, so the move does not fail every launch.
+        let window = BTreeMap::from([
+            ("org-1".to_string(), vec!["github.com/acme/web".to_string(), " ".to_string(), "bad\u{7}name".to_string(), "x".repeat(LONGEST + 1)]),
+            ("".to_string(), vec!["github.com/acme/api".to_string()]),
+        ]);
+        let pins = adopt(window).unwrap();
+        assert!(pins.adopted);
+        assert_eq!(orgs(&pins), [("org-1".to_string(), vec!["github.com/acme/web".to_string()])]);
+
+        // Any organization id is taken, but only so many organizations hold pins.
+        for org in 2..=MOST_ORGS {
+            set(&format!("org-{org}"), "blank/notes", true).unwrap();
+        }
+        assert_eq!(load().unwrap().orgs.len(), MOST_ORGS);
+        assert!(set("org-new", "blank/notes", true).unwrap_err().to_string().contains("as many organizations"));
+        // One that holds pins still takes another, and unpinning frees a place.
+        set("org-1", "github.com/acme/api", true).unwrap();
+        set("org-2", "blank/notes", false).unwrap();
+        set("org-new", "blank/notes", true).unwrap();
+        // Moved past the limit, the rest is left out, not the move refused.
+        let pins = adopt(BTreeMap::from([("org-other".to_string(), vec!["blank/notes".to_string()])])).unwrap();
+        assert!(!pins.orgs.contains_key("org-other") && pins.orgs.len() == MOST_ORGS);
     }
 }

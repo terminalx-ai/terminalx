@@ -1,3 +1,4 @@
+import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -23,7 +24,7 @@ function backend(command: string, args?: { edit?: { kind: string; orgId?: string
   const edit = args?.edit;
   if (command === "edit_cloud_pins" && edit) {
     const orgs = { ...mocks.saved.orgs };
-    if (edit.kind === "adopt" && !mocks.saved.adopted) {
+    if (edit.kind === "adopt") {
       for (const [orgId, list] of Object.entries(edit.orgs ?? {})) orgs[orgId] = [...new Set([...(orgs[orgId] ?? []), ...list])];
       mocks.saved = { orgs, adopted: true };
     } else if (edit.kind === "set") {
@@ -59,12 +60,32 @@ describe("cloud pins kept by the app (#1403)", () => {
     expect(mocks.invoke.mock.calls.map(([command]) => command)).toEqual(["cloud_pins"]);
   });
 
+  it("moves a pin an older build set in the preferences after the move, and clears it there", async () => {
+    mocks.saved = { orgs: { "org-1": ["github.com/acme/api"] }, adopted: true };
+    // An older build keeps pins in the preferences still: run after the move, it pinned one there.
+    const { prefs, pins } = await launch({ "org-1": ["github.com/acme/site"] });
+    await pins.bootCloudPins();
+    expect(mocks.invoke).toHaveBeenCalledWith("edit_cloud_pins", { edit: { kind: "adopt", orgs: { "org-1": ["github.com/acme/site"] } } });
+    expect(pins.getCloudPins()).toEqual({ "org-1": ["github.com/acme/api", "github.com/acme/site"] });
+    expect(prefs.getPrefs().cloudPinned).toEqual({});
+  });
+
   it("keeps the window's pins when the app could not be read", async () => {
     mocks.invoke.mockImplementation(async () => { throw new Error("runtime restarting"); });
     const { prefs, pins } = await launch({ "org-1": ["github.com/acme/web"] });
     await pins.bootCloudPins();
     expect(prefs.getPrefs().cloudPinned).toEqual({ "org-1": ["github.com/acme/web"] });
     expect(pins.cloudPinsError()).toContain("runtime restarting");
+
+    // The sidebar shows it until a read succeeds; tried again once the app
+    // answers, the error goes and the pins are moved then.
+    const { result } = renderHook(() => pins.useCloudPinsError());
+    expect(result.current).toContain("runtime restarting");
+    mocks.invoke.mockImplementation(backend);
+    await act(() => pins.bootCloudPins());
+    expect(result.current).toBeNull();
+    expect(pins.getCloudPins()).toEqual({ "org-1": ["github.com/acme/api", "github.com/acme/web"] });
+    expect(prefs.getPrefs().cloudPinned).toEqual({});
   });
 
   it("pins through the app, follows another window's or a phone's change, and forgets organizations left", async () => {
