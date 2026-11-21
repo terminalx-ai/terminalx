@@ -673,9 +673,10 @@ pub fn take_in(store: &mut Store, bot: &Bot, service: &str, account: &str, messa
     let notice = |store: &mut Store, text: String| {
         store.outbox.push(Kept::Known(outgoing(&bot.id, service, chat, "notice", text, message_id, thread)));
     };
-    // A code waiting for this bot: a message that is one links its chat; a wrong one from a chat not linked counts
-    // against that chat, and is answered only when it was sent as a command (`/start CODE`, `/link CODE`): a word
-    // that only looks like a code ("thanks") is a message, not a try.
+    // A code waiting for this bot: a message that is one links its chat; a wrong one counts against that chat and
+    // the code, from any chat (a member of a linked group who could guess freely would link it as theirs). From a
+    // chat not linked it goes no further, answered only when it was sent as a command (`/start CODE`, `/link CODE`):
+    // a word that only looks like a code ("thanks") is sent nothing. From a linked chat it is a message as well.
     let command = text.trim_start().starts_with('/');
     let linked_here = store.link(&bot.id, service, chat).is_some();
     if let Some(code) = code_in(text) {
@@ -712,9 +713,9 @@ pub fn take_in(store: &mut Store, bot: &Bot, service: &str, account: &str, messa
                 notice(store, format!("Linked to {name} in TerminalX. {reach} Unlink it in TerminalX → {name} → Settings → Channels.", name = bot.name));
                 return Taken::Linked(link);
             }
+            waiting.tries += 1;
+            *waiting.wrong.entry(chat.clone()).or_default() += 1;
             if !linked_here {
-                waiting.tries += 1;
-                *waiting.wrong.entry(chat.clone()).or_default() += 1;
                 if command {
                     notice(store, "That code is not right, or it is no longer good: make a new one in TerminalX.".into());
                 }

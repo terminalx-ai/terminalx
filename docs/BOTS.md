@@ -817,8 +817,9 @@ its row stays off.
   five wrong codes can no longer link with that code, and other chats still
   can, so someone who finds the bot cannot use up the owner's tries. Two
   hundred wrong codes from all chats end the code, which keeps guessing one
-  (one in 32⁶) out of reach. A wrong code from a linked chat is a message,
-  not a try. Only a wrong code sent as a command (`/start`, `/link`) is
+  (one in 32⁶) out of reach. A wrong code from a linked chat counts too (a
+  member of a linked group who guessed right would become its owner), and
+  is still taken as a message. Only a wrong code sent as a command (`/start`, `/link`) is
   answered "not right"; a word that only looks like a code ("thanks") is
   sent nothing.
 - **Unlinking needs a person (PRO-509).** `chatAppUnlink` is signed by the

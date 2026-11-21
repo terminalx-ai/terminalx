@@ -131,6 +131,23 @@ fn a_code_that_is_old_or_tried_too_often_links_nothing() {
     assert!(matches!(take_in(&mut store, &bot, SLACK, "acct", &message("late", "D-owner", true, person("U-owner", "P", None), &code.code)), Taken::NotAccepted(_)));
 }
 
+/// PRO-509: a member of a linked group who guesses codes there uses up that chat's tries like anyone: a right guess
+/// would link the group again with them as its owner.
+#[test]
+fn a_linked_chat_guessing_codes_uses_up_its_tries_too() {
+    let _home = bots_on();
+    let bot = bot_with(json!([]));
+    let mut store = Store::default();
+    linked(&mut store, &bot.id, TELEGRAM, "-100", false);
+    let code = new_code(&mut store, &bot.id, TELEGRAM);
+    for attempt in 0..CODE_TRIES {
+        let _ = take_in(&mut store, &bot, TELEGRAM, "acct", &message(&format!("x{attempt}"), "-100", false, person("8", "Ankit", None), "/link ZZZZZZ"));
+    }
+    assert_eq!(store.codes().next().map(|code| (code.tries, code.wrong.get("-100").copied())), Some((CODE_TRIES, Some(CODE_TRIES))));
+    assert!(matches!(take_in(&mut store, &bot, TELEGRAM, "acct", &message("right", "-100", false, person("8", "Ankit", None), &format!("/link {}", code.code))), Taken::NotAccepted(_)));
+    assert_eq!(store.link(&bot.id, TELEGRAM, "-100").map(|link| link.user.as_str()), Some("7"), "the group's owner is still who linked it");
+}
+
 #[test]
 fn the_view_never_shows_a_waiting_code() {
     let _home = bots_on();
