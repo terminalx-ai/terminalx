@@ -274,3 +274,34 @@ fn a_delete_stops_the_bots_sessions_and_gives_back_nothing() {
         assert!(!tab.unknown.contains_key(chat::HELD_FROM_KEY), "{id}");
     }
 }
+
+/// PRO-470: a role put back, or a change to it undone, reaches the bot's
+/// agents as a role write does; a note, or undoing one, restarts nothing.
+#[test]
+fn a_role_put_back_or_undone_starts_the_bots_agents_again() {
+    let _home = bots_on();
+    let (manager, terminals, sink) = manager();
+    let bot = chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let home = chat::home_chat(sink.as_ref(), &bot.id).unwrap();
+    set_status(&home, TabStatus::Completed);
+    let home = index::get(&home.id).unwrap();
+    let restart = || running(&manager, &terminals, &sink, &home);
+
+    let pane = restart();
+    let added = call(&manager, "memoryAdd", &serde_json::json!({"id": bot.id, "place": "bot", "text": "Status updates go in a table."})).unwrap();
+    call(&manager, "memoryUndo", &serde_json::json!({"id": bot.id, "change": added[0]["id"]})).unwrap();
+    assert!(terminals.is_running(&pane), "a note restarts no agent");
+
+    call(&manager, "roleWrite", &serde_json::json!({"id": bot.id, "text": "Plan the work.\n"})).unwrap();
+    until("a role write starts it again", || !terminals.is_running(&pane));
+    let role_change = crate::bots::changes::read_log(&bot.id).unwrap().changes.into_iter().rev().find(|change| change.kind == "role").unwrap().id;
+
+    let pane = restart();
+    call(&manager, "memoryUndo", &serde_json::json!({"id": bot.id, "change": role_change})).unwrap();
+    until("a role change undone starts it again", || !terminals.is_running(&pane));
+
+    let pane = restart();
+    call(&manager, "roleRestore", &serde_json::json!({"id": bot.id, "change": role_change})).unwrap();
+    until("a role put back starts it again", || !terminals.is_running(&pane));
+    assert!(std::fs::read_to_string(crate::store::bots::home_dir(&bot.id).unwrap().join("ROLE.md")).unwrap().contains("Plan the work."));
+}
