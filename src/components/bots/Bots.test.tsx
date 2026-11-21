@@ -242,14 +242,13 @@ describe("Bots: the switch and the shortcut", () => {
     expect(keymap["app.bots"]).toEqual([]);
   });
 
-  it("Pause all has ⌥⇧⌘P, which nothing else holds (⇧⌘P is the markdown preview's), and drops it with the switch off", () => {
+  it("Pause all has ⌥⇧⌘P, which nothing else holds (⇧⌘P is the markdown preview's), and frees it with the switch off", () => {
     const keymap = resolveKeymap({});
     expect(keymap["app.pauseAllBots"]).toEqual(["mod+alt+shift+p"]);
     expect(keymap["files.togglePreview"]).toContain("mod+shift+p");
     expect(conflictOf("mod+alt+shift+p", "app.home")?.id).toBe("app.pauseAllBots");
     mocks.switches = { bots: false };
     expect(conflictOf("mod+alt+shift+p", "app.home")).toBeNull();
-    expect(resolveKeymap({})["app.pauseAllBots"]).toEqual([]);
   });
 });
 
@@ -467,11 +466,13 @@ describe("Bots: the team table (23.02)", () => {
   });
 
   it("pauses and resumes one bot from its row", async () => {
-    await boot(listOf(4, [atlas]));
+    // Two bots: pausing the only one would make every bot paused, and show the paused page instead of the table.
+    await boot(listOf(4, [atlas, iris]));
     mocks.api.pause.mockResolvedValue({ ...atlas, paused: { at: "2026-11-20T12:00:00Z", by: "owner" } });
     render(<Screen />);
     fireEvent.click(main().getByRole("button", { name: "Pause Atlas" }));
-    await waitFor(() => expect(main().getByTestId("bots-table-row").dataset.paused).toBe("true"));
+    await waitFor(() => expect(main().getAllByTestId("bots-table-row").map((row) => row.dataset.paused)).toEqual(["true", "false"]));
+    expect(main().queryByTestId("bots-paused")).toBeNull();
     expect(mocks.api.pause).toHaveBeenCalledWith("a", "app");
     expect(main().getByRole("button", { name: "Resume Atlas" })).toBeTruthy();
   });

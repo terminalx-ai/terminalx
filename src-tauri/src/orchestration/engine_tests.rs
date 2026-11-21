@@ -686,6 +686,25 @@ fn a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each
 }
 
 #[test]
+fn a_run_its_paused_lead_starts_before_any_worker_is_started_on_the_resume_and_the_lead_is_told() {
+    let _home = crate::store::temp_home();
+    let (host, run) = started_free();
+    let id = run.id.as_str();
+    assert_eq!(store::get(id).unwrap().state, RunState::Planned);
+
+    // The lead's first `runs start` while its bot is paused: refused, and the run counts as started.
+    *host.paused_bot.lock().unwrap() = Some("Atlas".into());
+    assert_eq!(engine::start(&host, id).unwrap_err().code, "bot_paused");
+    assert!(host.made().is_empty(), "no worker starts while paused");
+    assert_eq!(store::get(id).unwrap().state, RunState::Running);
+
+    *host.paused_bot.lock().unwrap() = None;
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map"], "its ready piece starts on the resume");
+    assert!(host.world().told.iter().any(|text| text.contains("resumed you") && text.contains("map")), "the lead is told: {:?}", host.world().told);
+}
+
+#[test]
 fn start_starts_only_the_pieces_whose_dependencies_are_done() {
     let _home = crate::store::temp_home();
     let (host, run) = started_free();

@@ -318,7 +318,8 @@ const SAID: Record<string, string> = { answer: "Your answer", comment: "Your com
 
 /**
  * The owner's messages about this item that have not reached the bot yet, as the app keeps them: each is sent to the
- * home chat once its agent next starts, or now with Send again, and cleared only once sent.
+ * home chat once its agent next starts, or now with Send again, and cleared only once sent. A paused bot's wait for its
+ * resume, which sends them.
  */
 function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
   const [busy, setBusy] = useState(false);
@@ -331,11 +332,19 @@ function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
     resendBotItem(bot.id, item.number).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
   const why = waiting[waiting.length - 1]?.error;
+  // A paused bot gets nothing from a chat start, and Send again is refused: only its resume sends these (PRO-474).
+  const paused = !!bot.paused;
   return (
     <section aria-label="Not delivered yet" role="alert" className="flex min-w-0 flex-col gap-2 rounded-lg bg-warning/10 px-4 py-3 text-[12.5px] text-warning" data-testid="bot-item-undelivered">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <p className="min-w-0 flex-1 font-medium">Not delivered yet: {bot.name} gets {waiting.length === 1 ? "this" : "these"} when its home chat next starts{why ? ` (${why})` : ""}.</p>
-        <Button size="xs" variant="outline" disabled={busy} onClick={again}>{busy ? <Loader2 className="animate-spin" /> : null} Send again</Button>
+        {paused ? (
+          <p className="min-w-0 flex-1 font-medium">Kept while paused: {bot.name} gets {waiting.length === 1 ? "this" : "these"} when you resume it.</p>
+        ) : (
+          <>
+            <p className="min-w-0 flex-1 font-medium">Not delivered yet: {bot.name} gets {waiting.length === 1 ? "this" : "these"} when its home chat next starts{why ? ` (${why})` : ""}.</p>
+            <Button size="xs" variant="outline" disabled={busy} onClick={again}>{busy ? <Loader2 className="animate-spin" /> : null} Send again</Button>
+          </>
+        )}
       </div>
       <ul className="flex flex-col gap-1">
         {waiting.map((message) => (

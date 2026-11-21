@@ -95,7 +95,7 @@ export function BotsPaused({ bots, busy, onResumeAll, onError, children }: { bot
             {bots.length === 1 ? `${bots[0].name} is paused` : bots.length === 2 ? "Both bots are paused" : `All ${numberWord(bots.length)} bots are paused`}
           </h2>
           <p className="mt-0.5 text-[12.5px] leading-5 text-muted-foreground" data-testid="bots-paused-by">
-            {pausedBySentence(bots)} {inTurn > 0 ? `Nothing new starts on its own; ${inTurn === 1 ? "1 worker finishes the step it is on" : `${inTurn} workers finish the step they are on`}, then stops.` : "Nothing runs on its own and nothing more is spent."} A message you send to a bot is still answered, and the answer says the bot is paused.
+            {pausedBySentence(bots)} {inTurn > 0 ? `Nothing new starts on its own; ${inTurn === 1 ? "1 worker finishes the step it is on" : `${inTurn} workers finish the step they are on`}, then stops.` : "Nothing runs on its own."} A message you send to a bot is still answered, and the answer says the bot is paused; answering is the only thing it spends on.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
@@ -239,7 +239,7 @@ function WhatPauseDoes() {
     { icon: CircleStop, warn: true, title: "Stops everything unattended", text: "Duties, look-arounds, hand-offs and runs. A worker finishes the step it is on, then stops." },
     { icon: MessageSquare, title: "Keeps direct chat", text: "Your own messages are answered. The bot starts no work from them until you resume." },
     { icon: Inbox, title: "Keeps what arrives", text: "Events are kept and handled on resume. Scheduled checks that were due are skipped, not run late." },
-    { icon: Receipt, title: "Stops spending", text: "No new turn starts, so nothing more is spent once the workers finish their step." },
+    { icon: Receipt, title: "Stops spending", text: "Nothing starts on its own, so once the workers finish their step only the answers to your own messages are spent on." },
   ];
   return (
     <aside className="w-full shrink-0 @5xl/editor-host:w-[300px]" aria-labelledby="bots-pause-does" data-testid="bots-pause-does">

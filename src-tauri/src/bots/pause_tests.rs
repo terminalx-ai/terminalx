@@ -113,9 +113,16 @@ fn a_paused_bots_run_worker_finishes_the_step_it_is_on_and_takes_plan_mode_after
     assert!(tab.unknown.contains_key(chat::HELD_FROM_KEY), "the mode it had is given back on resume");
 
     // The paused page counts it as still in its step.
-    let held = held(&manager).unwrap();
-    let atlas_now = held["bots"].as_array().unwrap().iter().find(|bot| bot["id"] == atlas.id.as_str()).unwrap().clone();
-    assert_eq!(atlas_now["inTurn"], 1, "{held}");
+    let finishing = held(&manager).unwrap();
+    let atlas_now = finishing["bots"].as_array().unwrap().iter().find(|bot| bot["id"] == atlas.id.as_str()).unwrap().clone();
+    assert_eq!(atlas_now["inTurn"], 1, "{finishing}");
+
+    // Its owner's message answered while paused is a chat in a turn, not a worker finishing its step.
+    let home = chat::home_chat(sink.as_ref(), &atlas.id).unwrap();
+    in_a_turn(&manager, &terminals, &sink, &home);
+    let answering = held(&manager).unwrap();
+    let atlas_now = answering["bots"].as_array().unwrap().iter().find(|bot| bot["id"] == atlas.id.as_str()).unwrap().clone();
+    assert_eq!(atlas_now["inTurn"], 1, "the chat answering is not counted: {answering}");
 }
 
 #[test]

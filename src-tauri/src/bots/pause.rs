@@ -301,7 +301,7 @@ pub fn held(manager: &SessionManager) -> Result<Value> {
 
     entries.sort_by(|a, b| a["at"].as_str().unwrap_or_default().cmp(b["at"].as_str().unwrap_or_default()));
 
-    // What of each bot is in a turn still (a paused bot's workers finishing their step), and its questions open.
+    // Each bot's run workers in a turn still (a paused bot's, finishing their step), and its questions open.
     // Spend is read apart (`spentToday`, per bot): it reads every transcript, and this is read whenever a pause
     // changes what it holds.
     let per_bot: Vec<Value> = bots
@@ -309,7 +309,8 @@ pub fn held(manager: &SessionManager) -> Result<Value> {
         .map(|bot| {
             let finishing: usize = sessions
                 .iter()
-                .filter(|entry| !entry.archived && acting_bot(entry).as_deref() == Some(bot.id.as_str()))
+                // Only a run's workers finish a step: a chat in a turn while paused is the bot answering its owner.
+                .filter(|entry| !entry.archived && finishes_its_step(entry) && acting_bot(entry).as_deref() == Some(bot.id.as_str()))
                 .flat_map(|entry| entry.tabs.iter().filter(|tab| !tab.is_terminal() && in_turn(tab) && manager.is_running(&entry.id, &tab.id)))
                 .count();
             json!({"id": bot.id, "inTurn": finishing, "needsYou": asking.get(&bot.id).copied().unwrap_or(0)})

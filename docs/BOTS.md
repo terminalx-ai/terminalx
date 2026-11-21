@@ -319,7 +319,8 @@ Pause is a thin layer over the pause record (`BotPause` in `bots.json`) and
   `reconcile` asks for plan mode, applied when the turn ends, and keeps the
   mode it had for resume. Every other tab in a turn is stopped, as before.
   The orchestration engine starts no worker in a run led by a paused bot
-  (`Host::held_by_pause`; starting one by hand fails with `bot_paused`). On
+  (`Host::held_by_pause`; starting one by hand fails with `bot_paused`, and a
+  run not started yet counts as started, so its resume starts it). On
   resume, `orchestration::engine::bot_resumed` starts what became ready, once,
   and tells the lead.
 - **What is kept and what is skipped.** Due scheduled duty runs are skipped
@@ -331,8 +332,8 @@ Pause is a thin layer over the pause record (`BotPause` in `bots.json`) and
   its rules tell it to say first that it is paused.
 - **What is held.** `bots_pause_held` (`bots::pause::held`) reads, where each
   is kept: skipped runs since the pause, event duties, waiting hand-offs and
-  messages, and kept answers, with every bot's tabs still in a turn and open
-  questions. A part that cannot be read is listed in `errors`. Spend is read
+  messages, and kept answers, with every bot's run workers still in a turn
+  (not its chats answering the owner) and open questions. A part that cannot be read is listed in `errors`. Spend is read
   apart (`bot_spent_today`); since the pause is today's spend less the pause's
   record. The window reads it only while some bot is paused
   (`src/lib/botPause.ts`).

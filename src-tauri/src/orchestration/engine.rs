@@ -754,6 +754,21 @@ fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, Engi
     // A paused bot's run starts no worker (PRO-474): what is ready stays ready, and starts on its resume. A
     // person's own start is told why; the engine's own (a retry, a free slot) simply waits.
     if let Some(bot) = host.held_by_pause(&run) {
+        // The lead's own start of a run not started yet starts it, as a start every worker limit holds does: it is
+        // running with nothing in a turn, so the resume (`bot_resumed`) starts its ready pieces.
+        let run = if matches!(launch, Launch::Ready) && run.state == RunState::Planned {
+            let (run, ()) = store::update(id, |run| {
+                if run.state == RunState::Planned {
+                    run.state = RunState::Running;
+                }
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            changed(host, &run);
+            run
+        } else {
+            run
+        };
         if matches!(launch, Launch::Ready) && run.ready().iter().any(|piece| piece.state == PieceState::Queued) {
             let mut error = EngineError::new(
                 "bot_paused",

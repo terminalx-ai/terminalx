@@ -57,6 +57,7 @@ export type PauseHeldEntry =
 
 /** What the paused bots hold (PRO-474): every bot's turns still going and its open questions, and the held list. */
 export interface PauseHeld {
+  /** `inTurn`: its run workers in a turn (a paused bot's, finishing their step); its chats answering you are not counted. */
   bots: { id: string; inTurn: number; needsYou: number }[];
   entries: PauseHeldEntry[];
   /** A part that could not be read: said, never shown as nothing held. */
