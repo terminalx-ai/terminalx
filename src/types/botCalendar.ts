@@ -4,7 +4,7 @@ import type { QuietHours } from "@/types/botDuties";
  * What a block on the week's grid says (PRO-473): the four states of the design (ran and did its work, ran and
  * reported, ran and found nothing new, still to come), and the run log's others as they are.
  */
-export type BlockState = "done" | "reported" | "quiet" | "next" | "running" | "failed" | "skipped";
+export type BlockState = "done" | "reported" | "quiet" | "next" | "running" | "failed" | "stopped" | "skipped";
 
 /** One run, or a time still to come, of a duty drawn on the grid (`bots::calendar::Block`). */
 export interface CalendarBlock {
@@ -18,6 +18,8 @@ export interface CalendarBlock {
   state: BlockState;
   /** The runs it stands for: more than one only for repeats the log keeps no time of. */
   count: number;
+  /** How long its run went on (to now while it runs), when the log says; absent from an older runtime. */
+  minutes?: number;
   runId?: string;
   sessionId?: string;
   note?: string;

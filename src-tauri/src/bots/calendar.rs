@@ -59,6 +59,8 @@ pub enum BlockState {
     Running,
     /// Its check failed, or it timed out.
     Failed,
+    /// It began, and was stopped before it finished.
+    Stopped,
     /// Its time passed without a run: the app was closed, its bot was paused, or its previous run had not finished.
     Skipped,
 }
@@ -77,6 +79,9 @@ pub struct Block {
     pub state: BlockState,
     /// The runs it stands for: more than one only for repeats the log keeps no time of.
     pub count: u32,
+    /// How long its run went on, to its end or to now while it runs, when the log says: a block for one run only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -250,6 +255,8 @@ fn event_trigger(trigger: AutomationTrigger) -> bool {
 /// What a run's block shows.
 fn state_of(run: &AutomationRun) -> BlockState {
     match run.status {
+        // A run that began (its check or its agent) and was then stopped: not a time that passed without one.
+        AutomationRunStatus::Cancelled if woke(run) => BlockState::Stopped,
         AutomationRunStatus::Pending | AutomationRunStatus::Running => BlockState::Running,
         AutomationRunStatus::SkippedPrecheck => BlockState::Quiet,
         AutomationRunStatus::Failed | AutomationRunStatus::TimedOut => BlockState::Failed,
@@ -268,6 +275,18 @@ fn state_of(run: &AutomationRun) -> BlockState {
 /// Whether a run looked at something: not a time that passed while the app was closed or the bot paused.
 fn woke(run: &AutomationRun) -> bool {
     run.status != AutomationRunStatus::SkippedMissed && !(run.status == AutomationRunStatus::Cancelled && run.precheck.is_none() && run.session_id.is_none())
+}
+
+/// How many whole minutes a run went on, from when it was due (or began) to its end, or to `now` while it runs; `None`
+/// when the log does not say, or for a run of a few seconds.
+fn run_minutes(run: &AutomationRun, now: DateTime<Utc>) -> Option<u32> {
+    let from = first_time(run)?;
+    let to = match run.status {
+        AutomationRunStatus::Pending | AutomationRunStatus::Running => now,
+        _ => parse(run.ended_at.as_deref())?,
+    };
+    let minutes = to.signed_duration_since(from).num_minutes();
+    (minutes > 0).then(|| minutes.min(7 * 24 * 60) as u32)
 }
 
 /// When a run happened, and when each of its folded repeats did in the week
@@ -392,7 +411,9 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
 
         let mut ran_at = BTreeSet::new();
         for run in entry.runs {
-            for (at, count) in times_of(duty, run, start, end) {
+            // A folded row's end is its last repeat's: only a row of one run has a length.
+            let length = if run.repeat_count <= 1 { run_minutes(run, now) } else { None };
+            for (index, (at, count)) in times_of(duty, run, start, end).into_iter().enumerate() {
                 ran_at.insert(at);
                 let Some((day, minute)) = place(at) else { continue };
                 let state = state_of(run);
@@ -433,9 +454,10 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
                         at: at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                         state,
                         count,
+                        minutes: if index == 0 { length } else { None },
                         run_id: Some(run.run_id.clone()),
                         session_id: run.session_id.clone(),
-                        note: matches!(state, BlockState::Failed | BlockState::Skipped).then(|| run.error.as_deref().map(capped_note)).flatten(),
+                        note: matches!(state, BlockState::Failed | BlockState::Skipped | BlockState::Stopped).then(|| run.error.as_deref().map(capped_note)).flatten(),
                     }),
                 }
             }
@@ -463,6 +485,7 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
                     at: at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     state: BlockState::Next,
                     count: 1,
+                    minutes: None,
                     run_id: None,
                     session_id: None,
                     note: None,
