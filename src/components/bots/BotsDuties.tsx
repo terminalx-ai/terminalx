@@ -45,7 +45,11 @@ export function BotsDuties() {
     setChoosing(null);
     setEditing({ bot, duty: null, initial: slot ? dutyAt(slot.day, slot.minute, slot.timezone) : null });
   };
-  const open = (bot: Bot, dutyId: string) => setEditing({ bot, duty: automations.automations.find((value) => value.id === dutyId) ?? null, initial: null });
+  // A duty not (or no longer) among the automations opens nothing, never a new one.
+  const open = (bot: Bot, dutyId: string) => {
+    const duty = automations.automations.find((value) => value.id === dutyId && value.bot?.id === bot.id);
+    if (duty) setEditing({ bot, duty, initial: null });
+  };
 
   const lead = (
     <>
