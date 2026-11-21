@@ -166,6 +166,18 @@ fn a_look_around_with_nothing_new_to_see_costs_no_model_and_is_logged_as_nothing
     ended(Builtin::LookAround, &atlas, &completed(&look));
     let why = nothing_to_do(Builtin::LookAround, &atlas).expect("nothing changed");
     assert!(why.starts_with("Nothing new"), "{why}");
+    // Another bot, its chats and its own looks are not what this one watches: still nothing new.
+    let iris = rig.hire("Iris");
+    let theirs = rig.builtin(&iris, Builtin::LookAround);
+    let run = crate::store::automations::insert_run(serde_json::from_value(json!({"runId": "iris-look-1", "runNumber": 1, "automationId": theirs.id, "trigger": "scheduled", "status": "running"})).unwrap()).unwrap();
+    duties::open_session(rig.sink.as_ref(), &theirs, &run).unwrap();
+    assert!(nothing_to_do(Builtin::LookAround, &atlas).is_some(), "another bot's sessions count for nothing");
+    // A new focus line is a reason to look again.
+    let refocus = json!({"name": "Look around", "prompt": "", "schedule": look.schedule, "reportsTo": "terminalx", "enabled": true, "focus": "The release branch"});
+    rig.bots("dutySave", json!({"id": atlas.id, "dutyId": look.id, "input": refocus})).unwrap();
+    assert_eq!(nothing_to_do(Builtin::LookAround, &atlas), None, "the focus changed");
+    ended(Builtin::LookAround, &atlas, &completed(&look));
+    assert!(nothing_to_do(Builtin::LookAround, &atlas).is_some());
     // A change it can see (a new item on its list) and it goes ahead.
     super::super::items::add(rig.sink.as_ref(), &atlas, &super::super::items::By::Owner, super::super::items::NewItem { title: "Ship it".into(), summary: String::new(), done_means: Vec::new(), start: false, asked_by: None, added_by: None }).unwrap();
     assert_eq!(nothing_to_do(Builtin::LookAround, &atlas), None);
@@ -241,7 +253,7 @@ fn a_tidy_merges_and_removes_as_one_change_that_one_undo_puts_back() {
     };
     let places = memory::conversation_places(&atlas);
     let log_before = super::super::changes::read_log(&atlas.id).unwrap().changes.len();
-    let recorded = memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source()).unwrap();
+    let recorded = memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source(), None).unwrap();
     assert_eq!(recorded.len(), 1, "one change");
     assert_eq!((recorded[0].kind.as_str(), recorded[0].text.as_str()), (memory::TIDY_KIND, "Tidied memory: merged 2 notes into 1 note, removed 1 note"));
     assert_eq!(super::super::changes::read_log(&atlas.id).unwrap().changes.len(), log_before + 1);
@@ -253,6 +265,16 @@ fn a_tidy_merges_and_removes_as_one_change_that_one_undo_puts_back() {
     // One Undo puts every note back where it was.
     memory::undo(rig.sink.as_ref(), &atlas, &recorded[0].id, super::super::OWNER, source()).unwrap();
     assert_eq!(read(), before);
+
+    // A Tidy memory run tidies once, judged under the history's lock: its second tidy is refused and writes nothing.
+    let run_source = || super::super::changes::Source { session: Some("tidy-run".into()), ..source() };
+    let plan = memory::TidyPlan { remove: vec![memory::TidyLine { place: None, line: number("Releases ship on Fridays."), note: "Releases ship on Fridays.".into() }], ..Default::default() };
+    memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, run_source(), Some("tidy-run")).unwrap();
+    let once = read();
+    let again = memory::TidyPlan { remove: vec![memory::TidyLine { place: None, line: 1 + once.lines().position(|line| line.ends_with("Merges wait for CI.")).unwrap(), note: "Merges wait for CI.".into() }], ..Default::default() };
+    let refused = memory::tidy(rig.sink.as_ref(), &atlas, &again, &places, &atlas.id, run_source(), Some("tidy-run")).unwrap_err();
+    assert!(refused.to_string().contains("already tidied"), "{refused:#}");
+    assert_eq!(read(), once);
 }
 
 #[test]
@@ -267,7 +289,7 @@ fn a_tidy_is_refused_whole_when_its_lines_do_not_read_as_named() {
     let before = std::fs::read_to_string(home.join(memory::Place::Bot.memory_file())).unwrap();
     let at = |text: &str| before.lines().position(|line| line.ends_with(text)).unwrap() + 1;
     let places = memory::conversation_places(&atlas);
-    let tidy = |plan: memory::TidyPlan| memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source()).unwrap_err().to_string();
+    let tidy = |plan: memory::TidyPlan| memory::tidy(rig.sink.as_ref(), &atlas, &plan, &places, &atlas.id, source(), None).unwrap_err().to_string();
     let named = |line: usize, note: &str| memory::TidyLine { place: None, line, note: note.into() };
     assert!(tidy(memory::TidyPlan::default()).contains("Nothing to tidy"));
     assert!(tidy(memory::TidyPlan { remove: vec![named(at("One."), "Two.")], ..Default::default() }).contains("memory changed since it was read"));
@@ -278,7 +300,7 @@ fn a_tidy_is_refused_whole_when_its_lines_do_not_read_as_named() {
     // A place the caller may not tidy.
     let personal = memory::TidyLine { place: Some("personal".into()), line: 1, note: "x".into() };
     let only_own = [memory::Place::Bot];
-    let refused = memory::tidy(rig.sink.as_ref(), &atlas, &memory::TidyPlan { remove: vec![personal], ..Default::default() }, &only_own, &atlas.id, source()).unwrap_err();
+    let refused = memory::tidy(rig.sink.as_ref(), &atlas, &memory::TidyPlan { remove: vec![personal], ..Default::default() }, &only_own, &atlas.id, source(), None).unwrap_err();
     assert!(refused.to_string().contains("may not change"), "{refused:#}");
     // Nothing was written by any of them.
     assert_eq!(std::fs::read_to_string(home.join(memory::Place::Bot.memory_file())).unwrap(), before);

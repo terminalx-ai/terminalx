@@ -1192,15 +1192,21 @@ impl ControlService {
                 })?;
                 // The owner may tidy every place; a bot, its own notes and its working place's.
                 let places = if by == bots::OWNER { memory::places(&bot) } else { memory::conversation_places(&bot) };
-                // One tidy is one change: a run of the built-in Tidy memory makes one (PRO-477).
-                if let Some(session) = caller.session.as_deref().filter(|_| by != bots::OWNER) {
-                    let tidy_run = index::get(session).ok().as_ref().and_then(crate::bots::builtins::of_session).is_some_and(|run| run.kind == crate::bots::builtins::Builtin::TidyMemory);
+                // One tidy is one change: a run of the built-in Tidy memory makes one (PRO-477). Said as forbidden here
+                // when it plainly already tidied; `memory::tidy` judges it again under the history's lock, so two tidies
+                // sent at once still record one.
+                let tidy_run = caller
+                    .session
+                    .as_deref()
+                    .filter(|_| by != bots::OWNER)
+                    .filter(|session| index::get(session).ok().as_ref().and_then(crate::bots::builtins::of_session).is_some_and(|run| run.kind == crate::bots::builtins::Builtin::TidyMemory));
+                if let Some(session) = tidy_run {
                     let tidied = crate::bots::changes::read_log(&bot.id).map_err(ControlError::internal)?.changes.iter().any(|change| change.kind == memory::TIDY_KIND && change.source.session.as_deref() == Some(session));
-                    if tidy_run && tidied {
+                    if tidied {
                         return Err(ControlError::new("forbidden", "This run already tidied your memory: one tidy is one change. Reply with what you merged and removed.", None::<String>));
                     }
                 }
-                let recorded = memory::tidy(sink, &bot, &plan, &places, &by, source).map_err(failed)?;
+                let recorded = memory::tidy(sink, &bot, &plan, &places, &by, source, tidy_run).map_err(failed)?;
                 Ok(json!({"bot": bot.id, "changes": memory::shown(&recorded)}))
             }
             "bots.memory.forget" => {

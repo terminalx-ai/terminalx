@@ -311,9 +311,10 @@ pub fn ended(kind: Builtin, bot: &Bot, run: &AutomationRun) {
 }
 
 /// What a look around can see, as one hash: each project's git state (by its
-/// files' sizes and times, so nothing is run), the sessions that do not work
-/// for this bot and their tabs' states, the bot's open items, and its open
-/// suggestions. Any change to them, and the next look goes ahead.
+/// files' sizes and times, so nothing is run), its own prompt and focus line,
+/// the person's sessions (not any bot's) by what lasts in them, the bot's open
+/// items, and its open suggestions. Any change to them, and the next look goes
+/// ahead.
 fn look_fingerprint(bot: &Bot) -> String {
     let mut hash = sha2::Sha256::new();
     let stamp = |hash: &mut sha2::Sha256, path: &std::path::Path| {
@@ -330,11 +331,20 @@ fn look_fingerprint(bot: &Bot) -> String {
             }
         }
     }
+    // Its own prompt, which holds the owner's focus line: a new focus is a reason to look again.
+    if let Ok(duties) = duties::duties_of(&bot.id) {
+        for duty in duties.iter().filter(|duty| of(duty) == Some(Builtin::LookAround)) {
+            hash.update(format!("prompt {}\n", duty.prompt));
+        }
+    }
+    // The person's sessions, by what lasts: made, renamed, archived, a tab opened or closed. Not their tabs' states,
+    // which change every turn, and not any bot's sessions (other bots' looks run on the same schedule), or every look
+    // would count as new.
     if let Ok(entries) = index::load() {
-        for entry in entries.iter().filter(|entry| super::chat::acting_bot(entry).as_deref() != Some(bot.id.as_str())) {
-            hash.update(format!("{}:{}", entry.id, entry.archived));
+        for entry in entries.iter().filter(|entry| super::chat::acting_bot(entry).is_none()) {
+            hash.update(format!("{}:{}:{}", entry.id, entry.archived, entry.title));
             for tab in &entry.tabs {
-                hash.update(format!(":{}={}", tab.id, serde_json::to_string(&tab.status).unwrap_or_default()));
+                hash.update(format!(":{}", tab.id));
             }
             hash.update("\n");
         }

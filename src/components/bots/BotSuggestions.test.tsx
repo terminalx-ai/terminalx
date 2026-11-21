@@ -128,8 +128,13 @@ describe("a bot's Home tab, beside its work (PRO-477, 23.01)", () => {
   it("says what a look was refused, why one did nothing, and offers to switch it on", async () => {
     view.status.lookAround = lookStatus({ last: { ...lookStatus().last!, refused: 2, refusedWhat: ["`git push`", "`Write`"] } });
     render(<BotHomeAside bot={atlas} />);
-    expect((await screen.findByTestId("bot-look-refused")).textContent).toBe("Refused: `git push`, `Write`. It suggested them instead of doing them.");
+    expect((await screen.findByTestId("bot-look-refused")).textContent?.trim()).toBe("Refused: `git push`, `Write`. It may suggest such things, not do them.");
     expect(screen.getByTestId("bot-look-status").textContent).toContain("2 actions refused, it may only read");
+    cleanup();
+    // A look that was refused and suggested nothing does not claim it suggested them.
+    view.status.lookAround = lookStatus({ last: { ...lookStatus().last!, suggestions: 0, refused: 1, refusedWhat: ["`git push`"] } });
+    render(<BotHomeAside bot={atlas} />);
+    expect((await screen.findByTestId("bot-look-refused")).textContent?.trim()).toBe("Refused: `git push`. It made no suggestions instead.");
     cleanup();
 
     view.status.lookAround = lookStatus({ enabled: false, last: null });

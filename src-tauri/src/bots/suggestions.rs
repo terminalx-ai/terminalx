@@ -246,28 +246,43 @@ fn close(sink: &dyn EventSink, bot: &Bot, number: u64, state: &str, item: Option
     })
 }
 
-/// The open suggestion `number`, as it is now.
-fn open_one(bot: &Bot, number: u64) -> Result<Suggestion> {
-    read(&bot.id)?
-        .readable()
-        .into_iter()
-        .find(|suggestion| suggestion.number == number)
-        .filter(Suggestion::open)
-        .ok_or_else(|| refused(format!("{} has no open suggestion {number}.", bot.name)))
+/// Change suggestion `number`, which this build reads, under the file's lock.
+fn amend(sink: &dyn EventSink, bot: &Bot, number: u64, f: impl FnOnce(&mut Suggestion)) -> Result<Suggestion> {
+    change(Some(sink), &bot.id, |file| {
+        let at = file.suggestions.iter().position(|value| value["number"].as_u64() == Some(number)).ok_or_else(|| refused(format!("{} has no suggestion {number}.", bot.name)))?;
+        let mut suggestion: Suggestion = serde_json::from_value(file.suggestions[at].clone())?;
+        f(&mut suggestion);
+        file.suggestions[at] = serde_json::to_value(&suggestion)?;
+        Ok(suggestion)
+    })
 }
 
 /// Start: the suggestion becomes an item the owner gave, already in progress, and is sent to the bot's home chat as
 /// the owner's message, so the bot begins. The owner's press is what makes it their words.
+///
+/// It is closed as started first, under the file's lock, so a second Start or a Dismiss at the same time (two windows)
+/// finds it closed and gives no second item or message; if giving the work fails, it is open again.
 pub fn start(manager: &crate::session::SessionManager, bot: &Bot, number: u64) -> Result<Value> {
-    let suggestion = open_one(bot, number)?;
     let sink = manager.sink();
+    let suggestion = close(sink.as_ref(), bot, number, STARTED, None)?;
     let summary = format!("{}\n\nYou suggested this{}; your owner pressed Start.", suggestion.why, match suggestion.from.run_number {
         Some(run) => format!(" in your look around (run {run})"),
         None => String::new(),
     });
-    let (item, answer) = super::items::give(manager, bot, &suggestion.title, &summary, true)?;
-    let closed = close(sink.as_ref(), bot, number, STARTED, Some(item))?;
-    Ok(json!({"suggestion": closed, "item": answer["item"], "delivery": answer["delivery"]}))
+    let (item, answer) = match super::items::give(manager, bot, &suggestion.title, &summary, true) {
+        Ok(given) => given,
+        Err(error) => {
+            if let Err(reopen) = amend(sink.as_ref(), bot, number, |suggestion| {
+                suggestion.state = OPEN.into();
+                suggestion.closed = None;
+            }) {
+                log::warn!("bot {}: open suggestion {number} again after Start failed: {reopen:#}", bot.id);
+            }
+            return Err(error);
+        }
+    };
+    let started = amend(sink.as_ref(), bot, number, |suggestion| suggestion.item = Some(item))?;
+    Ok(json!({"suggestion": started, "item": answer["item"], "delivery": answer["delivery"]}))
 }
 
 pub fn dismiss(sink: &dyn EventSink, bot: &Bot, number: u64) -> Result<Suggestion> {

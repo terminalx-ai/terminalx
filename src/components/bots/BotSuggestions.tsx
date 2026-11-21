@@ -126,7 +126,9 @@ function LookStatus({ bot, look, onChanged }: { bot: Bot; look: BuiltinStatus | 
         {bot.paused && " Paused: it does not look while paused."}
       </p>
       {refused.length > 0 && (
-        <p className="min-w-0 break-words text-faint" data-testid="bot-look-refused">Refused: {refused.join(", ")}. It suggested them instead of doing them.</p>
+        <p className="min-w-0 break-words text-faint" data-testid="bot-look-refused">
+          Refused: {refused.join(", ")}. {(look?.last?.suggestions ?? 0) > 0 ? "It may suggest such things, not do them." : "It made no suggestions instead."}
+        </p>
       )}
       {look && !look.enabled && (
         <Button size="xs" variant="secondary" className="w-fit" disabled={busy} onClick={switchOn} data-testid="bot-look-switch-on">

@@ -846,8 +846,10 @@ fn tidy_text(merges: usize, merged: usize, removed: usize) -> String {
 /// each removed note goes. Every line is named by its number and its text;
 /// one that no longer reads so refuses the whole tidy, and nothing is
 /// written. The whole tidy is one change in the history, which one Undo
-/// puts back. `places` are the places the caller may tidy.
-pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], by: &str, source: Source) -> Result<Vec<Change>> {
+/// puts back. `places` are the places the caller may tidy. With `once_in`, a
+/// session that already tidied (a Tidy memory run tidies once) is refused,
+/// judged under the history's lock, so two tidies sent at once record one.
+pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], by: &str, source: Source, once_in: Option<&str>) -> Result<Vec<Change>> {
     let named = plan.merge.iter().map(|merge| merge.lines.len()).sum::<usize>() + plan.remove.len();
     if named == 0 {
         return Err(refused("Nothing to tidy: name notes to merge or remove. When nothing needs tidying, change nothing."));
@@ -867,6 +869,11 @@ pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], 
         Ok(place)
     };
     let ((), recorded) = changes::commit(sink, &bot.id, |files| {
+        if let Some(session) = once_in {
+            if changes::read_log(&bot.id)?.changes.iter().any(|change| change.kind == TIDY_KIND && change.source.session.as_deref() == Some(session)) {
+                return Err(refused("This run already tidied your memory: one tidy is one change. Reply with what you merged and removed."));
+            }
+        }
         // Each named note, checked against the file as it is now, and named once.
         let mut texts: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut taken: BTreeSet<(String, usize)> = BTreeSet::new();

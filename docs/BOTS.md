@@ -385,8 +385,9 @@ free check, its prompt and its report.
   `duties::may_wake` when a run is due). A look around is skipped while five
   of its suggestions wait on the owner, or when nothing it can see has changed
   since its last finished look: a SHA-256 over the projects' `.git` state
-  files, the tabs of sessions not working for it, its open items and its
-  open suggestions. A tidy is skipped when memory is off, holds fewer than two
+  files, its own prompt and focus line, the person's sessions (not any
+  bot's) by what lasts in them (made, renamed, archived, tabs opened or
+  closed; not their tabs' states), its open items and its open suggestions. A tidy is skipped when memory is off, holds fewer than two
   notes, or is as the last tidy left it. A skipped run is logged as "Nothing
   new" (one folded row) and starts no session; the Home tab says why.
 - **Suggestions** are kept at the store root, `bot-suggestions/<bot id>.json`,
@@ -399,9 +400,12 @@ free check, its prompt and its report.
   they are and counted as not shown.
 - **Start and Dismiss** are the window's (`suggestionStart`,
   `suggestionDismiss` in the runtime's `bots` call). Start needs the window's
-  proof (`enforce::needs_person`), as giving work does: it makes an item the
+  proof (`enforce::needs_person`, `consent::GUARDED_BOTS`): it is closed as
+  started first, under the file's lock, so a second Start finds it closed; it
+  makes an item the
   owner asked for, in progress, and sends it to the bot's home chat as the
-  owner's message, which tells it to begin. Dismiss only closes it.
+  owner's message, which tells it to begin, and opens again if that fails.
+  Dismiss only closes it.
 - **The Home tab's right column** (23.01): who it reports to (PRO-475), Up
   next (the bot's duties that are on, soonest first), and Suggestions with a
   line saying when it last looked, how many it suggested, what was refused

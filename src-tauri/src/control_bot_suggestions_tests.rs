@@ -147,11 +147,18 @@ fn start_makes_the_item_and_sends_it_as_the_owners_message_and_dismiss_only_clos
     let first = rig.as_session(&entry, "look-secret", "bots.suggest", json!({"title": "Close PR #1247", "why": "#1198 covers it."})).unwrap()["suggestion"]["number"].as_u64().unwrap();
     let second = rig.as_session(&entry, "look-secret", "bots.suggest", json!({"title": "Sort the open issues", "why": "37 are untriaged."})).unwrap()["suggestion"]["number"].as_u64().unwrap();
 
-    // Start gives the bot work, so only a person may: the control socket's route without the window's proof is refused.
-    assert!(crate::bots::enforce::needs_person("suggestionStart", &json!({})));
-    assert!(!crate::bots::enforce::needs_person("suggestionDismiss", &json!({})));
-    let unproved = rig.service.execute_for_tests("runtime.session.bots", json!({"operation": "suggestionStart", "params": {"id": rig.bot, "number": first}}));
-    assert_eq!(unproved.unwrap_err().code, "person_required");
+    // Start gives the bot work, so only a person may: the window attaches its proof to it (`guards_request`, which
+    // `local_runtime::desktop` asks before it signs), and the control socket's route without that proof is refused.
+    let start = json!({"operation": "suggestionStart", "params": {"id": rig.bot, "number": first}});
+    let dismiss = json!({"operation": "suggestionDismiss", "params": {"id": rig.bot, "number": second}});
+    assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &start), "the window witnesses Start");
+    assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &dismiss), "Dismiss gives nothing");
+    assert!(crate::bots::enforce::needs_person("suggestionStart", &start["params"]));
+    assert!(!crate::bots::enforce::needs_person("suggestionDismiss", &dismiss["params"]));
+    let socket = headless_service().0.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    assert_eq!(socket.execute_for_tests("runtime.session.bots", start.clone()).unwrap_err().code, "person_required");
+    assert!(crate::bots::items::read(&rig.bot).unwrap().items.is_empty(), "nothing was made without the proof");
+    assert!(crate::bots::suggestions::read(&rig.bot).unwrap().open().iter().any(|suggestion| suggestion.number == first), "and it still waits");
 
     let started = rig.window("suggestionStart", json!({"id": rig.bot, "number": first})).unwrap();
     assert_eq!(started["suggestion"]["state"], "started");
@@ -163,8 +170,10 @@ fn start_makes_the_item_and_sends_it_as_the_owners_message_and_dismiss_only_clos
     let sent = crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().clone());
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(sent[0].2.contains("Close PR #1247") && sent[0].2.contains("Start on it now"), "{}", sent[0].2);
-    // Started once: a second Start is refused, and no second item is made.
+    // Started once: a second Start, or a Dismiss after it, is refused, and no second item is made or sent.
     assert!(rig.window("suggestionStart", json!({"id": rig.bot, "number": first})).is_err());
+    assert!(rig.window("suggestionDismiss", json!({"id": rig.bot, "number": first})).unwrap_err().to_string().contains("already started"));
+    assert_eq!(crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().len()), 1);
     assert_eq!(crate::bots::items::read(&rig.bot).unwrap().items.len(), items.items.len());
 
     // Dismiss closes it and tells the bot nothing.
