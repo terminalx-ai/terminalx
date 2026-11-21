@@ -641,6 +641,46 @@ fn a_deleted_duty_is_read_through_the_dispatch_and_goes_with_its_bot() {
     assert!(trashed.join("duty-runs").join(&status.id).join("runs.jsonl").is_file(), "into its home, in the trash");
 }
 
+/// PRO-499 review: a duty deleted while a run of it goes on ends that run then, as stopped: nothing reads a deleted
+/// duty's log to close it after, so the week would draw it running for ever. A run written to the kept log after
+/// the delete is read as ended at the deletion too.
+#[test]
+fn a_duty_deleted_mid_run_ends_its_run_then() {
+    let rig = rig();
+    let atlas = rig.hire("Atlas");
+    let status = rig.duty(&atlas, "Daily status", daily(18, "UTC"));
+    let began = Utc::now() - Duration::minutes(30);
+    let stamp = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    automation_store::insert_run(run(&status.id, 1, "running", &stamp(began), json!({"endedAt": null, "sessionId": "s1"}))).unwrap();
+    rig.bots("dutyDelete", json!({"id": atlas.id, "dutyId": status.id})).unwrap();
+
+    // Ended in the log itself, when the duty went.
+    let kept = automation_store::get_deleted(&status.id).unwrap().unwrap();
+    let runs = automation_store::list_runs(&status.id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].status, runs[0].ended_at.as_deref(), runs[0].error.as_deref()), (AutomationRunStatus::Cancelled, Some(kept.deleted_at.as_str()), Some(automation_store::DELETED_MID_RUN)));
+
+    // One a scheduler tick wrote just after the delete, still open in the log.
+    automation_store::insert_run(run(&status.id, 2, "pending", &kept.deleted_at, json!({"endedAt": null}))).unwrap();
+
+    let week = rig.bots("dutyWeek", json!({"week": began.date_naive().format("%Y-%m-%d").to_string(), "timezone": "UTC"})).unwrap();
+    let blocks: Vec<&Value> = week["blocks"].as_array().unwrap().iter().filter(|block| block["dutyId"] == status.id.as_str()).collect();
+    assert!(!blocks.is_empty(), "{week}");
+    assert!(blocks.iter().all(|block| block["state"] != "running" && block["continued"].is_null()), "nothing goes on: {week}");
+    let first = blocks.iter().find(|block| block["runId"] == format!("{}-1", status.id).as_str()).unwrap();
+    assert_eq!(first["state"], "stopped");
+    let minutes = first["minutes"].as_u64().unwrap();
+    assert!((29..=31).contains(&minutes), "to the deletion, not to now or a week: {minutes}");
+
+    let log = rig.bots("dutyKeptLog", json!({"id": atlas.id, "dutyId": status.id})).unwrap();
+    let statuses: Vec<&str> = log["runs"].as_array().unwrap().iter().map(|run| run["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["cancelled", "cancelled"], "{log}");
+    assert_eq!(log["runs"][0]["endedAt"].as_str(), Some(kept.deleted_at.as_str()));
+
+    // Read only: the log keeps what was written.
+    assert!(!automation_store::list_runs(&status.id).unwrap()[0].status.is_terminal());
+}
+
 /// The Bots switch is off while this lives, and on again after, whatever the test does.
 struct BotsOff;
 

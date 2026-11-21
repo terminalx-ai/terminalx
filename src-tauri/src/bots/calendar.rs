@@ -600,7 +600,7 @@ fn kept_log(params: &Value) -> Result<Value> {
     let kept = automation_store::get_deleted(duty_id)?
         .filter(|kept| duties::owner(&kept.automation).is_some_and(|owner| owner.id == bot.id))
         .ok_or_else(|| refused(format!("{} has no deleted duty {duty_id} whose runs are kept.", bot.name)))?;
-    let runs = automation_store::list_runs(duty_id)?;
+    let runs = automation_store::closed_at_deletion(automation_store::list_runs(duty_id)?, &kept.deleted_at);
     Ok(serde_json::json!({"dutyId": duty_id, "botId": bot.id, "name": kept.automation.name, "deletedAt": kept.deleted_at, "runs": runs}))
 }
 
@@ -637,7 +637,8 @@ fn answer(params: &Value) -> Result<Value> {
         for (duty, deleted_at) in live.chain(gone) {
             // A log that cannot be read is said on the duty's row, never shown as a week in which nothing ran.
             let (runs, unreadable) = match automation_store::list_runs(&duty.id) {
-                Ok(runs) => (runs, None),
+                // A deleted duty's run still open in its log went on no longer than the duty.
+                Ok(runs) => (match deleted_at { Some(at) => automation_store::closed_at_deletion(runs, at), None => runs }, None),
                 Err(error) => (Vec::new(), Some(format!("{error:#}"))),
             };
             read.push((duty, bot, runs, unreadable, deleted_at));
