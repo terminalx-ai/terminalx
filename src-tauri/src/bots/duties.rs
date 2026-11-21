@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use super::chat::{self, BotRef};
 use super::{refused, Bot, BotAccess};
-use crate::automations::{self, Automation, AutomationHost, AutomationInput, AutomationPrecheck, AutomationRun, AutomationRunStatus, AutomationSchedule, AutomationTrigger, AutomationWorkspace, DueAction, ScheduleKind};
+use crate::automations::{self, Automation, AutomationEventSource, AutomationEventTrigger, AutomationHost, AutomationInput, AutomationPrecheck, AutomationRun, AutomationRunStatus, AutomationSchedule, AutomationTrigger, AutomationWorkspace, DueAction, ScheduleKind};
 use crate::session::SessionManager;
 use crate::sink::EventSink;
 use crate::store::bots as bot_store;
@@ -93,6 +93,9 @@ const CHECKS_DIR: &str = "duty-checks";
 pub const HOME_ENV: &str = "TERMINALX_BOT_HOME";
 /// What a deleted bot's duties are kept as, in its home, which goes to the trash.
 const REMOVED_FILE: &str = "duties-removed.json";
+/// The variable that names the file of events a duty's first check is given (PRO-472), and that file.
+pub const EVENTS_ENV: &str = "TERMINALX_EVENTS";
+const EVENTS_FILE: &str = "events.json";
 
 /// Where a duty's result goes. A target a newer build wrote (Slack, Telegram,
 /// a pull request, with the channel tickets) is kept as [`DutyReport::Other`]
@@ -486,19 +489,31 @@ fn check_folder(key: &str) -> Result<PathBuf> {
 
 /// Run a duty's first check as its runs do: in its own folder, as the owner,
 /// with the bot's home in [`HOME_ENV`] for a script that wants to look there.
-fn run_check_in(key: &str, bot_id: &str, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+fn run_check_in(key: &str, bot_id: &str, precheck: &AutomationPrecheck, events: Option<&Value>) -> Result<automations::precheck::PrecheckTrial> {
     let dir = check_folder(key)?;
     let home = bot_store::home_dir(bot_id)?;
     let folder = dir.to_string_lossy().into_owned();
     // git looks for a repository no higher than the check's own folder.
-    let set = [(HOME_ENV.to_string(), home.to_string_lossy().into_owned()), ("GIT_CEILING_DIRECTORIES".to_string(), folder)];
+    let mut set = vec![(HOME_ENV.to_string(), home.to_string_lossy().into_owned()), ("GIT_CEILING_DIRECTORIES".to_string(), folder)];
+    // What woke it (PRO-472), as a file in the check's own folder: what others wrote is data for the check, never its command.
+    if let Some(events) = events {
+        let file = dir.join(EVENTS_FILE);
+        crate::store::write_json(&file, events)?;
+        set.push((EVENTS_ENV.to_string(), file.to_string_lossy().into_owned()));
+    }
     automations::precheck::run_in_folder(&dir, &set, precheck)
 }
 
-/// A duty's first check, for its run (`precheck::check`).
-pub fn run_check(automation: &Automation, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+/// A duty's first check, for its run (`precheck::check`), given the events a read would wake it on.
+pub fn run_check(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&Value>) -> Result<automations::precheck::PrecheckTrial> {
     let bot_id = owner_id(automation).context("the duty names no bot")?;
-    run_check_in(&automation.id, bot_id, precheck)
+    run_check_in(&automation.id, bot_id, precheck, events)
+}
+
+/// A "wait until" duty's command (PRO-472), run as its first check is: as the owner, in a folder of its own.
+pub fn run_watch(automation: &Automation, precheck: &AutomationPrecheck) -> Result<automations::precheck::PrecheckTrial> {
+    let bot_id = owner_id(automation).context("the duty names no bot")?;
+    run_check_in(&format!("watch-{}", automation.id), bot_id, precheck, None)
 }
 
 /// The session a run of `automation` (bound by [`bind`]) goes ahead in: a new
@@ -555,6 +570,7 @@ pub fn prompt(automation: &Automation, run: &AutomationRun, prompt: String) -> R
     let woke = match run.trigger {
         AutomationTrigger::Manual => "because your owner pressed Run now",
         AutomationTrigger::Scheduled => "on its schedule",
+        AutomationTrigger::LinearIssue | AutomationTrigger::PullRequest | AutomationTrigger::Event => "by the event described above",
         _ => "when it was woken",
     };
     let file = note_file(&automation.id);
@@ -602,7 +618,7 @@ fn capped(text: &str) -> String {
     }
 }
 
-fn access_words(access: &BotAccess) -> &'static str {
+pub(crate) fn access_words(access: &BotAccess) -> &'static str {
     match access.effective() {
         BotAccess::Full => "full access",
         BotAccess::AskOutward => "ask-before-acting access",
@@ -672,6 +688,13 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
         None => (super::OWNER.to_string(), format!("{what}:\n{body}")),
     };
     let noted = note_in_home_chat(app, lead.as_ref().map_or(bot.id.as_str(), |lead| lead.id.as_str()), &note);
+    // A report to the lead is a status addressed to it, which can wake its duties (PRO-472): one hop more than what woke this run.
+    if let Some(lead) = &lead {
+        let hops = super::wakes::hops_of_run(run).saturating_add(1);
+        if let Err(error) = super::wakes::post(app.sink().as_ref(), &bot, lead, super::wakes::MessageKind::Status, &format!("{what}:\n{body}"), hops) {
+            log::warn!("duty {}: leave its report for {}: {error:#}", automation.id, lead.id);
+        }
+    }
     // During quiet hours only an urgent report reaches the owner; one for the lead reaches them only when urgent.
     let notify = !failed && (urgent || (lead.is_none() && !quiet));
     let record = json!({"reportedTo": to, "urgent": urgent, "quiet": quiet, "notified": notify, "note": noted});
@@ -701,6 +724,10 @@ pub struct DutyInput {
     pub reports_to: DutyReport,
     #[serde(default)]
     pub enabled: bool,
+    /// What wakes it besides its schedule (PRO-472): an event source. Left
+    /// out, the stored one is kept; `null` makes it a duty on a schedule.
+    #[serde(default, deserialize_with = "automations::sources::present")]
+    pub wake: Option<Option<AutomationEventTrigger>>,
 }
 
 /// Every duty of bot `bot_id`, readable or not, in the order they were saved.
@@ -760,6 +787,10 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
         }
         remove_check_folders(id);
     }
+    // The messages other bots left it (PRO-472).
+    if let Err(error) = super::wakes::forget_bot(bot_id) {
+        failed.get_or_insert(error);
+    }
     // The folder its Try it used for a duty not saved yet.
     if let Ok(root) = crate::store::root() {
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("new-{bot_id}")));
@@ -782,6 +813,7 @@ fn remove_check_folders(duty_id: &str) {
     if let Ok(root) = crate::store::root() {
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(duty_id));
         let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("try-{duty_id}")));
+        let _ = std::fs::remove_dir_all(root.join(CHECKS_DIR).join(format!("watch-{duty_id}")));
     }
 }
 
@@ -803,7 +835,8 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
     refuse_unless!(!name.is_empty() && name.chars().count() <= MAX_NAME_CHARS && !name.chars().any(char::is_control), "A duty's name is one line of at most {MAX_NAME_CHARS} characters.");
     refuse_unless!(!input.prompt.trim().is_empty(), "Say what {} looks at when the duty wakes.", bot.name);
     refuse_unless!(input.prompt.len() <= MAX_PROMPT_BYTES, "A duty's prompt is at most {} KB.", MAX_PROMPT_BYTES / 1024);
-    refuse_unless!(matches!(input.schedule.kind, ScheduleKind::Preset | ScheduleKind::Cron), "A duty wakes on a schedule.");
+    let wake = wake_after_save(input.wake.clone(), existing)?;
+    refuse_unless!(wake.is_some() || matches!(input.schedule.kind, ScheduleKind::Preset | ScheduleKind::Cron), "A duty wakes on a schedule.");
     let previous = existing.and_then(owner);
     if let DutyReport::Other(value) = &input.reports_to {
         // Kept as a newer build wrote it, never chosen here.
@@ -835,7 +868,7 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
             missed_run_grace_minutes: existing.map_or(60, |existing| existing.missed_run_grace_minutes),
             run_timeout_minutes: Some(existing.and_then(|existing| existing.run_timeout_minutes).unwrap_or(RUN_TIMEOUT_MINUTES)),
             issue_trigger: None,
-            event_trigger: None,
+            event_trigger: Some(wake.clone()),
             pipeline: None,
         },
         existing,
@@ -855,6 +888,7 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
             stored.name = automation.name;
             stored.prompt = automation.prompt;
             stored.schedule = automation.schedule;
+            stored.event_trigger = automation.event_trigger;
             stored.precheck = automation.precheck;
             stored.enabled = automation.enabled;
             stored.next_run_at = automation.next_run_at;
@@ -871,8 +905,28 @@ fn save(sink: &dyn EventSink, bot: &Bot, existing: Option<&Automation>, input: D
         .map_err(|error| refused(format!("{error:#}")))?,
         None => automation_store::insert(automation)?,
     };
+    // A wake added, removed or reading something else starts from now (`docs/AUTOMATION-SOURCES.md`).
+    automations::sources::saved(&saved.id, existing.and_then(|existing| existing.event_trigger.as_ref()), saved.event_trigger.as_ref())?;
     announce(sink);
     Ok(saved)
+}
+
+/// What wakes a saved duty besides a schedule: the one given (`None` left
+/// out, so the stored one stays), held to what a duty may be woken by. A
+/// duty runs one run at a time, so a read wakes at most one; a Linear issue
+/// it wakes on is reported to the bot's owner, never commented on as them;
+/// a kind this build does not know stays only as it was.
+fn wake_after_save(given: Option<Option<AutomationEventTrigger>>, existing: Option<&Automation>) -> Result<Option<AutomationEventTrigger>> {
+    let stored = existing.and_then(|existing| existing.event_trigger.clone());
+    let Some(mut wake) = given.unwrap_or_else(|| stored.clone()) else { return Ok(None) };
+    if let AutomationEventSource::Unsupported(_) = wake.source {
+        refuse_unless!(stored.as_ref().is_some_and(|stored| stored.source == wake.source), "This kind of event needs a newer TerminalX.");
+    }
+    wake.max_runs_per_tick = 1;
+    if let AutomationEventSource::LinearIssue(source) = &mut wake.source {
+        source.report = automations::sources::LinearIssueReport { comment: false, move_to_state_id: None, move_to_state_name: None, comment_on_failure: false };
+    }
+    Ok(Some(wake))
 }
 
 /// [`DutyInput`] of a saved duty.
@@ -884,12 +938,16 @@ fn input_of(automation: &Automation) -> DutyInput {
         precheck: automation.precheck.clone(),
         reports_to: owner(automation).map(|owner| owner.reports_to).unwrap_or_default(),
         enabled: automation.enabled,
+        wake: Some(automation.event_trigger.clone()),
     }
 }
 
 /// Switch a duty on or off. On, its next run is the schedule's next after now.
 fn switch(sink: &dyn EventSink, duty: &Automation, on: bool) -> Result<Automation> {
-    let next = if on { Some(automations::next_run_after(&duty.schedule, Utc::now()).map_err(|error| refused(format!("{error:#}")))?) } else { None };
+    // A duty that wakes on an event is never due on a schedule (`sources::never`).
+    let next = if on && duty.event_trigger.is_some() {
+        Some(automations::sources::never())
+    } else if on { Some(automations::next_run_after(&duty.schedule, Utc::now()).map_err(|error| refused(format!("{error:#}")))?) } else { None };
     let saved = automation_store::update(&duty.id, |value| {
         value.enabled = on;
         if let Some(next) = next {
@@ -916,14 +974,24 @@ fn local_timezone() -> String {
         .unwrap_or_else(|| "UTC".into())
 }
 
-/// At hire: each of the role template's duties that wakes on a schedule
-/// becomes the new bot's duty, switched off. The ones that wake on an event,
-/// another bot or a message come with the triggers ticket (PRO-472).
+/// At hire: each of the role template's duties that wakes on a schedule or
+/// on another bot's message becomes the new bot's duty, switched off.
 pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
+    use super::templates::DutyWake;
     let Some(template) = super::templates::find(&bot.role_template_id) else { return Ok(()) };
     let timezone = local_timezone();
     for duty in template.duties {
-        let super::templates::DutyWake::Schedule { cron } = duty.wake else { continue };
+        // One that wakes on a pull request or a Linear issue needs its repository or team, which the owner names
+        // on the Duties tab; one that wakes on a person's message comes with the channels (PRO-480, PRO-481).
+        let (cron, wake) = match duty.wake {
+            DutyWake::Schedule { cron } => (cron, None),
+            DutyWake::Bot => ("0 9 * * *", Some(AutomationEventTrigger {
+                source: AutomationEventSource::Bot(super::wakes::BotSource { kind: "botMessage".into(), fields: Default::default() }),
+                poll_interval_minutes: 1,
+                max_runs_per_tick: 1,
+            })),
+            DutyWake::Github { .. } | DutyWake::Linear { .. } | DutyWake::Message => continue,
+        };
         let schedule: AutomationSchedule = serde_json::from_value(json!({
             "kind": "cron", "cron": cron, "timezone": timezone, "dtstart": index::now(),
         }))?;
@@ -934,6 +1002,7 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
             precheck: None,
             reports_to: DutyReport::TerminalX,
             enabled: duty.enabled,
+            wake: Some(wake),
         };
         save(sink, bot, None, input, Some(duty.id))?;
     }
@@ -987,7 +1056,7 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
                 Some(_) => format!("try-{}", duty()?.id),
                 None => format!("new-{}", bot.id),
             };
-            serde_json::to_value(run_check_in(&key, &bot.id, &precheck)?)?
+            serde_json::to_value(run_check_in(&key, &bot.id, &precheck, None)?)?
         }
         "dutyDuplicate" => {
             let original = duty()?;

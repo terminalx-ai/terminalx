@@ -62,6 +62,9 @@ pub struct AutomationEventTrigger {
 pub enum AutomationEventSource {
     LinearIssue(LinearIssueSource),
     GithubPullRequest(PullRequestSource),
+    /// A source only a bot's duty has (PRO-472): a mention, an alert, a
+    /// branch's checks, another bot's message, a watched change.
+    Bot(crate::bots::wakes::BotSource),
     /// A kind a newer TerminalX wrote: kept as written, never polled.
     Unsupported(Value),
 }
@@ -81,6 +84,7 @@ impl Serialize for AutomationEventSource {
         match self {
             Self::LinearIssue(source) => KnownSource::LinearIssue(source.clone()).serialize(serializer),
             Self::GithubPullRequest(source) => KnownSource::GithubPullRequest(source.clone()).serialize(serializer),
+            Self::Bot(source) => source.serialize(serializer),
             Self::Unsupported(value) => value.serialize(serializer),
         }
     }
@@ -89,6 +93,9 @@ impl Serialize for AutomationEventSource {
 impl<'de> Deserialize<'de> for AutomationEventSource {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
+        if let Some(source) = crate::bots::wakes::BotSource::from_value(value.clone()) {
+            return source.map(Self::Bot).map_err(serde::de::Error::custom);
+        }
         if !value.get("kind").and_then(Value::as_str).is_some_and(|kind| KNOWN_KINDS.contains(&kind)) {
             return Ok(Self::Unsupported(value));
         }
@@ -231,7 +238,7 @@ fn filled(value: &Option<String>) -> Option<&str> {
 }
 
 /// Reads a field that may be absent (`None`), `null` (`Some(None)`) or a value.
-pub(super) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<Option<T>>, D::Error> {
+pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<Option<T>>, D::Error> {
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
@@ -248,7 +255,7 @@ pub(super) fn trigger_after_save(given: Option<Option<AutomationEventTrigger>>, 
 /// The `next_run_at` an event automation is saved with. This build never
 /// reads it; a build without event triggers takes the automation for a
 /// schedule and must never find it due.
-pub(super) fn never() -> DateTime<Utc> {
+pub(crate) fn never() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("9999-01-01T00:00:00Z").expect("a fixed date").with_timezone(&Utc)
 }
 
@@ -272,6 +279,7 @@ pub(super) fn validate(trigger: &AutomationEventTrigger, has_issue_trigger: bool
                 bail!("Choose at least one pull request event.");
             }
         }
+        AutomationEventSource::Bot(source) => source.validate()?,
         AutomationEventSource::Unsupported(_) => {}
     }
     if trigger.poll_interval_minutes < 1 {
@@ -336,6 +344,9 @@ pub struct SourceSeen {
     /// Pull requests held back by the rate limit, and when each resumes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub held: BTreeMap<String, String>,
+    /// When the trigger started (its first complete read): a bot source wakes only on what happens after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
 }
 
 fn seen_path(automation_id: &str) -> Result<PathBuf> {
@@ -384,7 +395,7 @@ fn fingerprint(source: &AutomationEventSource) -> String {
 /// After a definition is saved: a trigger added, removed or reading something
 /// else starts afresh, so a trigger switched back on never replays what
 /// happened while it was off. Any other save retries a failing read at once.
-pub(super) fn saved(automation_id: &str, before: Option<&AutomationEventTrigger>, after: Option<&AutomationEventTrigger>) -> Result<()> {
+pub(crate) fn saved(automation_id: &str, before: Option<&AutomationEventTrigger>, after: Option<&AutomationEventTrigger>) -> Result<()> {
     let print = |trigger: Option<&AutomationEventTrigger>| trigger.map(|trigger| fingerprint(&trigger.source));
     if print(before) != print(after) {
         return clear_seen(automation_id);
@@ -683,10 +694,15 @@ fn read_viewer(cwd: &Path) -> Result<String, SourceError> {
 pub enum Snapshot {
     Linear(Vec<crate::issues::Issue>),
     PullRequests { pulls: Vec<PullRequest>, viewer: Option<String> },
+    Bot(Vec<crate::bots::wakes::BotEvent>),
 }
 
 /// One read of the source: everything that matches for a baseline, else back to `since`.
 fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceSeen, since: Option<DateTime<Utc>>) -> Result<Read, SourceError> {
+    #[cfg(test)]
+    if let Some(snapshot) = test_reads::take(&automation.id) {
+        return Ok(Read { snapshot, bound: None });
+    }
     let baseline = !state.initialized;
     match source {
         AutomationEventSource::LinearIssue(source) => read_linear(source, since, if baseline { BASELINE_PAGES } else { ACTIVITY_PAGES }),
@@ -701,6 +717,10 @@ fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceS
             };
             Ok(Read { snapshot: Snapshot::PullRequests { pulls, viewer }, bound })
         }
+        AutomationEventSource::Bot(source) => {
+            let events = crate::bots::wakes::read(automation, source, baseline, since)?;
+            Ok(Read { snapshot: Snapshot::Bot(events), bound: None })
+        }
         AutomationEventSource::Unsupported(_) => Err(SourceError::plain(NEEDS_NEWER)),
     }
 }
@@ -711,6 +731,7 @@ fn read(automation: &Automation, source: &AutomationEventSource, state: &SourceS
 pub enum WakeSubject {
     Linear(Box<crate::issues::Issue>),
     PullRequest(Box<PullRequest>, PullRequestEvent),
+    Bot(Box<crate::bots::wakes::BotEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -745,6 +766,8 @@ pub struct Plan {
     pub pending: Vec<String>,
     /// Pull requests the rate limit holds back, and when each resumes.
     pub held: Vec<(i64, DateTime<Utc>)>,
+    /// Messages that passed between bots too many times to wake anyone (recorded as seen).
+    pub looped: usize,
 }
 
 /// Runs one pull request may wake for one automation in any hour, and in any day.
@@ -753,16 +776,21 @@ pub const WAKES_PER_DAY: usize = 12;
 
 /// When a pull request that woke runs at `wakes` may wake another, if not now.
 fn resumes_at(wakes: &[String], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    limited(wakes, now, WAKES_PER_HOUR, WAKES_PER_DAY)
+}
+
+/// When something that woke runs at `wakes` may wake another, past `per_hour` an hour or `per_day` a day, if not now.
+fn limited(wakes: &[String], now: DateTime<Utc>, per_hour: usize, per_day: usize) -> Option<DateTime<Utc>> {
     let mut times: Vec<DateTime<Utc>> = wakes.iter().filter_map(|at| parse(Some(at))).filter(|at| now - *at < chrono::TimeDelta::days(1)).collect();
     times.sort();
     let in_hour: Vec<_> = times.iter().copied().filter(|at| now - *at < chrono::TimeDelta::hours(1)).collect();
     let mut resume = None;
     // The window opens when enough of the wakes in it have aged out of it.
-    if in_hour.len() >= WAKES_PER_HOUR {
-        resume = Some(in_hour[in_hour.len() - WAKES_PER_HOUR] + chrono::TimeDelta::hours(1));
+    if in_hour.len() >= per_hour {
+        resume = Some(in_hour[in_hour.len() - per_hour] + chrono::TimeDelta::hours(1));
     }
-    if times.len() >= WAKES_PER_DAY {
-        resume = resume.max(Some(times[times.len() - WAKES_PER_DAY] + chrono::TimeDelta::days(1)));
+    if times.len() >= per_day {
+        resume = resume.max(Some(times[times.len() - per_day] + chrono::TimeDelta::days(1)));
     }
     resume
 }
@@ -873,6 +901,27 @@ pub fn plan(source: &AutomationEventSource, snapshot: &Snapshot, state: &SourceS
                 out.wakes.push(Wake { subject, record: vec![(key, value)], what: WakeSubject::PullRequest(Box::new(pr.clone()), event) });
             }
         }
+        (AutomationEventSource::Bot(source), Snapshot::Bot(events)) => {
+            let started = parse(state.started_at.as_deref());
+            for event in events {
+                if !is_new(&event.key, &event.value) {
+                    continue;
+                }
+                let entry = (event.key.clone(), event.value.clone());
+                // The baseline, and what happened before the trigger started, is never news.
+                if !state.initialized || (source.from_now_only() && event.before(started)) {
+                    out.record.push(entry);
+                } else if event.hops >= crate::bots::wakes::MAX_HOPS {
+                    // Passed between bots too often: seen, shown, and woken on by nobody.
+                    out.looped += 1;
+                    out.record.push(entry);
+                } else if out.wakes.len() < context.cap && !context.active.contains(&event.key) {
+                    out.wakes.push(Wake { subject: event.key.clone(), record: vec![entry], what: WakeSubject::Bot(Box::new(event.clone())) });
+                } else if let Some(at) = &event.at {
+                    out.pending.push(at.clone());
+                }
+            }
+        }
         _ => {}
     }
     out
@@ -949,7 +998,7 @@ pub(super) fn due(automation: &Automation, now: DateTime<Utc>) -> bool {
 
 pub(super) fn evaluate(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
     let trigger = run_trigger(&automation.event_trigger.as_ref().context("event trigger missing")?.source);
-    poll(app, automation, now, read, || super::precheck::gate_wakes(app, automation, trigger), |wake| insert_run(automation, wake), |wake, run| start(app, automation, wake, run))
+    poll(app, automation, now, read, |wakes| super::precheck::gate_wakes(app, automation, trigger, wakes), |wake| insert_run(automation, wake), |wake, run| start(app, automation, wake, run))
 }
 
 /// Whether the automation still has this trigger, on and reading the same source:
@@ -959,9 +1008,45 @@ fn still_current(automation: &Automation) -> bool {
     automation_store::get(&automation.id).is_ok_and(|stored| stored.enabled && print(&stored) == print(automation))
 }
 
+/// The key under which a duty's wakes, from every source, are counted and held (PRO-472).
+const DUTY_SUBJECT: &str = "duty";
+
+fn when(resume: &str) -> String {
+    parse(Some(resume)).map_or_else(|| resume.to_owned(), |at| at.format("%Y-%m-%d %H:%M UTC").to_string())
+}
+
+fn duty_notice(held: &BTreeMap<String, String>) -> Option<String> {
+    held.get(DUTY_SUBJECT).map(|resume| {
+        format!(
+            "Holding its events until {}: it woke more than {} times in an hour or {} in a day. They are kept and wake it then.",
+            when(resume),
+            crate::bots::wakes::WAKES_PER_HOUR,
+            crate::bots::wakes::WAKES_PER_DAY,
+        )
+    })
+}
+
+/// A bot source keeps at most [`crate::bots::wakes::SEEN_LIMIT`] seen events. The oldest go, and the
+/// trigger starts no earlier than when they were seen, so what they were cannot wake it again.
+fn prune_seen(state: &mut SourceSeen) {
+    let over = state.events.len().saturating_sub(crate::bots::wakes::SEEN_LIMIT);
+    if over == 0 {
+        return;
+    }
+    let mut by_age: Vec<(String, String)> = state.events.iter().map(|(key, seen)| (seen.at.clone(), key.clone())).collect();
+    by_age.sort();
+    for (seen_at, key) in by_age.into_iter().take(over) {
+        state.events.remove(&key);
+        if parse(state.started_at.as_deref()).is_none_or(|started| parse(Some(&seen_at)).is_some_and(|seen| seen > started)) {
+            state.started_at = Some(seen_at);
+        }
+    }
+}
+
 fn held_notice(held: &BTreeMap<String, String>) -> Option<String> {
     let list = held
         .iter()
+        .filter(|(subject, _)| subject.as_str() != DUTY_SUBJECT)
         .map(|(subject, resume)| {
             let when = parse(Some(resume)).map_or_else(|| resume.clone(), |at| at.format("%Y-%m-%d %H:%M UTC").to_string());
             format!("#{} until {when}", subject.trim_start_matches("pr:"))
@@ -981,7 +1066,7 @@ fn poll(
     automation: &Automation,
     now: DateTime<Utc>,
     read: impl FnOnce(&Automation, &AutomationEventSource, &SourceSeen, Option<DateTime<Utc>>) -> Result<Read, SourceError>,
-    gate: impl FnOnce() -> Result<bool>,
+    gate: impl FnOnce(&[Wake]) -> Result<bool>,
     mut insert: impl FnMut(&Wake) -> Result<AutomationRun>,
     mut start: impl FnMut(&Wake, AutomationRun) -> Result<AutomationRun>,
 ) -> Result<()> {
@@ -998,6 +1083,7 @@ fn poll(
         // Switched off: switching it back on starts from then, not from here, and checks at once.
         if state.initialized || state.retry_after.is_some() || state.last_poll_error.is_some() {
             state.initialized = false;
+            state.started_at = None;
             state.retry_after = None;
             state.failures = 0;
             state.last_poll_error = None;
@@ -1062,7 +1148,19 @@ fn poll(
     if let Snapshot::PullRequests { viewer: Some(viewer), .. } = &snapshot {
         state.viewer = Some(viewer.clone());
     }
-    let plan = plan(&trigger.source, &snapshot, &state, &context(&automation.id, trigger.max_runs_per_tick as usize, now)?);
+    let mut plan = plan(&trigger.source, &snapshot, &state, &context(&automation.id, trigger.max_runs_per_tick as usize, now)?);
+    // A bot's duty wakes at most so often from all its events (PRO-472): past that they wait, unseen, and the status says until when.
+    let duty = crate::bots::duties::is_duty(automation);
+    let mut duty_held = false;
+    if duty {
+        state.held.retain(|subject, resume| subject != DUTY_SUBJECT || parse(Some(resume)).is_some_and(|resume| resume > now));
+        let wakes = state.pr_wakes.get(DUTY_SUBJECT).map_or(&[][..], Vec::as_slice);
+        if let (false, Some(resume)) = (plan.wakes.is_empty(), limited(wakes, now, crate::bots::wakes::WAKES_PER_HOUR, crate::bots::wakes::WAKES_PER_DAY)) {
+            plan.wakes.clear();
+            state.held.insert(DUTY_SUBJECT.into(), stamp(resume));
+            duty_held = true;
+        }
+    }
     // The rate limit's holds: those read now as planned, the others kept until they resume.
     if let Snapshot::PullRequests { pulls, .. } = &snapshot {
         let read_now: BTreeSet<String> = pulls.iter().map(|pr| pr_subject(pr.number)).collect();
@@ -1075,12 +1173,19 @@ fn poll(
         damaged,
         bound.map(|bound| format!("More than {bound} changed since the last check; the ones past that were not looked at.")),
         held_notice(&state.held),
+        duty_notice(&state.held),
+        (plan.looped > 0).then(|| format!(
+            "{} message{} had passed between bots {} times and woke nobody, so two bots cannot keep waking each other.",
+            plan.looped,
+            if plan.looped == 1 { "" } else { "s" },
+            crate::bots::wakes::MAX_HOPS,
+        )),
     ]
     .into_iter()
     .flatten()
     .collect();
     state.notice = (!notices.is_empty()).then(|| notices.join(" "));
-    if !plan.wakes.is_empty() && !gate()? {
+    if !plan.wakes.is_empty() && !gate(&plan.wakes)? {
         // A first check found nothing new, or failed: it wrote its one history
         // row; everything read stays unseen for the next read to find again.
         // A check that outlasted its trigger (changed or switched off meanwhile) writes nothing.
@@ -1095,13 +1200,22 @@ fn poll(
         state.events.remove(key);
     }
     write(&mut state, &plan.record, &at, None);
+    if !state.initialized {
+        state.started_at = Some(at.clone());
+    }
     state.initialized = true;
     // The next read pages back to the oldest match left for later, so none is starved.
     let oldest_pending = plan.pending.iter().filter_map(|at| parse(Some(at))).min();
-    state.last_read_at = Some(match oldest_pending {
-        Some(oldest) if oldest < now => stamp(oldest - chrono::TimeDelta::seconds(1)),
-        _ => at.clone(),
-    });
+    if !duty_held {
+        // Held back by the duty's limit: the next read pages back as far as this one did.
+        state.last_read_at = Some(match oldest_pending {
+            Some(oldest) if oldest < now => stamp(oldest - chrono::TimeDelta::seconds(1)),
+            _ => at.clone(),
+        });
+    }
+    if let AutomationEventSource::Bot(_) = trigger.source {
+        prune_seen(&mut state);
+    }
     let day_ago = now - chrono::TimeDelta::days(1);
     state.pr_wakes.retain(|_, wakes| {
         wakes.retain(|at| parse(Some(at)).is_some_and(|at| at > day_ago));
@@ -1119,6 +1233,9 @@ fn poll(
         write(&mut state, &wake.record, &at, Some(&run.run_id));
         if let WakeSubject::PullRequest(..) = wake.what {
             state.pr_wakes.entry(wake.subject.clone()).or_default().push(at.clone());
+        }
+        if duty {
+            state.pr_wakes.entry(DUTY_SUBJECT.into()).or_default().push(at.clone());
         }
         save_seen(&automation.id, &state)?;
         start(wake, run)?;
@@ -1189,6 +1306,7 @@ pub fn pull_request_prompt(template: &str, repo: &str, pr: &PullRequest, event: 
 fn run_trigger(source: &AutomationEventSource) -> AutomationTrigger {
     match source {
         AutomationEventSource::LinearIssue(_) => AutomationTrigger::LinearIssue,
+        AutomationEventSource::Bot(_) => AutomationTrigger::Event,
         _ => AutomationTrigger::PullRequest,
     }
 }
@@ -1209,12 +1327,22 @@ fn insert_run(automation: &Automation, wake: &Wake) -> Result<AutomationRun> {
             );
             pending
         }
+        WakeSubject::Bot(event) => {
+            let mut pending = new_run(&automation.id, AutomationTrigger::Event, None, AutomationRunStatus::Pending);
+            pending.unknown.insert(crate::bots::wakes::RUN_EVENT.into(), event.record());
+            pending
+        }
     };
     pending.unknown.insert(SUBJECT.into(), json!(wake.subject));
     automation_store::insert_run(pending)
 }
 
 fn start(app: &impl AutomationHost, automation: &Automation, wake: &Wake, run: AutomationRun) -> Result<AutomationRun> {
+    // A bot's duty is given the event fenced, as information (PRO-472).
+    if crate::bots::duties::is_duty(automation) {
+        let prompt = duty_prompt(automation, &wake.what);
+        return start_run(app, automation, run, prompt, None, None);
+    }
     let run = match &wake.what {
         WakeSubject::Linear(issue) => start_run(app, automation, run, issue_prompt(&automation.prompt, issue), Some(linear_ref(issue)), Some(issue_worktree_name(issue)))?,
         WakeSubject::PullRequest(pr, event) => {
@@ -1225,11 +1353,70 @@ fn start(app: &impl AutomationHost, automation: &Automation, wake: &Wake, run: A
             let worktree = slug(&format!("pr {} {} {}", pr.number, event.name(), pr.title), 40);
             start_run(app, automation, run, pull_request_prompt(&automation.prompt, &repo, pr, event), None, Some(worktree))?
         }
+        WakeSubject::Bot(event) => start_run(app, automation, run, crate::bots::wakes::event_prompt(&automation.prompt, event), None, None)?,
     };
     if run.status == AutomationRunStatus::Failed && run.issue.is_some() {
         spawn_report(app, automation.id.clone(), run.run_id.clone(), true);
     }
     Ok(run)
+}
+
+/// The repository a pull request source reads, or none.
+fn source_repo(automation: &Automation) -> String {
+    match automation.event_trigger.as_ref().map(|trigger| &trigger.source) {
+        Some(AutomationEventSource::GithubPullRequest(source)) => source.repo.trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A duty run's prompt for what woke it: the duty's prompt, then the event,
+/// with everything someone else wrote fenced as information (PRO-472).
+fn duty_prompt(automation: &Automation, what: &WakeSubject) -> String {
+    use crate::bots::wakes::prompt;
+    match what {
+        WakeSubject::Linear(issue) => prompt(
+            &automation.prompt,
+            &format!("Linear issue {} matches this duty", issue.identifier),
+            &[("Title", issue.title.clone()), ("State", issue.state.clone()), ("Link", issue.url.clone())],
+            issue.body.as_deref().unwrap_or_default(),
+        ),
+        WakeSubject::PullRequest(pr, event) => {
+            let repo = source_repo(automation);
+            let mut text = prompt(
+                &automation.prompt,
+                &format!("pull request #{} in {repo}: {}", pr.number, event.words()),
+                &[
+                    ("Title", pr.title.clone()),
+                    ("Head branch", pr.head.clone()),
+                    ("Head commit", pr.head_sha.chars().filter(char::is_ascii_hexdigit).take(40).collect()),
+                    ("Base branch", pr.base.clone()),
+                    ("Author", pr.author.clone()),
+                    ("Link", pr.url.clone()),
+                ],
+                "",
+            );
+            text.push_str(&format!("\n\nTo read it, use `gh pr view {0} --repo {repo}` and `gh pr diff {0} --repo {repo}`.", pr.number));
+            text
+        }
+        WakeSubject::Bot(event) => crate::bots::wakes::event_prompt(&automation.prompt, event),
+    }
+}
+
+/// What a duty's first check is given of the events a read would wake on (PRO-472).
+pub(super) fn wake_events(automation: &Automation, wakes: &[Wake]) -> Value {
+    let repo = source_repo(automation);
+    let events: Vec<Value> = wakes
+        .iter()
+        .map(|wake| match &wake.what {
+            WakeSubject::Linear(issue) => json!({"kind": "linearIssue", "id": issue.id, "identifier": issue.identifier, "title": issue.title, "url": issue.url, "state": issue.state}),
+            WakeSubject::PullRequest(pr, event) => json!({
+                "kind": "pullRequest", "repo": repo, "number": pr.number, "event": event.name(), "title": pr.title, "url": pr.url,
+                "head": pr.head, "headSha": pr.head_sha, "base": pr.base, "author": pr.author,
+            }),
+            WakeSubject::Bot(event) => serde_json::to_value(event.as_ref()).unwrap_or_default(),
+        })
+        .collect();
+    crate::bots::wakes::check_events(&events)
 }
 
 // ------------------------------------------------------------------ a run's end
@@ -1383,7 +1570,25 @@ pub fn preview(project_path: &Path, source: &AutomationEventSource) -> Result<Ve
                 })
                 .collect())
         }
+        AutomationEventSource::Bot(_) => bail!("This trigger has nothing to list before it wakes."),
         AutomationEventSource::Unsupported(_) => bail!("{NEEDS_NEWER}"),
+    }
+}
+
+/// What a test's scheduler reads for an automation instead of asking GitHub or Linear: queued answers, in turn.
+#[cfg(test)]
+pub(crate) mod test_reads {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Mutex;
+
+    static QUEUED: Mutex<BTreeMap<String, VecDeque<super::Snapshot>>> = Mutex::new(BTreeMap::new());
+
+    pub(crate) fn queue(automation_id: &str, snapshot: super::Snapshot) {
+        QUEUED.lock().unwrap_or_else(|error| error.into_inner()).entry(automation_id.to_owned()).or_default().push_back(snapshot);
+    }
+
+    pub(super) fn take(automation_id: &str) -> Option<super::Snapshot> {
+        QUEUED.lock().unwrap_or_else(|error| error.into_inner()).get_mut(automation_id)?.pop_front()
     }
 }
 

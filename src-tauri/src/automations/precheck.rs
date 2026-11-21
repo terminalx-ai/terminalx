@@ -391,9 +391,14 @@ pub fn prompt_with_output(prompt: &str, command: &str, output: &str, truncated: 
 /// Run `precheck` for `automation` as a run would. A check that cannot be
 /// run at all (no folder, no environment) is a failed check.
 fn check(automation: &Automation, precheck: &AutomationPrecheck) -> PrecheckTrial {
+    check_with(automation, precheck, None)
+}
+
+/// [`check`], with the events a read would wake a bot's duty on, which its check is given (PRO-472).
+fn check_with(automation: &Automation, precheck: &AutomationPrecheck, events: Option<&serde_json::Value>) -> PrecheckTrial {
     // A bot's duty never runs its check in the bot's home, which the bot can write.
     if crate::bots::duties::is_duty(automation) {
-        return crate::bots::duties::run_check(automation, precheck).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
+        return crate::bots::duties::run_check(automation, precheck, events).unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0));
     }
     run_in(&automation.project_path, automation.workspace, automation.session_id.as_deref(), precheck)
         .unwrap_or_else(|error| failed(format!("The first check could not run: {error:#}"), 0))
@@ -716,14 +721,16 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
 /// quiet or failing check, which writes its one (folded) history row; the
 /// caller then marks nothing seen. False, with nothing written, when the
 /// automation changed while its check ran.
-pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger) -> Result<bool> {
+pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<bool> {
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
         return Ok(true);
     };
     if !agent_available(automation) {
         return Ok(true);
     }
-    let trial = check(automation, precheck);
+    // Only a duty's check is given the events; an ordinary automation's runs as it always has.
+    let events = crate::bots::duties::is_duty(automation).then(|| super::sources::wake_events(automation, wakes));
+    let trial = check_with(automation, precheck, events.as_ref());
     let Ok(current) = automation_store::get(&automation.id) else {
         return Ok(false);
     };

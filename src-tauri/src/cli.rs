@@ -175,6 +175,7 @@ Usage:
   terminalx bots memory add NOTE [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory forget NOTE [--line N] [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory list [--bot BOT] [--place PLACE] [--json]
+  terminalx bots message BOT TEXT [--kind handoff|question|status] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -1626,6 +1627,19 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
             rpc(&format!("bots.{command}"), from_caller(json!({"bot": bot})), tokens)
         }
         "memory" => parse_bot_memory(tokens),
+        // From a bot's own chat or duty run (PRO-472): a hand-off, a question or a status for another bot.
+        "message" => {
+            let kind = tokens.option("--kind")?.unwrap_or_else(|| "handoff".into());
+            if !matches!(kind.as_str(), "handoff" | "question" | "status") {
+                return Err(invalid("--kind is handoff, question or status."));
+            }
+            let bot = tokens.required_front("bot")?;
+            let text = tokens.required_front("message")?;
+            if text.trim().is_empty() {
+                return Err(invalid("bots message needs the message's text."));
+            }
+            rpc("bots.message", from_caller(json!({"bot": bot, "text": text, "kind": kind})), tokens)
+        }
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
 }

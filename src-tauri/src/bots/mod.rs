@@ -13,6 +13,7 @@ pub mod chat;
 pub mod duties;
 pub mod enforce;
 pub mod templates;
+pub mod wakes;
 
 use std::collections::BTreeMap;
 

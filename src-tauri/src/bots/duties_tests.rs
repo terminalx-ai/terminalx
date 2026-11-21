@@ -173,7 +173,7 @@ fn a_roles_scheduled_duties_arrive_switched_off_at_hire() {
     let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
     let duties = duties_of(&bot.id).unwrap();
-    // The two that wake on a schedule; the one that wakes on a GitHub event comes with the triggers ticket.
+    // The two that wake on a schedule; the one that wakes on a GitHub event needs its repository, named on the Duties tab.
     let names: Vec<&str> = duties.iter().map(|duty| duty.name.as_str()).collect();
     assert_eq!(names, ["Watch pull requests", "Watch stalled sessions"]);
     for duty in &duties {
@@ -418,7 +418,7 @@ fn only_a_person_adds_runs_or_switches_on_a_duty_and_switching_off_is_open() {
         assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": operation, "params": params})), "the window witnesses {operation}");
         assert_eq!(ask(operation, params.clone()).unwrap_err().code, "person_required", "{operation} {params}");
     }
-    assert_eq!(duties_of(&bot.id).unwrap().len(), 2, "the hire's one and this one, nothing added");
+    assert_eq!(duties_of(&bot.id).unwrap().len(), 3, "the hire's two and this one, nothing added");
     assert!(runs(&duty).is_empty());
     let off = json!({"id": bot.id, "dutyId": duty.id, "on": false});
     assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "dutySwitch", "params": off})));
@@ -511,7 +511,7 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     let stored: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("bot-duties.json")).unwrap()).unwrap();
     assert!(stored["bots"].get(&argus.id).is_none());
     assert_eq!(stored["bots"][&atlas.id]["quietHours"]["from"], "23:00");
-    assert_eq!(duties_of(&atlas.id).unwrap().len(), 2);
+    assert_eq!(duties_of(&atlas.id).unwrap().len(), 3);
     // Kept with its home in the trash: the definitions, the settings and the run log.
     let trashed = crate::store::root().unwrap().join("trash").join("bots").join(&argus.id);
     let kept: Value = serde_json::from_str(&std::fs::read_to_string(trashed.join(REMOVED_FILE)).unwrap()).unwrap();
