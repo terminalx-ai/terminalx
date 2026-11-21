@@ -887,7 +887,7 @@ impl SessionManager {
                     // asks; one the gate refuses is shown with the reason and denied at once.
                     let mut refused = None;
                     if let Payload::PermissionRequested { request_id, tool_name, input, cwd, reason, .. } = &mut payload {
-                        match crate::bots::access::approval_gate(rt.acting_bot.as_deref(), tool_name, input, cwd.as_deref()) {
+                        match crate::bots::builtins::approval_gate(rt.bot_builtin.as_ref(), rt.acting_bot.as_deref(), tool_name, input, cwd.as_deref()) {
                             crate::bots::access::Gate::Leave => {}
                             crate::bots::access::Gate::Ask(why) => *reason = Some(why),
                             crate::bots::access::Gate::Refuse(why) => {

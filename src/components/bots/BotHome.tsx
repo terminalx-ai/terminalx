@@ -10,12 +10,13 @@ import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotItem } from "@/types/botItems";
 import { AgentQuestionCard, ItemQuestionCard, UndeliveredNotes } from "./NeedsYou";
-import { BotReportsTo } from "./BotHandoffs";
+import { BotHomeAside } from "./BotSuggestions";
 
 /**
  * A bot's Home tab (PRO-469, design 23.01): what needs the owner, with answer buttons, what is in progress, what is
  * planned, and how much was done today or is snoozed. "Give <bot> work" adds an item the owner asked for and tells the
- * bot in its home chat. Who it reports to, and who reports to it, is PRO-475's; Up next and Suggestions are later tickets'.
+ * bot in its home chat. Beside them: who it reports to and who reports to it (PRO-475), Up next, its next duty runs,
+ * and the Suggestions its look around made (PRO-477), in `BotHomeAside`.
  */
 export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: number) => void }) {
   const needs = useNeedsYou();
@@ -32,56 +33,58 @@ export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: nu
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-home">
-      <div className="flex max-w-[860px] min-w-0 flex-col gap-6 px-5 py-4 sm:px-6">
-        {error && !list && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">Couldn't read {bot.name}'s work: {error}</p>}
-        {list && list.unreadable > 0 && (
-          <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
-            {list.unreadable === 1 ? "1 item was" : `${list.unreadable} items were`} saved by a newer TerminalX and can't be shown here.
-          </p>
-        )}
-        <UndeliveredNotes bots={[bot]} botId={bot.id} />
-        <BotReportsTo bot={bot} />
+      <div className="grid min-w-0 max-w-[1220px] grid-cols-1 gap-6 px-5 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_312px]">
+        <div className="flex min-w-0 flex-col gap-6">
+          {error && !list && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">Couldn't read {bot.name}'s work: {error}</p>}
+          {list && list.unreadable > 0 && (
+            <p className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
+              {list.unreadable === 1 ? "1 item was" : `${list.unreadable} items were`} saved by a newer TerminalX and can't be shown here.
+            </p>
+          )}
+          <UndeliveredNotes bots={[bot]} botId={bot.id} />
 
-        {asking.length > 0 && (
-          <Section label="Needs you" count={asking.length} accent testId="bot-home-needs-you">
-            <div className="divide-y divide-hairline overflow-hidden rounded-lg border border-accent/40 bg-card">
-              {asking.map((entry) =>
-                entry.kind === "item" ? (
-                  <ItemQuestionCard key={`item-${entry.item.number}`} bot={bot} item={entry.item} onOpen={() => onOpenItem(entry.item.number)} />
-                ) : (
-                  <AgentQuestionCard key={entry.requestId} bot={bot} entry={entry} />
-                ),
-              )}
-            </div>
+          {asking.length > 0 && (
+            <Section label="Needs you" count={asking.length} accent testId="bot-home-needs-you">
+              <div className="divide-y divide-hairline overflow-hidden rounded-lg border border-accent/40 bg-card">
+                {asking.map((entry) =>
+                  entry.kind === "item" ? (
+                    <ItemQuestionCard key={`item-${entry.item.number}`} bot={bot} item={entry.item} onOpen={() => onOpenItem(entry.item.number)} />
+                  ) : (
+                    <AgentQuestionCard key={entry.requestId} bot={bot} entry={entry} />
+                  ),
+                )}
+              </div>
+            </Section>
+          )}
+
+          <Section label="In progress" count={working.length} testId="bot-home-in-progress">
+            {working.length > 0 ? <ItemRows items={working} onOpen={onOpenItem} /> : <Empty>{list ? `${bot.name} is not working on anything right now.` : <Reading />}</Empty>}
           </Section>
-        )}
 
-        <Section label="In progress" count={working.length} testId="bot-home-in-progress">
-          {working.length > 0 ? <ItemRows items={working} onOpen={onOpenItem} /> : <Empty>{list ? `${bot.name} is not working on anything right now.` : <Reading />}</Empty>}
-        </Section>
+          <Section
+            label="Planned"
+            count={planned.length}
+            testId="bot-home-planned"
+            action={
+              <Button size="xs" variant="ghost" onClick={() => setGiving((value) => !value)} data-testid="bot-give-work">
+                <Plus /> Give {bot.name} work
+              </Button>
+            }
+          >
+            {giving && <GiveWork bot={bot} onClose={() => setGiving(false)} onGiven={() => setGiving(false)} />}
+            {planned.length > 0 ? <ItemRows items={planned} onOpen={onOpenItem} /> : !giving && <Empty>{list ? "Nothing planned." : <Reading />}</Empty>}
+          </Section>
 
-        <Section
-          label="Planned"
-          count={planned.length}
-          testId="bot-home-planned"
-          action={
-            <Button size="xs" variant="ghost" onClick={() => setGiving((value) => !value)} data-testid="bot-give-work">
-              <Plus /> Give {bot.name} work
-            </Button>
-          }
-        >
-          {giving && <GiveWork bot={bot} onClose={() => setGiving(false)} onGiven={() => setGiving(false)} />}
-          {planned.length > 0 ? <ItemRows items={planned} onOpen={onOpenItem} /> : !giving && <Empty>{list ? "Nothing planned." : <Reading />}</Empty>}
-        </Section>
-
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-4 text-[12.5px] text-muted-foreground">
-            <Fold label="Done today" count={doneToday.length} open={open.done} onToggle={() => setOpen((value) => ({ ...value, done: !value.done }))} />
-            <Fold label="Snoozed" count={asleep.length} open={open.snoozed} onToggle={() => setOpen((value) => ({ ...value, snoozed: !value.snoozed }))} />
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-4 text-[12.5px] text-muted-foreground">
+              <Fold label="Done today" count={doneToday.length} open={open.done} onToggle={() => setOpen((value) => ({ ...value, done: !value.done }))} />
+              <Fold label="Snoozed" count={asleep.length} open={open.snoozed} onToggle={() => setOpen((value) => ({ ...value, snoozed: !value.snoozed }))} />
+            </div>
+            {open.done && doneToday.length > 0 && <ItemRows items={doneToday} onOpen={onOpenItem} />}
+            {open.snoozed && asleep.length > 0 && <ItemRows items={asleep} onOpen={onOpenItem} />}
           </div>
-          {open.done && doneToday.length > 0 && <ItemRows items={doneToday} onOpen={onOpenItem} />}
-          {open.snoozed && asleep.length > 0 && <ItemRows items={asleep} onOpen={onOpenItem} />}
         </div>
+        <BotHomeAside bot={bot} />
       </div>
     </div>
   );

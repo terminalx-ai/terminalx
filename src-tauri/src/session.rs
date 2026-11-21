@@ -1231,6 +1231,9 @@ pub struct TabRuntime {
     /// so a bot's gate needs no index read per tool call, and cannot lose
     /// the bot to an index that cannot be read (PRO-478).
     pub(crate) acting_bot: Option<String>,
+    /// The bot's built-in duty this tab runs, when it runs one (PRO-477): its
+    /// tool calls meet that built-in's allow-list first. Read with `acting_bot`.
+    pub(crate) bot_builtin: Option<crate::bots::builtins::Run>,
     pub harness: String,
     pub seq: u64,
     /// Set only while applying a source transcript record; empty means unknown.
@@ -2699,6 +2702,7 @@ impl SessionManager {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
                 acting_bot: crate::bots::chat::acting_bot(&entry),
+                bot_builtin: crate::bots::builtins::of_session(&entry),
                 harness: tab.harness.clone(),
                 seq,
                 status: TabStatus::Idle,
@@ -8307,8 +8311,12 @@ impl SessionManager {
             // A session acting for a bot (PRO-478: its chats and what they started) is held to
             // the bot's access as it is now, on top of the mode `bots::chat` holds it to: the
             // frame showed this launch's token, so its session is its own.
-            let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
-            match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+            // A built-in duty's run (PRO-477) meets its allow-list first.
+            let (acting_bot, builtin) = {
+                let rt = rt_arc.lock().unwrap();
+                (rt.acting_bot.clone(), rt.bot_builtin.clone())
+            };
+            match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
                 crate::bots::access::Gate::Leave => {}
                 crate::bots::access::Gate::Refuse(reason) => {
                     log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
@@ -8453,8 +8461,11 @@ impl SessionManager {
             "PermissionRequest" => {
                 // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
                 // what it asks about is asked on a card that says why.
-                let acting_bot = rt_arc.lock().unwrap().acting_bot.clone();
-                let because = match crate::bots::access::session_gate(acting_bot.as_deref(), &frame.payload) {
+                let (acting_bot, builtin) = {
+                    let rt = rt_arc.lock().unwrap();
+                    (rt.acting_bot.clone(), rt.bot_builtin.clone())
+                };
+                let because = match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
                     crate::bots::access::Gate::Refuse(reason) => {
                         log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
                         return HookReply { output: Some(crate::bots::access::permission_refusal(&reason)), refused: None };

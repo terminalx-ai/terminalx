@@ -295,5 +295,6 @@ export function dutyInputOf(duty: Automation): DutyInput {
     reportsTo: duty.bot?.reportsTo ?? "terminalx",
     enabled: duty.enabled,
     wake: wakeOf(duty),
+    ...(duty.bot?.builtin ? { focus: duty.bot.focus ?? null } : {}),
   };
 }

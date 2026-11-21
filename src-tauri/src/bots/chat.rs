@@ -299,6 +299,10 @@ pub fn hire(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Result<
     if let Err(error) = super::duties::from_template(sink, &bot) {
         log::warn!("bot {} was hired without its role's duties: {error:#}", bot.id);
     }
+    // Its built-in Look around and Tidy memory, switched on: a look only reads and a tidy is one undoable change (PRO-477).
+    if let Err(error) = super::builtins::ensure(sink, &bot, true) {
+        log::warn!("bot {} was hired without its built-in duties: {error:#}", bot.id);
+    }
     Ok(bot)
 }
 

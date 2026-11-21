@@ -181,7 +181,9 @@ fn home_chat(bot: &Bot) -> index::SessionEntry {
 fn a_roles_scheduled_duties_arrive_switched_off_at_hire() {
     let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
-    let duties = duties_of(&bot.id).unwrap();
+    // Its built-in Look around and Tidy memory come with every bot, switched on (PRO-477, `builtins_tests`).
+    let (builtin, duties): (Vec<Automation>, Vec<Automation>) = duties_of(&bot.id).unwrap().into_iter().partition(super::super::builtins::marked);
+    assert_eq!(builtin.iter().map(|duty| (duty.name.as_str(), duty.enabled)).collect::<Vec<_>>(), [("Look around", true), ("Tidy memory", true)]);
     // The two that wake on a schedule; the one that wakes on a GitHub event needs its repository, named on the Duties tab.
     let names: Vec<&str> = duties.iter().map(|duty| duty.name.as_str()).collect();
     assert_eq!(names, ["Watch pull requests", "Watch stalled sessions"]);
@@ -429,7 +431,7 @@ fn only_a_person_adds_runs_or_switches_on_a_duty_and_switching_off_is_open() {
         assert!(crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": operation, "params": params})), "the window witnesses {operation}");
         assert_eq!(ask(operation, params.clone()).unwrap_err().code, "person_required", "{operation} {params}");
     }
-    assert_eq!(duties_of(&bot.id).unwrap().len(), 3, "the hire's two and this one, nothing added");
+    assert_eq!(duties_of(&bot.id).unwrap().iter().filter(|duty| !super::super::builtins::marked(duty)).count(), 3, "the hire's two and this one, nothing added");
     assert!(runs(&duty).is_empty());
     let off = json!({"id": bot.id, "dutyId": duty.id, "on": false});
     assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "dutySwitch", "params": off})));
@@ -522,7 +524,7 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     let stored: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("bot-duties.json")).unwrap()).unwrap();
     assert!(stored["bots"].get(&argus.id).is_none());
     assert_eq!(stored["bots"][&atlas.id]["quietHours"]["from"], "23:00");
-    assert_eq!(duties_of(&atlas.id).unwrap().len(), 3);
+    assert_eq!(duties_of(&atlas.id).unwrap().iter().filter(|duty| !super::super::builtins::marked(duty)).count(), 3);
     // Kept with its home in the trash: the definitions, the settings and the run log.
     let trashed = crate::store::root().unwrap().join("trash").join("bots").join(&argus.id);
     let kept: Value = serde_json::from_str(&std::fs::read_to_string(trashed.join(REMOVED_FILE)).unwrap()).unwrap();
