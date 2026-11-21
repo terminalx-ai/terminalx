@@ -428,9 +428,18 @@ mention starts a conversation, not a duty run.
   per bot.
 - **The gate.** `bots post` and `bots reply` are reports
   (`access::report_command`): Full access posts, the two lower levels ask
-  first, a paused bot is refused. A Full access bot can still post with
-  `gh` by itself, unsigned: the rule tells it not to, nothing stops it
-  (the PRO-489 class).
+  first, a paused bot is refused. At every level, Full access included, a
+  bot's session is refused the `gh` commands that post a comment or a
+  review unsigned (`access::unsigned_post`, PRO-502): `gh pr comment`,
+  `gh issue comment`, `gh pr review`, and a `gh api` call that writes to a
+  `comments` or `reviews` path or sends a GraphQL mutation that names a
+  comment or a review. The refusal names `bots post` and `bots reply`. It
+  finds them anywhere in a command line (lists, pipes, `sh -c`, `env`,
+  `sudo`), but it reads commands: a script, another program (`curl` to
+  the API, a Linear client), a connected server's (MCP) tool, or a call
+  spelt another way still posts. The bot holds the owner's credentials,
+  so this stops habit and a prompt that asks for it, not a bot set on
+  getting around it.
 - **Reading.** The automation scheduler's tick calls `channels::tick`,
   which reads at most every two minutes, on a thread of its own: the
   conversation and review comments of the GitHub repositories of the
@@ -452,10 +461,34 @@ mention starts a conversation, not a duty run.
   and starts nothing. A comment that carries the signature, or comes from a
   bot account, is not looked at (a signature only in quoted `>` lines is a
   person quoting a bot's post, and counts as theirs): a bot's signed post
-  wakes no bot, and is never taken for the owner. A Full access bot that
-  posts unsigned with raw `gh api` is not told apart from the owner (the
-  PRO-489 class); so the agent is told a comment from the owner's account
-  is not always the owner's, and it is a request, never an approval.
+  wakes no bot, and is never taken for the owner.
+- **While a bot is at work (PRO-502).** A mention from the owner's account
+  written while one of the owner's bots at Full access was in a turn is
+  kept as "not accepted", with the bot's name and "mention @slug again in a
+  new comment once it has finished", as an edited comment is. It reads no
+  command. A spell (`Working` in `bot-channels.json`) opens on a bot tab's
+  first sign of work in a turn (its prompt, turn start or a tool call,
+  `SessionManager::publish_event`) while the bot is at Full access and not
+  paused, and closes at the turn's end; one whose end was never seen closes
+  on the next read when the tab has no turn open. A comment counts as
+  written in a spell from two minutes before it starts to two minutes after
+  it ends (`WORK_MARGIN_SECONDS`: the services' clocks and posting delay).
+  Spells are kept a day. Bots at the two lower levels open none: they ask
+  before every command, and the card shows it. Comments from people in Who
+  can ask are not affected: a bot posts with the owner's login, not theirs.
+  The trade-off: the owner's mention made while any Full access bot is
+  working is turned away and must be made again. A narrower rule (only
+  turns that ran a command not known to read, or comments whose text a
+  tool call carried) would read the bot's commands, which is what this
+  check is there not to depend on.
+- **What is not guaranteed.** A bot's unsigned post with the owner's login
+  is still taken for the owner when it is made outside a turn: by a
+  process the bot left running in the background, by a scheduled job, or
+  through a session the app does not know acts for a bot. A bot at a lower
+  level can post unsigned with a command the owner approves on the card.
+  So the agent is still told a comment from the owner's account is not
+  always the owner's, its text reaches it fenced as a request, never an
+  approval, and at most ten mentions an hour reach one bot.
 - **Names.** Outside the fence, a mention names its author in the app's
   words: the name the owner gave a listed person, the owner's own login or
   Linear name, never a display name the commenter chose. The GitHub login
