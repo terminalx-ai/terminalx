@@ -12,6 +12,8 @@ export const botHandoffsApi = {
   list: (id: string) => invoke<HandoffList>("bot_handoffs", { id }),
   /** Stop one hand-off: only the receiving bot's work on it stops. */
   stop: (number: number) => invoke<{ handoff: Handoff }>("bot_handoff_stop", { number }),
+  /** Send a message that did not reach its chat again, now. */
+  resend: (message: string) => invoke<{ delivery: { sent: number; error?: string } }>("bot_handoff_resend", { message }),
   /** Hand a bot's item to another bot, with the owner's own note. Needs the window's proof. */
   hand: (id: string, number: number, to: string, note: string, due: string) => invoke<{ handoff: Handoff }>("bot_item_hand", { id, number, to, note, due: due || null }),
   brief: () => invoke<TeamBrief>("bot_brief"),
@@ -31,6 +33,9 @@ function useReadOn<T>(key: string | null, event: string, read: () => Promise<T>)
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   useEffect(() => {
+    // A value read for another key is never shown for this one.
+    setValue(null);
+    setError(null);
     if (key === null) return;
     let live = true;
     const load = () => Promise.resolve().then(read).then((next) => { if (live) { setValue(next); setError(null); } }, (cause) => { if (live) setError(reason(cause)); });
@@ -44,7 +49,15 @@ function useReadOn<T>(key: string | null, event: string, read: () => Promise<T>)
     };
     // `read` follows `key`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, event, tick]);
+  }, [key, event]);
+  useEffect(() => {
+    if (key === null || tick === 0) return;
+    let live = true;
+    Promise.resolve().then(read).then((next) => { if (live) { setValue(next); setError(null); } }, (cause) => { if (live) setError(reason(cause)); });
+    return () => { live = false; };
+    // A reload reads again without clearing what is shown.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tick]);
   return { value, error, reload: () => setTick((value) => value + 1) };
 }
 
@@ -63,11 +76,14 @@ export function handoffOpen(handoff: Pick<Handoff, "state">): boolean {
   return !["answered", "failed", "stopped"].includes(handoff.state);
 }
 
-/** "Working · 40s", "Waiting · Sentry is paused", "Answered", or a state a newer app wrote as itself. */
-export function handoffStateLabel(handoff: Handoff, toName: string, now = Date.now()): string {
+/**
+ * "Working · 40s", "Waiting · Sentry is paused", "Answered", or a state a newer app wrote as itself. `toPaused`: the
+ * receiving bot is paused now; a waiting hand-off of a bot that is not paused is waiting to start.
+ */
+export function handoffStateLabel(handoff: Handoff, toName: string, now = Date.now(), toPaused = true): string {
   switch (handoff.state) {
     case "waiting":
-      return `Waiting · ${toName} is paused`;
+      return toPaused ? `Waiting · ${toName} is paused` : "Waiting to start";
     case "working":
       return `Working · ${elapsed(handoff.started ?? handoff.created, now)}`;
     case "answered":
@@ -76,6 +92,7 @@ export function handoffStateLabel(handoff: Handoff, toName: string, now = Date.n
       if (handoff.stoppedBy === "deleted") return "Failed · its bot was deleted";
       return handoff.answer?.by === "terminalx" ? "Failed · not started" : "Could not do it";
     case "stopped":
+      if (handoff.stoppedBy === "deleted") return "Stopped · its sender was deleted";
       return handoff.stoppedBy === "owner" ? "Stopped by you" : "Stopped";
     default:
       return handoff.state;

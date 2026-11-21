@@ -598,6 +598,8 @@ pub struct NewItem {
     pub done_means: Vec<String>,
     pub start: bool,
     pub asked_by: Option<String>,
+    /// Who added it, when not the one `By` names: the bot that handed it on (PRO-475).
+    pub added_by: Option<String>,
 }
 
 fn check_link(bot: &Bot, link: &Link) -> Result<()> {
@@ -687,7 +689,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             state: if new.start { ItemState::InProgress } else { ItemState::Planned },
             done_means,
             asked_by,
-            added_by: by.id(bot).into(),
+            added_by: new.added_by.clone().unwrap_or_else(|| by.id(bot).into()),
             links: Vec::new(),
             question: None,
             snoozed_until: None,
@@ -1284,6 +1286,7 @@ fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command
         }
         "show" => Ok(json!({"botId": bot.id, "item": shown(&bot.id, number(params, "item")?)?})),
         "add" => item(add(sink, bot, &by, NewItem {
+            added_by: None,
             title: optional(params, "title").unwrap_or_default().into(),
             summary: optional(params, "summary").unwrap_or_default().into(),
             done_means: strings(params, "done"),
@@ -1472,6 +1475,7 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
         }
         "itemGive" => {
             let item = add(sink, &bot, &By::Owner, NewItem {
+                added_by: None,
                 title: params["title"].as_str().unwrap_or_default().into(),
                 summary: params["summary"].as_str().unwrap_or_default().into(),
                 done_means: Vec::new(),

@@ -57,7 +57,7 @@ export function BotSettings({ bot }: { bot: Bot }) {
       <Section title="Channels" note={`Where you can reach ${bot.name} and where it reports.`}>
         <Channels bot={bot} />
       </Section>
-      <Section title="Who can ask" note={`People and bots that may give ${bot.name} work. ${bot.name} acts with your accounts.`}>
+      <Section title="Who can ask" note={`People and bots that may give ${bot.name} work. ${bot.name} acts with your accounts. Its lead hands it work anyway; any other bot, a report of ${bot.name} included, hands it work only when listed here with "Can hand off work".`}>
         <WhoCanAsk bot={bot} busy={busy.has("whoCanAsk")} onChange={(whoCanAsk) => saveList("whoCanAsk", { whoCanAsk })} />
       </Section>
     </div>

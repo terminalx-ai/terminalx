@@ -54,6 +54,9 @@ function route(command: string, args: Record<string, unknown> = {}) {
   switch (command) {
     case "bot_handoffs":
       return Promise.resolve(list);
+    case "bot_handoff_resend":
+      list = { ...list, undelivered: (list.undelivered ?? []).filter((message) => message.id !== args.message) };
+      return Promise.resolve({ delivery: { sent: 1 } });
     case "bot_handoff_stop":
       return Promise.resolve({ handoff: { ...list.handoffs[0], state: "stopped" } });
     case "bot_brief":
@@ -136,7 +139,37 @@ describe("hand-off cards in a bot's chat (23.04)", () => {
     await waitFor(() => expect(mocks.listeners.has("bot_handoffs_changed")).toBe(false));
   });
 
+  it("say a failed read, never showing it as no hand-offs, and read again after the runtime restarts (lead review 1)", async () => {
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_unavailable")) : route(command, args));
+    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't read Atlas's hand-offs: runtime_unavailable");
+    list.handoffs = [handoff(3)];
+    mocks.invoke.mockImplementation(route);
+    fireEvent.click(screen.getByText("Restart runtime"));
+    expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("show an answer or a message that did not reach its chat, with a Resend (lead review 1)", async () => {
+    list.handoffs = [handoff(3, { state: "answered", answer: { at: "2026-11-21T10:00:00Z", text: "Done.", by: "b2" } })];
+    list.undelivered = [
+      { id: "m1", at: "2026-11-21T10:00:00Z", from: "b2", to: "b1", kind: "answer", handoff: 3, tries: 3, error: "the chat could not take the message", held: true },
+      { id: "m2", at: "2026-11-21T10:01:00Z", from: "b2", to: "b1", kind: "tell", handoff: null, tries: 1, error: "the tab is gone", held: false },
+    ];
+    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    const card = await screen.findByTestId("bot-handoff-card");
+    const onCard = within(card).getByTestId("bot-handoff-undelivered-message");
+    expect(onCard.textContent).toContain("An answer from Sentry to Atlas is not delivered · it goes when that bot's chat starts: the chat could not take the message");
+    const loose = screen.getAllByTestId("bot-handoff-undelivered-message").find((row) => !card.contains(row))!;
+    expect(loose.textContent).toContain("A message from Sentry to Atlas is not delivered: the tab is gone");
+    fireEvent.click(within(onCard).getByTestId("bot-handoff-resend"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoff_resend", { message: "m1" }));
+    await waitFor(() => expect(screen.getAllByTestId("bot-handoff-undelivered-message")).toHaveLength(1));
+  });
+
   it("keep the open ones and only the last few closed", () => {
+    expect(handoffStateLabel(handoff(1, { state: "waiting" }), "Sentry", Date.now(), false)).toBe("Waiting to start");
+    expect(handoffStateLabel(handoff(1, { state: "stopped", stoppedBy: "deleted" }), "Sentry")).toBe("Stopped · its sender was deleted");
     const many = [handoff(9), ...Array.from({ length: 5 }, (_, n) => handoff(n + 1, { state: "answered" }))];
     expect(chatHandoffs(many, "atlas-home").map((value) => value.number)).toEqual([9, 1, 2]);
     expect(handoffStateLabel(handoff(1, { state: "failed", answer: { at: "", text: "x", by: "terminalx", failed: true } }), "Sentry")).toBe("Failed · not started");
@@ -166,6 +199,41 @@ describe("the team brief (Every bot reads)", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_brief_write", { text: "Status updates go in a table.", expected: "h1" }));
   });
 
+  it("a save refused because the brief changed offers the newer text and keeps the draft (lead review 1)", async () => {
+    brief = { ...brief, text: "Old.\n", hash: "h1", lines: 1 };
+    render(<TeamBriefEditor />);
+    const box = screen.getByLabelText<HTMLTextAreaElement>("Team brief text");
+    await waitFor(() => expect(box.value).toBe("Old.\n"));
+    fireEvent.change(box, { target: { value: "Mine." } });
+    brief = { ...brief, text: "Theirs.\n", hash: "h5" };
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) =>
+      command === "bot_brief_write" && args.expected === "h1" ? Promise.reject(new Error("The team brief changed since you opened it. Open it again to see what changed.")) : route(command, args));
+    fireEvent.click(screen.getByTestId("bot-team-brief-save"));
+    await screen.findByTestId("bot-team-brief-stale");
+    expect(box.value).toBe("Mine.");
+    fireEvent.click(screen.getByTestId("bot-team-brief-load-newer"));
+    await waitFor(() => expect(box.value).toBe("Theirs.\n"));
+    fireEvent.click(screen.getByTestId("bot-team-brief-put-back"));
+    expect(box.value).toBe("Mine.");
+    fireEvent.click(screen.getByTestId("bot-team-brief-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_brief_write", { text: "Mine.", expected: "h5" }));
+  });
+
+  it("Save mine over it writes the draft over the newer brief", async () => {
+    brief = { ...brief, text: "Old.\n", hash: "h1", lines: 1 };
+    render(<TeamBriefEditor />);
+    const box = screen.getByLabelText<HTMLTextAreaElement>("Team brief text");
+    await waitFor(() => expect(box.value).toBe("Old.\n"));
+    fireEvent.change(box, { target: { value: "Mine." } });
+    brief = { ...brief, text: "Theirs.\n", hash: "h5" };
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) =>
+      command === "bot_brief_write" && args.expected === "h1" ? Promise.reject(new Error("The team brief changed since you opened it.")) : route(command, args));
+    fireEvent.click(screen.getByTestId("bot-team-brief-save"));
+    fireEvent.click(await screen.findByTestId("bot-team-brief-save-over"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_brief_write", { text: "Mine.", expected: "h5" }));
+    await waitFor(() => expect(screen.queryByTestId("bot-team-brief-stale")).toBeNull());
+  });
+
   it("says when the file was changed outside TerminalX", async () => {
     brief = { ...brief, text: "Push to main.\n", hash: "h9", lines: 1, outside: true };
     render(<><ul><TeamBriefRow selected onOpen={() => {}} /></ul><TeamBriefEditor /></>);
@@ -189,6 +257,12 @@ describe("Reports to, on a bot's Home", () => {
     render(<BotReportsTo bot={sentry} />);
     expect(screen.getByTestId("bot-lead").textContent).toContain("Reports to Atlas");
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_handoffs")).toHaveLength(1);
+  });
+
+  it("says a failed read of the hand-offs, and does not show a stale lead's list for another bot", async () => {
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_unavailable")) : route(command, args));
+    render(<BotReportsTo bot={atlas} />);
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't read Atlas's hand-offs");
   });
 
   it("shows nothing for a bot with no line", () => {
@@ -224,5 +298,26 @@ describe("Hand to another bot, on an item's page (23.09)", () => {
     mocks.bots = [atlas];
     render(<HandToBot bot={atlas} item={item} onClose={() => {}} onHanded={() => {}} />);
     expect(screen.getByTestId("bot-hand-none")).toBeTruthy();
+  });
+});
+
+describe("useBotHandoffs (lead review 1)", () => {
+  it("clears what it read for one bot when asked about another", async () => {
+    const { useBotHandoffs } = await import("@/lib/botHandoffs");
+    let release: (value: HandoffList) => void = () => {};
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) =>
+      command === "bot_handoffs" && args.id === "b2" ? new Promise<HandoffList>((resolve) => { release = resolve; }) : route(command, args));
+    list.handoffs = [handoff(1)];
+    function Probe({ id }: { id: string }) {
+      const { list: read } = useBotHandoffs(id);
+      return <p data-testid="probe">{read ? read.handoffs.length : "none"}</p>;
+    }
+    const { rerender } = render(<Probe id="b1" />);
+    await waitFor(() => expect(screen.getByTestId("probe").textContent).toBe("1"));
+    rerender(<Probe id="b2" />);
+    expect(screen.getByTestId("probe").textContent).toBe("none");
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoffs", { id: "b2" }));
+    await act(async () => release({ ...list, handoffs: [] }));
+    expect(screen.getByTestId("probe").textContent).toBe("0");
   });
 });

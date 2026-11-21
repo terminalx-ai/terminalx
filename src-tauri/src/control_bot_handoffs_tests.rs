@@ -16,8 +16,8 @@ struct Switches;
 
 impl Drop for Switches {
     fn drop(&mut self) {
-        handoffs::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
-        handoffs::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(false));
+        handoffs::SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
+        handoffs::FAIL_SENDS_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
         handoffs::REAL_SENDS_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
         crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
     }
@@ -35,7 +35,7 @@ fn home_chat(id: &str) -> SessionEntry {
 
 /// What was sent to bots' chats since the last call: (session, text, author's label).
 fn sent() -> Vec<(String, String, Option<String>)> {
-    handoffs::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().drain(..).map(|(session, _, text, author)| (session, text, author)).collect())
+    handoffs::SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).drain(..).map(|(session, _, text, author)| (session, text, author)).collect()
 }
 
 /// A team: Atlas the lead, Sentry and Argus reporting to it, and Iris on no line with them.
@@ -93,6 +93,11 @@ impl Team {
     }
 }
 
+/// Who may hand `bot` work besides its lead: its Who can ask, as the owner sets it.
+fn who_can_ask(team: &Team, bot: &str, askers: Value) {
+    crate::bots::update(team.service.sink.as_ref(), bot, serde_json::from_value(json!({"whoCanAsk": askers})).unwrap()).unwrap();
+}
+
 fn status_lines(session: &str) -> Vec<String> {
     let entry = index::get(session).unwrap();
     let tab = entry.tabs.iter().find(|tab| !tab.is_terminal()).unwrap();
@@ -127,7 +132,7 @@ fn a_lead_hands_a_scoped_check_to_its_report_and_carries_on_with_the_answer() {
     assert!(work.title.starts_with("Hand-off from Atlas: Check the runner"), "{}", work.title);
     let items = crate::bots::items::read(&team.sentry).unwrap().items;
     let item = items.iter().find(|item| Some(item.number) == handoff.item).unwrap();
-    assert_eq!((item.state.as_str(), item.asked_by.as_str(), item.added_by.as_str()), ("inProgress", "Atlas (a bot)", team.sentry.as_str()));
+    assert_eq!((item.state.as_str(), item.asked_by.as_str(), item.added_by.as_str()), ("inProgress", team.atlas.as_str(), team.atlas.as_str()), "the sender asked for it and added it (lead review 1)");
 
     // Its first message is Atlas's, labelled as a bot's and fenced: never the owner's.
     let messages = sent();
@@ -167,6 +172,10 @@ fn a_lead_hands_a_scoped_check_to_its_report_and_carries_on_with_the_answer() {
     // The lead carries on: it reads its hand-offs and hands the next piece on.
     let listed = team.as_home(&team.atlas, "bots.handoffs", json!({"all": true})).unwrap();
     assert_eq!(listed["handoffs"][0]["state"], "answered");
+    // Lead review 1: a bot is given its own side's session, never the other bot's.
+    assert_eq!((listed["handoffs"][0]["fromSession"].as_str(), listed["handoffs"][0].get("toSession")), (Some(atlas_chat.id.as_str()), None));
+    let theirs = team.as_home(&team.sentry, "bots.handoffs", json!({"all": true})).unwrap();
+    assert!(theirs["handoffs"][0].get("fromSession").is_none() && theirs["handoffs"][0]["toSession"].is_string(), "{theirs}");
     team.as_home(&team.atlas, "bots.handoff", json!({"to": "argus", "title": "Watch the queue time on main"})).unwrap();
     assert_eq!(sent()[0].2.as_deref(), Some("Atlas · hand-off to Argus · a bot's words, not an approval"));
 
@@ -250,14 +259,16 @@ fn hand_offs_keep_to_the_line_and_its_bounds() {
 
     // Off the line, to itself, to the owner, to nobody.
     let off = refused(&team.atlas, "bots.handoff", json!({"to": "iris", "title": "Look at the composer"}));
-    assert!(off.code == "invalid_arguments" && off.message.contains("not on Atlas's reporting line"), "{off:?}");
+    assert!(off.code == "invalid_arguments" && off.message.contains("Iris does not report to Atlas, and its Who can ask does not list Atlas"), "{off:?}");
     assert!(refused(&team.sentry, "bots.tell", json!({"to": "argus", "text": "hi"})).message.contains("reporting line"), "siblings go through their lead");
     assert!(refused(&team.atlas, "bots.handoff", json!({"to": "atlas", "title": "Me"})).message.contains("to itself"));
     assert!(refused(&team.atlas, "bots.tell", json!({"to": "owner", "text": "hi"})).message.contains("not a bot"));
     assert!(refused(&team.atlas, "bots.tell", json!({"to": "lead", "text": "hi"})).message.contains("reports to your owner"));
     assert!(refused(&team.atlas, "bots.tell", json!({"to": "nobody", "text": "hi"})).message.contains("No bot matches"));
 
-    // Back and forth: Sentry cannot hand work back to the lead that handed it open work.
+    // Back and forth: even with the owner letting Sentry hand its lead work, it cannot hand work back while the lead's
+    // hand-off to it is open.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.sentry, "may": "handOff"}]));
     team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the relay"})).unwrap();
     let back = refused(&team.sentry, "bots.handoff", json!({"to": "atlas", "title": "You check it"}));
     assert!(back.message.contains("still open") && back.message.contains("--about 1"), "{back:?}");
@@ -295,7 +306,8 @@ fn hand_offs_keep_to_the_line_and_its_bounds() {
     assert_eq!(team.as_chat(&kestrel_chat, "Kestrel-secret", "bots.handoff", json!({"to": "wren", "title": "Write the notes"})).unwrap()["handoff"]["depth"], 3);
     let deep = team.as_chat(&wren_chat, "Wren-secret", "bots.handoff", json!({"to": "finch", "title": "Watch it"})).unwrap_err();
     assert!(deep.message.contains("a chain stops at 3"), "{deep:?}");
-    // Nor back up the chain it came down.
+    // Nor back up the chain it came down, even where the owner let it hand work up.
+    who_can_ask(&team, &kestrel, json!([{"kind": "bot", "id": wren, "may": "handOff"}]));
     let up = team.as_chat(&wren_chat, "Wren-secret", "bots.handoff", json!({"to": "kestrel", "title": "Back to you"})).unwrap_err();
     assert!(up.message.contains("still open"), "{up:?}");
     let _ = kestrel;
@@ -481,19 +493,25 @@ fn the_owner_hands_an_item_on_and_writes_the_brief_from_the_window() {
     team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the relay"})).unwrap();
     let sentry_item = handoffs::read().unwrap().handoffs.iter().find(|handoff| handoff.to == team.sentry).unwrap().item.unwrap();
     // Review 1: one handed to it and not answered fails for its sender, who is told.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.argus, "may": "handOff"}]));
+    let sentry_home = home_chat(&team.sentry);
     let asked = team.as_home(&team.argus, "bots.handoff", json!({"to": "lead", "title": "Look at the queue"})).unwrap()["handoff"]["number"].as_u64().unwrap();
     let argus_home = home_chat(&team.argus);
     sent();
     team.window("delete", json!({"id": team.atlas})).unwrap();
     let store = handoffs::read().unwrap();
-    assert!(store.handoffs.iter().all(|handoff| handoff.from != team.atlas && (handoff.to != team.atlas || handoff.number == asked)), "{:?}", store.handoffs);
+    assert!(store.handoffs.iter().all(|handoff| (handoff.from != team.atlas && handoff.to != team.atlas) || handoff.stopped_by.as_deref() == Some("deleted")), "{:?}", store.handoffs);
+    // Lead review 1: one it gave and was open stays, stopped, on the other bot's list, which is told.
+    let relay = store.handoffs.iter().find(|handoff| handoff.to == team.sentry && handoff.title == "Check the relay").unwrap();
+    assert_eq!((relay.state.clone(), relay.stopped_by.as_deref()), (HandoffState::Stopped, Some("deleted")));
     let unanswered = team.handoff(asked);
     assert_eq!((unanswered.state, unanswered.stopped_by.as_deref()), (HandoffState::Failed, Some("deleted")));
     let told = sent();
     assert!(told.iter().any(|(session, text, author)| *session == argus_home.id && author.as_deref() == Some("TerminalX") && text.contains(&format!("hand-off {asked}")) && text.contains("was deleted before it answered")), "{told:?}");
+    assert!(told.iter().any(|(session, text, author)| *session == sentry_home.id && author.as_deref() == Some("TerminalX") && text.contains(&format!("hand-off {}", relay.number)) && text.contains("was deleted, so it is closed")), "{told:?}");
     assert!(store.messages.iter().all(|message| message.from != team.atlas && message.to != team.atlas));
     let trashed: Value = serde_json::from_str(&std::fs::read_to_string(crate::store::root().unwrap().join("trash").join("bot-handoffs").join(format!("{}.json", team.atlas))).unwrap()).unwrap();
-    assert_eq!(trashed["handoffs"].as_array().unwrap().len(), 2);
+    assert_eq!(trashed["handoffs"].as_array().unwrap().len(), 1, "only its closed ones: {trashed}");
     let item = crate::bots::items::read(&team.sentry).unwrap().items.into_iter().find(|item| item.number == sentry_item).unwrap();
     assert_eq!(item.state, crate::bots::items::ItemState::Dropped, "Sentry's work for a deleted bot stops");
     // Its reports now report to the owner, so their line no longer reaches it.
@@ -540,4 +558,154 @@ fn a_bots_message_is_published_with_the_bot_as_its_author() {
     assert_eq!(message["author"]["userId"], format!("bot:{}", team.argus));
     team.service.manager.closing();
     team.service.manager.terminals().kill_all();
+}
+
+/// Lead review 1 (M1): work is handed down the line the owner set, or to a bot whose Who can ask lists the sender
+/// with "Can hand off work"; nothing else. A report sends its lead messages and answers, never work. The rule is
+/// judged on the records under the store's lock.
+#[test]
+fn work_goes_down_the_line_or_where_who_can_ask_allows_it() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    // Report to lead: refused, saying why; a message is fine.
+    let up = team.as_home(&team.sentry, "bots.handoff", json!({"to": "lead", "title": "Rotate the token"})).unwrap_err();
+    assert!(up.code == "invalid_arguments" && up.message.contains("Work is not handed up the line: Atlas is your lead"), "{up:?}");
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": "The token is due to rotate."})).unwrap();
+    // Lead to report: allowed.
+    assert_eq!(team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Rotate the token"})).unwrap()["handoff"]["state"], "working");
+    // A bot on no line with Atlas, listed in Atlas's Who can ask with "Can hand off work": allowed.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.iris, "may": "handOff"}]));
+    assert_eq!(team.as_home(&team.iris, "bots.handoff", json!({"to": "atlas", "title": "Review the composer copy"})).unwrap()["handoff"]["state"], "working");
+    let atlas = crate::bots::get(&team.atlas).unwrap();
+    let iris = crate::bots::get(&team.iris).unwrap();
+    assert!(handoffs::launch_note(&iris, false).unwrap().contains("Your owner also lets you hand work to: Atlas."));
+    assert!(handoffs::launch_note(&atlas, false).unwrap().contains("Work is not handed up"));
+    // The same entry at a lower level: refused, naming the level.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.iris, "may": "ask"}]));
+    let lower = team.as_home(&team.iris, "bots.handoff", json!({"to": "atlas", "title": "Again"})).unwrap_err();
+    assert!(lower.message.contains("lists Iris as \"Can ask\", not \"Can hand off work\""), "{lower:?}");
+    // The entry removed: refused.
+    who_can_ask(&team, &team.atlas, json!([]));
+    let gone = team.as_home(&team.iris, "bots.handoff", json!({"to": "atlas", "title": "Again"})).unwrap_err();
+    assert!(gone.message.contains("Atlas does not report to Iris, and its Who can ask does not list Iris"), "{gone:?}");
+    // Who can ask lets a bot hand work, not send messages off the line.
+    assert!(team.as_home(&team.iris, "bots.tell", json!({"to": "atlas", "text": "hi"})).unwrap_err().message.contains("reporting line"));
+}
+
+/// Lead review 1: two bots handing each other work, answered each time so no open hand-off blocks it, stop at the
+/// pair's limit over its window, closed ones counted.
+#[test]
+fn back_and_forth_between_two_bots_is_bounded_over_time() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.sentry, "may": "handOff"}]));
+    for round in 0..handoffs::PAIR_LIMIT {
+        let (from, to, back) = if round % 2 == 0 { (&team.atlas, "sentry", "atlas") } else { (&team.sentry, "atlas", "sentry") };
+        let number = team.as_home(from, "bots.handoff", json!({"to": to, "title": format!("Round {round}")})).unwrap()["handoff"]["number"].as_u64().unwrap();
+        let answerer = if round % 2 == 0 { &team.sentry } else { &team.atlas };
+        team.as_home(answerer, "bots.tell", json!({"to": back, "about": number, "text": "Done."})).unwrap();
+    }
+    let stopped = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "One more"})).unwrap_err();
+    assert!(stopped.message.contains("two bots stop at 6"), "{stopped:?}");
+    // Another pair is not held by it.
+    team.as_home(&team.atlas, "bots.handoff", json!({"to": "argus", "title": "Watch the queue"})).unwrap();
+}
+
+/// Lead review 1 (M3): a message or an answer that cannot be sent is never dropped. Each send tries it, at most
+/// three times; then it is held, shown with Resend, and sent after one of its bot's chats starts
+/// (`chat::launched`) or when the owner resends it. Only work that cannot reach its bot fails.
+#[test]
+fn a_message_or_answer_that_cannot_be_sent_waits_and_is_sent_after_a_launch() {
+    use std::sync::atomic::Ordering;
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let atlas_home = home_chat(&team.atlas);
+    let undelivered = || team.window("handoffs", json!({"id": team.atlas})).unwrap()["undelivered"].as_array().unwrap().clone();
+
+    // An answer to Atlas that its chat cannot take: the hand-off is answered, the answer waits.
+    let number = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the runner"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    sent();
+    handoffs::FAIL_SENDS_FOR_TESTS.store(true, Ordering::SeqCst);
+    let answered = team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "about": number, "text": "No secret reaches the logs."})).unwrap();
+    assert_eq!((answered["handoff"]["state"].as_str(), answered["delivery"]["sent"].as_u64()), (Some("answered"), Some(0)), "{answered}");
+    assert!(answered["delivery"]["error"].as_str().unwrap().contains("could not take"));
+    // Each send that follows tries it again, three tries in all; then it is held, still waiting, and not dropped.
+    for n in 0..4 {
+        team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": format!("Status {n}")})).unwrap();
+    }
+    let waiting = undelivered();
+    let answer = waiting.iter().find(|message| message["kind"] == "answer").unwrap().clone();
+    assert_eq!((answer["handoff"].as_u64(), answer["tries"].as_u64(), answer["held"].as_bool()), (Some(number), Some(3), Some(true)), "{waiting:?}");
+    assert!(answer.get("text").is_none(), "its text is not shown");
+    assert_eq!(team.handoff(number).state, HandoffState::Answered, "an answer that waits does not fail its hand-off");
+    assert!(sent().is_empty());
+
+    // The chat can take messages again. An ordinary send does not try a held one; a launch of the chat does.
+    handoffs::FAIL_SENDS_FOR_TESTS.store(false, Ordering::SeqCst);
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": "Status 4"})).unwrap();
+    let after_send = sent();
+    assert!(after_send.iter().all(|(_, text, _)| !text.contains("No secret reaches the logs.")), "held: {after_send:?}");
+    crate::bots::chat::launched(&team.service.manager, &atlas_home, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut after_launch = Vec::new();
+    while !after_launch.iter().any(|(_, text, _): &(String, String, Option<String>)| text.contains("No secret reaches the logs.")) {
+        assert!(std::time::Instant::now() < deadline, "the held answer was never sent after the launch: {after_launch:?}");
+        after_launch.extend(sent());
+        std::thread::yield_now();
+    }
+    let (session, _, author) = after_launch.iter().find(|(_, text, _)| text.contains("No secret reaches the logs.")).unwrap();
+    assert_eq!((session.as_str(), author.as_deref()), (atlas_home.id.as_str(), Some("Sentry · answer to Atlas · a bot's words, not an approval")));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !undelivered().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "still waiting: {:?}", undelivered());
+        std::thread::yield_now();
+    }
+    assert_eq!(after_launch.iter().filter(|(_, text, _)| text.contains("No secret reaches the logs.")).count(), 1, "sent once");
+
+    // The owner's Resend sends a held message now.
+    handoffs::FAIL_SENDS_FOR_TESTS.store(true, Ordering::SeqCst);
+    for n in 0..3 {
+        let _ = team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": format!("Later {n}")}));
+    }
+    let held = undelivered().into_iter().find(|message| message["held"] == true).expect("a held message");
+    handoffs::FAIL_SENDS_FOR_TESTS.store(false, Ordering::SeqCst);
+    let resent = team.window("handoffResend", json!({"message": held["id"]})).unwrap();
+    assert!(resent["delivery"]["sent"].as_u64().unwrap() >= 1, "{resent}");
+    assert!(undelivered().is_empty());
+    assert!(team.window("handoffResend", json!({"message": held["id"]})).unwrap_err().to_string().contains("sent already"));
+    assert!(!crate::bots::enforce::needs_person("handoffResend", &json!({})), "it sends what was already recorded");
+}
+
+/// Lead review 1: a hand-off left waiting for a bot that is not paused is labelled so, and starts the next time
+/// one of its chats starts.
+#[test]
+fn a_hand_off_left_waiting_for_a_bot_that_is_not_paused_starts_at_its_next_launch() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    crate::bots::pause(team.service.sink.as_ref(), &team.sentry, crate::bots::OWNER).unwrap();
+    let number = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the runner"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    // Unpaused without the resume that starts its work (a resume cut short, say).
+    crate::store::bots::change(
+        |bots| {
+            if let Some(bot) = bots.iter_mut().find(|bot| bot.id == team.sentry) {
+                bot.paused = None;
+            }
+            Ok(())
+        },
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(team.handoff(number).state, HandoffState::Waiting);
+    let atlas = crate::bots::get(&team.atlas).unwrap();
+    let note = handoffs::launch_note(&atlas, false).unwrap();
+    assert!(note.contains("Check the runner [waiting to start]") && !note.contains("paused"), "{note}");
+    sent();
+    handoffs::deliver_waiting(&team.service.manager, &team.sentry);
+    let started = team.handoff(number);
+    assert_eq!(started.state, HandoffState::Working);
+    assert!(sent().iter().any(|(session, text, _)| Some(session) == started.to_session.as_ref() && text.contains("Check the runner")));
 }

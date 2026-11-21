@@ -43,11 +43,27 @@ export interface Handoff {
   waitingMessages: number;
 }
 
+/** A message or answer between bots that did not reach its chat yet: shown with Resend, never its text. */
+export interface UndeliveredMessage {
+  id: string;
+  at: string;
+  from: string;
+  to: string;
+  kind: string;
+  handoff?: number | null;
+  tries: number;
+  error: string;
+  /** Out of automatic tries: it goes after one of its bot's chats starts, or on Resend. */
+  held: boolean;
+}
+
 export interface HandoffList {
   revision: number;
   handoffs: Handoff[];
   /** Messages waiting for the bot asked about. */
   waitingMessages: number;
+  /** To or from the bot, and not delivered after at least one try. */
+  undelivered?: UndeliveredMessage[];
   unreadable: number;
 }
 

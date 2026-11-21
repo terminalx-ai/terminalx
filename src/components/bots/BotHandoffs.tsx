@@ -11,7 +11,7 @@ import { openBot } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotItem } from "@/types/botItems";
-import type { Handoff } from "@/types/botHandoffs";
+import type { Handoff, UndeliveredMessage } from "@/types/botHandoffs";
 import { BotAvatar } from "./BotAvatar";
 
 /**
@@ -45,18 +45,60 @@ export function chatHandoffs(handoffs: Handoff[], chatId: string): Handoff[] {
 
 /** Above a bot's open chat: a card for each hand-off it made or works on there (design 23.04). */
 export function HandoffCards({ bot, chatId }: { bot: Bot; chatId: string }) {
-  const { list } = useBotHandoffs(bot.id);
+  const { list, error, reload } = useBotHandoffs(bot.id);
   const shown = chatHandoffs(list?.handoffs ?? [], chatId);
   const now = useTicking(shown.some((handoff) => handoff.state === "working"));
-  if (shown.length === 0) return null;
+  const undelivered = list?.undelivered ?? [];
+  // Messages that are about no hand-off shown here: kept in a strip of their own, so none is lost from view.
+  const loose = undelivered.filter((message) => !shown.some((handoff) => handoff.number === message.handoff));
+  // A failed read is said, never shown as no hand-offs.
+  if (error) {
+    return (
+      <div className="shrink-0 border-b border-hairline px-4 py-2" data-testid="bot-handoff-cards-error">
+        <MachineHostError error={`Couldn't read ${bot.name}'s hand-offs: ${error}`} onRestarted={reload} />
+      </div>
+    );
+  }
+  if (shown.length === 0 && loose.length === 0) return null;
   return (
     <div className="flex max-h-[40%] shrink-0 flex-col gap-2 overflow-y-auto border-b border-hairline px-4 py-2 scrollbar-thin" aria-label="Hand-offs" data-testid="bot-handoff-cards">
-      {shown.map((handoff) => <HandoffCard key={handoff.number} handoff={handoff} now={now} />)}
+      {shown.map((handoff) => <HandoffCard key={handoff.number} handoff={handoff} now={now} undelivered={undelivered.filter((message) => message.handoff === handoff.number)} onResent={reload} />)}
+      {loose.length > 0 && <Undelivered messages={loose} onResent={reload} />}
     </div>
   );
 }
 
-function HandoffCard({ handoff, now }: { handoff: Handoff; now: number }) {
+const KIND_WORD: Record<string, string> = { answer: "An answer", tell: "A message", handoff: "The hand-off", stopped: "A note", failed: "A note" };
+
+/** Messages between bots that did not reach their chat: why, and a Resend. Never their text. */
+function Undelivered({ messages, onResent }: { messages: UndeliveredMessage[]; onResent: () => void }) {
+  const { bots } = useBotStore();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const resend = (id: string) => {
+    setBusy(id);
+    setError(null);
+    botHandoffsApi.resend(id).then((answer) => { if (answer.delivery.error) setError(answer.delivery.error); onResent(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(null));
+  };
+  return (
+    <div className="flex min-w-0 flex-col gap-1" data-testid="bot-handoff-undelivered">
+      {messages.map((message) => (
+        <p key={message.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-warning/10 px-2 py-1 text-[11.5px] text-warning" data-testid="bot-handoff-undelivered-message">
+          <TriangleAlert className="size-3 shrink-0" />
+          <span className="min-w-0 flex-1 basis-[10rem] truncate" title={message.error}>
+            {KIND_WORD[message.kind] ?? "A message"} from {message.from === "terminalx" ? "TerminalX" : nameOf(bots, message.from)} to {nameOf(bots, message.to)} is not delivered{message.held ? " · it goes when that bot's chat starts" : ""}: {message.error}
+          </span>
+          <Button size="xs" variant="outline" className="shrink-0" disabled={busy !== null} onClick={() => resend(message.id)} data-testid="bot-handoff-resend">
+            {busy === message.id ? <Loader2 className="animate-spin" /> : null} Resend
+          </Button>
+        </p>
+      ))}
+      {error && <MachineHostError error={error} onRestarted={onResent} />}
+    </div>
+  );
+}
+
+function HandoffCard({ handoff, now, undelivered, onResent }: { handoff: Handoff; now: number; undelivered: UndeliveredMessage[]; onResent: () => void }) {
   const { bots } = useBotStore();
   const from = bots.find((bot) => bot.id === handoff.from);
   const to = bots.find((bot) => bot.id === handoff.to);
@@ -79,9 +121,9 @@ function HandoffCard({ handoff, now }: { handoff: Handoff; now: number }) {
           <BotAvatar roleTemplateId={to?.roleTemplateId ?? ""} size="xs" paused={!!to?.paused} />
         </span>
         <span className="min-w-0 flex-1 basis-[7rem] truncate text-[12.5px] font-medium text-foreground" title={handoff.title}>{handoff.title}</span>
-        <Chip className={cn("min-w-0 max-w-full", tone)} data-testid="bot-handoff-state" title={handoffStateLabel(handoff, toName, now)}>
+        <Chip className={cn("min-w-0 max-w-full", tone)} data-testid="bot-handoff-state" title={handoffStateLabel(handoff, toName, now, !!to?.paused)}>
           {handoff.state === "working" && <Loader2 className="size-3 shrink-0 animate-spin" />}
-          <span className="truncate">{handoffStateLabel(handoff, toName, now)}</span>
+          <span className="truncate">{handoffStateLabel(handoff, toName, now, !!to?.paused)}</span>
         </Chip>
         {open && (
           <Button size="xs" variant="outline" className="min-w-0 max-w-full" disabled={busy} onClick={stop} data-testid="bot-handoff-stop" aria-label={`Stop ${toName}'s work on hand-off ${handoff.number}`} title={`Stop ${toName}'s work on this hand-off`}>
@@ -100,6 +142,7 @@ function HandoffCard({ handoff, now }: { handoff: Handoff; now: number }) {
         </p>
       )}
       {handoff.waitingMessages > 0 && <p className="text-[11.5px] text-faint">{handoff.waitingMessages === 1 ? "1 message waits" : `${handoff.waitingMessages} messages wait`} for its chat to start.</p>}
+      {undelivered.length > 0 && <Undelivered messages={undelivered} onResent={onResent} />}
       {error && <MachineHostError error={error} onRestarted={stop} />}
     </article>
   );
@@ -136,6 +179,9 @@ export function TeamBriefEditor() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // A save refused because the brief changed since it was opened: the owner's draft, kept while they read the newer.
+  const [kept, setKept] = useState<string | null>(null);
+  const stale = !!error && error.includes("changed since you opened it");
   const text = draft ?? brief?.text ?? "";
   const changed = draft !== null && draft !== (brief?.text ?? "");
   const limit = brief?.limit ?? 8192;
@@ -146,7 +192,32 @@ export function TeamBriefEditor() {
     setBusy(true);
     setError(null);
     botHandoffsApi.writeBrief(text, base ?? brief.hash).then(
-      () => { setDraft(null); setBase(null); setSaved(true); reload(); },
+      () => { setDraft(null); setBase(null); setKept(null); setSaved(true); reload(); },
+      (cause) => setError(errorMessage(cause)),
+    ).finally(() => setBusy(false));
+  };
+  /** Show the newer brief; the draft stays, to put back. */
+  const loadNewer = () => {
+    setKept(draft);
+    setDraft(null);
+    setBase(null);
+    setError(null);
+    reload();
+  };
+  /** Put the draft back over the newer brief: the next save writes over the newer, knowingly. */
+  const putBack = () => {
+    if (kept === null || !brief) return;
+    setBase(brief.hash);
+    setDraft(kept);
+    setKept(null);
+  };
+  /** Save the draft over the newer brief, read now. */
+  const saveOver = () => {
+    if (draft === null || busy) return;
+    setBusy(true);
+    setError(null);
+    botHandoffsApi.brief().then((fresh) => botHandoffsApi.writeBrief(draft, fresh.hash)).then(
+      () => { setDraft(null); setBase(null); setKept(null); setSaved(true); reload(); },
       (cause) => setError(errorMessage(cause)),
     ).finally(() => setBusy(false));
   };
@@ -182,7 +253,20 @@ export function TeamBriefEditor() {
         {changed && <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={() => { setDraft(null); setBase(null); setError(null); }}>Discard</Button>}
         <Button size="sm" variant="accent" type="submit" disabled={busy || !changed || bytes > limit} data-testid="bot-team-brief-save">{busy && <Loader2 className="animate-spin" />} Save brief</Button>
       </div>
-      {error && <MachineHostError error={error} onRestarted={() => save()} className="max-w-[760px]" />}
+      {kept !== null && (
+        <p className="flex max-w-[760px] min-w-0 flex-wrap items-center gap-2 rounded-md bg-veil px-3 py-2 text-[12.5px] text-muted-foreground" data-testid="bot-team-brief-kept">
+          <span className="min-w-0 flex-1">This is the newer brief. Your draft is kept.</span>
+          <Button size="sm" variant="outline" type="button" onClick={putBack} disabled={!brief} data-testid="bot-team-brief-put-back">Put my draft back</Button>
+          <Button size="sm" variant="ghost" type="button" onClick={() => setKept(null)}>Drop my draft</Button>
+        </p>
+      )}
+      {stale ? (
+        <div role="alert" className="flex max-w-[760px] min-w-0 flex-wrap items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bot-team-brief-stale">
+          <span className="min-w-0 flex-1">The team brief changed since you opened it, so your draft was not saved.</span>
+          <Button size="sm" variant="outline" type="button" disabled={busy} onClick={loadNewer} data-testid="bot-team-brief-load-newer">Load the newer text</Button>
+          <Button size="sm" variant="ghost" type="button" disabled={busy} onClick={saveOver} data-testid="bot-team-brief-save-over">Save mine over it</Button>
+        </div>
+      ) : error && <MachineHostError error={error} onRestarted={() => save()} className="max-w-[760px]" />}
     </form>
   );
 }
@@ -195,7 +279,7 @@ export function BotReportsTo({ bot }: { bot: Bot }) {
   const { bots } = useBotStore();
   const lead = bots.find((other) => other.id === bot.reportsTo);
   const reports = bots.filter((other) => other.reportsTo === bot.id);
-  const { list } = useBotHandoffs(reports.length > 0 ? bot.id : null);
+  const { list, error, reload } = useBotHandoffs(reports.length > 0 ? bot.id : null);
   if (!lead && reports.length === 0) return null;
   const open = (list?.handoffs ?? []).filter(handoffOpen);
   return (
@@ -211,6 +295,7 @@ export function BotReportsTo({ bot }: { bot: Bot }) {
       {reports.length > 0 && (
         <>
           <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">Reports to {bot.name} <span className="ml-1">{reports.length}</span></h2>
+          {error && <MachineHostError error={`Couldn't read ${bot.name}'s hand-offs: ${error}`} onRestarted={reload} />}
           <ul className="divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-card">
             {reports.map((report) => {
               const given = open.filter((handoff) => handoff.to === report.id);

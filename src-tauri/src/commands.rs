@@ -6376,6 +6376,12 @@ pub async fn bot_handoff_stop(state: State<'_, AppState>, number: u64) -> CmdRes
     bots_call(state, "handoffStop", serde_json::json!({"number": number})).await
 }
 
+/// Send again, now, a bots' message that could not reach its chat (its count of tries starts again).
+#[tauri::command]
+pub async fn bot_handoff_resend(state: State<'_, AppState>, message: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffResend", serde_json::json!({"message": message})).await
+}
+
 /// Hand a bot's item to another bot, with the owner's own note.
 #[tauri::command]
 pub async fn bot_item_hand(state: State<'_, AppState>, id: String, number: u64, to: String, note: String, due: Option<String>) -> CmdResult<serde_json::Value> {

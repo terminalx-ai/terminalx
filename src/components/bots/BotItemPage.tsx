@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { errorMessage } from "@/lib/api";
+import { useBotStore } from "@/lib/bots";
 import { commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { confirmInApp } from "@/lib/confirm";
@@ -55,6 +56,7 @@ export function mayDoHere(bot: Bot): string {
 export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
   const item = useBotItem(bot.id, number);
   const store = useSessionStore();
+  const { bots } = useBotStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // "Hand to another bot" (PRO-475).
@@ -132,7 +134,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               {(item.links ?? []).filter((link) => link.kind === "pullRequest" || link.kind === "ticket").slice(0, 3).map((link) => (
                 <Chip key={`${link.kind}:${link.target}`} title={link.title || link.target}>{link.kind === "pullRequest" ? <GitPullRequest className="size-3" /> : <Hash className="size-3" />} {link.target}</Chip>
               ))}
-              <span className="ml-1">started {relativeTime(item.created)} · asked by {askedBy(item, bot)}</span>
+              <span className="ml-1">started {relativeTime(item.created)} · asked by {askedBy(item, bot, bots)}</span>
             </div>
           </div>
 
@@ -183,7 +185,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
         <aside className="flex w-full min-w-0 flex-col gap-6 sm:w-[280px] sm:shrink-0" aria-label="About this item" data-testid="bot-item-aside">
           <Panel label="About this item">
             <Fact label="Owner">{bot.name}</Fact>
-            <Fact label="Asked by">{askedBy(item, bot)}</Fact>
+            <Fact label="Asked by">{askedBy(item, bot, bots)}</Fact>
             <Fact label="Spend"><span className="font-mono">{usd.format(item.spentUsd || 0)}</span> so far</Fact>
             <Fact label="Started">{relativeTime(item.created)}</Fact>
             <Fact label="Updated">{relativeTime(item.modified)}</Fact>
@@ -208,9 +210,16 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
   );
 }
 
-/** Who asked for it: you when you gave the work; otherwise who the bot says asked, as the bot's word. */
-function askedBy(item: BotItem, bot: Bot): string {
+/**
+ * Who asked for it: you when you gave the work; the sending bot when another bot handed it on (PRO-475), as
+ * TerminalX recorded it; otherwise who the bot says asked, as the bot's word.
+ */
+export function askedBy(item: BotItem, bot: Bot, bots: Bot[] = []): string {
   if (item.addedBy === "owner") return "you";
+  if (item.addedBy && item.addedBy !== bot.id) {
+    const sender = bots.find((other) => other.id === item.addedBy);
+    return `${sender?.name ?? "a bot no longer here"} (a bot), through a hand-off`;
+  }
   const said = item.askedBy === "owner" ? "you" : item.askedBy;
   return `${said}, as ${bot.name} noted`;
 }

@@ -70,7 +70,24 @@ fn trimming_keeps_the_owners_and_what_waits_and_the_size_is_bounded() {
     assert_eq!(store.messages.iter().filter(|message| !message.pending).count(), MAX_MESSAGES);
     assert!(store.messages.iter().any(|message| message.id == "waiting"), "a waiting message is kept however old");
 
-    // The size: a bot's change past the limit is refused; one that makes room goes in.
+    // The size, by bytes (lead review 1): past the limit the oldest sent messages and closed hand-offs make room.
+    let size = std::fs::metadata(path().unwrap()).unwrap().len() as usize;
+    WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(size)));
+    let sent_before = read().unwrap().messages.iter().filter(|message| !message.pending).count();
+    change(Some(&sink), BOT_WRITE_BYTES, |store| {
+        store.messages.push(new_message("a", "b", "tell", None, "y".repeat(4000), String::new(), None));
+        Ok(())
+    })
+    .unwrap();
+    let after = read().unwrap();
+    assert!(after.messages.iter().filter(|message| !message.pending).count() < sent_before, "sent messages made room");
+    assert!(after.messages.iter().any(|message| message.id == "waiting") && after.handoffs.iter().any(|handoff| handoff.number == 999), "what waits or is open stays");
+
+    // Only open hand-offs and waiting messages left: a change that grows past the limit is refused; one that
+    // makes room goes in.
+    let open: Vec<Value> = (1..=20).map(|number| record(number, "a", "b", "working", "a")).collect();
+    let waiting: Vec<Value> = (0..20).map(|n| json!({"id": format!("w{n}"), "at": "2026-11-21T10:00:00Z", "from": "a", "to": "b", "kind": "tell", "text": "z".repeat(2000), "pending": true})).collect();
+    std::fs::write(path().unwrap(), serde_json::to_vec(&json!({"handoffs": open, "messages": waiting})).unwrap()).unwrap();
     let size = std::fs::metadata(path().unwrap()).unwrap().len() as usize;
     WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(size)));
     let grown = change(Some(&sink), BOT_WRITE_BYTES, |store| {
@@ -79,7 +96,7 @@ fn trimming_keeps_the_owners_and_what_waits_and_the_size_is_bounded() {
     });
     assert!(refusal_text(grown.unwrap_err()).contains("are full"));
     change(Some(&sink), BOT_WRITE_BYTES, |store| {
-        store.messages.retain(|message| message.pending);
+        store.messages.truncate(5);
         Ok(())
     })
     .unwrap();

@@ -105,8 +105,9 @@
 - Bots (experimental): bots work as a team. From its sessions a bot hands a
   scoped piece of work to another with `terminalx bots handoff --to BOT
   --title … --scope … [--due …]`, and tells one something with `terminalx
-  bots tell --to BOT|lead`. A bot hands work and sends messages only along
-  the reporting line its owner set. The receiving bot gets a chat of its own
+  bots tell --to BOT|lead`. A bot hands work down its reporting line, or to a
+  bot whose Who can ask lists it with "Can hand off work"; work never goes up
+  the line, and messages go only along it. The receiving bot gets a chat of its own
   for the work, under its own access and pause, and an item on its list; it
   answers with `tell --about N` (`--failed` when it could not), and the answer
   reaches the chat the work was handed from. Every message one bot sends

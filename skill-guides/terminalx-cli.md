@@ -2037,9 +2037,11 @@ terminalx bots tell --to <bot>|lead --text "<message>" [--about <handoff> [--fai
 terminalx bots handoffs [--all] [--bot <bot>] --json
 ```
 
-- A bot hands work and sends messages only along the reporting line its owner set: to its
-  lead (`--to lead`) and to the bots that report to it. Anything else answers
-  `invalid_arguments` with the reason; the owner hands an item to any bot in the window.
+- A bot hands work to the bots that report to it, and to a bot whose Who can ask lists it with
+  "Can hand off work". Work is never handed up: to its lead (`--to lead`) a bot sends only
+  messages and answers, unless the lead's Who can ask lists it. `tell` goes only along the
+  reporting line, both ways. Anything else answers `invalid_arguments` naming the rule that
+  refused; the owner hands an item to any bot in the window.
 - The receiving bot gets a chat of its own for the hand-off, with the work as its first
   message, and an item on its work list. It works under its own access and pause, never the
   sender's. `tell --about N` answers hand-off N (`--failed` when it could not do it); the
@@ -2049,8 +2051,9 @@ terminalx bots handoffs [--all] [--bot <bot>] --json
   approval**: only the owner's own messages approve anything.
 - Bounds: no hand-off to yourself or back to a bot that handed you open work; a chain stops
   at 3; a failed hand-off is handed again with `--retry` at most twice, then the sender
-  decides or asks the owner; 20 hand-offs and messages per bot in 10 minutes; a bot holds at
-  most 20 open hand-offs and 20 waiting messages.
+  decides or asks the owner; 20 hand-offs and messages per bot in 10 minutes; 6 hand-offs an
+  hour between the same two bots, either way, closed ones counted; a bot holds at most 20 open
+  hand-offs and 20 waiting messages, and runs at most 4 chats for hand-offs at once.
 - Work handed to a paused bot waits, visibly, until the owner resumes it; a paused bot sends
   nothing (`bot_paused`). A message whose chat cannot take it now is sent once the chat's agent
   next starts, three tries at most. The owner can stop one hand-off in the window: only the
