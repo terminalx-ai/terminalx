@@ -217,9 +217,7 @@ fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<
         return None;
     }
     let group = words.remove(0);
-    let owned: Vec<String> = words.iter().map(|word| word.to_string()).collect();
-    let browser_wait = group == "wait" && crate::browser::cli::is_browser_wait(&owned);
-    if crate::cli::MACHINE_GROUPS.contains(&group) && !browser_wait {
+    if MACHINE_GROUPS.contains(&group) && !(group == "wait" && browser_wait(&words)) {
         if let Some(at) = words.iter().position(|word| *word == "--machine") {
             let name = words.get(at + 1)?;
             if name.starts_with('-') {
@@ -229,6 +227,19 @@ fn terminalx_words<'a>(program: &str, args: &[&'a str]) -> Option<(&'a str, Vec<
         }
     }
     Some((group, words))
+}
+
+/// The groups that take `--machine NAME` (`cli.rs` `MACHINE_GROUPS`), and
+/// the flags that make `wait` the built-in browser's
+/// (`browser::cli::WAIT_FLAGS`). Copied, since the headless runtime gates a
+/// bot's sessions too and builds neither module; a desktop test holds the
+/// copies to the originals.
+pub(crate) const MACHINE_GROUPS: [&str; 8] = ["projects", "sessions", "tabs", "send", "read", "wait", "permissions", "worktrees"];
+pub(crate) const BROWSER_WAIT_FLAGS: [&str; 7] = ["--text", "--url", "--selector", "--load", "--fn", "--ms", "--download"];
+
+/// `wait`'s words make it the browser's (`browser::cli::is_browser_wait`).
+fn browser_wait(words: &[&str]) -> bool {
+    words.iter().any(|word| BROWSER_WAIT_FLAGS.iter().any(|flag| *word == *flag || word.strip_prefix(flag).is_some_and(|rest| rest.starts_with('='))))
 }
 
 /// A `terminalx` read: help or the version (anything with `--help`, `-h`,
@@ -241,7 +252,7 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
         return true;
     }
     let Some((group, rest)) = terminalx_words(program, args) else { return false };
-    if group == "wait" && crate::browser::cli::is_browser_wait(&rest.iter().map(|word| word.to_string()).collect::<Vec<_>>()) {
+    if group == "wait" && browser_wait(&rest) {
         return false;
     }
     if TERMINALX_READS.contains(&(group, "")) {

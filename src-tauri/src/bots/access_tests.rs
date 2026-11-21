@@ -419,3 +419,16 @@ fn claude_is_answered_ask_with_the_reason() {
     assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "ask");
     assert_eq!(answer["hookSpecificOutput"]["permissionDecisionReason"], "This bot asks: `git push`.");
 }
+
+/// The gate's copies of the command line's machine groups and the browser's
+/// wait flags are the command line's own.
+#[cfg(feature = "desktop")]
+#[test]
+fn the_gates_copies_of_the_command_lines_lists_are_the_same() {
+    assert_eq!(MACHINE_GROUPS, crate::cli::MACHINE_GROUPS);
+    assert_eq!(BROWSER_WAIT_FLAGS, crate::browser::cli::WAIT_FLAGS);
+    for words in [vec!["--fn", "x"], vec!["s1", "--selector=#a"], vec!["s1"], vec!["--function"], vec!["--fnx=1"]] {
+        let owned: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+        assert_eq!(browser_wait(&words), crate::browser::cli::is_browser_wait(&owned), "{words:?}");
+    }
+}
