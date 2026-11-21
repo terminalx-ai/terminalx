@@ -396,6 +396,13 @@ minute they fall on.
   counts, and "This week so far" agrees with the duty's own counts.
 - **What is still to come** comes from the schedule, from now to the end of
   the week, for a duty that is on and a bot that is not paused.
+- **How a block reads (PRO-497).** A run that began and was stopped is
+  "Stopped", never "Did not run", which is kept for a time that passed
+  without a run. A block for one run is as tall as the run went on (to now
+  while it runs; `blocks[].minutes`), cut at midnight, and one near midnight
+  is drawn ending inside its day. The calendar ticks only while the window is
+  shown, and reads the week again when it is shown. An older runtime that does
+  not know `dutyWeek` is offered Restart runtime.
 - **Counted, not drawn.** A duty due more than six times on some day, and one
   that wakes on events (or a run an event started), go in the "Often" and
   "Events" rows as counts per day. A schedule with more times in the week than
