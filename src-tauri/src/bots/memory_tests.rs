@@ -439,10 +439,24 @@ fn a_role_has_one_limit_and_the_editor_saves_only_over_what_it_started_from() {
     // The same limit as the launch reads (PRO-468), so what is saved is what the bot is told.
     assert_eq!(ROLE_LIMIT, super::super::chat::ROLE_READ_LIMIT);
     assert!(super::super::role_write(sink.as_ref(), &bot.id, &"x".repeat(ROLE_LIMIT as usize), None).is_ok());
-    // A file already past it is shown read-only, as a conversation reads it.
+    // A file past even what the editor shows is shown in part, read-only.
     std::fs::write(home_of(&bot).join("ROLE.md"), &long).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
-    assert!(shown.role.read.over_limit && !shown.role.editable && shown.role.text.len() as u64 <= ROLE_LIMIT && shown.role.limit == ROLE_LIMIT);
+    assert!(shown.role.read.over_limit && !shown.role.editable && shown.role.text.len() as u64 <= ROLE_SHOWN_LIMIT && shown.role.limit == ROLE_LIMIT);
+    assert_eq!(shown.role.cut, long.len() as u64 - ROLE_LIMIT);
+    // PRO-489 review (low): a role saved under the older 32 KB limit is shown whole and editable, with what a
+    // conversation cuts of it said; it is saved once shortened to the limit, and its stored text is never cut by a read.
+    let older = "a line of a role saved before the limit came down\n".repeat(400);
+    assert!(older.len() as u64 > ROLE_LIMIT && older.len() as u64 <= ROLE_SHOWN_LIMIT);
+    std::fs::write(home_of(&bot).join("ROLE.md"), &older).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap().role;
+    assert!(shown.editable && !shown.read.over_limit, "shown whole");
+    assert_eq!(shown.text, older);
+    assert_eq!(shown.cut, older.len() as u64 - ROLE_LIMIT);
+    assert!(super::super::role_write(sink.as_ref(), &bot.id, &older, Some(&shown.hash)).unwrap_err().to_string().contains("at most"));
+    let shortened = &older[..ROLE_LIMIT as usize];
+    assert!(super::super::role_write(sink.as_ref(), &bot.id, shortened, Some(&shown.hash)).is_ok());
+    assert_eq!(view(sink.as_ref(), &bot).unwrap().role.cut, 0);
 
     // The editor names the text it started from: a role changed since is not written over.
     std::fs::write(home_of(&bot).join("ROLE.md"), "Mine.\n").unwrap();

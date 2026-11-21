@@ -46,6 +46,12 @@ pub const ROLE_READ_LIMIT: u64 = 16 * 1024;
 /// at most doubles it, and a workspace's prompts still fit
 /// (`cloud_config::APPENDED_PROMPT_LIMIT` refuses a launch that would not).
 pub const INSTRUCTIONS_LIMIT: usize = 60 * 1024;
+/// The most a bot's whole launch note ([`launch_note`]) comes to: its
+/// instructions, then how it posts on GitHub and Linear, its work items and
+/// the team's (the reporting line, open hand-offs and the team brief). A
+/// later section that would take it past this is left out whole, and the
+/// note says so, rather than the launch being refused for it (PRO-489).
+pub const LAUNCH_NOTE_LIMIT: usize = 80 * 1024;
 /// Where a tab keeps the mode it had before a bot's limit narrowed it, so
 /// a resume or a wider access gives it back (`enforce`).
 pub const HELD_FROM_KEY: &str = "botHeldFrom";
@@ -554,23 +560,39 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
     // The home chat's first conversation: a fresh tab, not one carried on from another.
     let first_run = reference.home && tab.provider_session_id.is_none() && tab.fork_from.is_none() && tab.continuation.is_none() && entry.tabs.first().is_some_and(|first| first.id == tab.id);
     let in_plan = tab_limit(entry, tab).is_some_and(|limit| limit.mode == "plan");
-    let mut text = instructions(&bot, &home, &role, memory.as_deref(), first_run, in_plan);
-    if let Some(items) = super::items::launch_note(&bot.id) {
-        text.push('\n');
-        text.push_str(&items);
-        text.push('\n');
+    let text = instructions(&bot, &home, &role, memory.as_deref(), first_run, in_plan);
+    let sections = [
+        // PRO-480: where people mention it, and how it posts there: rules, so first.
+        Some(("how you post on GitHub and Linear", super::channels::launch_note(&bot))),
+        super::items::launch_note(&bot.id).map(|items| ("work items (`terminalx bots items list` shows them)", items)),
+        // PRO-475: the reporting line, hand-offs, and the team brief every bot reads.
+        super::handoffs::launch_note(&bot, in_plan).map(|team| ("note on working with other bots, with open hand-offs and the team brief (`terminalx bots handoffs` shows the hand-offs)", team)),
+    ];
+    Some(with_sections(text, sections.into_iter().flatten()))
+}
+
+/// `text` and each of `sections` after it, as long as the whole stays within
+/// [`LAUNCH_NOTE_LIMIT`]; a section that would not fit is left out whole,
+/// never cut inside its fenced block, and a line says what was left out.
+pub(crate) fn with_sections(mut text: String, sections: impl IntoIterator<Item = (&'static str, String)>) -> String {
+    let mut left_out = Vec::new();
+    for (what, section) in sections {
+        // Room is kept for the line that would say a later one was left out.
+        if text.len() + section.len() + 2 + 1024 <= LAUNCH_NOTE_LIMIT {
+            text.push('\n');
+            text.push_str(&section);
+            text.push('\n');
+        } else {
+            left_out.push(what);
+        }
     }
-    // PRO-475: the reporting line, hand-offs, and the team brief every bot reads.
-    if let Some(team) = super::handoffs::launch_note(&bot, in_plan) {
-        text.push('\n');
-        text.push_str(&team);
-        text.push('\n');
+    if !left_out.is_empty() {
+        text.push_str(&format!(
+            "\n(Left out of this conversation's start, to fit in one launch with your role and memory: your {}. Ask your owner to shorten your ROLE.md or MEMORY.md if you need them here.)\n",
+            left_out.join(", and your ")
+        ));
     }
-    // PRO-480: where people mention it, and how it posts there.
-    text.push('\n');
-    text.push_str(&super::channels::launch_note(&bot));
-    text.push('\n');
-    Some(text)
+    text
 }
 
 /// A launch of `entry`'s tab settled. In a bot's home chat whose agent `started`, the owner's messages that did not

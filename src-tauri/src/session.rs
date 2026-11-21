@@ -94,7 +94,7 @@ pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace:
     let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
     let bot = crate::bots::chat::launch_note(entry, tab);
     let prompt = crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()]);
-    prompt.fits()?;
+    prompt.fits_for(bot.is_some())?;
     Ok(prompt)
 }
 

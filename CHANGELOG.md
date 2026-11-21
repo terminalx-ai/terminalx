@@ -89,8 +89,14 @@
   sessions and terminals through the runtime directly or acts for a paired
   phone or a share. On Linux and servers, `terminalx bots resume` in a
   terminal of your own resumes a bot at once. A Mac window that cannot read
-  its Keychain key still connects, and says what to do before it changes
-  anything (PRO-489).
+  its Keychain key still connects, says so at once, and Try again proves it
+  once Keychain is unlocked; a process with a terminal of its own registers
+  as the window only with the key. A runtime started without the key says
+  so too. A bot's own week of duties reads on a Mac as its duties do. A
+  role saved under the older 32 KB limit is shown whole, with what a
+  conversation cuts, and saved once shortened; work items, hand-offs and the
+  team brief that would make a bot's launch too long are left out and named
+  (PRO-489).
 - Settings → Machines: Restart runtime is offered only for the runtime running
   now, restarts only what the window showed, and a failure stays on screen
   when a handover withdraws the offer (PRO-489).

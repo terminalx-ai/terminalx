@@ -32,6 +32,19 @@ const STABLE: Duration = Duration::from_secs(30);
 const LOST_EVENTS: &str = "The connection to the background runtime closed. Agents and terminal commands keep running.";
 const LOST_VIEW: &str = "Live terminal output in this window disconnected. Agents and terminal commands keep running.";
 
+/// Why a runtime cannot hold bots by this window's proof (PRO-489). `pinned`:
+/// the runtime pinned the window's key, and did not take this app for the
+/// window, which could not prove it; registering again with the proof
+/// repairs it. Otherwise the runtime was started without the key (Keychain
+/// could not be read at its launch), and holds bots by where a command comes
+/// from, as on Linux, until it is restarted with the key.
+#[derive(Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnprovenWindow {
+    pub why: String,
+    pub pinned: bool,
+}
+
 /// What one window shows. Read without asking the owner anything, so it never
 /// waits on an owner that has stopped answering.
 #[derive(Serialize, Debug, PartialEq)]
@@ -39,10 +52,15 @@ const LOST_VIEW: &str = "Live terminal output in this window disconnected. Agent
 pub enum ConnectionState {
     /// `outdated`: the runtime is older than this app, and is replaced with
     /// the one bundled with it once none of its agents is mid-turn (#730).
+    /// `unproven`: while Bots is on, the runtime cannot hold bots by this
+    /// window's proof (PRO-489): it did not take this app for its window,
+    /// or it was started without the window's key.
     Connected {
         epoch: String, generation: u64, view: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         outdated: Option<super::replace::Outdated>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        unproven: Option<UnprovenWindow>,
     },
     /// Retrying by itself. `terminal`: only this window's terminal output is
     /// down; otherwise every window's live updates are.
@@ -239,7 +257,7 @@ impl Inner {
             return ConnectionState::Connecting { terminal: false, attempt: 1, retry_in_ms: 0, down_ms: 0, message: LOST_EVENTS.into() };
         };
         if let Some(retry) = self.pending.get(&Target::View(window.into())) { return retrying(retry, true); }
-        ConnectionState::Connected { epoch, generation: attached.generation, view: attached.view, outdated: None }
+        ConnectionState::Connected { epoch, generation: attached.generation, view: attached.view, outdated: None, unproven: None }
     }
 }
 
@@ -634,7 +652,7 @@ mod tests {
         assert!(!connected(&inner.status("main", attached(4), "", now)));
         assert_eq!(attempt(&mut inner, now + SECOND, Ok(9)), Target::View("main".into()));
         let renewed = Some(Snapshot { generation: 4, epoch: Some("owner".into()), view: 9 });
-        assert_eq!(inner.status("main", renewed, "", now + SECOND), ConnectionState::Connected { epoch: "owner".into(), generation: 4, view: 9, outdated: None });
+        assert_eq!(inner.status("main", renewed, "", now + SECOND), ConnectionState::Connected { epoch: "owner".into(), generation: 4, view: 9, outdated: None, unproven: None });
     }
 
     #[test]

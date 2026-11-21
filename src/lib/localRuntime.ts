@@ -74,6 +74,15 @@ export function bootLocalRuntime(): Promise<void> {
 }
 
 /** "Try again": the desktop attempts now whatever it is re-establishing. */
+/** Have the runtime take this app for its window again, proving it with the window's Keychain key (PRO-489). Throws why it could not ask. */
+export async function proveLocalRuntimeWindow(): Promise<void> {
+  try {
+    await localRuntime.proveWindow();
+  } finally {
+    await refreshLocalRuntime();
+  }
+}
+
 export async function reconnectLocalRuntime(): Promise<void> {
   await localRuntime.reconnect().catch(() => {});
   await refreshLocalRuntime();

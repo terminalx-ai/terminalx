@@ -47,7 +47,7 @@ const extra = `(() => {
     if (operation === "memoryLook") return { found: 0 };
     if (operation !== "memoryView") return [];
     return {
-      role: { path: home + "ROLE.md", text: role, hash: "h-9", editable: true, limit: 16384, bytes: role.length, overLimit: false, templateTitle: "CTO",
+      role: { path: home + "ROLE.md", text: role, hash: "h-9", editable: true, limit: 16384, shownLimit: 32768, cut: 0, bytes: role.length, overLimit: false, templateTitle: "CTO",
         versions: [
           { change: "c-9", at: now, by: "bot-1", kind: "outside", source: { kind: "outside" }, hash: "h-9" },
           { change: "c-8", at: now, by: "owner", kind: "role", source: { kind: "app" }, hash: "h-8" },

@@ -319,12 +319,20 @@ pub const APPENDED_PROMPT_LIMIT: usize = 127 * 1024;
 impl AppendedPrompt {
     /// Refused when the prompt is longer than [`APPENDED_PROMPT_LIMIT`]: the
     /// launch would fail with no word of why (`E2BIG`) on Linux, so it is
-    /// not made, and the reader is told what to shorten.
+    /// not made, and the reader is told what to shorten. A tab that works
+    /// for no bot is told of the workspace's prompts alone.
     pub fn fits(&self) -> Result<()> {
+        self.fits_for(false)
+    }
+
+    /// [`Self::fits`], for a tab that works for a bot (`bot`), whose role and
+    /// memory are part of the prompt too.
+    pub fn fits_for(&self, bot: bool) -> Result<()> {
         let longest = self.value.as_ref().map_or(0, |value| APPENDED_PROMPT_ENV.len() + 1 + value.len()).max(self.args.len());
+        let shorten = if bot { "Shorten the workspace's prompts, or the bot's ROLE.md or MEMORY.md." } else { "Shorten the workspace's prompts in its settings." };
         anyhow::ensure!(
             longest <= APPENDED_PROMPT_LIMIT,
-            "What this agent is told besides your messages comes to {} KB, more than the {} KB one launch can carry. Shorten the workspace's prompts, or the bot's ROLE.md or MEMORY.md.",
+            "What this agent is told besides your messages comes to {} KB, more than the {} KB one launch can carry. {shorten}",
             longest.div_ceil(1024),
             APPENDED_PROMPT_LIMIT / 1024
         );
@@ -1060,8 +1068,11 @@ mod tests {
         let room = APPENDED_PROMPT_LIMIT - APPENDED_PROMPT_ENV.len() - 1;
         for shell in [LaunchShell::Posix, LaunchShell::Csh] {
             assert!(prompt_args_for(shell, "claude", &[Some(&"x".repeat(room))]).fits().is_ok());
-            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits().unwrap_err().to_string();
+            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits_for(true).unwrap_err().to_string();
             assert!(error.contains("ROLE.md or MEMORY.md") && error.contains("127 KB"), "{error}");
+            // A tab no bot works for hears of nothing Bots adds (PRO-489 review, low).
+            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits().unwrap_err().to_string();
+            assert!(error.contains("workspace's prompts in its settings") && !error.contains("ROLE.md") && !error.contains("bot"), "{error}");
         }
         // Codex's value is TOML, and it is that length which counts: a control character is always escaped (`\u0001`).
         let escaped = "\u{1}".repeat(room / 4);

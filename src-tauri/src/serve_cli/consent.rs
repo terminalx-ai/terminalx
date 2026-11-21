@@ -212,6 +212,13 @@ impl Window {
     pub fn keyed(&self) -> bool {
         matches!(self, Self::Keyed(_))
     }
+
+    /// Whether the desktop launched this runtime without pinning its key:
+    /// on a Mac, one that could not read Keychain then (PRO-489). A Linux
+    /// desktop pins none, ever (`launch.rs`), so it is not said there.
+    pub fn unpinned(&self) -> bool {
+        cfg!(target_os = "macos") && matches!(self, Self::Unrecognisable)
+    }
 }
 
 pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_KEY";

@@ -526,39 +526,48 @@ impl ControlService {
         }
         if let Some(lifetime) = &self.local_lifetime {
             if command == crate::serve_cli::consent::WINDOW_REGISTER {
-                // While Bots is on, a runtime whose window's key is pinned
-                // takes for the window only a registrant that proves it is
-                // (PRO-489): the control token is in every agent tab's
-                // environment, so a lease alone says nothing of who holds it.
+                // A runtime whose window's key is pinned takes for the window
+                // only a registrant that proves it is, Bots on or off (PRO-489):
+                // the control token is in every agent tab's environment, so a
+                // lease alone says nothing of who holds it. With Bots off nothing
+                // is guarded, so an unproven window still provides its services;
+                // it is not recognised, so turning Bots on later leaves its
+                // writes refused until it proves itself (Try again in the app).
                 let mut params = params;
                 let window = current_window();
-                let proven = if crate::bots::enabled_cached() && window.keyed() {
-                    let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                    match crate::serve_cli::consent::verify_window_for(run, &mut params, &window) {
-                        Ok(witness) => Some(witness),
-                        // Unproven (a window that cannot read its Keychain key, or
-                        // not the window at all): its attachment stays, so the app
-                        // still shows what runs and can repair, but it provides no
-                        // window services, which a launch trusts, and is not taken
-                        // for the window, so it changes nothing here (review 2).
-                        Err(error) => {
-                            if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
-                            log::warn!("a registration as the window did not prove it is the window ({}): attached, not taken for the window", error.message);
-                            return Ok(json!({"registered": false, "proven": false, "message": error.message}));
-                        }
+                let proof = window.keyed().then(|| self.prove_window(&mut params, &window));
+                if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
+                let unproven = match &proof { Some(Err(error)) => Some(error.message.clone()), _ => None };
+                if let Some(message) = &unproven {
+                    log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
+                    // Unproven (a window that cannot read its Keychain key, or
+                    // not the window at all) while Bots is on: its attachment
+                    // stays, so the app still shows what runs and can repair, but
+                    // it provides no window services, which a launch trusts, and
+                    // changes nothing here (review 2).
+                    if crate::bots::enabled_cached() {
+                        return Ok(json!({"registered": false, "proven": false, "message": message}));
                     }
-                } else {
-                    if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
-                    None
-                };
-                let registered = lifetime.window.register(lifetime, params)?;
+                }
+                let mut registered = lifetime.window.register(lifetime, params)?;
+                if let Some(message) = unproven {
+                    registered["proven"] = json!(false);
+                    registered["message"] = json!(message);
+                }
+                // A desktop launch that could not pin the window's key (Keychain
+                // could not be read then): bots are held by placement alone here,
+                // which the window says (PRO-489 review, low).
+                if crate::bots::enabled_cached() && window.unpinned() {
+                    registered["pinned"] = json!(false);
+                    registered["message"] = json!(UNPINNED);
+                }
                 // The registrant is the window from now on: the process that
-                // proved it, when it is the one that asked; else one that
-                // runs in no pane and not under this runtime (PRO-468).
-                // Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
+                // proved it, when it is the one that asked; where no key is
+                // pinned, one that runs in no pane and not under this runtime
+                // (PRO-468). Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
                 #[cfg(unix)]
                 if let Some(pid) = crate::hooks::caller_pid() {
-                    let window = match proven { Some(witness) => witness == pid, None => self.may_be_the_window(pid) };
+                    let window = match proof { Some(Ok(witness)) => witness == pid, Some(Err(_)) => false, None => self.may_be_the_window(pid) };
                     match crate::serve_cli::consent::started_at(pid) {
                         Some(started) if window => lifetime.window.recognise((pid, started)),
                         _ => log::warn!("process {pid} registered as the window, but did not prove it, or runs in a pane or under this runtime: not taken for the window"),
@@ -1159,13 +1168,13 @@ impl ControlService {
     fn bot_memory(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, memory, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let sink = self.sink.as_ref();
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let caller = Caller::of(&self.manager, &params);
@@ -1291,12 +1300,12 @@ impl ControlService {
     fn bot_items(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let action = command.trim_start_matches("bots.items.");
@@ -1348,12 +1357,12 @@ impl ControlService {
     fn bot_message(&self, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, wakes, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let caller = Caller::of(&self.manager, &params);
@@ -3011,6 +3020,20 @@ impl ControlService {
         window
     }
 
+    /// The process that proved, with the window's key, that it is the window
+    /// registering (`consent::verify_window_for`). Only a Mac runtime pins a
+    /// key the control service checks (`current_window`).
+    #[cfg(unix)]
+    fn prove_window(&self, params: &mut Value, window: &crate::serve_cli::consent::Window) -> Result<i32, ControlError> {
+        let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
+        crate::serve_cli::consent::verify_window_for(run, params, window)
+    }
+
+    #[cfg(not(unix))]
+    fn prove_window(&self, _params: &mut Value, _window: &crate::serve_cli::consent::Window) -> Result<i32, ControlError> {
+        Err(ControlError::new("pairing_unavailable", "This runtime cannot check the window's proof.", None::<String>))
+    }
+
     /// Whether process `pid`, registering as the window, may be taken for it:
     /// not in any of this runtime's panes, nor under this runtime's process.
     #[cfg(unix)]
@@ -3021,6 +3044,9 @@ impl ControlService {
     }
 }
 
+/// What an unpinned desktop runtime's registration says (`consent::Window::unpinned`).
+const UNPINNED: &str = "This TerminalX runtime was started without the window's key, as Keychain could not be read then. While Bots is on it tells your commands from a bot's by where they come from alone, as on Linux, and cannot take the window's proof.";
+
 /// The window this runtime was launched for (`consent::Window`): fixed for
 /// the process's life, and kept across a handover, which execs in the same
 /// environment.
@@ -3028,6 +3054,10 @@ fn current_window() -> crate::serve_cli::consent::Window {
     #[cfg(test)]
     if let Some(seed) = TEST_WINDOW_KEY.with(std::cell::Cell::get) {
         return crate::serve_cli::consent::window_for_test(&seed);
+    }
+    #[cfg(test)]
+    if TEST_WINDOW_UNPINNED.with(std::cell::Cell::get) {
+        return crate::serve_cli::consent::Window::Unrecognisable;
     }
     #[cfg(unix)]
     return crate::serve_cli::consent::Window::current();
@@ -3046,7 +3076,7 @@ fn window_only(what: &str) -> ControlError {
     ControlError::new(
         "person_required",
         format!("While Bots is on, only the TerminalX window may {what} through the runtime directly, and this call came from another process."),
-        Some(format!("Use the `terminalx` commands, or TerminalX itself. If this is TerminalX, it could not prove it is the window: {} Then choose Restart runtime in Settings → Machines.", crate::serve_cli::consent::KEYCHAIN_DENIED_SHORT)),
+        Some(format!("Use the `terminalx` commands, or TerminalX itself. If this is TerminalX, it could not prove it is the window: {} Then choose Try again where TerminalX says it could not prove it is this runtime's window.", crate::serve_cli::consent::KEYCHAIN_DENIED_SHORT)),
     )
 }
 
@@ -3264,6 +3294,12 @@ thread_local! {
 
 #[cfg(test)]
 thread_local! {
+    /// A test's desktop launch that could not pin the window's key.
+    static TEST_WINDOW_UNPINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
     /// The seed of the window key a test pins, as a desktop launch would.
     static TEST_WINDOW_KEY: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
 }
@@ -3420,7 +3456,7 @@ impl Caller {
         #[cfg(unix)]
         let (placing, gone) = (peer.map(|pid| manager.session_of_process(pid)).transpose(), peer.is_some_and(|pid| !crate::serve_cli::consent::alive(pid)));
         #[cfg(not(unix))]
-        let (placing, gone): (anyhow::Result<Option<crate::session::Placed>>, bool) = { let _ = (peer, manager); (Ok(None), false) };
+        let (placing, gone): (anyhow::Result<Option<Option<crate::session::Placed>>>, bool) = { let _ = (peer, manager); (Ok(None), false) };
         let (placed, mut incomplete) = match placing {
             Ok(placed) => (placed.flatten(), false),
             Err(error) => {
@@ -4992,8 +5028,58 @@ mod tests {
         for action in OUTWARD_SAFE_ACTIONS {
             caller.gate("pipelines.act", &json!({"action": action})).unwrap();
         }
+        // The same through the dispatch (PRO-489 lead review, low): the gate runs before the pipeline or issue is looked up.
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(Some(script.id() as i32)));
+        let mut dispatched = Vec::new();
+        for (command, params) in &outward {
+            let mut params = params.clone();
+            params["pipeline"] = json!("none");
+            params["issue"] = json!("ENG-1");
+            dispatched.push((command.to_string(), service.execute(command, params, "r").map_err(|error| error.code).err()));
+        }
+        let safe: Vec<_> = OUTWARD_SAFE_ACTIONS.iter().map(|action| service.execute("pipelines.act", json!({"pipeline": "none", "action": action}), "r").map_err(|error| error.code).err()).collect();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(None));
+        for (command, code) in dispatched {
+            assert_eq!(code.as_deref(), Some("bot_paused"), "{command} through the dispatch");
+        }
+        for code in safe {
+            assert_ne!(code.as_deref(), Some("bot_paused"), "stop and refresh are left to it");
+        }
         let _ = script.kill();
         let _ = script.wait();
+    }
+
+    /// PRO-489 lead review (low): `may_steer` through the dispatch. A caller
+    /// that had exited before it could be placed steers no run (`runs.stop`
+    /// and the rest reach no gate before it); the owner's own process does.
+    #[cfg(unix)]
+    #[test]
+    fn a_gone_caller_steers_no_run_through_the_dispatch() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "a-run", "lead": {"sessionId": "lead", "tabId": "t"}, "projectPath": "/fixture", "goal": "Something",
+            "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
+        })).unwrap();
+        crate::orchestration::store::insert(&run).unwrap();
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = exited.id() as i32;
+        exited.wait().unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(Some(dead)));
+        let steered: Vec<_> = ["runs.stop", "runs.note", "runs.skip", "runs.cleanup", "runs.finish", "runs.merge"]
+            .map(|command| (command, service.execute(command, json!({"run": "a-run", "note": "n", "piece": "p"}), "r").unwrap_err()))
+            .into_iter().collect();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(None));
+        for (command, refused) in steered {
+            assert_eq!(refused.code, "person_required", "{command}: {}", refused.message);
+            assert!(refused.message.contains("had exited"), "{command}: {}", refused.message);
+        }
+        // In-process (the owner's window): past the gate, to whatever the run itself says.
+        let ran = service.execute("runs.note", json!({"run": "a-run", "note": "n"}), "r");
+        assert_ne!(ran.map_err(|error| error.code).err().as_deref(), Some("person_required"));
     }
 
     /// PRO-489: a caller that was gone before it could be placed, or whose
@@ -5151,6 +5237,21 @@ mod tests {
             (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
         };
         let write = || service.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r").map_err(|error| error.code).err();
+        let bots = |on: bool| {
+            let mut settings = crate::store::settings::load();
+            settings.experimental.bots = on;
+            crate::store::settings::save(&settings).unwrap();
+        };
+
+        // M2: with Bots off an unproven window still gets its services, says
+        // it is unproven, and is not recognised, so turning Bots on later
+        // leaves its writes refused until it proves itself.
+        bots(false);
+        let (_, services) = register(None);
+        assert_eq!((services["registered"].clone(), services["proven"].clone()), (json!(true), json!(false)), "{services}");
+        assert!(lifetime.window.window_process().is_none(), "not recognised while Bots is off either");
+        bots(true);
+        assert_eq!(write().as_deref(), Some("person_required"), "Bots on: still not the window");
 
         let (_, unproven) = register(None);
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
@@ -5166,6 +5267,36 @@ mod tests {
         std::fs::write(run.join("done"), b"").unwrap();
         TEST_WINDOW_KEY.with(|key| key.set(None));
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 review (low): a runtime the desktop launched without pinning
+    /// the window's key registers the window as before, by placement, and
+    /// says it is unpinned while Bots is on, for the window to show; with
+    /// Bots off it says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unpinned_runtime_says_so_when_the_window_registers() {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = format!("76.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_UNPINNED.with(|unpinned| unpinned.set(true));
+        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        let answer = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), "r").unwrap();
+        assert_eq!((answer["registered"].clone(), answer["pinned"].clone()), (json!(true), json!(false)), "{answer}");
+        assert!(answer["message"].as_str().unwrap().contains("started without the window's key"), "{answer}");
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        let answer = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration, "r").unwrap();
+        assert!(answer.get("pinned").is_none(), "{answer}");
+        TEST_WINDOW_UNPINNED.with(|unpinned| unpinned.set(false));
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
 

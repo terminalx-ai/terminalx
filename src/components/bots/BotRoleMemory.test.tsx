@@ -45,7 +45,7 @@ const change = (id: string, extra: Partial<BotChange> = {}): BotChange => ({
 });
 const view = (extra: Partial<BotRoleMemory> = {}): BotRoleMemory => ({
   role: {
-    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", hash: "h-now", editable: true, limit: 16384, bytes: 17, overLimit: false, templateTitle: "CTO",
+    path: "/home/bots/atlas-id/ROLE.md", text: "You are the CTO.\n", hash: "h-now", editable: true, limit: 16384, shownLimit: 32768, cut: 0, bytes: 17, overLimit: false, templateTitle: "CTO",
     versions: [
       { change: "c-role", at: "2026-11-18T10:00:00Z", by: "owner", kind: "role", source: { kind: "app" }, hash: "h-now" },
       { change: null, at: "2026-11-01T10:00:00Z", by: "owner", kind: "template", source: { kind: "template" }, hash: "h-template" },
@@ -231,12 +231,12 @@ describe("Role and memory (PRO-470)", () => {
 
   it("shows a role too large to save read-only, so a save never cuts it short", async () => {
     const shown = view();
-    shown.role = { ...shown.role, editable: false, overLimit: true, bytes: 300_000 };
+    shown.role = { ...shown.role, editable: false, overLimit: true, bytes: 300_000, cut: 300_000 - 16384 };
     serve(shown);
     show();
     const editor = (await screen.findByTestId("bot-role-text")) as HTMLTextAreaElement;
     expect(editor.readOnly).toBe(true);
-    expect(screen.getByTestId("bot-role-read-only").textContent).toContain("ROLE.md is 293 KB, more than the 16 KB a role may be");
+    expect(screen.getByTestId("bot-role-read-only").textContent).toContain("ROLE.md is 293 KB, more than the 32 KB shown here");
     expect((screen.getByTestId("bot-role-save") as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -314,7 +314,7 @@ describe("Role and memory (PRO-470)", () => {
   it("says what is not read: past the line budget, or over the size limit", async () => {
     const shown = view();
     shown.memory = { ...shown.memory, places: [place("bot", ["- 2026-11-20 a"], { notRead: 12, overLimit: true, bytes: 70_000 }), place("personal", [])] };
-    shown.role = { ...shown.role, overLimit: true, bytes: 80_000 };
+    shown.role = { ...shown.role, overLimit: true, bytes: 80_000, cut: 80_000 - 16384 };
     serve(shown);
     show();
     expect((await screen.findByTestId("bot-memory-not-read")).textContent).toContain("12 older lines are past the 200-line budget");

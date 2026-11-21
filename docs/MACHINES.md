@@ -1976,7 +1976,9 @@ which runs in a child process because data privacy is one switch per process.
   an offer change asks the runtime nothing. The key provisioned before the
   stop is the one every launch pins until that relaunch ends, then it is
   forgotten; any other launch that cannot read Keychain still starts an
-  unpinned runtime, which the next guarded command repairs. Nothing pins or replaces a key over IPC. A separately launched headless runtime still
+  unpinned runtime, which the next guarded command repairs. That relaunch is
+  the Mac's (`window_consent`): on Windows each launch pins the window's
+  DPAPI-sealed key as it reads it, and no relaunch provisions or forgets one. Nothing pins or replaces a key over IPC. A separately launched headless runtime still
   permits an unrelated interactive terminal. A same-user process that opens
   its own pseudo-terminal can pass the terminal check on supported Mac
   desktops and headless runtimes.

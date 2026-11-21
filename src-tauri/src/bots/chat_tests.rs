@@ -436,3 +436,28 @@ fn a_bots_session_on_an_agent_it_cannot_reach_is_refused_at_launch() {
     crate::bots::delete(sink.as_ref(), &bot.id).unwrap();
     refuse_unheld_launch(&started, "opencode").unwrap();
 }
+
+/// PRO-489 review (low): what main adds to a bot's launch after its
+/// instructions (work items, hand-offs and the team brief) cannot take the
+/// whole note past what one launch carries: a section that would is left
+/// out whole, and the note says which; the rules about posting come first.
+#[test]
+fn a_launch_note_leaves_out_a_section_that_would_not_fit() {
+    let instructions = "i".repeat(INSTRUCTIONS_LIMIT);
+    let post = ("how you post on GitHub and Linear", "# Channels\n\nPost with `terminalx bots post`.".to_string());
+    let items = ("work items (`terminalx bots items list` shows them)", "# Your work items\n\n".to_string() + &"#1 [open] a title\n".repeat(1_500));
+    let team = ("note on working with other bots", "# Working with other bots\n\nYou report to your owner.".to_string());
+    let text = with_sections(instructions.clone(), [post.clone(), items.clone(), team.clone()]);
+    assert!(text.len() <= LAUNCH_NOTE_LIMIT, "{} bytes", text.len());
+    assert!(text.contains("# Channels") && text.contains("# Working with other bots"), "what fits is kept");
+    assert!(!text.contains("# Your work items"), "the one that does not is left out whole");
+    assert!(text.contains("Left out of this conversation's start") && text.contains("work items (`terminalx bots items list`"), "{}", &text[INSTRUCTIONS_LIMIT..]);
+    // Everything fits: nothing is said.
+    let text = with_sections("short".into(), [post, items, team]);
+    assert!(text.contains("# Your work items") && !text.contains("Left out"));
+    // The most instructions and every section left out still fit, and so does a launch with a workspace's prompts.
+    let huge = || ("x", "y".repeat(LAUNCH_NOTE_LIMIT));
+    let text = with_sections(instructions, [huge(), huge(), huge()]);
+    assert!(text.len() <= LAUNCH_NOTE_LIMIT);
+    crate::cloud_config::prompt_args("codex", &[Some(&"w".repeat(32 * 1024)), Some(&text)]).fits_for(true).unwrap();
+}

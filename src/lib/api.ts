@@ -2318,6 +2318,16 @@ export interface KillResult {
 }
 
 /**
+ * Why the runtime cannot hold bots by this window's proof (PRO-489). `pinned`: it pinned the window's key and did not
+ * take this app for its window, which could not prove it; Try again registers again with the proof. Otherwise it was
+ * started without the key, and tells a person's commands from a bot's by where they come from alone until it restarts.
+ */
+export interface LocalRuntimeUnproven {
+  why: string;
+  pinned: boolean;
+}
+
+/**
  * One window's live connection to the local runtime (`supervisor.rs`). A new
  * `generation` is a new attachment; a new `view` is a new connection for this
  * window's terminal output alone. Either way the window attaches again.
@@ -2325,7 +2335,8 @@ export interface KillResult {
 export type LocalRuntimeState =
   | { state: "inProcess" }
   /** `outdated`: the runtime is older than this app, and is replaced with the app's own (#730): handed over at once when it `keeps` what it runs (#765), otherwise once none of its agents is mid-turn. */
-  | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated }
+  /** `unproven`: while Bots is on, the runtime cannot hold bots by this window's proof (PRO-489), and why. */
+  | { state: "connected"; epoch: string; generation: number; view: number; outdated?: LocalRuntimeOutdated; unproven?: LocalRuntimeUnproven }
   /** Re-establishing by itself. `terminal`: only this window's terminal output is down. */
   | { state: "connecting"; terminal: boolean; attempt: number; retryInMs: number; downMs: number; message: string }
   /** Retrying cannot help until something outside this window changes. `startFailed`: the runtime the desktop started exited before it attached (PRO-287). */
@@ -2415,6 +2426,8 @@ export interface LocalRuntimeSettings { quitBehavior: QuitBehavior | null }
 export const localRuntime = {
   status: () => invoke<LocalRuntimeState>("local_runtime_status"),
   reconnect: () => invoke<LocalRuntimeState>("local_runtime_reconnect"),
+  /** Register again with the window's proof, reading its Keychain key now (PRO-489). */
+  proveWindow: () => invoke<LocalRuntimeState>("local_runtime_prove_window"),
   /** The end of the runtime's log, as it wrote it, for Copy logs (PRO-287). */
   log: () => invoke<string>("local_runtime_log"),
   /** Restart a runtime that stopped answering; the desktop attaches a fresh one. One that can be handed over keeps what it runs unless `how` says otherwise (#765); a refusal is a `LocalRuntimeRestartRefused`, with nothing stopped. */

@@ -267,7 +267,7 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/cannot confirm that you asked/);
     fireEvent.click(within(alert).getByRole("button", { name: /Restart runtime/ }));
-    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("e1"));
+    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("e1", RESTART));
     await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_save")).toHaveLength(2));
     const [, second] = mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_save");
     expect(second[1]).toMatchObject({ id: "b1", dutyId: "d1", input: { name: "Daily status", prompt: "Look.", schedule: { kind: "preset", preset: "daily", hour: 16, minute: 30 } } });
