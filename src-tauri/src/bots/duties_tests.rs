@@ -222,6 +222,7 @@ fn a_quiet_check_spends_nothing_tells_nobody_and_is_logged_as_nothing_new() {
 
 #[test]
 fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where_told() {
+    let mut rig = rig();
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("claude");
     std::fs::write(&program, "#!/bin/sh\nprintf 'listening\\n'\nstty -icanon\nexec cat\n").unwrap();
@@ -231,7 +232,6 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     }
     let _claude = crate::harness::claude::pty::claude_program_for_tests(program);
     let _ready = AgentReady::on();
-    let mut rig = rig();
     let bot = rig.hire("watcher", "Argus");
     let home = super::super::home(&bot).unwrap();
     let duty = rig.add(&bot, Some("echo '2 failures on main'"), true);
@@ -486,8 +486,8 @@ fn quiet_hours_cross_midnight_and_a_reply_is_read_as_people_write_it() {
 #[test]
 fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_be_removed() {
     // No run here reaches an agent; the stand-in is held so none could start a real one.
-    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
     let argus = rig.hire("watcher", "Argus");
     let atlas = rig.hire("cto", "Atlas");
     let mine = rig.add(&argus, Some("true"), true);
@@ -549,6 +549,7 @@ fn deleting_a_bot_removes_its_duties_and_a_duty_left_without_its_bot_can_still_b
     assert!(delete(&held.id).unwrap_err().to_string().contains(ELSEWHERE));
 }
 
+/// Take it after [`rig`]: the temp home first and the stand-in second, as every other test does, or two deadlock.
 fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestProgram) {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("claude");
@@ -567,8 +568,8 @@ fn stand_in_claude() -> (tempfile::TempDir, crate::harness::claude::pty::TestPro
 #[test]
 fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_home() {
     // The run below prints, so it would go on to the agent: only ever the stand-in.
-    let (_dir, _claude) = stand_in_claude();
     let rig = rig();
+    let (_dir, _claude) = stand_in_claude();
     let bot = rig.hire("cto", "Atlas");
     let home = super::super::home(&bot).unwrap();
     std::fs::write(home.join("check.sh"), "echo planted by the bot\n").unwrap();
@@ -627,9 +628,9 @@ fn a_duty_check_runs_in_its_own_folder_and_never_finds_what_the_bot_left_in_its_
 /// the bot's list.
 #[test]
 fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
+    let rig = rig();
     let (_dir, _claude) = stand_in_claude();
     let _ready = AgentReady::on();
-    let rig = rig();
     let bot = rig.hire("cto", "Atlas");
     let duty = rig.add(&bot, Some("echo found"), true);
     assert_eq!(duty.run_timeout_minutes, Some(RUN_TIMEOUT_MINUTES));

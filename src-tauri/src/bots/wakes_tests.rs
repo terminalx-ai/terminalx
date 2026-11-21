@@ -116,6 +116,8 @@ impl AutomationHost for Host {
 }
 
 /// The agent counts as ready, as a stand-in Claude Code, while this lives.
+/// Take it after [`rig`]: tests hold the temp home first and the stand-in
+/// second, the order every other test takes them in, or two deadlock.
 struct StandIn(#[allow(dead_code)] tempfile::TempDir, #[allow(dead_code)] crate::harness::claude::pty::TestProgram);
 
 impl StandIn {
@@ -214,8 +216,8 @@ fn pulls(list: Vec<PullRequest>) -> Snapshot {
 
 #[test]
 fn a_new_pull_request_wakes_a_review_duty_once_and_its_check_and_agent_are_given_the_pull_request() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let bot = rig.hire("watcher", "Argus");
     let source = json!({"kind": "githubPullRequest", "repo": "acme/widgets", "events": ["opened"]});
     // The check prints the events it is given, so the run goes ahead with them in its output.
@@ -266,8 +268,8 @@ fn linear_issue(id: &str, title: &str) -> crate::issues::Issue {
 
 #[test]
 fn a_new_linear_issue_matching_its_filter_wakes_its_duty_once_and_is_never_commented_on() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let bot = rig.hire("watcher", "Argus");
     let source = json!({"kind": "linearIssue", "teamId": "team-1", "labels": ["Bug"], "assignee": "unassigned", "report": {"comment": true, "commentOnFailure": true}});
     let duty = rig.add(&bot, "Find an owner for the bug.", source, None);
@@ -296,8 +298,8 @@ fn a_new_linear_issue_matching_its_filter_wakes_its_duty_once_and_is_never_comme
 
 #[test]
 fn messages_left_while_a_bot_is_paused_wake_it_once_on_resume() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let atlas = rig.hire("cto", "Atlas");
     let argus = rig.hire("watcher", "Argus");
     let duty = rig.add(&argus, "Act on what Atlas hands you.", json!({"kind": "botMessage", "from": [atlas.id], "kinds": ["handoff"]}), None);
@@ -343,8 +345,8 @@ fn messages_left_while_a_bot_is_paused_wake_it_once_on_resume() {
 
 #[test]
 fn a_duty_reporting_to_its_lead_leaves_it_a_status_one_hop_on() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let atlas = rig.hire("cto", "Atlas");
     let argus = rig.hire("watcher", "Argus");
     rig.bots("update", json!({"id": argus.id, "patch": {"reportsTo": atlas.id}})).unwrap();
@@ -361,8 +363,8 @@ fn a_duty_reporting_to_its_lead_leaves_it_a_status_one_hop_on() {
 
 #[test]
 fn a_duty_wakes_at_most_so_often_and_what_it_holds_back_waits_and_is_shown() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let atlas = rig.hire("cto", "Atlas");
     let argus = rig.hire("watcher", "Argus");
     let duty = rig.add(&argus, "Answer.", json!({"kind": "botMessage"}), None);
@@ -414,8 +416,8 @@ fn a_bot_source_is_kept_as_written_and_only_a_duty_takes_one() {
 
 #[test]
 fn a_watch_wakes_on_each_change_after_the_first_read() {
-    let _agent = StandIn::on();
     let rig = rig();
+    let _agent = StandIn::on();
     let bot = rig.hire("watcher", "Argus");
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), "version 1").unwrap();
