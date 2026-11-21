@@ -89,12 +89,17 @@ fn computer_launch(
 /// The one appended prompt a terminal launch of `tab` gives its agent: the
 /// workspace's prompts, the desktop tools' note, a sparse checkout's folders
 /// and, in a bot's chat, the bot's rules, role and memory as they are now.
-/// Refused when it is longer than one launch can carry (`AppendedPrompt::fits`).
+/// Refused when what Bots adds makes it longer than one launch can carry
+/// (`AppendedPrompt::fits_for_bot`). Only that is (PRO-507): an ordinary
+/// session launches as it did before Bots, as does a bot's chat whose
+/// workspace prompts were already too long without the bot's note.
 pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> Result<crate::cloud_config::AppendedPrompt> {
     let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
     let bot = crate::bots::chat::launch_note(entry, tab);
     let prompt = crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()]);
-    prompt.fits_for(bot.is_some())?;
+    if bot.is_some() && !prompt.fits() && crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref()]).fits() {
+        prompt.fits_for_bot()?;
+    }
     Ok(prompt)
 }
 

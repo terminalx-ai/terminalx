@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Loader2, Moon, MousePointerClick, Plus } from "@/icons";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { ChevronLeft, ChevronRight, Keyboard, Loader2, Moon, MousePointerClick, Plus, Trash2 } from "@/icons";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { errorMessage } from "@/lib/api";
-import { HOUR_PX, WEEKDAYS, addDays, blockBox, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
+import { HOUR_PX, WEEKDAYS, addDays, blockBox, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, firstWeekday, fitLanes, goesOn, lanes, lanesThatFit, logWords, movedSchedule, oftenText, scheduleWords, stepCell, stepMove, wallClock, weekLabel, weekShown, weekUnknown, weekdayOf, type Cell } from "@/lib/botCalendar";
 import { useLocalRuntime } from "@/lib/localRuntime";
 import { OutdatedRuntimeDetails } from "@/components/layout/RuntimeStatus";
-import { dutiesApi, dutyInputOf, reportsToLabel } from "@/lib/botDuties";
+import { dutiesApi, dutyInputOf, reportsToLabel, runAt, runOutcome, runTook, tookText } from "@/lib/botDuties";
 import { useAutomationStore } from "@/lib/automations";
 import { cn } from "@/lib/cn";
 import type { Automation, AutomationSchedule } from "@/types/automations";
-import type { BlockState, CalendarBlock, DayCount, DutyWeek } from "@/types/botCalendar";
+import type { BlockState, CalendarBlock, DayCount, DutyWeek, KeptLog } from "@/types/botCalendar";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, roleMark } from "./BotAvatar";
 
@@ -87,11 +89,16 @@ const STATE_WORDS: Record<BlockState, string> = {
 const KEY_ALWAYS: BlockState[] = ["done", "reported", "quiet", "next"];
 const KEY_SOMETIMES: BlockState[] = ["running", "failed", "stopped", "skipped"];
 
-/** Where a new duty is to go: a clicked hour, or (from Add a duty) none. */
+/** Where a new duty is to go: a clicked hour, or (from Add a duty) none. `day` is the weekday, 0 for Monday … 6. */
 export type Slot = { day: number; minute: number; timezone: string } | null;
 
-/** A block being dragged. `moved` once it has left its place: let go back there, it is put back, not opened. */
+/**
+ * A block being dragged, or moved with the keyboard (`pointer` is then {@link KEYBOARD}). `moved` once it has left its
+ * place: let go back there, it is put back, not opened.
+ */
 type Drag = { index: number; pointer: number; startY: number; to: { day: number; minute: number } | null; moved: boolean };
+/** The pointer id of a move made with the keyboard: no pointer has it. */
+const KEYBOARD = -1;
 /** A move being saved: `before` is the schedule it replaces; `undoing` when it puts one back. */
 type PendingMove = { block: CalendarBlock; duty: Automation; schedule: AutomationSchedule; before: AutomationSchedule; undoing?: boolean };
 
@@ -105,7 +112,7 @@ type PendingMove = { block: CalendarBlock; duty: Automation; schedule: Automatio
  * `bots` are the bots it may show; with `filter` the toolbar offers to show one of them. `lead` fills the start of the
  * toolbar (the title and the List | Calendar switch).
  */
-export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
+export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty, onOpenSession }: {
   bots: readonly Bot[];
   /** One bot's calendar (its Duties tab): no filter, and its week only. */
   single?: Bot;
@@ -113,8 +120,12 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   /** Add a duty for a bot (or one to be chosen when `bot` is null) at `slot`. */
   onAdd: (bot: Bot | null, slot: Slot) => void;
   onOpenDuty: (bot: Bot, dutyId: string) => void;
+  /** Open a run's session, from a deleted duty's kept log; without it the log only says what each run did. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const automations = useAutomationStore();
+  // The week starts where the system's region starts it (PRO-499): read once, as the window's locale is.
+  const firstDay = useMemo(() => firstWeekday(), []);
   const [week, setWeek] = useState<string | null>(null);
   const [only, setOnly] = useState<string | null>(null);
   const [data, setData] = useState<DutyWeek | null>(null);
@@ -127,6 +138,12 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const [moved, setMoved] = useState<PendingMove | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [now, setNow] = useState(() => new Date());
+  // The hour the grid's keyboard focus is on, and how many blocks fit side by side in a day's column.
+  const [cell, setCell] = useState<Cell>({ day: 0, hour: 9 });
+  const [laneRoom, setLaneRoom] = useState(Infinity);
+  // A deleted duty whose kept log is open.
+  const [kept, setKept] = useState<{ bot: Bot; dutyId: string } | null>(null);
+  const cells = useRef(new Map<string, HTMLDivElement>());
   const grid = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const scrolled = useRef(false);
@@ -140,9 +157,9 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   useEffect(() => {
     let live = true;
     // A week that could not be read leaves nothing of the one before drawn under the error.
-    calendarApi.week(botId, week).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) { setData(null); setError(errorMessage(cause)); } });
+    calendarApi.week(botId, week, firstDay).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) { setData(null); setError(errorMessage(cause)); } });
     return () => { live = false; };
-  }, [botId, week, changeKey, tick, epoch]);
+  }, [botId, week, changeKey, tick, epoch, firstDay]);
   // Only while the window is shown: hidden, nothing ticks, and on coming back the week is read again at once.
   useEffect(() => {
     let timers: number[] = [];
@@ -166,16 +183,32 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const duties = useMemo(() => new Map(automations.automations.filter((value) => value.bot).map((value) => [value.id, value])), [automations.automations]);
   const blocks = data?.blocks ?? [];
   const placed = useMemo(() => lanes(blocks), [blocks]);
+  const fitted = useMemo(() => fitLanes(blocks, placed, laneRoom), [blocks, placed, laneRoom]);
   const wall = data ? wallClock(data.timezone, now) : null;
   const today = data && wall ? data.days.indexOf(wall.ymd) : -1;
+  /** A column's weekday name, from its date: an older runtime's week starts on Monday whatever was asked. */
+  const dayName = (column: number) => (data ? WEEKDAYS[weekdayOf(data.days[column])] : WEEKDAYS[column]);
 
-  // The grid opens at the morning, or earlier when a block is earlier.
+  // The grid opens at the morning, or earlier when a block is earlier; its keyboard focus starts on now, or the morning.
   useLayoutEffect(() => {
     if (!data || scrolled.current || !scroller.current) return;
     scrolled.current = true;
-    const earliest = Math.min(8 * 60, ...data.blocks.map((block) => block.minute));
+    const earliest = Math.min(8 * 60, ...data.blocks.filter((block) => !block.continued).map((block) => block.minute));
     scroller.current.scrollTop = Math.max(0, Math.floor(earliest / 60) - 1) * HOUR_PX;
-  }, [data]);
+    setCell(today >= 0 && wall ? { day: today, hour: Math.floor(wall.minute / 60) } : { day: 0, hour: 9 });
+  }, [data, today, wall]);
+
+  // How many blocks a day's column holds side by side, as it is laid out now.
+  const shown = !!data;
+  useLayoutEffect(() => {
+    const node = grid.current;
+    if (!node) return;
+    const measure = () => setLaneRoom(lanesThatFit(node.getBoundingClientRect().width / 7));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [shown]);
 
   /** The day column under the pointer. */
   const dayAt = useCallback((clientX: number) => {
@@ -199,8 +232,29 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     );
   }, [byId, duties]);
 
+  /** A block's duty opens; a deleted one's kept log, as it has no page any more. */
+  const openBlock = (block: CalendarBlock) => {
+    const bot = byId.get(block.botId);
+    if (!bot) return;
+    if (block.deleted) setKept({ bot, dutyId: block.dutyId });
+    else onOpenDuty(bot, block.dutyId);
+  };
+
+  /** Save a block's duty moved to `to`, or say why its schedule cannot move there. */
+  const commit = (block: CalendarBlock, to: { day: number; minute: number }) => {
+    const duty = duties.get(block.dutyId);
+    if (!duty || !data) return;
+    const result = movedSchedule(duty.schedule, block, to, data.timezone);
+    if ("reason" in result) {
+      setNotice(`${duty.name} was not moved. ${result.reason}`);
+      return;
+    }
+    setNotice(null);
+    move({ block, duty, schedule: result.schedule, before: duty.schedule });
+  };
+
   const onBlockDown = (event: ReactPointerEvent, index: number) => {
-    if (event.button !== 0 || blocks[index]?.state !== "next") return;
+    if (event.button !== 0 || blocks[index]?.state !== "next" || blocks[index]?.deleted) return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     setDrag({ index, pointer: event.pointerId, startY: event.clientY, to: null, moved: false });
   };
@@ -226,26 +280,70 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     if (!to) {
       // Dragged away and brought back: put back where it was, and nothing opens.
       if (current?.index === index && current.moved) return;
-      onOpenDuty(bot, block.dutyId);
+      openBlock(block);
       return;
     }
-    const duty = duties.get(block.dutyId);
-    if (!duty || !data) return;
     event.stopPropagation();
-    const result = movedSchedule(duty.schedule, block, to, data.timezone);
-    if ("reason" in result) {
-      setNotice(`${duty.name} was not moved. ${result.reason}`);
+    commit(block, to);
+  };
+  /**
+   * A block's keys (PRO-499): Enter or Space opens it. Alt (Option) and the arrow keys move one still to come, by a
+   * drag's step up and down and a day left and right, shown where it would go; Enter saves it there, Escape puts it back.
+   */
+  const onBlockKey = (event: ReactKeyboardEvent, index: number) => {
+    const block = blocks[index];
+    if (!block) return;
+    const moving = drag?.pointer === KEYBOARD && drag.index === index ? drag : null;
+    if (event.altKey && event.key.startsWith("Arrow")) {
+      event.preventDefault();
+      if (block.state !== "next" || block.deleted) {
+        setNotice(`${dutyName(block.dutyId)} is not moved: only a block still to come moves.`);
+        return;
+      }
+      const to = stepMove(moving?.to ?? { day: block.day, minute: block.minute }, event.key);
+      if (!to) return;
+      const home = to.day === block.day && to.minute === block.minute;
+      setNotice(null);
+      setDrag({ index, pointer: KEYBOARD, startY: 0, to: home ? null : to, moved: true });
       return;
     }
-    setNotice(null);
-    move({ block, duty, schedule: result.schedule, before: duty.schedule });
+    if (moving && event.key === "Escape") {
+      event.preventDefault();
+      setDrag(null);
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (moving) {
+        setDrag(null);
+        if (moving.to) commit(block, moving.to);
+        return;
+      }
+      openBlock(block);
+    }
   };
-  const onColumnClick = (event: React.MouseEvent<HTMLDivElement>, day: number) => {
-    if (event.target !== event.currentTarget || !data) return;
-    const box = event.currentTarget.getBoundingClientRect();
-    const minute = Math.min(23, Math.max(0, Math.floor((event.clientY - box.top) / HOUR_PX))) * 60;
-    const chosen = single ?? (only ? byId.get(only) ?? null : bots.length === 1 ? bots[0] : null);
-    onAdd(chosen, { day, minute, timezone: data.timezone });
+
+  /** The bot a duty added here is for: the one shown, or the only one; none when one is still to be chosen. */
+  const chosenBot = () => single ?? (only ? byId.get(only) ?? null : bots.length === 1 ? bots[0] : null);
+  /** Add a duty at hour `hour` of column `column`, on its weekday, whatever day the week starts on. */
+  const addAt = (column: number, hour: number) => {
+    if (!data) return;
+    onAdd(chosenBot(), { day: weekdayOf(data.days[column]), minute: hour * 60, timezone: data.timezone });
+  };
+  /** The grid's keys (PRO-499): the arrows between hours and days, Home and End, Page Up and Down; Enter adds a duty. */
+  const onCellKey = (event: ReactKeyboardEvent, at: Cell) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      addAt(at.day, at.hour);
+      return;
+    }
+    const next = stepCell(at, event.key);
+    if (!next) return;
+    event.preventDefault();
+    setCell(next);
+    const node = cells.current.get(`${next.day}:${next.hour}`);
+    node?.focus();
+    node?.scrollIntoView?.({ block: "nearest" });
   };
 
   const counted = (row: DayCount[] | undefined, text: (count: DayCount, phase: ReturnType<typeof dayPhase>, any: boolean, first: boolean) => string, any: boolean) =>
@@ -257,8 +355,18 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const oftenCells = counted(data?.often, oftenText, !!data?.oftenDuties.length);
   const eventCells = counted(data?.events, eventsText, !!data?.eventDuties.length);
   const states = new Set(blocks.map((block) => block.state));
-  const dutyName = (id: string) => duties.get(id)?.name ?? "A duty";
+  // A deleted duty is no longer among the duties: the week names it.
+  const deletedNames = new Map((data?.deleted ?? []).map((gone) => [gone.dutyId, gone.name]));
+  const dutyName = (id: string) => duties.get(id)?.name ?? deletedNames.get(id) ?? "A duty";
   const dragged = drag?.to ? blocks[drag.index] : null;
+  const keyMoving = drag?.pointer === KEYBOARD ? blocks[drag.index] : null;
+  // What each hour of the grid holds, for its cell's name: the blocks that begin in it.
+  const startsIn = new Map<string, string[]>();
+  for (const block of blocks) {
+    if (block.continued) continue;
+    const key = `${block.day}:${Math.floor(block.minute / 60)}`;
+    startsIn.set(key, [...(startsIn.get(key) ?? []), dutyName(block.dutyId)]);
+  }
   const notKept = data?.notKept ?? [];
   const logs = data?.logs ?? [];
   // The duties drawn this week: a day's "history not kept" covers its column only when it is true of all of them.
@@ -303,6 +411,11 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
             <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} onFailed={setMoveError} className="mb-2" />
           )}
           {notice && <p role="status" className="mb-2 rounded-md bg-warning/10 px-3 py-1.5 text-[12px] text-warning" data-testid="calendar-notice">{notice}</p>}
+          {keyMoving && drag && (
+            <p role="status" className="mb-2 rounded-md bg-veil px-3 py-1.5 text-[12px] text-muted-foreground" data-testid="calendar-key-move">
+              {drag.to ? `Moving ${dutyName(keyMoving.dutyId)} to ${dayName(drag.to.day)} ${clock(drag.to.minute)}: Enter saves it there, Escape puts it back.` : `${dutyName(keyMoving.dutyId)} is where it was: Alt (Option) and the arrow keys move it.`}
+            </p>
+          )}
           {moved && !pending && (
             <p role="status" className="mb-2 flex min-w-0 items-center gap-2 rounded-md bg-veil px-3 py-1 text-[12px] text-muted-foreground" data-testid="calendar-moved">
               <span className="min-w-0 truncate">
@@ -328,10 +441,10 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
             <>
               <div className="grid shrink-0 grid-cols-[44px_repeat(7,minmax(0,1fr))]" data-testid="calendar-head">
                 <div />
-                {WEEKDAYS.map((name, day) => (
-                  <div key={name} className={cn("flex h-9 min-w-0 items-center gap-1.5 border-l border-hairline px-2 text-[12px]", day === today ? "font-medium text-foreground" : "text-muted-foreground")}>
-                    {name}
-                    <span className={day === today ? "inline-grid size-5 place-items-center rounded-full bg-primary text-[11px] text-primary-foreground" : "text-faint"}>{dayNumber(data.days[day])}</span>
+                {data.days.map((ymd, day) => (
+                  <div key={ymd} className={cn("flex h-9 min-w-0 items-center gap-1.5 border-l border-hairline px-2 text-[12px]", day === today ? "font-medium text-foreground" : "text-muted-foreground")} data-testid="calendar-day-head">
+                    {dayName(day)}
+                    <span className={day === today ? "inline-grid size-5 place-items-center rounded-full bg-primary text-[11px] text-primary-foreground" : "text-faint"}>{dayNumber(ymd)}</span>
                   </div>
                 ))}
               </div>
@@ -348,13 +461,37 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                     {Array.from({ length: 23 }, (_, line) => (
                       <div key={line} aria-hidden className="pointer-events-none absolute right-0 left-0 border-t border-hairline" style={{ top: (line + 1) * HOUR_PX }} />
                     ))}
-                    {WEEKDAYS.map((name, day) => (
+                    {/* The hours, under the blocks: a click or Enter on one adds a duty there, the arrows move between them. */}
+                    <div role="grid" aria-label={`Hours of the week of ${weekLabel(data.days, wall?.ymd)}`} aria-rowcount={24} aria-colcount={7} className="absolute inset-0" data-testid="calendar-cells">
+                      {Array.from({ length: 24 }, (_, hour) => (
+                        <div key={hour} role="row" aria-rowindex={hour + 1} className="absolute right-0 left-0 grid grid-cols-7" style={{ top: hour * HOUR_PX, height: HOUR_PX }}>
+                          {data.days.map((ymd, day) => {
+                            const here = startsIn.get(`${day}:${hour}`) ?? [];
+                            return (
+                              <div
+                                key={ymd}
+                                ref={(node) => { if (node) cells.current.set(`${day}:${hour}`, node); else cells.current.delete(`${day}:${hour}`); }}
+                                role="gridcell"
+                                aria-colindex={day + 1}
+                                tabIndex={cell.day === day && cell.hour === hour ? 0 : -1}
+                                aria-label={`${dayName(day)} ${dayNumber(ymd)}, ${clock(hour * 60)}${here.length ? `: ${here.join(", ")}` : ""}`}
+                                className="cursor-cell outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
+                                onClick={() => { setCell({ day, hour }); addAt(day, hour); }}
+                                onFocus={() => setCell({ day, hour })}
+                                onKeyDown={(event) => onCellKey(event, { day, hour })}
+                                data-testid="calendar-cell"
+                              />
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                    {data.days.map((ymd, day) => (
                       <div
-                        key={name}
-                        className={cn("relative h-full cursor-cell border-l border-hairline", day === today && "bg-primary/[.04]")}
-                        onClick={(event) => onColumnClick(event, day)}
+                        key={ymd}
+                        className={cn("pointer-events-none relative h-full border-l border-hairline", day === today && "bg-primary/[.04]")}
                         role="group"
-                        aria-label={`${name} ${dayNumber(data.days[day])}`}
+                        aria-label={`${dayName(day)} ${dayNumber(ymd)}`}
                         data-testid="calendar-day"
                       >
                         {day === today && wall && (
@@ -382,36 +519,83 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                         })()}
                         {blocks.map((block, index) => {
                           if (block.day !== day) return null;
-                          const lane = placed.get(index) ?? { lane: 0, of: 1 };
+                          // Too many side by side to read: drawn in a "+N more" below.
+                          const lane = fitted.shown.get(index);
+                          if (!lane) return null;
                           const bot = byId.get(block.botId);
                           const name = dutyName(block.dutyId);
-                          const length = block.minutes && block.minutes >= 1 ? ` · ${block.state === "running" ? "for" : "ran"} ${lengthWords(block.minutes)}` : "";
-                          const title = `${name} · ${bot?.name ?? "A bot"} · ${clock(block.minute)} · ${STATE_WORDS[block.state] ?? "Ran"}${block.count > 1 ? ` ×${block.count}` : ""}${length}${block.note ? ` · ${block.note}` : ""}`;
                           const box = blockBox(block);
                           return (
                             <button
                               key={`${block.dutyId}-${block.at}-${index}`}
                               type="button"
-                              title={title}
-                              aria-label={title}
+                              title={blockTitle(block, name, bot)}
+                              aria-label={blockTitle(block, name, bot)}
                               onPointerDown={(event) => onBlockDown(event, index)}
                               onPointerMove={onBlockMove}
                               onPointerUp={(event) => onBlockUp(event, index)}
                               onPointerCancel={() => setDrag(null)}
-                              onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && bot) { event.preventDefault(); onOpenDuty(bot, block.dutyId); } }}
+                              onKeyDown={(event) => onBlockKey(event, index)}
+                              onBlur={() => setDrag((current) => (current?.pointer === KEYBOARD && current.index === index ? null : current))}
                               className={cn(
-                                "absolute truncate rounded-[5px] px-1.5 text-left text-[11px] leading-[20px] outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                                block.state === "next" ? "cursor-grab touch-none" : "cursor-pointer",
+                                "pointer-events-auto absolute flex items-center gap-1 overflow-hidden rounded-[5px] px-1.5 text-left text-[11px] leading-[20px] whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                                block.state === "next" && !block.deleted ? "cursor-grab touch-none" : "cursor-pointer",
                                 blockLook(block.state, bot),
+                                // A deleted duty's run: dimmed, and it cannot be moved.
+                                block.deleted && "opacity-55 grayscale",
+                                // A run across midnight: open at the edge where it goes on.
+                                block.continued && "rounded-t-none",
+                                goesOn(block) && "rounded-b-none",
                                 drag?.index === index && drag.to && "opacity-40",
                               )}
                               style={{ top: box.top, height: box.height, left: `calc(${(lane.lane / lane.of) * 100}% + 3px)`, width: `calc(${100 / lane.of}% - 6px)` }}
                               data-testid="calendar-block"
                               data-state={block.state}
                               data-duty={block.dutyId}
+                              data-deleted={block.deleted ? "true" : undefined}
+                              data-continued={block.continued ? "true" : undefined}
                             >
-                              {name}{block.count > 1 ? ` ×${block.count}` : ""}
+                              {block.deleted && <Trash2 aria-hidden className="size-3 shrink-0" data-testid="calendar-block-deleted" />}
+                              <span className="min-w-0 truncate">{block.continued ? "↳ " : ""}{name}{block.count > 1 ? ` ×${block.count}` : ""}</span>
                             </button>
+                          );
+                        })}
+                        {fitted.more.filter((more) => more.day === day).map((more) => {
+                          const first = blocks[more.members[0]];
+                          const at = first ? (first.continued ? "00:00" : clock(first.minute)) : "";
+                          const label = `${more.members.length} more at ${at}`;
+                          return (
+                            <Popover key={`more-${more.members[0]}`}>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-label={`${label}: ${more.members.map((index) => dutyName(blocks[index].dutyId)).join(", ")}`}
+                                  className="pointer-events-auto absolute flex items-start justify-center overflow-hidden rounded-[5px] border border-hairline bg-card px-1 text-[11px] leading-[20px] whitespace-nowrap text-muted-foreground outline-none hover:bg-veil focus-visible:ring-2 focus-visible:ring-ring/50"
+                                  style={{ top: more.top, height: more.height, left: `calc(${(more.lane / more.of) * 100}% + 3px)`, width: `calc(${100 / more.of}% - 6px)` }}
+                                  data-testid="calendar-more"
+                                >
+                                  +{more.members.length} more
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent label={`${dayName(day)} ${dayNumber(ymd)}: ${label}`} className="w-72">
+                                <ul className="flex flex-col" data-testid="calendar-more-list">
+                                  {more.members.map((index) => {
+                                    const block = blocks[index];
+                                    const bot = byId.get(block.botId);
+                                    return (
+                                      <li key={index}>
+                                        <button type="button" onClick={() => openBlock(block)} className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] outline-none hover:bg-veil focus-visible:ring-2 focus-visible:ring-ring/40" data-testid="calendar-more-item">
+                                          <span className="w-10 shrink-0 font-mono text-[11px] text-faint tabular-nums">{block.continued ? "00:00" : clock(block.minute)}</span>
+                                          <span className={cn("h-2.5 w-2.5 shrink-0 rounded-[3px]", blockLook(block.state, bot), block.deleted && "opacity-55 grayscale")} />
+                                          <span className="min-w-0 truncate text-foreground">{dutyName(block.dutyId)}{block.deleted ? " (deleted)" : ""}</span>
+                                          <span className="ml-auto shrink-0 truncate text-[11px] text-faint">{bot?.name ?? "A bot"}</span>
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </PopoverContent>
+                            </Popover>
                           );
                         })}
                         {dragged && drag?.to?.day === day && (
@@ -427,6 +611,10 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
               <p className="mt-3 flex shrink-0 items-start gap-2 text-[12px] text-faint" data-testid="calendar-hint">
                 <MousePointerClick className="mt-0.5 size-3.5 shrink-0" />
                 Click an empty hour to add a duty there. Drag a block still to come to move it. Checks that run many times a day, and duties that wake on an event, are counted in the two rows on top.
+              </p>
+              <p className="mt-1 flex shrink-0 items-start gap-2 text-[12px] text-faint" data-testid="calendar-keys">
+                <Keyboard className="mt-0.5 size-3.5 shrink-0" />
+                On the grid, the arrow keys move between hours and days and Enter adds a duty at the hour. On a block still to come, Alt (Option) and the arrow keys move it; Enter saves it there.
               </p>
             </>
           )}
@@ -476,7 +664,103 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
           <QuietHoursList data={data} bots={single ? [single] : only ? bots.filter((bot) => bot.id === only) : bots} />
         </aside>
       </div>
+      {kept && (
+        <KeptLogDialog
+          bot={kept.bot}
+          dutyId={kept.dutyId}
+          timezone={data?.timezone}
+          lead={(id) => bots.find((bot) => bot.id === id)?.name ?? null}
+          onOpenSession={onOpenSession && ((sessionId) => { setKept(null); onOpenSession(sessionId); })}
+          onClose={() => setKept(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/** What a block says it is, for its title and its name to a screen reader. */
+function blockTitle(block: CalendarBlock, name: string, bot: Bot | undefined): string {
+  const end = clock(block.minute + (block.minutes ?? 0));
+  // A run's later day says when it ends; its first how long it went on, and that it goes on past midnight.
+  const when = block.continued ? `on from the day before, until ${goesOn(block) ? "after midnight" : end}` : clock(block.minute);
+  const length = !block.continued && block.minutes && block.minutes >= 1 ? ` · ${block.state === "running" ? "for" : "ran"} ${lengthWords(block.minutes)}${goesOn(block) ? ", on past midnight" : ""}` : "";
+  return `${name}${block.deleted ? " (deleted)" : ""} · ${bot?.name ?? "A bot"} · ${when} · ${STATE_WORDS[block.state] ?? "Ran"}${block.count > 1 ? ` ×${block.count}` : ""}${length}${block.note ? ` · ${block.note}` : ""}`;
+}
+
+/** A time in the week's time zone, with its day: `Tue 17 Nov, 09:00`. */
+function dayAndTime(iso: string | null, timezone: string | undefined): string {
+  if (!iso) return "–";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  try {
+    return at.toLocaleString("en-GB", { timeZone: timezone, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  } catch {
+    return at.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+}
+
+/**
+ * A deleted duty's kept log (PRO-499): its runs as its page listed them, read from the log the runtime keeps when a
+ * duty is deleted. Nothing in it can be changed or run again.
+ */
+function KeptLogDialog({ bot, dutyId, timezone, lead, onOpenSession, onClose }: {
+  bot: Bot;
+  dutyId: string;
+  timezone: string | undefined;
+  lead: (id: string) => string | null;
+  onOpenSession?: (sessionId: string) => void;
+  onClose: () => void;
+}) {
+  const [log, setLog] = useState<KeptLog | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    calendarApi.keptLog(bot.id, dutyId).then((value) => { if (live) setLog(value); }, (cause) => { if (live) setError(errorMessage(cause)); });
+    return () => { live = false; };
+  }, [bot.id, dutyId]);
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent width="max-w-[36rem]" className="p-4" data-testid="calendar-kept-log">
+        <DialogTitle className="mr-8 truncate text-sm font-semibold">{log ? `${log.name} (deleted)` : "A deleted duty"}</DialogTitle>
+        <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
+          {log ? `${bot.name}'s duty, deleted ${dayAndTime(log.deletedAt, timezone)}. Its runs are kept so the weeks they ran in still show them; it runs no more.` : `${bot.name}'s deleted duty.`}
+        </DialogDescription>
+        {error ? (
+          <p role="alert" className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{weekUnknown(error.replace("dutyKeptLog", "dutyWeek")) ? "The TerminalX runtime running is older than this app and does not keep a deleted duty's runs." : error}</p>
+        ) : !log ? (
+          <p className="mt-3 flex items-center gap-2 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading its runs…</p>
+        ) : log.runs.length === 0 ? (
+          <p className="mt-3 text-[12.5px] text-faint">No runs are kept.</p>
+        ) : (
+          <div className="mt-3 max-h-[50vh] min-w-0 overflow-auto scrollbar-thin">
+            <table className="w-full border-collapse text-[12.5px]" aria-label={`${log.name} runs`} data-testid="calendar-kept-runs">
+              <thead>
+                <tr className="border-b border-hairline text-left text-[11px] uppercase tracking-[.06em] text-faint">
+                  <th scope="col" className="px-2 py-2 font-medium">When</th>
+                  <th scope="col" className="px-2 py-2 font-medium">Then</th>
+                  <th scope="col" className="px-2 py-2 font-medium">Took</th>
+                </tr>
+              </thead>
+              <tbody>
+                {log.runs.map((run) => (
+                  <tr key={run.runId} className="border-b border-hairline" data-testid="calendar-kept-run">
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-faint tabular-nums">{dayAndTime(runAt(run), timezone)}{run.repeatCount > 1 ? ` ×${run.repeatCount}` : ""}</td>
+                    <td className="px-2 py-2">
+                      {run.sessionId && onOpenSession ? (
+                        <button type="button" onClick={() => onOpenSession(run.sessionId!)} className="block max-w-[280px] truncate text-left text-foreground hover:underline">{runOutcome(run, lead)}</button>
+                      ) : (
+                        <span className={cn("block max-w-[280px] truncate", run.status === "failed" ? "text-destructive" : "text-muted-foreground")} title={run.error ?? undefined}>{runOutcome(run, lead)}</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2 whitespace-nowrap text-faint tabular-nums">{tookText(runTook(run))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

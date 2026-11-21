@@ -119,7 +119,7 @@ function ProjectFilterMenu() {
     if (canonicalProject(project.path) !== (store.chatsPath && canonicalProject(store.chatsPath))) choices.set(canonicalProject(project.path), project.name);
   }
   for (const session of store.sessions) {
-    const path = sidebarProjectOf(session, store.chatsPath);
+    const path = sidebarProjectOf(session, store.chatsPath, store);
     if (path && !choices.has(path)) choices.set(path, path.split("/").pop() || path);
   }
   for (const org of cloud) if (visibleIds.has(org.orgId)) {

@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn a_connected_window_says_it_is_unproven() {
         let connected = ConnectionState::Connected { epoch: "e".into(), generation: 1, view: 0, outdated: None, unproven: None };
-        let locked = || Some(super::super::supervisor::UnprovenWindow { why: "locked".into(), pinned: true });
+        let locked = || Some(super::super::supervisor::UnprovenWindow { why: "locked".into(), pinned: true, restart: None });
         let shown = unproven(connected, locked());
         assert!(matches!(&shown, ConnectionState::Connected { unproven: Some(why), .. } if why.why == "locked"), "{shown:?}");
         let value = serde_json::to_value(&shown).unwrap();

@@ -10,6 +10,7 @@ import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib
 import { idleSuspendSentence } from "@/lib/idleSuspend";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
+import { useCloudPins } from "@/lib/cloudPins";
 import { useSessionStore } from "@/lib/sessions";
 import type { CloudProject } from "@/types/target";
 
@@ -28,6 +29,7 @@ import type { CloudProject } from "@/types/target";
 export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
   const { status } = useAccount();
   return useMemo(() => {
     const live = new Set(liveCloudOrgIds(status));
@@ -37,14 +39,14 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
       .sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
     return orgs.map((org) => {
       const placed = placeCloudProjects(catalog.orgs[org.id] ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, {
-        pinned: prefs.cloudPinned[org.id],
+        pinned: cloudPins[org.id],
         added: prefs.cloudProjects[org.id],
         blank: prefs.cloudBlankProjects[org.id],
       });
       // Whether this account may start a session there: an owner or admin; null while its role is not known yet.
       return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, mayStart: mayStartCloudSessions(status, org.id) };
     });
-  }, [catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+  }, [catalog, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 function sectionName(org: { isPersonal?: boolean; name: string }): string {
@@ -56,6 +58,7 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
   const store = useSessionStore();
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
   const { status } = useAccount();
   const key = store.cloudSessionPreset?.projectKey ?? null;
   return useMemo(() => {
@@ -65,13 +68,13 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
     const org = status.organizations?.find((item) => item.id === orgId);
     const orgName = org ? (org.isPersonal ? "Personal" : org.name) : "Organization";
     const placed = placeCloudProjects(catalog.orgs[orgId] ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {
-      pinned: prefs.cloudPinned[orgId],
+      pinned: cloudPins[orgId],
       added: prefs.cloudProjects[orgId],
       blank: prefs.cloudBlankProjects[orgId],
     });
     const project = [...placed.projects, ...placed.more].find((item) => item.key === key) ?? null;
     return { project, orgName, mayStart: mayStartCloudSessions(status, orgId) };
-  }, [key, catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+  }, [key, catalog, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 export function cloudStartError(error: unknown, orgId: string | null = null): string {

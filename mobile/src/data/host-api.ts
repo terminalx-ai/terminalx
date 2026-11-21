@@ -31,6 +31,13 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
+  /** Pinned on the Mac (#1403): listed in the phone's Pinned section. Absent from older Macs: not pinned. */
+  pinned?: boolean;
+  /**
+   * Where the Mac's Pinned group places it, from 0, while the sidebar is in
+   * its custom (dragged) order; null or absent otherwise, and from older Macs.
+   */
+  pinnedRank?: number | null;
   tabs: {
     id: string;
     /** The tab's own title: the reader's, else the first words of its first request. */
@@ -67,8 +74,10 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
  * `bots`: the `bots.*` methods and `bot_question` notices (PRO-479). Named only while the Mac's Bots setting is on:
  * without it, nothing of the bots shows on the phone.
+ * `pin`: `sessions.pin`, `cloud.pins` and `cloud.pin` read and set the Mac's pinned sessions and cloud projects (#1403).
+ * Without it the Pinned section still shows what the Mac pinned, with no Pin or Unpin and no cloud rows.
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number; bots?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number; bots?: number; pin?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -384,6 +393,33 @@ export class HostApi {
     return (await this.features()).sendIds === 1 ? { clientMessageId: messageId } : {};
   }
 
+  /** Whether this Mac pins and unpins from the phone, and says which cloud projects it pinned (`pin`, #1403). */
+  async pins(): Promise<boolean> {
+    return (await this.features()).pin === 1;
+  }
+
+  /** Pin or unpin a session as the Mac's sidebar does; the list moves once the Mac has confirmed it (`pin`). */
+  async setPinned(sessionId: string, pinned: boolean): Promise<ControlResult> {
+    return this.control("sessions.pin", { sessionId, pinned });
+  }
+
+  /**
+   * The cloud projects the Mac pinned, by organization, each by its
+   * repository identity (`pin`). Empty from a Mac that does not name `pin`;
+   * null when the Mac would not say, so what was shown stays.
+   */
+  async cloudPins(): Promise<Record<string, string[]> | null> {
+    if (!await this.pins()) return {};
+    const result = await this.connection.request<{ orgs?: unknown }>("cloud.pins", {});
+    if (!result.ok) return null;
+    return readCloudPins(result.value?.orgs);
+  }
+
+  /** Pin or unpin a cloud project on the Mac, as its sidebar's "Pin project" does (`pin`). */
+  async setCloudPinned(orgId: string, identity: string, pinned: boolean): Promise<ControlResult> {
+    return this.control("cloud.pin", { orgId, identity, pinned });
+  }
+
   /** Whether this Mac takes the session controls; an older one offers sending and answering only. */
   async sessionControls(): Promise<boolean> {
     return (await this.features()).sessionControls === 1;
@@ -672,6 +708,18 @@ export function checkSyncPage(value: unknown, sessionId: string, tabId: string, 
   if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
   if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
   return page;
+}
+
+/** Only lists of names, per organization, are cloud pins; anything else of a reply is left out. */
+export function readCloudPins(value: unknown): Record<string, string[]> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const pins: Record<string, string[]> = {};
+  for (const [orgId, list] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    const names = list.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+    if (names.length) pins[orgId] = names;
+  }
+  return pins;
 }
 
 export function isSessionSummary(value: unknown): value is SessionSummary {

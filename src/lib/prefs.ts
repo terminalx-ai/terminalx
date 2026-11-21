@@ -132,7 +132,12 @@ export interface Prefs {
    * is known by that workspace's name on every device.
    */
   cloudBlankProjects: Record<string, string[]>;
-  /** Cloud projects the reader pinned, per organization, as repository identities. */
+  /**
+   * Cloud projects the reader pinned, per organization, as repository
+   * identities, as windows kept them before #1403. The app keeps them now
+   * (`@/lib/cloudPins`), where a paired phone reads them too: what is left
+   * here is moved there once and then cleared. Nothing else reads it.
+   */
   cloudPinned: Record<string, string[]>;
   /** Cloud projects the reader collapsed, by project key (`cloud:<orgId>:<identity>`); expanded by default. */
   cloudCollapsed: Record<string, true>;

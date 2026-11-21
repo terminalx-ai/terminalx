@@ -12,6 +12,39 @@
   "Also sends to" beside the home chat's send button forwards its replies
   there too. Tokens are kept in the store, readable by you alone, never in the
   bot's settings. WhatsApp needs a relay and stays off (PRO-481).
+- Bots (experimental): the week calendar of duties starts on the first day of
+  the week of the system's region. Too many duties at one time to read side
+  by side show "+N more", which lists the rest. The grid is keyboard-driven:
+  the arrow keys move between hours and days, Enter adds a duty at the hour,
+  and Alt (Option) with the arrows moves a block still to come, Enter saving
+  it. A deleted duty's past runs stay on the weeks they ran, dimmed and named,
+  and open its kept run log. A run that goes on past midnight carries on as a
+  second block on the next day (PRO-499).
+- Sidebar: a quick chat is no longer a project of its own named by its
+  session id. It is listed under Chats by its title, saying in its tooltip
+  where it runs (its scratch folder, or the folder it was pointed at); one
+  pointed into a listed project's folder or one of its worktrees is listed
+  under that project, and with orchestration on, one another session started
+  joins its parent's project, where it nests (#1464).
+
+- Mobile: the Sessions list has a Pinned section, after Needs you and before
+  the projects, holding what the Mac pinned: its sessions, out of their
+  projects as on the sidebar, in the sidebar's own order when it is in its
+  custom order and newest first otherwise, and the workspaces of cloud
+  projects pinned on the Mac, with a cloud mark. A pinned session waiting on
+  you stays in Needs you only, with a pin; under Working and in a search
+  pinned sessions keep their projects and their pin. A long press on a row
+  pins or unpins it on the Mac (a cloud workspace's project, also from the
+  Cloud tab), and the row moves once the Mac has confirmed; a phone that may
+  only watch is told no. Pinned cloud projects are now kept by the app rather
+  than a window's preferences, so the phone reads and changes them too; those
+  pinned before are moved over once (#1403).
+- Bots (experimental): below Full access a bot asks before it fetches a web
+  page (`WebFetch`), at Read and report as it asks before a report: the
+  address can carry what it read off this computer, and the card shows it. A
+  paused bot, and its look around or memory tidy, fetch none. Web searches
+  and a connected server's resources still count as reads, and the access
+  picker now says what each level lets through, the web included (PRO-496).
 - Bots (experimental): a bot's Claude Code sessions run no inline `!` command
   of a skill or custom slash command, which runs as it loads with no tool call
   the access gate could see; the command is replaced by a placeholder and the

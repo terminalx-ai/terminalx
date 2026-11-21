@@ -154,6 +154,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         lead={<><h2 className="text-[15px] font-semibold text-foreground">Duties</h2><DutiesViewSwitch value={view} onChange={choose} /></>}
         onAdd={(_, slot) => setScreen({ kind: "edit", id: null, initial: slot ? dutyAt(slot.day, slot.minute, slot.timezone) : undefined })}
         onOpenDuty={(_, id) => setScreen({ kind: "duty", id })}
+        onOpenSession={onOpenSession}
       />
     );
   }

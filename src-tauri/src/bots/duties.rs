@@ -850,6 +850,8 @@ pub fn orphaned(automation: &Automation) -> bool {
 pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
     let duties: Vec<Automation> = automation_store::list()?.into_iter().filter(|automation| owner_id(automation) == Some(bot_id)).collect();
     let ids: Vec<String> = duties.iter().map(|duty| duty.id.clone()).collect();
+    // The kept logs of its duties deleted before (PRO-499) go with it too.
+    let deleted: Vec<String> = automation_store::list_deleted().unwrap_or_default().into_iter().filter(|kept| owner_id(&kept.automation) == Some(bot_id)).map(|kept| kept.automation.id).collect();
     // Kept in its home, which goes to the trash with it: the definitions, the settings, and each duty's run log.
     // A record whose id names no home (one edited by hand) has nowhere to keep them: they are only removed.
     // A copy that cannot be kept does not keep them: they are removed all the same, and the failure is said.
@@ -857,7 +859,7 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
         let kept = json!({"duties": duties, "settings": read_settings_file().ok().and_then(|file| file.bots.get(bot_id).cloned())});
         crate::store::write_json(&home.join(REMOVED_FILE), &kept)?;
         let logs = crate::store::root()?.join("automations");
-        for id in &ids {
+        for id in ids.iter().chain(&deleted) {
             if logs.join(id).is_dir() {
                 std::fs::create_dir_all(home.join("duty-runs"))?;
                 std::fs::rename(logs.join(id), home.join("duty-runs").join(id))?;
@@ -871,6 +873,16 @@ pub(crate) fn forget_bot(sink: &dyn EventSink, bot_id: &str) -> Result<()> {
             failed.get_or_insert(error);
         }
         remove_check_folders(id);
+    }
+    // A kept log that could not be moved to its home is removed: nothing is left of a deleted bot outside it.
+    if let Ok(logs) = crate::store::root().map(|root| root.join("automations")) {
+        for id in &deleted {
+            if logs.join(id).is_dir() {
+                if let Err(error) = std::fs::remove_dir_all(logs.join(id)) {
+                    failed.get_or_insert(error.into());
+                }
+            }
+        }
     }
     // The messages other bots left it (PRO-472).
     if let Err(error) = super::wakes::forget_bot(bot_id) {
@@ -1214,7 +1226,8 @@ fn answer(manager: &SessionManager, operation: &str, params: &Value) -> Result<V
             let duty = duty()?;
             refuse_unless!(!super::builtins::marked(&duty), "{} is built in: switch it off instead.", duty.name);
             let id = duty.id;
-            automation_store::remove(&id)?;
+            // Its run log stays, with its name, so its past runs are still drawn on the weeks they ran (PRO-499).
+            automation_store::remove_keeping_runs(&id, &Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))?;
             remove_check_folders(&id);
             announce(sink);
             Value::Null

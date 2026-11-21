@@ -1,4 +1,5 @@
-//! A paired phone starting sessions and changing this Mac's settings. Each
+//! A paired phone starting sessions, changing this Mac's settings and pinning
+//! sessions and cloud projects (#1403). Each
 //! case runs in a child of its own: stand-in agent CLIs go first on the
 //! lookup path, which a process fixes once.
 #[cfg(unix)]
@@ -13,7 +14,7 @@ const CASE: &str = "TERMINALX_TEST_PHONE_CREATE_CASE";
 
 #[test]
 fn a_phone_starts_sessions_and_changes_settings_as_the_desktop_does() {
-    for case in ["create", "settings", "refused"] {
+    for case in ["create", "settings", "refused", "pins"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -186,6 +187,48 @@ fn phone_create_child() {
             assert!(call("phone", "setSettings", json!({"nativeCodex":true})).is_err());
             assert_eq!(store::index::load().unwrap().len(), before);
             assert!(!store::settings::load().experimental.native_codex);
+        }
+        "pins" => {
+            // Pinned from the phone as from the sidebar: the windows and other phones hear of it at once.
+            let session: store::index::SessionEntry = serde_json::from_value(json!({
+                "id":"pin-me", "projectPath":repo.path, "cwd":repo.path, "title":"Pin me", "created":"2026-01-01", "modified":"2026-01-01"
+            })).unwrap();
+            store::index::save(&[session]).unwrap();
+            assert_eq!(features()["pin"], 1);
+            let updated = |events: &mut tokio::sync::broadcast::Receiver<sink::Published>| std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|published| &*published.event == "session_updated")
+                .map(|published| serde_json::from_str::<Value>(&published.payload).unwrap())
+                .last();
+            assert_eq!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":true})).unwrap(), json!({"sessionId":"pin-me","pinned":true}));
+            assert!(store::index::get("pin-me").unwrap().pinned);
+            assert_eq!(updated(&mut events).unwrap()["pinned"], true);
+            // A phone that may only watch pins nothing.
+            let read_only = |result: Result<Value>| result.unwrap_err().to_string();
+            assert!(read_only(call("tablet", "pin", json!({"sessionId":"pin-me","pinned":false}))).contains("read-only"));
+            assert!(store::index::get("pin-me").unwrap().pinned);
+            assert!(updated(&mut events).is_none());
+            assert_eq!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":false})).unwrap()["pinned"], false);
+            assert!(!store::index::get("pin-me").unwrap().pinned);
+            // A session that has gone, said in words the phone shows.
+            assert!(call("phone", "pin", json!({"sessionId":"gone","pinned":true})).unwrap_err().to_string().contains("no longer on this Mac"));
+            assert!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":"yes"})).is_err());
+
+            // A cloud project, kept where the sidebar reads it.
+            let pins = call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":true})).unwrap();
+            assert_eq!(pins, json!({"orgs":{"org-1":["github.com/acme/web"]}}));
+            assert_eq!(store::cloud_pins::load().unwrap().orgs["org-1"], ["github.com/acme/web"]);
+            let announced = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == store::cloud_pins::CHANGED).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&announced.payload).unwrap()["orgs"]["org-1"], json!(["github.com/acme/web"]));
+            assert!(read_only(call("tablet", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":false}))).contains("read-only"));
+            assert!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"","pinned":true})).is_err());
+            assert_eq!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":false})).unwrap(), json!({"orgs":{}}));
+
+            // A revoked phone pins nothing.
+            manager.mobile.revoke_device(&owner, "driver").unwrap();
+            assert!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":true})).is_err());
+            assert!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":true})).is_err());
+            assert!(!store::index::get("pin-me").unwrap().pinned);
+            assert!(store::cloud_pins::load().unwrap().orgs.is_empty());
         }
         _ => unreachable!(),
     }
