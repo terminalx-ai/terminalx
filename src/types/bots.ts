@@ -61,6 +61,8 @@ export interface Bot {
   paused?: BotPause;
   /** Who besides the owner may give it work. Absent or empty: the owner alone. */
   whoCanAsk?: BotAsker[];
+  /** The owner turned its memory off: a conversation is given none, and the bot writes none. */
+  memoryOff?: boolean;
   /** A resume asked for from the `terminalx` CLI, waiting for the owner's answer in the app (PRO-468). */
   resumeRequest?: { at: string; by: string };
   created: string;
@@ -90,6 +92,7 @@ export interface BotPatch {
   whoCanAsk?: BotAsker[];
   /** The bot's `modified` as read: a whole-list change is refused when the bot changed since. */
   ifModified?: string;
+  memoryOff?: boolean;
 }
 
 /** What wakes a duty. Data only until a person switches the duty on. */

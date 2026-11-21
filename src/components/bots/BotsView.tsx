@@ -1,17 +1,19 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
-import { Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
+import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { pauseAllBots, pauseBot, reloadBots, resumeAllBots, resumeBot, useBotStore } from "@/lib/bots";
-import { focusTaken, showBotSettings, showHireBot, useBotsPage } from "@/lib/botsPage";
+import { botMemoryApi, hasRoleDraft, keepRoleDraft } from "@/lib/botMemory";
+import { focusTaken, showBotRoleMemory, showBotSettings, showBotsTeam, showHireBot, useBotsPage } from "@/lib/botsPage";
 import { cn } from "@/lib/cn";
 import { openBot } from "@/lib/sessions";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } from "./botLabels";
 import { unreadableText } from "./BotsSidebarSection";
+import { BotRoleMemory } from "./BotRoleMemory";
 import { BotsHeader } from "./BotsHeader";
 import { BotSettingsPage } from "./BotSettingsPage";
 import { FirstBot } from "./FirstBot";
@@ -25,8 +27,16 @@ import { HireBot } from "./HireBot";
 export function BotsView() {
   const page = useBotsPage();
   const store = useBotStore();
+  // Opening the Bots page looks for edits made to the bots' role and memory outside the app (PRO-470), so a bot's own
+  // edit of its files is recorded when it is next seen, not only when its Role and memory page opens.
+  useEffect(() => {
+    Promise.resolve().then(() => botMemoryApi.look()).catch(() => {
+      /* each bot's own page looks again, and says what went wrong */
+    });
+  }, []);
   if (page.page === "hire") return <HireBot initialRoleId={page.roleId} />;
   if (page.page === "settings") return <BotSettingsPage botId={page.botId} />;
+  if (page.page === "roleMemory") return <BotRoleMemoryPage botId={page.botId} />;
   if (store.loaded && !store.error && store.bots.length === 0 && store.unreadable === 0) return <FirstBot />;
   return <BotsTeam focus={page.page === "team" && !!page.focus} />;
 }
@@ -132,6 +142,38 @@ function BotsTeam({ focus }: { focus: boolean }) {
   );
 }
 
+/** One bot's Role and memory, reached from its row in the team (PRO-470). */
+function BotRoleMemoryPage({ botId }: { botId: string }) {
+  const store = useBotStore();
+  const bot = store.bots.find((value) => value.id === botId) ?? null;
+  // Unsaved standing instructions are asked about before leaving; elsewhere the edit is kept for when the page opens again.
+  const [leaving, setLeaving] = useState(false);
+  const back = () => (hasRoleDraft(botId) ? setLeaving(true) : showBotsTeam(true));
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="bot-role-memory-page">
+      <BotsHeader title={bot ? `${bot.name} · Role and memory` : "Role and memory"} note={bot?.roleTitle}>
+        <Button variant="outline" size="sm" onClick={back} data-testid="bot-role-memory-back">
+          <ArrowLeft /> Team
+        </Button>
+      </BotsHeader>
+      {leaving && (
+        <div role="alertdialog" aria-label="Unsaved changes" className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning" data-testid="bot-role-leave">
+          <span className="min-w-0 flex-1">The standing instructions have changes that are not saved.</span>
+          <Button variant="outline" size="sm" autoFocus onClick={() => setLeaving(false)} data-testid="bot-role-leave-stay">Keep editing</Button>
+          <Button variant="ghost" size="sm" onClick={() => { keepRoleDraft(botId, null); showBotsTeam(true); }} data-testid="bot-role-leave-discard">Leave and discard them</Button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+        {bot ? <BotRoleMemory bot={bot} bots={store.bots} unreadable={store.unreadable} /> : (
+          <p className="px-6 py-6 text-[12.5px] text-faint" role={store.loaded ? "alert" : "status"}>
+            {!store.loaded ? "Reading the bots…" : store.error ? `Couldn't read the bots: ${store.error}` : "This bot is no longer on the team."}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StatCard({ label, value, note, accent = false }: { label: string; value: string; note: string; accent?: boolean }) {
   return (
     <div className="min-w-0 rounded-lg border border-hairline bg-card px-4 py-3" data-testid="bots-stat">
@@ -220,7 +262,12 @@ function TeamRow({ bot, bots, unreadable, onError }: { bot: Bot; bots: Bot[]; un
       </td>
       <td className="px-2 py-2.5 font-mono text-faint">—</td>
       <td className="px-2 py-2.5 text-faint">—</td>
-      <td className="px-2 py-2.5 text-right whitespace-nowrap">
+      <td className="whitespace-nowrap px-2 py-2.5 text-right">
+        <WithTooltip label={`${bot.name}'s role and memory`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s role and memory`} onClick={() => showBotRoleMemory(bot.id)} data-testid="bot-role-memory-open">
+            <BookUser />
+          </Button>
+        </WithTooltip>
         <WithTooltip label={`${bot.name}'s settings`}>
           <Button variant="ghost" size="icon-xs" aria-label={`${bot.name}'s settings`} onClick={() => showBotSettings(bot.id)} data-testid="bot-settings-open">
             <Settings2 />

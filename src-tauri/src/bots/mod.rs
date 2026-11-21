@@ -8,6 +8,8 @@
 //! every operation here refuses, and nothing about the app changes.
 
 pub mod access;
+pub mod changes;
+pub mod memory;
 pub mod chat;
 pub mod enforce;
 pub mod templates;
@@ -31,7 +33,6 @@ pub const RESERVED_SLUGS: [&str; 4] = [OWNER, PERSONAL, "all", "everyone"];
 const DEFAULT_HARNESS: &str = "claude";
 const MAX_NAME_CHARS: usize = 80;
 const MAX_SLUG_CHARS: usize = 40;
-const MAX_ROLE_BYTES: usize = 256 * 1024;
 
 /// Why an operation refused. Anything else that fails is the app's problem,
 /// not something the caller can fix by asking differently.
@@ -245,6 +246,10 @@ pub struct Bot {
     /// Who besides the owner may give it work. Empty: the owner alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub who_can_ask: Vec<BotAsker>,
+    /// The owner turned its memory off (PRO-470): a conversation is given
+    /// none, and the bot cannot write any.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_off: bool,
     pub created: String,
     pub modified: String,
     #[serde(flatten, default)]
@@ -307,6 +312,8 @@ pub struct BotPatch {
     /// since, so it never puts back what someone else just removed.
     #[serde(default)]
     pub if_modified: Option<String>,
+    #[serde(default)]
+    pub memory_off: Option<bool>,
 }
 
 /// A field that is present, even as `null`, is `Some`: absent is "leave it".
@@ -530,6 +537,7 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
             works_in: personal(),
             paused: None,
             who_can_ask: Vec::new(),
+            memory_off: false,
             created: now.clone(),
             modified: now,
             unknown: BTreeMap::new(),
@@ -539,6 +547,9 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
     });
     if saved.is_err() {
         bot_store::discard_home(&home);
+    } else if let Err(error) = changes::seed(&id) {
+        // The first look compares with the same files, so nothing is lost.
+        log::warn!("bot {id}'s history was not started at hire: {error:#}");
     }
     saved
 }
@@ -552,7 +563,7 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
 pub const BY_PERSON: &str = "byPerson";
 
 /// What an update [`PERSON_REQUIRED`] for names: what [`gives_more`] finds.
-pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, a new name, or another place to run) needs you to confirm it in the TerminalX window.";
+pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, a new name, another place to run, or its memory back on) needs you to confirm it in the TerminalX window.";
 
 /// How much an entry of Who can ask may do; a value this build does not know is the most.
 fn may_rank(may: &str) -> u8 {
@@ -567,8 +578,8 @@ fn may_rank(may: &str) -> u8 {
 /// Whether `patch` gives `bot` more than it has, so only a person may make
 /// it (PRO-468, PRO-478): more access, another reporting line, a place it
 /// does not work in yet, an entry of Who can ask that is new, changed or may
-/// do more, another agent, model or effort, another name, or another place to
-/// run. Taking any of them away
+/// do more, another agent, model or effort, another name, another place to
+/// run, or its memory turned back on (PRO-470). Taking any of them away
 /// gives nothing, and needs no one.
 pub fn gives_more(bot: &Bot, patch: &BotPatch) -> bool {
     let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
@@ -585,7 +596,8 @@ pub fn gives_more(bot: &Bot, patch: &BotPatch) -> bool {
         || patch.model.as_ref().is_some_and(|model| *model != bot.model)
         || patch.effort.as_ref().is_some_and(|effort| *effort != bot.effort);
     let renamed = patch.name.as_ref().is_some_and(|name| clean_name(name).map_or(true, |name| name != bot.name));
-    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed || elsewhere
+    let memory_on = patch.memory_off == Some(false) && bot.memory_off;
+    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed || elsewhere || memory_on
 }
 
 /// How much an access level lets a bot do; a level this build does not know is the least.
@@ -666,6 +678,9 @@ pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: boo
         }
         if let Some(askers) = &patch.who_can_ask {
             bot.who_can_ask = clean_askers(askers, &bots[index], bots)?;
+        }
+        if let Some(off) = patch.memory_off {
+            bot.memory_off = off;
         }
         if bot != bots[index] {
             bot.modified = crate::store::index::now();
@@ -748,7 +763,11 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         }
         Ok(removed)
     })?;
-    bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
+    let trashed = bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
+    // Its history goes with its home, so a home put back finds it beside it.
+    if let Some(trashed) = trashed {
+        changes::trash(&removed.id, &trashed).with_context(|| format!("{} is deleted, but its history could not be moved to the trash and is still in bot-changes/", removed.name))?;
+    }
     Ok(())
 }
 
@@ -844,13 +863,19 @@ pub fn role_read(id: &str) -> Result<String> {
     bot_store::read_role(&bot.id)
 }
 
-/// Replace a bot's standing instructions.
-pub fn role_write(sink: &dyn EventSink, id: &str, text: &str) -> Result<Bot> {
+/// Replace a bot's standing instructions, by the owner in the app. The
+/// change is recorded in the bot's history (PRO-470) and can be undone.
+/// `expected` is the hash of the text the editor started from: a role
+/// changed since is not written over. A role is at most [`memory::ROLE_LIMIT`],
+/// what a launch reads of it (`chat::ROLE_READ_LIMIT`).
+pub fn role_write(sink: &dyn EventSink, id: &str, text: &str, expected: Option<&str>) -> Result<Bot> {
     require_enabled()?;
-    refuse_unless!(text.len() <= MAX_ROLE_BYTES, "A role is at most {} KB.", MAX_ROLE_BYTES / 1024);
+    let bot = get(id)?;
+    if memory::write_role(sink, &bot, text, OWNER, changes::Source::of("app"), "role", expected)?.is_empty() {
+        return Ok(bot);
+    }
     change(sink, |bots| {
         let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
-        bot_store::write_role(&bot.id, text)?;
         bot.modified = crate::store::index::now();
         Ok(bot.clone())
     })
@@ -864,6 +889,9 @@ pub fn home(bot: &Bot) -> Option<std::path::PathBuf> {
 /// The app's commands, as the runtime that owns the store answers them
 /// (`runtime.session.bots`). A change made in the app is by the owner.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Value> {
+    if let Some(answer) = memory::call(sink, operation, params) {
+        return answer;
+    }
     if let Some(answer) = chat::call(sink, operation, params) {
         return answer;
     }
@@ -892,7 +920,7 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "dismissResume" => serde_json::to_value(dismiss_resume(sink, string("id")?)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
         "spentToday" => json!({"usd": spent_today(string("id")?)?, "day": crate::stats::today()}),
-        "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
+        "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?, params["expected"].as_str())?)?,
         other => return Err(refused(format!("Unknown bots operation {other}"))),
     })
 }

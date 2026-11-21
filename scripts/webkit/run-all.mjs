@@ -39,7 +39,8 @@ const checks = [
   "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run", "confirm-dialogs",
   "attachment-preview", "session-start", "composer-controls", "session-menu", "chat-scrollbar", "settings-stats",
   "automation-sources",
-  "bots-screens", "bot-chat", "bot-settings",
+  "bots-screens", "bot-role-memory",
+  "bot-chat", "bot-settings",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

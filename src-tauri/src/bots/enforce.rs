@@ -228,14 +228,28 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
         "pauseAll" | "resumeAll" => reconcile(manager, None),
         _ => {}
     }
-    // Its agents start again only when what they are told changed: its access, a resume, its role.
+    // Its agents start again only when what they are told changed: its access, a resume, its role
+    // (written, put back, or a change to it undone, PRO-470).
     match operation {
-        "resume" | "roleWrite" => refresh(manager, params["id"].as_str()),
+        "resume" | "roleWrite" | "roleRestore" => refresh(manager, params["id"].as_str()),
+        "memoryUndo" if params["id"].as_str().zip(answer["id"].as_str()).is_some_and(|(bot, change)| undid_role(bot, change)) => refresh(manager, params["id"].as_str()),
         "update" if access_before != after_access(params) => refresh(manager, params["id"].as_str()),
         "resumeAll" => refresh(manager, None),
         _ => {}
     }
     Ok(answer)
+}
+
+/// Whether undo `change` of `bot` changed its role.
+fn undid_role(bot: &str, change: &str) -> bool {
+    match super::changes::read_log(bot) {
+        Ok(log) => log.changes.iter().any(|recorded| recorded.id == change && recorded.states.contains_key(crate::store::bots::ROLE_FILE)),
+        Err(error) => {
+            log::warn!("read bot {bot}'s history after an undo: {error:#}");
+            // Unknown: start its agents again, as a role change would.
+            true
+        }
+    }
 }
 
 /// The access an update sets, when it sets one.
@@ -245,13 +259,18 @@ fn after_access(params: &serde_json::Value) -> Option<super::BotAccess> {
 
 /// Whether a bots operation of the runtime gives a bot more than it has, so
 /// only a person may send it (PRO-468): a resume, saying no to one asked for,
-/// a hire, a delete, and an update that gives more (`bots::gives_more`:
-/// more access, another reporting line, a new place to work, a new or wider
-/// entry in Who can ask, another agent or model, a rename). A pause, taking
-/// any of those away, and every read need no one.
+/// a hire, a delete, an update that gives more (`bots::gives_more`: more
+/// access, another reporting line, a new place to work, a new, wider or
+/// changed entry in Who can ask, another agent or model, a rename, another
+/// place to run, memory turned back on), and the owner's writes to its role
+/// and memory (PRO-470: what a bot is told comes from a person). A pause,
+/// taking any of those away, and every read need no one. `memoryView` and
+/// `memoryLook` record edits found outside the app, so they are not reads
+/// either, but they give nothing.
 pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
     match operation {
         "resume" | "resumeAll" | "dismissResume" | "create" | "delete" => true,
+        "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
         "update" => {
             // A patch this build cannot read may give more than it can tell.
             let Ok(patch) = serde_json::from_value::<super::BotPatch>(params["patch"].clone()) else { return true };

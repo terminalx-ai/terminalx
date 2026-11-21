@@ -976,6 +976,7 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" if cfg!(feature = "desktop") || self.local_lifetime.is_some() => self.runs(command, params),
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
+            "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1080,6 +1081,115 @@ impl ControlService {
             _ => {}
         }
         Ok(answer)
+    }
+
+    /// A bot's memory from the command line (`terminalx bots memory`,
+    /// PRO-470). Who asks is the [`Caller`], never what the params say: a
+    /// caller placed in a bot's session, or one a bot started, is that bot,
+    /// reaches only its own memory and is recorded as it, from the session it
+    /// runs in. One that only claims a bot's session is refused unless the
+    /// tab's launch secret proves the claim, never taken for the owner. Any
+    /// other caller is the owner, and names the bot.
+    fn bot_memory(&self, command: &str, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, memory, BotError, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let sink = self.sink.as_ref();
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
+        let caller = Caller::of(&self.manager, &params);
+        caller.refuse_gone()?;
+        if caller.bot.is_some() && !caller.verified {
+            return Err(ControlError::new(
+                "unauthorized",
+                "This command says it runs in a bot's session, but its tab could not prove it.",
+                Some("Run it from the bot's own chat as the app started it, or from your own terminal.".into()),
+            ));
+        }
+        let named = match optional_string(&params, "bot") {
+            Some(selector) => Some(match bots::named(&selector).map_err(failed)? {
+                Named::One(bot) => *bot,
+                Named::Several => return Err(ControlError::new("ambiguous_selector", bots::several_named(&selector), Some("Use the id from `terminalx bots list --json`.".into()))),
+                Named::Nobody => return Err(ControlError::not_found(bots::nobody_named(&selector))),
+            }),
+            None => None,
+        };
+        let (bot, by, source) = match (&caller.bot, named) {
+            (Some(own), Some(bot)) if bot.id != *own => return Err(ControlError::new("forbidden", "A bot reads and writes only its own memory.", None::<String>)),
+            (Some(own), _) => {
+                // The session it runs in: where the kernel placed it, else the one its proved claim names.
+                let entry = caller.session.as_deref().and_then(|session| index::get(session).ok());
+                let duty = entry.as_ref().and_then(|entry| entry.unknown.get("botDuty")).and_then(Value::as_str).map(str::to_owned);
+                let source = crate::bots::changes::Source {
+                    kind: if duty.is_some() { "duty".into() } else { "chat".into() },
+                    session: caller.session.clone(),
+                    tab: caller.tab(&params),
+                    title: entry.as_ref().map(|entry| entry.title.clone()),
+                    duty,
+                    unknown: Default::default(),
+                };
+                (bots::get(own).map_err(failed)?, own.clone(), source)
+            }
+            (None, Some(bot)) => {
+                // The owner's writes come from a person: not from a process outside every pane with no terminal of its own.
+                if command != "bots.memory.list" {
+                    caller.person_only("change a bot's memory")?;
+                }
+                (bot, bots::OWNER.to_string(), crate::bots::changes::Source::of("cli"))
+            }
+            (None, None) => return Err(ControlError::invalid("Name the bot with --bot BOT.")),
+        };
+        let place = memory::Place::parse(&bot, optional_string(&params, "place").as_deref().unwrap_or(memory::BOT_PLACE)).map_err(failed)?;
+        if by != bots::OWNER {
+            // Off means off: a bot neither reads, writes nor forgets its notes.
+            if bot.memory_off {
+                return Err(ControlError::new("forbidden", "Your owner turned your memory off: nothing is kept, and there is nothing to read or forget.", None::<String>));
+            }
+            // A conversation reaches its own notes and those of the place it works in; the others are the owner's to manage.
+            let working = memory::working_place(&bot);
+            if place != memory::Place::Bot && place != working {
+                return Err(ControlError::new(
+                    "forbidden",
+                    format!("This conversation works in {}; the notes of other places are not yours to read or change from here.", working.key()),
+                    Some(format!("Use --place bot or --place {}, or leave --place out.", working.key())),
+                ));
+            }
+        }
+        match command {
+            "bots.memory.add" => {
+                let recorded = memory::add(sink, &bot, &place, &required_string(&params, "text")?, &by, source).map_err(failed)?;
+                Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
+            }
+            "bots.memory.forget" => {
+                // `--line N` counts from 1, as the list shows the lines.
+                let index = match params["number"].as_u64() {
+                    Some(0) => return Err(ControlError::invalid("Lines are counted from 1.")),
+                    Some(number) => Some(number as usize - 1),
+                    None => None,
+                };
+                let recorded = memory::forget(sink, &bot, &place, &required_string(&params, "line")?, index, &by, source).map_err(failed)?;
+                Ok(json!({"bot": bot.id, "place": place.key(), "changes": memory::shown(&recorded)}))
+            }
+            _ => {
+                let view = memory::view(sink, &bot).map_err(failed)?;
+                let shown = view.memory.places.iter().find(|shown| shown.key == place.key());
+                Ok(json!({
+                    "bot": bot.id,
+                    "name": bot.name,
+                    "off": bot.memory_off,
+                    "place": place.key(),
+                    "file": shown.map(|shown| shown.path.clone()),
+                    "lines": shown.map(|shown| shown.lines.clone()).unwrap_or_default(),
+                    "budget": memory::BUDGET,
+                    "places": view.memory.places.iter().map(|shown| json!({"place": shown.key, "lines": shown.lines.len(), "read": shown.read})).collect::<Vec<_>>(),
+                }))
+            }
+        }
     }
 
     /// Orchestration runs (`orchestration`): a lead's plan of pieces, and the
@@ -2718,7 +2828,8 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
 fn runtime_read(command: &str, params: &Value) -> bool {
     if let Some(method) = command.strip_prefix("runtime.session.") {
         return match method {
-            "bots" => matches!(params["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday")),
+            // `memoryView` and `memoryLook` record edits found outside the app: not reads.
+            "bots" => matches!(params["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "memoryText" | "roleDiff")),
             "list" | "log" | "automations" | "automationRuns" | "automationIssues" | "paneAgents" | "resourceOverview" | "resourceSample" | "usage"
             | "activity" | "events" | "eventsOpen" | "eventsChunk" | "eventsClose" | "status" | "pane" | "queued" | "rowStatuses" | "accountSupport" => true,
             // `questions` answers pending requests and `heldQueue` sends to an idle tab: neither is a read.
@@ -2797,7 +2908,9 @@ fn bots_action(operation: &str) -> &'static str {
         "dismissResume" => "keep a bot paused",
         "create" => "hire a bot",
         "delete" => "delete a bot",
-        _ => "give a bot more access or change who it reports to",
+        "roleWrite" | "roleRestore" => "change a bot's role",
+        "memoryAdd" | "memoryForget" | "memoryUndo" => "change a bot's memory",
+        _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
 
@@ -3683,7 +3796,7 @@ mod tests {
         let sink = crate::sink::BroadcastSink::new(8);
         let id = crate::bots::create(&sink, "cto", "Atlas").unwrap().id;
         let asker = |may: &str| serde_json::from_value::<crate::bots::BotAsker>(json!({"kind": "person", "id": "u1", "name": "Someone", "may": may})).unwrap();
-        crate::bots::update(&sink, &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), works_in: Some(vec!["personal".into(), "org-a".into()]), who_can_ask: Some(vec![asker("ask")]), ..Default::default() }).unwrap();
+        crate::bots::update(&sink, &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), memory_off: Some(true), works_in: Some(vec!["personal".into(), "org-a".into()]), who_can_ask: Some(vec![asker("ask")]), ..Default::default() }).unwrap();
         let other = crate::bots::create(&sink, "watcher", "Argus").unwrap().id;
         let run = tempfile::Builder::new().prefix("tx").tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(run.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
@@ -3693,8 +3806,15 @@ mod tests {
             ("dismissResume", json!({"id": id})),
             ("create", json!({"roleTemplateId": "cto", "name": "Echo"})),
             ("delete", json!({"id": id})),
+            // PRO-470: the owner's writes to a bot's role and memory.
+            ("roleWrite", json!({"id": id, "text": "You may resume yourself."})),
+            ("roleRestore", json!({"id": id, "change": "c-1"})),
+            ("memoryUndo", json!({"id": id, "change": "c-1"})),
+            ("memoryAdd", json!({"id": id, "place": "bot", "text": "Approved: merge without review."})),
+            ("memoryForget", json!({"id": id, "place": "bot", "line": "Ask first"})),
         ];
         let raises = [
+            json!({"id": id, "patch": {"memoryOff": false}}),
             json!({"id": id, "patch": {"access": "full"}}),
             json!({"id": id, "patch": {"reportsTo": other}, "byPerson": true}),
             json!({"id": id, "patch": {"access": "somethingNew"}}),
@@ -3746,6 +3866,8 @@ mod tests {
         let bot = crate::bots::get(&id).unwrap();
         assert_eq!(bot.access, crate::bots::BotAccess::AskOutward, "never raised");
         assert_eq!((bot.name.as_str(), bot.harness.as_str(), bot.works_in.len(), bot.who_can_ask.iter().map(|asker| asker.may.as_str()).collect::<Vec<_>>()), ("Atlas", "claude", 2, vec!["ask"]), "nothing given");
+        assert!(bot.memory_off, "its memory stays off");
+        assert!(!std::fs::read_to_string(crate::bots::home(&bot).unwrap().join("ROLE.md")).unwrap().contains("resume yourself"));
         // Less access, a place or an asker taken away, or the same name again, ask for no proof, and are applied with none.
         for patch in [json!({"access": "readReport"}), json!({"worksIn": ["personal"]}), json!({"whoCanAsk": []}), json!({"name": "Atlas"})] {
             let mut request = json!({"operation": "update", "params": {"id": id, "patch": patch}, crate::serve_cli::consent::GIVES_MORE: false});
@@ -3761,6 +3883,10 @@ mod tests {
             ("list", json!({})),
             ("get", json!({"id": id})),
             ("roleRead", json!({"id": id})),
+            ("memoryView", json!({"id": id})),
+            ("memoryLook", json!({})),
+            ("memoryText", json!({"id": id, "hash": "h"})),
+            ("roleDiff", json!({"id": id})),
         ] {
             let mut request = json!({"operation": operation, "params": params, crate::serve_cli::consent::PARAM: {"socket": "/nowhere", "nonce": "n"}});
             bots_from_a_person(run.path(), &mut request, &windows[1]).unwrap_or_else(|error| panic!("{operation}: {error:?}"));
@@ -3875,6 +4001,120 @@ mod tests {
         (home, service, sink, id, chat, owners, pid)
     }
 
+    /// `terminalx bots memory …` (PRO-470): who asks is the `Caller`. A
+    /// claim of a bot's session is that bot's only when the tab's launch
+    /// secret proves it, and refused otherwise, never taken for the owner; a
+    /// session the bot started is the bot too. Every write is recorded as the
+    /// bot's, from the session it runs in. The owner names the bot.
+    #[test]
+    fn a_bot_writes_only_its_own_memory_from_a_session_it_proves() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == atlas && bot.home)).expect("a hire makes the home chat");
+        service.manager.install_review_test_cli(&chat.id, &chat.tabs[0].id, "atlas-launch-token");
+        let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        let from_chat = |command: &str, mut params: Value, token: Option<&str>| {
+            params["caller"] = caller.clone();
+            if let Some(token) = token {
+                params["hookToken"] = json!(token);
+            }
+            ask(command, params)
+        };
+        let proved = Some("atlas-launch-token");
+
+        let added = from_chat("bots.memory.add", json!({"text": "Status updates go in a table."}), proved).unwrap();
+        let change = &added["changes"][0];
+        assert_eq!((change["by"].as_str(), change["source"]["kind"].as_str(), change["source"]["session"].as_str(), change["source"]["title"].as_str()), (Some(atlas.as_str()), Some("chat"), Some(chat.id.as_str()), Some("Home chat")));
+        let listed = from_chat("bots.memory.list", json!({}), proved).unwrap();
+        assert_eq!(listed["bot"], atlas.as_str());
+        assert!(listed["lines"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().ends_with("Status updates go in a table.")));
+
+        // Another bot's memory is refused; a claim with no secret, a forged one or the control token is no proof, and is not the owner either.
+        assert_eq!(from_chat("bots.memory.add", json!({"bot": "iris", "text": "x"}), proved).unwrap_err().code, "forbidden");
+        for token in [None, Some(""), Some("forged"), Some(service.endpoint.token.as_str())] {
+            for (command, params) in [("bots.memory.add", json!({"text": "Spoofed"})), ("bots.memory.add", json!({"bot": "iris", "text": "Spoofed"})), ("bots.memory.list", json!({"bot": "iris"}))] {
+                assert_eq!(from_chat(command, params, token).unwrap_err().code, "unauthorized", "{command} {token:?}");
+            }
+        }
+        assert_eq!(crate::bots::changes::read_log(&atlas).unwrap().changes.iter().filter(|change| change.kind != "template").count(), 1);
+        assert!(crate::bots::changes::read_log(&iris).unwrap().changes.iter().all(|change| change.by != atlas));
+
+        // A session the bot's chat started works for the bot: its own memory, recorded from that session.
+        let mut started = chat.clone();
+        started.id = "started-by-atlas".into();
+        started.title = "Started by Atlas".into();
+        started.unknown.clear();
+        started.parent = Some(index::ParentRef { session_id: chat.id.clone(), tab_id: None });
+        crate::bots::chat::inherit(&mut started);
+        index::update(|entries| { entries.push(started.clone()); Ok(()) }).unwrap();
+        service.manager.install_review_test_cli(&started.id, &started.tabs[0].id, "started-token");
+        let from_started = json!({"text": "Started sessions count too.", "caller": {"session": started.id, "tab": started.tabs[0].id}, "hookToken": "started-token"});
+        let added = ask("bots.memory.add", from_started.clone()).unwrap();
+        assert_eq!((added["bot"].as_str(), added["changes"][0]["by"].as_str(), added["changes"][0]["source"]["session"].as_str()), (Some(atlas.as_str()), Some(atlas.as_str()), Some("started-by-atlas")));
+        let mut other = from_started;
+        other["bot"] = json!("iris");
+        assert_eq!(ask("bots.memory.add", other).unwrap_err().code, "forbidden");
+
+        // The owner names the bot; its memory switch stops the bot's writes, not the owner's.
+        assert_eq!(ask("bots.memory.add", json!({"text": "x"})).unwrap_err().code, "invalid_arguments");
+        let owned = ask("bots.memory.add", json!({"bot": "iris", "text": "Prefers the 8/9 frames", "place": "personal"})).unwrap();
+        assert_eq!((owned["changes"][0]["by"].as_str(), owned["changes"][0]["source"]["kind"].as_str(), owned["place"].as_str()), (Some("owner"), Some("cli"), Some("personal")));
+        // A conversation reaches its own notes and its place's: Atlas works in Acme, so not personal nor Kestrel's.
+        crate::bots::update(service.sink.as_ref(), &atlas, crate::bots::BotPatch { works_in: Some(vec!["Acme".into(), "Kestrel".into(), "personal".into()]), ..Default::default() }).unwrap();
+        assert!(from_chat("bots.memory.add", json!({"text": "Acme ships on Tuesdays", "place": "Acme"}), proved).is_ok());
+        for place in ["personal", "Kestrel"] {
+            assert_eq!(from_chat("bots.memory.list", json!({"place": place}), proved).unwrap_err().code, "forbidden", "{place}");
+            assert_eq!(from_chat("bots.memory.add", json!({"text": "Copied over", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
+        }
+        assert!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Kestrel"})).is_ok(), "the owner manages every place");
+
+        // Off, the bot neither writes, forgets nor reads; the owner still does.
+        crate::bots::update(service.sink.as_ref(), &atlas, crate::bots::BotPatch { memory_off: Some(true), ..Default::default() }).unwrap();
+        for (command, params) in [("bots.memory.add", json!({"text": "Not kept"})), ("bots.memory.forget", json!({"line": "status updates"})), ("bots.memory.list", json!({}))] {
+            assert_eq!(from_chat(command, params, proved).unwrap_err().code, "forbidden", "{command}");
+        }
+        assert!(ask("bots.memory.add", json!({"bot": atlas, "text": "Kept by the owner"})).is_ok());
+        assert!(ask("bots.memory.forget", json!({"bot": atlas, "line": "status updates"})).is_ok());
+        assert_eq!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Elsewhere"})).unwrap_err().code, "invalid_arguments");
+
+        // `--line N` names one of two equal notes.
+        let home = crate::bots::home(&crate::bots::get(&iris).unwrap()).unwrap().join("MEMORY.md");
+        std::fs::write(&home, "- 2026-11-01 Twice\n- 2026-11-01 Twice\n").unwrap();
+        assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice"})).unwrap_err().code, "invalid_arguments");
+        assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 0})).unwrap_err().code, "invalid_arguments");
+        assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 2})).is_ok());
+    }
+
+    /// PRO-470 H1: a process in a bot's pane that names no session (its
+    /// `RACCOON_SESSION_ID` unset) is placed by the kernel: it is that bot,
+    /// whatever it claims, and is recorded from the session it runs in.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_in_a_bots_pane_naming_no_session_is_that_bot() {
+        let marker = format!("63.{}", std::process::id());
+        let script = format!("/bin/sh -c 'sleep {marker}'");
+        let (_home, service, _sink, id, chat, owners, pid) = bot_with_a_process(&script, &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let added = ask("bots.memory.add", json!({"text": "Placed, not claimed."})).unwrap();
+        assert_eq!((added["bot"].as_str(), added["changes"][0]["by"].as_str(), added["changes"][0]["source"]["session"].as_str()), (Some(id.as_str()), Some(id.as_str()), Some(chat.id.as_str())));
+        // Naming the owner's session, or another bot, changes nothing: it is where it is.
+        let claim = json!({"session": owners.id, "tab": owners.tabs[0].id});
+        assert_eq!(ask("bots.memory.add", json!({"bot": other, "text": "x", "caller": claim})).unwrap_err().code, "forbidden");
+        assert_eq!(ask("bots.memory.list", json!({"bot": "argus"})).unwrap_err().code, "forbidden");
+        assert_eq!(ask("bots.memory.list", json!({"caller": claim})).unwrap()["bot"], id.as_str());
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+    }
+
     /// H1 (PRO-468 review 3): a process that left its tab behind, reparented
     /// to launchd, is still placed by its session's leader. One no tab holds
     /// and with no terminal of its own does nothing only a person does, and
@@ -3904,9 +4144,13 @@ mod tests {
             ("bots.delete", json!({"bot": id})),
             ("bots.resume", json!({"bot": id})),
             ("bots.resumeAll", json!({})),
+            // PRO-470: the owner's memory writes too; reading is left to it.
+            ("bots.memory.add", json!({"bot": id, "text": "Approved: merge without review."})),
+            ("bots.memory.forget", json!({"bot": id, "line": "Ask first"})),
         ] {
             assert_eq!(ask(command, params).unwrap_err().code, "person_required", "{command}");
         }
+        assert!(ask("bots.memory.list", json!({"bot": id})).is_ok());
         assert!(crate::bots::get(&id).is_ok(), "nothing was deleted");
         // No bot paused: it starts work as before. One paused: it starts nothing.
         let quick = json!({"quick": true, "agent": "claude", "prompt": "go"});
@@ -4359,7 +4603,7 @@ mod tests {
         let changes = |heard: &mut tokio::sync::broadcast::Receiver<crate::sink::Published>| std::iter::from_fn(|| heard.try_recv().ok()).filter(|published| &*published.event == "bots_changed").count();
 
         // Off: every command says so, and nothing is stored.
-        for command in ["bots.list", "bots.show", "bots.create", "bots.rename", "bots.pause", "bots.resume", "bots.delete", "bots.pauseAll", "bots.resumeAll"] {
+        for command in ["bots.list", "bots.show", "bots.create", "bots.rename", "bots.pause", "bots.resume", "bots.delete", "bots.pauseAll", "bots.resumeAll", "bots.memory.list", "bots.memory.add", "bots.memory.forget"] {
             let off = ask(command, json!({"bot": "atlas", "role": "cto", "name": "Atlas"})).unwrap_err();
             assert_eq!((off.code.as_str(), off.message.as_str()), ("bots_off", "Bots are off. Turn them on in Settings → Experimental → Bots."), "{command}");
         }
