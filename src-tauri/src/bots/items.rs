@@ -1060,6 +1060,12 @@ pub fn runtime_call(manager: &crate::session::SessionManager, operation: &str, p
     Some(owner_call(manager, operation, params))
 }
 
+/// The owner's answer as it reaches the bot's home chat: the item's number and the owner's words, nothing the bot wrote
+/// besides the answer the owner chose.
+pub(crate) fn owner_answer_message(number: u64, words: &str) -> String {
+    format!("My answer to your question on item #{number}:\n\n{}", words.trim())
+}
+
 fn owner_call(manager: &crate::session::SessionManager, operation: &str, params: &Value) -> Result<Value> {
     if operation == "needsYou" {
         return needs_you(manager);
@@ -1078,15 +1084,17 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
                 (None, Some(text)) => Answer::Typed(text.into()),
                 (None, None) => return Err(refused("Choose an answer, or write one.")),
             };
-            let (item, words, question) = answer(sink, &bot, number, &chosen, params["asked"].as_str())?;
-            let message = format!("About item #{number} {}: you asked {}. My answer: {}", quoted(&item.title), quoted(&question), quoted(&words));
+            let (item, words, _question) = answer(sink, &bot, number, &chosen, params["asked"].as_str())?;
+            // Sent as the owner's message: only the owner's own words and the item's number. The bot's title and
+            // question are its own text and are left out, so they cannot speak for the owner here.
+            let message = owner_answer_message(number, &words);
             json!({"item": full(&item, &sessions()), "delivery": delivered(to_home_chat(manager, &bot.id, message))})
         }
         "itemComment" => {
             let number = number(params, "number")?;
             let note = params["text"].as_str().unwrap_or_default();
             let item = comment(sink, &bot, &By::Owner, number, note)?;
-            let message = format!("About item #{number} {}: {}", quoted(&item.title), note.trim());
+            let message = format!("About item #{number}: {}", note.trim());
             json!({"item": full(&item, &sessions()), "delivery": delivered(to_home_chat(manager, &bot.id, message))})
         }
         "itemGive" => {

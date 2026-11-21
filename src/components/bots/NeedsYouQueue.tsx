@@ -1,6 +1,6 @@
 import type { Bot } from "@/types/bots";
 import type { NeedsYou } from "@/types/botItems";
-import { NeedsYouRow } from "./NeedsYou";
+import { NeedsYouRow, UndeliveredNotes } from "./NeedsYou";
 
 /** The Needs you card's note on the Bots page: how long the oldest has waited. */
 export function needsYouNote(needs: NeedsYou | null, now = Date.now()): string {
@@ -27,6 +27,7 @@ export function NeedsYouQueue({ bots, needs }: { bots: Bot[]; needs: NeedsYou | 
         </h2>
         {entries.length > 0 && <p className="text-[12px] text-faint">Answer here, or open the item to read it first.</p>}
       </div>
+      <div className="mb-2 empty:hidden"><UndeliveredNotes bots={bots} botId={null} /></div>
       {entries.length === 0 ? (
         <p className="rounded-lg border border-dashed border-hairline-strong px-4 py-3 text-[12.5px] text-faint">
           Nothing needs you. A bot's questions and approvals wait here.

@@ -13,7 +13,7 @@ import { effectiveAccess, type Bot } from "@/types/bots";
 import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
 import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
-import { deliveryNote, ItemQuestionCard } from "./NeedsYou";
+import { ItemQuestionCard, UndeliveredNotes } from "./NeedsYou";
 
 const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
 
@@ -57,7 +57,6 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   if (!item) {
     return (
@@ -124,7 +123,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
 
           {item.summary && <p className="text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground" data-testid="bot-item-summary">{item.summary}</p>}
           {error && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{error}</p>}
-          {note && <p role="status" className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">{note}</p>}
+          <UndeliveredNotes bots={[bot]} botId={bot.id} />
 
           {item.question && (
             <section aria-label="Needs you" className="overflow-hidden rounded-lg border border-accent/40 bg-card">
@@ -163,7 +162,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
             </ol>
           </section>
 
-          <CommentBox bot={bot} item={item} onNote={setNote} />
+          <CommentBox bot={bot} item={item} />
         </main>
 
         <aside className="flex w-full min-w-0 flex-col gap-6 sm:w-[280px] sm:shrink-0" aria-label="About this item" data-testid="bot-item-aside">
@@ -271,6 +270,8 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
   const owners = entry.by === "owner";
   // A bot's notes are its own words: shown as such, never as an instruction or an approval.
   const words = entry.kind === "comment" || entry.kind === "answered" || entry.kind === "asked" || entry.kind === "done" || entry.kind === "added";
+  // An answer is the owner's; the question it answers, kept as its detail, is the bot's own text.
+  const detailLabel = entry.kind === "answered" ? `${bot.name}'s question` : owners ? "your words" : `${bot.name}'s words · not an approval`;
   return (
     <li className="flex min-w-0 gap-3 border-b border-hairline py-2 last:border-b-0" data-testid="bot-item-activity-row" data-by={owners ? "owner" : "bot"}>
       <span className="w-12 shrink-0 pt-0.5 font-mono text-[11.5px] text-faint" title={entry.at}>{clock(entry.at)}</span>
@@ -279,7 +280,7 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
         <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-foreground">
           <span className="break-words">{entry.text || `${who(entry.by, bot)}: ${entry.kind}`}</span>
           {words && entry.detail && (
-            <span className="rounded border border-hairline px-1.5 text-[10.5px] text-faint">{owners ? "your words" : `${bot.name}'s words · not an approval`}</span>
+            <span className="rounded border border-hairline px-1.5 text-[10.5px] text-faint">{detailLabel}</span>
           )}
         </p>
         {entry.detail && <p className="mt-0.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground">{entry.detail}</p>}
@@ -288,7 +289,7 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
   );
 }
 
-function CommentBox({ bot, item, onNote }: { bot: Bot; item: BotItem; onNote: (note: string | null) => void }) {
+function CommentBox({ bot, item }: { bot: Bot; item: BotItem }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -298,10 +299,7 @@ function CommentBox({ bot, item, onNote }: { bot: Bot; item: BotItem; onNote: (n
     setBusy(true);
     setError(null);
     commentOnBotItem(bot.id, item.number, text.trim()).then(
-      (act) => {
-        setText("");
-        onNote(deliveryNote(bot, act.delivery));
-      },
+      () => setText(""),
       (cause) => setError(errorMessage(cause)),
     ).finally(() => setBusy(false));
   };

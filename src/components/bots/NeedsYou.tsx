@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { CircleQuestionMark, Loader2, MessageSquare, Send } from "@/icons";
+import { CircleQuestionMark, Loader2, MessageSquare, Send, TriangleAlert, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
-import { answerBotItem, openBotItem, refreshNeedsYou } from "@/lib/botItems";
+import { answerBotItem, dismissUndelivered, openBotItem, refreshNeedsYou, useUndelivered, type Undelivered } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { openBot, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
@@ -27,14 +27,38 @@ export function waited(iso: string, now = Date.now()): string {
   return hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
 }
 
-/** What a send that did not reach the home chat says: the answer itself is recorded. */
-export function deliveryNote(bot: Pick<Bot, "name">, delivery: { sent: boolean; error?: string } | undefined): string | null {
-  if (!delivery || delivery.sent) return null;
-  return `Recorded, but it could not be sent to ${bot.name}'s home chat${delivery.error ? `: ${delivery.error}` : ""}. Tell ${bot.name} there.`;
+const WHAT: Record<Undelivered["what"], string> = { answer: "Your answer", comment: "Your comment", work: "The work you gave" };
+
+/** What a send that did not reach the home chat says: what the owner did is recorded, the bot was not told. */
+export function undeliveredNote(bot: Pick<Bot, "name">, entry: Pick<Undelivered, "number" | "what" | "error">): string {
+  return `${WHAT[entry.what]} on item #${entry.number} is recorded, but it could not be sent to ${bot.name}'s home chat${entry.error ? `: ${entry.error}` : ""}. ${bot.name} has not been told: tell it there.`;
+}
+
+/**
+ * The sends that did not reach a bot: shown where the owner acts (a bot's Home tab and item page, or the Bots page for
+ * every bot) until dismissed. Kept in the store, not on the card answered, since answering removes the card.
+ */
+export function UndeliveredNotes({ bots, botId }: { bots: Bot[]; botId: string | null }) {
+  const entries = useUndelivered(botId);
+  if (entries.length === 0) return null;
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5" data-testid="bot-undelivered">
+      {entries.map((entry) => {
+        const bot = bots.find((value) => value.id === entry.botId) ?? { name: "the bot" };
+        return (
+          <div key={entry.id} role="alert" className="flex min-w-0 items-start gap-2 rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+            <p className="min-w-0 flex-1 break-words">{undeliveredNote(bot, entry)}</p>
+            <button type="button" onClick={() => dismissUndelivered(entry.id)} aria-label="Dismiss" className="shrink-0 rounded hover:text-foreground"><X className="size-3.5" /></button>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 /** The answer buttons of an item's question: the recommended one first and accented, then the others, then "or reply…". */
-function Answers({ bot, item, compact, onDone }: { bot: Bot; item: BotItem; compact: boolean; onDone?: (note: string | null) => void }) {
+function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boolean }) {
   const question = item.question;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,10 +70,9 @@ function Answers({ bot, item, compact, onDone }: { bot: Bot; item: BotItem; comp
     setBusy(true);
     setError(null);
     answerBotItem(bot.id, item.number, choice, question.asked).then(
-      (act) => {
+      () => {
         setReply("");
         setReplying(false);
-        onDone?.(deliveryNote(bot, act.delivery));
       },
       (cause) => setError(errorMessage(cause)),
     ).finally(() => setBusy(false));
@@ -107,7 +130,6 @@ function Answers({ bot, item, compact, onDone }: { bot: Bot; item: BotItem; comp
 
 /** A Needs you card on the bot's Home tab and on an item's page. */
 export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotItem; onOpen?: () => void }) {
-  const [note, setNote] = useState<string | null>(null);
   if (!item.question) return null;
   return (
     <article className="flex min-w-0 gap-3 px-4 py-3" data-testid="needs-you-card" aria-label={`${bot.name} asks: ${item.question.text}`}>
@@ -123,8 +145,7 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
           </button>
         ) : null}
         {item.summary && onOpen && <p className="line-clamp-2 text-[12.5px] whitespace-pre-wrap text-muted-foreground">{item.summary}</p>}
-        <Answers bot={bot} item={item} compact={false} onDone={setNote} />
-        {note && <p role="status" className="text-[12px] text-warning">{note}</p>}
+        <Answers bot={bot} item={item} compact={false} />
       </div>
     </article>
   );
@@ -181,7 +202,6 @@ export function AgentQuestionCard({ bot, entry, compact = false }: { bot: Bot; e
 
 /** One row of the Bots page's Needs you queue (23.02): the question, whose it is, the recommended answer and Open. */
 export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) {
-  const [note, setNote] = useState<string | null>(null);
   if (entry.kind === "agentQuestion") return <AgentQuestionCard bot={bot} entry={entry} compact />;
   const item = entry.item;
   return (
@@ -190,10 +210,9 @@ export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) 
       <div className="min-w-[200px] flex-1">
         <p className="truncate text-[13px] text-foreground" title={item.question?.text}>{item.question?.text}</p>
         <p className="truncate text-[11.5px] text-faint">{bot.name} · #{item.number} {item.title}</p>
-        {note && <p role="status" className="text-[11.5px] text-warning">{note}</p>}
       </div>
       <div className="flex min-w-0 max-w-full items-center gap-2">
-        <RecommendedOnly bot={bot} item={item} onDone={setNote} />
+        <RecommendedOnly bot={bot} item={item} />
         <Button size="xs" variant="outline" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-open">Open</Button>
         <span className="w-8 shrink-0 text-right text-[11.5px] text-faint" title={item.question?.asked}>{item.question ? waited(item.question.asked) : ""}</span>
       </div>
@@ -201,23 +220,29 @@ export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) 
   );
 }
 
-/** The row's one answer button: the recommended answer (the first when none is), the rest on the item's page. */
-function RecommendedOnly({ bot, item, onDone }: { bot: Bot; item: BotItem; onDone: (note: string | null) => void }) {
+/**
+ * The row's one answer button: the answer the bot recommends, the rest on the item's page. With no recommendation
+ * there is no one-click answer: every answer is read on the item's page first.
+ */
+function RecommendedOnly({ bot, item }: { bot: Bot; item: BotItem }) {
   const question = item.question;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (!question || question.answers.length === 0) return null;
-  const index = question.recommended ?? 0;
-  const recommended = question.recommended !== undefined;
+  const index = question?.recommended;
+  if (!question) return null;
+  if (index == null || !question.answers[index]) {
+    return <span className="shrink-0 text-[11.5px] text-faint" data-testid="needs-you-choose">{question.answers.length} answers · open to choose</span>;
+  }
   const send = () => {
     setBusy(true);
-    answerBotItem(bot.id, item.number, { answer: index }, question.asked).then((act) => onDone(deliveryNote(bot, act.delivery)), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    setError(null);
+    answerBotItem(bot.id, item.number, { answer: index }, question.asked).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
   return (
     <>
-      <Button size="xs" variant={recommended ? "accent" : "outline"} disabled={busy} onClick={send} title={error ?? undefined} className="max-w-[260px]" data-testid="needs-you-answer">
+      <Button size="xs" variant="accent" disabled={busy} onClick={send} title={error ?? undefined} className="max-w-[260px]" data-testid="needs-you-answer">
         <span className="truncate">{question.answers[index]}</span>
-        {recommended && <span className="text-[10px] font-normal opacity-75">recommended</span>}
+        <span className="text-[10px] font-normal opacity-75">recommended</span>
       </Button>
       {error && <span role="alert" className="max-w-[200px] truncate text-[11.5px] text-destructive" title={error}>{error}</span>}
     </>

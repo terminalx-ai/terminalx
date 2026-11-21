@@ -38,9 +38,26 @@ interface State {
   error: string | null;
   /** An item the next bot view should open: `openBotItem` sets it, the bot's view takes it. */
   opening: { botId: string; number: number } | null;
+  /**
+   * What the owner did that was recorded but did not reach the bot's home chat. Kept here, not on the card that was
+   * answered: answering takes the question away, and its card with it. Shown until the owner dismisses it.
+   */
+  undelivered: Undelivered[];
 }
 
-const EMPTY: State = { needs: null, lists: {}, items: {}, error: null, opening: null };
+/** A recorded answer, comment or piece of work that could not be sent to the bot's home chat. */
+export interface Undelivered {
+  id: number;
+  botId: string;
+  number: number;
+  what: "answer" | "comment" | "work";
+  error?: string;
+}
+
+const MAX_UNDELIVERED = 20;
+let undeliveredId = 0;
+
+const EMPTY: State = { needs: null, lists: {}, items: {}, error: null, opening: null, undelivered: [] };
 let state: State = EMPTY;
 const listeners = new Set<() => void>();
 
@@ -203,8 +220,8 @@ export function useBotItem(botId: string, number: number): BotItem | null {
   return store.items[itemKey(botId, number)] ?? store.lists[botId]?.items.find((item) => item.number === number) ?? null;
 }
 
-/** Take an act's answer at once; its `bot_items_changed` follows. */
-function took(botId: string, act: BotItemAct): BotItemAct {
+/** Take an act's answer at once; its `bot_items_changed` follows. A send that failed is kept to be shown. */
+function took(botId: string, act: BotItemAct, what: Undelivered["what"]): BotItemAct {
   const item = act.item;
   const list = state.lists[botId];
   const items = { ...state.items };
@@ -212,25 +229,26 @@ function took(botId: string, act: BotItemAct): BotItemAct {
   const lists = list
     ? { ...state.lists, [botId]: { ...list, items: list.items.some((value) => value.number === item.number) ? list.items.map((value) => (value.number === item.number ? { ...value, ...item } : value)) : [item, ...list.items] } }
     : state.lists;
-  set({ items, lists });
+  const failed = act.delivery && !act.delivery.sent ? [{ id: ++undeliveredId, botId, number: item.number, what, error: act.delivery.error }] : [];
+  set({ items, lists, undelivered: [...state.undelivered, ...failed].slice(-MAX_UNDELIVERED) });
   void readNeeds(generation);
   return act;
 }
 
 export async function answerBotItem(botId: string, number: number, choice: { answer: number } | { text: string }, asked: string | null) {
-  return took(botId, await botItemsApi.answer(botId, number, choice, asked));
+  return took(botId, await botItemsApi.answer(botId, number, choice, asked), "answer");
 }
 
 export async function commentOnBotItem(botId: string, number: number, text: string) {
-  return took(botId, await botItemsApi.comment(botId, number, text));
+  return took(botId, await botItemsApi.comment(botId, number, text), "comment");
 }
 
 export async function giveBotWork(botId: string, title: string, summary: string) {
-  return took(botId, await botItemsApi.give(botId, title, summary));
+  return took(botId, await botItemsApi.give(botId, title, summary), "work");
 }
 
 export async function stopBotItem(botId: string, number: number) {
-  return took(botId, await botItemsApi.stop(botId, number));
+  return took(botId, await botItemsApi.stop(botId, number), "work");
 }
 
 /** Read what needs the owner again now (after answering a session's question card). */
@@ -252,6 +270,16 @@ export function useOpeningItem(botId: string): number | null {
 
 export function tookOpening() {
   if (state.opening) set({ opening: null });
+}
+
+/** The sends that did not reach bot `botId`'s home chat (every bot's when null). */
+export function useUndelivered(botId: string | null): Undelivered[] {
+  const store = useStore();
+  return botId ? store.undelivered.filter((entry) => entry.botId === botId) : store.undelivered;
+}
+
+export function dismissUndelivered(id: number) {
+  set({ undelivered: state.undelivered.filter((entry) => entry.id !== id) });
 }
 
 /** Whether an item is out of the way until a later time. */

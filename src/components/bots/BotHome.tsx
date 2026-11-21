@@ -8,7 +8,7 @@ import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
 import type { BotItem } from "@/types/botItems";
-import { AgentQuestionCard, deliveryNote, ItemQuestionCard } from "./NeedsYou";
+import { AgentQuestionCard, ItemQuestionCard, UndeliveredNotes } from "./NeedsYou";
 
 /**
  * A bot's Home tab (PRO-469, design 23.01): what needs the owner, with answer buttons, what is in progress, what is
@@ -19,7 +19,6 @@ export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: nu
   const needs = useNeedsYou();
   const { list, error } = useBotItems(bot.id);
   const [giving, setGiving] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
   const [open, setOpen] = useState<{ done: boolean; snoozed: boolean }>({ done: false, snoozed: false });
   const items = list?.items ?? [];
   const asking = needsYouOf(needs, bot.id);
@@ -38,7 +37,7 @@ export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: nu
             {list.unreadable === 1 ? "1 item was" : `${list.unreadable} items were`} saved by a newer TerminalX and can't be shown here.
           </p>
         )}
-        {note && <p role="status" className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">{note}</p>}
+        <UndeliveredNotes bots={[bot]} botId={bot.id} />
 
         {asking.length > 0 && (
           <Section label="Needs you" count={asking.length} accent testId="bot-home-needs-you">
@@ -68,7 +67,7 @@ export function BotHome({ bot, onOpenItem }: { bot: Bot; onOpenItem: (number: nu
             </Button>
           }
         >
-          {giving && <GiveWork bot={bot} onClose={() => setGiving(false)} onGiven={(given) => { setGiving(false); setNote(given); }} />}
+          {giving && <GiveWork bot={bot} onClose={() => setGiving(false)} onGiven={() => setGiving(false)} />}
           {planned.length > 0 ? <ItemRows items={planned} onOpen={onOpenItem} /> : !giving && <Empty>{list ? "Nothing planned." : <Reading />}</Empty>}
         </Section>
 
@@ -166,7 +165,7 @@ function ItemRows({ items, onOpen }: { items: BotItem[]; onOpen: (number: number
 }
 
 /** "Give <bot> work": a title and, if wanted, what it is about. */
-function GiveWork({ bot, onClose, onGiven }: { bot: Bot; onClose: () => void; onGiven: (note: string | null) => void }) {
+function GiveWork({ bot, onClose, onGiven }: { bot: Bot; onClose: () => void; onGiven: () => void }) {
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [busy, setBusy] = useState(false);
@@ -176,7 +175,7 @@ function GiveWork({ bot, onClose, onGiven }: { bot: Bot; onClose: () => void; on
     if (!title.trim()) return;
     setBusy(true);
     setError(null);
-    giveBotWork(bot.id, title.trim(), summary.trim()).then((act) => onGiven(deliveryNote(bot, act.delivery)), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+    giveBotWork(bot.id, title.trim(), summary.trim()).then(() => onGiven(), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
   };
   return (
     <form onSubmit={submit} className="flex min-w-0 flex-col gap-2 rounded-lg border border-hairline bg-card px-4 py-3" data-testid="bot-give-work-form" aria-label={`Give ${bot.name} work`}>
