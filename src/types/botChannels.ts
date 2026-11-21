@@ -49,7 +49,7 @@ export interface BotChannelsView {
 
 /** Where a chat that a mention started came from, as its session entry carries it. */
 export interface SessionBotChannel {
-  kind: "github" | "linear" | (string & {});
+  kind: "github" | "linear" | "slack" | "telegram" | (string & {});
   /** `owner/name#12` or `PRO-123`. */
   label: string;
   url: string;

@@ -2171,6 +2171,15 @@ export const botsApi = {
   spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
   /** Its newest mentions on GitHub and Linear (none of their text) and what it posted there (PRO-480). */
   channels: (id: string) => invoke<import("@/types/botChannels").BotChannelsView>("bot_channels", { id }),
+  /** Its Slack and Telegram connections, the chats linked and the newest messages, none of their text (PRO-481). */
+  chatApps: (id: string) => invoke<import("@/types/botChatApps").BotChatAppsView>("bot_chat_apps", { id }),
+  /** Check the tokens with the service and keep them with the bots' other logins: never in the bot's record. */
+  chatAppConnect: (id: string, service: string, tokens: Record<string, string>) => invoke<{ service: string; account: { name: string } }>("bot_chat_app_connect", { id, service, tokens }),
+  chatAppDisconnect: (id: string, service: string) => invoke<unknown>("bot_chat_app_disconnect", { id, service }),
+  /** A one-time code: the chat it is sent from is linked. */
+  chatAppLink: (id: string, service: string) => invoke<import("@/types/botChatApps").BotChatAppsView>("bot_chat_app_link", { id, service }),
+  chatAppUnlink: (id: string, service: string, chat: string) => invoke<import("@/types/botChatApps").BotChatAppsView>("bot_chat_app_unlink", { id, service, chat }),
+  chatAppAlsoSends: (id: string, services: string[]) => invoke<import("@/types/botChatApps").BotChatAppsView>("bot_chat_app_also_sends", { id, services }),
 };
 
 export function errorMessage(e: unknown): string {

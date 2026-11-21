@@ -411,8 +411,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
 - **Not covered.** Security alerts are Dependabot's only, not code scanning
   or secret scanning. Mentions are conversation comments only, not review
   comments, reviews or a pull request's or issue's own text.
-- **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
-  connector (PRO-480, PRO-481); their tiles stay off.
+- **Not here yet.** Duties woken by Slack, Telegram or WhatsApp and
+  webhooks; their tiles stay off. A message from Slack or Telegram reaches
+  the bot as a chat message (PRO-481), not as a duty's wake.
 
 ## Hand-offs, the reporting line and the team brief (PRO-475)
 
@@ -772,6 +773,62 @@ mention starts a conversation, not a duty run.
 - **With Bots off** nothing is read, nothing is delivered, and both
   commands answer `bots_off`.
 
+## Slack and Telegram as channels (PRO-481)
+
+`src-tauri/src/bots/chat_apps.rs`, with the connectors in `telegram.rs`
+(Bot API long polling, `getUpdates`) and `slack.rs` (Socket Mode). No
+relay: both need only outbound connections from the runtime, which runs
+them. WhatsApp's Cloud API delivers only by webhook to a public address, so
+its row stays off.
+
+- **Logins.** The owner makes their own Telegram bot (@BotFather) or Slack
+  app (Socket Mode on; bot scopes `chat:write`, `im:history`,
+  `app_mentions:read`, `users:read`, `users:read.email`, `channels:read`;
+  events `message.im` and `app_mention`; interactivity on) and pastes its
+  tokens in Settings → the bot → Channels. The window checks them (`getMe`;
+  `auth.test` and `apps.connections.open`) and writes them itself to
+  `bot-chat-logins.json` in the store, owner-readable, beside
+  `settings.json` where the Linear key is: the runtime has no Keychain, and
+  the tokens never cross the control socket. Never in `bots.json`, the
+  bot's home, a log or an error: the clients' errors are built from the
+  services' answers, not the HTTP library's, which would print Telegram's
+  address and its token.
+- **Linking.** "Link a chat" makes a code (six letters and digits, ten
+  minutes, five wrong tries) that is sent from the chat to link: bare,
+  `/start CODE` (the `t.me` link the dialog opens) or `/link@bot CODE` in a
+  group. Whoever sends it is the owner there. A message from a chat that is
+  not linked, or linked through another login, is kept without its text,
+  shown in the dialog's "Lately", and never reaches the agent.
+- **Who may ask.** In a linked group or channel, someone else is accepted
+  only when they are in Who can ask by the email Slack gives for them,
+  judged as a GitHub or Linear mention is (`channels::judge`). Telegram
+  gives no email, so only the person who linked a Telegram chat asks there.
+  The text reaches the agent fenced (`chat-message`), with TerminalX as the
+  transcript's author, as a request and never an approval.
+- **Where it goes.** The owner's direct message goes to the home chat; a
+  group's or channel's goes to a chat of its own per Telegram group or
+  Slack thread, marked `botChannel` (`slack`, `telegram`). A paused bot's
+  messages wait (the chat is told once); at most 30 reach one bot an hour.
+- **Replies.** The turn that answers a message (found by its start after
+  the sequence number it was sent at, so a queued message waits its turn)
+  is sent back where it was asked: in its Slack thread, as a Telegram reply.
+  A stopped turn says so; after six hours it is given up.
+- **Reports and questions.** A duty's report to the owner goes to every
+  direct chat the owner linked, with no sound in quiet hours (Telegram's
+  `disable_notification`). A "Needs you" question goes with its answers as
+  buttons (inline keyboard; Block Kit, the recommended one primary). A
+  press is taken only from the person who linked that chat, once, as an
+  answer from outside the window (`byPerson: false`), so one that would
+  approve a run is refused; such a question goes with no buttons and says
+  to answer in TerminalX.
+- **Also sends to** (design 23.04): beside the home chat's send button, the
+  linked direct chats the bot's replies to what the owner writes there also
+  go to, each with a quote of what was written.
+- **Workers.** The scheduler's tick (and the window's read) start one pump
+  and one connector per saved login; each stops when its login changes or
+  goes, the bot is deleted, or Bots is switched off. Deleting a bot forgets
+  its links, messages and logins.
+
 ## The week of duties (PRO-473)
 
 The calendar (screen 23.13) is a view of what already exists, not a store of
@@ -960,7 +1017,7 @@ issue.
 | PRO-477 | Look around, suggestions, nightly memory tidy | 23.01 | In review |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | In review |
 | PRO-480 | GitHub and Linear as channels | 23.07 | In review |
-| PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
+| PRO-481 | Slack and Telegram or WhatsApp as channels | 23.04, 23.07 | In review |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
 | PRO-489 | Hardening left over from reviews | n/a | In review |

@@ -29,6 +29,7 @@ import { usePeople } from "@/lib/cloudPeople";
 import { Chat } from "@/components/chat/Chat";
 import { FirstMessage } from "@/components/chat/FirstMessage";
 import { Composer, type Handoff } from "@/components/chat/Composer";
+import { AlsoSendsTo } from "@/components/bots/BotChatApps";
 import { goalCommand, goalCommandProblem } from "@/lib/goalCommand";
 import { sentMessages } from "@/components/chat/useComposerHistory";
 import { TerminalView } from "@/components/terminal/TerminalView";
@@ -1058,6 +1059,7 @@ export function TabView({
         {backend.changeHeldQueue && <div className="mx-auto w-full max-w-3xl px-6"><HeldQueueTray key={tab.id} scope={tab.id} queue={heldQueue} onChange={changeHeldQueue} disabled={!!gate?.blocked} busy={live}
           unavailable={local ? undefined : { move: backend.unavailable?.moveHeld, pause: backend.unavailable?.pauseHeld }} row={local ? undefined : heldRow} /></div>}
         <Composer
+          beforeSend={local && session.bot?.home && typeof session.bot.id === "string" ? <AlsoSendsTo botId={session.bot.id} /> : undefined}
           setupRunning={setup?.status === "running" || setup?.status === "pending" || setup?.status === "stopping"}
           followUps={backend.changeHeldQueue ? followUps : undefined}
           sendScope={sendScope}

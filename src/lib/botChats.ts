@@ -13,7 +13,8 @@ import type { SessionEntry } from "@/types/session";
 export function chatSource(chat: Pick<SessionEntry, "botChannel">): string | null {
   const source = chat.botChannel;
   if (!source || typeof source.label !== "string") return null;
-  const service = source.kind === "github" ? "GitHub" : source.kind === "linear" ? "Linear" : source.kind;
+  const names: Record<string, string> = { github: "GitHub", linear: "Linear", slack: "Slack", telegram: "Telegram" };
+  const service = names[source.kind] ?? source.kind;
   return `${service} · ${source.label}`;
 }
 
