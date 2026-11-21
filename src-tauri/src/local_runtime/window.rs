@@ -185,14 +185,13 @@ impl Registry {
     }
 
     /// The provider of window services now: none while Bots is on for one
-    /// that did not prove it is the window, which is dropped then (PRO-507).
+    /// that did not prove it is the window (PRO-507). It is kept, not
+    /// dropped: it serves again once Bots is off, and gives way meanwhile to a
+    /// registration that proves it, or to any while Bots is on (`register_as`).
     fn live(&self) -> Option<Arc<Service>> {
-        let mut current = self.0.lock().unwrap();
-        let service = current.clone().filter(|service| service.attachment.valid())?;
+        let service = self.0.lock().unwrap().clone().filter(|service| service.attachment.valid())?;
         if service.unproven && crate::bots::enabled_cached() {
-            log::warn!("Bots is on: the window registered without its proof no longer provides window services");
             *self.2.lock().unwrap_or_else(|e| e.into_inner()) = Some(service.attachment.clone());
-            *current = None;
             return None;
         }
         Some(service)
@@ -487,10 +486,11 @@ mod tests {
     }
 
     /// PRO-507: a window registered without its proof while Bots was off
-    /// serves only while Bots stays off. It gives way to a registration that
-    /// proves it, Bots on or off, and to any once Bots is on, when it is
-    /// dropped; a window service asked for meanwhile says why, not that no
-    /// window is open.
+    /// serves only while Bots is off: it is held, not dropped, while Bots is
+    /// on, and serves again once Bots is off (review of #1468, item 1). It
+    /// gives way to a registration that proves it, Bots on or off, and to any
+    /// while Bots is on; a window service asked for meanwhile says why, not
+    /// that no window is open.
     #[test]
     fn an_unproven_window_serves_only_with_bots_off_and_gives_way_to_a_proven_one() {
         let _home = crate::store::temp_home();
@@ -516,18 +516,26 @@ mod tests {
         assert!(lifetime.window.call("computer.listApps", json!({})).is_ok());
         lifetime.command("runtime.detach", proven).unwrap();
 
-        // Bots on: an unproven provider is dropped, and says why.
+        // Bots on: an unproven provider serves nothing, and says why; Bots
+        // off again, it serves again, as nothing re-registers it.
         lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).unwrap();
         bots(true);
-        assert!(!lifetime.window.available(), "dropped once Bots is on");
+        assert!(!lifetime.window.available(), "held while Bots is on");
         let error = lifetime.window.call("computer.listApps", json!({})).unwrap_err();
         assert_eq!(error.code, "desktop_unavailable");
         assert!(error.message == UNPROVEN && error.recovery.as_deref().is_some_and(|hint| hint.contains("Try again")), "{error:?}");
         bots(false);
-        assert!(!lifetime.window.available(), "dropped, it does not come back by itself");
+        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "Bots off again: it serves again");
+        // Bots on, any registration unseats it, unproven too (`|| bots`): it serves nothing then anyway.
+        bots(true);
+        let third = attach(&lifetime);
+        lifetime.window.register_unproven(&lifetime, registration(&third, &endpoint)).unwrap();
+        bots(false);
+        assert!(lifetime.window.register_unproven(&lifetime, registration(&other, &endpoint)).is_err(), "the one that took its place holds it");
         lifetime.window.register(&lifetime, registration(&other, &endpoint)).unwrap();
         bots(true);
-        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "the same window, proved, serves");
+        assert!(lifetime.window.call("computer.listApps", json!({})).is_ok(), "a window proved serves while Bots is on");
+        lifetime.command("runtime.detach", third).unwrap();
         lifetime.command("runtime.detach", other).unwrap();
         // A registration refused for want of proof while Bots is on says why too, while it is attached.
         let refused = attach(&lifetime);
