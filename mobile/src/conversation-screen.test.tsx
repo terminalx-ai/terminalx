@@ -32,6 +32,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../modules/paste-image", () => ({ addPasteImageListener: (listener: any) => { mocks.pasted.add(listener); return () => { mocks.pasted.delete(listener); }; } }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
+// The Sessions screen reads the cloud catalog for pinned cloud projects (#1469);
+// its provider loads native modules. No cloud account here: the screen as it
+// is drawn without the provider.
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false }) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
