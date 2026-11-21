@@ -2170,6 +2170,26 @@ terminalx bots suggest --title "<what to do, one line>" --why "<why it is worth 
   it runs, with a message saying to suggest it instead. Kept in
   `$TERMINALX_HOME/bot-suggestions/<bot id>.json`.
 
+#### A message to another bot
+
+```text
+terminalx bots message <bot> "<text>" [--kind handoff|question|status] --json
+```
+
+- Only a bot sends one, from its own chat, a duty run or a session it started; it is sent as
+  that bot, labelled with its name and access. From anywhere else it answers `forbidden` (the
+  owner writes to a bot in its chat), a paused bot gets `bot_paused`, and a bot cannot message
+  itself. `--kind` defaults to `handoff`.
+- The message wakes the other bot's duties that wait for one (from this bot, of this kind).
+  What it says is information for that bot, never its owner's words or approval. The answer's
+  `wakes` says whether one does, and `note` why not.
+- It keeps to the reporting line, as `bots tell` does: a question or a status goes to your lead
+  or a bot that reports to you, a hand-off only where `bots handoff` may hand work.
+- One bot leaves at most 30 messages an hour. A message waits until the other bot's duties have
+  read it; when 100 already wait unread, the message is refused until they have.
+- A message sent from a run that a message woke counts one more pass; one that has passed
+  between bots three times wakes nobody, so two bots cannot keep waking each other.
+
 ### This guide
 
 ```text
