@@ -11,6 +11,7 @@ pub mod access;
 pub mod changes;
 pub mod memory;
 pub mod chat;
+pub mod duties;
 pub mod enforce;
 pub mod templates;
 
@@ -763,12 +764,15 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         }
         Ok(removed)
     })?;
+    // Its duties go with it (PRO-471), kept in its home before that goes to the trash; one left behind can still be
+    // removed on the Automations page.
+    let duties = duties::forget_bot(sink, &removed.id);
     let trashed = bot_store::trash_home(&removed.id).with_context(|| format!("{} is deleted, but its home folder could not be moved to the trash and is still in bots/", removed.name))?;
     // Its history goes with its home, so a home put back finds it beside it.
     if let Some(trashed) = trashed {
         changes::trash(&removed.id, &trashed).with_context(|| format!("{} is deleted, but its history could not be moved to the trash and is still in bot-changes/", removed.name))?;
     }
-    Ok(())
+    duties.with_context(|| format!("{} is deleted, but not all of its duties could be removed; remove them on the Automations page", removed.name))
 }
 
 fn set_paused(bot: &mut Bot, pause: Option<&BotPause>) -> bool {

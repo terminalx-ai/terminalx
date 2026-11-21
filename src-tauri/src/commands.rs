@@ -6313,6 +6313,56 @@ pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResul
     bots_call(state, "spentToday", serde_json::json!({"id": id})).await
 }
 
+// A bot's duties (PRO-471). The duties themselves arrive as automations
+// (`automations_changed`); these change them, each through the window's own
+// path, which carries a person's proof for what gives the bot more.
+
+/// The bot's quiet hours and each of its duties' notes.
+#[tauri::command]
+pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "duties", serde_json::json!({"id": id})).await
+}
+
+/// Add a duty (`duty_id` absent) or change one.
+#[tauri::command]
+pub async fn bot_duty_save(state: State<'_, AppState>, id: String, duty_id: Option<String>, input: serde_json::Value) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySave", serde_json::json!({"id": id, "dutyId": duty_id, "input": input})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_switch(state: State<'_, AppState>, id: String, duty_id: String, on: bool) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySwitch", serde_json::json!({"id": id, "dutyId": duty_id, "on": on})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_delete(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<()> {
+    bots_call(state, "dutyDelete", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// A copy of a duty, switched off.
+#[tauri::command]
+pub async fn bot_duty_duplicate(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutyDuplicate", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Run a duty now: its first check, then the bot only when the check found something.
+#[tauri::command]
+pub async fn bot_duty_run(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::AutomationRun> {
+    bots_call(state, "dutyRun", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Try a duty's first check once, where its runs run it (its own folder, not the bot's home). Nothing is recorded.
+#[tauri::command]
+pub async fn bot_duty_try_check(state: State<'_, AppState>, id: String, duty_id: Option<String>, precheck: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    bots_call(state, "dutyTryCheck", serde_json::json!({"id": id, "dutyId": duty_id, "precheck": precheck})).await
+}
+
+/// The bot's quiet hours, or `null` for none.
+#[tauri::command]
+pub async fn bot_quiet_hours(state: State<'_, AppState>, id: String, quiet_hours: serde_json::Value) -> CmdResult<serde_json::Value> {
+    bots_call(state, "quietHours", serde_json::json!({"id": id, "quietHours": quiet_hours})).await
+}
+
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
 
 /// Settings → Orchestrator: the app-wide values and each project's own.

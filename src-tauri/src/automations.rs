@@ -745,9 +745,62 @@ fn emit_run(app: &impl AutomationHost, run: &AutomationRun) {
     app.sink().emit("automation_run", run);
 }
 
+/// End a run that has not started a session, with `status` and why.
+fn end_pending(app: &impl AutomationHost, automation_id: &str, run: AutomationRun, status: AutomationRunStatus, message: String) -> Result<AutomationRun> {
+    let run = automation_store::replace_run(automation_id, &run.run_id, |value| {
+        if !value.status.is_terminal() {
+            value.status = status;
+            value.ended_at = Some(index::now());
+            value.error = Some(message);
+        }
+        Ok(())
+    })?;
+    emit_run(app, &run);
+    let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+    update_summary(app, automation_id, run.status, &ended_at);
+    Ok(run)
+}
+
+/// A scheduled time that passes without a run, as one history row: the same
+/// reason again counts as a repeat of the newest row (as missed runs do).
+pub(crate) fn record_skipped(app: &impl AutomationHost, automation: &Automation, scheduled_for: DateTime<Utc>, status: AutomationRunStatus, message: &str) -> Result<()> {
+    if let Some(previous) = automation_store::list_runs(&automation.id)?.into_iter().next() {
+        if previous.status == status && previous.session_id.is_none() && previous.error.as_deref() == Some(message) {
+            let run = automation_store::replace_run(&automation.id, &previous.run_id, |run| {
+                run.repeat_count += 1;
+                run.last_repeat_at = Some(index::now());
+                Ok(())
+            })?;
+            emit_run(app, &run);
+            return Ok(());
+        }
+    }
+    let mut run = new_run(&automation.id, AutomationTrigger::Scheduled, Some(scheduled_for), status);
+    run.error = Some(message.into());
+    let run = automation_store::insert_run(run)?;
+    emit_run(app, &run);
+    let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+    update_summary(app, &automation.id, run.status, &ended_at);
+    Ok(())
+}
+
+/// Record a change to a run made after it ended (a duty's report, PRO-471), and say so.
+pub(crate) fn amend_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, change: impl FnOnce(&mut AutomationRun)) -> Result<AutomationRun> {
+    let run = automation_store::replace_run(automation_id, run_id, |run| {
+        change(run);
+        Ok(())
+    })?;
+    emit_run(app, &run);
+    Ok(run)
+}
+
 /// Save definitions in the process that schedules them. The canonical target
 /// and existing definition are resolved here, not trusted from a window cache.
 pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: AutomationInput) -> Result<Automation> {
+    // A bot's duty is changed on its bot's Duties tab, where giving it more needs a person (PRO-471).
+    if id.is_some_and(|id| automation_store::get(id).is_ok_and(|existing| crate::bots::duties::is_duty(&existing))) {
+        bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
     input.project_path = crate::store::projects::canonical(&input.project_path)?;
     if input.workspace == AutomationWorkspace::NewWorktree && !crate::git::is_repo(Path::new(&input.project_path)) {
         bail!("Folder automations must use an existing session; worktrees require a Git repository.");
@@ -773,6 +826,10 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
 }
 
 pub fn remove_definition(app: &impl AutomationHost, id: &str) -> Result<()> {
+    // A duty whose bot was deleted has no Duties tab left to be removed from (PRO-471).
+    if automation_store::get(id).is_ok_and(|automation| crate::bots::duties::is_duty(&automation) && !crate::bots::duties::orphaned(&automation)) {
+        bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
     automation_store::remove(id)?;
     emit_definitions(app);
     Ok(())
@@ -899,6 +956,17 @@ fn start_run(
     issue: Option<index::IssueRef>,
     worktree_name: Option<String>,
 ) -> Result<AutomationRun> {
+    // A bot's duty runs as its bot does now, or not at all (PRO-471).
+    let bound;
+    let automation = match crate::bots::duties::bind(automation) {
+        crate::bots::duties::Bound::Ordinary => automation,
+        crate::bots::duties::Bound::Duty(duty) => {
+            bound = *duty;
+            &bound
+        }
+        crate::bots::duties::Bound::Refused(why) => return end_pending(app, &automation.id, run, AutomationRunStatus::Cancelled, why),
+    };
+    let duty = crate::bots::duties::is_duty(automation);
     emit_run(app, &run);
     let started_at = run.started_at.clone().unwrap_or_else(index::now);
     update_summary(app, &automation.id, run.status, &started_at);
@@ -906,13 +974,37 @@ fn start_run(
     let Some(prompt) = precheck::gate(app, automation, &mut run, prompt)? else {
         return Ok(run);
     };
+    // Paused, deleted or switched off while its check ran: it does no work.
+    if duty {
+        if let crate::bots::duties::Bound::Refused(why) = crate::bots::duties::bind(automation) {
+            return end_pending(app, &automation.id, run, AutomationRunStatus::Cancelled, why);
+        }
+    }
 
     let result = (|| -> Result<()> {
-        let available = crate::harness::offered()
-            .into_iter()
-            .any(|value| value.id == automation.harness && value.available);
+        let available = if duty {
+            crate::bots::duties::agent_ready(&automation.harness)
+        } else {
+            crate::harness::offered()
+                .into_iter()
+                .any(|value| value.id == automation.harness && value.available)
+        };
         if !available {
             bail!("The selected agent is not available.");
+        }
+        if duty {
+            let entry = crate::bots::duties::open_session(app.sink().as_ref(), automation, &run)?;
+            let tab = entry.tabs.first().context("duty session has no tab")?;
+            run = automation_store::replace_run(&automation.id, &run.run_id, |value| {
+                value.session_id = Some(entry.id.clone());
+                value.tab_id = Some(tab.id.clone());
+                Ok(())
+            })?;
+            emit_run(app, &run);
+            crate::store::environment::prepare_unattended(&entry.cwd, None)?;
+            let prompt = crate::bots::duties::prompt(automation, &run, prompt)?;
+            app.sessions()?.send(&entry.id, &tab.id, prompt, Vec::new())?;
+            return Ok(());
         }
         let cwd = match automation.workspace {
             AutomationWorkspace::NewWorktree => None,
@@ -1444,6 +1536,7 @@ fn finish_from_hook(
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
         archive_finished_run(app, &run);
+        crate::bots::duties::ended(app, &run);
         sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
@@ -1525,6 +1618,11 @@ pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Failed);
 }
 
+/// End a run that has gone on past its time (a bot's duty, PRO-471). Its agent is stopped by the caller.
+pub(crate) fn time_out_run(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::TimedOut);
+}
+
 pub fn cancel_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
     end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Cancelled);
 }
@@ -1554,6 +1652,7 @@ fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
+        crate::bots::duties::ended(app, &run);
         sources::run_ended(&stamp.id, &stamp.run_id, Path::new(&entry.cwd));
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, true);
@@ -1793,13 +1892,18 @@ impl Drop for EvaluationGuard {
     }
 }
 
-fn evaluate(app: &impl AutomationHost) -> Result<()> {
+pub(crate) fn evaluate(app: &impl AutomationHost) -> Result<()> {
     if EVALUATING.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
     let _guard = EvaluationGuard;
     let now = Utc::now();
     for automation in automation_store::list()? {
+        // A bot's duty wakes only while Bots is on and its bot is listed and
+        // not paused; a paused bot's due runs are skipped, not run late (PRO-471).
+        if crate::bots::duties::is_duty(&automation) && !crate::bots::duties::may_wake(app, &automation, now) {
+            continue;
+        }
         // One with a first check is evaluated on a thread of its own, so its
         // check never holds up the others (PRO-484).
         if precheck::evaluate_apart(app, &automation, now) {

@@ -87,7 +87,7 @@ pub fn guards(command: &str) -> bool {
 /// The owner's writes to a bot's role and memory (PRO-470) are a person's
 /// too: what a bot is told comes from them.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 11] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget"];
+pub const GUARDED_BOTS: [&str; 18] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -116,6 +116,8 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
             let memory_on = patch.get("memoryOff").and_then(Value::as_bool) == Some(false);
             memory_on || (widens && params[GIVES_MORE].as_bool() != Some(false))
         }
+        // Switching a duty off gives its bot nothing (PRO-471).
+        Some("dutySwitch") => params["params"]["on"].as_bool() != Some(false),
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
     }
