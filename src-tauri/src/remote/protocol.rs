@@ -145,7 +145,7 @@ pub fn served(machine: bool) -> Vec<&'static str> {
     if !machine {
         return CAPABILITIES.to_vec();
     }
-    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8]).collect()
+    CAPABILITIES.iter().copied().filter(|capability| !super::machine::WITHHELD.contains(capability)).chain([super::machine::MACHINE, super::machine::MACHINE_2, super::machine::MACHINE_3, super::machine::MACHINE_4, super::machine::MACHINE_5, super::machine::MACHINE_6, super::machine::MACHINE_7, super::machine::MACHINE_8, super::machine::MACHINE_9]).collect()
 }
 
 /// Authority an attachment grants, from the API's `authority` (`manage` →
@@ -419,6 +419,9 @@ pub const METHODS: &[Method] = &[
     method("session.usage", "machine/8", Participate, false),
     method("session.prepareContinuation", "machine/8", Participate, false),
     method("session.checkFailures", "machine/8", Manage, false),
+    // PRO-487: where the machine listens and whether it answers public
+    // callers. It opens or closes ports there, so it is the manager's.
+    method("machine.setListen", "machine/9", Manage, false),
 ];
 
 /// Method prefixes of a namespace: `collab/1` spans presence, notes and
@@ -457,6 +460,7 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         "machine/6" => &["machine.browse", "machine.addProject", "machine.removeProject", "machine.cloneProject", "machine.cloneStatus", "machine.cloneCancel"],
         "machine/7" => &["machine.sessionActions", "machine.runAction", "machine.setupRerun", "machine.setupStop"],
         "machine/8" => &["session.usage", "session.prepareContinuation", "session.checkFailures"],
+        "machine/9" => &["machine.setListen"],
         "agent-commands/1" => &["session.steer", "session.stop", "session.decide"],
         FOLLOW_UPS => &[FOLLOW_UP_METHOD],
         _ => &[],
@@ -820,7 +824,7 @@ mod tests {
         // A machine/2 client is granted what it asked for, and nothing of machine/3.
         let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/2"]}), &machine).unwrap();
         assert_eq!(older, vec!["machine/1", "machine/2"]);
-        let refused = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/9"]}), &machine).unwrap_err();
+        let refused = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/99"]}), &machine).unwrap_err();
         assert_eq!(refused.code, "update_required");
         let data = refused.data.clone().expect("update_required carries data");
         assert_eq!(data["runtimeVersion"], env!("CARGO_PKG_VERSION"));
@@ -847,6 +851,19 @@ mod tests {
         }
         let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/6"]}), &machine).unwrap();
         assert_eq!(older, vec!["machine/1", "machine/6"], "an older desktop is not handed machine/8");
+    }
+
+    /// PRO-487: `machine/9` is offered by a machine only, and choosing where
+    /// it listens is the manager's.
+    #[test]
+    fn machine_9_is_a_machines_listen_choice_for_its_manager() {
+        let (workspace, machine) = (served(false), served(true));
+        assert!(machine.contains(&"machine/9") && !workspace.contains(&"machine/9"));
+        let method = find_method("machine.setListen").unwrap();
+        assert_eq!((method.capability, method.authority, method.idempotent), ("machine/9", Manage, false));
+        assert!(namespace_prefixes("machine/9").contains(&"machine.setListen"));
+        let older = negotiate(&json!({"protocol": PROTOCOL, "want": ["machine/1", "machine/8"]}), &machine).unwrap();
+        assert_eq!(older, vec!["machine/1", "machine/8"], "an older desktop is not handed machine/9");
     }
 
     /// PRO-351: `machine/6` is offered by a machine only, and every one of

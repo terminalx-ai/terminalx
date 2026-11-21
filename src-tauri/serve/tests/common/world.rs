@@ -551,7 +551,7 @@ pub async fn pair_with(code: &MachineCode, endpoint: &str, secret: [u8; 32]) -> 
     let mut code = code.clone();
     code.direct_endpoints.insert(0, endpoint.to_string());
     let (_cancel, cancelled) = watch::channel(false);
-    let me = pair::Me { client_secret: &secret, label: OPERATOR_LABEL, platform: "macos" };
+    let me = pair::Me { client_secret: &secret, label: OPERATOR_LABEL, platform: "macos", relay_user: None };
     let outcome = pair::pair(&code, me, PAIRING_WAIT, cancelled).await.unwrap_or_else(|error| panic!("the pairing client failed (not a refusal): {error:#}"));
     outcome.map(|paired| paired.described)
 }

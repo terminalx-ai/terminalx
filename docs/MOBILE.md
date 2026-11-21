@@ -143,6 +143,13 @@ same E2EE and RPC pipeline as relay; it is not a lower-security mode. Both
 paths terminate at the Mac's one runtime listener and one persistent host key,
 not transport-specific listeners or identities.
 
+The listener is bound where `machines.listen` says (PRO-487; docs/MACHINES.md,
+"As built (PRO-487)"): no port under "Relay only", otherwise the Tailscale,
+private or all addresses chosen. A pairing offer carries only addresses that
+are bound, so with "Relay only" a phone pairs and connects through the relay.
+A connection from a public source address is refused unless
+`machines.allowPublic` is on.
+
 The iOS build includes `NSLocalNetworkUsageDescription`. The app requests Local
 Network access just in time when the user pairs or connects to a LAN address,
 explains why it is needed, and presents a Settings recovery action after denial.

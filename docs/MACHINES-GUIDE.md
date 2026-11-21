@@ -188,6 +188,32 @@ When it is on:
 A computer you allow can do here what you can: start sessions, open terminals,
 change files. Allow only computers you own.
 
+### Where this Mac listens
+
+**Where it listens** decides which addresses this Mac opens for paired
+computers and phones (TCP port 6768). It shows whether or not the switch is
+on, since your phones use the same addresses:
+
+- **Relay only**: no port. They reach this Mac through the TerminalX relay,
+  end-to-end encrypted. Turning the switch on for the first time chooses it
+  when you are signed in and nothing is paired yet. Signed out, there is no
+  relay, so it chooses **Local network** instead. With a phone or computer
+  already paired, nothing changes until you choose. Sharing a session through
+  the relay works under Relay only; a local-network-only share needs another
+  choice.
+- **Tailscale**: this Mac's Tailscale address only.
+- **Local network**: its private network and Tailscale addresses.
+- **All interfaces**: every address, public ones included.
+
+Whatever you choose, a connection that comes from a public address is refused
+unless you tick **Answer callers from public addresses** under All
+interfaces. A Mac that was already operated before this setting existed keeps
+listening as it did; if it has a public address, the page asks once whether to
+keep it or close it. The same block says which user TerminalX runs as. A
+paired machine's page (Settings → Machines → the machine) shows the same for
+that machine under **Listening and privileges**, and a computer that manages
+it can change where it listens from there.
+
 ## Data privacy mode
 
 Data privacy mode turns Machines off on this Mac in both directions: no other

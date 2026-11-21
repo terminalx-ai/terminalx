@@ -89,6 +89,16 @@ pub struct MachinesSettings {
     /// "Let other computers operate this Mac": off until the person turns it
     /// on. Off, the runtime opens no listener and registers nothing.
     pub allow_operating: bool,
+    /// Where TCP 6768 listens while something hosts (PRO-487,
+    /// `crate::listen`): the runtime's listener and the window's phone
+    /// listener both follow it. Absent until the person chooses: an install
+    /// that listened before the setting existed keeps every interface.
+    #[serde(deserialize_with = "crate::listen::lenient", skip_serializing_if = "Option::is_none")]
+    pub listen: Option<crate::listen::Listen>,
+    /// Whether callers from public addresses are answered. Absent until the
+    /// person answers; until then they are refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_public: Option<bool>,
 }
 
 /// Paired phones and this Mac (docs/PAIRING-APPROVAL.md).

@@ -51,8 +51,8 @@ if (!process.env.MACHINES_SHOTS) await writeFile(join(output, ".gitignore"), "*\
 
 const ALL = ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "lifecycle/1", "agents/1", "agent-pty/1",
   "composer/1", "composer/2", "composer/3", "composer/4", "ports/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1",
-  "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8"];
-const OLDER = ALL.filter((capability) => capability !== "machine/4" && capability !== "machine/6" && capability !== "machine/7" && capability !== "machine/8");
+  "machine/1", "machine/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8", "machine/9"];
+const OLDER = ALL.filter((capability) => capability !== "machine/4" && capability !== "machine/6" && capability !== "machine/7" && capability !== "machine/8" && capability !== "machine/9");
 
 // Runs in the page, after the stub.
 const fixture = `(() => {
@@ -141,10 +141,17 @@ const fixture = `(() => {
     notify(sub.connectionId, "pty.output", { subscriptionId: sub.id, data: b64("\\r\\nError: the device code expired before it was used.\\r\\n"), offset: sub.offset });
     notify(sub.connectionId, "pty.exit", { subscriptionId: sub.id, code });
   };
+  let hosting = { choice: "relay", chosen: true, addresses: [], allowPublic: false, askPublic: false, refusedPublicAt: null };
   answers.cloud_remote_send = ({ connectionId, frame }) => {
     const { method, id, params } = frame;
     if (method === "runtime.agents") reply(connectionId, id, agents[connectionId]);
     else if (method === "lifecycle.resources") reply(connectionId, id, resources(connectionId));
+    // PRO-487: dev-server says where it listens and who it runs as; old-box (an older runtime) says neither.
+    else if (method === "machine.describe") reply(connectionId, id, connectionId === "conn-" + ids.dev ? { machineId: ids.dev, name: "dev-server", listen: hosting, runsAs: { user: "paresh", root: false, passwordlessSudo: false } } : { name: "old-box" });
+    else if (method === "machine.setListen") {
+      hosting = { ...hosting, choice: params.listen, chosen: true, allowPublic: params.allowPublic === true, askPublic: false, addresses: params.listen === "relay" ? [] : params.listen === "all" ? ["0.0.0.0:6768"] : ["192.168.1.20:6768"] };
+      reply(connectionId, id, { listen: hosting });
+    }
     else if (method === "machine.updateStatus") reply(connectionId, id, status);
     else if (method === "machine.projects") reply(connectionId, id, { projects: connectionId === "conn-" + ids.dev ? projects : [] });
     else if (method === "session.list") reply(connectionId, id, { sessions: connectionId === "conn-" + ids.dev ? devSessions : [] });

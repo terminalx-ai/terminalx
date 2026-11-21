@@ -11,6 +11,10 @@
 //! - Credentials rotate on every connection and expire after 90 days unused;
 //!   Disconnect holds a computer off; the activity log records it all.
 //! - Data privacy mode opens no listener and makes no machine connection.
+//! - A caller from a public address is refused under every listen choice
+//!   unless the person allowed public callers; "Relay only" opens no port;
+//!   a computer pairs through the relay only with the live code's invite and
+//!   the person's Allow (PRO-487).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -317,6 +321,294 @@ async fn the_activity_log_records_what_a_computer_did_and_nothing_secret() {
 }
 
 /// Data privacy mode turns off being operated and operating (PRO-357). It is
+fn plan(choice: crate::listen::Listen, allow_public: bool) -> crate::listen::Plan {
+    crate::listen::Plan { choice, chosen: true, allow_public, public_unanswered: false }
+}
+
+/// PRO-487: whatever the listener is bound to, a connection whose source is
+/// a public address is refused before anything is read from it, unless the
+/// person allowed public callers. Local, private and Tailscale sources are
+/// answered throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed() {
+    use crate::listen::Listen;
+    let rig = rig(TTL);
+    let source = |ip: &str| -> std::net::SocketAddr { format!("{ip}:50000").parse().unwrap() };
+    let public = ["203.0.113.7", "8.8.8.8", "100.128.0.1", "172.32.0.1"];
+    let nearby = ["127.0.0.1", "192.168.1.20", "10.1.2.3", "172.16.4.5", "100.93.49.78", "169.254.1.2"];
+
+    // Before anyone chose (an install from before the setting): refused.
+    for ip in public {
+        assert!(!rig.host.answers(source(ip)), "{ip} before any choice");
+    }
+    for choice in Listen::EVERY {
+        // The listeners themselves are another test's; here, who is answered.
+        rig.host.state.lock().unwrap().plan = Some(plan(choice, false));
+        for ip in public {
+            assert!(!rig.host.answers(source(ip)), "{ip} under {choice:?}");
+        }
+        for ip in nearby {
+            assert!(rig.host.answers(source(ip)), "{ip} under {choice:?}");
+        }
+        assert!(!rig.host.answers("[2001:db8::1]:50000".parse().unwrap()), "a public IPv6 source under {choice:?}");
+        assert!(rig.host.answers("[fd7a:115c:a1e0::1]:50000".parse().unwrap()), "Tailscale's IPv6 range under {choice:?}");
+    }
+    // The refusal is said in the status and kept for the next start.
+    let status = rig.host.status();
+    let listen = status.listen.expect("the status says where it listens");
+    assert!(!listen.allow_public && listen.refused_public_at.is_some(), "{listen:?}");
+    let kept = eventually("the refusal is kept on disk", || std::fs::read(rig.host.data_dir.join(super::DIR).join(super::PUBLIC_CALLERS_FILE)).ok()).await;
+    let kept_at = serde_json::from_slice::<Value>(&kept).unwrap()["refusedAt"].as_i64().expect("when it was refused");
+    assert!(kept_at <= listen.refused_public_at.unwrap(), "the first refusal of the hour is the one kept");
+    assert!(super::read_refused_public(&rig.host.data_dir).is_some(), "read back at the next start");
+
+    // Only the explicit choice answers them.
+    rig.host.state.lock().unwrap().plan = Some(plan(Listen::All, true));
+    for ip in public {
+        assert!(rig.host.answers(source(ip)), "{ip} once public callers are allowed");
+    }
+    assert!(rig.host.status().listen.unwrap().allow_public);
+
+    // Over the real socket: a local caller is still served, a refusal having changed nothing for it.
+    rig.host.state.lock().unwrap().plan = Some(plan(Listen::All, false));
+    let mut computer = connected(&rig, "desk", [21; 32], "desk-token-0000000000000000", &["machine/1"]).await;
+    let described = computer.call("d", "machine.describe", json!({})).await;
+    assert_eq!(described["ok"], true, "{described}");
+    assert_eq!(described["result"]["listen"]["choice"], "all", "its page reads where it listens: {described}");
+    assert_eq!(described["result"]["listen"]["allowPublic"], false);
+    assert!(described["result"]["runsAs"]["user"].as_str().is_some_and(|user| !user.is_empty()), "and who it runs as: {described}");
+}
+
+/// PRO-487: the install that listened before the setting existed keeps every
+/// interface, refuses public callers, and asks once whether to keep its
+/// public address; answering either way ends the question.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_machine_from_before_the_setting_asks_once_about_its_public_address() {
+    use crate::listen::{Listen, Plan};
+    let rig = rig(TTL);
+    let before = Plan::of(&crate::store::settings::MachinesSettings { allow_operating: true, listen: None, allow_public: None });
+    let public: std::net::Ipv4Addr = "203.0.113.7".parse().unwrap();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(before);
+        state.interfaces = vec![std::net::Ipv4Addr::LOCALHOST, public];
+    }
+    let listen = rig.host.status().listen.unwrap();
+    assert_eq!((listen.choice, listen.chosen, listen.allow_public, listen.ask_public), (Listen::All, false, false, true), "{listen:?}");
+    assert!(!rig.host.answers("198.51.100.9:4000".parse().unwrap()), "refused until the person answers");
+
+    // Behind NAT nothing is asked until a public caller was refused. (One
+    // rig a test: a second would wait on the first's temp home.)
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.refused_public_at = None;
+        state.interfaces = vec![std::net::Ipv4Addr::LOCALHOST, "192.168.1.20".parse().unwrap()];
+    }
+    assert!(!rig.host.status().listen.unwrap().ask_public);
+    assert!(!rig.host.answers("198.51.100.9:4000".parse().unwrap()));
+    assert!(rig.host.status().listen.unwrap().ask_public, "a public caller reached it and was refused");
+
+    // Keep the public address, or close it: asked once.
+    for (choice, allow_public) in [(Listen::All, true), (Listen::Lan, false)] {
+        rig.host.state.lock().unwrap().plan = Some(plan(choice, allow_public));
+        let listen = rig.host.status().listen.unwrap();
+        assert_eq!((listen.chosen, listen.ask_public, listen.allow_public), (true, false, allow_public), "{listen:?}");
+    }
+}
+
+/// PRO-487 (security review): a connection let in under one plan does not
+/// outlive it. Withdrawing "answer public callers" closes the direct
+/// connections and phones from public addresses at once, and leaves the
+/// rest; a connection that finishes its handshake after its listener closed,
+/// or from an address the plan no longer answers, is not let in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn withdrawing_public_callers_closes_the_ones_already_in_and_late_handshakes_are_refused() {
+    use super::{Tracked, Via};
+    use crate::listen::Listen;
+    use crate::machine_wire::ComputerRoute;
+    let rig = rig(TTL);
+    let listener: std::net::SocketAddr = format!("0.0.0.0:{}", rig.port).parse().unwrap();
+    let via = |peer: &str| Via { listener, peer: peer.parse().unwrap() };
+    let (public_tx, mut public_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (private_tx, mut private_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (phone_tx, mut phone_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, true));
+        state.connections.entry("far".into()).or_default().push(Tracked { id: 901, cancel: public_tx, route: ComputerRoute::Lan, via: Some(via("203.0.113.7:50000")) });
+        state.connections.entry("near".into()).or_default().push(Tracked { id: 902, cancel: private_tx, route: ComputerRoute::Lan, via: Some(via("192.168.1.20:50000")) });
+        state.connections.entry("relayed".into()).or_default().push(Tracked { id: 903, cancel: relay_tx, route: ComputerRoute::Relay, via: None });
+        state.phones.insert(904, (Some(via("198.51.100.9:50000")), phone_tx));
+        // Allowed: nothing is closed.
+        state.close_refused_callers();
+    }
+    assert!(public_rx.try_recv().is_err() && phone_rx.try_recv().is_err(), "public callers stay while they are allowed");
+
+    // Withdrawn, as the settings file says on the next pass, or machine.setListen at once.
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, false));
+        state.close_refused_callers();
+    }
+    assert!(public_rx.try_recv().is_ok(), "the computer from a public address is closed");
+    assert!(phone_rx.try_recv().is_ok(), "and the phone from one");
+    assert!(private_rx.try_recv().is_err(), "a private caller stays");
+    assert!(relay_rx.try_recv().is_err(), "a relay connection has no address to judge and stays");
+    rig.host.state.lock().unwrap().connections.retain(|id, _| !["far", "near", "relayed"].contains(&id.as_str()));
+    rig.host.state.lock().unwrap().phones.remove(&904);
+
+    // A handshake that ends after the plan changed is judged by the new plan.
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(Some(via("203.0.113.7:50001")), cancel).is_none(), "a public phone is not let in");
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    let phone = rig.host.track_phone(Some(via("192.168.1.20:50001")), cancel).expect("a private phone is");
+    rig.host.untrack_phone(phone);
+    // And by its listener: one closed while it handshook lets nothing in.
+    let gone = Via { listener: "192.168.1.20:6768".parse().unwrap(), peer: "192.168.1.30:50002".parse().unwrap() };
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(Some(gone), cancel).is_none(), "its listener is closed");
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.track_phone(None, cancel).map(|id| rig.host.untrack_phone(id)).is_some(), "a relay phone has no listener to judge");
+}
+
+/// PRO-487 (security review): an unused pairing code's relay invite is
+/// revoked even if the relay was not there when the code ended. Its device
+/// stays queued, and is never taken for a phone, until the relay confirms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ended_invite_waits_for_the_relay_to_confirm_its_revocation() {
+    let rig = rig(TTL);
+    rig.host.code_with_relay_for_test("computer-unused");
+    // Replaced by a new code with no relay to tell: kept, not forgotten.
+    rig.host.state.lock().unwrap().pairing.create(super::now_ms(), None, None).unwrap();
+    rig.host.retire_code_invites();
+    assert!(rig.host.unrevoked.lock().unwrap().contains_key("computer-unused"), "queued until a relay confirms it");
+    assert_eq!(rig.host.unrevoked.lock().unwrap().get("computer-unused"), Some(&false), "nothing in flight without a registered relay");
+    use crate::remote::host::MachineRoutes;
+    assert!(rig.host.is_computer("computer-unused"), "its connections are never handed on as a phone's");
+    // Every later pass tries again; still nothing to send it to.
+    rig.host.retire_code_invites();
+    assert!(rig.host.unrevoked.lock().unwrap().contains_key("computer-unused"));
+}
+
+/// PRO-487: the listeners follow the choice. "Relay only" opens no port and
+/// closes the connections that came in on one; "Local network" binds private
+/// and Tailscale addresses only, never loopback or a public one; the
+/// advertised endpoints are the bound addresses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_listen_choice_decides_what_is_bound_and_relay_only_opens_no_port() {
+    use crate::listen::Listen;
+    let mut rig = rig(TTL);
+    let interfaces = crate::listen::interfaces();
+    let mut computer = connected(&rig, "desk", [22; 32], "desk-token-0000000000000000", &["machine/1"]).await;
+    let all_port = rig.port;
+
+    // Relay only: nothing listens, and the computer that came in directly is closed.
+    rig.host.listen_for_test(plan(Listen::Relay, false), interfaces.clone()).unwrap();
+    assert!(computer.closed_within(Duration::from_secs(5)).await, "its listener closed, and it with it");
+    let status = rig.host.status();
+    assert!(status.listening.is_none(), "no listener: {:?}", status.listening);
+    let listen = status.listen.unwrap();
+    assert_eq!((listen.choice, listen.addresses.len()), (Listen::Relay, 0), "{listen:?}");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", all_port)).is_err(), "the port is closed");
+    assert!(rig.host.direct_endpoints().is_empty(), "no address is advertised, not even loopback");
+    // No listener and no relay registration: a code no computer could use is not made.
+    let refused = rig.host.create_code(None).unwrap_err();
+    assert_eq!(refused.code, "not_reachable", "{refused:?}");
+    assert!(refused.recovery.unwrap().contains("terminalx-serve login"));
+    assert!(rig.host.status().code.is_none());
+
+    // Local network: private and Tailscale addresses only.
+    rig.host.listen_for_test(plan(Listen::Lan, false), interfaces.clone()).unwrap();
+    let wanted = crate::listen::bind_addresses(Listen::Lan, &interfaces);
+    let bound: Vec<std::net::SocketAddr> = rig.host.status().listen.unwrap().addresses.iter().map(|address| address.parse().unwrap()).collect();
+    assert_eq!(bound.iter().map(|address| address.ip()).collect::<Vec<_>>(), wanted.iter().map(|ip| std::net::IpAddr::V4(*ip)).collect::<Vec<_>>());
+    assert!(bound.iter().all(|address| !address.ip().is_loopback() && !address.ip().is_unspecified() && !crate::listen::is_public(address.ip())), "{bound:?}");
+    if let Some(port) = bound.first().map(std::net::SocketAddr::port) {
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "loopback is not a local-network address");
+        let endpoints = rig.host.direct_endpoints();
+        assert!(endpoints.iter().all(|endpoint| !endpoint.contains("127.0.0.1")) && !endpoints.is_empty(), "{endpoints:?}");
+    }
+
+    // Tailscale: its address only (none on a computer without Tailscale).
+    rig.host.listen_for_test(plan(Listen::Tailscale, false), interfaces.clone()).unwrap();
+    let bound: Vec<std::net::SocketAddr> = rig.host.status().listen.unwrap().addresses.iter().map(|address| address.parse().unwrap()).collect();
+    assert!(bound.iter().all(|address| crate::listen::is_tailscale(address.ip())), "{bound:?}");
+    assert_eq!(bound.len(), crate::listen::bind_addresses(Listen::Tailscale, &interfaces).len());
+
+    // All interfaces, chosen in so many words: the wildcard again, and a code names its addresses.
+    rig.host.listen_for_test(plan(Listen::All, false), interfaces).unwrap();
+    rig.port = rig.host.port_for_test();
+    assert_eq!(rig.host.status().listen.unwrap().addresses, vec![format!("0.0.0.0:{}", rig.port)]);
+    let code = wire::MachineCode::decode(&rig.host.create_code(None).unwrap().code).unwrap();
+    assert!(!code.direct_endpoints.is_empty() && code.relay.is_none(), "no relay registration here: {:?}", code.direct_endpoints);
+    let mut again = ask(&rig, [22; 32], "desk-token-0000000000000000").await;
+    assert_eq!(again.answer(Duration::from_secs(5)).await, Answer::In, "it connects again where the machine listens now");
+}
+
+/// PRO-487: pairing by code through the relay, for a machine with no
+/// listener. Only the relay device the live code's invite was made for may
+/// ask; nothing is granted before Allow; the computer's record keeps that
+/// relay device, so it is admitted through the relay from then on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_computer_pairs_through_the_relay_only_with_the_codes_invite_and_allow() {
+    use crate::remote::host::{MachineRoutes, RelayAsking};
+    let rig = rig(TTL);
+    let secret = [23; 32];
+    let asking = |device: &str, token: &str| RelayAsking {
+        relay_device_id: device.into(),
+        token: token.into(),
+        client_key_b64: public_b64(secret),
+        label: Some("Test\u{7}MacBook".into()),
+        platform: Some("macos".into()),
+    };
+    let token = rig.host.code_with_relay_for_test("computer-invited");
+    assert!(rig.host.is_computer("computer-invited"), "its connection is the machine's, never passed on as a phone's");
+    assert!(!rig.host.is_computer("computer-other"));
+
+    // Another relay device with the code's token is not a pairing, and is not admitted.
+    assert!(rig.host.clone().pair_computer(asking("computer-other", &token)).await.unwrap().is_none());
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert_eq!(rig.host.admit_computer("computer-other", &token, &public_b64(secret), cancel).unwrap().unwrap_err(), wire::REFUSED_CODE_INACTIVE);
+    // The invite's device with a wrong token is refused, as on the direct route.
+    assert_eq!(rig.host.clone().pair_computer(asking("computer-invited", "not-the-codes-token-000000")).await.unwrap(), Some(Err(wire::REFUSED_CODE_INACTIVE)));
+
+    // The right one waits for the person; nothing is written meanwhile.
+    let waiting = tokio::spawn(rig.host.clone().pair_computer(asking("computer-invited", &token)));
+    let pending = eventually("the machine asks the person", || rig.host.status().pending).await;
+    assert_eq!((pending.transport.as_str(), pending.label.as_str()), ("relay", "TestMacBook"), "{pending:?}");
+    assert!(rig.host.registry().list().unwrap().is_empty(), "nothing is granted before Allow");
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.admit_computer("computer-invited", &token, &public_b64(secret), cancel).unwrap().is_err(), "not admitted before Allow");
+
+    let approve = rig.host.clone();
+    let request_id = pending.request_id.clone();
+    tokio::task::spawn_blocking(move || approve.approve(&request_id)).await.unwrap().unwrap();
+    assert_eq!(waiting.await.unwrap().unwrap(), Some(Ok(())));
+    let computers = rig.host.registry().list().unwrap();
+    assert_eq!(computers.len(), 1);
+    assert_eq!(computers[0].relay_device_id.as_deref(), Some("computer-invited"), "its relay device from now on");
+    assert_eq!(computers[0].client_public_key_b64.as_deref(), Some(public_b64(secret).as_str()), "pinned to the key it paired with");
+
+    // Admitted through the relay as any paired computer, with its key only.
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    let (id, tracked) = rig.host.admit_computer("computer-invited", &token, &public_b64(secret), cancel).unwrap().unwrap();
+    assert_eq!(id, computers[0].id);
+    rig.host.release_computer(&id, tracked);
+    let (cancel, _closed) = tokio::sync::mpsc::unbounded_channel();
+    assert!(rig.host.admit_computer("computer-invited", &token, &public_b64([24; 32]), cancel).unwrap().is_err(), "another key with its token");
+    assert!(rig.host.status().code.is_none(), "the code is spent");
+
+    // A computer that gives up (its relay connection closes) leaves the request.
+    let token = rig.host.code_with_relay_for_test("computer-second");
+    let waiting = tokio::spawn(rig.host.clone().pair_computer(asking("computer-second", &token)));
+    eventually("the second request", || rig.host.status().pending).await;
+    waiting.abort();
+    let _ = waiting.await;
+    eventually("the request is left when the computer gives up", || rig.host.status().pending.is_none().then_some(())).await;
+    assert_eq!(rig.host.registry().list().unwrap().len(), 1, "nothing was granted to it");
+}
+
 /// one switch per process, so the check runs in a child of its own.
 #[test]
 fn data_privacy_mode_opens_no_listener_and_makes_no_machine_connection() {

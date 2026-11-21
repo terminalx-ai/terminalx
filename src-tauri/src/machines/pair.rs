@@ -3,6 +3,12 @@
 //! turn, run E2EE v2 pinned to the code's key with this installation's
 //! client key, prove the code's token inside `e2ee_auth` with this
 //! computer's name, and wait for the machine's answer.
+//!
+//! When no direct endpoint answers and the code carries a relay invite
+//! (PRO-487: a machine set to "Relay only", or one on another network), the
+//! same proof and the same wait go through the relay
+//! (`remote::machine_client::pair_through_relay`), and this computer keeps a
+//! relay credential for the machine.
 
 use std::time::Duration;
 
@@ -61,11 +67,17 @@ pub struct Me<'a> {
     pub client_secret: &'a [u8; 32],
     pub label: &'a str,
     pub platform: &'a str,
+    /// The TerminalX account signed in on this computer, if one is: a relay
+    /// credential is kept for it, so pairing through the relay needs one.
+    pub relay_user: Option<&'a str>,
 }
 
 /// Paired: what the machine said about itself after Allow, if it answered.
 pub struct Paired {
     pub described: Option<MachineIdentity>,
+    /// This computer's relay credential for the machine, when it paired
+    /// through the relay.
+    pub relay: Option<crate::remote::machine_client::RelayCredential>,
 }
 
 type Socket = crate::data_privacy::Socket;
@@ -147,7 +159,10 @@ pub async fn pair(code: &MachineCode, me: Me<'_>, approval_wait: Duration, mut c
             }
         }
         let Some(mut connection) = connection else {
-            return Ok(Err(Failure::new("unreachable", "No address of the machine answered. Check that both computers are on the same network or Tailscale.")));
+            return Ok(match &code.relay {
+                Some(invite) => through_relay(code, invite, &me, approval_wait).await,
+                None => Err(Failure::new("unreachable", "No address of the machine answered. Check that both computers are on the same network or Tailscale.")),
+            });
         };
         let transcript = connection.session.transcript_hash_b64.clone();
         // The token goes only inside E2EE, with the name the dialog shows.
@@ -167,11 +182,31 @@ pub async fn pair(code: &MachineCode, me: Me<'_>, approval_wait: Duration, mut c
         }
         let described = describe(&mut connection).await;
         let _ = connection.socket.close(None).await;
-        Ok(Ok(Paired { described }))
+        Ok(Ok(Paired { described, relay: None }))
     };
     tokio::select! {
         outcome = attempt => outcome,
         _ = cancel.wait_for(|cancelled| *cancelled) => Ok(Err(Failure::cancelled())),
+    }
+}
+
+/// The code's relay invite, when no direct endpoint answered.
+async fn through_relay(code: &MachineCode, invite: &crate::machine_wire::MachineRelay, me: &Me<'_>, approval_wait: Duration) -> Result<Paired, Failure> {
+    use crate::remote::machine_client::{pair_through_relay, RelayPairer, RelayPairing};
+    let direct = if code.direct_endpoints.is_empty() { "This machine opens no port: it is reached through the TerminalX relay." } else { "No address of the machine answered, so it is reached through the TerminalX relay." };
+    let Some(user_id) = me.relay_user else {
+        return Err(Failure::new("sign-in-required", format!("{direct} Sign in to TerminalX on this computer, then pair again.")));
+    };
+    let pairer = RelayPairer { public_key_b64: &code.public_key_b64, device_token: &code.device_token, client_secret: *me.client_secret, label: me.label, platform: me.platform, user_id };
+    match pair_through_relay(invite, pairer, approval_wait).await {
+        RelayPairing::Paired { credential, described } => Ok(Paired { described: described.as_ref().and_then(identity_of), relay: Some(credential) }),
+        RelayPairing::Refused(reason) => Err(Failure::refused(&reason)),
+        RelayPairing::CodeInactive => Err(Failure::code_inactive()),
+        RelayPairing::NotAnswered => Err(Failure::refused("not-approved")),
+        RelayPairing::Unreachable(detail) => {
+            log::debug!("machines: pairing through the relay: {detail}");
+            Err(Failure::new("unreachable", if code.direct_endpoints.is_empty() { "The machine did not answer through the TerminalX relay. Check that it is running and signed in to TerminalX." } else { "No address of the machine answered, and it did not answer through the TerminalX relay." }))
+        }
     }
 }
 
@@ -195,6 +230,11 @@ async fn describe(connection: &mut Connection) -> Option<MachineIdentity> {
     if let Err(error) = connection.call("pair-projects", "machine.projects", json!({})).await {
         log::debug!("machines: machine.projects after pairing: {error:#}");
     }
+    identity_of(&described)
+}
+
+/// What `machine.describe` said, as the record keeps it.
+fn identity_of(described: &Value) -> Option<MachineIdentity> {
     Some(MachineIdentity {
         machine_id: described["machineId"].as_str()?.into(),
         name: described["name"].as_str()?.into(),

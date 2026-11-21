@@ -272,6 +272,37 @@ pub struct Status {
     /// before PRO-359, which served none.
     #[serde(default)]
     pub phones: PhoneStatus,
+    /// Where it listens and who it answers (PRO-487). Absent from a runtime
+    /// before PRO-487, which bound every interface and answered any caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<ListenStatus>,
+    /// Who the runtime runs as (PRO-487). Absent from an older runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_as: Option<crate::listen::RunsAs>,
+}
+
+/// Where the runtime listens for direct connections now (PRO-487): the
+/// answer in [`Status`], in `machine.describe` and of `machine.setListen`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenStatus {
+    /// `machines.listen`, or every interface while nobody has chosen.
+    pub choice: crate::listen::Listen,
+    /// The person chose it. False on an install that listened before the
+    /// setting existed and keeps every interface until they choose.
+    pub chosen: bool,
+    /// The addresses bound now, as `192.168.1.20:6768`; `0.0.0.0:6768` is
+    /// every interface. Empty while nothing listens.
+    pub addresses: Vec<String>,
+    /// Callers from public addresses are answered.
+    pub allow_public: bool,
+    /// The one-time question is open (decision 3): this install listened on
+    /// every interface before the setting, a public caller can reach it or
+    /// tried to, and nobody has said whether to keep answering them. They
+    /// are refused meanwhile.
+    pub ask_public: bool,
+    /// When a public caller was last refused, if one was.
+    pub refused_public_at: Option<i64>,
 }
 
 /// Phones the runtime serves while no window takes them (PRO-359).
@@ -470,8 +501,10 @@ pub struct MachineIdentity {
     pub version: String,
 }
 
-/// The relay half of a machine's code, in the shape of a phone offer's
-/// (`remote::client::RelayOffer`). No code carries one until PRO-344.
+/// The relay half of a machine's code (PRO-487): a single-use invite for a
+/// fresh relay device, so a machine with no listener open, or one this
+/// computer cannot reach directly, is paired through the relay. A machine
+/// registered with the relay puts one in every code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineRelay {
@@ -479,6 +512,9 @@ pub struct MachineRelay {
     pub cell_url: String,
     pub assignment_epoch: u64,
     pub relay_host_id: String,
+    /// The relay device the invite is for (PRO-487): the computer's on the
+    /// relay from then on, kept with its record on both sides.
+    pub relay_device_id: String,
     pub invite_token: String,
     pub invite_expires_at: i64,
 }
@@ -571,6 +607,17 @@ impl MachineCode {
         }
         if decoded.direct_endpoints.is_empty() && decoded.relay.is_none() {
             bail!("the code names no way to reach the machine");
+        }
+        if let Some(relay) = &decoded.relay {
+            let https = |origin: &str| url::Url::parse(origin).is_ok_and(|url| matches!(url.scheme(), "https" | "http") && url.host_str().is_some());
+            if relay.relay_host_id != decoded.machine.machine_id
+                || !https(&relay.director_url)
+                || !https(&relay.cell_url)
+                || !crate::remote::host::valid_opaque_id(&relay.relay_device_id)
+                || URL_SAFE_NO_PAD.decode(&relay.invite_token).map(|token| token.len()) != Ok(32)
+            {
+                bail!("the code's relay invite is invalid");
+            }
         }
         if decoded.direct_endpoints.len() > 64
             || !decoded.direct_endpoints.iter().all(|endpoint| {
@@ -693,6 +740,8 @@ mod tests {
             code: Some(CodeExpiry { expires_at: 9 }),
             paused_until: None,
             phones: Default::default(),
+            listen: None,
+            runs_as: None,
             relay_state: RelayState::Off,
             relay: None,
         };

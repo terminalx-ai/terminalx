@@ -155,6 +155,11 @@ fn start_pair_on_dev_server(dev: &DevServer, hosting_on: bool) -> (Terminal, Mac
     if !hosting_on {
         terminal.wait_for("Let other computers operate this server? [y/N]");
         terminal.type_line("y");
+        // Where to listen (PRO-487): every interface of the container, which its published port forwards to; public callers stay refused.
+        terminal.wait_for("Choice [1]:");
+        terminal.type_line("4");
+        terminal.wait_for("Also answer callers whose own address is public? [y/N]");
+        terminal.type_line("n");
     }
     let code = terminal.code();
     assert_eq!(code.machine.name, "dev-server", "the code names the server by its host name");
