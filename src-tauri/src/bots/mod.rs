@@ -40,6 +40,14 @@ pub const OWNER: &str = "owner";
 /// The place a bot works in when it works for its owner alone, with or without an organisation.
 pub const PERSONAL: &str = "personal";
 pub const OFF_MESSAGE: &str = "Bots are off. Turn them on in Settings → Experimental → Bots.";
+/// Bots need a unix runtime (PRO-489). What holds a bot to its access there,
+/// placing the process that sent a command in the pane it runs in
+/// (`control::Caller`) and the window's proof that a person asked
+/// (`window_consent`), has no Windows counterpart yet: a bot's process that
+/// named no session would pass as its owner. So off unix Bots stays off,
+/// whatever the switch says, rather than half held.
+pub const SUPPORTED: bool = cfg!(unix);
+pub const UNSUPPORTED_MESSAGE: &str = "Bots need macOS or Linux: on Windows TerminalX cannot yet tell a bot's commands from yours.";
 /// Words that name someone or everyone wherever a bot is named, so no bot's slug is one of them.
 pub const RESERVED_SLUGS: [&str; 4] = [OWNER, PERSONAL, "all", "everyone"];
 const DEFAULT_HARNESS: &str = "claude";
@@ -61,7 +69,7 @@ pub enum BotError {
 impl std::fmt::Display for BotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Off => f.write_str(OFF_MESSAGE),
+            Self::Off => f.write_str(off_message()),
             Self::Refused(message) => f.write_str(message),
             Self::NotFound(id) => write!(f, "No bot has the id {id}."),
         }
@@ -352,7 +360,12 @@ fn given<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(deserializer: D)
 }
 
 pub fn enabled() -> bool {
-    crate::store::settings::load().experimental.bots
+    SUPPORTED && crate::store::settings::load().experimental.bots
+}
+
+/// Why Bots is off: the switch, or a system it cannot be held on.
+pub fn off_message() -> &'static str {
+    if SUPPORTED { OFF_MESSAGE } else { UNSUPPORTED_MESSAGE }
 }
 
 /// [`enabled`] for a path taken on every keystroke (the runtime's guard):

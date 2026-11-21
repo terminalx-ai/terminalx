@@ -1947,19 +1947,29 @@ terminalx bots delete <bot> --json
   `create`, `delete`, `resume` and `resume-all` with `forbidden`, for any bot. Its `pause` is
   recorded as that bot (its id in `by`). A command no tab holds is the owner's only from a
   terminal of the person's own, or a TerminalX pane: with neither it is refused those four with
-  `person_required`, and while any bot is paused it starts no work (`bot_paused`; reads such as
-  `machine list` still answer). A command whose process exits, or closes its connection, before
-  the app looks at it is refused with `person_required` (on macOS and Linux alike): let
-  `terminalx` wait for its answer. While Bots is on, the runtime's own calls that change sessions
-  or terminals are taken from the TerminalX window (its process, checked by pid and start time,
-  and carried across a runtime update) and otherwise only from a session no bot works for or a
-  terminal of the person's own; everything else is refused. The limit (PRO-489): a bot's process
-  that has left its tab and runs code of its own choosing, such as one that gives itself a
-  terminal (`script`, an existing tmux server), is not held by this; nor are the runtime's
-  `mobile` and `sharing` calls. The fix is a credential only the window holds.
+  `person_required`, and while any bot is paused it starts no work and does nothing outward
+  (`bot_paused`): no session, run, pipeline start or prompt, and no `issues comment|create|status|
+  assign|label`, `pipelines auto-merge|resolve-conflicts` or `pipelines act` other than `stop` and
+  `refresh` (PRO-489). That holds for a script of your own with no terminal too (launchd, cron, a
+  CI runner): run it from a terminal, or resume the bots first. Reads such as `machine list` still
+  answer. A session that works for a bot does those outward commands only when the bot has full
+  access and is not paused (`forbidden`, or `bot_paused`). A command whose process exits before
+  the app looks at it is refused with `person_required`; on macOS so is one whose process closed
+  its connection first, since the sender can no longer be read there, while on Linux the kernel
+  still names a sender that closed but lives on, and it is placed as usual: let `terminalx` wait
+  for its answer. While Bots is on, the runtime's own calls that change sessions or terminals,
+  and its `mobile` and `sharing` calls, come from the TerminalX window. On a Mac whose window's
+  key is pinned, the window is the process that registered with the key's proof, checked by pid
+  and start time and carried across a runtime update, and no other process makes those calls
+  (PRO-489). Where no key can be pinned (Linux, a server) the window's process is the one that
+  registered from no pane, and the changing calls, and `mobile` and `sharing`, are otherwise
+  taken only from a session no bot works for or a terminal of the person's own. The limit: a bot's process that has left its tab
+  and gives itself a terminal (`script`, an existing tmux server) passes as a person.
   Hiring, resuming, deleting, and raising a bot's access or changing who it reports to are a
   person's, in the TerminalX window on a Mac. Where no window can confirm (a server, Linux),
-  `resume` says so with `person_required` rather than waiting.
+  `resume` and `resume-all` apply at once when run in a terminal of your own (not a TerminalX
+  tab), as pairing does there, and are refused with `person_required` from anywhere else. There
+  the limit above reaches resuming too: a bot's process that gives itself a terminal can resume.
 - A session that works for a bot runs in no wider a permission mode than the bot's access
   allows (full: bypass; ask before acting: Ask every time, or Plan on native Codex, which cannot
   ask; read and report: Plan), and in Plan while the bot is paused. A tab the limit cannot

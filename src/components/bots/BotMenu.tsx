@@ -59,7 +59,7 @@ function useSave(onDone: () => void) {
   };
   const error = failed && (
     <div data-testid="bot-menu-error">
-      <MachineHostError error={failed.message} onRestarted={() => run(failed.action)} className="text-xs" />
+      <MachineHostError error={failed.message} onRestarted={() => run(failed.action)} onFailed={(message) => setFailed({ message, action: failed.action })} className="text-xs" />
     </div>
   );
   return { busy, error, run };

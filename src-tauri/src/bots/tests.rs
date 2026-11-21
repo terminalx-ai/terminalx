@@ -18,6 +18,20 @@ fn changes(events: &mut tokio::sync::broadcast::Receiver<crate::sink::Published>
     std::iter::from_fn(|| events.try_recv().ok()).filter(|published| &*published.event == "bots_changed").count()
 }
 
+/// Off unix Bots stays off with the switch on, and says why (PRO-489):
+/// nothing there can tell a bot's commands from its owner's.
+#[test]
+fn bots_stay_off_where_they_cannot_be_held_to_their_access() {
+    let (_home, sink, _events) = bots_on();
+    assert_eq!(SUPPORTED, cfg!(unix));
+    assert_eq!(enabled(), cfg!(unix));
+    let expected = if cfg!(unix) { OFF_MESSAGE } else { UNSUPPORTED_MESSAGE };
+    assert_eq!((off_message(), BotError::Off.to_string().as_str()), (expected, expected));
+    if !cfg!(unix) {
+        assert_eq!(call(sink.as_ref(), "create", &json!({"roleTemplateId": "cto", "name": "Atlas"})).unwrap_err().to_string(), UNSUPPORTED_MESSAGE);
+    }
+}
+
 #[test]
 fn everything_refuses_while_the_switch_is_off() {
     let _home = crate::store::temp_home();

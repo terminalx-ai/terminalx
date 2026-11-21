@@ -137,7 +137,17 @@ fn status(app: &AppHandle, window: &str) -> ConnectionState {
     let status = state.runtime_supervisor.status(window, runtime.as_deref(), &unattached);
     let keeps = runtime.as_ref().is_some_and(|runtime| super::replace::keeps(runtime.build()));
     let status = judged(status, state.runtime_health.unresponsive(), runtime.as_ref().map(|runtime| runtime.epoch()), keeps);
-    super::replace::shown(&state.runtime_replacement, status)
+    let status = super::replace::shown(&state.runtime_replacement, status);
+    unproven(status, runtime.as_deref().and_then(super::desktop::Desktop::unproven).filter(|_| crate::bots::enabled_cached()))
+}
+
+/// A connected window that the runtime did not take for its window says so
+/// while Bots is on, with what kept it from proving itself (PRO-489).
+fn unproven(status: ConnectionState, why: Option<super::supervisor::UnprovenWindow>) -> ConnectionState {
+    match status {
+        ConnectionState::Connected { epoch, generation, view, outdated, unproven: None } => ConnectionState::Connected { epoch, generation, view, outdated, unproven: why },
+        status => status,
+    }
 }
 
 /// What a window is told: the supervisor's status, unless the runtime
@@ -204,6 +214,22 @@ const COPIED_LOG: u64 = 256 * 1024;
 #[tauri::command]
 pub async fn local_runtime_status(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
     tauri::async_runtime::spawn_blocking(move || status(&app, window.label())).await.map_err(|error| error.to_string())
+}
+
+/// "Try again" on a window the runtime did not take for its window
+/// (PRO-489): register again with the window's proof, reading its key in
+/// Keychain now, once it is unlocked and TerminalX allowed. No request is
+/// replayed; what was refused is asked again by the person.
+#[tauri::command]
+pub async fn local_runtime_prove_window(app: AppHandle, window: tauri::WebviewWindow) -> Result<ConnectionState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        if let Some(runtime) = state.runtime() {
+            runtime.prove_again().map_err(|error| format!("{error:#}"))?;
+        }
+        let _ = app.emit("local_runtime_state", ());
+        Ok(status(&app, window.label()))
+    }).await.map_err(|error| error.to_string())?
 }
 
 /// "Try again": attempt now whatever the supervisor is re-establishing. It
@@ -370,6 +396,22 @@ mod tests {
     use super::*;
     use crate::local_runtime::client::{Refused, Unresponsive};
 
+    /// PRO-489 M2: a connected window the runtime did not take for its window
+    /// is told why; any other state is left as it is.
+    #[test]
+    fn a_connected_window_says_it_is_unproven() {
+        let connected = ConnectionState::Connected { epoch: "e".into(), generation: 1, view: 0, outdated: None, unproven: None };
+        let locked = || Some(super::super::supervisor::UnprovenWindow { why: "locked".into(), pinned: true });
+        let shown = unproven(connected, locked());
+        assert!(matches!(&shown, ConnectionState::Connected { unproven: Some(why), .. } if why.why == "locked"), "{shown:?}");
+        let value = serde_json::to_value(&shown).unwrap();
+        assert_eq!(value["unproven"], serde_json::json!({"why": "locked", "pinned": true}));
+        let unavailable = ConnectionState::Unavailable { message: "m".into(), start_failed: None };
+        assert_eq!(unproven(unavailable, locked()), ConnectionState::Unavailable { message: "m".into(), start_failed: None });
+        let plain = unproven(ConnectionState::Connected { epoch: "e".into(), generation: 1, view: 0, outdated: None, unproven: None }, None);
+        assert!(serde_json::to_value(&plain).unwrap().get("unproven").is_none(), "said only when it holds");
+    }
+
     fn timed_out() -> anyhow::Error {
         Unresponsive { command: "runtime.liveness".into(), waited: Duration::from_secs(15) }.into()
     }
@@ -415,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_runtime_found_not_responding_is_said_so_in_place_of_connected_or_reconnecting() {
-        let connected = || ConnectionState::Connected { epoch: "wedged".into(), generation: 1, view: 0, outdated: None };
+        let connected = || ConnectionState::Connected { epoch: "wedged".into(), generation: 1, view: 0, outdated: None, unproven: None };
         let connecting = || ConnectionState::Connecting { terminal: false, attempt: 3, retry_in_ms: 500, down_ms: 20_000,
             message: "Could not reconnect to the background runtime".into() };
         let finding = || Some("The TerminalX runtime did not answer runtime.liveness within 15 seconds.".to_string());

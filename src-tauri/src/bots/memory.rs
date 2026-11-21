@@ -43,10 +43,15 @@ pub const BUDGET: usize = 200;
 pub const READ_LIMIT: u64 = 64 * 1024;
 /// The most a role may be, and what a conversation reads of it.
 pub const ROLE_LIMIT: u64 = super::chat::ROLE_READ_LIMIT;
+/// The most of `ROLE.md` the app's editor shows: the limit a role had before
+/// PRO-489, so a role saved under it is still shown whole and can be
+/// shortened in place, with what a conversation cuts of it said ([`RoleView::cut`]).
+pub const ROLE_SHOWN_LIMIT: u64 = 32 * 1024;
 /// The most of each memory file's lines a conversation is given, in bytes,
-/// so the role, both files and the rules stay well under the 128 KB one
-/// argument may be on Linux.
-pub const SHOWN_BYTES: usize = 30 * 1024;
+/// so the role, both files and the rules stay under
+/// `chat::INSTRUCTIONS_LIMIT` (PRO-489), and Codex's escaping of them under
+/// the 128 KB one argument may be on Linux.
+pub const SHOWN_BYTES: usize = 16 * 1024;
 /// An archive this large is rolled to `memory/archive-<date>.md` before more is added to it.
 pub const ARCHIVE_ROLL_BYTES: u64 = 768 * 1024;
 pub const ARCHIVE_FILE: &str = "archive.md";
@@ -213,6 +218,16 @@ pub fn read_in_home(home: &Path, rel: &str) -> Limited {
     let tail = rel.rsplit('/').next() == Some(bot_store::MEMORY_FILE);
     match changes::no_links(home, rel) {
         Ok(()) => read_limited_to(&home.join(rel), limit, tail),
+        Err(error) => Limited { problem: Some(format!("{error:#}")), ..Default::default() },
+    }
+}
+
+/// `ROLE.md` as the app's editor shows it: to [`ROLE_SHOWN_LIMIT`], not the
+/// [`ROLE_LIMIT`] a conversation reads, so a role saved before PRO-489 lowered
+/// it is read whole.
+fn read_role_shown(home: &Path) -> Limited {
+    match changes::no_links(home, bot_store::ROLE_FILE) {
+        Ok(()) => read_limited_to(&home.join(bot_store::ROLE_FILE), ROLE_SHOWN_LIMIT, false),
         Err(error) => Limited { problem: Some(format!("{error:#}")), ..Default::default() },
     }
 }
@@ -610,13 +625,18 @@ pub struct RoleVersion {
 #[serde(rename_all = "camelCase")]
 pub struct RoleView {
     pub path: String,
-    /// What a conversation reads: at most [`ROLE_LIMIT`] bytes.
+    /// The role as stored, up to [`ROLE_SHOWN_LIMIT`] bytes.
     pub text: String,
-    /// The most a role may be ([`ROLE_LIMIT`]).
+    /// The most a role may be ([`ROLE_LIMIT`]), and what a conversation reads of it.
     pub limit: u64,
+    /// The most of it shown here ([`ROLE_SHOWN_LIMIT`]).
+    pub shown_limit: u64,
+    /// How many of its bytes a conversation does not read: those past [`ROLE_LIMIT`].
+    pub cut: u64,
     /// The hash of the file as read, for the editor's save to name what it started from.
     pub hash: String,
-    /// Whether the editor may save it: read whole, so a save never cuts it short.
+    /// Whether the editor may save it: read whole, so a save never cuts it
+    /// short. One past [`ROLE_LIMIT`] is saved once shortened to it.
     pub editable: bool,
     #[serde(flatten)]
     pub read: Limited,
@@ -724,7 +744,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     let log = changes::read_log(&bot.id)?;
     let mut secrets = Vec::new();
 
-    let role = read_in_home(&home, bot_store::ROLE_FILE);
+    let role = read_role_shown(&home);
     if looks_secret(&role.text) {
         secrets.push(shown(bot_store::ROLE_FILE));
     }
@@ -735,9 +755,11 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
     if let Some(template) = &template {
         versions.push(RoleVersion { change: None, at: bot.created.clone(), by: OWNER.into(), kind: "template".into(), source: Source::of("template"), hash: Some(changes::hash_of(&super::role_text(template))) });
     }
-    // One limit everywhere: a role over it is shown as read, and not saved from here.
+    // Shown whole up to the older limit, and saved once it fits the one a conversation reads; a role past even that is
+    // shown in part, and not saved from here.
     let editable = role.problem.is_none() && !role.over_limit;
-    let role = RoleView { path: shown(bot_store::ROLE_FILE), hash: changes::hash_of(&role.text), text: role.text.clone(), limit: ROLE_LIMIT, editable, read: role, template_title: template.map(|template| template.title.to_string()), versions };
+    let cut = role.bytes.saturating_sub(ROLE_LIMIT);
+    let role = RoleView { path: shown(bot_store::ROLE_FILE), hash: changes::hash_of(&role.text), text: role.text.clone(), limit: ROLE_LIMIT, shown_limit: ROLE_SHOWN_LIMIT, cut, editable, read: role, template_title: template.map(|template| template.title.to_string()), versions };
 
     let working = working_place(bot);
     let read_files: Vec<String> = [Place::Bot.memory_file(), working.memory_file()].into();
@@ -786,7 +808,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
 pub fn template_diff(bot: &Bot) -> Result<Option<Vec<DiffLine>>> {
     let Some(template) = super::templates::find(&bot.role_template_id) else { return Ok(None) };
     let home = bot_store::home_dir(&bot.id)?;
-    let role = read_in_home(&home, bot_store::ROLE_FILE);
+    let role = read_role_shown(&home);
     Ok(changes::diff(&changes::lines_of(&super::role_text(&template)), &changes::lines_of(&role.text)))
 }
 

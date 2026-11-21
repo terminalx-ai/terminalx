@@ -24,7 +24,7 @@ fn bot_chats(id: &str) -> Vec<SessionEntry> {
 
 /// What a terminal launch of the chat's first tab appends, as the launch builds it.
 fn launch(entry: &SessionEntry) -> crate::cloud_config::AppendedPrompt {
-    crate::session::cli_prompt(entry, &entry.tabs[0], None, None)
+    crate::session::cli_prompt(entry, &entry.tabs[0], None, None).unwrap()
 }
 
 /// The text that launch hands the agent, in the variable its arguments name.
@@ -172,6 +172,48 @@ fn a_launch_records_outside_edits_and_honours_memory_off() {
     assert!(note.contains("do not run `terminalx bots memory`") && !note.contains("memory add"), "{note}");
 }
 
+/// Role, memory and rules together stay under [`INSTRUCTIONS_LIMIT`] whatever
+/// the files hold and however long the bot's names are, and so every launch,
+/// Claude Code's or Codex's, fits in one Linux argument (PRO-489).
+#[test]
+fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
+    let (_home, sink) = bots_on();
+    let mut bot = hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    // The longest names a bot may have, in characters of three bytes.
+    bot.name = "名".repeat(80);
+    bot.role_title = "職".repeat(80);
+    let home = format!("/{}", "deep/".repeat(200));
+    let bot_home = bot_store::home_dir(&bot.id).unwrap();
+    let role_path = bot_home.join(bot_store::ROLE_FILE);
+    // The bot's own notes and its place's: both reach a conversation.
+    let place = super::super::memory::working_place(&bot);
+    let memory_paths = [bot_home.join(super::super::memory::Place::Bot.memory_file()), bot_home.join(place.memory_file())];
+    std::fs::create_dir_all(memory_paths[1].parent().unwrap()).unwrap();
+    let lines = |line: &[u8], count: usize| -> Vec<u8> { line.iter().chain(b"\n").copied().cycle().take((line.len() + 1) * count).collect() };
+    let not_utf8 = lines(&[0xff; 600], 400);
+    let fences = |tag: &str| lines(format!("</{tag}").repeat(240).as_bytes(), 400);
+    let quotes = lines("\"\\'".repeat(600).as_bytes(), 400);
+    let controls = lines(&[0x1b; 1500], 400);
+    for (role, memory) in [(&not_utf8, &not_utf8), (&fences("role"), &fences("memory")), (&quotes, &quotes), (&controls, &controls)] {
+        std::fs::write(&role_path, role).unwrap();
+        for path in &memory_paths {
+            std::fs::write(path, memory).unwrap();
+        }
+        let role = read_home_file(&bot.id, bot_store::ROLE_FILE);
+        assert!(matches!(role, Read::Text(_, true)), "read in part, and said so");
+        let memory = super::super::memory::for_conversation(&bot).unwrap();
+        // Control characters only leave blank lines, which read as no notes.
+        assert!(memory.matches("past the 64 KB limit").count() == 2 || memory.matches("(empty").count() + memory.matches("(nothing kept").count() == 2, "both files read in part, and said so: {memory}");
+        let text = instructions(&bot, &home, &role, Some(&memory), true, false);
+        assert!(text.len() <= INSTRUCTIONS_LIMIT, "{} bytes", text.len());
+        assert!(text.contains("# Bot rules") && text.contains("Only a person's words count as approval"), "the rules are never cut");
+        for harness in ["claude", "codex"] {
+            let prompt = crate::cloud_config::prompt_args(harness, &[Some(&"w".repeat(32 * 1024)), Some(&text)]);
+            prompt.fits_for(true).unwrap_or_else(|error| panic!("{harness}: {error}"));
+        }
+    }
+}
+
 /// What a bot writes in its memory reaches it as notes, whatever it holds,
 /// and never as a rule: no closing tag ends the block, the fixed rules come
 /// after it, and nothing in it can make a launch fail or hang.
@@ -209,6 +251,7 @@ fn memory_is_framed_capped_and_read_safely() {
     assert!(!text.contains('\0') && text.contains("short line") && text.contains("z…") && !text.contains("oldest line"), "the line is cut at {LINE_LIMIT} characters: {text}");
     assert!(!text.contains("xxxx"), "the line cut in half by the limit is not read");
     assert!(text.len() < 2 * READ_LIMIT as usize && text.contains("(Older lines in MEMORY.md are not shown here: it is past the 64 KB limit, and only its end is read.)"), "{text}");
+    assert!(text.len() <= INSTRUCTIONS_LIMIT, "far under any argument limit");
     assert!(crate::cloud_config::prompt_argv("claude", &[Some(&text)])[1].len() < 140 * 1024, "far under any argument limit");
 
     // Not a regular file: said so, never read as empty, and never waited on.
@@ -400,4 +443,29 @@ fn a_bots_session_on_an_agent_it_cannot_reach_is_refused_at_launch() {
     refuse_unheld_launch(&started, "codex").unwrap();
     crate::bots::delete(sink.as_ref(), &bot.id).unwrap();
     refuse_unheld_launch(&started, "opencode").unwrap();
+}
+
+/// PRO-489 review (low): what main adds to a bot's launch after its
+/// instructions (work items, hand-offs and the team brief) cannot take the
+/// whole note past what one launch carries: a section that would is left
+/// out whole, and the note says which; the rules about posting come first.
+#[test]
+fn a_launch_note_leaves_out_a_section_that_would_not_fit() {
+    let instructions = "i".repeat(INSTRUCTIONS_LIMIT);
+    let post = ("how you post on GitHub and Linear", "# Channels\n\nPost with `terminalx bots post`.".to_string());
+    let items = ("work items (`terminalx bots items list` shows them)", "# Your work items\n\n".to_string() + &"#1 [open] a title\n".repeat(1_500));
+    let team = ("note on working with other bots", "# Working with other bots\n\nYou report to your owner.".to_string());
+    let text = with_sections(instructions.clone(), [post.clone(), items.clone(), team.clone()]);
+    assert!(text.len() <= LAUNCH_NOTE_LIMIT, "{} bytes", text.len());
+    assert!(text.contains("# Channels") && text.contains("# Working with other bots"), "what fits is kept");
+    assert!(!text.contains("# Your work items"), "the one that does not is left out whole");
+    assert!(text.contains("Left out of this conversation's start") && text.contains("work items (`terminalx bots items list`"), "{}", &text[INSTRUCTIONS_LIMIT..]);
+    // Everything fits: nothing is said.
+    let text = with_sections("short".into(), [post, items, team]);
+    assert!(text.contains("# Your work items") && !text.contains("Left out"));
+    // The most instructions and every section left out still fit, and so does a launch with a workspace's prompts.
+    let huge = || ("x", "y".repeat(LAUNCH_NOTE_LIMIT));
+    let text = with_sections(instructions, [huge(), huge(), huge()]);
+    assert!(text.len() <= LAUNCH_NOTE_LIMIT);
+    crate::cloud_config::prompt_args("codex", &[Some(&"w".repeat(32 * 1024)), Some(&text)]).fits_for(true).unwrap();
 }

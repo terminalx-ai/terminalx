@@ -90,6 +90,9 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
   const runs = useDutyRuns(duties);
   const stateKey = useMemo(() => duties.map((duty) => `${duty.id}:${duty.modified}:${duty.lastRunAt ?? ""}`).join("|"), [duties]);
   const { state, error: stateError, reload } = useDutyState(bot.id, stateKey);
+  // Restart runtime's own failure, shown in place of the read error it was offered for until that error changes (PRO-489).
+  const [restartFailure, setRestartFailure] = useState<{ for: string; message: string } | null>(null);
+  const shownStateError = stateError && restartFailure?.for === stateError ? restartFailure.message : stateError;
   const spent = useCallback((sessionId: string) => sessionSpend(sessions.sessions.find((session) => session.id === sessionId)), [sessions.sessions]);
   const leadName = useCallback((id: string) => bots.bots.find((other) => other.id === id)?.name ?? null, [bots.bots]);
 
@@ -171,7 +174,14 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
           </div>
           <Button size="sm" variant="secondary" onClick={() => setScreen({ kind: "edit", id: null })} data-testid="duty-add"><Plus /> Add a duty</Button>
         </div>
-        {stateError && <MachineHostError error={stateError} onRestarted={reload} className="mt-3" />}
+        {stateError && shownStateError && (
+          <MachineHostError
+            error={shownStateError}
+            onRestarted={() => { setRestartFailure(null); reload(); }}
+            onFailed={(message) => setRestartFailure({ for: stateError, message })}
+            className="mt-3"
+          />
+        )}
         {!automations.loaded ? (
           <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading the duties…</p>
         ) : duties.length === 0 ? (
@@ -333,7 +343,7 @@ export function QuietHoursCard({ bot, quiet, loaded, onSaved }: { bot: Bot; quie
       ) : (
         <p className="mt-2 flex items-start gap-2 text-[12.5px] text-muted-foreground"><Moon className="mt-0.5 size-3.5 shrink-0" /> {quietText(quiet)}</p>
       )}
-      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (pending) save(pending.value); }} className="mt-1.5" />}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (pending) save(pending.value); }} onFailed={setError} className="mt-1.5" />}
     </section>
   );
 }

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { LocalRuntimeState } from "@/lib/api";
 
-const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), replace: vi.fn(), listeners: new Map<string, () => void>() }));
+const native = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn(), restart: vi.fn(), replace: vi.fn(), proveWindow: vi.fn(), listeners: new Map<string, () => void>() }));
 const terminals = vi.hoisted(() => ({ reattachLocalTerminals: vi.fn() }));
 vi.mock("@/lib/api", async (actual) => ({ localRuntime: native, errorMessage: (await actual<typeof import("@/lib/api")>()).errorMessage }));
 vi.mock("@/lib/terminal", () => terminals);
@@ -34,6 +34,10 @@ beforeEach(() => {
   native.replace.mockReset().mockImplementation(async () => {
     native.status.mockResolvedValue({ ...connected, epoch: "bundled", generation: 2 });
     return { state: "updating", from: "0.2.21", to: "0.2.23", keeping: false };
+  });
+  native.proveWindow.mockReset().mockImplementation(async () => {
+    native.status.mockResolvedValue(connected);
+    return connected;
   });
   native.listeners.clear();
   terminals.reattachLocalTerminals.mockReset();
@@ -316,4 +320,41 @@ it("keeps a busy handover out of the failure notice and clears a previous failur
   expect(native.replace).toHaveBeenCalledExactlyOnceWith("owner", []);
   await changed({ ...connected, epoch: "bundled", generation: 2 });
   expect(screen.queryByRole("status")).toBeNull();
+});
+
+// PRO-489 lead review M2: a window the runtime did not take for its window says so, and why, while it lasts; Try
+// again registers again with the window's proof, and the notice goes once the runtime takes it.
+it("says when the runtime did not take this app for its window, and proves it again on Try again", async () => {
+  await mounted();
+  expect(screen.queryByTestId("local-runtime-unproven")).toBeNull();
+  await changed({ ...connected, unproven: { why: "TerminalX couldn’t access the window consent key in Keychain.", pinned: true } });
+  expect(screen.getByText("This window can't change sessions or terminals")).toBeTruthy();
+  expect(screen.getByTestId("local-runtime-unproven-why").textContent).toContain("window consent key in Keychain");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  expect(native.proveWindow).toHaveBeenCalledTimes(1);
+  expect(native.restart).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("local-runtime-unproven")).toBeNull();
+});
+
+it("keeps the notice, and says why, when proving the window again fails", async () => {
+  await mounted();
+  await changed({ ...connected, unproven: { why: "no proof", pinned: true } });
+  native.proveWindow.mockReset().mockRejectedValue("Keychain is locked.");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+  expect(screen.getByTestId("local-runtime-unproven")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toContain("Keychain is locked.");
+});
+
+// PRO-489 review (low): a runtime started without the window's key says so, with the way to restart it with the key;
+// nothing is tried on its own, and it can be hidden.
+it("says when the runtime was started without the window's key, and hides on request", async () => {
+  await mounted();
+  await changed({ ...connected, unproven: { why: "This TerminalX runtime was started without the window's key.", pinned: false } });
+  const notice = screen.getByTestId("local-runtime-unpinned");
+  expect(notice.textContent).toContain("started without the window's key");
+  expect(notice.textContent).toContain("Create pairing code");
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Hide" })); });
+  expect(screen.queryByTestId("local-runtime-unpinned")).toBeNull();
+  expect(native.proveWindow).not.toHaveBeenCalled();
 });

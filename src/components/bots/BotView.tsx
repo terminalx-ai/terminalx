@@ -176,7 +176,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
           </button>
         ))}
       </div>
-      {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="shrink-0 px-5 py-2 text-xs" />}
+      {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
           <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={briefOpen ? null : open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} briefOpen={briefOpen} onOpenBrief={() => setBriefOpen(true)} />

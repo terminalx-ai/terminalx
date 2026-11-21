@@ -11,12 +11,12 @@ impl ControlService {
     pub(super) fn bot_channels(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let action = command.trim_start_matches("bots.");

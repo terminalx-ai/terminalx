@@ -66,6 +66,19 @@ struct Windows {
     renewed: HashMap<String, u64>,
 }
 
+/// Why a runtime cannot hold bots by this window's proof (PRO-489). `pinned`:
+/// the runtime pinned the window's key, and did not take this app for the
+/// window, which could not prove it; registering again with the proof
+/// repairs it. Otherwise the runtime was started without the key (Keychain
+/// could not be read at its launch), and holds bots by where a command comes
+/// from, as on Linux, until it is restarted with the key.
+#[derive(serde::Serialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UnprovenWindow {
+    pub why: String,
+    pub pinned: bool,
+}
+
 pub struct Desktop {
     client: Arc<Client>,
     events: Bridge,
@@ -73,6 +86,11 @@ pub struct Desktop {
     watch: Option<Watch>,
     generation: u64,
     windows: Arc<Mutex<Windows>>,
+    /// Why the runtime attached this window without taking it for the
+    /// window (PRO-489), and the endpoint it registered, to register again
+    /// with its proof ([`Self::prove_again`]). None once proven, or where
+    /// none is asked.
+    unproven: Mutex<Option<(UnprovenWindow, crate::hooks::ControlEndpoint)>>,
 }
 
 impl Desktop {
@@ -89,7 +107,7 @@ impl Desktop {
         let generation = next();
         let lost = watch.clone().map(|watch| -> super::bridge::Lost { Box::new(move |reason| watch(Lost::Events { generation, reason })) });
         let events = Bridge::connect(&client, sink.clone(), lost)?;
-        Ok(Self { client, events, sink, watch, generation, windows: Arc::default() })
+        Ok(Self { client, events, sink, watch, generation, windows: Arc::default(), unproven: Mutex::default() })
     }
 
     /// Attach again through `client`, which discovery found: the same owner,
@@ -122,16 +140,77 @@ impl Desktop {
     /// The listener is private to this window. Only the owner publishes home discovery.
     fn register_window(&self, endpoint: crate::hooks::ControlEndpoint) -> Result<()> {
         let attachment = self.attachment()?;
-        let registered: Result<serde_json::Value> = self.client.call_within("runtime.window.register", serde_json::json!({
+        let registration = serde_json::json!({
             "epoch":attachment.epoch,"lease":attachment.lease,"socket":endpoint.socket,"token":endpoint.token
-        }), LIFECYCLE_TIMEOUT);
+        });
+        // What kept the proof from being made here: Keychain locked or denied.
+        let mut local = None;
+        // Witnessed, with the window's proof (PRO-489): while Bots is on, a
+        // runtime whose window's key is pinned takes only a registrant that
+        // proves it for the window. A runtime from before that refuses the
+        // witness as an unknown field, and a window that cannot read its key
+        // makes none: both register as before, and the runtime judges.
+        let registered = match self.client.call_within::<serde_json::Value>(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), LIFECYCLE_TIMEOUT) {
+            Err(error) if error.downcast_ref::<super::client::Refused>().is_none_or(|refused| refused.message.contains("Invalid desktop registration")) => {
+                log::info!("register the window without its proof: {error:#}");
+                if error.downcast_ref::<super::client::Refused>().is_none() && error.downcast_ref::<super::client::Unresponsive>().is_none() {
+                    local = Some(format!("{error:#}"));
+                }
+                self.client.call_unwitnessed(crate::serve_cli::consent::WINDOW_REGISTER, registration, LIFECYCLE_TIMEOUT)
+            }
+            answered => answered,
+        };
         match registered {
             // Its own earlier lease was revoked before this one was taken, so
             // the window services belong to a different desktop process.
             Err(error) if format!("{error:#}").contains("Another desktop currently provides") =>
                 Err(Blocked("Another TerminalX window is connected to this background runtime. Close it, then try again.".into()).into()),
-            other => other.map(drop),
+            // Attached, but not taken for the window (review 2): a runtime
+            // whose window's key is pinned, with Bots on, took no proof from
+            // this one, so it changes nothing until it can prove it (the
+            // Keychain unlocked, then Try again, which registers again with
+            // the proof). It still shows what runs, and says so (M2).
+            Ok(answer) if answer["proven"] == false => {
+                let why = local.unwrap_or_else(|| answer["message"].as_str().unwrap_or("no proof").to_owned());
+                log::warn!("the runtime attached this window without taking it for the window: {why}");
+                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: true }, endpoint));
+                Ok(())
+            }
+            // A runtime started without the window's key (Keychain could not
+            // be read at its launch) holds bots by placement alone; the window
+            // says so, for a restart with the key to repair (PRO-489).
+            Ok(answer) if answer["pinned"] == false => {
+                let why = answer["message"].as_str().unwrap_or("This runtime was started without the window's key.").to_owned();
+                log::warn!("the runtime this window attached to has no window key pinned: {why}");
+                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: false }, endpoint));
+                Ok(())
+            }
+            other => {
+                *self.unproven.lock().unwrap() = None;
+                other.map(drop)
+            }
         }
+    }
+
+    /// Why the runtime attached this window without taking it for the
+    /// window, while it has not proved it since (PRO-489): while Bots is on,
+    /// its session and terminal changes are refused until it does.
+    pub fn unproven(&self) -> Option<UnprovenWindow> {
+        self.unproven.lock().unwrap().as_ref().map(|(unproven, _)| unproven.clone())
+    }
+
+    /// Register again, with the window's proof: what Try again does once the
+    /// Keychain can be read. Whether the runtime now takes this window for
+    /// the window; a window it already took, or never asked to prove
+    /// itself, has nothing to do.
+    pub fn prove_again(&self) -> Result<bool> {
+        let Some((unproven, endpoint)) = self.unproven.lock().unwrap().clone() else { return Ok(true) };
+        // Only a restart pins a key a runtime started without (`window_consent`).
+        if !unproven.pinned {
+            return Ok(false);
+        }
+        self.register_window(endpoint)?;
+        Ok(self.unproven().is_none())
     }
 
     /// Drop the attachment without reporting it: replacing it, or failing to publish it.

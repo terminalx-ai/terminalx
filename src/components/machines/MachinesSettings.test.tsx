@@ -255,7 +255,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(alert.textContent).not.toContain(EPOCH);
     expect(alert.textContent).toContain("Restarting stops what it runs: Claude in api. Each agent picks up its conversation again when its tab next starts.");
     fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH, shown: unverified }));
     // Once the fresh runtime is attached, the code is made again by itself.
     expect((await screen.findByTestId("machine-pairing-code")).textContent).toContain(CODE.code);
     expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
@@ -279,7 +279,7 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(alert.textContent).toContain("the connection of MacBook");
     expect(alert.textContent).not.toContain(EPOCH);
     fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
-    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("local_runtime_restart_for_window", { epoch: EPOCH, shown: offered }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
   });
 
@@ -333,7 +333,32 @@ describe("Settings → Machines (screen 21.02)", () => {
     expect(screen.queryByText(/runtime_restart_required/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
     await waitFor(() => expect(asked).toBe(2));
+    // The second click sends back the list it showed then, not the first (PRO-489).
+    const sent = mocks.invoke.mock.calls.filter(([command]) => command === "local_runtime_restart_for_window").map(([, args]) => (args as { shown: string }).shown);
+    expect(sent).toEqual([grantOffer(EPOCH, "Claude in api"), grantOffer(EPOCH, "Claude in api; a terminal in web")]);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull());
+  });
+
+  it("keeps Restart runtime's failure shown when the offer it answered is withdrawn, as on a handover (PRO-489)", async () => {
+    const EPOCH = "3d2e1f00-aaaa-4bbb-8ccc-000000000004";
+    const handedOver = "The TerminalX runtime was updated while it was being restarted, so it was not restarted. Try again in a moment.";
+    view = { ...view, allowOperating: true, restartRequired: grantOffer(EPOCH, "the connection of MacBook") };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown> = {}) => {
+      if (command === "local_runtime_restart_for_window") {
+        // The backend withdraws the offer, and says so, before the failure returns.
+        view = { ...view, restartRequired: null };
+        act(() => mocks.listeners.get("machines_host_changed")!({ payload: view }));
+        throw handedOver;
+      }
+      return answer(command, args);
+    });
+    render(<MachinesSettings />);
+    await screen.findByText(/the connection of MacBook/);
+    await waitFor(() => expect(mocks.listeners.has("machines_host_changed")).toBe(true));
+    fireEvent.click(screen.getByRole("button", { name: "Restart runtime" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(handedOver);
+    expect(screen.queryByRole("button", { name: "Restart runtime" })).toBeNull();
   });
 
   it("shows any other pairing-code failure as it is, with no restart offered", async () => {

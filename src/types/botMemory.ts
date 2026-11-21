@@ -60,13 +60,17 @@ export interface BotRoleVersion {
 
 export interface BotRoleView extends BotFileRead {
   path: string;
-  /** What a conversation reads: at most `limit` bytes. */
+  /** The role as stored, up to `shownLimit` bytes. */
   text: string;
   /** The most a role may be, in bytes: what a conversation reads of it. */
   limit: number;
+  /** The most of it shown here: the older limit, so a role saved under it is shown whole (PRO-489). */
+  shownLimit: number;
+  /** How many of its bytes a conversation does not read: those past `limit`. */
+  cut: number;
   /** The hash of the file as read: a save names it, so a role changed since is not written over. */
   hash: string;
-  /** Whether the editor may save it: `false` for a file past the limit, so a save never cuts it short. */
+  /** Whether the editor may save it: `false` for a file past `shownLimit`, so a save never cuts it short. One past `limit` is saved once shortened to it. */
   editable: boolean;
   templateTitle: string | null;
   /** Newest first; the template's last. */

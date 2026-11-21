@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { Bot } from "@/types/bots";
 import type { NeedsYou } from "@/types/botItems";
 import { MachineHostError } from "@/components/machines/MachineHostError";
@@ -22,9 +23,18 @@ export function needsYouNote(needs: NeedsYou | null, now = Date.now()): string {
  */
 function NeedsYouError({ error }: { error: string }) {
   const { state } = useLocalRuntime();
+  // Restart runtime's own failure, shown in place of the offer for the read error it was made for (PRO-489).
+  const [restartFailure, setRestartFailure] = useState<{ for: string; message: string } | null>(null);
+  if (restartFailure?.for === error) {
+    return (
+      <p role="alert" className="mb-2 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] break-words text-destructive">
+        {restartFailure.message}
+      </p>
+    );
+  }
   if (olderRuntime(error) && state?.state === "connected") {
     const offer = `runtime_restart_required:${state.epoch}: The TerminalX runtime running is older than this app and keeps no work lists, so what needs you cannot be read. Restart runtime starts the app's own.`;
-    return <MachineHostError error={offer} className="mb-2 rounded-md bg-destructive/10 px-3 py-2" onRestarted={refreshNeedsYou} />;
+    return <MachineHostError error={offer} className="mb-2 rounded-md bg-destructive/10 px-3 py-2" onRestarted={refreshNeedsYou} onFailed={(message) => setRestartFailure({ for: error, message })} />;
   }
   return (
     <p role="alert" className="mb-2 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] break-words text-destructive" data-testid="bots-needs-you-error">

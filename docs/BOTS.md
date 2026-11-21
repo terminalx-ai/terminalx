@@ -126,6 +126,118 @@ the first sub-issues.
   saved back exactly as it was. Unknown fields on a record, or on a pause,
   are kept too.
 
+## What holds a bot, and what does not
+
+The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
+
+- **macOS and Linux only.** The runtime works out who sent a `terminalx`
+  command from the process the kernel names, placed in the pane or agent it
+  runs under, and only a person's answer in the window counts as consent.
+  The Windows port (`docs/LOCAL-RUNTIME.md`, "Windows") pins the window's key
+  (sealed with DPAPI) and judges pairing by the console a caller sits in,
+  but its control service does not yet ask which process sent a command
+  (`hooks::caller` has no pipe peer there), and it checks no window proof
+  for Bots: a bot's process that named no session would pass as its owner.
+  So off unix Bots stays off whatever the switch says (`bots::SUPPORTED`),
+  and every operation says why.
+- **Placing a caller takes no tab's lock.** The runtime keeps each agent's
+  process id in a map of its own as the agent starts and exits, so one tab
+  held mid-launch, or wedged, stalls no one else's command.
+- **Outward work needs full access.** Steering an issue pipeline
+  (`pipelines.autoMerge`, `pipelines.resolveConflicts`, `pipelines.act`) and
+  writing to an issue (`issues.comment`, `issues.create`, `issues.status`,
+  `issues.assign`, `issues.label`) act with the owner's own GitHub or Linear
+  sign-in. A session that works for a bot does them only when the bot has
+  full access and is not paused. Stopping a pipeline, or having it look at
+  its pull request again, is left to any session. While any bot is paused, a
+  process no tab holds and with no terminal does none of them either, as it
+  starts no work: it may be a bot's helper that left its tab. That includes
+  the owner's own script with no terminal (launchd, cron, a CI runner), which
+  runs them from a terminal, or once the bots are resumed.
+- **Only the window writes through the runtime directly.** The control token
+  is in every agent tab's environment, and a lease (`runtime.attach`) is
+  anyone's for the asking. So a runtime whose window's key is pinned
+  (TerminalX on a Mac) takes for the window only a registrant that proves it,
+  Bots on or off: `runtime.window.register` carries the consent witness
+  signed with the window's Keychain key, as pairing does, and the process
+  that proved it, as the kernel names it, is the window. A terminal of the
+  registrant's own proves nothing here (`consent::verify_window_for`): it
+  pairs where a person's would, but registers as the window only with the
+  key. With Bots off an unproven window still provides its services, as
+  nothing is guarded then; it is not recognised, so turning Bots on later
+  leaves its writes refused until it proves itself. Only that process (pid
+  and start time, carried across a runtime update) may then make the
+  `runtime.session.*` and `runtime.pty.*` calls that change anything, and
+  any `runtime.mobile.*` or `runtime.sharing.*` call, whose actor is in its
+  parameters. No other process is placed and let through there, whatever
+  session it runs in. The window's credential is its process, proved once,
+  rather than a secret it sends: no secret is written for a handover to
+  carry, and none can be read out of a request.
+- **Where no key can be pinned.** On Linux there is no store that keeps a
+  secret from another process of the same user, so the window cannot prove
+  itself: there, and on a runtime with no window, a registrant that runs in
+  no pane is taken for the window as before, and the changing calls are
+  otherwise taken only from a session no bot works for or a terminal of the
+  person's own; a paired phone's and a share's calls are placed the same
+  way. A bot's sessions still hire, delete and resume no bot there. The same
+  holds on a Mac runtime launched unpinned (Keychain could not be read at
+  its launch): the window says so, with the way to restart it with the key
+  (Settings → Machines → Create pairing code).
+  No window can confirm a resume, so a resume, or Resume all, applies only
+  when run in a terminal of the person's own (not a TerminalX tab, not under
+  the runtime), as `terminalx-serve pair` does.
+- **A caller that is gone steers nothing.** One that exited, or closed its
+  connection on macOS, before the runtime could place it, or whose place
+  could not be read, starts, steers, stops, merges and cleans up no run.
+- **What the agent is told fits one argument.** The role (16 KB read, and
+  the most a role may be; the editor shows up to 32 KB, the limit before
+  PRO-489, so an older role is read whole there and says how much a
+  conversation cuts, and is saved once shortened) and each memory file (the newest 16 KB of its
+  notes, `memory::SHOWN_BYTES`) are cut again after decoding, without control
+  characters, so role, memory and rules stay under 60 KB
+  (`chat::INSTRUCTIONS_LIMIT`) whatever the files hold. Twice that, Codex's
+  TOML escaping at most, is still under the 128 KB Linux allows one argument
+  or variable. What follows the instructions (how it posts on GitHub and
+  Linear, its work items, and the team's: the reporting line, open hand-offs
+  and the team brief) keeps the whole note within 80 KB
+  (`chat::LAUNCH_NOTE_LIMIT`): a section that would pass it is left out
+  whole, never cut inside its fence, and the note says which. A launch
+  whose whole appended prompt, with a workspace's prompts, would pass 127 KB
+  is refused with what to shorten, not left to fail in the kernel; a tab no
+  bot works for is told only of the workspace's prompts.
+- **Every login shell.** The prompt travels in a variable the login shell
+  expands as one word: `"$TERMINALX_APPENDED_PROMPT"` in sh, bash, zsh and
+  fish, `$TERMINALX_APPENDED_PROMPT:q` in csh and tcsh, which refuse a
+  double-quoted variable that holds a newline.
+- **Residual: a terminal of its own.** A process that leaves its pane for a
+  new session with a pseudo-terminal of its own (`script`, or a tmux server
+  that was already running) is placed in no pane and has a terminal that is
+  not the runtime's, so it passes as a person. What still holds is the
+  agent's permission mode: a bot that asks first must have its owner approve
+  the command that does this, and a paused or read-only bot runs in plan
+  mode and runs nothing. A full-access bot can do it, as it can run anything
+  its owner can. More access is still only ever given in the window. On a
+  Mac whose runtime pinned the window's key a resume is too, and such a
+  process cannot register as the window either: a terminal of its own
+  proves nothing there, and it has no key. This class is narrowed, not
+  closed: on Linux, on a headless runtime and on a Mac runtime launched
+  unpinned, such a process passes as a person for session and terminal
+  writes, may register as the window when none has, and a resume is taken
+  from a terminal of the person's own, the same trust pairing uses there,
+  so it can resume its own bot, or every bot: on those runtimes, a pause
+  holds a bot that stays in its tabs, not one that has already left them.
+- **A window that cannot read its key.** With Bots on, a Mac window whose
+  Keychain key is locked, denied or missing still attaches and shows what
+  runs, but is not taken for the window: it provides no computer use, and
+  its session and terminal changes are refused. The window says so at once,
+  with why ("This window can't change sessions or terminals"), and Try
+  again registers again with the key's proof once Keychain is unlocked and
+  TerminalX allowed (`local_runtime_prove_window`); nothing is restarted.
+  An unproven registrant never takes the window's services while Bots is
+  on, so a process with only the control token cannot stand in for the
+  window. The window still reads its key at every registration with Bots
+  off: that proof is what keeps it the window when Bots is turned on.
+
 ## Duties (PRO-471)
 
 A duty is an ordinary automation that names its bot: `automations.json`
@@ -823,7 +935,7 @@ issue.
 | PRO-466 | Store, home folder, role templates, CLI, experimental switch | n/a | Merged |
 | PRO-467 | Sidebar section, Bots page, first-bot page, hiring | 23.02, 23.03, 23.11 | Merged |
 | PRO-484 | Automations: first check before the model, in the editor | 23.10 | Merged |
-| PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | In review |
+| PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | Merged |
 | PRO-478 | Settings: runs on, access, works in, channels, who can ask | 23.07 | In review |
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
 | PRO-469 | Work items and "Needs you" questions | 23.01, 23.02, 23.09 | In review |
@@ -840,7 +952,7 @@ issue.
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
-| PRO-489 | Hardening left over from reviews | n/a | Backlog |
+| PRO-489 | Hardening left over from reviews | n/a | In review |
 
 ## Not in this epic
 

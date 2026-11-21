@@ -517,19 +517,60 @@ impl ControlService {
             refuse_limited_machine_caller(action, &params)?;
         }
         // A session working for a bot is held to it, whatever it says it is (PRO-468).
-        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume") || command.starts_with("machine.") {
+        // As is one that acts outward with the owner's sign-in (PRO-489).
+        if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume")
+            || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label")
+            || command.starts_with("machine.")
+        {
             Caller::of(&self.manager, &params).gate(command, &params)?;
         }
         if let Some(lifetime) = &self.local_lifetime {
-            if command == "runtime.window.register" {
-                let registered = lifetime.window.register(lifetime, params)?;
-                // The registrant is the window from now on, unless it runs in a pane or under this runtime (PRO-468).
-                // Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
+            if command == crate::serve_cli::consent::WINDOW_REGISTER {
+                // A runtime whose window's key is pinned takes for the window
+                // only a registrant that proves it is, Bots on or off (PRO-489):
+                // the control token is in every agent tab's environment, so a
+                // lease alone says nothing of who holds it. With Bots off nothing
+                // is guarded, so an unproven window still provides its services;
+                // it is not recognised, so turning Bots on later leaves its
+                // writes refused until it proves itself (Try again in the app).
+                let mut params = params;
+                let window = current_window();
+                let proof = window.keyed().then(|| self.prove_window(&mut params, &window));
+                if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
+                let unproven = match &proof { Some(Err(error)) => Some(error.message.clone()), _ => None };
+                if let Some(message) = &unproven {
+                    log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
+                    // Unproven (a window that cannot read its Keychain key, or
+                    // not the window at all) while Bots is on: its attachment
+                    // stays, so the app still shows what runs and can repair, but
+                    // it provides no window services, which a launch trusts, and
+                    // changes nothing here (review 2).
+                    if crate::bots::enabled_cached() {
+                        return Ok(json!({"registered": false, "proven": false, "message": message}));
+                    }
+                }
+                let mut registered = lifetime.window.register(lifetime, params)?;
+                if let Some(message) = unproven {
+                    registered["proven"] = json!(false);
+                    registered["message"] = json!(message);
+                }
+                // A desktop launch that could not pin the window's key (Keychain
+                // could not be read then): bots are held by placement alone here,
+                // which the window says (PRO-489 review, low).
+                if crate::bots::enabled_cached() && window.unpinned() {
+                    registered["pinned"] = json!(false);
+                    registered["message"] = json!(UNPINNED);
+                }
+                // The registrant is the window from now on: the process that
+                // proved it, when it is the one that asked; where no key is
+                // pinned, one that runs in no pane and not under this runtime
+                // (PRO-468). Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
                 #[cfg(unix)]
                 if let Some(pid) = crate::hooks::caller_pid() {
+                    let window = match proof { Some(Ok(witness)) => witness == pid, Some(Err(_)) => false, None => self.may_be_the_window(pid) };
                     match crate::serve_cli::consent::started_at(pid) {
-                        Some(started) if self.may_be_the_window(pid) => lifetime.window.recognise((pid, started)),
-                        _ => log::warn!("process {pid} registered as the window, but runs in a pane or under this runtime: not taken for the window"),
+                        Some(started) if window => lifetime.window.recognise((pid, started)),
+                        _ => log::warn!("process {pid} registered as the window, but did not prove it, or runs in a pane or under this runtime: not taken for the window"),
                     }
                 }
                 return Ok(registered);
@@ -573,6 +614,11 @@ impl ControlService {
                     let data = crate::store::root().map_err(ControlError::internal)?;
                     return crate::remote::machine_update::report(&data, &params).map_err(|error| ControlError::invalid(format!("{error:#}")));
                 }
+                // Who a paired phone's or a share's request is from is taken
+                // from its parameters: only the window relays them (PRO-489).
+                if command.starts_with("runtime.mobile.") || command.starts_with("runtime.sharing.") {
+                    refuse_unless_the_window(&self.manager, self.window_process(lifetime), current_window().keyed())?;
+                }
                 if let Some(method) = command.strip_prefix("runtime.mobile.") {
                     return crate::local_runtime::mobile::execute(&self.manager, lifetime, method, params).map_err(ControlError::internal);
                 }
@@ -582,13 +628,8 @@ impl ControlService {
                 if command.starts_with("runtime.session.") || command.starts_with("runtime.pty.") {
                     // A process in a bot's session reads here and changes nothing:
                     // its writes go through the commands that hold it to its bot (PRO-468).
-                    #[cfg(unix)]
-                    let window = lifetime.window.window_process();
-                    #[cfg(not(unix))]
-                    let window = None;
-                    #[cfg(test)]
-                    let window = TEST_WINDOW_PROCESS.with(std::cell::Cell::get).or(window);
-                    refuse_bot_runtime_call(&self.manager, command, &params, window)?;
+                    // Where the window proves itself, only it writes here (PRO-489).
+                    refuse_bot_runtime_call(&self.manager, command, &params, self.window_process(lifetime), current_window().keyed())?;
                 }
                 if matches!(command, "runtime.session.workspace" | "runtime.session.pipeline" | "runtime.session.create" | "runtime.session.rowStatuses" | "runtime.session.workspaceSetup" | "runtime.pty.githubLogin") {
                     // Missing/expired origin stamps still permit local facts,
@@ -1016,14 +1057,14 @@ impl ControlService {
     fn bots(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some(if bots::SUPPORTED { "Ask the person to turn Bots on; do not edit settings.json for them." } else { "Use TerminalX on a Mac or Linux for bots." }.into())));
         }
         let sink = self.sink.as_ref();
         // Only the caller's own mistakes are `invalid_arguments`: an unreadable store or a failed write is not.
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let named = || -> Result<bots::Bot, ControlError> {
@@ -1041,12 +1082,14 @@ impl ControlService {
         let caller = Caller::of(&self.manager, &params);
         let by = caller.verified_bot().unwrap_or_else(|| bots::OWNER.into());
         let waiting = "Waiting for you to confirm in TerminalX: a resume asked for from the command line is applied only when you press Resume in the app.";
-        // Where no window can confirm a resume, none is asked for.
+        // Where no window can confirm a resume (Linux, a headless runtime),
+        // none is asked for: a person's own terminal resumes at once, as it
+        // pairs there (`terminalx-serve pair`), and nothing else does (PRO-489).
         let confirmable = resume_confirmable();
         let unconfirmable = || ControlError::new(
             "person_required",
-            "Resuming a bot needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none, so nothing can confirm it here.",
-            Some("Resume it in TerminalX on a Mac.".into()),
+            "No TerminalX window here can confirm that you asked to resume a bot, so it is resumed only from a terminal of your own: this command came from a TerminalX pane, or a process with no terminal.",
+            Some("Run `terminalx bots resume` in a terminal of your own (not a TerminalX tab), or resume it in TerminalX on a Mac.".into()),
         );
         let answer = match command {
             "bots.list" => json!(bots::listing().map_err(failed)?),
@@ -1067,7 +1110,12 @@ impl ControlService {
             "bots.resume" => {
                 caller.person_only("resume bots")?;
                 if !confirmable {
-                    return Err(unconfirmable());
+                    if !caller.in_a_terminal_of_its_own() {
+                        return Err(unconfirmable());
+                    }
+                    let bot = bots::resume(sink, &named()?.id).map_err(failed)?;
+                    let message = if bot.paused.is_none() { "Resumed." } else { "Still paused." };
+                    return Ok(json!({"bot": bot, "waiting": false, "message": message}));
                 }
                 let bot = bots::request_resume(sink, &named()?.id, "cli").map_err(failed)?;
                 let asked = bot.paused.is_some();
@@ -1086,7 +1134,13 @@ impl ControlService {
             _ => {
                 caller.person_only("resume bots")?;
                 if !confirmable {
-                    return Err(unconfirmable());
+                    if !caller.in_a_terminal_of_its_own() {
+                        return Err(unconfirmable());
+                    }
+                    let mut listing = json!(bots::resume_all(sink).map_err(failed)?);
+                    listing["waiting"] = json!(false);
+                    listing["message"] = json!("Every bot is resumed.");
+                    return Ok(listing);
                 }
                 let paused: Vec<String> = bots::listing().map_err(failed)?.bots.into_iter().filter(|bot| bot.paused.is_some()).map(|bot| bot.id).collect();
                 for id in &paused {
@@ -1115,13 +1169,13 @@ impl ControlService {
     fn bot_memory(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, memory, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let sink = self.sink.as_ref();
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let caller = Caller::of(&self.manager, &params);
@@ -1247,12 +1301,12 @@ impl ControlService {
     fn bot_items(&self, command: &str, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let action = command.trim_start_matches("bots.items.");
@@ -1347,12 +1401,12 @@ impl ControlService {
     fn bot_message(&self, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, wakes, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let caller = Caller::of(&self.manager, &params);
@@ -2999,6 +3053,31 @@ pub(crate) fn resolve_account(agent: &str, selector: &str) -> Result<String, Con
 /// record that grants nothing, and a session the app does not know (the
 /// environment of one since deleted) is simply not recorded.
 impl ControlService {
+    /// The window's process as this runtime recognises it (pid, start time).
+    fn window_process(&self, lifetime: &crate::local_runtime::Lifetime) -> Option<(i32, u64)> {
+        #[cfg(unix)]
+        let window = lifetime.window.window_process();
+        #[cfg(not(unix))]
+        let window = { let _ = lifetime; None };
+        #[cfg(test)]
+        let window = TEST_WINDOW_PROCESS.with(std::cell::Cell::get).or(window);
+        window
+    }
+
+    /// The process that proved, with the window's key, that it is the window
+    /// registering (`consent::verify_window_for`). Only a Mac runtime pins a
+    /// key the control service checks (`current_window`).
+    #[cfg(unix)]
+    fn prove_window(&self, params: &mut Value, window: &crate::serve_cli::consent::Window) -> Result<i32, ControlError> {
+        let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
+        crate::serve_cli::consent::verify_window_for(run, params, window)
+    }
+
+    #[cfg(not(unix))]
+    fn prove_window(&self, _params: &mut Value, _window: &crate::serve_cli::consent::Window) -> Result<i32, ControlError> {
+        Err(ControlError::new("pairing_unavailable", "This runtime cannot check the window's proof.", None::<String>))
+    }
+
     /// Whether process `pid`, registering as the window, may be taken for it:
     /// not in any of this runtime's panes, nor under this runtime's process.
     #[cfg(unix)]
@@ -3009,14 +3088,69 @@ impl ControlService {
     }
 }
 
+/// What an unpinned desktop runtime's registration says (`consent::Window::unpinned`).
+const UNPINNED: &str = "This TerminalX runtime was started without the window's key, as Keychain could not be read then. While Bots is on it tells your commands from a bot's by where they come from alone, as on Linux, and cannot take the window's proof.";
+
+/// The window this runtime was launched for (`consent::Window`): fixed for
+/// the process's life, and kept across a handover, which execs in the same
+/// environment.
+fn current_window() -> crate::serve_cli::consent::Window {
+    #[cfg(test)]
+    if let Some(seed) = TEST_WINDOW_KEY.with(std::cell::Cell::get) {
+        return crate::serve_cli::consent::window_for_test(&seed);
+    }
+    #[cfg(test)]
+    if TEST_WINDOW_UNPINNED.with(std::cell::Cell::get) {
+        return crate::serve_cli::consent::Window::Unrecognisable;
+    }
+    #[cfg(unix)]
+    return crate::serve_cli::consent::Window::current();
+    #[cfg(not(unix))]
+    crate::serve_cli::consent::Window::Headless
+}
+
+/// Whether the kernel's sender `pid` is the window's process (pid and start time).
+#[cfg(unix)]
+fn is_the_window(window: Option<(i32, u64)>, pid: i32) -> bool {
+    window.is_some_and(|(window, started)| window == pid && crate::serve_cli::consent::started_at(pid) == Some(started))
+}
+
+/// The refusal of a call only the window makes, from any other process.
+#[cfg(unix)]
+fn window_only(what: &str) -> ControlError {
+    ControlError::new(
+        "person_required",
+        format!("While Bots is on, only the TerminalX window may {what} through the runtime directly, and this call came from another process."),
+        Some(format!("Use the `terminalx` commands, or TerminalX itself. If this is TerminalX, it could not prove it is the window: {} Then choose Try again where TerminalX says it could not prove it is this runtime's window.", crate::serve_cli::consent::KEYCHAIN_DENIED_SHORT)),
+    )
+}
+
+/// While Bots is on, a paired phone's or a share's call (`runtime.mobile.*`,
+/// `runtime.sharing.*`) comes from the window, which relays them, or from the
+/// runtime itself (PRO-489). Their actor is in their parameters, so any other
+/// holder of the control token could otherwise answer permissions or send as
+/// a phone. Where the window proves itself (`keyed`) nothing else passes;
+/// elsewhere (Linux, a headless runtime, a Mac runtime launched unpinned) a
+/// caller is placed as for session writes: never from a bot's session, nor
+/// from a process in no pane with no terminal of its own.
+fn refuse_unless_the_window(manager: &SessionManager, window: Option<(i32, u64)>, keyed: bool) -> Result<(), ControlError> {
+    if !crate::bots::enabled_cached() {
+        return Ok(());
+    }
+    refuse_unless_window_or_person(manager, window, keyed, None, "act for a paired phone or a share")
+}
+
 /// While Bots is on, a `runtime.session.*` or `runtime.pty.*` call that is
 /// not a read ([`runtime_read`]) is the window's: its process, by pid and
-/// start time (`window`), passes at once, every keystroke included. Any
-/// other caller is placed, every time: it passes only from a session no bot
-/// works for, or with no session but a terminal of the person's own. Refused
-/// from a bot's session or one a bot started, when the caller is gone, and
-/// when it could not be placed. With Bots off nothing is looked at.
-fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
+/// start time (`window`), passes at once, every keystroke included. Where
+/// the window proves itself (`keyed`: its key is pinned, and only a
+/// registrant that proved it is recognised) no other process passes
+/// (PRO-489). Elsewhere any other caller is placed, every time: it passes
+/// only from a session no bot works for, or with no session but a terminal
+/// of the person's own. Refused from a bot's session or one a bot started,
+/// when the caller is gone, and when it could not be placed. With Bots off
+/// nothing is looked at.
+fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>, keyed: bool) -> Result<(), ControlError> {
     if !crate::bots::enabled_cached() {
         return Ok(());
     }
@@ -3028,6 +3162,16 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     if runtime_read(command, params) {
         return Ok(());
     }
+    refuse_unless_window_or_person(manager, window, keyed, Some((command, params)), "change sessions or terminals")
+}
+
+/// The guard of [`refuse_bot_runtime_call`] and [`refuse_unless_the_window`],
+/// for a call that `what`: the window passes; where it proves itself
+/// (`keyed`) nothing else does; elsewhere a caller is placed, and passes
+/// only from a session no bot works for, or with no session but a terminal
+/// of the person's own. A bot's own duties (`call`, [`own_duties_read`]) are
+/// a read of its own, which its session makes keyed or not (PRO-471).
+fn refuse_unless_window_or_person(manager: &SessionManager, window: Option<(i32, u64)>, keyed: bool, call: Option<(&str, &Value)>, what: &str) -> Result<(), ControlError> {
     let pid = match crate::hooks::caller() {
         // In-process: no peer to place.
         crate::hooks::Peer::InProcess => return Ok(()),
@@ -3036,28 +3180,44 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     };
     #[cfg(unix)]
     {
-        if window.is_some_and(|(window, started)| window == pid && crate::serve_cli::consent::started_at(pid) == Some(started)) {
+        if is_the_window(window, pid) {
             return Ok(());
+        }
+        // Its duties and its week of duties (PRO-471, PRO-473): every read
+        // `own_duties_read` lets a bot's session make of its own.
+        let duties = call.filter(|(command, params)| *command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("duties" | "dutyWeek")));
+        // Not placed: no other process does this here, whoever it is, but for
+        // a bot's session reading its own duties.
+        if keyed {
+            if let Some((command, params)) = duties {
+                let caller = Caller::of_process(manager, &json!({}), Some(pid));
+                caller.refuse_gone()?;
+                if own_duties_read(command, params, caller.bot.as_deref()) {
+                    return Ok(());
+                }
+            }
+            log::warn!("refused a call to {what} from process {pid}: not the TerminalX window");
+            return Err(window_only(what));
         }
         let caller = Caller::of_process(manager, &json!({}), Some(pid));
         caller.refuse_gone()?;
         // A bot reads its own duties, and no other bot's (PRO-471).
-        if caller.bot.is_some() && own_duties_read(command, params, caller.bot.as_deref()) {
+        if duties.is_some_and(|(command, params)| own_duties_read(command, params, caller.bot.as_deref())) {
             return Ok(());
         }
         if caller.bot.is_some() {
-            return Err(caller.forbidden("change sessions or terminals through the runtime directly"));
+            return Err(caller.forbidden(&format!("{what} through the runtime directly")));
         }
-        if caller.placed.is_none() && !person_terminal(pid) {
+        if caller.placed.is_none() && !own_terminal(pid) {
             return Err(ControlError::new(
                 "person_required",
-                "This call changes sessions or terminals, and came from a process that is not the TerminalX window, runs in no TerminalX pane and has no terminal of its own: while Bots is on, it may be a bot's.",
+                format!("This call would {what}, and came from a process that is not the TerminalX window, runs in no TerminalX pane and has no terminal of its own: while Bots is on, it may be a bot's."),
                 Some("Use the `terminalx` commands, or run it in a terminal of your own.".into()),
             ));
         }
     }
     #[cfg(not(unix))]
-    let _ = (manager, window, pid);
+    let _ = (manager, window, pid, keyed, call, what);
     Ok(())
 }
 
@@ -3163,6 +3323,30 @@ fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli:
 thread_local! {
     /// Tests run with no window; they say whether one could confirm.
     static TEST_WINDOW_CONFIRMS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// [`refuse_bot_runtime_call`] on a runtime whose window cannot prove itself.
+#[cfg(test)]
+fn refuse_bot_runtime_call_unkeyed(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
+    refuse_bot_runtime_call(manager, command, params, window, false)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's stand-in for a sender at a terminal of its own: CI has none.
+    static TEST_OWN_TERMINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's desktop launch that could not pin the window's key.
+    static TEST_WINDOW_UNPINNED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The seed of the window key a test pins, as a desktop launch would.
+    static TEST_WINDOW_KEY: std::cell::Cell<Option<[u8; 32]>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -3278,6 +3462,9 @@ struct Caller {
     bot: Option<String>,
     name: String,
     paused: bool,
+    /// What the bot's owner lets it do (`BotAccess::effective`); read and
+    /// report when the bot cannot be read.
+    access: crate::bots::BotAccess,
     verified: bool,
     /// The session that works for the bot the caller runs in.
     session: Option<String>,
@@ -3309,12 +3496,12 @@ impl Caller {
     fn of_process(manager: &SessionManager, params: &Value, peer: Option<i32>) -> Self {
         // With Bots off nothing is looked up: the command is what it says, as before.
         if !crate::bots::enabled() {
-            return Self { bot: None, name: String::new(), paused: false, verified: false, session: None, placed: None, peer: None, gone: false, incomplete: false };
+            return Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: None, gone: false, incomplete: false };
         }
         #[cfg(unix)]
         let (placing, gone) = (peer.map(|pid| manager.session_of_process(pid)).transpose(), peer.is_some_and(|pid| !crate::serve_cli::consent::alive(pid)));
         #[cfg(not(unix))]
-        let (placing, gone): (anyhow::Result<Option<crate::session::Placed>>, bool) = { let _ = (peer, manager); (Ok(None), false) };
+        let (placing, gone): (anyhow::Result<Option<Option<crate::session::Placed>>>, bool) = { let _ = (peer, manager); (Ok(None), false) };
         let (placed, mut incomplete) = match placing {
             Ok(placed) => (placed.flatten(), false),
             Err(error) => {
@@ -3333,7 +3520,7 @@ impl Caller {
             },
             None => None,
         };
-        let nobody = Self { bot: None, name: String::new(), paused: false, verified: false, session: None, placed: placed.clone(), peer, gone, incomplete };
+        let nobody = Self { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: placed.clone(), peer, gone, incomplete };
         // A placed caller's claim is not read: it is where it is.
         let claimed = if placed.is_some() { None } else { params["caller"]["session"].as_str().and_then(|id| index::get(id).ok()) };
         let proved = || match (claimed.as_ref(), params["caller"]["tab"].as_str()) {
@@ -3347,13 +3534,13 @@ impl Caller {
                 None => return nobody,
             },
         };
-        let (name, paused) = match crate::store::bots::get(&id) {
-            Ok(Some(bot)) => (bot.name, bot.paused.is_some()),
+        let (name, paused, access) = match crate::store::bots::get(&id) {
+            Ok(Some(bot)) => (bot.name, bot.paused.is_some(), bot.access.effective()),
             // A bot that is gone leaves an ordinary session behind.
             Ok(None) => return nobody,
-            Err(_) => ("Its bot".to_owned(), true),
+            Err(_) => ("Its bot".to_owned(), true, crate::bots::BotAccess::ReadReport),
         };
-        Self { bot: Some(id), name, paused, verified, session: Some(session), placed, peer, gone, incomplete }
+        Self { bot: Some(id), name, paused, access, verified, session: Some(session), placed, peer, gone, incomplete }
     }
 
     /// The session the command runs in: where the kernel places it, else the one it names.
@@ -3376,7 +3563,17 @@ impl Caller {
     /// own (not one of the runtime's): asked only when it matters.
     fn unplaced_without_terminal(&self) -> bool {
         #[cfg(unix)]
-        return self.placed.is_none() && self.peer.is_some_and(|pid| !person_terminal(pid));
+        return self.placed.is_none() && self.peer.is_some_and(|pid| !own_terminal(pid));
+        #[cfg(not(unix))]
+        false
+    }
+
+    /// Whether the process that sent this is in no TerminalX pane, not under
+    /// the runtime, and has a controlling terminal of its own: a person at a
+    /// terminal, as far as the kernel can say (`person_terminal`).
+    fn in_a_terminal_of_its_own(&self) -> bool {
+        #[cfg(unix)]
+        return self.placed.is_none() && self.peer.is_some_and(own_terminal);
         #[cfg(not(unix))]
         false
     }
@@ -3434,6 +3631,25 @@ impl Caller {
         ))
     }
 
+    /// Refused unless the bot may act outward on its own: full access, and
+    /// not paused. What these do leaves this computer with the owner's own
+    /// GitHub or Linear sign-in (a push, a merge, a comment), and a bot that
+    /// asks first, or only reads and reports, has its owner do it (PRO-489).
+    fn refuse_outward(&self, what: &str) -> Result<(), ControlError> {
+        self.refuse_while_paused(what)?;
+        if self.access == crate::bots::BotAccess::Full {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            "forbidden",
+            match self.access {
+                crate::bots::BotAccess::AskOutward => format!("{} asks its owner before anything that leaves this computer, so a session that works for it does not {what}: that is done with the owner's own sign-in.", self.name),
+                _ => format!("{} only reads and reports, so a session that works for it does not {what}: that is done with the owner's own sign-in.", self.name),
+            },
+            Some("Tell your owner what you would do and why; they can do it in TerminalX, or give the bot full access.".into()),
+        ))
+    }
+
     fn forbidden(&self, what: &str) -> ControlError {
         ControlError::new(
             "forbidden",
@@ -3445,11 +3661,13 @@ impl Caller {
     /// What a session working for a bot may not do outside the bots
     /// commands (PRO-468): start work while the bot is paused, start work
     /// that could not be held to its access (another computer, a cloud
-    /// workspace, an issue pipeline), approve a permission, or prompt a
-    /// session that does not work for the same bot.
+    /// workspace, an issue pipeline), approve a permission, prompt a
+    /// session that does not work for the same bot, or, unless it has full
+    /// access, act outward with the owner's sign-in: steer or merge an issue
+    /// pipeline, or write to an issue (PRO-489).
     fn gate(&self, command: &str, params: &Value) -> Result<(), ControlError> {
         self.refuse_gone()?;
-        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command) };
+        let Some(bot) = self.bot.as_deref() else { return self.gate_unplaced(command, params) };
         match command {
             "sessions.create" => self.refuse_while_paused("start sessions"),
             "runs.create" => {
@@ -3463,6 +3681,11 @@ impl Caller {
             // Which run is settled in `runs`, where the run is found.
             "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" => self.refuse_while_paused("start or steer runs"),
             "pipelines.start" => Err(self.forbidden("start an issue pipeline: its sessions could not be held to the bot's access")),
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" => self.refuse_outward("change how an issue pipeline merges"),
+            // Stopping one, or looking at its pull request again, sends nothing anywhere.
+            "pipelines.act" if OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()) => Ok(()),
+            "pipelines.act" => self.refuse_outward("move an issue pipeline on: it pushes, reviews and merges"),
+            "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => self.refuse_outward("write to an issue"),
             "cloud.sessions.create" | "cloud.send" | "cloud.resume" => Err(self.forbidden("start work in a cloud workspace: it could not be held to the bot's access")),
             "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
             "send" => {
@@ -3483,12 +3706,19 @@ impl Caller {
         }
     }
 
-    /// A caller no tab holds and with no terminal starts no work while any
-    /// bot is paused: it may be a bot's process that left its tab behind.
-    /// What only reads or steers is left to it.
-    fn gate_unplaced(&self, command: &str) -> Result<(), ControlError> {
+    /// A caller no tab holds and with no terminal starts no work, and acts
+    /// on nothing outward with the owner's sign-in (an issue write, a
+    /// pipeline's merge switches or any action but stop and refresh), while
+    /// any bot is paused: it may be a bot's process that left its tab behind
+    /// (PRO-489). That includes the owner's own script with no terminal
+    /// (launchd, cron, a CI runner), which can be run from a terminal or
+    /// once the bots are resumed. What only reads or steers is left to it.
+    fn gate_unplaced(&self, command: &str, params: &Value) -> Result<(), ControlError> {
         let starts_work = match command {
             "sessions.create" | "runs.create" | "runs.start" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume" => true,
+            // What acts outward with the owner's sign-in counts too (PRO-489).
+            "pipelines.autoMerge" | "pipelines.resolveConflicts" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => true,
+            "pipelines.act" => !OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()),
             _ => command.strip_prefix("machine.").is_some_and(|action| !MACHINE_READS.contains(&action)),
         };
         if !crate::bots::enabled() || !starts_work || !self.unplaced_without_terminal() {
@@ -3505,8 +3735,12 @@ impl Caller {
         ))
     }
 
-    /// A run steered by a bot's session is one its lead works for the same bot.
+    /// A run steered by a bot's session is one its lead works for the same
+    /// bot; a caller that was gone, or could not be placed, steers none
+    /// (PRO-489): `stop`, `merge`, `finish`, `note`, `skip` and `cleanup`
+    /// reach no gate before this.
     fn may_steer(&self, run: &crate::orchestration::Run) -> Result<(), ControlError> {
+        self.refuse_gone()?;
         let Some(bot) = self.bot.as_deref() else { return Ok(()) };
         let lead = index::get(&run.lead.session_id).ok();
         if lead.as_ref().and_then(crate::bots::chat::acting_bot).as_deref() == Some(bot) {
@@ -3526,8 +3760,22 @@ fn gone() -> ControlError {
     )
 }
 
+/// The `pipelines.act` actions that send nothing anywhere: a bot may stop a
+/// pipeline, or have it look at its pull request again, whatever its access.
+const OUTWARD_SAFE_ACTIONS: &[&str] = &["stop", "refresh"];
+
 /// What a `machine.*` command only reads on another computer.
 const MACHINE_READS: &[&str] = &["list", "status", "projects.list", "sessions.list", "tabs.list", "read", "wait", "permissions.list", "worktrees.list"];
+
+/// [`person_terminal`] for a caller: a test stands in for a person at a terminal, which CI has none of.
+#[cfg(unix)]
+fn own_terminal(pid: i32) -> bool {
+    #[cfg(test)]
+    if TEST_OWN_TERMINAL.with(std::cell::Cell::get) {
+        return true;
+    }
+    person_terminal(pid)
+}
 
 /// Whether `pid` has a controlling terminal of its own: one, and not one of
 /// the runtime's, nor in a session one of its shells leads (`consent::judge`).
@@ -4217,6 +4465,65 @@ mod tests {
         }
     }
 
+    /// A session that works for a bot moves no issue pipeline on and writes
+    /// to no issue, which is done with the owner's own sign-in, unless the
+    /// bot has full access and is not paused; stopping a pipeline or looking
+    /// again is left to any (PRO-489). Held from the runtime's dispatch, so a
+    /// refusal comes before the pipeline or the issue is even looked up.
+    #[test]
+    fn a_bot_acts_outward_with_the_owners_sign_in_only_with_full_access() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, sink) = headless_service();
+        let id = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        let caller = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        let outward = [
+            ("pipelines.autoMerge", json!({"pipeline": "none", "value": true})),
+            ("pipelines.resolveConflicts", json!({"pipeline": "none", "value": true})),
+            ("pipelines.act", json!({"pipeline": "none", "action": "merge"})),
+            ("pipelines.act", json!({"pipeline": "none", "action": "advance"})),
+            ("pipelines.act", json!({"pipeline": "none"})),
+            ("issues.comment", json!({"issue": "ENG-1", "body": "hi"})),
+            ("issues.create", json!({"title": "t"})),
+            ("issues.status", json!({"issue": "ENG-1", "status": "Done"})),
+            ("issues.assign", json!({"issue": "ENG-1"})),
+            ("issues.label", json!({"issue": "ENG-1", "label": "x"})),
+        ];
+        let ask = |command: &str, params: &Value| {
+            let mut params = params.clone();
+            params["caller"] = caller.clone();
+            service.execute(command, params, "r")
+        };
+        let set_access = |access: &str| { crate::bots::update(sink.as_ref(), &id, serde_json::from_value(json!({"access": access})).unwrap()).unwrap(); };
+        for access in ["askOutward", "readReport"] {
+            set_access(access);
+            for (command, params) in &outward {
+                let error = ask(command, params).unwrap_err();
+                assert_eq!(error.code, "forbidden", "{access} {command} {params}");
+                assert!(error.message.contains("owner's own sign-in"), "{}", error.message);
+            }
+            for action in OUTWARD_SAFE_ACTIONS {
+                assert_ne!(ask("pipelines.act", &json!({"pipeline": "none", "action": action})).unwrap_err().code, "forbidden", "{access} {action}: refused only for the pipeline that is not there");
+            }
+        }
+        // Full access: past the guard, to the pipeline or issue that is not there.
+        set_access("full");
+        for (command, params) in &outward {
+            assert!(!matches!(ask(command, params).map_err(|error| error.code).unwrap_err().as_str(), "forbidden" | "bot_paused"), "{command} {params}");
+        }
+        // Paused, even full access acts on nothing outward.
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+        for (command, params) in &outward {
+            assert_eq!(ask(command, params).unwrap_err().code, "bot_paused", "{command}");
+        }
+        // The owner's own sessions are held to none of it.
+        let owner = json!({"caller": {}});
+        assert_ne!(service.execute("issues.comment", json!({"issue": "ENG-1", "body": "hi", "caller": owner["caller"]}), "r").map_err(|error| error.code).unwrap_err(), "forbidden");
+    }
+
     /// N3 (PRO-468): who asks is worked out from the process that asked. A
     /// command run in a bot's chat, or by anything that terminal started, is
     /// held to the bot whatever it claims, or if it claims nothing at all.
@@ -4256,6 +4563,13 @@ mod tests {
         assert_ne!(child, shell, "a process the pane started, not the pane's own");
         assert_eq!(service.manager.session_of_process(child).unwrap().and_then(|placed| placed.session), Some(chat.id.clone()), "found up the child's ancestry");
         assert_eq!(service.manager.session_of_process(std::process::id() as i32).unwrap(), None, "the test's own process is no tab's");
+        // Placing takes no tab's lock (PRO-489): a tab held mid-launch, or wedged, stalls no one else's command.
+        let (placed, waited) = service.manager.while_tab_locked_for_test(&chat.id, &chat.tabs[0].id, || {
+            let started = std::time::Instant::now();
+            (service.manager.session_of_process(child).unwrap().and_then(|placed| placed.session), started.elapsed())
+        });
+        assert_eq!(placed, Some(chat.id.clone()));
+        assert!(waited < std::time::Duration::from_secs(2), "placed while the tab was locked, in {waited:?}");
 
         // Claiming nothing, or the owner's own session, changes nothing.
         let claims = [json!({}), json!({"caller": {"session": owners.id, "tab": "owners-tab"}})];
@@ -4728,8 +5042,15 @@ mod tests {
         // What the runtime answered each frame, by its id, whether or not its sender could still read it.
         let (answered, answers) = std::sync::mpsc::channel::<(String, Value)>();
         let answered = std::sync::Mutex::new(answered);
+        // PRO-489: the closing frame is held until its sender has closed, so
+        // a runner under load cannot read the sender before it is gone.
+        let (closed_signal, closing) = std::sync::mpsc::channel::<()>();
+        let closing = std::sync::Mutex::new(closing);
         crate::hooks::serve_private(endpoint.clone(), |_| crate::hooks::HookReply::default(), move |request| {
             let id = request.id.clone();
+            if id == "closed" {
+                closing.lock().unwrap().recv_timeout(std::time::Duration::from_secs(10)).expect("the sender closes");
+            }
             let response = service.handle(request);
             let _ = answered.lock().unwrap().send((id, serde_json::to_value(&response).unwrap()));
             response
@@ -4751,9 +5072,352 @@ mod tests {
         let mut closed = std::os::unix::net::UnixStream::connect(&endpoint.socket).unwrap();
         closed.write_all(frame("closed").as_bytes()).unwrap();
         drop(closed);
+        closed_signal.send(()).unwrap();
         let refused = answer("closed");
         assert_eq!(refused["error"]["code"], "person_required", "{refused}");
         assert!(refused["error"]["message"].as_str().unwrap().contains("exited"), "{refused}");
+    }
+
+    /// PRO-489 (review): while any bot is paused, a process no tab holds and
+    /// with no terminal (a bot's helper that left its tab, or the owner's own
+    /// cron or CI script) acts on nothing outward with the owner's sign-in,
+    /// as it starts no work; stopping or refreshing a pipeline, and reads,
+    /// are left to it, and with no bot paused nothing is refused.
+    #[cfg(unix)]
+    #[test]
+    fn an_unplaced_caller_with_no_terminal_acts_on_nothing_outward_while_a_bot_is_paused() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, sink) = headless_service();
+        let id = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let mut script = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let caller = Caller::of_process(&service.manager, &json!({}), Some(script.id() as i32));
+        assert!(caller.bot.is_none() && caller.unplaced_without_terminal(), "no tab holds it, and it has no terminal");
+        let outward = [
+            ("issues.comment", json!({})), ("issues.create", json!({})), ("issues.status", json!({})), ("issues.assign", json!({})), ("issues.label", json!({})),
+            ("pipelines.autoMerge", json!({})), ("pipelines.resolveConflicts", json!({})), ("pipelines.act", json!({"action": "merge"})),
+        ];
+        for (command, params) in &outward {
+            caller.gate(command, params).unwrap_or_else(|error| panic!("{command}, no bot paused: {error:?}"));
+        }
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+        for (command, params) in &outward {
+            assert_eq!(caller.gate(command, params).unwrap_err().code, "bot_paused", "{command}");
+        }
+        for action in OUTWARD_SAFE_ACTIONS {
+            caller.gate("pipelines.act", &json!({"action": action})).unwrap();
+        }
+        // The same through the dispatch (PRO-489 lead review, low): the gate runs before the pipeline or issue is looked up.
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(Some(script.id() as i32)));
+        let mut dispatched = Vec::new();
+        for (command, params) in &outward {
+            let mut params = params.clone();
+            params["pipeline"] = json!("none");
+            params["issue"] = json!("ENG-1");
+            dispatched.push((command.to_string(), service.execute(command, params, "r").map_err(|error| error.code).err()));
+        }
+        let safe: Vec<_> = OUTWARD_SAFE_ACTIONS.iter().map(|action| service.execute("pipelines.act", json!({"pipeline": "none", "action": action}), "r").map_err(|error| error.code).err()).collect();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(None));
+        for (command, code) in dispatched {
+            assert_eq!(code.as_deref(), Some("bot_paused"), "{command} through the dispatch");
+        }
+        for code in safe {
+            assert_ne!(code.as_deref(), Some("bot_paused"), "stop and refresh are left to it");
+        }
+        let _ = script.kill();
+        let _ = script.wait();
+    }
+
+    /// PRO-489 lead review (low): `may_steer` through the dispatch. A caller
+    /// that had exited before it could be placed steers no run (`runs.stop`
+    /// and the rest reach no gate before it); the owner's own process does.
+    #[cfg(unix)]
+    #[test]
+    fn a_gone_caller_steers_no_run_through_the_dispatch() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "a-run", "lead": {"sessionId": "lead", "tabId": "t"}, "projectPath": "/fixture", "goal": "Something",
+            "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
+        })).unwrap();
+        crate::orchestration::store::insert(&run).unwrap();
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let dead = exited.id() as i32;
+        exited.wait().unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(Some(dead)));
+        let steered: Vec<_> = ["runs.stop", "runs.note", "runs.skip", "runs.cleanup", "runs.finish", "runs.merge"]
+            .map(|command| (command, service.execute(command, json!({"run": "a-run", "note": "n", "piece": "p"}), "r").unwrap_err()))
+            .into_iter().collect();
+        crate::hooks::TEST_CALLER_PID.with(|pid| pid.set(None));
+        for (command, refused) in steered {
+            assert_eq!(refused.code, "person_required", "{command}: {}", refused.message);
+            assert!(refused.message.contains("had exited"), "{command}: {}", refused.message);
+        }
+        // In-process (the owner's window): past the gate, to whatever the run itself says.
+        let ran = service.execute("runs.note", json!({"run": "a-run", "note": "n"}), "r");
+        assert_ne!(ran.map_err(|error| error.code).err().as_deref(), Some("person_required"));
+    }
+
+    /// PRO-489: a caller that was gone before it could be placed, or whose
+    /// place could not be worked out, steers no run, whatever the command.
+    #[test]
+    fn a_gone_or_unplaced_caller_steers_no_run() {
+        let run: crate::orchestration::Run = serde_json::from_value(json!({
+            "id": "a-run", "lead": {"sessionId": "lead", "tabId": "t"}, "projectPath": "/fixture", "goal": "Something",
+            "state": "running", "pieces": [], "workerMode": "plan", "created": "2026-11-20T09:00:00Z", "modified": "2026-11-20T09:00:00Z",
+        })).unwrap();
+        let caller = |gone: bool, incomplete: bool| Caller { bot: None, name: String::new(), paused: false, access: crate::bots::BotAccess::Full, verified: false, session: None, placed: None, peer: Some(4242), gone, incomplete };
+        caller(false, false).may_steer(&run).unwrap();
+        assert_eq!(caller(true, false).may_steer(&run).unwrap_err().code, "person_required");
+        let refused = caller(false, true).may_steer(&run).unwrap_err();
+        assert!(refused.message.contains("could not tell where"), "{}", refused.message);
+    }
+
+    /// PRO-489 (review 2): where no window key is pinned, a phone's or a
+    /// share's call is still held: placed as session writes are, it is
+    /// refused from a bot's session and from a detached process with no
+    /// terminal, and passes from the window; with Bots off nothing is asked.
+    #[cfg(unix)]
+    #[test]
+    fn without_a_pinned_key_phone_and_share_calls_are_placed() {
+        let marker = format!("73.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, in_bot) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        let mut helper = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let detached = helper.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let ask = |pid: i32, command: &str| {
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+            service.execute(command, json!({}), "r").map_err(|error| error.code).err()
+        };
+        assert!(!current_window().keyed());
+        for command in ["runtime.mobile.check", "runtime.mobile.register", "runtime.sharing.status", "runtime.sharing.register"] {
+            assert_eq!(ask(detached, command).as_deref(), Some("person_required"), "{command}: a detached helper");
+            assert_eq!(ask(in_bot, command).as_deref(), Some("forbidden"), "{command}: a bot's session");
+        }
+        lifetime.window.handed_over(Some((detached, crate::serve_cli::consent::started_at(detached).unwrap())));
+        assert!(!matches!(ask(detached, "runtime.sharing.status").as_deref(), Some("person_required" | "forbidden")), "the window passes");
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert!(!matches!(ask(in_bot, "runtime.sharing.status").as_deref(), Some("person_required" | "forbidden")), "Bots off");
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        let _ = helper.kill();
+        let _ = helper.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489: while Bots is on, a runtime whose window's key is pinned takes
+    /// for the window only a registrant that proves it, and lets no other
+    /// process change a session or a terminal, nor act for a phone or a
+    /// share, placed or not: a detached helper with the control token is
+    /// refused outright, and a lease of its own gets it nothing.
+    #[cfg(unix)]
+    #[test]
+    fn on_a_keyed_runtime_only_the_proven_window_writes_through_the_runtime() {
+        let marker = format!("72.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        let mut stranger = std::process::Command::new("/usr/bin/perl")
+            .args(["-e", "use POSIX; POSIX::setsid(); sleep 30"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        let pid = stranger.id() as i32;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+
+        // A lease is anyone's: registering on it alone, or with a witness of a
+        // process the runtime started, proves nothing. Review 2: the attachment
+        // stays (a window that cannot read its Keychain key still shows what
+        // runs), but it provides no window services and is not the window.
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": "/nowhere.sock", "token": "ab".repeat(16)});
+        let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone()).unwrap();
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
+        let mut witnessed = registration.clone();
+        let run = service.endpoint.socket.parent().unwrap().to_owned();
+        let _witness = crate::serve_cli::consent::witness_for_test(crate::serve_cli::consent::WINDOW_REGISTER, &run, &mut witnessed, Some(&[7; 32])).unwrap();
+        let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, witnessed).unwrap();
+        assert_eq!(unproven["proven"], false, "the runtime's own process is never the window: {unproven}");
+        assert!(lifetime.window.window_process().is_none(), "nobody is taken for the window");
+        assert!(lifetime.attachment(attached["epoch"].as_str().unwrap(), attached["lease"].as_str().unwrap()).is_ok(), "still attached");
+        assert!(lifetime.window.call("computer.capabilities", json!({})).is_err(), "no window services from it");
+
+        let writes = [
+            ("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="})),
+            ("runtime.session.send", json!({})),
+            ("runtime.mobile.check", json!({})),
+            ("runtime.sharing.status", json!({})),
+        ];
+        for (command, params) in &writes {
+            let refused = ask(command, params.clone()).unwrap_err();
+            assert_eq!(refused.code, "person_required", "{command}: {}", refused.message);
+            assert!(refused.message.contains("only the TerminalX window"), "{}", refused.message);
+        }
+        assert_ne!(ask("runtime.session.list", json!({})).map_err(|error| error.code).err().as_deref(), Some("person_required"), "reads are anyone's");
+
+        // The window, once recognised (here as a handover carries it): every one passes the guard.
+        lifetime.window.handed_over(Some((pid, crate::serve_cli::consent::started_at(pid).unwrap())));
+        for (command, params) in &writes {
+            assert_ne!(ask(command, params.clone()).map_err(|error| error.code).err().as_deref(), Some("person_required"), "{command}");
+        }
+        // Bots off: nothing is asked, as before.
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(std::process::id() as i32 + 100_000)));
+        assert_ne!(ask("runtime.sharing.status", json!({})).map_err(|error| error.code).err().as_deref(), Some("person_required"));
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 lead review M1: on a keyed runtime with Bots on, a process
+    /// with the control token and a pseudo-terminal of its own, outside the
+    /// runtime's tree (as `script` gives one), is not taken for the window
+    /// when it registers without the key's proof, and writes nothing; the same
+    /// registration proved with the key is registered and recognised end to
+    /// end, and its writes pass the guard.
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_of_its_own_registers_as_the_window_only_with_the_keys_proof() {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = format!("74.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        let run = service.endpoint.socket.parent().unwrap().to_owned();
+        // The window's own endpoint: a private socket in this runtime's `run`.
+        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        let register = |key: Option<&[u8; 32]>| {
+            let (pid, terminal, mut params) = crate::serve_cli::consent::tests::detached_request_with(&run, crate::serve_cli::consent::WINDOW_REGISTER, key, true);
+            assert!(terminal, "the registrant has a terminal of its own");
+            for (field, value) in registration.as_object().unwrap() {
+                params[field] = value.clone();
+            }
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+            (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
+        };
+        let write = || service.execute("runtime.pty.write", json!({"id": chat.tabs[0].pane_id(), "data": "aGk="}), "r").map_err(|error| error.code).err();
+        let bots = |on: bool| {
+            let mut settings = crate::store::settings::load();
+            settings.experimental.bots = on;
+            crate::store::settings::save(&settings).unwrap();
+        };
+
+        // M2: with Bots off an unproven window still gets its services, says
+        // it is unproven, and is not recognised, so turning Bots on later
+        // leaves its writes refused until it proves itself.
+        bots(false);
+        let (_, services) = register(None);
+        assert_eq!((services["registered"].clone(), services["proven"].clone()), (json!(true), json!(false)), "{services}");
+        assert!(lifetime.window.window_process().is_none(), "not recognised while Bots is off either");
+        bots(true);
+        assert_eq!(write().as_deref(), Some("person_required"), "Bots on: still not the window");
+
+        let (_, unproven) = register(None);
+        assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
+        assert!(unproven["message"].as_str().unwrap().contains("window's key"), "{unproven}");
+        assert!(lifetime.window.window_process().is_none(), "not taken for the window on its terminal alone");
+        assert_eq!(write().as_deref(), Some("person_required"), "and it writes nothing");
+
+        let (pid, proven) = register(Some(&[7; 32]));
+        assert_eq!(proven["registered"], true, "{proven}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid), "the process that proved it is the window");
+        assert_ne!(write().as_deref(), Some("person_required"), "the proven window writes");
+
+        std::fs::write(run.join("done"), b"").unwrap();
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 review (low): a runtime the desktop launched without pinning
+    /// the window's key registers the window as before, by placement, and
+    /// says it is unpinned while Bots is on, for the window to show; with
+    /// Bots off it says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unpinned_runtime_says_so_when_the_window_registers() {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = format!("76.{}", std::process::id());
+        let (_home, service, _sink, _id, chat, _owners, _pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let lifetime = crate::local_runtime::Lifetime::new(std::time::Duration::ZERO);
+        let service = service.with_local_lifetime(lifetime.clone());
+        TEST_WINDOW_UNPINNED.with(|unpinned| unpinned.set(true));
+        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        let answer = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), "r").unwrap();
+        assert_eq!((answer["registered"].clone(), answer["pinned"].clone()), (json!(true), json!(false)), "{answer}");
+        assert!(answer["message"].as_str().unwrap().contains("started without the window's key"), "{answer}");
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        let answer = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration, "r").unwrap();
+        assert!(answer.get("pinned").is_none(), "{answer}");
+        TEST_WINDOW_UNPINNED.with(|unpinned| unpinned.set(false));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+    }
+
+    /// PRO-489 lead review M5: on a keyed runtime too, a process in a bot's
+    /// session reads its own bot's week of duties through the dispatch, as
+    /// its duties, and neither another bot's nor every bot's.
+    #[cfg(unix)]
+    #[test]
+    fn on_a_keyed_runtime_a_bots_session_reads_its_own_duties_and_week_only() {
+        let marker = format!("75.{}", std::process::id());
+        let (_home, service, _sink, id, chat, _owners, pid) = bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+        let other = service.execute("bots.create", json!({"role": "watcher", "name": "Argus"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+        TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+        let bots = |operation: &str, params: Value| service.execute("runtime.session.bots", json!({"operation": operation, "params": params}), "r");
+        let own_week = bots("dutyWeek", json!({"id": id, "timezone": "UTC"}));
+        let other_week = bots("dutyWeek", json!({"id": other, "timezone": "UTC"}));
+        let every_week = bots("dutyWeek", json!({"timezone": "UTC"}));
+        let own_duties = bots("duties", json!({"id": id}));
+        let other_duties = bots("duties", json!({"id": other}));
+        // Main's other bot reads are not a bot's own to make here: they are the window's.
+        let window_reads = ["handoffs", "brief", "suggestions", "channels", "pauseHeld"].map(|operation| (operation, bots(operation, json!({"id": id}))));
+        TEST_WINDOW_KEY.with(|key| key.set(None));
+        crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+        service.manager.terminals().kill(&chat.tabs[0].pane_id());
+        let _ = std::process::Command::new("pkill").args(["-f", &format!("^sleep {marker}$")]).status();
+        let own_week = own_week.unwrap();
+        assert!(own_week["days"].as_array().is_some_and(|days| days.len() == 7), "{own_week}");
+        assert!(own_duties.is_ok(), "{own_duties:?}");
+        for (what, refused) in [("another bot's week", other_week), ("every bot's week", every_week), ("another bot's duties", other_duties)] {
+            assert_eq!(refused.unwrap_err().code, "person_required", "{what}");
+        }
+        for (operation, refused) in window_reads {
+            assert_eq!(refused.unwrap_err().code, "person_required", "{operation}");
+        }
     }
 
     /// M2 (review 6): after a handover, the window's frames reach a runtime
@@ -4958,16 +5622,16 @@ mod tests {
         let (_home, service, _sink, _id, chat, _owners, pid) = bot_with_a_process(&script, &marker);
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
         for command in ["runtime.session.permission", "runtime.session.send", "runtime.session.create", "runtime.session.automationSave", "runtime.session.automationRun", "runtime.pty.write"] {
-            assert_eq!(refuse_bot_runtime_call(&service.manager, command, &json!({}), None).unwrap_err().code, "forbidden", "{command}");
+            assert_eq!(refuse_bot_runtime_call_unkeyed(&service.manager, command, &json!({}), None).unwrap_err().code, "forbidden", "{command}");
         }
-        assert_eq!(refuse_bot_runtime_call(&service.manager, "runtime.session.bots", &json!({"operation": "pause"}), None).unwrap_err().code, "forbidden");
+        assert_eq!(refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.session.bots", &json!({"operation": "pause"}), None).unwrap_err().code, "forbidden");
         for (command, params) in [("runtime.session.list", json!({})), ("runtime.session.bots", json!({"operation": "list"})), ("runtime.pty.shells", json!({}))] {
-            refuse_bot_runtime_call(&service.manager, command, &params, None).unwrap_or_else(|error| panic!("{command}: {error:?}"));
+            refuse_bot_runtime_call_unkeyed(&service.manager, command, &params, None).unwrap_or_else(|error| panic!("{command}: {error:?}"));
         }
         // The window passes by its process and start time; a later process given its pid does not.
         let started = crate::serve_cli::consent::started_at(pid).unwrap();
-        refuse_bot_runtime_call(&service.manager, "runtime.pty.write", &json!({}), Some((pid, started))).unwrap();
-        assert_eq!(refuse_bot_runtime_call(&service.manager, "runtime.pty.write", &json!({}), Some((pid, started + 1))).unwrap_err().code, "forbidden");
+        refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.pty.write", &json!({}), Some((pid, started))).unwrap();
+        assert_eq!(refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.pty.write", &json!({}), Some((pid, started + 1))).unwrap_err().code, "forbidden");
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
         service.manager.terminals().kill(&chat.tabs[0].pane_id());
     }
@@ -4989,17 +5653,17 @@ mod tests {
         let me = std::process::id() as i32;
         let window = Some((me, crate::serve_cli::consent::started_at(me).unwrap()));
         for command in ["runtime.session.permission", "runtime.session.send", "runtime.session.create", "runtime.session.automationSave", "runtime.pty.write"] {
-            assert_eq!(refuse_bot_runtime_call(&service.manager, command, &json!({}), window).unwrap_err().code, "person_required", "{command}");
+            assert_eq!(refuse_bot_runtime_call_unkeyed(&service.manager, command, &json!({}), window).unwrap_err().code, "person_required", "{command}");
         }
-        refuse_bot_runtime_call(&service.manager, "runtime.session.list", &json!({}), window).unwrap();
-        assert_eq!(refuse_bot_runtime_call(&service.manager, "runtime.session.send", &json!({}), None).unwrap_err().code, "person_required", "no window attached");
+        refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.session.list", &json!({}), window).unwrap();
+        assert_eq!(refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.session.send", &json!({}), None).unwrap_err().code, "person_required", "no window attached");
         let bots = |on: bool| {
             let mut settings = crate::store::settings::load();
             settings.experimental.bots = on;
             crate::store::settings::save(&settings).unwrap();
         };
         bots(false);
-        refuse_bot_runtime_call(&service.manager, "runtime.session.send", &json!({}), window).unwrap();
+        refuse_bot_runtime_call_unkeyed(&service.manager, "runtime.session.send", &json!({}), window).unwrap();
         bots(true);
         crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
         let _ = helper.kill();
@@ -5062,9 +5726,29 @@ mod tests {
             assert_eq!(refused.code, "person_required", "{command}");
             assert!(!refused.message.to_lowercase().contains("waiting"), "{command}: {}", refused.message);
         }
-        TEST_WINDOW_CONFIRMS.with(|confirms| confirms.set(true));
         let bot = crate::bots::get(&id).unwrap();
         assert!(bot.paused.is_some() && !bot.unknown.contains_key(crate::bots::RESUME_REQUEST_KEY), "nothing was asked for");
+
+        // PRO-489: there, a person's own terminal resumes at once, as it pairs; a process with none still cannot.
+        #[cfg(unix)]
+        {
+            let mut person = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(person.id() as i32)));
+            assert_eq!(ask("bots.resume", json!({"bot": "atlas"})).unwrap_err().code, "person_required", "no terminal of its own");
+            TEST_OWN_TERMINAL.with(|own| own.set(true));
+            let resumed = ask("bots.resume", json!({"bot": "atlas"})).unwrap();
+            assert_eq!((resumed["waiting"].as_bool(), resumed["message"].as_str()), (Some(false), Some("Resumed.")), "{resumed}");
+            assert!(crate::bots::get(&id).unwrap().paused.is_none());
+            ask("bots.pause", json!({"bot": "atlas"})).unwrap();
+            let resumed = ask("bots.resumeAll", json!({})).unwrap();
+            assert_eq!(resumed["waiting"], false);
+            assert!(crate::bots::get(&id).unwrap().paused.is_none());
+            TEST_OWN_TERMINAL.with(|own| own.set(false));
+            crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+            let _ = person.kill();
+            let _ = person.wait();
+        }
+        TEST_WINDOW_CONFIRMS.with(|confirms| confirms.set(true));
     }
 
     /// is off; on, the records, the homes and the trash are the app's.

@@ -315,7 +315,7 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(error.textContent).toContain("Restarting it stops one running session.");
     expect(error.textContent).not.toContain("runtime_restart_required");
     fireEvent.click(within(error).getByRole("button", { name: "Restart runtime" }));
-    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("epoch-7"));
+    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("epoch-7", RESTART));
     await waitFor(() => expect(mocks.api.update).toHaveBeenCalledTimes(2));
     expect(mocks.api.update.mock.calls[1]).toEqual(["b1", { access: "full" }]);
     await waitFor(() => expect(page.queryByTestId("bot-settings-error")).toBeNull());

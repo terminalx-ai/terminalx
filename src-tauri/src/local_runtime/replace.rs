@@ -435,9 +435,9 @@ pub(crate) fn shown(replacement: &Replacement, status: super::ui::ConnectionStat
         return ConnectionState::Updating { from, to, keeping };
     }
     match status {
-        ConnectionState::Connected { epoch, generation, view, .. } => {
+        ConnectionState::Connected { epoch, generation, view, unproven, .. } => {
             let outdated = replacement.outdated(&epoch);
-            ConnectionState::Connected { epoch, generation, view, outdated }
+            ConnectionState::Connected { epoch, generation, view, outdated, unproven }
         }
         status => status,
     }
@@ -775,7 +775,7 @@ mod tests {
     }
 
     fn connected(epoch: &str) -> ConnectionState {
-        ConnectionState::Connected { epoch: epoch.into(), generation: 1, view: 0, outdated: None }
+        ConnectionState::Connected { epoch: epoch.into(), generation: 1, view: 0, outdated: None, unproven: None }
     }
 
     /// The test's own version is the app's; one release before it is older.

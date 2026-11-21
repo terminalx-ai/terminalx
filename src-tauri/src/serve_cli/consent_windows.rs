@@ -50,6 +50,12 @@ pub const PARAM: &str = "consent";
 /// the runtime refuses those that need a person (`control::bots_without_a_window`).
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
 
+/// The window's registration (PRO-489). On a Mac a runtime whose window's key
+/// is pinned takes for the window only a registrant that proves it; no
+/// control service checks a proof on Windows (`control::current_window`), so
+/// it is not witnessed here, and Bots stays off (`bots::SUPPORTED`).
+pub const WINDOW_REGISTER: &str = "runtime.window.register";
+
 pub const GUARDED: [&str; 5] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK, machine_wire::PHONE_CODE, machine_wire::PHONE_APPROVE];
 
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
@@ -57,6 +63,12 @@ const MAX_NONCE: u64 = 256;
 
 pub fn guards(command: &str) -> bool {
     GUARDED.contains(&command)
+}
+
+/// Whether this request needs a person's consent: on Windows, a guarded
+/// command only. No window signs a Bots action here, nor its registration.
+pub fn guards_request(command: &str, _params: &Value) -> bool {
+    guards(command)
 }
 
 /// A process id.
@@ -119,6 +131,16 @@ pub enum Window {
 pub(crate) const WINDOW_PUBLIC_KEY_ENV: &str = "TERMINALX_LOCAL_WINDOW_CONSENT_KEY";
 
 impl Window {
+    /// Whether this window can prove it is the window: its key is pinned.
+    pub fn keyed(&self) -> bool {
+        matches!(self, Self::Keyed(_))
+    }
+
+    /// Whether the desktop launched this runtime without pinning its key.
+    pub fn unpinned(&self) -> bool {
+        matches!(self, Self::Unrecognisable)
+    }
+
     fn current() -> Self {
         if headless() {
             return Self::Headless;
@@ -182,6 +204,12 @@ fn window_message(socket: &Path, nonce: &str) -> Vec<u8> {
 #[cfg(feature = "desktop")]
 pub(crate) fn launch_public_key() -> Result<Option<String>> {
     WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
+}
+
+/// A window keyed with `seed`, for other modules' tests (as on Unix).
+#[cfg(test)]
+pub(crate) fn window_for_test(seed: &[u8; 32]) -> Window {
+    Window::Keyed(Ed25519KeyPair::from_seed_unchecked(seed).unwrap().public_key().as_ref().try_into().unwrap())
 }
 
 /// Loads the window's signing key. Only runtime launch may request creation.

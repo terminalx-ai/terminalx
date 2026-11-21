@@ -100,9 +100,11 @@ pub struct Machines {
     pairing: Mutex<Option<watch::Sender<bool>>>,
     /// The runtime's last status, so a settings change re-emits it.
     last_status: Mutex<Option<Status>>,
-    /// The restart last offered for the attached runtime, as last read with
-    /// what it would stop (PRO-486), so a runtime event re-emits it too.
-    restart_required: Mutex<Option<String>>,
+    /// The runtime attached when the view was last read, whose restart offer
+    /// (PRO-486) every view shows while it stands. Kept by epoch, not as the
+    /// offer's text, so an offer for a runtime since replaced is never shown
+    /// (PRO-489).
+    offers_for: Mutex<Option<String>>,
     approval_wait: std::time::Duration,
     /// The app's account, once it is up: pairing through the relay keeps
     /// its credential for the account signed in (PRO-487).
@@ -119,7 +121,7 @@ impl Default for Machines {
 
 impl Machines {
     fn new(secrets: MachineSecrets, store_dir: Option<std::path::PathBuf>) -> Self {
-        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), restart_required: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT, account: std::sync::OnceLock::new(), phones: std::sync::OnceLock::new() }
+        Self { secrets, store_dir, pairing: Mutex::new(None), last_status: Mutex::new(None), offers_for: Mutex::new(None), approval_wait: pair::APPROVAL_WAIT, account: std::sync::OnceLock::new(), phones: std::sync::OnceLock::new() }
     }
 
     /// The window's phone pairing, for the addresses its listener holds.
@@ -287,7 +289,8 @@ fn this_computer_label() -> String {
 
 fn view(machines: &Machines, status: Option<Status>) -> MachineHostView {
     let settings = crate::store::settings::load();
-    let restart_required = machines.restart_required.lock().unwrap().clone();
+    let attached = machines.offers_for.lock().unwrap().clone();
+    let restart_required = attached.and_then(|epoch| restart_offered(&epoch));
     MachineHostView {
         allow_operating: settings.machines.allow_operating,
         keep_awake: settings.pairing.keep_awake,
@@ -323,25 +326,44 @@ fn host_view(machines: &Machines, runtime: Option<Arc<crate::local_runtime::desk
     if status.is_some() {
         *machines.last_status.lock().unwrap() = status.clone();
     }
-    // What a restart would stop now, not when it was offered (PRO-486).
+    // What a restart would stop now, not when it was offered (PRO-486): the
+    // offer is kept with that list, which the view then shows.
     #[cfg(all(unix, feature = "desktop"))]
-    let restart_required = runtime.as_ref().and_then(|runtime| {
-        crate::local_runtime::window_consent::offered_now_for(runtime.epoch(), || crate::local_runtime::window_consent::in_use(runtime))
-    });
-    #[cfg(not(all(unix, feature = "desktop")))]
-    let restart_required: Option<String> = None;
-    *machines.restart_required.lock().unwrap() = restart_required.map(|required| required.to_string());
+    if let Some(runtime) = &runtime {
+        crate::local_runtime::window_consent::offered_now_for(runtime.epoch(), || crate::local_runtime::window_consent::in_use(runtime));
+    }
+    offer_view(machines, runtime.as_ref().map(|runtime| runtime.epoch()), status)
+}
+
+/// The view with `status`, showing the restart offered for runtime
+/// `attached`, the one attached now, as it stands.
+fn offer_view(machines: &Machines, attached: Option<&str>, status: Option<Status>) -> MachineHostView {
+    *machines.offers_for.lock().unwrap() = attached.map(str::to_owned);
     view(machines, status)
 }
 
+/// The restart offered for runtime `epoch`, as the window shows it.
+fn restart_offered(epoch: &str) -> Option<String> {
+    #[cfg(all(unix, feature = "desktop"))]
+    return crate::local_runtime::window_consent::offered(epoch).map(|required| required.to_string());
+    #[cfg(not(all(unix, feature = "desktop")))]
+    {
+        let _ = epoch;
+        None
+    }
+}
+
 /// Send every window a fresh view, as after the restart offered for the
-/// attached runtime changed (PRO-486). Blocking: runtime IPC.
+/// attached runtime changed (PRO-486). Asks the runtime nothing: the offer is
+/// as it was just made, and the status as last read, so it never waits on a
+/// runtime, which the restart lock may be held for (PRO-489).
 #[cfg(all(target_os = "macos", feature = "desktop"))]
 pub(crate) fn emit_host_view(app: &tauri::AppHandle) {
     use tauri::{Emitter, Manager};
     let machines = app.state::<Arc<Machines>>().inner().clone();
-    let runtime = app.state::<crate::AppState>().runtime();
-    let _ = app.emit(HOST_CHANGED_EVENT, &host_view(&machines, runtime));
+    let attached = app.state::<crate::AppState>().runtime();
+    let status = machines.last_status.lock().unwrap().clone();
+    let _ = app.emit(HOST_CHANGED_EVENT, &offer_view(&machines, attached.as_ref().map(|runtime| runtime.epoch()), status));
 }
 
 /// A machine host command that names the window's attachment, then the view.
@@ -583,6 +605,44 @@ mod tests {
             seen.push((event.event.to_string(), event.payload.to_string()));
         }
         assert!(seen.iter().any(|(event, payload)| event == APP_UPDATE_REQUESTED_EVENT && payload == r#"{"version":"0.2.40"}"#), "{seen:?}");
+    }
+
+    /// PRO-489: a view shows the restart offered for the runtime attached
+    /// when it was read, as it stands, and never one for a runtime since
+    /// replaced; a runtime event re-emits it without asking the runtime.
+    #[cfg(all(unix, feature = "desktop"))]
+    #[test]
+    fn the_view_shows_only_the_offer_for_the_runtime_attached() {
+        use crate::local_runtime::window_consent::{self, RestartRequired};
+        let _home = crate::store::temp_home();
+        let sink = Arc::new(crate::sink::BroadcastSink::new(16));
+        let mut events = sink.subscribe();
+        let machines = Arc::new(Machines::new(MachineSecrets::default(), None));
+        machines.configure(sink.clone(), "ai.terminalx.test").unwrap();
+        window_consent::offer_for_test(RestartRequired { epoch: "view-1".into(), work: vec!["Claude in api".into()] });
+        let shown = offer_view(&machines, Some("view-1"), None).restart_required.expect("offered");
+        assert!(shown.starts_with("runtime_restart_required:view-1: ") && shown.contains("Claude in api"), "{shown}");
+        assert_eq!(offer_view(&machines, Some("view-other"), None).restart_required, None, "another runtime attached");
+        offer_view(&machines, Some("view-1"), None);
+        // An update hands the runtime over: the offer goes with it, and the
+        // next runtime event shows none.
+        window_consent::attached_in_place_of("view-1", "view-2");
+        let emitter: Arc<dyn EventSink> = sink.clone();
+        let status = serde_json::json!({ "enabled": true, "hostKey": "ready", "machineId": null, "listening": null, "phoneRoute": false, "error": null, "computers": [] });
+        emitter.emit(wire::CHANGED_EVENT, &status);
+        let mut views = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if &*event.event == HOST_CHANGED_EVENT {
+                views.push(serde_json::from_str::<serde_json::Value>(event.payload.as_ref()).unwrap());
+            }
+        }
+        assert_eq!(views.len(), 1, "{views:?}");
+        assert_eq!(views[0]["restartRequired"], serde_json::Value::Null);
+        assert_eq!(views[0]["status"]["enabled"], true);
+        // The same runtime again keeps its offer.
+        window_consent::offer_for_test(RestartRequired { epoch: "view-3".into(), work: Vec::new() });
+        window_consent::attached_in_place_of("view-3", "view-3");
+        assert!(offer_view(&machines, Some("view-3"), None).restart_required.is_some());
     }
 
     #[test]

@@ -83,7 +83,8 @@ function useWrite() {
   };
   const fail = (cause: unknown) => setFailure({ error: errorMessage(cause) });
   const alert = (className?: string) => failure && (
-    <MachineHostError error={failure.error} className={className} onRestarted={() => { const retry = failure.retry; setFailure(null); retry?.(); }} />
+    <MachineHostError error={failure.error} className={className} onRestarted={() => { const retry = failure.retry; setFailure(null); retry?.(); }}
+      onFailed={(message) => setFailure({ error: message })} />
   );
   return { run, fail, alert };
 }
@@ -254,8 +255,8 @@ function RoleEditor({ bot, view }: { bot: Bot; view: RoleMemory }) {
         </Button>
       </div>
       {role.problem && <Problem>ROLE.md: {role.problem}</Problem>}
-      {role.overLimit && <Problem testId="bot-role-over-limit">ROLE.md is {kb(role.bytes)}. Only the first {kb(role.limit)} is read at the start of a conversation.</Problem>}
-      {!role.editable && !role.problem && <Problem testId="bot-role-read-only">ROLE.md is {kb(role.bytes)}, more than the {kb(role.limit)} a role may be, so it is shown read-only. Shorten it in your editor; the rest can go in a topic file under memory/.</Problem>}
+      {role.cut > 0 && <Problem testId="bot-role-over-limit">ROLE.md is {kb(role.bytes)}. A conversation reads only its first {kb(role.limit)}, so the last {kb(role.cut)} is cut. Shorten it to {kb(role.limit)} to save it; the rest can go in a topic file under memory/.</Problem>}
+      {!role.editable && !role.problem && <Problem testId="bot-role-read-only">ROLE.md is {kb(role.bytes)}, more than the {kb(role.shownLimit)} shown here, so it is shown in part, read-only. Shorten it in your editor; the rest can go in a topic file under memory/.</Problem>}
       {conflict && (
         <Problem testId="bot-role-conflict">
           ROLE.md changed while you were editing.{" "}

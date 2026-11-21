@@ -211,7 +211,7 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedul
       </div>
 
       {/* The draft stays in this editor while the runtime restarts; the save is sent again after. */}
-      {error && <MachineHostError error={error} onRestarted={() => { setError(null); void save(); }} className="mt-4 max-w-[720px]" />}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); void save(); }} onFailed={setError} className="mt-4 max-w-[720px]" />}
       <div className="mt-5 flex max-w-[720px] justify-end gap-2">
         <Button variant="ghost" onClick={() => onClose(null)} disabled={saving}>Cancel</Button>
         <Button onClick={() => void save()} disabled={!canSave || saving} data-testid="duty-save">{saving ? <Loader2 className="animate-spin" /> : null} {duty ? "Save" : "Add the duty"}</Button>

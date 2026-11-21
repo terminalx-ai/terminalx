@@ -46,7 +46,7 @@ export function BotSettings({ bot }: { bot: Bot }) {
     <div className="flex min-w-0 max-w-[1040px] flex-col" data-testid="bot-settings">
       {error && (
         <div data-testid="bot-settings-error">
-          <MachineHostError error={error.message} onRestarted={() => { setError(null); error.retry(); }} className="mb-3 rounded-md bg-destructive/10 px-3 py-2" />
+          <MachineHostError error={error.message} onRestarted={() => { setError(null); error.retry(); }} onFailed={(message) => setError({ message, retry: error.retry })} className="mb-3 rounded-md bg-destructive/10 px-3 py-2" />
         </div>
       )}
       <Section title="Runs on" note={`Where ${bot.name} lives and works. Moving a bot takes its role, memory and duties with it.`}>

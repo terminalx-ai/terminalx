@@ -135,7 +135,7 @@ function LookStatus({ bot, look, onChanged }: { bot: Bot; look: BuiltinStatus | 
           {busy ? <Loader2 className="animate-spin" /> : <Telescope />} Switch on Look around
         </Button>
       )}
-      {error && <MachineHostError error={error} onRestarted={() => { setError(null); switchOn(); }} />}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); switchOn(); }} onFailed={setError} />}
     </div>
   );
 }
@@ -169,7 +169,7 @@ function SuggestionRow({ bot, suggestion, onChanged }: { bot: Bot; suggestion: B
           Dismiss
         </button>
       </div>
-      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed); }} />}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed); }} onFailed={setError} />}
     </li>
   );
 }

@@ -119,6 +119,30 @@
   stops every session that works for it and archives its chats; turning Bots
   off stops them. A bot's memory reaches its agent as its own notes, read safely
   and capped (PRO-468).
+- Bots (experimental): a bot's sessions merge, steer and write to issues
+  (`terminalx pipelines auto-merge|act|resolve-conflicts`, `terminalx issues
+  comment|create|…`) only when the bot has full access and is not paused; a bot
+  that asks first has its owner do them. Its role, memory and rules are capped
+  to fit one launch on Linux, a launch too long to make says what to shorten,
+  and a csh or tcsh login shell starts a bot's chat. Bots stay off on Windows,
+  where TerminalX cannot yet tell a bot's commands from yours. While a bot is
+  paused, a script with no terminal (launchd, cron) writes to no issue and
+  merges no pipeline either; run it from a terminal. On a Mac only the
+  TerminalX window, proved with its Keychain key when it registers, changes
+  sessions and terminals through the runtime directly or acts for a paired
+  phone or a share. On Linux and servers, `terminalx bots resume` in a
+  terminal of your own resumes a bot at once. A Mac window that cannot read
+  its Keychain key still connects, says so at once, and Try again proves it
+  once Keychain is unlocked; a process with a terminal of its own registers
+  as the window only with the key. A runtime started without the key says
+  so too. A bot's own week of duties reads on a Mac as its duties do. A
+  role saved under the older 32 KB limit is shown whole, with what a
+  conversation cuts, and saved once shortened; work items, hand-offs and the
+  team brief that would make a bot's launch too long are left out and named
+  (PRO-489).
+- Settings → Machines: Restart runtime is offered only for the runtime running
+  now, restarts only what the window showed, and a failure stays on screen
+  when a handover withdraws the offer (PRO-489).
 - Bots (experimental): a bot's Role and memory. The owner edits its job title,
   who it reports to and its standing instructions (`ROLE.md`, with a saved
   state, Open in editor, every earlier version and the role it was built from).

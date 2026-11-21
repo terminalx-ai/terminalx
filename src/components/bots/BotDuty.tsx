@@ -98,7 +98,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
         {builtin && <Chip title="Every bot has it. Switch it off to stop it." data-testid="duty-builtin">Built in</Chip>}
         <span className={cn("shrink-0 text-[12.5px] font-normal", duty.enabled && !bot.paused ? "text-success" : "text-faint")} data-testid="duty-status">· {status}</span>
       </h2>
-      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed.name, failed.action); }} className="mt-3" />}
+      {error && <MachineHostError error={error} onRestarted={() => { setError(null); if (failed) act(failed.name, failed.action); }} onFailed={setError} className="mt-3" />}
 
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2" data-testid="duty-stats">
         <Card label="Last run" value={last ? clockOf(runAt(last)) || "–" : "Never"} detail={last ? runOutcome(last, leadName) : "It has not run yet"} />

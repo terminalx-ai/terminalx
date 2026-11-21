@@ -135,7 +135,7 @@ export function PrecheckSection({ input, onChange, onTry, where }: {
           </div>
           {/* A duty's Try it is guarded (PRO-471): its error can offer a restart, after which it is tried again. */}
           {error && (onTry
-            ? <MachineHostError error={error} onRestarted={() => { setError(null); void tryIt(); }} />
+            ? <MachineHostError error={error} onRestarted={() => { setError(null); void tryIt(); }} onFailed={setError} />
             : <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>)}
           {trial && <PrecheckTrialResult trial={trial} />}
         </>
