@@ -45,6 +45,9 @@
 //! included, so a checkout that has either carries nothing; nor does one
 //! whose working tree holds a `.gitattributes` that is not the committed one
 //! (changed, untracked, or ignored), since Git reads attributes from there.
+//! One in a directory that none of the merged trees has a path in, such as
+//! a package's inside an ignored `node_modules`, applies to nothing merged
+//! and does not count.
 //! The user's attributes file is left out.
 
 use std::path::Path;
@@ -127,12 +130,61 @@ fn custom_merge_rules(cwd: &Path) -> Result<Option<String>> {
     if rules.lines().map(str::trim).any(|line| !line.is_empty() && !line.starts_with('#')) {
         return Ok(Some("this checkout has attributes of its own in .git/info/attributes, which can change what a merge gives".into()));
     }
-    // Git reads attributes from the working tree: only committed ones count.
-    let stray = run(cwd, &["status", "--porcelain", "--ignored=matching", "--untracked-files=all", "--", ":(glob).gitattributes", ":(glob)**/.gitattributes"])?;
-    if let Some(line) = stray.lines().find(|line| !line.trim().is_empty()) {
-        return Ok(Some(format!("the working tree has a .gitattributes that is not the committed one ({}), which can change what a merge gives", line.get(3..).unwrap_or(line).trim())));
+    Ok(None)
+}
+
+/// The first `.gitattributes` in the working tree that is not the committed
+/// one (changed, untracked or ignored) and can change how a path of `trees`
+/// merges: Git reads attributes from the working tree, and a
+/// `.gitattributes` applies to the paths beneath its own directory. One in
+/// a directory none of `trees` has a path in (a package inside an ignored
+/// `node_modules`) applies to nothing they merge, so it does not count.
+fn stray_attributes(cwd: &Path, trees: &[&str]) -> Result<Option<String>> {
+    // `--ignored=matching` names an ignored directory once, with a trailing
+    // slash, when the pathspec could match inside it: that is not a file.
+    let status = run(cwd, &["-c", "core.quotepath=off", "status", "--porcelain", "-z", "--ignored=matching", "--untracked-files=all", "--", ":(glob).gitattributes", ":(glob)**/.gitattributes"])?;
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next() {
+        let (code, path) = (entry.get(..2).unwrap_or(""), entry.get(3..).unwrap_or(""));
+        if code.starts_with(['R', 'C']) {
+            // A rename or copy is followed by the path it came from.
+            entries.next();
+        }
+        match path.strip_suffix('/') {
+            // Only an ignored directory that some tree merges into is
+            // looked inside; a dependency folder is never walked.
+            Some(dir) => {
+                if in_trees(cwd, dir, trees)? {
+                    let ignored = run(cwd, &["-c", "core.quotepath=off", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--full-name", "--", &format!(":(top,literal){dir}/")])?;
+                    files.extend(ignored.split('\0').filter(|file| is_attributes(file)).map(String::from));
+                }
+            }
+            None if is_attributes(path) => files.push(path.to_string()),
+            None => {}
+        }
+    }
+    for file in files {
+        let dir = file.strip_suffix(".gitattributes").unwrap_or(&file).trim_end_matches('/');
+        if dir.is_empty() || in_trees(cwd, dir, trees)? {
+            return Ok(Some(format!("the working tree has a .gitattributes that is not the committed one ({file}), which can change what a merge gives")));
+        }
     }
     Ok(None)
+}
+
+fn is_attributes(path: &str) -> bool {
+    path == ".gitattributes" || path.ends_with("/.gitattributes")
+}
+
+/// Whether any of `trees` has `dir` in it, so has paths beneath it.
+fn in_trees(cwd: &Path, dir: &str, trees: &[&str]) -> Result<bool> {
+    for tree in trees {
+        if !run(cwd, &["ls-tree", "--full-tree", "--name-only", tree, "--", dir])?.trim().is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The diff options pinned for every read: nothing the checkout's config
@@ -220,6 +272,12 @@ pub fn classify(cwd: &Path, base_commit: &str, reviewed: &str, head: &str) -> Re
         return Ok(Carry::NewWork(format!("the history from {} does not lead back to {} through its first parents", short(&head), short(&reviewed))));
     }
     merges.reverse();
+    // Every tree the remerges read or the head holds.
+    let mut trees = vec![head.as_str(), base_commit.as_str()];
+    trees.extend(line.lines().flat_map(str::split_whitespace));
+    if let Some(why) = stray_attributes(cwd, &trees)? {
+        return Ok(Carry::NewWork(why));
+    }
 
     // What each merge recorded beyond the merge Git makes by itself. The
     // remerge is made in a temporary object store Git removes afterwards.
@@ -470,6 +528,47 @@ mod tests {
         std::fs::write(repo.path().join(".gitattributes"), "shared.txt merge=union\n").unwrap();
         assert_eq!(repo.git(&["status", "--porcelain"]), "", "hidden from a plain status");
         assert!(matches!(classify(repo.path(), &base, &reviewed, &head).unwrap(), Carry::NewWork(why) if why.contains(".gitattributes")));
+    }
+
+    #[test]
+    fn an_ignored_dependency_folder_does_not_stop_a_clean_merge_from_carrying() {
+        let repo = Repo::new();
+        repo.commit(".gitignore", "node_modules/\nvendor/\n", "ignore dependencies");
+        let reviewed = branch_reviewed(&repo);
+        repo.git(&["checkout", "-q", "main"]);
+        let base = repo.commit("shared.txt", &lines(|n| (n == 2).then(|| "line 2, from main".into())), "main edits the shared file");
+        repo.git(&["checkout", "-q", "feature"]);
+        repo.git(&["merge", "-q", "--no-edit", "main"]);
+        let head = repo.head();
+        // Installed dependencies: an ignored directory `git status
+        // --ignored=matching` names as one entry, with no .gitattributes.
+        std::fs::create_dir_all(repo.path().join("node_modules/pkg")).unwrap();
+        repo.write("node_modules/pkg/index.js", "module.exports = 1;\n");
+        assert!(repo.git(&["status", "--porcelain", "--ignored=matching", "--untracked-files=all", "--", ":(glob)**/.gitattributes"]).contains("node_modules/"));
+        assert!(base_merges(classify(repo.path(), &base, &reviewed, &head).unwrap()).clean());
+        // A package that ships a .gitattributes: nothing the merges read
+        // lives beneath it, so it changes nothing they give.
+        repo.write("node_modules/pkg/.gitattributes", "* merge=union\n");
+        assert!(base_merges(classify(repo.path(), &base, &reviewed, &head).unwrap()).clean());
+        // An ignored directory that does hold tracked paths is looked
+        // inside, and an ignored .gitattributes there counts.
+        std::fs::create_dir_all(repo.path().join("vendor/lib")).unwrap();
+        repo.write("vendor/lib/tracked.txt", "tracked\n");
+        repo.git(&["add", "-f", "vendor/lib/tracked.txt"]);
+        repo.git(&["commit", "-q", "-m", "vendor a file"]);
+        let vendored = repo.head();
+        repo.git(&["checkout", "-q", "main"]);
+        let base = repo.commit("package.json", "{\n  \"version\": \"1.0.1\"\n}\n", "bump on main");
+        repo.git(&["checkout", "-q", "feature"]);
+        repo.git(&["merge", "-q", "--no-edit", "main"]);
+        let head = repo.head();
+        assert!(base_merges(classify(repo.path(), &base, &vendored, &head).unwrap()).clean());
+        repo.write("vendor/lib/.gitattributes", "tracked.txt merge=union\n");
+        assert!(matches!(classify(repo.path(), &base, &vendored, &head).unwrap(), Carry::NewWork(why) if why.contains("vendor/lib/.gitattributes")));
+        std::fs::remove_file(repo.path().join("vendor/lib/.gitattributes")).unwrap();
+        // An untracked .gitattributes beside tracked files still refuses.
+        repo.write(".gitattributes", "shared.txt merge=union\n");
+        assert!(matches!(classify(repo.path(), &base, &vendored, &head).unwrap(), Carry::NewWork(why) if why.contains("(.gitattributes)")));
     }
 
     #[test]

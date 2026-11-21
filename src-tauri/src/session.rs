@@ -2549,6 +2549,16 @@ impl SessionManager {
         })
     }
 
+    /// A person approved or started a run from its Run view: a bot's item that asked them about it is settled
+    /// (PRO-501). Not when the start is an item's own answer, which records itself.
+    fn started_by_person(&self, params: &serde_json::Value) {
+        if params[crate::bots::runs::ANSWERING_ITEM].as_bool() != Some(true) {
+            if let Some(id) = params["id"].as_str() {
+                crate::bots::runs::started_from_run_view(self.sink.as_ref(), id);
+            }
+        }
+    }
+
     /// What the window asks of orchestration runs (`orchestration`). Approve
     /// and Edit are here and nowhere in the `terminalx` CLI: the lead runs
     /// the CLI, and a lead does not approve its own plan.
@@ -2568,7 +2578,9 @@ impl SessionManager {
             "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
             "approve" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
+                let approved = serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                approved
             }
             "start" => {
                 self.accepting_work()?;
@@ -2577,7 +2589,9 @@ impl SessionManager {
             // A person's Start run on a `planned` run (PRO-365): recorded as theirs, and the lead is told.
             "startPlanned" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?
+                let started = serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                started
             }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
             // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.
@@ -2844,6 +2858,15 @@ impl SessionManager {
                     rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "agent"));
                 }
                 Payload::TurnCompleted { status, .. } => rt.incident(|incidents, ctx| incidents.turn_ended(ctx, ev.seq, *status)),
+                _ => {}
+            }
+        }
+        // When a bot at Full access is at work (PRO-502): a mention from the owner's account
+        // written then is not taken as the owner's, since the bot posts with their login.
+        if let Some(bot) = rt.acting_bot.as_deref() {
+            match &ev.payload {
+                Payload::UserMessage { queued: false, .. } | Payload::TurnStarted { .. } | Payload::ToolCallStarted { .. } => crate::bots::channels::working(bot, &rt.session_id, &rt.tab_id),
+                Payload::TurnCompleted { .. } if ev.subagent.is_none() => crate::bots::channels::worked(&rt.session_id, &rt.tab_id),
                 _ => {}
             }
         }
@@ -3130,6 +3153,28 @@ impl SessionManager {
             rt.pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: serde_json::json!({}), suggestions: Vec::new() });
         }
         self.set_display_status(&mut rt, status);
+    }
+
+    /// An agent's question card open on a tab, as its agent's `tool` would raise one.
+    #[cfg(test)]
+    pub(crate) fn put_question_for_tests(&self, session_id: &str, tab_id: &str, tool: &str, input: serde_json::Value) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        runtime.lock().unwrap().pending.insert(format!("question-{tab_id}"), PendingAsk { tool_use_id: "tool".into(), tool_name: tool.into(), input, suggestions: Vec::new() });
+    }
+
+    /// Hold tab `tab_id`'s lock on a thread of its own, as a slow launch does, until the sender is dropped or sent to.
+    #[cfg(test)]
+    pub(crate) fn hold_tab_for_tests(&self, session_id: &str, tab_id: &str) -> std::sync::mpsc::Sender<()> {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _rt = runtime.lock().unwrap();
+            held.send(()).ok();
+            released.recv().ok();
+        });
+        is_held.recv().unwrap();
+        release
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
@@ -3464,10 +3509,29 @@ impl SessionManager {
     }
 
     pub fn pending_permissions(&self) -> Vec<PendingPermission> {
+        self.pending_permissions_as(true)
+    }
+
+    /// [`Self::pending_permissions`] without waiting: a tab whose lock is held (a launch in progress, which can take
+    /// seconds) is left out, so a read of what waits on the owner never waits behind it. Its question is read on
+    /// the next look.
+    pub fn pending_permissions_now(&self) -> Vec<PendingPermission> {
+        self.pending_permissions_as(false)
+    }
+
+    fn pending_permissions_as(&self, wait: bool) -> Vec<PendingPermission> {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         let mut out = Vec::new();
         for runtime in runtimes {
-            let runtime = runtime.lock().unwrap();
+            let runtime = if wait {
+                runtime.lock().unwrap()
+            } else {
+                match runtime.try_lock() {
+                    Ok(runtime) => runtime,
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => continue,
+                }
+            };
             for (request_id, pending) in &runtime.pending {
                 let mut options = vec!["allow".to_string(), "deny".to_string()];
                 options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
@@ -6502,7 +6566,7 @@ impl SessionManager {
         let started = if refused { Err(anyhow!("the agent's CLI could not start (a test refused it)")) } else { self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI").map(|_| ()) };
         // The agent is running, or never will: in a bot's home chat that started, the owner's waiting messages are
         // sent now as messages (`bots::chat::launched`); after a failed launch they keep waiting.
-        crate::bots::chat::launched(self, entry, started.is_ok());
+        crate::bots::chat::launched(self, entry, &tab.id, started.is_ok());
         started?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
