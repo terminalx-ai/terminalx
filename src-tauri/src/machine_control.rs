@@ -451,6 +451,31 @@ mod desktop {
 mod tests {
     use super::*;
 
+    /// What `machines list` and `machines status` print, which a Read and report bot may run unasked
+    /// (`bots::access::TERMINALX_READS`, PRO-494): a machine's name, system, version, state and the route
+    /// it was last reached by. Never its pinned host key, the addresses it offered, where its relay is or
+    /// a credential: those stay in `machines.json` and the Keychain.
+    #[test]
+    fn a_row_carries_no_key_address_list_relay_or_credential() {
+        let machine = json!({
+            "machineId": "m1", "name": "Mac mini", "os": {"family": "macos"}, "version": "0.2.40",
+            "publicKeyB64": "c2VjcmV0LWtleQ==", "directEndpoints": ["192.168.1.20:6768", "100.64.0.7:6768"], "route": "relayAndNearby",
+            "pairedAt": 1, "lastSeenAt": 2, "lastRoute": {"kind": "lan", "endpoint": "192.168.1.20:6768"},
+            "relay": {"directorUrl": "https://relay.example/d", "cellUrl": "https://cell.example/c", "assignmentEpoch": 3, "userId": "u1"},
+            "token": "t0k3n", "secret": "s3cret",
+        });
+        let state = json!({"state": "direct", "route": {"kind": "lan", "endpoint": "192.168.1.20:6768"}, "since": 5, "rttMs": 3});
+        let row = row(&machine, &state);
+        let text = row.to_string();
+        for hidden in ["c2VjcmV0LWtleQ==", "100.64.0.7", "relay.example", "cell.example", "u1", "t0k3n", "s3cret", "publicKey", "directEndpoints"] {
+            assert!(!text.contains(hidden), "{hidden} in {text}");
+        }
+        assert_eq!(row["relay"], true);
+        let mut keys: Vec<&str> = row.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["connection", "headless", "key", "lastRoute", "lastSeenAt", "machineId", "name", "os", "pairedAt", "relay", "route", "state", "version"]);
+    }
+
     fn machines() -> Vec<Value> {
         vec![
             json!({ "machineId": "m1", "name": "Mac mini", "os": { "family": "macos" }, "version": "0.2.40", "route": "relayAndNearby", "pairedAt": 1, "lastSeenAt": 2 }),

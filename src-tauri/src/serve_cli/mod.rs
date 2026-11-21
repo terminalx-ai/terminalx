@@ -99,6 +99,10 @@ pub fn check_socket_room(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The commands [`run`] takes. The bots' access gate counts no help flag on
+/// one of them as a read of the app's command line (`bots::access::HELP_GROUPS`).
+pub const COMMANDS: [&str; 8] = ["service", "pair", "hosting", "devices", "projects", "login", "logout", "update"];
+
 /// Run a headless command if `args` names one. Returns the exit code, or
 /// `None` for anything else (the runtime itself, hooks and other helpers).
 pub fn run(args: &[String]) -> Option<i32> {
@@ -178,6 +182,17 @@ mod tests {
         let (dir, _) = take_data_dir(&args(&["--data-dir=/srv/tx"])).unwrap();
         assert_eq!(dir.as_deref(), Some(Path::new("/srv/tx")));
         assert!(take_data_dir(&args(&["--data-dir"])).is_err());
+    }
+
+    /// Every name in [`COMMANDS`] is one `run` takes: asked for its help, each prints it.
+    #[test]
+    fn the_listed_commands_are_the_ones_run_takes() {
+        for command in COMMANDS {
+            if cfg!(windows) && command == "projects" {
+                continue;
+            }
+            assert_eq!(run(&[command.to_string(), "--help".to_string()]), Some(0), "{command}");
+        }
     }
 
     #[test]

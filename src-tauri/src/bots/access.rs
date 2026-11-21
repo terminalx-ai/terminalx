@@ -117,13 +117,13 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
         return Gate::Refuse(format!("TerminalX refused `{what}`: it would post on GitHub with your owner's login and no line saying a bot wrote it, so it could be taken for your owner's own words. This did not run. Post with `terminalx bots post github --pr PR|--issue ISSUE --text \"…\"` or `terminalx bots post linear --issue ISSUE --text \"…\"`, or answer a mention with `terminalx bots reply --text \"…\"`: they sign the post as yours."));
     }
     let access = access.effective();
-    if access == BotAccess::Full || reads(tool, input, cwd) || single(tool, input, own_notes) {
+    if access == BotAccess::Full || reads(tool, input, cwd) || single(tool, input, |program, args| app_cli(program, cwd) && own_notes(program, args)) {
         return Gate::Leave;
     }
     let what = describe(tool, input);
     match access {
         BotAccess::AskOutward => Gate::Ask(format!("This bot reads freely and asks before it changes anything or runs a command: {what}.")),
-        _ => match single(tool, input, |program, args| report_command(program, args).is_some()) {
+        _ => match single(tool, input, |program, args| app_cli(program, cwd) && report_command(program, args).is_some()) {
             true => Gate::Ask(format!("This bot reads and reports only, and asks before a report leaves this computer: {what}.")),
             false => Gate::Refuse(format!("TerminalX refused {what}: this bot is set to Read and report, so it changes nothing and runs only commands known to read. This did not run. Read with Read, Grep or Glob or with commands that only read, and report what you found in the chat.")),
         },
@@ -169,7 +169,7 @@ pub(crate) fn reads(tool: &str, input: &Value, cwd: Option<&str>) -> bool {
         return true;
     }
     // A `terminalx` read on its own: `terminalx sessions list --json`.
-    single(tool, input, terminalx_read)
+    single(tool, input, |program, args| app_cli(program, cwd) && terminalx_read(program, args))
 }
 
 /// A shell call's program, as written, and its arguments when it is one plain command.
@@ -254,13 +254,12 @@ fn browser_wait(words: &[&str]) -> bool {
     words.iter().any(|word| BROWSER_WAIT_FLAGS.iter().any(|flag| *word == *flag || word.strip_prefix(flag).is_some_and(|rest| rest.starts_with('='))))
 }
 
-/// A `terminalx` read: help or the version (anything with `--help`, `-h`,
-/// `--version` or `-V` prints that, or nothing), or a (group, verb) pair in
-/// [`TERMINALX_READS`]. `wait` with a browser wait flag is the built-in
-/// browser's, which can run a script in a signed-in page (`--fn`) or save a
-/// file (`--download`), so it is no read.
+/// A `terminalx` read: help or the version ([`help_or_version`]), or a
+/// (group, verb) pair in [`TERMINALX_READS`]. `wait` with a browser wait flag
+/// is the built-in browser's, which can run a script in a signed-in page
+/// (`--fn`) or save a file (`--download`), so it is no read.
 fn terminalx_read(program: &str, args: &[&str]) -> bool {
-    if matches!(program, "terminalx" | "tnx") && args.iter().any(|word| matches!(*word, "--help" | "-h" | "--version" | "-V")) {
+    if help_or_version(program, args) {
         return true;
     }
     let Some((group, rest)) = terminalx_words(program, args) else { return false };
@@ -271,6 +270,92 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
         return true;
     }
     rest.first().is_some_and(|verb| TERMINALX_READS.contains(&(group, verb)))
+}
+
+/// The groups of the app's command line (`cli.rs` `parse_with_stdin`) under
+/// which a help or version flag only prints that: every one but the
+/// built-in browser's verbs, and none that is also a command of the headless
+/// runtime's binary (`serve_cli::COMMANDS`: `projects`), whose own parsers
+/// differ (PRO-494). A desktop test holds each to a group of the command line.
+pub(crate) const HELP_GROUPS: [&str; 21] = [
+    "status", "machines", "config", "cloud", "sessions", "floating", "share", "tabs", "send", "read", "wait", "permissions", "worktrees", "issues", "review", "pipelines", "runs", "bots", "computer", "vm", "skills",
+];
+
+/// `terminalx --help`, `terminalx sessions create --help`, `tnx --version`:
+/// the command line parses a help or version flag before anything else and
+/// then prints that, or fails (`cli.rs` `parse_with_stdin`). Only when what
+/// stands first (after `--json`) is that flag or one of [`HELP_GROUPS`]: the
+/// headless runtime's own commands (`service`, `update`, `pair`…) are not the
+/// command line's, and the runtime's binary is `terminalx-serve`, never put
+/// on the path as `terminalx` (`scripts/install/install.sh`), so a help flag
+/// on one of them is no read either (PRO-494).
+fn help_or_version(program: &str, args: &[&str]) -> bool {
+    if !matches!(program, "terminalx" | "tnx") {
+        return false;
+    }
+    let flag = |word: &&str| matches!(*word, "--help" | "-h" | "--version" | "-V");
+    let words: Vec<&str> = args.iter().copied().filter(|word| *word != "--json").collect();
+    words.first().is_some_and(|first| flag(first) || HELP_GROUPS.contains(first)) && words.iter().any(flag)
+}
+
+/// Whether a bare `terminalx` or `tnx`, run from `cwd`, may be found in a
+/// folder of the session's path that is relative (`.`, `bin`, an empty
+/// entry), before any absolute one has it (PRO-494). Sessions get the login
+/// shell's path (`pty::session_environment`), the app's own folder
+/// (`~/.local/bin`, where Install command line tools links both) first; a
+/// relative entry finds what the repository the bot reads holds, so it is
+/// not taken for the app's command line. An absolute folder is the owner's:
+/// to put a program there the bot would first have to write outside its
+/// work, which the gate asks about or refuses below Full access.
+pub(crate) fn shadowed_cli(program: &str, path: &std::ffi::OsStr, cwd: Option<&str>) -> bool {
+    if !matches!(program, "terminalx" | "tnx") {
+        return false;
+    }
+    for dir in std::env::split_paths(path) {
+        if dir.is_absolute() {
+            if is_program(&dir.join(program)) {
+                return false;
+            }
+            continue;
+        }
+        // Where a relative folder is cannot be told without the call's folder: it may hold one.
+        let Some(cwd) = cwd else { return true };
+        if is_program(&Path::new(cwd).join(&dir).join(program)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_program(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata().is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file() || ["cmd", "exe", "bat"].iter().any(|ext| path.with_extension(ext).is_file())
+    }
+}
+
+/// [`shadowed_cli`] on the path sessions are given.
+pub(crate) fn app_cli(program: &str, cwd: Option<&str>) -> bool {
+    !matches!(program, "terminalx" | "tnx") || !shadowed_cli(program, std::ffi::OsStr::new(&crate::binpath::login_path()), cwd)
+}
+
+/// What a session acting for a bot is launched with in Claude Code's
+/// `--settings`, while Bots is on (PRO-494): a skill's or a custom slash
+/// command's inline `!` command runs when it loads, with no tool call, so
+/// no hook sees it, and in plan mode (Read and report) Claude's own
+/// classifier decides (checked on Claude Code 2.1.330). Turned off, it is
+/// replaced by a placeholder, and the skill's text still loads. At every
+/// level, since a level changes without a relaunch; at Full access the bot
+/// runs those commands itself instead, with nothing asked anyway.
+pub fn claude_settings(acting_bot: Option<&str>, settings: &mut Value) {
+    if acting_bot.is_some() && super::enabled() {
+        settings["disableSkillShellExecution"] = json!(true);
+    }
 }
 
 /// A bot's own notes and work list, kept with the commands its rules tell it

@@ -192,7 +192,7 @@ fn allowed(kind: Builtin, payload: &Value) -> bool {
         Builtin::LookAround => look_command,
         Builtin::TidyMemory => tidy_command,
     };
-    access::reads(tool, input, cwd) || access::single(tool, input, own)
+    access::reads(tool, input, cwd) || access::single(tool, input, |program, args| access::app_cli(program, cwd) && own(program, args))
 }
 
 /// What the agent is told of a call its built-in run may not make.

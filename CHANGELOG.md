@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot's Claude Code sessions run no inline `!` command
+  of a skill or custom slash command, which runs as it loads with no tool call
+  the access gate could see; the command is replaced by a placeholder and the
+  skill's text still loads. A help or version flag counts as a read only after
+  one of the command line's own groups (not `service`, `update`, `pair` or
+  another command of the headless runtime), and a `terminalx` the session's
+  path finds in a relative folder (`bin`, `.`) before the app's own is not
+  taken for the app's command line. On a bot's settings page the arrow keys
+  move between the access levels and Space or Enter picks one, so passing over
+  a level saves nothing and the focus stays put while a save runs; two
+  sections saved at once no longer refuse each other (PRO-494).
 - Automations: an automation that runs on a Linear issue or a pull request
   starts at most 48 runs in any 24 hours, across everything it wakes on, so a
   chain of runs that each make the next event stops there. The editor shows
