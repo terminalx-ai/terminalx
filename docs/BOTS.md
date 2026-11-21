@@ -216,10 +216,13 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   Linear, its work items, and the team's: the reporting line, open hand-offs
   and the team brief) keeps the whole note within 80 KB
   (`chat::LAUNCH_NOTE_LIMIT`): a section that would pass it is left out
-  whole, never cut inside its fence, and the note says which. A launch
-  whose whole appended prompt, with a workspace's prompts, would pass 127 KB
-  is refused with what to shorten, not left to fail in the kernel; a tab no
-  bot works for is told only of the workspace's prompts.
+  whole, never cut inside its fence, and the note says which. Only what
+  Bots adds is held to 127 KB (PRO-507, `session::cli_prompt`): a bot's
+  chat whose note takes its appended prompt past 127 KB is refused with what
+  to shorten, not left to fail in the kernel. An ordinary session launches
+  as it did before Bots, whatever its workspace's prompts, and so does a
+  bot's chat whose workspace prompts were already past 127 KB without the
+  note (on Linux such a launch fails in the kernel, as it did before).
 - **Every login shell.** The prompt travels in a variable the login shell
   expands as one word: `"$TERMINALX_APPENDED_PROMPT"` in sh, bash, zsh and
   fish, `$TERMINALX_APPENDED_PROMPT:q` in csh and tcsh, which refuse a

@@ -5414,9 +5414,14 @@ mod tests {
 
     /// PRO-507: on a keyed runtime, a window registered without its proof
     /// while Bots was off gives way to the window proving it on a lease of its
-    /// own once Bots is on, instead of "Another desktop currently provides…";
+    /// own, Bots off or on, instead of "Another desktop currently provides…",
+    /// while the unproven one still holds the slot (review of #1468, item 3);
     /// and a registration without the proof unseats a window this runtime
-    /// never saw prove it (one a handover carried over), Bots on or off.
+    /// never saw prove it (one a handover carried over), Bots on or off. A
+    /// registration without the proof never reaches the slot while Bots is on
+    /// (it is refused first), so the other half of giving way, any
+    /// registration while Bots is on, is the registry's test's
+    /// (`window::tests::an_unproven_window_serves_only_with_bots_off_and_gives_way_to_a_proven_one`).
     #[cfg(unix)]
     #[test]
     fn an_unproven_window_gives_way_to_the_proven_one_and_unseats_a_handed_over_one() {
@@ -5427,7 +5432,12 @@ mod tests {
         let service = service.with_local_lifetime(lifetime.clone());
         TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
         let run = service.endpoint.socket.parent().unwrap().to_owned();
-        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        // The window's endpoint lives in this runtime's `run`, named through a
+        // short link in /tmp: under a long TMPDIR its own path would be past
+        // what a Unix socket's may be.
+        let short = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(crate::store::root().unwrap().join("run"), short.path().join("r")).unwrap();
+        let endpoint = short.path().join("r").join("w.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
         std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
         let register = |key: Option<&[u8; 32]>| {
@@ -5437,7 +5447,7 @@ mod tests {
                 params[field] = value;
             }
             crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
-            (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
+            (pid, attached, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r"))
         };
         let bots = |on: bool| {
             let mut settings = crate::store::settings::load();
@@ -5445,29 +5455,46 @@ mod tests {
             crate::store::settings::save(&settings).unwrap();
         };
 
-        // A handover's window is unseated by a registration that cannot prove it, Bots off.
+        // A handover's window is unseated by a registration that cannot prove
+        // it: Bots on, one refused at once; Bots off, one that is registered.
+        bots(true);
+        lifetime.window.handed_over(Some((1, 1)));
+        let (_, _, refused) = register(None);
+        assert_eq!(refused.unwrap()["registered"], false);
+        assert!(lifetime.window.window_process().is_none(), "Bots on: the handed-over window is no longer taken for it");
         bots(false);
         lifetime.window.handed_over(Some((1, 1)));
-        let (_, unproven) = register(None);
+        let (_, _, unproven) = register(None);
+        let unproven = unproven.unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
         assert!(lifetime.window.window_process().is_none(), "the handed-over window is no longer taken for it");
         assert!(lifetime.window.available(), "Bots off: the unproven window serves");
+        let (_, _, another) = register(None);
+        assert!(another.unwrap_err().message.contains("Another desktop"), "it holds the slot against another unproven one");
+
+        // Bots off: the window, proving it on its own lease, takes the slot from it.
+        let (pid, attached, proven) = register(Some(&[7; 32]));
+        let proven = proven.unwrap();
+        assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
+        lifetime.command("runtime.detach", attached).unwrap();
+
+        // Bots on: an unproven window serves nothing but keeps the slot (it
+        // serves again with Bots off); the window proving it takes it.
+        let (_, _, unproven) = register(None);
+        assert_eq!(unproven.unwrap()["registered"], true);
         bots(true);
         assert!(!lifetime.window.available(), "Bots on: it serves no longer");
-        // And Bots on, by one refused at once.
-        lifetime.window.handed_over(Some((1, 1)));
-        let (_, refused) = register(None);
-        assert_eq!(refused["registered"], false, "{refused}");
-        assert!(lifetime.window.window_process().is_none());
-
-        // The window, proving it on its own lease, is registered and recognised.
-        let (pid, proven) = register(Some(&[7; 32]));
-        assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
+        bots(false);
+        assert!(lifetime.window.available(), "still in the slot: Bots off, it serves again");
+        bots(true);
+        let (pid, _, proven) = register(Some(&[7; 32]));
+        assert_eq!(proven.unwrap()["registered"], true, "gives way while Bots is on");
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
         assert!(lifetime.window.available());
         // Another process that cannot prove it does not unseat it.
-        let (_, stranger) = register(None);
-        assert_eq!(stranger["registered"], false, "{stranger}");
+        let (_, _, stranger) = register(None);
+        assert_eq!(stranger.unwrap()["registered"], false);
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid), "the proven window stays");
 
         std::fs::write(run.join("done"), b"").unwrap();
