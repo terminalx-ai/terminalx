@@ -1357,12 +1357,12 @@ impl ControlService {
     fn bot_duty_off(&self, params: Value) -> Result<Value, ControlError> {
         use crate::bots::{self, BotError, Named};
         if !bots::enabled() {
-            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+            return Err(ControlError::new("bots_off", bots::off_message(), Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
         }
         let failed = |error: anyhow::Error| match bots::refusal(&error) {
             Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
             Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
-            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::off_message(), None::<String>),
             None => ControlError::internal(error),
         };
         let named = |selector: &str| -> Result<bots::Bot, ControlError> {
@@ -4728,7 +4728,8 @@ mod tests {
         assert_eq!(ask("bots.dutyOff", json!({"duty": "No such duty", "bot": "iris"})).unwrap_err().code, "invalid_arguments");
         settings.experimental.bots = false;
         crate::store::settings::save(&settings).unwrap();
-        assert_eq!(from_chat(json!({"duty": mine.id})).unwrap_err().code, "bots_off");
+        let off = from_chat(json!({"duty": mine.id})).unwrap_err();
+        assert_eq!((off.code.as_str(), off.message.as_str()), ("bots_off", crate::bots::off_message()));
     }
 
     /// `terminalx bots memory …` (PRO-470): who asks is the `Caller`. A
@@ -5374,8 +5375,15 @@ mod tests {
         let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
         let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
         let answer = service.execute(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone(), "r").unwrap();
-        assert_eq!((answer["registered"].clone(), answer["pinned"].clone()), (json!(true), json!(false)), "{answer}");
-        assert!(answer["message"].as_str().unwrap().contains("started without the window's key"), "{answer}");
+        // Only a Mac pins the window's key, so only there is a runtime without one said to be unpinned
+        // (`consent::Window::unpinned`); a Linux desktop pins none, ever, and says nothing.
+        if cfg!(target_os = "macos") {
+            assert_eq!((answer["registered"].clone(), answer["pinned"].clone()), (json!(true), json!(false)), "{answer}");
+            assert!(answer["message"].as_str().unwrap().contains("started without the window's key"), "{answer}");
+        } else {
+            assert_eq!(answer["registered"], json!(true), "{answer}");
+            assert!(answer.get("pinned").is_none(), "{answer}");
+        }
         let mut settings = crate::store::settings::load();
         settings.experimental.bots = false;
         crate::store::settings::save(&settings).unwrap();
