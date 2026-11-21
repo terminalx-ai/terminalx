@@ -102,6 +102,25 @@
   Deleting a bot removes its duties, kept with its home in the trash.
   Adding, changing, running or switching on a duty, and quiet hours, are the
   owner's to do from the window (PRO-471).
+- Bots: each bot has a settings page (PRO-478), reached from the team table
+  and from the bot's own view: where it runs (this Mac; cloud and another
+  machine come later), its access, the organisations it works in, its
+  channels (TerminalX, and the state of the GitHub and Linear connections),
+  and who besides you may ask it for work. On top of the mode its access
+  holds a bot's sessions to, every tool call they make, including native
+  Codex's approval requests, is checked against the access as it is set now:
+  Ask before outward actions reads freely and asks you on a card before it
+  changes anything or runs a command; Read and report reads and runs only
+  commands known to read, asks before a comment or a message, and refuses the
+  rest; a paused bot only reads. At every level, and while paused, a bot
+  keeps its own notes with `terminalx bots memory add|forget|list`, and is
+  refused writes to its own record and the app's settings. Adding an organisation, someone new,
+  changed or more able in Who can ask, another agent or model, a rename and
+  another place to run are confirmed by the TerminalX window, as raising
+  access is, and a runtime that cannot confirm it offers Restart runtime on
+  the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
+  files on this Mac by other means. Agent and model, rename and delete are
+  under the page's menu.
 - Bots (experimental): a week calendar of duties. The Bots page's Calendar
   button, and a List | Calendar switch on a bot's Duties tab, show the week
   with one block per scheduled run: ran and did its work, ran and reported,

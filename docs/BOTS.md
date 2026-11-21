@@ -54,9 +54,13 @@ with its record next to it as `bot.json`.
   `terminalx bots memory add "<note>"` and `terminalx bots memory forget
   "<words>"` (`list` reads), never by editing the files. From a bot's chat, or
   a session it started (who asks is `Caller`, in `control.rs`), they reach
-  only that bot's own notes and its place's. A read-and-report bot may use
-  them too. With memory off they answer `forbidden`. A note that looks like a
-  secret is refused.
+  only that bot's own notes and its place's; a `--bot` or `--place` naming
+  another is refused (`forbidden`). At every access level, and while the bot
+  is paused, the access gate lets exactly these three (`add`, `forget`,
+  `list`) through with no card (`bots::access`, PRO-478), and so too the
+  bot's own work list, `terminalx bots items list|show|add|set|ask|check|
+  comment|done` (PRO-469). With memory off
+  they answer `forbidden`. A note that looks like a secret is refused.
 - **Proof for the owner's changes.** The owner's changes to a role or memory
   in the app (`roleWrite`, `roleRestore`, `memoryAdd`, `memoryForget`,
   `memoryUndo`) and turning memory back on need the window's proof, as hiring
@@ -84,6 +88,20 @@ the first sub-issues.
 - **Only a person's words count as approval.** A message from one bot to
   another is labelled with the sender and the sender's authority. A bot cannot
   grant itself more access, and a bot cannot resume itself after a pause.
+- **Access is a mode plus a per-call gate (PRO-478).** A bot's sessions run no
+  wider than `bots::chat::permission_mode` allows. Every tool call also passes
+  `bots::access`: Ask before outward actions asks before anything that is not
+  a known read; Read and report runs known reads, asks before a report, and
+  refuses the rest. A paused bot only reads. A known read is a named read
+  tool, a shell command vetted read-only, or an exact `terminalx` read (not
+  the built-in browser's `wait`). The bot's own memory and work-list
+  commands pass at every level (see above). It is not a sandbox. **Web and MCP resource reads
+  count as reads**: `WebFetch`, `WebSearch`, a connected server's resource
+  reads and a vetted read-only command that fetches a URL run unasked at
+  Read and report (and at Ask before outward actions). A web request can
+  carry data out of this Mac in its address, and a resource read can carry
+  it out to the server it is read from. Keep secrets away from a bot that
+  should not send them anywhere.
 - **Pause says what it stopped.** Pause and Pause all are recorded with who
   paused the bot. A paused bot still answers its owner in chat (screen 23.12).
 - **Templates carry no credentials or permissions.** Every duty in a template

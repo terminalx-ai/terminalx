@@ -2,7 +2,8 @@
 // PRO-468: a bot's view (designs 23.01 and 23.04) in real WebKit, at 1440×900 and at the scaled 1280×800, dark and
 // light: the header (avatar, name, role, status line, chips, Pause) on one band; the five tabs; on Chat, the chat
 // list beside the transcript and composer; a paused bot's banner with Resume. Nothing overlaps, nothing leaves the
-// window, and the bot's chats are not in the sidebar's lists.
+// window, and the bot's chats are not in the sidebar's lists. PRO-478: the header's menu after Pause, and the
+// Settings tab with the bot's five settings sections inside the view.
 // Run after pnpm build: node scripts/webkit/bot-chat.mjs
 // BOT_CHAT_SHOTS=<dir> saves a screenshot of each case.
 import { launch, open, report, serve, sidebar } from "./harness.mjs";
@@ -86,7 +87,33 @@ try {
           const bannerBox = await box(banner);
           checks["the banner sits between the tabs and the composer, right of the list"] = bannerBox.top >= tabsBox.bottom - 0.5 && bannerBox.bottom <= composerBox.top + 0.5 && bannerBox.left >= listBox.right - 0.5;
         }
-        failed += report(`bot chat ${name}`, checks, { viewBox, headingBox, chipBox, pauseBox, tabsBox, listBox, composerBox, tabNames, rows, listed, errors });
+        // PRO-478: the header's menu after Pause, on the same band.
+        const menuBox = await box(view.getByTestId("bot-menu"));
+        checks["the menu follows Pause on the header's band, inside the view"] = menuBox.left >= pauseBox.right - 0.5 && menuBox.bottom <= tabsBox.top + 0.5 && inside(menuBox, viewBox);
+        failed += report(`bot chat ${name}`, checks, { viewBox, headingBox, chipBox, pauseBox, menuBox, tabsBox, listBox, composerBox, tabNames, rows, listed, errors });
+
+        // PRO-478: the Settings tab has the bot's settings, inside the view, scrolling within it.
+        await tabs.getByRole("tab", { name: "Settings" }).click();
+        const panel = view.getByTestId("bot-view-settings");
+        await panel.getByTestId("bot-settings").waitFor();
+        if (shots) await page.screenshot({ path: `${shots}/bot-chat-settings-${viewport.width}-${colorScheme}${paused ? "-paused" : ""}.png` });
+        const settings = await panel.evaluate((element) => {
+          const outer = element.getBoundingClientRect();
+          const problems = [];
+          const label = (node) => (node.getAttribute("aria-label") || node.textContent || node.tagName).trim().slice(0, 40);
+          for (const node of element.querySelectorAll("[data-testid=bot-settings-section], [role=radio], li, button, [role=switch]")) {
+            const rect = node.getBoundingClientRect();
+            if (rect.width > 0 && (rect.left < outer.left - 0.5 || rect.right > outer.right + 0.5)) problems.push(`${label(node)} leaves the panel sideways`);
+          }
+          const sections = element.querySelectorAll("[data-testid=bot-settings-section]").length;
+          return { problems, sections, scrolls: element.scrollHeight > element.clientHeight, sideways: document.documentElement.scrollWidth > innerWidth + 1, outer: { left: outer.left, top: outer.top, right: outer.right, bottom: outer.bottom } };
+        });
+        failed += report(`bot settings tab ${name}`, {
+          "the five sections": settings.sections === 5,
+          "nothing leaves the panel sideways, nor the page": settings.problems.length === 0 && !settings.sideways,
+          "the panel sits below the tabs and inside the view": settings.outer.top >= tabsBox.bottom - 0.5 && inside(settings.outer, viewBox),
+          "no page errors": errors.length === 0,
+        }, settings);
         await page.close();
       }
     }

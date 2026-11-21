@@ -7,7 +7,7 @@ import { openBots, openWelcome, useSessionStore } from "@/lib/sessions";
  * or Hire a bot (23.03) with a role picked, or one bot's Role and memory (23.06). Kept apart from the session store so the view union stays one value.
  * `focus` asks the team page to take the keyboard focus when it shows (after a hire, whose page is gone).
  */
-export type BotsPage = { page: "team"; focus?: boolean } | { page: "hire"; roleId: string | null } | { page: "roleMemory"; botId: string } | { page: "duties" };
+export type BotsPage = { page: "team"; focus?: boolean } | { page: "hire"; roleId: string | null } | { page: "settings"; botId: string } | { page: "roleMemory"; botId: string } | { page: "duties" };
 
 let current: BotsPage = { page: "team" };
 const listeners = new Set<() => void>();
@@ -41,6 +41,12 @@ export function showBotsTeam(focus = false) {
 /** Hire a bot, with `roleId` picked (the first role when left out). */
 export function showHireBot(roleId: string | null = null) {
   set({ page: "hire", roleId });
+  openBots();
+}
+
+/** A bot's settings (23.07, PRO-478), by its id. */
+export function showBotSettings(botId: string) {
+  set({ page: "settings", botId });
   openBots();
 }
 

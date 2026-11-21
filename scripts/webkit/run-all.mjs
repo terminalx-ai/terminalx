@@ -40,7 +40,7 @@ const checks = [
   "attachment-preview", "session-start", "composer-controls", "session-menu", "chat-scrollbar", "settings-stats",
   "automation-sources",
   "bots-screens", "bot-role-memory",
-  "bot-chat",
+  "bot-chat", "bot-settings",
   "bot-items",
   "bot-duties",
   "bot-calendar",
