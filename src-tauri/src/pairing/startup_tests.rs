@@ -133,3 +133,39 @@ fn startup_leaves_the_listener_off_without_a_claimed_unrevoked_device() {
         assert!(manager.0.registry.list().unwrap().is_empty());
     }
 }
+
+/// PRO-487: under "Relay only" a saved phone's Mac opens no listener; the
+/// window still follows the setting, and binds once another is chosen.
+#[test]
+fn relay_only_opens_no_phone_listener_until_another_choice() {
+    let _home = crate::store::temp_home();
+    DeviceRegistry.add(saved_device()).unwrap();
+    crate::listen::choose(crate::listen::Listen::Relay, false).unwrap();
+    let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let manager = configure(port);
+    tauri::async_runtime::block_on(async {
+        wait_until(|| manager.0.inner.lock().unwrap().direct_watching).await;
+        assert_eq!(manager.0.ensure_direct_listener().unwrap_err().kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert!(!manager.0.inner.lock().unwrap().direct_listener_started);
+        assert!(manager.0.window_listening().is_empty());
+        assert!(manager.0.has_paired_phones());
+        assert!(std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "nothing listens");
+    });
+}
+
+/// PRO-487 review: while the runtime holds the port the window still
+/// follows the listen setting, so its phone offers name what is chosen now.
+#[test]
+fn the_window_follows_the_listen_setting_while_the_runtime_holds_the_port() {
+    let _home = crate::store::temp_home();
+    let manager = configure(0);
+    manager.0.machine.lock().unwrap().set_status_for_test(true);
+    assert!(manager.0.runtime_owns_direct());
+    // No runtime is attached to hand phones over: the error is that, not the bind.
+    let _ = manager.0.ensure_direct_listener();
+    assert!(manager.0.inner.lock().unwrap().direct_watching, "the watcher runs whoever holds the port");
+    assert!(!manager.0.inner.lock().unwrap().direct_listener_started || manager.0.inner.lock().unwrap().direct_via_runtime);
+    assert!(manager.0.window_listening().is_empty(), "the window holds no address of its own");
+}

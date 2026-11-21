@@ -153,6 +153,27 @@
         "allowOperating": {
           "description": "Computers you approve can start sessions, open terminals and change files here. Connections are end-to-end encrypted; the relay only passes sealed messages.",
           "type": "boolean"
+        },
+        "allowPublic": {
+          "description": "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "listen": {
+          "description": "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
+          "enum": [
+            "relay",
+            "tailscale",
+            "lan",
+            "all",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"

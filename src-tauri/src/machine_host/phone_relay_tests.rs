@@ -197,9 +197,9 @@ async fn detached_runtime_applies_account_revocations_to_direct_phones() {
         Rpc::Ready(rpc) => rpc.clone(),
         _ => unreachable!(),
     };
-    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let listener = direct::listen_everywhere(rig.host.clone(), rpc, 0).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
-    rig.host.state.lock().unwrap().listening = Some(listener);
+    rig.host.state.lock().unwrap().listeners = vec![listener];
     let connect = || async {
         let stream = tokio::net::TcpStream::connect(address).await.unwrap();
         let (socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream).await.unwrap();
@@ -412,9 +412,9 @@ async fn detached_poll_fences_a_phone_admitted_by_the_window_before_acknowledgin
         Rpc::Ready(rpc) => rpc.clone(),
         _ => unreachable!(),
     };
-    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let listener = direct::listen_everywhere(rig.host.clone(), rpc, 0).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
-    rig.host.state.lock().unwrap().listening = Some(listener);
+    rig.host.state.lock().unwrap().listeners = vec![listener];
     let key = &rig.key;
     let connect = |token: &'static str| async move {
         let stream = tokio::net::TcpStream::connect(address).await.unwrap();
@@ -1174,9 +1174,9 @@ async fn authenticated_direct_phone_can_provision_the_runtime_relay() {
         Rpc::Ready(rpc) => rpc.clone(),
         _ => unreachable!(),
     };
-    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let listener = direct::listen_everywhere(rig.host.clone(), rpc, 0).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
-    rig.host.state.lock().unwrap().listening = Some(listener);
+    rig.host.state.lock().unwrap().listeners = vec![listener];
     let stream = tokio::net::TcpStream::connect(address).await.unwrap();
     let (mut socket, _) = tokio_tungstenite::client_async(format!("ws://{address}/"), stream)
         .await
@@ -1239,9 +1239,9 @@ async fn direct_phones_are_closed_as_refused_when_their_credential_is_refused_or
         Rpc::Ready(rpc) => rpc.clone(),
         _ => unreachable!(),
     };
-    let listener = direct::listen(rig.host.clone(), rpc, 0).unwrap();
+    let listener = direct::listen_everywhere(rig.host.clone(), rpc, 0).unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], listener.address.port()));
-    rig.host.state.lock().unwrap().listening = Some(listener);
+    rig.host.state.lock().unwrap().listeners = vec![listener];
     let connect = |token: &'static str| {
         let key = rig.key.public_key_b64();
         async move {

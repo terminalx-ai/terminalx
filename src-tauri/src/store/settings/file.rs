@@ -109,6 +109,12 @@ pub(super) static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
     for key in ["linearApiKey", "linearViewer", "machineName"] {
         value[key] = Value::Null;
     }
+    // Optional keys the defaults leave unset (PRO-487). They must be in the
+    // template: a key that is not is kept from the file as one this build
+    // does not know, so a changed choice would never reach the disk.
+    for key in ["listen", "allowPublic"] {
+        value["machines"][key] = Value::Null;
+    }
     value["preferences"] = PREFERENCE_DEFAULTS.clone();
     value
 });
