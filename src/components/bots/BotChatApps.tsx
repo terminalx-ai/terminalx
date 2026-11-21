@@ -16,7 +16,7 @@ import { chatAppName, refreshChatApps, setChatApps, useChatApps } from "@/lib/bo
 import { cn } from "@/lib/cn";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
-import type { BotChatAppsView, ChatAppService, ChatAppServiceView } from "@/types/botChatApps";
+import type { BotChatAppsView, ChatAppMadeCode, ChatAppService, ChatAppServiceView } from "@/types/botChatApps";
 
 export const CHAT_APP_ICON = { slack: Hash, telegram: Send } as const;
 
@@ -75,6 +75,8 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // The code is shown only from the answer that made it: the view says only that one waits.
+  const [made, setMade] = useState<ChatAppMadeCode | null>(null);
   const steps = STEPS[service];
 
   const act = async (what: string, run: () => Promise<BotChatAppsView | unknown>) => {
@@ -82,7 +84,11 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
     setError(null);
     try {
       const answer = await run();
-      if (answer && typeof answer === "object" && "services" in answer) setChatApps(bot.id, answer as BotChatAppsView);
+      if (answer && typeof answer === "object" && "services" in answer) {
+        const view = answer as BotChatAppsView;
+        if (view.made?.service === service) setMade(view.made);
+        setChatApps(bot.id, view);
+      }
       else await refreshChatApps(bot.id);
     } catch (cause) {
       setError(errorMessage(cause));
@@ -156,27 +162,28 @@ export function ChatAppDialog({ bot, service, onClose }: { bot: Bot; service: Ch
                 </ul>
               )}
             </div>
-            {shown.code ? (
+            {shown.code && made ? (
               <div className="rounded-md border border-hairline bg-card/60 p-2.5" data-testid="bot-chat-app-code">
                 <div className="text-xs text-muted-foreground">
                   {service === "telegram" ? `Send this code to ${shown.account?.name ?? "the bot"} from the chat to link, or open the link on your phone.` : `Send this code to the app in a direct message, or mention it with the code in a channel it is in.`}
                 </div>
                 <div className="mt-1.5 flex items-center gap-2">
-                  <span className="font-mono text-[18px] tracking-[0.2em] text-foreground">{shown.code.code}</span>
+                  <span className="font-mono text-[18px] tracking-[0.2em] text-foreground">{made.code}</span>
                   <WithTooltip label={copied ? "Copied" : "Copy the code"}>
-                    <Button variant="ghost" size="icon-xs" aria-label="Copy the code" onClick={() => { void navigator.clipboard?.writeText(shown.code!.code); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }}>
+                    <Button variant="ghost" size="icon-xs" aria-label="Copy the code" onClick={() => { void navigator.clipboard?.writeText(made.code); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }}>
                       {copied ? <Check /> : <Copy />}
                     </Button>
                   </WithTooltip>
-                  {shown.code.link && <Button variant="outline" size="xs" onClick={() => void openUrl(shown.code!.link!)}>Open in Telegram</Button>}
-                  {shown.code.expires && <span className="ml-auto text-[11.5px] text-faint">{`Good for 10 minutes`}</span>}
+                  {made.link && <Button variant="outline" size="xs" onClick={() => void openUrl(made.link!)}>Open in Telegram</Button>}
+                  {made.expires && <span className="ml-auto text-[11.5px] text-faint">Good for 10 minutes</span>}
                 </div>
               </div>
             ) : (
-              <div>
+              <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" disabled={!!busy} onClick={() => void act("link", () => botsApi.chatAppLink(bot.id, service))} data-testid="bot-chat-app-link">
-                  {busy === "link" && <Loader2 className="animate-spin" />}Link a chat
+                  {busy === "link" && <Loader2 className="animate-spin" />}{shown.code ? "Make a new code" : "Link a chat"}
                 </Button>
+                {shown.code && <span className="text-[11.5px] text-faint">A code made earlier still waits; a new one replaces it.</span>}
               </div>
             )}
             <Activity view={view} service={service} />

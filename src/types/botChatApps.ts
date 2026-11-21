@@ -18,7 +18,14 @@ export interface ChatAppLink {
   linked: string;
 }
 
+/** That a link code waits, and until when: never the code, which only the person who asked for it is given. */
 export interface ChatAppCode {
+  expires: string | null;
+}
+
+/** A new link code, as only `chatAppLink` (a person's call) answers with it. */
+export interface ChatAppMadeCode {
+  service: string;
   code: string;
   expires: string | null;
   /** Telegram: the `t.me` link that sends the code. */
@@ -50,6 +57,8 @@ export interface ChatAppMessage {
 
 export interface BotChatAppsView {
   services: ChatAppServiceView[];
+  /** Only in the answer to `chatAppLink`. */
+  made?: ChatAppMadeCode;
   alsoSendsTo: string[];
   activity: ChatAppMessage[];
 }

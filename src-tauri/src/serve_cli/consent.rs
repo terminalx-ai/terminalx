@@ -89,7 +89,7 @@ pub fn guards(command: &str) -> bool {
 /// gives the bot work as the owner's message. A chat-app link code (PRO-481)
 /// lets the chat that sends it give the bot work.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 22] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart", "chatAppLink"];
+pub const GUARDED_BOTS: [&str; 23] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget", "dutySave", "dutySwitch", "dutyDelete", "dutyDuplicate", "dutyRun", "dutyTryCheck", "quietHours", "itemHand", "briefWrite", "suggestionStart", "chatAppLink", "chatAppUnlink"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no

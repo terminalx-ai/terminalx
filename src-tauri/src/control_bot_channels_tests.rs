@@ -148,10 +148,10 @@ fn the_access_gate_asks_before_a_post_at_the_lower_levels() {
 }
 
 /// PRO-481: a chat-app link code and "Also sends to" a chat app are a person's acts. The window witnesses them
-/// (`guards_request`, which it asks before it signs) and the control socket's route without that proof is refused;
-/// unlinking a chat and choosing no chat app give nothing, and need none.
+/// (`guards_request`, which it asks before it signs) and the control socket's route without that proof is refused.
+/// Unlinking a chat cuts the owner's channel, so it needs one too; choosing no chat app gives nothing, and needs none.
 #[test]
-fn a_chat_app_link_code_and_also_sends_to_need_the_windows_proof() {
+fn a_chat_app_link_code_unlinking_and_also_sends_to_need_the_windows_proof() {
     let _home = crate::store::temp_home();
     bots_on();
     let (service, _sink) = headless_service();
@@ -161,13 +161,33 @@ fn a_chat_app_link_code_and_also_sends_to_need_the_windows_proof() {
     let also = request("chatAppAlsoSends", json!({"id": bot, "services": ["telegram"]}));
     let none = request("chatAppAlsoSends", json!({"id": bot, "services": []}));
     let unlink = request("chatAppUnlink", json!({"id": bot, "service": "telegram", "chat": "7"}));
-    for (shown, guarded) in [(&link, true), (&also, true), (&none, false), (&unlink, false)] {
+    for (shown, guarded) in [(&link, true), (&also, true), (&none, false), (&unlink, true)] {
         assert_eq!(crate::serve_cli::consent::guards_request("runtime.session.bots", shown), guarded, "the window signs {shown}");
         assert_eq!(crate::bots::enforce::needs_person(shown["operation"].as_str().unwrap(), &shown["params"]), guarded, "the runtime asks a person for {shown}");
     }
     let socket = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
-    for refused in [link, also] {
+    for refused in [link, also, unlink] {
         assert_eq!(socket.execute_for_tests("runtime.session.bots", refused.clone()).unwrap_err().code, "person_required", "{refused}");
     }
     assert!(crate::bots::chat_apps::read().unwrap().codes.is_empty(), "no code was made without the proof");
+}
+
+/// PRO-509: while a chat is being linked, an agent tab's read of the bot's chat apps (the control socket's route,
+/// with no window's proof) says only that a code waits and until when, never the code: whoever sends it first has
+/// their chat linked as the owner's.
+#[test]
+fn an_agent_tabs_read_of_the_chat_apps_never_sees_a_waiting_code() {
+    let _home = crate::store::temp_home();
+    bots_on();
+    let (service, _sink) = headless_service();
+    let bot = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    // The window's witnessed `chatAppLink` made it.
+    let code = crate::bots::chat_apps::change(|store| Ok(crate::bots::chat_apps::new_code(store, &bot, "telegram"))).unwrap();
+    let socket = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    let read = socket.execute_for_tests("runtime.session.bots", json!({"operation": "chatApps", "params": {"id": bot}})).unwrap();
+    let shown = read.to_string();
+    assert!(!shown.contains(&code.code), "{shown}");
+    assert!(read.get("made").is_none(), "{shown}");
+    let telegram = read["services"].as_array().unwrap().iter().find(|row| row["service"] == "telegram").unwrap().clone();
+    assert!(telegram["code"]["expires"].is_string(), "that one waits, and until when: {telegram}");
 }

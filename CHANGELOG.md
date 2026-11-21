@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bots (experimental): a chat-app link code is shown only to the window that
+  made it: an agent tab's read of the bot's channels says only that a code
+  waits. Unlinking a chat now asks for you, as linking does. Wrong codes are
+  counted per chat, so a stranger who finds the bot cannot use up your tries,
+  and a word that only looks like a code is not answered. Connecting another
+  Telegram bot in place of the first no longer drops its first messages and
+  button presses (PRO-509).
 - Bots (experimental): message a bot from Slack or Telegram. Connect your own
   Slack app (Socket Mode) or Telegram bot in Settings → the bot → Channels,
   then link a chat by sending it the one-time code shown there; messages from
