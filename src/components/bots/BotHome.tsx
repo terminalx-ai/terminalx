@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Circle, Clock, ListChecks, Loader2, Plus } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
+import { itemRunChip } from "@/lib/botRuns";
 import { errorMessage } from "@/lib/api";
 import { giveBotWork, needsYouOf, sameDay, snoozed, useBotItems, useNeedsYou } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
@@ -153,6 +154,7 @@ function ItemRows({ items, onOpen }: { items: BotItem[]; onOpen: (number: number
                 {sub && <span className="block truncate text-[12px] text-faint" title={sub}>{sub}</span>}
               </span>
               <span className="hidden shrink-0 items-center gap-1.5 sm:flex">
+                {itemRunChip(item) && <Chip title="The runs it links" data-testid="bot-item-run-chip">{itemRunChip(item)}</Chip>}
                 {lines.length > 0 && <Chip title="Done means met">{met} of {lines.length}</Chip>}
                 {item.state === "waiting" && <span className="text-[12px] text-muted-foreground">Waiting</span>}
                 {!KNOWN.includes(item.state) && <Chip title="A state this version of TerminalX does not know">{item.state}</Chip>}

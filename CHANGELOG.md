@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Bots (experimental): a lead bot plans and starts orchestration runs. It leads
+  a run from a session it starts in the project, then `terminalx bots items
+  plan` asks "Approve the plan and start the run?" with a run plan card in its
+  chat (pieces, workers, estimate). Only the owner's answer approves and starts
+  the run; "Start, but ask before merging" holds the bot's `runs merge` until
+  the owner says Merge (`bots items ask-merge`). The item links the run and its
+  workers, shows each hand-off with its cost and report, cannot close until the
+  run ends, and `--check-back TIME|report` wakes the bot without spending
+  anything while it waits. "Started by <bot>" shows the bot's runs with their
+  state. Needs Orchestrator runs on too (PRO-476).
 - Bots (experimental, off by default): the foundation for AI employees with
   standing roles. Settings → Experimental → Bots turns on the bots' store and
   `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
