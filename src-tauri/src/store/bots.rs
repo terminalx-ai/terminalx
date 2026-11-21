@@ -26,6 +26,13 @@ pub const RECORD_FILE: &str = "bot.json";
 pub const FILE_VERSION: u32 = 1;
 
 static DEFINITION_WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// How many times this process saved `bots.json`, so a cached reading can tell it is stale (PRO-505).
+static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times this process saved the bots' definitions.
+pub(crate) fn writes() -> u64 {
+    WRITES.load(std::sync::atomic::Ordering::Acquire)
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +123,7 @@ pub fn change<T>(f: impl FnOnce(&mut Vec<Bot>) -> Result<T>, announce: impl FnOn
     file.bots.extend(unreadable.iter().cloned());
     file.revision += 1;
     super::write_json(&definitions_path()?, &file)?;
+    WRITES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     announce(&Snapshot { revision: file.revision, bots, unreadable });
     Ok(out)
 }

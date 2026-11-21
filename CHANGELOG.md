@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bots (experimental): the gate on a bot's unsigned GitHub posts also refuses
+  `gh pr -R owner/repo comment`, `gh issue --repo=owner/repo comment` and
+  `gh pr -R owner/repo review`, and a `gh api graphql` call that sends its
+  query with `--input` or reads it from a file (`-F query=@file`), since what
+  it sends cannot be read. Whether a bot is at Full access is read at most
+  once a second, not on every tool call (PRO-505).
 - CI: every Linux job runs on Instabox (`instabox-medium`), pull requests
   included. The macOS jobs and the runtime release stay on GitHub's runners
   (docs/CI-RUNNERS.md).

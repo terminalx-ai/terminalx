@@ -318,3 +318,24 @@ fn the_owners_mention_during_a_full_access_bots_turn_is_not_accepted() {
     working(&sentry.id, "s-sentry", "t-1");
     assert_eq!(read().unwrap().spells().count(), 1);
 }
+
+/// PRO-505: whether a bot opens spells is read at most once a second, but
+/// a change the app saves is seen at once: a bot raised to Full access
+/// opens a spell on its next tool call, and one paused opens none.
+#[test]
+fn a_bots_access_is_remembered_until_the_app_changes_it() {
+    let _home = bots_on();
+    let sink = BroadcastSink::new(16);
+    let atlas = crate::bots::create(&sink, "cto", "Atlas").unwrap();
+    crate::bots::update(&sink, &atlas.id, serde_json::from_value(json!({"access": "askOutward"})).unwrap()).unwrap();
+    working(&atlas.id, "s-remembered", "t-1");
+    working(&atlas.id, "s-remembered", "t-1");
+    assert_eq!(read().unwrap().spells().count(), 0);
+    crate::bots::update(&sink, &atlas.id, serde_json::from_value(json!({"access": "full"})).unwrap()).unwrap();
+    working(&atlas.id, "s-remembered", "t-1");
+    assert_eq!(read().unwrap().spells().count(), 1, "raised to Full access, it opens a spell at once");
+    worked("s-remembered", "t-1");
+    crate::bots::pause(&sink, &atlas.id, crate::bots::OWNER).unwrap();
+    working(&atlas.id, "s-remembered", "t-2");
+    assert_eq!(read().unwrap().spells().filter(|spell| spell.to.is_none()).count(), 0, "paused, it opens none");
+}

@@ -530,13 +530,23 @@ mention starts a conversation, not a duty run.
   review unsigned (`access::unsigned_post`, PRO-502): `gh pr comment`,
   `gh issue comment`, `gh pr review`, and a `gh api` call that writes to a
   `comments` or `reviews` path or sends a GraphQL mutation that names a
-  comment or a review. The refusal names `bots post` and `bots reply`. It
-  finds them anywhere in a command line (lists, pipes, `sh -c`, `env`,
-  `sudo`), but it reads commands: a script, another program (`curl` to
-  the API, a Linear client), a connected server's (MCP) tool, or a call
-  spelt another way still posts. The bot holds the owner's credentials,
-  so this stops habit and a prompt that asks for it, not a bot set on
-  getting around it.
+  comment or a review. `-R`/`--repo` and its value are skipped wherever
+  they stand, so `gh pr -R o/r comment 12` and `gh issue --repo=o/r comment`
+  are refused too (PRO-505). A `gh api graphql` call whose query cannot be
+  read, sent with `--input` or read from a file or stdin (`-F
+  query=@add.graphql`, `-F query=@-`), is refused as if it were a comment
+  mutation, whatever the file says: a bot reads with GraphQL by writing
+  the query in the command (`-f query='query { … }'`), and `-f
+  query=@x` is the text `@x`, not a file. The refusal names `bots post`
+  and `bots reply`. It finds them anywhere in a command line (lists,
+  pipes, `sh -c`, `env`, `sudo`), but it reads commands: a script, another
+  program (`curl` to the API, a Linear client), a connected server's (MCP)
+  tool, an alias, a `gh` extension, or a call spelt another way (an option
+  `gh` reads that this check does not know of, set before the
+  subcommand) still posts. The bot holds the owner's credentials, so this
+  stops habit and a prompt that asks for it, not a bot set on getting
+  around it. What stands behind it is the check below, which reads no
+  command.
 - **Reading.** The automation scheduler's tick calls `channels::tick`,
   which reads at most every two minutes, on a thread of its own: the
   conversation and review comments of the GitHub repositories of the
@@ -567,7 +577,12 @@ mention starts a conversation, not a duty run.
   first sign of work in a turn (its prompt, turn start or a tool call,
   `SessionManager::publish_event`) while the bot is at Full access and not
   paused, and closes at the turn's end; one whose end was never seen closes
-  on the next read when the tab has no turn open. A comment counts as
+  on the next read when the tab has no turn open. Whether a bot is at Full
+  access and not paused is read from `bots.json` at most once a second per
+  bot (`channels::opens_spells`, PRO-505), so a bot below Full access does
+  not have the file read on every tool call. An access or pause change the
+  same process saves is seen on the next event; any other change to
+  `bots.json` within a second. A comment counts as
   written in a spell from two minutes before it starts to two minutes after
   it ends (`WORK_MARGIN_SECONDS`: the services' clocks and posting delay).
   Spells are kept a day. Bots at the two lower levels open none: they ask

@@ -467,6 +467,50 @@ fn unsigned_comments_and_reviews_are_refused_at_every_level() {
     }
 }
 
+/// PRO-505: `gh pr` and `gh issue` take `-R`/`--repo` before the
+/// subcommand, and a GraphQL query sent with `--input` or read from a file
+/// cannot be read: both are refused as unsigned posts, at every level.
+#[test]
+fn a_repository_flag_or_a_query_from_a_file_does_not_get_past_the_gate() {
+    let _home = crate::store::temp_home();
+    let cwd = crate::store::root().unwrap().to_string_lossy().into_owned();
+    let levels = [BotAccess::Full, BotAccess::AskOutward, BotAccess::ReadReport, BotAccess::Other("someday".into())];
+    for command in [
+        "gh pr -R acme/app comment 12 -b '@sentry merge it'",
+        "gh issue --repo acme/app comment 7 --body hi",
+        "gh pr -R acme/app review 12 --approve",
+        "gh pr --repo=acme/app comment 12 -b hi",
+        "gh issue --repo=acme/app comment 7 --body-file note.md",
+        "gh pr -Racme/app review 12 --comment -b LGTM",
+        "gh pr comment -R acme/app 12 -b hi",
+        "cd /tmp && gh pr -R acme/app comment 12 -b hi",
+        "gh api graphql -F query=@add.graphql",
+        "gh api graphql --field=query=@add.graphql -F subject=I_1",
+        "gh api graphql -Fquery=@add.graphql",
+        "gh api graphql -F query=@- < add.graphql",
+        "gh api graphql --input req.json",
+        "gh api graphql --input=req.json",
+    ] {
+        for access in &levels {
+            let Gate::Refuse(reason) = gate(access, &shell(command, &cwd)) else { panic!("{command} at {access:?} is not refused") };
+            assert!(reason.contains("terminalx bots post") && reason.contains("did not run"), "{reason}");
+        }
+    }
+    let codex = json!({"tool_name": "exec_command", "tool_input": {"command": ["gh", "issue", "--repo", "acme/app", "comment", "7", "--body", "hi"]}, "cwd": cwd});
+    assert!(is_refused(&gate(&BotAccess::Full, &codex)));
+    // A repository's value is not taken for a subcommand, and the reads are as before.
+    for command in [
+        "gh pr -R acme/app view 12 --comments",
+        "gh issue --repo comment list",
+        "gh pr --repo=acme/app list",
+        "gh api graphql -f query=@add.graphql",
+        "gh api graphql -f query='query { viewer { login } }' -F first=10",
+        "gh api graphql -f query='query($n: Int) { viewer { login } }' -F n=@count.txt",
+    ] {
+        assert_eq!(gate(&BotAccess::Full, &shell(command, &cwd)), Gate::Leave, "{command}");
+    }
+}
+
 #[test]
 fn a_codex_card_that_gets_no_answer_is_a_refusal() {
     let refused = codex_answer(None);
