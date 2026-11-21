@@ -2290,6 +2290,38 @@ pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) 
     Ok(saved)
 }
 
+/// The cloud projects pinned on this computer, per organization (#1403).
+#[tauri::command]
+pub async fn cloud_pins() -> CmdResult<store::cloud_pins::CloudPins> {
+    tauri::async_runtime::spawn_blocking(store::cloud_pins::load).await.map_err(err)?.map_err(err)
+}
+
+/// A change to the cloud pins, told to every window and phone.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum CloudPinsEdit {
+    /// Pin or unpin one project.
+    Set { org_id: String, identity: String, pinned: bool },
+    /// The window's old preferences, moved here once.
+    Adopt { orgs: std::collections::BTreeMap<String, Vec<String>> },
+    /// Organizations the account is no longer a member of.
+    Forget { org_ids: Vec<String> },
+}
+
+#[tauri::command]
+pub async fn edit_cloud_pins(app: AppHandle, edit: CloudPinsEdit) -> CmdResult<store::cloud_pins::CloudPins> {
+    let saved = tauri::async_runtime::spawn_blocking(move || match edit {
+        CloudPinsEdit::Set { org_id, identity, pinned } => store::cloud_pins::set(&org_id, &identity, pinned),
+        CloudPinsEdit::Adopt { orgs } => store::cloud_pins::adopt(orgs),
+        CloudPinsEdit::Forget { org_ids } => store::cloud_pins::forget_orgs(&org_ids),
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    let _ = app.emit(store::cloud_pins::CHANGED, &saved);
+    Ok(saved)
+}
+
 /// Save one workspace's tab order, pins, mutes and titles, for every window and every device.
 #[tauri::command]
 pub fn set_tab_layout(app: AppHandle, workspace: String, layout: index::TabLayout) -> CmdResult<()> {

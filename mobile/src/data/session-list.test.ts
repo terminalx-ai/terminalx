@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
-import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
+import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime, withPinnedCloud, type CloudPinRow, type ListRow, type RowSection } from "./session-list";
 import { bucketSessions } from "@terminalx/portable/dashboard";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
@@ -183,6 +183,81 @@ describe("the list's sections and filters", () => {
     expect(filterCounts(rows)).toEqual({ all: 7, needs: 2, working: 2 });
     expect(filterCounts([])).toEqual({ all: 0, needs: 0, working: 0 });
     expect(listSections([], "all")).toEqual([]);
+  });
+});
+
+describe("sessions pinned on the Mac (#1403)", () => {
+  const sessions = [
+    reported("asks", [{ status: "waiting", activity: "needs_answer" }], {}, { project: "beta", pinned: true, modified: "2026-11-07T09:58:00Z" }),
+    reported("works", [{ status: "in_progress" }], {}, { project: "alpha", pinned: true, modified: "2026-11-07T10:00:00Z" }),
+    reported("old", [{ status: "idle" }], {}, { project: "beta", pinned: true, modified: "2026-11-06T10:00:00Z" }),
+    reported("loose", [{ status: "idle" }], {}, { project: "alpha", modified: "2026-11-07T09:00:00Z" }),
+    reported("other", [{ status: "idle" }], {}, { project: "beta", modified: "2026-11-07T08:00:00Z" }),
+  ];
+  const shape = (sections: RowSection<ListRow>[]) => sections.map((section) => [section.title, section.data.map((row) => row.key)]);
+  const all = shape(listSections(chatRows(sessions), "all"));
+
+  it("lists Needs you, then Pinned, newest first, then the projects, with no session twice", () => {
+    expect(all).toEqual([
+      ["Needs you", ["asks"]],
+      ["Pinned", ["works", "old"]],
+      ["alpha", ["loose"]],
+      ["beta", ["other"]],
+    ]);
+    const keys = all.flatMap(([, keys]) => keys as string[]);
+    expect(new Set(keys).size).toBe(keys.length);
+    // The pinned session waiting on the person keeps its pin, in Needs you.
+    expect(one(sessions[0]).pinned).toBe(true);
+  });
+
+  it("lists the list as before for a Mac that sends no pins", () => {
+    const older = sessions.map(({ pinned: _pinned, ...rest }) => rest);
+    expect(chatRows(older).every((row) => !row.pinned && row.pinnedRank === null)).toBe(true);
+    expect(shape(listSections(chatRows(older), "all"))).toEqual([
+      ["Needs you", ["asks"]],
+      ["alpha", ["works", "loose"]],
+      ["beta", ["other", "old"]],
+    ]);
+  });
+
+  it("orders Pinned as the Mac's custom order places it", () => {
+    const ranked = [
+      ...sessions.slice(0, 3).map((value, index) => ({ ...value, pinnedRank: [2, 1, 0][index] })),
+      // A rank on a session that is not pinned means nothing.
+      { ...sessions[3], pinnedRank: 5 },
+      sessions[4],
+    ];
+    expect(shape(listSections(chatRows(ranked), "all"))[1]).toEqual(["Pinned", ["old", "works"]]);
+    expect(chatRows(ranked).find((row) => row.key === "loose")?.pinnedRank).toBeNull();
+  });
+
+  it("keeps pinned sessions in their projects under Working and in a search", () => {
+    expect(shape(listSections(chatRows(sessions), "working"))).toEqual([["alpha", ["works"]]]);
+    expect(shape(listSections(chatRows(sessions, "chat"), "all", true))).toEqual([
+      ["Needs you", ["asks"]],
+      ["alpha", ["works", "loose"]],
+      ["beta", ["other", "old"]],
+    ]);
+  });
+
+  const cloud = (id: string, time: number): CloudPinRow => ({
+    kind: "cloud", key: `cloud:org-1:${id}`, orgId: "org-1", identity: "github.com/acme/web", title: id, time,
+    item: { workspace: { id, orgId: "org-1", name: id, state: "running" } } as CloudPinRow["item"],
+  });
+
+  it("adds the pinned cloud workspaces to Pinned, by activity, or after the Mac's own in its custom order", () => {
+    const works = Date.parse("2026-11-07T10:00:00Z");
+    const sections = listSections(chatRows(sessions), "all");
+    const withCloud = withPinnedCloud(sections, [cloud("early", works - 1), cloud("late", works + 1)], "all");
+    expect(shape(withCloud)[1]).toEqual(["Pinned", ["cloud:org-1:late", "works", "cloud:org-1:early", "old"]]);
+    const ranked = listSections(chatRows(sessions.map((value, index) => index < 3 ? { ...value, pinnedRank: index } : value)), "all");
+    expect(shape(withPinnedCloud(ranked, [cloud("late", works + 1)], "all"))[1]).toEqual(["Pinned", ["works", "old", "cloud:org-1:late"]]);
+    // Nothing of the Mac's own pinned: the section is made for the cloud ones, after Needs you.
+    const unpinned = listSections(chatRows(sessions.map((value) => ({ ...value, pinned: false }))), "all");
+    expect(shape(withPinnedCloud(unpinned, [cloud("late", 0)], "all")).map(([title]) => title)).toEqual(["Needs you", "Pinned", "alpha", "beta"]);
+    // Only All, out of a search, has a Pinned section.
+    expect(withPinnedCloud(unpinned, [cloud("late", 0)], "working")).toBe(unpinned);
+    expect(withPinnedCloud(unpinned, [cloud("late", 0)], "all", true)).toBe(unpinned);
   });
 });
 
