@@ -10,6 +10,9 @@
 pub mod access;
 pub mod changes;
 pub mod channels;
+pub mod chat_apps;
+#[cfg(test)]
+pub(crate) mod chat_app_test_server;
 pub mod memory;
 pub mod chat;
 pub mod calendar;
@@ -22,7 +25,9 @@ pub mod items;
 pub mod phone;
 pub mod pause;
 pub mod runs;
+pub mod slack;
 pub mod suggestions;
+pub mod telegram;
 pub mod templates;
 pub mod wakes;
 

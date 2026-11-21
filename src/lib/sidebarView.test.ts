@@ -46,4 +46,12 @@ describe("sidebar view choices", () => {
     expect(sidebarProjectOf(session("chat", { projectPath: "/Chats" }), "/Chats")).toBeNull();
     expect(sidebarProjectOf(session("quick", { kind: "quick" }), null)).toBeNull();
   });
+
+  it("filters a quick chat by the listed project it was pointed into, as the sidebar lists it (#1464)", () => {
+    const listed = { projects: [{ path: "/repos/web", name: "web", kind: "git" as const }], workspaces: {} };
+    const quick = (cwd: string) => session("quick", { kind: "quick", projectPath: "/store/quick/q", cwd });
+    expect(sidebarProjectOf(quick("/repos/web/src"), "/Chats", listed)).toBe("/repos/web");
+    expect(sidebarProjectOf(quick("/repos/website"), "/Chats", listed)).toBeNull();
+    expect(sidebarProjectOf(quick("/store/quick/q"), "/Chats", listed)).toBeNull();
+  });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
-import { Bot as BotIcon, Brain, CircleDot, Github, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles, SquareKanban } from "@/icons";
+import { Bot as BotIcon, Brain, CircleDot, Github, Hash, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, Send, ShieldOff, Settings2, Sparkles, SquareKanban } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -394,7 +394,8 @@ function ChatGroup({ label, action, children }: { label: string; action?: ReactN
 function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void; sub?: string }) {
   const working = chat.tabs.some((tab) => tab.status === "in_progress");
   const source = home ? null : chatSource(chat);
-  const Icon = home ? Home : chat.botChannel?.kind === "github" ? Github : chat.botChannel?.kind === "linear" ? SquareKanban : MessageSquare;
+  const kind = chat.botChannel?.kind;
+  const Icon = home ? Home : kind === "github" ? Github : kind === "linear" ? SquareKanban : kind === "slack" ? Hash : kind === "telegram" ? Send : MessageSquare;
   return (
     <li>
       <button

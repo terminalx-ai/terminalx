@@ -2186,6 +2186,8 @@ pub(crate) fn start_recovered_scheduler(app: impl AutomationHost) {
                     // Bots' GitHub and Linear channels (PRO-480): read when due, on a thread of their own.
                     if crate::bots::enabled() {
                         if let Ok(manager) = app.sessions() {
+                            // Slack and Telegram (PRO-481): their connectors and the pump, started once each.
+                            crate::bots::chat_apps::supervise(&manager);
                             crate::bots::channels::tick(manager);
                         }
                     }

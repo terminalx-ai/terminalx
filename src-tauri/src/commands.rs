@@ -6427,6 +6427,46 @@ pub async fn bot_channels(state: State<'_, AppState>, id: String) -> CmdResult<s
     bots_call(state, "channels", serde_json::json!({"id": id})).await
 }
 
+// Slack and Telegram as a bot's channels (PRO-481).
+
+/// A bot's chat apps: each service's account (never its tokens), its connector's state, the chats linked, the
+/// waiting link code, "Also sends to", and the newest messages without their text.
+#[tauri::command]
+pub async fn bot_chat_apps(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatApps", serde_json::json!({"id": id})).await
+}
+
+/// Check a Slack app's or a Telegram bot's tokens with the service and save them where the bots' other logins
+/// are kept, in the store, never in the bot's record. The window writes them itself, as it does the Linear key:
+/// they never travel through the runtime's control socket.
+#[tauri::command]
+pub async fn bot_chat_app_connect(id: String, service: String, tokens: serde_json::Value) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || crate::bots::chat_apps::connect(&id, &service, &tokens).map_err(err)).await.map_err(err)?
+}
+
+/// Forget a bot's Slack or Telegram login: its connector stops and the chats linked with it are unlinked.
+#[tauri::command]
+pub async fn bot_chat_app_disconnect(id: String, service: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || crate::bots::chat_apps::disconnect(&id, &service).map_err(err)).await.map_err(err)?
+}
+
+/// A one-time code that links the chat it is sent from: a person's act, carrying the window's proof.
+#[tauri::command]
+pub async fn bot_chat_app_link(state: State<'_, AppState>, id: String, service: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppLink", serde_json::json!({"id": id, "service": service})).await
+}
+
+#[tauri::command]
+pub async fn bot_chat_app_unlink(state: State<'_, AppState>, id: String, service: String, chat: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppUnlink", serde_json::json!({"id": id, "service": service, "chat": chat})).await
+}
+
+/// "Also sends to": the services the home chat's replies to the owner also go to.
+#[tauri::command]
+pub async fn bot_chat_app_also_sends(state: State<'_, AppState>, id: String, services: Vec<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppAlsoSends", serde_json::json!({"id": id, "services": services})).await
+}
+
 // Hand-offs between bots and the team brief (PRO-475).
 
 /// The hand-offs a bot gave or was given (every bot's with no `id`).
@@ -6481,10 +6521,17 @@ pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<ser
     bots_call(state, "duties", serde_json::json!({"id": id})).await
 }
 
-/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`).
+/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`); `first_day` the
+/// weekday it starts on, 0 for Monday … 6 for Sunday (PRO-499).
 #[tauri::command]
-pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>) -> CmdResult<serde_json::Value> {
-    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week})).await
+pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>, first_day: Option<u8>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week, "firstDay": first_day})).await
+}
+
+/// What is kept of bot `id`'s deleted duty `duty_id` (PRO-499): its name, when it was deleted, and its run log.
+#[tauri::command]
+pub async fn bot_duty_kept_log(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyKeptLog", serde_json::json!({"id": id, "dutyId": duty_id})).await
 }
 
 /// Add a duty (`duty_id` absent) or change one.

@@ -96,7 +96,9 @@ describe("a chat a mention started (PRO-480)", () => {
   it("says where it came from, and nothing for any other chat", () => {
     expect(chatSource(session("a", { botChannel: { kind: "github", label: "acme/app#7", url: "u" } }))).toBe("GitHub · acme/app#7");
     expect(chatSource(session("b", { botChannel: { kind: "linear", label: "PRO-9", url: "u" } }))).toBe("Linear · PRO-9");
-    expect(chatSource(session("c", { botChannel: { kind: "slack", label: "#eng", url: "u" } }))).toBe("slack · #eng");
+    expect(chatSource(session("c", { botChannel: { kind: "slack", label: "#eng", url: "" } }))).toBe("Slack · #eng");
+    expect(chatSource(session("d", { botChannel: { kind: "telegram", label: "Kestrel team", url: "" } }))).toBe("Telegram · Kestrel team");
+    expect(chatSource(session("x", { botChannel: { kind: "jira", label: "OPS-4", url: "u" } }))).toBe("jira · OPS-4");
     expect(chatSource(session("d"))).toBeNull();
     expect(chatSource(session("e", { botChannel: { kind: "github" } as never }))).toBeNull();
   });

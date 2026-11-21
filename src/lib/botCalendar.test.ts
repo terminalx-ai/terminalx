@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CRON_WEEKDAYS, cronWeekdayCode } from "@/lib/automationSchedule";
-import { FIRST_WEEK, LAST_WEEK, addDays, blockBox, dragTarget, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
+import { FIRST_WEEK, LAST_WEEK, MIN_LANE_PX, addDays, blockBox, dragTarget, dutyAt, eventsText, firstWeekday, fitLanes, goesOn, lanes, lanesThatFit, movedSchedule, oftenText, stepCell, stepMove, wallClock, weekLabel, weekShown, weekUnknown, weekdayOf } from "@/lib/botCalendar";
 import type { AutomationSchedule } from "@/types/automations";
 import type { CalendarBlock } from "@/types/botCalendar";
 
@@ -138,5 +138,83 @@ describe("the week's grid and rows", () => {
 
   it("starts a duty added at a clicked hour as a weekly one on that day, at that time, in the week's time zone", () => {
     expect(dutyAt(3, 15 * 60, "Europe/London").schedule).toMatchObject({ kind: "preset", preset: "weekly", weekdays: ["TH"], hour: 15, minute: 0, timezone: "Europe/London" });
+  });
+});
+
+describe("the decisions left after the follow-up (PRO-499)", () => {
+  const at = (day: number, minute: number, dutyId = "d", minutes?: number): CalendarBlock => ({ dutyId, botId: "b", day, minute, at: "", state: "next", count: 1, minutes });
+
+  it("starts the week on the region's first day, Monday when it cannot say", () => {
+    expect(firstWeekday("en-GB")).toBe(0);
+    expect(firstWeekday("de-DE")).toBe(0);
+    expect(firstWeekday("en-US")).toBe(6);
+    expect(firstWeekday("ar-EG")).toBe(5);
+    expect(firstWeekday("not a locale")).toBe(0);
+    // Whatever the window's own locale, it is one of the seven days.
+    expect(firstWeekday()).toBeGreaterThanOrEqual(0);
+    expect(firstWeekday()).toBeLessThanOrEqual(6);
+  });
+
+  it("reads a column's weekday from its date, so a stored weekday keeps its meaning", () => {
+    expect(["2026-11-15", "2026-11-16", "2026-11-19", "2026-11-22"].map(weekdayOf)).toEqual([6, 0, 3, 6]);
+    // Monday in a week from Sunday is its second column, and is still Monday.
+    expect(dutyAt(weekdayOf("2026-11-16"), 9 * 60, "UTC").schedule.weekdays).toEqual(["MO"]);
+    // Moved by columns, a weekly duty moves by the days between them, whatever the week starts on.
+    expect(movedSchedule(preset("weekly", 11, 0, ["SA"]), { day: 6, minute: 660 }, { day: 5, minute: 660 }, "UTC")).toEqual({ schedule: preset("weekly", 11, 0, ["FR"]) });
+    expect(weekShown("2000-01-01") && !weekShown("1999-12-31") && weekShown("2199-12-31")).toBe(true);
+  });
+
+  it("keeps blocks side by side while each stays readable, and puts the rest in a \"+N more\"", () => {
+    expect(lanesThatFit(0)).toBe(Infinity);
+    expect(lanesThatFit(MIN_LANE_PX * 3 + 5)).toBe(3);
+    expect(lanesThatFit(30)).toBe(2);
+    // Four at Monday 10:00, one at 15:00 alone, and two at Tuesday 09:00.
+    const blocks = [at(0, 600, "a"), at(0, 600, "b"), at(0, 600, "c"), at(0, 600, "d"), at(0, 900, "e"), at(1, 540, "f"), at(1, 540, "g")];
+    const placed = lanes(blocks);
+    const { shown, more } = fitLanes(blocks, placed, 3);
+    expect([...shown.entries()].sort(([a], [b]) => a - b)).toEqual([[0, { lane: 0, of: 3 }], [1, { lane: 1, of: 3 }], [4, { lane: 0, of: 1 }], [5, { lane: 0, of: 2 }], [6, { lane: 1, of: 2 }]]);
+    expect(more).toEqual([{ day: 0, top: blockBox(blocks[2]).top, height: blockBox(blocks[2]).height, lane: 2, of: 3, members: [2, 3] }]);
+    // Room for every one: as `lanes` put them.
+    expect(fitLanes(blocks, placed, Infinity)).toEqual({ shown: placed, more: [] });
+    // Never fewer than one block and its "+N more".
+    expect(fitLanes(blocks, placed, 1).more[0]).toMatchObject({ lane: 1, of: 2, members: [1, 2, 3] });
+  });
+
+  it("joins hidden blocks whose boxes meet into one \"+N more\", as tall as all of them, and not those apart", () => {
+    // A long run from 10:00 to 12:00 keeps one group: beside it 10:00, 10:00 and 10:10 (boxes that meet), then 11:00
+    // and 11:00, apart from those.
+    const blocks = [at(0, 600, "long", 120), at(0, 600, "a"), at(0, 610, "b"), at(0, 660, "c"), at(0, 660, "d")];
+    const { shown, more } = fitLanes(blocks, lanes(blocks), 2);
+    expect([...shown.entries()]).toEqual([[0, { lane: 0, of: 2 }]]);
+    expect(more.map((chip) => [chip.members, chip.lane, chip.of])).toEqual([[[1, 2], 1, 2], [[3, 4], 1, 2]]);
+    expect(more[0].top).toBe(blockBox(blocks[1]).top);
+    expect(more[0].height).toBe(blockBox(blocks[2]).top + blockBox(blocks[2]).height - blockBox(blocks[1]).top);
+  });
+
+  it("moves the grid's focus by an hour or a day, inside the week", () => {
+    expect(stepCell({ day: 3, hour: 9 }, "ArrowUp")).toEqual({ day: 3, hour: 8 });
+    expect(stepCell({ day: 3, hour: 23 }, "ArrowDown")).toEqual({ day: 3, hour: 23 });
+    expect(stepCell({ day: 0, hour: 9 }, "ArrowLeft")).toEqual({ day: 0, hour: 9 });
+    expect(stepCell({ day: 3, hour: 9 }, "ArrowRight")).toEqual({ day: 4, hour: 9 });
+    expect(stepCell({ day: 3, hour: 9 }, "Home")).toEqual({ day: 0, hour: 9 });
+    expect(stepCell({ day: 3, hour: 9 }, "End")).toEqual({ day: 6, hour: 9 });
+    expect(stepCell({ day: 3, hour: 3 }, "PageUp")).toEqual({ day: 3, hour: 0 });
+    expect(stepCell({ day: 3, hour: 20 }, "PageDown")).toEqual({ day: 3, hour: 23 });
+    expect(stepCell({ day: 3, hour: 9 }, "a")).toBeNull();
+  });
+
+  it("moves a block by keyboard as a drag does: by its step, a day at a time, inside the week and the day", () => {
+    expect(stepMove({ day: 2, minute: 600 }, "ArrowUp")).toEqual({ day: 2, minute: 585 });
+    expect(stepMove({ day: 2, minute: 0 }, "ArrowUp")).toEqual({ day: 2, minute: 0 });
+    expect(stepMove({ day: 2, minute: 1425 }, "ArrowDown")).toEqual({ day: 2, minute: 1425 });
+    expect(stepMove({ day: 6, minute: 600 }, "ArrowRight")).toEqual({ day: 6, minute: 600 });
+    expect(stepMove({ day: 0, minute: 600 }, "ArrowLeft")).toEqual({ day: 0, minute: 600 });
+    expect(stepMove({ day: 2, minute: 600 }, "Enter")).toBeNull();
+  });
+
+  it("knows a run that goes on past midnight", () => {
+    expect(goesOn({ minute: 23 * 60, minutes: 61 })).toBe(true);
+    expect(goesOn({ minute: 23 * 60, minutes: 60 })).toBe(false);
+    expect(goesOn({ minute: 0, minutes: undefined })).toBe(false);
   });
 });

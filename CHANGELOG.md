@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Bots (experimental): message a bot from Slack or Telegram. Connect your own
+  Slack app (Socket Mode) or Telegram bot in Settings → the bot → Channels,
+  then link a chat by sending it the one-time code shown there; messages from
+  any other chat are refused. The owner's direct messages reach the bot's home
+  chat, a group's or channel's its own chat, and the bot's reply goes back
+  where it was asked. Duty reports and "Needs you" questions go to your linked
+  direct chats, the answers as buttons (a run's approval stays in TerminalX).
+  "Also sends to" beside the home chat's send button forwards its replies
+  there too. Tokens are kept in the store, readable by you alone, never in the
+  bot's settings. WhatsApp needs a relay and stays off (PRO-481).
+- Bots (experimental): the week calendar of duties starts on the first day of
+  the week of the system's region. Too many duties at one time to read side
+  by side show "+N more", which lists the rest. The grid is keyboard-driven:
+  the arrow keys move between hours and days, Enter adds a duty at the hour,
+  and Alt (Option) with the arrows moves a block still to come, Enter saving
+  it. A deleted duty's past runs stay on the weeks they ran, dimmed and named,
+  and open its kept run log. A run that goes on past midnight carries on as a
+  second block on the next day (PRO-499).
+- Sidebar: a quick chat is no longer a project of its own named by its
+  session id. It is listed under Chats by its title, saying in its tooltip
+  where it runs (its scratch folder, or the folder it was pointed at); one
+  pointed into a listed project's folder or one of its worktrees is listed
+  under that project, and with orchestration on, one another session started
+  joins its parent's project, where it nests (#1464).
+
 - Mobile: the Sessions list has a Pinned section, after Needs you and before
   the projects, holding what the Mac pinned: its sessions, out of their
   projects as on the sidebar, in the sidebar's own order when it is in its

@@ -421,8 +421,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
 - **Not covered.** Security alerts are Dependabot's only, not code scanning
   or secret scanning. Mentions are conversation comments only, not review
   comments, reviews or a pull request's or issue's own text.
-- **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
-  connector (PRO-480, PRO-481); their tiles stay off.
+- **Not here yet.** Duties woken by Slack, Telegram or WhatsApp and
+  webhooks; their tiles stay off. A message from Slack or Telegram reaches
+  the bot as a chat message (PRO-481), not as a duty's wake.
 
 ## Hand-offs, the reporting line and the team brief (PRO-475)
 
@@ -782,6 +783,62 @@ mention starts a conversation, not a duty run.
 - **With Bots off** nothing is read, nothing is delivered, and both
   commands answer `bots_off`.
 
+## Slack and Telegram as channels (PRO-481)
+
+`src-tauri/src/bots/chat_apps.rs`, with the connectors in `telegram.rs`
+(Bot API long polling, `getUpdates`) and `slack.rs` (Socket Mode). No
+relay: both need only outbound connections from the runtime, which runs
+them. WhatsApp's Cloud API delivers only by webhook to a public address, so
+its row stays off.
+
+- **Logins.** The owner makes their own Telegram bot (@BotFather) or Slack
+  app (Socket Mode on; bot scopes `chat:write`, `im:history`,
+  `app_mentions:read`, `users:read`, `users:read.email`, `channels:read`;
+  events `message.im` and `app_mention`; interactivity on) and pastes its
+  tokens in Settings → the bot → Channels. The window checks them (`getMe`;
+  `auth.test` and `apps.connections.open`) and writes them itself to
+  `bot-chat-logins.json` in the store, owner-readable, beside
+  `settings.json` where the Linear key is: the runtime has no Keychain, and
+  the tokens never cross the control socket. Never in `bots.json`, the
+  bot's home, a log or an error: the clients' errors are built from the
+  services' answers, not the HTTP library's, which would print Telegram's
+  address and its token.
+- **Linking.** "Link a chat" makes a code (six letters and digits, ten
+  minutes, five wrong tries) that is sent from the chat to link: bare,
+  `/start CODE` (the `t.me` link the dialog opens) or `/link@bot CODE` in a
+  group. Whoever sends it is the owner there. A message from a chat that is
+  not linked, or linked through another login, is kept without its text,
+  shown in the dialog's "Lately", and never reaches the agent.
+- **Who may ask.** In a linked group or channel, someone else is accepted
+  only when they are in Who can ask by the email Slack gives for them,
+  judged as a GitHub or Linear mention is (`channels::judge`). Telegram
+  gives no email, so only the person who linked a Telegram chat asks there.
+  The text reaches the agent fenced (`chat-message`), with TerminalX as the
+  transcript's author, as a request and never an approval.
+- **Where it goes.** The owner's direct message goes to the home chat; a
+  group's or channel's goes to a chat of its own per Telegram group or
+  Slack thread, marked `botChannel` (`slack`, `telegram`). A paused bot's
+  messages wait (the chat is told once); at most 30 reach one bot an hour.
+- **Replies.** The turn that answers a message (found by its start after
+  the sequence number it was sent at, so a queued message waits its turn)
+  is sent back where it was asked: in its Slack thread, as a Telegram reply.
+  A stopped turn says so; after six hours it is given up.
+- **Reports and questions.** A duty's report to the owner goes to every
+  direct chat the owner linked, with no sound in quiet hours (Telegram's
+  `disable_notification`). A "Needs you" question goes with its answers as
+  buttons (inline keyboard; Block Kit, the recommended one primary). A
+  press is taken only from the person who linked that chat, once, as an
+  answer from outside the window (`byPerson: false`), so one that would
+  approve a run is refused; such a question goes with no buttons and says
+  to answer in TerminalX.
+- **Also sends to** (design 23.04): beside the home chat's send button, the
+  linked direct chats the bot's replies to what the owner writes there also
+  go to, each with a quote of what was written.
+- **Workers.** The scheduler's tick (and the window's read) start one pump
+  and one connector per saved login; each stops when its login changes or
+  goes, the bot is deleted, or Bots is switched off. Deleting a bot forgets
+  its links, messages and logins.
+
 ## The week of duties (PRO-473)
 
 The calendar (screen 23.13) is a view of what already exists, not a store of
@@ -815,8 +872,8 @@ minute they fall on.
   it show "history not kept", never "none ran", and the totals say "at
   least". A log that cannot be read is said on its duty's row
   (`logs[].unreadable`) and its past days are not kept either.
-- **Which weeks.** Weeks from 3 January 2000 to the end of 2199 can be shown;
-  others are refused, and the arrows stop there. A day whose midnight does not
+- **Which weeks.** Weeks whose first day is from 1 January 2000 to the end
+  of 2199 can be shown; others are refused, and the arrows stop there. A day whose midnight does not
   exist (clocks moved forward over it) starts at the first valid instant.
 - **Changing from the calendar** uses the duties' own guarded routes: a
   click on an empty hour opens the duty editor with a weekly schedule at that
@@ -830,6 +887,18 @@ minute they fall on.
 - **Who may read it.** The window and a person's terminal read any bot's
   week or every bot's. A process in a bot's session reads its own bot's week
   only (`control.rs`, `own_duties_read`).
+
+### Decisions after the follow-up (PRO-499)
+
+Each was a default taken to start the work; the owner may change any of them.
+
+| Item | Built |
+|---|---|
+| Many duties at one time | Side by side while each stays at least 48 pixels wide; past that, the last lane of the group is a "+N more" that opens a list of the rest, each opening its duty (`fitLanes`) |
+| First day of the week | The system's region (`Intl.Locale` week info for the window's locale, `firstWeekday`); no new setting. `dutyWeek` takes `firstDay` (0 Monday … 6 Sunday, Monday when absent) and a block's `day` counts from it. Stored weekdays and cron days keep their meaning; the screen reads each column's weekday from its date, so an older runtime's Monday week still adds and moves on the right days |
+| Keyboard | The hours are an ARIA grid under the blocks with one tab stop: the arrow keys move between hours and days, Home and End to the week's ends, Page Up and Down by six hours, Enter or Space adds a duty at the hour. On a block still to come, Alt (Option) and the arrows move it by 15 minutes or a day, shown where it would go; Enter saves it, Escape or leaving it puts it back |
+| A deleted duty's past runs | `dutyDelete` keeps the run log, with the definition and when it was deleted beside it (`automations/<id>/deleted.json`); one that never ran leaves nothing. A run still going ends then, as stopped ("Its duty was deleted before this run finished."): recovery and a run's own ending read only the duties there are, so nothing would close it after, and a run the log gets after the delete is read as ended at it. Its past runs are drawn dimmed with a bin mark and "(deleted)", never moved, nothing of it is to come, and it is named from `deleted[]`. Clicking one opens its kept log (`dutyKeptLog`, a read), whose runs open their sessions on a bot's Duties tab. Deleting the bot takes its deleted duties' logs to its home in the trash |
+| A run past midnight | Drawn again from each later midnight of the week it covers, as a block marked `continued` whose `minutes` run from there; one begun the week before is drawn from the week's first midnight and counted in the week it began |
 
 ## Look around, suggestions and the memory tidy (PRO-477)
 
@@ -970,7 +1039,7 @@ issue.
 | PRO-477 | Look around, suggestions, nightly memory tidy | 23.01 | In review |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | In review |
 | PRO-480 | GitHub and Linear as channels | 23.07 | In review |
-| PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
+| PRO-481 | Slack and Telegram or WhatsApp as channels | 23.04, 23.07 | In review |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
 | PRO-489 | Hardening left over from reviews | n/a | In review |
