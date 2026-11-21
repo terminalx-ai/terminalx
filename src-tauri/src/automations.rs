@@ -609,8 +609,7 @@ pub fn occurrences_between(
             // A fresh `after` for each step, as `next_cron` asks: a kept iterator would also give the second of a
             // local time the clocks repeat, which the scheduler never fires.
             let parsed = cron_of(schedule)?;
-            loop {
-                let Some(next) = parsed.after(&at.with_timezone(&timezone)).next() else { break };
+            while let Some(next) = parsed.after(&at.with_timezone(&timezone)).next() {
                 let next = next.with_timezone(&Utc);
                 if next > until || next <= at {
                     break;
