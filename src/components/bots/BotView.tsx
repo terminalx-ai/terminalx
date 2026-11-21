@@ -11,6 +11,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
 import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
+import { showBotsTeam } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
@@ -19,6 +20,8 @@ import { effectiveAccess, type Bot } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
+import { BotMenu } from "./BotMenu";
+import { BotSettings } from "./BotSettings";
 
 export type BotTab = "home" | "chat" | "duties" | "role" | "settings";
 
@@ -29,11 +32,6 @@ const TABS: { id: BotTab; label: string; icon: typeof Home }[] = [
   { id: "role", label: "Role and memory", icon: Brain },
   { id: "settings", label: "Settings", icon: Settings2 },
 ];
-
-/** What a tab this ticket does not fill says, until its own ticket does. */
-const COMING: Record<Exclude<BotTab, "chat" | "home" | "duties" | "role">, string> = {
-  settings: "The bot's settings (its agent, where it runs, what it works in and its access) are coming.",
-};
 
 const ACCESS_LABEL = { full: "Full access", askOutward: "Asks before outward", readReport: "Read and report" } as const;
 
@@ -48,9 +46,11 @@ function runsOnLabel(bot: Bot): string {
 }
 
 /**
- * A bot's view (PRO-468, designs 23.01 and 23.04): its header with what it runs on and its Pause, and its tabs. Chat
- * has the bot's chats on the left, the open one's transcript and composer on the right; Role and memory is the bot's
- * role, memory and their history (PRO-470, design 23.06). An unsaved role edit is kept when another tab is opened.
+ * A bot's view (PRO-468, designs 23.01 and 23.04): its header with what it runs on, its Pause and its menu (agent and
+ * model, rename, delete), and its tabs. Chat has the bot's chats on the left, the open one's transcript and composer on
+ * the right; Role and memory is the bot's role, memory and their history (PRO-470, design 23.06), and an unsaved role
+ * edit is kept when another tab is opened; Settings has its settings (PRO-478, 23.07), the same as the team table's
+ * settings page.
  */
 export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarInset }: {
   botId: string;
@@ -202,8 +202,10 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
           </ErrorBoundary>
         </div>
       ) : (
-        <div role="tabpanel" aria-label={TABS.find((value) => value.id === tab)?.label} className="px-6 py-8">
-          <p className="max-w-[560px] text-sm text-muted-foreground">{COMING[tab]}</p>
+        <div role="tabpanel" aria-label="Settings" className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-view-settings">
+          <div className="px-8 py-4">
+            <BotSettings bot={bot} />
+          </div>
         </div>
       )}
     </main>
@@ -252,6 +254,7 @@ function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, on
         ) : (
           <Button size="xs" variant="outline" disabled={busy} onClick={onPause}><Pause /> Pause</Button>
         )}
+        <BotMenu bot={bot} onDeleted={() => showBotsTeam(true)} />
       </div>
     </div>
   );

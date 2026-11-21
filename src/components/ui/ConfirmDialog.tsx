@@ -23,8 +23,8 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
   destructive?: boolean;
   /** The action is under way: nothing can be pressed and the card stays. */
   busy?: boolean;
-  /** Why the action failed; the card stays open to say so. */
-  error?: string | null;
+  /** Why the action failed; the card stays open to say so. Text, or an element that offers what to do about it. */
+  error?: ReactNode;
   onAction: () => void;
   onAlternative?: () => void;
   onCancel: () => void;
@@ -46,7 +46,9 @@ export function ConfirmDialog({ open, title, children, action, cancel = "Cancel"
           ? <DialogDescription className="mt-1 whitespace-pre-line text-xs leading-[18px] text-muted-foreground [overflow-wrap:anywhere]">{children}</DialogDescription>
           // Radix wants a description or an explicit none; the title is the whole question here.
           : <DialogDescription className="sr-only">{title}</DialogDescription>}
-        {error && <p role="alert" className="mt-2 text-xs leading-[18px] text-destructive [overflow-wrap:anywhere]">{error}</p>}
+        {typeof error === "string"
+          ? error && <p role="alert" className="mt-2 text-xs leading-[18px] text-destructive [overflow-wrap:anywhere]">{error}</p>
+          : error && <div className="mt-2">{error}</div>}
         <div className="mt-3.5 flex flex-wrap justify-end gap-2">
           <Button variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={onCancel}>{cancel}</Button>
           {alternative && <Button variant="outline" size="sm" className="text-muted-foreground" disabled={busy} onClick={onAlternative}>{alternative}</Button>}
