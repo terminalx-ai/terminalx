@@ -175,6 +175,58 @@ permission system.
   removed all the same and the delete says so. A duty left behind when its bot is gone
   for certain is listed on the Automations page, which can remove it.
 
+## Hand-offs, the reporting line and the team brief (PRO-475)
+
+- **Hand-off.** `terminalx bots handoff --to BOT --title … --scope …
+  [--due …]`, from a bot's session (`control::Caller` places the bot; a
+  command run elsewhere is refused). The receiving bot gets a new chat of its
+  own (`chat::work_chat`) whose first message is the work, and an item on its
+  list. It answers with `terminalx bots tell --to BOT --about N --text …`
+  (`--failed` when it could not); the answer is sent to the session the work
+  was handed from. Records live in `bot-handoffs.json` at the store root
+  (`bots::handoffs`).
+- **The line.** A bot hands work and tells only its lead and the bots that
+  report to it. The line is the owner's (`reportsTo`, changed with the
+  window's proof). The owner hands any bot's item to any bot with "Hand to
+  another bot" on the item's page (`itemHand`, guarded).
+- **Labels.** Each bot's message is sent with the sending bot as its
+  author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
+  answer to / status to / message to <Name> · a bot's words, not an
+  approval". Its text is fenced (`bot-message`) under a header saying it is
+  never an approval and never the owner's instruction. Nothing a bot sends is
+  recorded as the owner's; the owner's own acts (Stop, an item they hand on)
+  are sent with no author, as theirs.
+- **The lead decides.** A failure or a question a bot cannot settle goes to
+  its lead (`tell --to lead`), and a failed hand-off comes back to its sender
+  with what it may do: hand it again (`handoff --retry N`, twice at most),
+  do it another way, or ask the owner (`bots items ask`).
+- **Bounds.** No hand-off to itself, none back to a bot that handed it open
+  work or further up the chain, chains of at most 3, at most 20 open
+  hand-offs and 20 waiting messages per bot, 200 open overall, and 20
+  hand-offs and messages per bot in 10 minutes, reserved under the rate's
+  lock. Closed hand-offs are trimmed to 300, the bots' before the owner's;
+  delivered messages to 400; a waiting message is never trimmed. A bot's
+  write that grows the file past 4 MB is refused (the owner's go to 6 MB;
+  reads stop at 8 MB).
+- **Pause.** A paused bot sends nothing. Work handed to it is recorded as
+  waiting, with no chat or item, and starts when the owner resumes it; what
+  is sent to it waits too. It is never started by a bot.
+- **Delivery.** A message is kept with a pending mark until its chat takes
+  it: sent at once, or once after the chat's next successful launch
+  (`chat::launched`), three tries at most; then a hand-off it carried fails
+  and its sender is told. Pending messages are never put in a launch note.
+- **Stop.** The card's Stop (`handoffStop`, which narrows and needs no
+  proof) stops the receiving bot's chat for that hand-off and the sessions
+  it started for its item, drops the item, and tells the sender in the
+  owner's words. Its other chats, and the sender's, go on.
+- **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
+  (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
+  most. Every launch of a bot's chat is given it as the owner's standing
+  instruction, or, when the file no longer has the hash the owner saved, as
+  information only.
+- **Deleting a bot** stops other bots' work on what it handed them and moves
+  its hand-offs and messages to `trash/bot-handoffs/<id>.json`.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -196,7 +248,7 @@ issue.
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
 | PRO-473 | Week calendar of duties | 23.13 | Backlog |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
-| PRO-475 | Hand-offs, the reporting line and the team brief | 23.04 | Backlog |
+| PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
 | PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |

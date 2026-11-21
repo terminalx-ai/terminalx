@@ -2,7 +2,6 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, RotateCcw, Square, SquareTerminal } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
-import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { commentOnBotItem, reopenBotItem, resendBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
@@ -14,6 +13,7 @@ import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
 import type { SessionEntry } from "@/types/session";
 import { StateIcon } from "./BotHome";
 import { ItemQuestionCard } from "./NeedsYou";
+import { HandToBot } from "./BotHandoffs";
 
 const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
 
@@ -49,14 +49,17 @@ export function mayDoHere(bot: Bot): string {
 /**
  * A work item's page (PRO-469, design 23.09): its title, state and links, its summary, what done means, its activity
  * and a comment box; on the right, about the item, its sessions and links, and what the bot may do here. "Take it
- * over" opens the item's session; "Stop this item" stops its sessions and drops it. Handing it to another bot comes in a
- * later build.
+ * over" opens the item's session; "Stop this item" stops its sessions and drops it; "Hand to another bot" hands it on
+ * with the owner's note (PRO-475).
  */
 export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
   const item = useBotItem(bot.id, number);
   const store = useSessionStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Hand to another bot" (PRO-475).
+  const [handing, setHanding] = useState(false);
+  const [handed, setHanded] = useState<number | null>(null);
 
   if (!item) {
     return (
@@ -101,11 +104,9 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               <Button size="sm" variant="outline" disabled={!takeOver} onClick={() => takeOver && selectSession(takeOver.id)} title={takeOver ? `Open ${conversationTitle(takeOver)}` : "No session works on this item"} data-testid="bot-item-take-over">
                 <SquareTerminal /> Take it over
               </Button>
-              <WithTooltip label="Handing an item to another bot comes in a later build">
-                <span>
-                  <Button size="sm" variant="outline" disabled aria-label="Hand to another bot (coming later)"><ArrowLeftRight /> Hand to another bot</Button>
-                </span>
-              </WithTooltip>
+              <Button size="sm" variant="outline" disabled={closed} aria-expanded={handing} onClick={() => { setHanding((value) => !value); setHanded(null); }} title={closed ? "Reopen it before handing it on" : undefined} data-testid="bot-item-hand">
+                <ArrowLeftRight /> Hand to another bot
+              </Button>
               {closed ? (
                 <Button size="sm" variant="outline" disabled={busy} onClick={reopen} data-testid="bot-item-reopen">
                   <RotateCcw /> Reopen
@@ -117,6 +118,9 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
               )}
             </div>
           </div>
+
+          {handing && !closed && <HandToBot bot={bot} item={item} onClose={() => setHanding(false)} onHanded={(handoff) => { setHanding(false); setHanded(handoff.number); }} />}
+          {handed !== null && <p className="text-[12.5px] text-muted-foreground" role="status" data-testid="bot-item-handed">Handed on as hand-off {handed}. Its card shows in the receiving bot's chat; the answer comes back to {bot.name}.</p>}
 
           <div className="flex min-w-0 flex-col gap-2">
             <h1 className="text-[19px] font-semibold break-words text-foreground">{item.title}</h1>

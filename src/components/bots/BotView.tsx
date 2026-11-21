@@ -19,6 +19,7 @@ import { effectiveAccess, type Bot } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
+import { HandoffCards, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
 
 export type BotTab = "home" | "chat" | "duties" | "role" | "settings";
 
@@ -70,6 +71,9 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => setStartedId(null), [chatId]);
+  // The team brief, open where a chat would be (PRO-475).
+  const [briefOpen, setBriefOpen] = useState(false);
+  useEffect(() => setBriefOpen(false), [chatId, botId]);
   // The Home tab's open item (PRO-469); another bot opens on its own Home.
   const [item, setItem] = useState<number | null>(null);
   useEffect(() => setItem(null), [botId]);
@@ -117,6 +121,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
 
   const open = startedBy.find((chat) => chat.id === startedId) ?? [...chats, ...dutyRuns].find((chat) => chat.id === chatId) ?? chats[0] ?? null;
   const select = (chat: SessionEntry) => {
+    setBriefOpen(false);
     if (chats.includes(chat) || dutyRuns.includes(chat)) selectSession(chat.id);
     else setStartedId(chat.id);
   };
@@ -168,13 +173,16 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
       {error && <MachineHostError error={error} onRestarted={() => setError(null)} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
-          <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
+          <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={briefOpen ? null : open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} briefOpen={briefOpen} onOpenBrief={() => setBriefOpen(true)} />
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             {bot.paused && (
               <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
             )}
-            {open ? (
+            {briefOpen ? (
+              <ErrorBoundary label="the team brief"><TeamBriefEditor /></ErrorBoundary>
+            ) : open ? (
               <ErrorBoundary key={open.id} label="the chat">
+                <HandoffCards bot={bot} chatId={open.id} />
                 <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
               </ErrorBoundary>
             ) : (
@@ -284,7 +292,7 @@ function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: bool
   );
 }
 
-function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewChat, busy }: {
+function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewChat, busy, briefOpen = false, onOpenBrief }: {
   bot: Bot;
   chats: SessionEntry[];
   startedBy: SessionEntry[];
@@ -293,6 +301,8 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
   onOpen: (chat: SessionEntry) => void;
   onNewChat: () => void;
   busy: boolean;
+  briefOpen?: boolean;
+  onOpenBrief?: () => void;
 }) {
   return (
     <nav aria-label={`${bot.name}'s chats`} className="flex w-[236px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-hairline px-2 py-3">
@@ -311,6 +321,11 @@ function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewC
       {dutyRuns.length > 0 && (
         <ChatGroup label="Duty runs">
           {dutyRuns.slice(0, 20).map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
+        </ChatGroup>
+      )}
+      {onOpenBrief && (
+        <ChatGroup label="Every bot reads">
+          <TeamBriefRow selected={briefOpen} onOpen={onOpenBrief} />
         </ChatGroup>
       )}
     </nav>

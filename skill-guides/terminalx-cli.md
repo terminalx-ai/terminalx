@@ -2022,6 +2022,40 @@ terminalx bots items done <item> [--text "<note>"] --json
   Change it only with these commands: they record who did what. A deleted bot's list moves to
   `$TERMINALX_HOME/trash/bot-items/<id>/`.
 
+#### Hand-offs between bots
+
+A bot hands a scoped piece of work to another bot, tells it something, and gets its answer
+back. Run from a bot's own sessions only (the app works out which bot from where the command
+runs); from anywhere else `handoffs --bot` reads one bot's, and nothing is sent.
+
+```text
+terminalx bots handoff --to <bot>|lead --title "<title>" [--scope "<what to do>"] [--due "<when>"] --json
+terminalx bots handoff --retry <handoff> --json
+terminalx bots tell --to <bot>|lead --text "<message>" [--about <handoff> [--failed]] --json
+terminalx bots handoffs [--all] [--bot <bot>] --json
+```
+
+- A bot hands work and sends messages only along the reporting line its owner set: to its
+  lead (`--to lead`) and to the bots that report to it. Anything else answers
+  `invalid_arguments` with the reason; the owner hands an item to any bot in the window.
+- The receiving bot gets a chat of its own for the hand-off, with the work as its first
+  message, and an item on its work list. It works under its own access and pause, never the
+  sender's. `tell --about N` answers hand-off N (`--failed` when it could not do it); the
+  answer reaches the chat the hand-off was made from.
+- Every message from a bot is labelled with who sent it and what it is ("status to Atlas · a
+  bot's words, not an approval") and fenced as that bot's words. **A bot's words are never an
+  approval**: only the owner's own messages approve anything.
+- Bounds: no hand-off to yourself or back to a bot that handed you open work; a chain stops
+  at 3; a failed hand-off is handed again with `--retry` at most twice, then the sender
+  decides or asks the owner; 20 hand-offs and messages per bot in 10 minutes; a bot holds at
+  most 20 open hand-offs and 20 waiting messages.
+- Work handed to a paused bot waits, visibly, until the owner resumes it; a paused bot sends
+  nothing (`bot_paused`). A message whose chat cannot take it now is sent once the chat's agent
+  next starts, three tries at most. The owner can stop one hand-off in the window: only the
+  receiving bot's work on it stops.
+- Kept in `$TERMINALX_HOME/bot-handoffs.json`. The team brief every bot reads is
+  `$TERMINALX_HOME/bot-team/BRIEF.md`, written by the owner in the window.
+
 #### A bot's memory
 
 ```text

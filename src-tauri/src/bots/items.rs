@@ -441,7 +441,7 @@ pub fn trash(id: &str) -> Result<()> {
 // ---------------------------------------------------------------- text
 
 /// One line: trimmed, at most `max` characters, nothing that is not printed.
-fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
+pub(crate) fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     let value = value.trim();
     if value.is_empty() {
         return Err(refused(format!("{what} is empty.")));
@@ -458,7 +458,7 @@ fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
 }
 
 /// Several lines: trimmed, at most `max` characters, tabs and newlines the only control characters kept.
-fn text(what: &str, value: &str, max: usize) -> Result<String> {
+pub(crate) fn text(what: &str, value: &str, max: usize) -> Result<String> {
     let value: String = value.trim().chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
     if value.chars().count() > max {
         return Err(refused(format!("{what} is at most {max} characters.")));
