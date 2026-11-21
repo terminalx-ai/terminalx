@@ -2861,6 +2861,15 @@ impl SessionManager {
                 _ => {}
             }
         }
+        // When a bot at Full access is at work (PRO-502): a mention from the owner's account
+        // written then is not taken as the owner's, since the bot posts with their login.
+        if let Some(bot) = rt.acting_bot.as_deref() {
+            match &ev.payload {
+                Payload::UserMessage { queued: false, .. } | Payload::TurnStarted { .. } | Payload::ToolCallStarted { .. } => crate::bots::channels::working(bot, &rt.session_id, &rt.tab_id),
+                Payload::TurnCompleted { .. } if ev.subagent.is_none() => crate::bots::channels::worked(&rt.session_id, &rt.tab_id),
+                _ => {}
+            }
+        }
         self.observer.agent_event(&ev);
         self.sink.emit("agent_event", &ev);
         ev

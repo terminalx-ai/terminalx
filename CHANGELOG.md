@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot posts on GitHub only signed. At every access
+  level its session is refused `gh pr comment`, `gh issue comment`, `gh pr
+  review` and `gh api` calls that write a comment or a review, and is told to
+  use `terminalx bots post` or `bots reply`. A mention of a bot from the
+  owner's account written while one of their bots at Full access was working
+  is kept as "not accepted" and asked for again, since the bot could have
+  posted it with the owner's login (PRO-502).
 - Bots (experimental): a bot's run the owner approves or starts from its Run
   view, rather than from the item's question, no longer refuses the lead's
   later `runs start` with `awaits_owner`; the item records the start and
