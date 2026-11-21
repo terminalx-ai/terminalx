@@ -996,6 +996,7 @@ impl ControlService {
             "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
             "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             "bots.suggest" => self.bot_suggest(params),
+            "bots.post" | "bots.reply" => self.bot_channels(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -5957,3 +5958,7 @@ mod bot_handoffs;
 // A bot's suggestions from the command line (PRO-477).
 #[path = "control_bot_suggestions.rs"]
 mod bot_suggestions;
+
+// Bots' posts on GitHub and Linear from the command line (PRO-480).
+#[path = "control_bot_channels.rs"]
+mod bot_channels;

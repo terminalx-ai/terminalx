@@ -311,6 +311,8 @@ fn report_command(program: &str, args: &[&str]) -> Option<String> {
         ("gh", ["pr" | "issue", "comment", ..] | ["issue", "create", ..]) => Some(format!("gh {} {}", plain[0], plain[1])),
         ("terminalx" | "tnx", ["send", ..]) => Some(format!("{program} send")),
         ("terminalx" | "tnx", ["issues", "comment" | "create", ..]) => Some(format!("{program} issues {}", plain[1])),
+        // A bot's post or reply on GitHub or Linear, signed as its own (PRO-480).
+        ("terminalx" | "tnx", ["bots", "post" | "reply", ..]) => Some(format!("{program} bots {}", plain[1])),
         _ => None,
     }
 }

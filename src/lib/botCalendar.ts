@@ -47,12 +47,18 @@ function dayOf(ymd: string): { day: number; month: string } {
   return { day, month: MONTHS[month - 1] ?? "" };
 }
 
-/** `16–22 Nov`, or `30 Nov – 6 Dec` across a month. */
-export function weekLabel(days: readonly string[]): string {
+/**
+ * `16–22 Nov`, or `30 Nov – 6 Dec` across a month. A week of another year than `todayYmd`'s says its year
+ * (`16–22 Nov 2025`), and one across a new year both (`28 Dec 2026 – 3 Jan 2027`).
+ */
+export function weekLabel(days: readonly string[], todayYmd?: string): string {
   if (days.length < 7) return "";
   const first = dayOf(days[0]);
   const last = dayOf(days[6]);
-  return first.month === last.month ? `${first.day}–${last.day} ${last.month}` : `${first.day} ${first.month} – ${last.day} ${last.month}`;
+  const [firstYear, lastYear] = [days[0].slice(0, 4), days[6].slice(0, 4)];
+  if (firstYear !== lastYear) return `${first.day} ${first.month} ${firstYear} – ${last.day} ${last.month} ${lastYear}`;
+  const year = todayYmd && todayYmd.slice(0, 4) !== firstYear ? ` ${firstYear}` : "";
+  return first.month === last.month ? `${first.day}–${last.day} ${last.month}${year}` : `${first.day} ${first.month} – ${last.day} ${last.month}${year}`;
 }
 
 /** The day of the month, for a column's head. */
@@ -120,15 +126,37 @@ export function eventsText(count: DayCount, phase: DayPhase, any: boolean, first
   return `${count.notKept > 0 ? "at least " : ""}${count.ran}${unit} · ${reportsText(count)}`;
 }
 
+/** The minutes a block covers on the grid: its run's length, or at least a block's height; never past midnight. */
+export function blockSpan(block: Pick<CalendarBlock, "minute" | "minutes">): number {
+  const least = (BLOCK_PX / HOUR_PX) * 60;
+  return Math.max(least, Math.min(block.minutes ?? 0, 1440 - block.minute));
+}
+
 /**
- * Side-by-side places for blocks that would cover each other: blocks of a day that start within half an hour of one
- * another share the column's width. Keyed by the block's index in `blocks`.
+ * Where a block is drawn in its day's column, in pixels: from its time, as tall as its span, and moved up so that one
+ * near midnight ends inside the day rather than below it.
+ */
+export function blockBox(block: Pick<CalendarBlock, "minute" | "minutes">): { top: number; height: number } {
+  const day = 24 * HOUR_PX;
+  const height = Math.max(BLOCK_PX, Math.round((blockSpan(block) / 60) * HOUR_PX) - 2);
+  return { top: Math.max(0, Math.min((block.minute / 60) * HOUR_PX + 1, day - height - 1)), height };
+}
+
+/** An older runtime that does not know the week of duties answers this way: only restarting it helps. */
+export function weekUnknown(error: string | null): boolean {
+  return !!error && /Unknown bots operation dutyWeek\b/.test(error);
+}
+
+/**
+ * Side-by-side places for blocks that would cover each other: blocks of a day whose spans (a run's length, or half an
+ * hour) meet share the column's width. Keyed by the block's index in `blocks`.
  */
 export function lanes(blocks: readonly CalendarBlock[]): Map<number, { lane: number; of: number }> {
   const placed = new Map<number, { lane: number; of: number }>();
-  const span = (BLOCK_PX / HOUR_PX) * 60;
+  // Where each is drawn: one moved up from midnight covers the minutes it is drawn over.
+  const from = (block: CalendarBlock) => (blockBox(block).top / HOUR_PX) * 60;
   for (let day = 0; day < 7; day++) {
-    const ofDay = blocks.map((block, index) => ({ block, index })).filter(({ block }) => block.day === day).sort((a, b) => a.block.minute - b.block.minute);
+    const ofDay = blocks.map((block, index) => ({ block, index })).filter(({ block }) => block.day === day).sort((a, b) => from(a.block) - from(b.block));
     let group: { index: number; lane: number }[] = [];
     let ends: number[] = [];
     const close = () => {
@@ -137,13 +165,13 @@ export function lanes(blocks: readonly CalendarBlock[]): Map<number, { lane: num
       ends = [];
     };
     for (const { block, index } of ofDay) {
-      if (group.length && ends.every((end) => end <= block.minute)) close();
-      let lane = ends.findIndex((end) => end <= block.minute);
+      if (group.length && ends.every((end) => end <= from(block))) close();
+      let lane = ends.findIndex((end) => end <= from(block));
       if (lane < 0) {
         lane = ends.length;
         ends.push(0);
       }
-      ends[lane] = block.minute + span;
+      ends[lane] = from(block) + blockSpan(block);
       group.push({ index, lane });
     }
     close();

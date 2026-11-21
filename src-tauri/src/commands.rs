@@ -6381,6 +6381,12 @@ pub async fn bot_suggestion_dismiss(state: State<'_, AppState>, id: String, numb
     bots_call(state, "suggestionDismiss", serde_json::json!({"id": id, "number": number})).await
 }
 
+/// A bot's newest mentions on GitHub and Linear, and what it posted there (PRO-480).
+#[tauri::command]
+pub async fn bot_channels(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "channels", serde_json::json!({"id": id})).await
+}
+
 // Hand-offs between bots and the team brief (PRO-475).
 
 /// The hand-offs a bot gave or was given (every bot's with no `id`).

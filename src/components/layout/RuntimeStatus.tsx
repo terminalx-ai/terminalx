@@ -61,7 +61,7 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
           onContextMenu={(event) => { suppressNativeContextMenu(event); event.stopPropagation(); }}
           className="z-(--z-menu) w-[24rem] max-w-[calc(100vw-2rem)] rounded-xl bg-popover p-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in"
         >
-          <RuntimeDetails epoch={runtime.epoch} outdated={outdated} />
+          <OutdatedRuntimeDetails epoch={runtime.epoch} outdated={outdated} />
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>
@@ -72,8 +72,9 @@ export function RuntimeStatus({ tier }: { tier: "full" | "compact" | "icon" }) {
  * that can be handed over keeps what it runs (#765): what its handover cannot
  * carry is named, never stopped by itself, and restarting now stops only that.
  * Only the runtime this window was told about: another window may already
- * have replaced it. */
-function RuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRuntimeOutdated }) {
+ * have replaced it. Also shown where a screen finds the runtime too old for
+ * what it reads (the week of duties, PRO-497). */
+export function OutdatedRuntimeDetails({ epoch, outdated }: { epoch: string; outdated: LocalRuntimeOutdated }) {
   const [restarting, setRestarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const { running, app, work, problem, failed, keeps, unkept } = outdated;

@@ -98,6 +98,45 @@ fn each_block_says_what_its_run_did_and_the_rest_of_the_week_is_still_to_come() 
     assert!(week.next_today.is_empty(), "today's run has started");
 }
 
+/// PRO-497: a run that began and was stopped is said as stopped, never as a time that passed without a run; one
+/// skipped because the one before was still going did not run.
+#[test]
+fn a_stopped_run_is_stopped_and_a_skipped_one_did_not_run() {
+    let atlas = bot("atlas", false);
+    let status = duty("status", "atlas", daily(9, "UTC"), json!({}));
+    let runs = vec![
+        run("status", 2, "cancelled", "2026-11-17T09:00:00Z", json!({"error": "Already running", "endedAt": "2026-11-17T09:00:00Z"})),
+        run("status", 1, "cancelled", "2026-11-16T09:00:00Z", json!({"sessionId": "s1", "error": "Stopped by you", "endedAt": "2026-11-16T09:20:00Z"})),
+    ];
+    let week = read(Tz::UTC, "2026-11-17T12:00:00Z", &[(&status, &atlas, runs)]);
+    let ran: Vec<_> = week.blocks.iter().filter(|block| block.state != BlockState::Next).map(|block| (block.day, block.state, block.note.as_deref())).collect();
+    assert_eq!(ran, vec![(0, BlockState::Stopped, Some("Stopped by you")), (1, BlockState::Skipped, Some("Already running"))]);
+    assert_eq!(week.totals.checks, 1, "the stopped run looked at something; the skipped one did not");
+    assert_eq!(serde_json::to_value(BlockState::Stopped).unwrap(), json!("stopped"));
+}
+
+/// PRO-497: a block says how long its run went on, to its end or, while it runs, to now; a folded repeat and a run of
+/// seconds say nothing.
+#[test]
+fn a_block_says_how_long_its_run_went_on() {
+    let atlas = bot("atlas", false);
+    let status = duty("status", "atlas", daily(9, "UTC"), json!({}));
+    let runs = vec![
+        run("status", 3, "running", "2026-11-18T09:00:00Z", json!({"endedAt": null, "sessionId": "s3"})),
+        run("status", 2, "completed", "2026-11-17T09:00:00Z", json!({"endedAt": "2026-11-17T09:00:40Z"})),
+        run("status", 1, "completed", "2026-11-16T09:00:00Z", json!({"endedAt": "2026-11-16T11:30:00Z", "repeatCount": 1})),
+    ];
+    let week = read(Tz::UTC, "2026-11-18T09:45:00Z", &[(&status, &atlas, runs)]);
+    let minutes: Vec<_> = week.blocks.iter().filter(|block| block.state != BlockState::Next).map(|block| (block.day, block.minutes)).collect();
+    assert_eq!(minutes, vec![(0, Some(150)), (1, None), (2, Some(45))]);
+    // A folded row's repeats keep no length.
+    let quiet = json!({"stdoutTail": "", "stderrTail": "", "truncated": false, "timedOut": false, "durationMs": 3});
+    let folded = vec![run("status", 1, "skippedPrecheck", "2026-11-16T09:00:00Z", json!({"repeatCount": 2, "lastRepeatAt": "2026-11-17T09:00:00Z", "endedAt": "2026-11-17T09:10:00Z", "precheck": quiet}))];
+    let week = read(Tz::UTC, "2026-11-18T09:45:00Z", &[(&status, &atlas, folded)]);
+    let minutes: Vec<_> = week.blocks.iter().filter(|block| block.state != BlockState::Next).map(|block| (block.day, block.minutes)).collect();
+    assert_eq!(minutes, vec![(0, None), (1, None)], "a fold's span is not one run's length");
+}
+
 #[test]
 fn a_folded_row_puts_each_repeat_at_its_scheduled_time() {
     let argus = bot("argus", false);
