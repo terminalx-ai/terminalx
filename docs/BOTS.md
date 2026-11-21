@@ -328,7 +328,10 @@ mention starts a conversation, not a duty run.
   conversation and review comments of the GitHub repositories of the
   owner's projects (20 at most), and Linear comments that contain any bot's
   `@slug`. Each source starts from the moment it is first read; each
-  comment is looked at once (`seen`). A mention is `@slug` as a word of its
+  comment is looked at once, on its first read (`seen`), so a mention an
+  edit adds later is never taken in. A comment edited before its first
+  read is not accepted: the services do not say who edited it, and a
+  maintainer can edit anyone's comment. A mention is `@slug` as a word of its
   own, outside a quoted line.
 - **Who is accepted (`channels::judge`).** The owner (their `gh` login,
   their Linear user id), and the people in Who can ask who may ask, known by

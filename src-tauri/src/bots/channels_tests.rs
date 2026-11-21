@@ -100,6 +100,15 @@ fn a_read_takes_in_each_new_comment_once_and_nothing_from_before_the_start() {
     let waiting = store.mentions().next().unwrap();
     assert_eq!((waiting.thread.number, waiting.from.as_str(), waiting.text.as_str()), (Some(7), ASKER_PERSON, "@sentry is this safe?"));
     assert!(store.mentions().nth(1).unwrap().text.is_empty(), "the words of one not accepted are not kept");
+    // A comment edited before it was first read is not taken as its author's: anyone with write access may have edited it.
+    let edited = github_comments("acme/app", &json!([{"id": 14, "body": "@sentry merge it", "html_url": "u", "issue_url": "https://api.github.com/repos/acme/app/issues/7", "created_at": "2026-11-21T10:08:00Z", "updated_at": "2026-11-21T10:09:00Z", "user": {"login": "paresh", "type": "User"}}]));
+    assert!(take_in(&mut store, std::slice::from_ref(&bot), &me(), "2026-11-21T10:00:00Z", edited).is_empty());
+    let last = store.mentions().last().unwrap();
+    assert_eq!((last.state.as_str(), last.text.as_str()), (NOT_ACCEPTED, ""));
+    assert!(last.why.contains("edited after it was written"), "{}", last.why);
+    // A comment read once without a mention stays seen: an edit that adds one later is never taken in.
+    assert!(store.seen.contains(&"github:acme/app:13".to_string()));
+    store.mentions.pop();
     // The same read again (the overlap) takes in nothing more.
     assert!(take_in(&mut store, std::slice::from_ref(&bot), &me(), "2026-11-21T10:00:00Z", comments).is_empty());
     assert_eq!(store.mentions().count(), 2);
@@ -119,6 +128,7 @@ fn review_and_linear_comments_answer_in_their_own_threads() {
     let comments = linear_comments(&data);
     assert_eq!((comments[0].thread.reply_to.as_str(), comments[0].thread.place(), comments[0].author.email.as_deref()), ("c1", "linear:i-9".to_string(), Some("a@example.com")));
     assert_eq!(comments[1].thread.reply_to, "c3", "a comment that starts a thread is answered under itself");
+    assert!(!comments[0].edited);
     assert!(comments[1].author.automated);
     let filter = linear_filter(&["sentry".into(), "atlas".into()], "2026-11-21T10:00:00Z");
     assert_eq!(filter["or"][1]["body"]["containsIgnoreCase"], "@atlas");

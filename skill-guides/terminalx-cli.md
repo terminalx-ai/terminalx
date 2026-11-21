@@ -2085,7 +2085,8 @@ terminalx bots reply --text "<answer>" --json
   with the bot, or goes to the chat that pull request or issue already has. It is accepted from
   the owner and from the people in the bot's Who can ask (by the GitHub login the owner gave
   them, and on Linear by their email); anyone else's is shown in the bot's settings as not
-  accepted. A comment that carries a bot's signature starts nothing.
+  accepted. A comment that carries a bot's signature starts nothing, and an edited comment is
+  not accepted (who edited it is not known): mention the bot again in a new comment.
 - `reply` answers, in its thread, the newest mention that reached the chat it runs in (or the
   chat that started its session). On GitHub it names the person who asked.
 - A post is a report to the access gate: Full access posts, Ask before outward actions and Read
