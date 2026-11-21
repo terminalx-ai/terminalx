@@ -780,6 +780,11 @@ pub fn ended(app: &impl AutomationHost, run: &AutomationRun) {
     }) {
         log::warn!("duty {}: record its report: {error:#}", automation.id);
     }
+    // A report to the owner also goes to the direct chats they linked on Slack or Telegram (PRO-481), with no
+    // sound in quiet hours unless urgent; a built-in's, as its notification, only when urgent.
+    if lead.is_none() && (failed || urgent || builtin.is_none()) {
+        super::chat_apps::report(&bot, &what, &body, quiet && !urgent);
+    }
     if notify {
         app.sink().emit(REPORT_EVENT, &json!({
             "botId": bot.id, "botName": bot.name, "dutyId": automation.id, "dutyName": automation.name,

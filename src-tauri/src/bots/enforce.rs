@@ -255,6 +255,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
     if let Err(error) = super::channels::forget_bot(id) {
         log::warn!("forget the channel mentions of deleted bot {id}: {error:#}");
     }
+    // Its Slack and Telegram logins, linked chats and messages (PRO-481).
+    if let Err(error) = super::chat_apps::forget_bot(id) {
+        log::warn!("forget the chat apps of deleted bot {id}: {error:#}");
+    }
     let ids: Vec<String> = chats(id).into_iter().filter(|entry| !entry.archived).map(|entry| entry.id).collect();
     if ids.is_empty() {
         return;
@@ -286,6 +290,10 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     }
     // What reached it from GitHub and Linear, and what it posted there (PRO-480).
     if let Some(answer) = super::channels::runtime_call(operation, params) {
+        return answer;
+    }
+    // Slack and Telegram: the chats linked, a link code, and "Also sends to" (PRO-481).
+    if let Some(answer) = super::chat_apps::runtime_call(manager, operation, params) {
         return answer;
     }
     if operation == "reconcile" {
@@ -376,6 +384,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "itemHand" | "briefWrite" => true,
         // PRO-477: Start makes a bot work, as the owner's message.
         "suggestionStart" => true,
+        // PRO-481: a link code lets the chat that sends it give the bot work.
+        "chatAppLink" => true,
         // PRO-476: an answer that approves a run's plan starts its workers, or lets it merge.
         "itemAnswer" => super::runs::answer_starts_run(params),
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),

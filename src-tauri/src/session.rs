@@ -2889,7 +2889,11 @@ impl SessionManager {
         if let Some(bot) = rt.acting_bot.as_deref() {
             match &ev.payload {
                 Payload::UserMessage { queued: false, .. } | Payload::TurnStarted { .. } | Payload::ToolCallStarted { .. } => crate::bots::channels::working(bot, &rt.session_id, &rt.tab_id),
-                Payload::TurnCompleted { .. } if ev.subagent.is_none() => crate::bots::channels::worked(&rt.session_id, &rt.tab_id),
+                Payload::TurnCompleted { .. } if ev.subagent.is_none() => {
+                    crate::bots::channels::worked(&rt.session_id, &rt.tab_id);
+                    // A reply may be owed to Slack or Telegram (PRO-481): only noted here, for the pump.
+                    crate::bots::chat_apps::turn_ended(bot, &rt.session_id, &rt.tab_id);
+                }
                 _ => {}
             }
         }
