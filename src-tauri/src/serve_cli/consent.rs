@@ -83,9 +83,11 @@ pub fn guards(command: &str) -> bool {
 /// The bots operations of `runtime.session.bots` that give a bot more than
 /// it has (PRO-468): only the window, a person, sends them. An `update` is
 /// witnessed always; the runtime asks for the proof only when it raises
-/// access or changes the reporting line (`bots::enforce::needs_person`).
+/// access, changes the reporting line or turns memory back on
+/// (`bots::enforce::needs_person`). The owner's writes to a bot's role and
+/// memory (PRO-470) are a person's too: what a bot is told comes from them.
 pub const BOTS_COMMAND: &str = "runtime.session.bots";
-pub const GUARDED_BOTS: [&str; 6] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update"];
+pub const GUARDED_BOTS: [&str; 11] = ["resume", "resumeAll", "dismissResume", "create", "delete", "update", "roleWrite", "roleRestore", "memoryUndo", "memoryAdd", "memoryForget"];
 
 /// The field of a bots request where the window says an `update` gives the
 /// bot nothing more (less access, the same reporting line), so it sends no
@@ -113,7 +115,9 @@ pub fn guards_request(command: &str, params: &Value) -> bool {
         Some("update") => {
             let patch = &params["params"]["patch"];
             let widens = ["access", "reportsTo"].iter().any(|field| patch.get(field).is_some_and(|value| !value.is_null()));
-            widens && params[GIVES_MORE].as_bool() != Some(false)
+            // Memory turned back on: a conversation is given notes again.
+            let memory_on = patch.get("memoryOff").and_then(Value::as_bool) == Some(false);
+            memory_on || (widens && params[GIVES_MORE].as_bool() != Some(false))
         }
         Some(operation) => GUARDED_BOTS.contains(&operation),
         None => false,
