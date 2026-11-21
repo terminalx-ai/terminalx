@@ -122,6 +122,25 @@
   can hand it to another bot with the owner's note; and a team brief that
   every bot is given in each conversation is written under "Every bot
   reads" in a bot's chat list (PRO-475).
+- Bots: each bot has a settings page (PRO-478), reached from the team table
+  and from the bot's own view: where it runs (this Mac; cloud and another
+  machine come later), its access, the organisations it works in, its
+  channels (TerminalX, and the state of the GitHub and Linear connections),
+  and who besides you may ask it for work. On top of the mode its access
+  holds a bot's sessions to, every tool call they make, including native
+  Codex's approval requests, is checked against the access as it is set now:
+  Ask before outward actions reads freely and asks you on a card before it
+  changes anything or runs a command; Read and report reads and runs only
+  commands known to read, asks before a comment or a message, and refuses the
+  rest; a paused bot only reads. At every level, and while paused, a bot
+  keeps its own notes with `terminalx bots memory add|forget|list`, and is
+  refused writes to its own record and the app's settings. Adding an organisation, someone new,
+  changed or more able in Who can ask, another agent or model, a rename and
+  another place to run are confirmed by the TerminalX window, as raising
+  access is, and a runtime that cannot confirm it offers Restart runtime on
+  the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
+  files on this Mac by other means. Agent and model, rename and delete are
+  under the page's menu.
 
 ## 0.2.37
 

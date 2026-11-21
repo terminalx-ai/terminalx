@@ -287,10 +287,12 @@ fn after_access(params: &serde_json::Value) -> Option<super::BotAccess> {
 
 /// Whether a bots operation of the runtime gives a bot more than it has, so
 /// only a person may send it (PRO-468): a resume, saying no to one asked for,
-/// a hire, a delete, a change that raises a bot's access, changes who it
-/// reports to or turns its memory back on, and the owner's writes to its
-/// role and memory (PRO-470: what a bot is told comes from a person). A
-/// pause, less access and every read need no one. `memoryView` and
+/// a hire, a delete, an update that gives more (`bots::gives_more`: more
+/// access, another reporting line, a new place to work, a new, wider or
+/// changed entry in Who can ask, another agent or model, a rename, another
+/// place to run, memory turned back on), and the owner's writes to its role
+/// and memory (PRO-470: what a bot is told comes from a person). A pause,
+/// taking any of those away, and every read need no one. `memoryView` and
 /// `memoryLook` record edits found outside the app, so they are not reads
 /// either, but they give nothing.
 pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
@@ -301,22 +303,11 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "itemHand" | "briefWrite" => true,
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
-            let patch = &params["patch"];
-            if patch.get("memoryOff").and_then(serde_json::Value::as_bool) == Some(false) {
-                return true;
-            }
-            if patch.get("reportsTo").is_some_and(|value| !value.is_null()) {
-                return true;
-            }
-            let Some(access) = patch.get("access").filter(|value| !value.is_null()) else { return false };
-            // A level this build does not know may be wider than it can tell.
-            let Ok(access) = serde_json::from_value::<super::BotAccess>(access.clone()) else { return true };
-            if matches!(access, super::BotAccess::Other(_)) {
-                return true;
-            }
-            let current = params["id"].as_str().and_then(|id| crate::store::bots::get(id).ok().flatten()).map(|bot| bot.access);
-            // Unknown now: any level counts as a raise. Judged again under the store's lock (`bots::update_as`).
-            current.is_none_or(|current| super::access_rank(&access) > super::access_rank(&current))
+            // A patch this build cannot read may give more than it can tell.
+            let Ok(patch) = serde_json::from_value::<super::BotPatch>(params["patch"].clone()) else { return true };
+            let current = params["id"].as_str().and_then(|id| crate::store::bots::get(id).ok().flatten());
+            // Unknown now: anything it sets counts. Judged again under the store's lock (`bots::update_as`).
+            current.is_none_or(|bot| super::gives_more(&bot, &patch))
         }
         _ => false,
     }

@@ -329,6 +329,7 @@ impl Rig {
         let rt = Arc::new(Mutex::new(TabRuntime {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
+            acting_bot: None,
             harness: match kind {
                 CliKind::Claude => "claude".into(),
                 CliKind::Codex => "codex".into(),
@@ -3988,4 +3989,157 @@ fn a_question_goes_with_the_cli_and_waits_behind_a_hooks_request() {
     // Said once.
     rig.tick();
     assert_eq!(rig.kinds().iter().filter(|k| *k == "terminal_prompt").count(), 2);
+}
+
+/// A bot's access, through the real hook path (PRO-478): each level against the
+/// same chat, in either agent. Read and report refuses an edit and lets a read
+/// through; Ask before outward actions asks about a command — Claude by
+/// answering "ask" at once, so its own permission request carries the card
+/// with the gate's reason, and Codex on the card at `PreToolUse`, where only
+/// the owner's allow lets it run.
+#[test]
+#[cfg(unix)]
+fn a_bots_access_gates_its_chat_through_on_hook() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "bypassPermissions");
+        let mut settings = store::settings::load();
+        settings.experimental.bots = true;
+        store::settings::save(&settings).unwrap();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let bot = crate::bots::create(&sink, "security-auditor", "Sentry").unwrap();
+        index::update_session(SESSION, |entry| {
+            entry.unknown.insert("bot".into(), json!({"id": bot.id, "home": true}));
+            Ok(())
+        })
+        .unwrap();
+        // The rig made its runtime before the entry was marked; a real one reads the mark when it is made.
+        let runtime = rig.manager.runtime(SESSION, TAB).unwrap();
+        assert_eq!(runtime.lock().unwrap().acting_bot, None);
+        runtime.lock().unwrap().acting_bot = crate::bots::chat::acting_bot(&index::get(SESSION).unwrap());
+        // A runtime made for a session a bot's chat started is stamped with the bot from its entry.
+        let with_tab = || crate::session_ops::NewQuickChat { tab: Some(crate::session_ops::NewTab { harness: "claude".into(), transport: Default::default(), model: String::new(), effort: None, permission_mode: Some("plan".into()) }), ..Default::default() };
+        let started = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        index::update_session(&started.id, |entry| {
+            entry.unknown.insert(crate::bots::chat::STARTED_KEY.into(), json!({"id": bot.id}));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rig.manager.runtime(&started.id, &started.tabs[0].id).unwrap().lock().unwrap().acting_bot.as_deref(), Some(bot.id.as_str()));
+        let plain = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        assert_eq!(rig.manager.runtime(&plain.id, &plain.tabs[0].id).unwrap().lock().unwrap().acting_bot, None);
+        let set = |access: &str| {
+            crate::bots::update(&sink, &bot.id, serde_json::from_value(json!({"access": access})).unwrap()).unwrap();
+        };
+        let cwd = std::fs::canonicalize(rig._dir.path()).unwrap();
+        let cwd = cwd.to_str().unwrap();
+        let edit = || HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd": cwd, "tool_name": "Edit", "tool_input": {"file_path": format!("{cwd}/x"), "old_string": "a", "new_string": "b"}}) };
+        let decision = |reply: &HookReply| reply.output.as_ref().map(|output| output["hookSpecificOutput"]["permissionDecision"].clone()).unwrap_or(Value::Null);
+
+        // Read and report: the edit is refused, saying why; a read goes on to the agent's own mode.
+        set("readReport");
+        let reply = rig.manager.on_hook(edit());
+        assert_eq!(decision(&reply), "deny", "{kind:?}");
+        assert!(reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("Read and report"));
+        assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "ls", cwd))), "deny", "{kind:?}: a read");
+        assert!(rig.manager.pending_permissions().is_empty());
+        // The lead's N1 and N3, through the hook: a `terminalx` command that changes state, or any
+        // program named like it, is refused; a `terminalx` read and the agent's own bookkeeping are not.
+        for command in ["terminalx issues status PRO-1 --to Done", "./scripts/terminalx sessions list", "terminalx computer type-text --app sessions --text list"] {
+            assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd))), "deny", "{kind:?}: {command}");
+        }
+        assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx sessions list --json", cwd))), "deny", "{kind:?}");
+        let named = |name: &str| HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload: json!({"cwd": cwd, "tool_name": name, "tool_input": {}}) };
+        for name in ["TaskCreate", "ToolSearch", "Skill"] {
+            assert_ne!(decision(&rig.manager.on_hook(named(name))), "deny", "{kind:?}: {name}");
+        }
+        // Codex's `write_stdin` types into a running program: not a read (the lead's third review).
+        assert_eq!(decision(&rig.manager.on_hook(named("write_stdin"))), "deny", "{kind:?}");
+        assert!(rig.manager.pending_permissions().is_empty());
+        // One that reaches the permission request anyway is denied there too, saying why, with no card.
+        let mut asked = edit();
+        asked.event = "PermissionRequest".into();
+        let reply = rig.manager.on_hook(asked);
+        let output = reply.output.unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny", "{kind:?}");
+        assert!(output["hookSpecificOutput"]["decision"]["message"].as_str().unwrap().contains("Read and report"), "{output}");
+        assert!(rig.manager.pending_permissions().is_empty(), "no card for a refusal");
+
+        // Ask before outward actions: the command is asked about.
+        set("askOutward");
+        match kind {
+            CliKind::Claude => {
+                let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", "git push origin main", cwd));
+                assert_eq!(decision(&reply), "ask");
+                assert!(rig.manager.pending_permissions().is_empty(), "nothing waits inside PreToolUse");
+                // Claude's permission request follows; its card says why.
+                let manager = rig.manager.clone();
+                let frame = command_frame(&rig, "PermissionRequest", "git push origin main", cwd);
+                let worker = std::thread::spawn(move || manager.on_hook(frame));
+                let request = wait_for_card(&rig, &worker);
+                let reason = rig.events().into_iter().rev().find_map(|event| match event.payload {
+                    Payload::PermissionRequested { reason, .. } => Some(reason),
+                    _ => None,
+                });
+                assert!(reason.flatten().is_some_and(|reason| reason.contains("asks before it changes anything")), "the card carries the gate's reason");
+                rig.manager.respond_permission(SESSION, TAB, &request, "deny").unwrap();
+                let output = worker.join().unwrap().output.unwrap();
+                assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny");
+            }
+            CliKind::Codex => {
+                for (answer, expect) in [("deny", Some("deny")), ("allow", None)] {
+                    let manager = rig.manager.clone();
+                    let frame = command_frame(&rig, "PreToolUse", "git push origin main", cwd);
+                    let worker = std::thread::spawn(move || manager.on_hook(frame));
+                    let request = wait_for_card(&rig, &worker);
+                    rig.manager.respond_permission(SESSION, TAB, &request, answer).unwrap();
+                    let reply = worker.join().unwrap();
+                    assert_eq!(decision(&reply).as_str(), expect, "Codex, {answer}");
+                }
+            }
+        }
+
+        // The lead's M1: at every level, and paused, the bot's own memory commands pass with no card. H1: the
+        // browser's `wait --fn` is refused at Read and report and while paused.
+        let notes = ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory list", "terminalx bots items add --title 'Fix the build'", "terminalx bots items list"];
+        for level in ["full", "askOutward", "readReport", "paused"] {
+            if level == "paused" {
+                crate::bots::pause(&sink, &bot.id, crate::bots::OWNER).unwrap();
+            } else {
+                set(level);
+            }
+            for command in notes {
+                let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd));
+                assert!(!matches!(decision(&reply).as_str(), Some("deny" | "ask")), "{kind:?} {level}: {command}");
+                assert!(rig.manager.pending_permissions().is_empty(), "{kind:?} {level}: no card for {command}");
+            }
+            if matches!(level, "readReport" | "paused") {
+                assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx wait --fn x", cwd))), "deny", "{kind:?} {level}");
+            }
+        }
+        crate::bots::resume(&sink, &bot.id).unwrap();
+
+        // A sub-agent's call reaches the same hook, with the tab's launch token, and meets the same gate.
+        set("readReport");
+        let mut from_sub_agent = edit();
+        from_sub_agent.payload["agent_id"] = json!("a1b2c3");
+        from_sub_agent.payload["agent_type"] = json!("general-purpose");
+        assert_eq!(decision(&rig.manager.on_hook(from_sub_agent)), "deny", "{kind:?}: a sub-agent's edit");
+
+        // Full access: the agent's own mode decides; the gate refuses nothing.
+        set("full");
+        assert_ne!(decision(&rig.manager.on_hook(edit())), "deny", "{kind:?}");
+    }
+}
+
+fn wait_for_card(rig: &Rig, worker: &std::thread::JoinHandle<HookReply>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() {
+            return request;
+        }
+        assert!(!worker.is_finished(), "the call must ask");
+        assert!(Instant::now() < deadline, "the call must publish a card");
+        std::thread::sleep(MOMENT);
+    }
 }

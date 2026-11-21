@@ -7,6 +7,7 @@
 //! Everything is behind Settings → Experimental → Bots. With the switch off
 //! every operation here refuses, and nothing about the app changes.
 
+pub mod access;
 pub mod changes;
 pub mod memory;
 pub mod chat;
@@ -182,6 +183,41 @@ pub struct BotPause {
     pub unknown: BTreeMap<String, Value>,
 }
 
+/// Someone besides the owner who may give a bot work (PRO-478), and what
+/// they may do. The owner is never listed: they may always ask and approve.
+///
+/// `kind` and `may` a newer build wrote are kept as they are and written
+/// back; this build grants nothing for them. A field a newer build left out
+/// reads as empty, so one such entry never makes the whole bot unreadable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BotAsker {
+    /// [`ASKER_PERSON`] or [`ASKER_BOT`].
+    #[serde(default)]
+    pub kind: String,
+    /// A person's account user id, or a bot's id.
+    #[serde(default)]
+    pub id: String,
+    /// How a person is shown, as they were named when added. A bot is shown by its own name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    /// [`MAY_ASK_APPROVE`], [`MAY_ASK`] or [`MAY_HAND_OFF`].
+    #[serde(default)]
+    pub may: String,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+pub const ASKER_PERSON: &str = "person";
+pub const ASKER_BOT: &str = "bot";
+/// Asks for work and approves what the bot asks about: a person only.
+pub const MAY_ASK_APPROVE: &str = "askApprove";
+/// Asks for work; the owner still approves.
+pub const MAY_ASK: &str = "ask";
+/// Hands work over to the bot: another bot only.
+pub const MAY_HAND_OFF: &str = "handOff";
+const MAX_ASKERS: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bot {
@@ -211,6 +247,9 @@ pub struct Bot {
     pub works_in: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<BotPause>,
+    /// Who besides the owner may give it work. Empty: the owner alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub who_can_ask: Vec<BotAsker>,
     /// The owner turned its memory off (PRO-470): a conversation is given
     /// none, and the bot cannot write any.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -269,6 +308,14 @@ pub struct BotPatch {
     pub reports_to: Option<String>,
     #[serde(default)]
     pub works_in: Option<Vec<String>>,
+    /// The whole list: an entry left out is removed.
+    #[serde(default)]
+    pub who_can_ask: Option<Vec<BotAsker>>,
+    /// The bot's `modified` as the caller read it. A patch that replaces a
+    /// whole list (`worksIn`, `whoCanAsk`) is refused when the bot has changed
+    /// since, so it never puts back what someone else just removed.
+    #[serde(default)]
+    pub if_modified: Option<String>,
     #[serde(default)]
     pub memory_off: Option<bool>,
 }
@@ -493,6 +540,7 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
             reports_to: owner(),
             works_in: personal(),
             paused: None,
+            who_can_ask: Vec::new(),
             memory_off: false,
             created: now.clone(),
             modified: now,
@@ -518,8 +566,43 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
 /// asked; the runtime's control route sets it, after removing any sent.
 pub const BY_PERSON: &str = "byPerson";
 
-/// What an update [`PERSON_REQUIRED`] for names: a raise in access, or another reporting line.
-pub const PERSON_REQUIRED: &str = "Giving a bot more access, changing who it reports to, or turning its memory back on needs you to confirm it in the TerminalX window.";
+/// What an update [`PERSON_REQUIRED`] for names: what [`gives_more`] finds.
+pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, a new name, another place to run, or its memory back on) needs you to confirm it in the TerminalX window.";
+
+/// How much an entry of Who can ask may do; a value this build does not know is the most.
+fn may_rank(may: &str) -> u8 {
+    match may {
+        MAY_ASK => 0,
+        MAY_HAND_OFF => 1,
+        MAY_ASK_APPROVE => 2,
+        _ => 3,
+    }
+}
+
+/// Whether `patch` gives `bot` more than it has, so only a person may make
+/// it (PRO-468, PRO-478): more access, another reporting line, a place it
+/// does not work in yet, an entry of Who can ask that is new, changed or may
+/// do more, another agent, model or effort, another name, another place to
+/// run, or its memory turned back on (PRO-470). Taking any of them away
+/// gives nothing, and needs no one.
+pub fn gives_more(bot: &Bot, patch: &BotPatch) -> bool {
+    let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
+    let reports_elsewhere = patch.reports_to.as_ref().is_some_and(|reports_to| *reports_to != bot.reports_to);
+    let new_place = patch.works_in.as_ref().is_some_and(|places| places.iter().any(|place| !bot.works_in.contains(place)));
+    // An entry it had, unchanged but for what it may do, and that no more: anything else is new.
+    let new_asker = patch.who_can_ask.as_ref().is_some_and(|askers| {
+        askers.iter().any(|asker| {
+            !bot.who_can_ask.iter().any(|had| BotAsker { may: asker.may.clone(), ..had.clone() } == *asker && may_rank(&asker.may) <= may_rank(&had.may))
+        })
+    });
+    let elsewhere = patch.runs_on.as_ref().is_some_and(|runs_on| *runs_on != bot.runs_on);
+    let other_agent = patch.harness.as_ref().is_some_and(|harness| *harness != bot.harness)
+        || patch.model.as_ref().is_some_and(|model| *model != bot.model)
+        || patch.effort.as_ref().is_some_and(|effort| *effort != bot.effort);
+    let renamed = patch.name.as_ref().is_some_and(|name| clean_name(name).map_or(true, |name| name != bot.name));
+    let memory_on = patch.memory_off == Some(false) && bot.memory_off;
+    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed || elsewhere || memory_on
+}
 
 /// How much an access level lets a bot do; a level this build does not know is the least.
 pub fn access_rank(access: &BotAccess) -> u8 {
@@ -540,10 +623,10 @@ pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: boo
         let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
         let mut bot = bots[index].clone();
         if !by_person {
-            let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
-            let reports_elsewhere = patch.reports_to.as_ref().is_some_and(|reports_to| *reports_to != bot.reports_to);
-            let memory_on = patch.memory_off == Some(false) && bot.memory_off;
-            refuse_unless!(!raises && !reports_elsewhere && !memory_on, "{PERSON_REQUIRED}");
+            refuse_unless!(!gives_more(&bot, &patch), "{PERSON_REQUIRED}");
+        }
+        if patch.works_in.is_some() || patch.who_can_ask.is_some() {
+            refuse_unless!(patch.if_modified.as_ref().is_none_or(|seen| *seen == bot.modified), "{} changed since this was read. The latest is shown now; make the change again.", bot.name);
         }
         if let Some(name) = &patch.name {
             let name = clean_name(name)?;
@@ -597,6 +680,9 @@ pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: boo
             refuse_unless!(!places.is_empty(), "A bot works somewhere: `{PERSONAL}` when it works for you alone.");
             bot.works_in = places;
         }
+        if let Some(askers) = &patch.who_can_ask {
+            bot.who_can_ask = clean_askers(askers, &bots[index], bots)?;
+        }
         if let Some(off) = patch.memory_off {
             bot.memory_off = off;
         }
@@ -606,6 +692,42 @@ pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: boo
         }
         Ok(bot)
     })
+}
+
+/// `askers` as a bot's list keeps them: each person or bot once, never the
+/// owner nor the bot itself, a bot that exists, and only what each may be
+/// given. Only a person's words count as approval, so a bot never approves;
+/// handing work over is between bots. An entry this build does not know is
+/// accepted only as the bot already has it, unchanged.
+fn clean_askers(askers: &[BotAsker], bot: &Bot, bots: &[Bot]) -> Result<Vec<BotAsker>> {
+    refuse_unless!(askers.len() <= MAX_ASKERS, "At most {MAX_ASKERS} people and bots may ask a bot for work.");
+    let mut kept: Vec<BotAsker> = Vec::new();
+    for asker in askers {
+        let id = asker.id.trim();
+        if kept.iter().any(|other| other.kind == asker.kind && other.id == id) {
+            continue;
+        }
+        if bot.who_can_ask.contains(asker) {
+            kept.push(asker.clone());
+            continue;
+        }
+        refuse_unless!(!id.is_empty() && id.chars().count() <= 200 && !id.chars().any(char::is_control), "Someone who may ask is named by an id of one line.");
+        refuse_unless!(asker.name.chars().count() <= MAX_NAME_CHARS * 2 && !asker.name.chars().any(char::is_control), "A name is one line of at most {} characters.", MAX_NAME_CHARS * 2);
+        refuse_unless!(id != OWNER, "You may always ask your bots; you are not listed.");
+        match asker.kind.as_str() {
+            ASKER_BOT => {
+                refuse_unless!(id != bot.id, "A bot does not ask itself for work.");
+                refuse_unless!(bots.iter().any(|other| other.id == id), "No bot has the id {id}.");
+                refuse_unless!(asker.may == MAY_HAND_OFF || asker.may == MAY_ASK, "Another bot may ask or hand off work, never approve: only a person's words count as approval.");
+            }
+            ASKER_PERSON => {
+                refuse_unless!(asker.may == MAY_ASK_APPROVE || asker.may == MAY_ASK, "A person may ask, or ask and approve.");
+            }
+            other => return Err(refused(format!("Unknown kind {other}. Use {ASKER_PERSON} or {ASKER_BOT}."))),
+        }
+        kept.push(BotAsker { id: id.into(), name: asker.name.trim().into(), ..asker.clone() });
+    }
+    Ok(kept)
 }
 
 /// Whether following `from`'s reporting line reaches `target`.
@@ -636,6 +758,11 @@ pub fn delete(sink: &dyn EventSink, id: &str) -> Result<()> {
         let now = crate::store::index::now();
         for bot in bots.iter_mut().filter(|bot| bot.reports_to == id) {
             bot.reports_to = owner();
+            bot.modified = now.clone();
+        }
+        // Nor does it ask any bot for work any more.
+        for bot in bots.iter_mut().filter(|bot| bot.who_can_ask.iter().any(|asker| asker.kind == ASKER_BOT && asker.id == id)) {
+            bot.who_can_ask.retain(|asker| !(asker.kind == ASKER_BOT && asker.id == id));
             bot.modified = now.clone();
         }
         Ok(removed)

@@ -317,10 +317,10 @@ pub fn no_upstream(cwd: &Path, branch: &str) -> anyhow::Result<()> {
 pub const VERIFIER_MODE: &str = "plan";
 
 /// The tools that change a file, by the names both agents' hooks give them.
-const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch", "file_change", "write_file", "create_file"];
+pub(crate) const EDIT_TOOLS: &[&str] = &["Edit", "MultiEdit", "Write", "NotebookEdit", "apply_patch", "file_change", "write_file", "create_file"];
 
 /// The tools that run a shell command, by the names both agents' hooks give them.
-const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command", "local_shell", "functions.exec_command", "functions.shell_command"];
+pub(crate) const SHELL_TOOLS: &[&str] = &["Bash", "shell", "shell_command", "exec_command", "local_shell", "functions.exec_command", "functions.shell_command"];
 
 /// What becomes of a verifier's tool call. It is refused when it changes a
 /// file, or is a shell command that is not known to only read. A verifier reads a result;
@@ -439,7 +439,14 @@ pub fn refusal_output(reason: &str) -> Value {
 
 /// The first rule a shell command breaks, with the command that breaks it.
 pub fn refused(command: &str) -> Option<(&'static Rule, String)> {
-    refused_at(command, 0)
+    find_command(command, &rule_broken)
+}
+
+/// The rule a program (by its base name) and its arguments break. git's
+/// arguments start at its subcommand.
+fn rule_broken(program: &str, args: &[&str]) -> Option<(&'static Rule, String)> {
+    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+    RULES.iter().filter(|rule| rule.programs.contains(&program)).find(|rule| args.starts_with(rule.words) || plain.starts_with(rule.words)).map(|rule| (rule, format!("{program} {}", rule.words.join(" "))))
 }
 
 /// Shells whose `-c` argument is a command of its own.
@@ -449,16 +456,25 @@ const WRAPPERS: &[&str] = &["env", "command", "exec", "sudo", "nohup", "time", "
 /// git's options that take a value of their own, before the subcommand.
 const GIT_VALUE_OPTIONS: &[&str] = &["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env"];
 
-fn refused_at(command: &str, depth: usize) -> Option<(&'static Rule, String)> {
+/// What `matches` says of the first command a shell would run from
+/// `command` that it says anything of. Each simple command is read through
+/// its wrappers (`env A=b`, `sudo`, `timeout 30`), `sh -c '…'` and `eval`;
+/// `matches` is given the program's base name and its arguments (git's from
+/// its subcommand on).
+pub(crate) fn find_command<T>(command: &str, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
+    find_at(command, 0, matches)
+}
+
+fn find_at<T>(command: &str, depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
     // A command nested this deep is not one a person or an agent writes.
     if depth > 4 {
         return None;
     }
-    simple_commands(command).iter().find_map(|words| refused_words(words, depth))
+    simple_commands(command).iter().find_map(|words| find_in_words(words, depth, matches))
 }
 
-/// The rule one simple command breaks, as its words.
-fn refused_words(mut words: &[String], depth: usize) -> Option<(&'static Rule, String)> {
+/// What `matches` says of one simple command, as its words.
+fn find_in_words<T>(mut words: &[String], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
     // `A=b git push`.
     while words.first().is_some_and(|word| is_assignment(word)) {
         words = &words[1..];
@@ -472,24 +488,23 @@ fn refused_words(mut words: &[String], depth: usize) -> Option<(&'static Rule, S
         // read as the start of that command. `sudo echo git push` is refused too: the price of
         // not guessing. One pass over the words: a wrapper inside a wrapper starts no pass of
         // its own, since this one reads what follows it too.
-        return (0..args.len()).find_map(|at| refused_command(&args[at..], depth));
+        return (0..args.len()).find_map(|at| find_in_command(&args[at..], depth, matches));
     }
-    refused_command(words, depth)
+    find_in_command(words, depth, matches)
 }
 
-/// The rule a program and its arguments break: a shell or `eval` by what it is given to
-/// run, any other program by its first words.
-fn refused_command(words: &[String], depth: usize) -> Option<(&'static Rule, String)> {
+/// What `matches` says of a program and its arguments: a shell or `eval` by what it is given
+/// to run, any other program by itself.
+fn find_in_command<T>(words: &[String], depth: usize, matches: &dyn Fn(&str, &[&str]) -> Option<T>) -> Option<T> {
     let (program, args) = words.split_first()?;
     let program = base(program);
     if SHELLS.contains(&program) || program == "eval" {
         // `sh -c 'git push'`, `bash -lc "…"`, `eval "git push"`.
         let script = if program == "eval" { Some(args.join(" ")) } else { args.iter().position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')).and_then(|at| args.get(at + 1)).cloned() };
-        return script.and_then(|script| refused_at(&script, depth + 1));
+        return script.and_then(|script| find_at(&script, depth + 1, matches));
     }
     let args: Vec<&str> = if program == "git" { git_arguments(args) } else { args.iter().map(String::as_str).collect() };
-    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
-    RULES.iter().filter(|rule| rule.programs.contains(&program)).find(|rule| args.starts_with(rule.words) || plain.starts_with(rule.words)).map(|rule| (rule, format!("{program} {}", rule.words.join(" "))))
+    matches(program, &args)
 }
 
 fn is_assignment(word: &str) -> bool {
@@ -514,6 +529,17 @@ fn git_arguments(args: &[String]) -> Vec<&str> {
         }
     }
     args.get(at..).unwrap_or_default().iter().map(String::as_str).collect()
+}
+
+/// The words of `command` when it is one plain command, as a shell would
+/// run it: no list, pipe, substitution, redirection or expansion.
+pub(crate) fn single_command(command: &str) -> Option<Vec<String>> {
+    let mut commands = simple_commands(command);
+    if commands.len() != 1 || command.contains("$(") || command.contains('`') {
+        return None;
+    }
+    let words = commands.pop()?;
+    words.iter().all(|word| !word.contains(['>', '<', '$'])).then_some(words)
 }
 
 /// A command line as the simple commands a shell would run from it, each as
