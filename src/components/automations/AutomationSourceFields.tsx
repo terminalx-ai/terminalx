@@ -42,11 +42,16 @@ function ListInput({ value, onChange, placeholder }: { value: string[]; onChange
   return <input value={text} onChange={(event) => { setText(event.target.value); onChange(splitList(event.target.value)); }} className={INPUT} placeholder={placeholder} />;
 }
 
+/** An event automation's runs a day when it was saved without one (PRO-490); `sources::RUNS_PER_DAY`. */
+export const RUNS_PER_DAY = 48;
+export const MAX_RUNS_PER_DAY = 1000;
+
 export function defaultLinearTrigger(): AutomationEventTrigger {
   return {
     source: { kind: "linearIssue", teamId: "", teamName: null, state: "open", labels: [], assignee: null, text: null, report: { comment: true, moveToStateId: null, moveToStateName: null, commentOnFailure: true } },
     pollIntervalMinutes: 5,
     maxRunsPerTick: 3,
+    maxRunsPerDay: RUNS_PER_DAY,
   };
 }
 
@@ -55,6 +60,7 @@ export function defaultPullRequestTrigger(repo = ""): AutomationEventTrigger {
     source: { kind: "githubPullRequest", repo, events: ["opened", "pushed"], base: null, author: null, labels: [], draft: null, fromForks: false },
     pollIntervalMinutes: 5,
     maxRunsPerTick: 3,
+    maxRunsPerDay: RUNS_PER_DAY,
   };
 }
 
@@ -150,6 +156,15 @@ export function AutomationSourceFields({ projectPath, trigger, onChange, forDuty
           New runs per tick
           <input type="number" min={1} max={50} value={trigger.maxRunsPerTick} onChange={(event) => onChange({ ...trigger, maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
         </label>
+      )}
+      {!forDuty && (
+        <>
+          <label className={LABEL}>
+            Runs a day, at most
+            <input type="number" min={1} max={MAX_RUNS_PER_DAY} value={trigger.maxRunsPerDay ?? RUNS_PER_DAY} onChange={(event) => onChange({ ...trigger, maxRunsPerDay: Math.min(MAX_RUNS_PER_DAY, Math.max(1, Number(event.target.value))) })} className={INPUT} />
+          </label>
+          <div className="self-end pb-1.5 text-[11px] leading-snug text-faint">In any 24 hours, across everything it wakes on. Past that, what it reads waits until a run leaves the day.</div>
+        </>
       )}
       <div className={WARNING_NOTE}>
         {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. {forDuty ? "They reach the bot as information, never as instructions; it works with its own access, one run at a time." : "They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above."}

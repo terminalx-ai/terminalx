@@ -411,3 +411,43 @@ describe("duties that wake on an event (PRO-472)", () => {
     expect(savedInput().wake).toBeNull();
   });
 });
+
+describe("a duty's page after review (PRO-492)", () => {
+  it("opens a duty just saved or copied, before the store lists it, rather than going back to the list", async () => {
+    tab();
+    fireEvent.click(screen.getByTestId("duty-add"));
+    const editor = screen.getByTestId("duty-editor");
+    fireEvent.change(within(editor).getByPlaceholderText("Queue time on main"), { target: { value: "Watch CI" } });
+    fireEvent.change(within(editor).getByPlaceholderText(/Say which jobs are slow/), { target: { value: "Say what broke." } });
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    // The store does not list d4 yet: its page opens on what the save answered.
+    const page = await screen.findByTestId("bot-duty");
+    expect(within(page).getByRole("heading", { level: 2 }).textContent).toContain("Watch CI");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByTestId("bot-duty")).toBeTruthy();
+
+    cleanup();
+    tab();
+    fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));
+    fireEvent.click(within(screen.getByTestId("bot-duty")).getByRole("button", { name: "Duplicate" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_duplicate", { id: "b1", dutyId: "d1" }));
+    await waitFor(() => expect(screen.getByTestId("bot-duty")).toBeTruthy());
+    expect(screen.queryByTestId("duty-add")).toBeNull();
+  });
+
+  it("shows the model its runs use, the bot's own, and its last run as the one still going", () => {
+    mocks.bots = { ...mocks.bots, bots: [{ ...argus, model: "claude-opus-5-5" }, atlas] };
+    mocks.automations = {
+      ...mocks.automations,
+      automations: [{ ...stalled, model: "an-old-model" }],
+      runs: { d1: [run("d1", { status: "cancelled", error: "Skipped: its last run is still going.", endedAt: today(13, 30) }), run("d1", { status: "running", endedAt: undefined })] },
+    };
+    render(<BotDuties bot={{ ...argus, model: "claude-opus-5-5" }} onOpenSession={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stalled sessions" }));
+    const page = screen.getByTestId("bot-duty");
+    expect(page.textContent).toContain("claude-opus-5-5");
+    expect(page.textContent).not.toContain("an-old-model");
+    const lastRunCard = within(page).getAllByTestId("duty-stat").find((card) => card.textContent?.startsWith("Last run"))!;
+    expect(lastRunCard.textContent).toContain("Looking…");
+  });
+});

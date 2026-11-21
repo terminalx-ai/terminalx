@@ -88,6 +88,8 @@ export interface AutomationEventTrigger {
   source: AutomationEventSource;
   pollIntervalMinutes: number;
   maxRunsPerTick: number;
+  /** The most runs the automation starts in any 24 hours, across everything it wakes on (PRO-490). Read as 48 when absent. */
+  maxRunsPerDay?: number;
 }
 
 /** One thing an event source would wake on now. */

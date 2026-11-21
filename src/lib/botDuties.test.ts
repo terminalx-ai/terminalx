@@ -3,7 +3,7 @@ import type { Automation, AutomationRun } from "@/types/automations";
 
 vi.mock("@/lib/api", () => ({ invoke: vi.fn() }));
 
-const { checkFound, checkRunsHomeFile, shownOnAutomations, dutiesOf, dutyInputOf, dutySpend, inQuietHours, isDuty, reportsToLabel, runOutcome, runTook, todayCounts, tookText } = await import("./botDuties");
+const { checkFound, checkRunsHomeFile, lastRun, shownOnAutomations, dutiesOf, dutyInputOf, dutySpend, inQuietHours, isDuty, reportsToLabel, runOutcome, runTook, todayCounts, tookText } = await import("./botDuties");
 
 const now = new Date("2026-11-21T15:00:00");
 const at = (hours: number, minutes = 0) => new Date(2026, 10, 21, hours, minutes).toISOString();
@@ -98,5 +98,15 @@ describe("a duty's first check and the Automations page (PRO-471 review 1)", () 
     expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, unreadable: 1 })).toBe(false);
     expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, error: "Bots is off" })).toBe(false);
     expect(shownOnAutomations({ bot: { id: "gone", reportsTo: "terminalx" } }, { ...bots, loaded: false })).toBe(false);
+  });
+});
+
+describe("a duty's last run (PRO-492)", () => {
+  it("is the one still going, not a due time skipped beside it", () => {
+    const going = run({ runId: "going", status: "running" });
+    const skipped = run({ runId: "skipped", status: "cancelled", error: "Skipped: its last run is still going." });
+    expect(lastRun([skipped, going])?.runId).toBe("going");
+    expect(lastRun([skipped, run({ runId: "older" })])?.runId).toBe("skipped");
+    expect(lastRun([])).toBeNull();
   });
 });

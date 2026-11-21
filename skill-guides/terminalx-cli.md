@@ -2190,6 +2190,20 @@ terminalx bots message <bot> "<text>" [--kind handoff|question|status] --json
 - A message sent from a run that a message woke counts one more pass; one that has passed
   between bots three times wakes nobody, so two bots cannot keep waking each other.
 
+#### Switch a duty off
+
+```text
+terminalx bots duty-off <duty> [--bot <bot>] --json
+```
+
+- Switches one duty off: it wakes nobody until its owner switches it on again on the bot's
+  Duties tab. `<duty>` is the duty's id or its name (any letter case); a name two duties share
+  is refused.
+- From a bot's own chat, duty run or a session it started, it reaches that bot's duties only
+  (another bot's is `forbidden`). From anywhere else, `--bot` names the bot.
+- Switching off gives a bot nothing, so it needs no person; switching a duty on, or changing
+  one, is the owner's, in the window.
+
 ### This guide
 
 ```text

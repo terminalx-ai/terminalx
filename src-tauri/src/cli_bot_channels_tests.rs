@@ -32,3 +32,16 @@ fn the_channel_commands_parse_as_the_guide_says() {
         assert!(parse(&args(words)).is_err(), "{words:?}");
     }
 }
+
+/// PRO-492: `terminalx bots duty-off DUTY [--bot BOT]`.
+#[test]
+fn duty_off_parses_with_and_without_its_bot() {
+    let args = |words: &[&str]| words.iter().map(|word| word.to_string()).collect::<Vec<_>>();
+    let rpc = |words: &[&str]| match parse(&args(words)).unwrap_or_else(|error| panic!("{words:?}: {error:?}")).action {
+        Action::Rpc { command, params, .. } => (command, params),
+        other => panic!("{words:?} is not a call: {other:?}"),
+    };
+    assert_eq!(rpc(&["bots", "duty-off", "Watch CI"]), ("bots.dutyOff".into(), json!({"duty": "Watch CI"})));
+    assert_eq!(rpc(&["bots", "duty-off", "Watch CI", "--bot", "atlas"]), ("bots.dutyOff".into(), json!({"duty": "Watch CI", "bot": "atlas"})));
+    assert!(parse(&args(&["bots", "duty-off"])).is_err());
+}

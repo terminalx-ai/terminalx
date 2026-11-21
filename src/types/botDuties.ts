@@ -113,4 +113,6 @@ export interface DutyReportEvent {
   tabId?: string | null;
   text: string;
   urgent: boolean;
+  /** The run failed (PRO-492): the window raises no failure notice of its own for a duty, so this is it. */
+  failed?: boolean;
 }

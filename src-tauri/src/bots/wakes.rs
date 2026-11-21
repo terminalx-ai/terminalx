@@ -398,35 +398,47 @@ pub fn read(automation: &Automation, source: &BotSource, first: bool, since: Opt
 
 /// The repository's comments changed since `since`, oldest first, a page of
 /// [`READ_EVENTS`] at a time and at most [`MENTION_PAGES`] pages: GitHub has no
-/// search for a mention in comments, so each is looked at here. When more
-/// changed than one read looks at, the next read goes on from the last one
-/// read, so a mention left during a pause or a long run is never passed over.
+/// search for a mention in comments, so each is looked at here. Each page
+/// starts at the last comment the one before it read (GitHub's `since` takes
+/// it in again; it is counted once), not at a page number: a comment edited
+/// between two pages moves to the end, and with page numbers the comment
+/// after it would slide back onto a page already read and be passed over
+/// (PRO-503). When more changed than one read looks at, the next read goes on
+/// from the last one read, so a mention left during a pause or a long run is
+/// never passed over.
 fn github_mention_read(cwd: &Path, source: &BotSource, since: Option<DateTime<Utc>>) -> Result<BotRead, SourceError> {
     let handle = source.handle();
     let Some(since) = since else {
         // Only a first read has no `since`, and it reads nothing.
         return Ok(BotRead::default());
     };
-    let from = since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let authors = CommentAuthors {
         anyone: source.fields.only_from.as_deref() == Some("anyone"),
         // A comment the signed-in user left (the bot's own, through `gh`) is never news.
         viewer: Some(gh_json(cwd, "user")?["login"].as_str().filter(|login| !login.is_empty()).map(str::to_owned).ok_or_else(|| plain("gh did not say who it is signed in as, so the bot's own comments cannot be told apart."))?),
     };
-    let mut events = Vec::new();
-    for page in 1..=MENTION_PAGES {
+    let mut events: Vec<BotEvent> = Vec::new();
+    let mut counted = std::collections::BTreeSet::new();
+    let (mut cursor, mut page) = (since, 1);
+    for read in 1..=MENTION_PAGES {
+        let from = cursor.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let path = format!("repos/{}/issues/comments?sort=updated&direction=asc&since={from}&per_page={READ_EVENTS}&page={page}", source.repo());
         let value = gh_json(cwd, &path)?;
         let comments = value.as_array().map_or(&[][..], Vec::as_slice);
-        events.extend(github_mentions(&value, &handle, &authors));
+        events.extend(github_mentions(&value, &handle, &authors).into_iter().filter(|event| counted.insert(event.key.clone())));
         if comments.len() < READ_EVENTS {
             return Ok(BotRead { events, ..BotRead::default() });
         }
-        if page == MENTION_PAGES {
-            let last = comments.last().and_then(|comment| comment["updated_at"].as_str()).and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
+        let last = comments.last().and_then(|comment| comment["updated_at"].as_str()).and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
+        if read == MENTION_PAGES {
             // Always a step on, even when a whole read changed in one second.
             let resume = last.filter(|last| *last > since).unwrap_or(since + chrono::TimeDelta::seconds(1));
             return Ok(BotRead { events, resume: Some(resume), bound: None });
+        }
+        match last {
+            // On from the last comment read; more than a page changed in that one second goes on by page.
+            Some(last) if last > cursor => (cursor, page) = (last, 1),
+            _ => page += 1,
         }
     }
     Ok(BotRead { events, ..BotRead::default() })
@@ -482,7 +494,9 @@ pub fn github_mentions(value: &Value, handle: &str, authors: &CommentAuthors) ->
             let number = comment["issue_url"].as_str().and_then(|url| url.rsplit('/').next()).unwrap_or("?").to_owned();
             Some(BotEvent {
                 key: format!("ghcomment:{id}"),
-                at: comment["created_at"].as_str().map(str::to_owned),
+                // When it last changed: a comment written before the trigger started and edited since to mention the
+                // bot is news, once (PRO-503); its key keeps a later edit from waking it again.
+                at: comment["updated_at"].as_str().or_else(|| comment["created_at"].as_str()).map(str::to_owned),
                 kind: "githubMention".into(),
                 summary: one_line(&format!("@{handle} was mentioned on #{number}")),
                 by: one_line(comment["user"]["login"].as_str().unwrap_or("someone")),
@@ -557,7 +571,7 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, S
     if let Some(team) = source.fields.team_id.as_deref().map(str::trim).filter(|team| !team.is_empty()) {
         filter["issue"] = json!({"team": {"id": {"eq": team}}});
     }
-    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { viewer { id } comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { id displayName name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
+    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { viewer { id } comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt updatedAt user { id displayName name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
     let mut events = Vec::new();
     let mut after = Value::Null;
     for _ in 0..MENTION_PAGES {
@@ -595,7 +609,8 @@ pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
             let by = comment["user"]["displayName"].as_str().or_else(|| comment["user"]["name"].as_str()).unwrap_or("someone");
             Some(BotEvent {
                 key: format!("lcomment:{}", comment["id"].as_str()?),
-                at: comment["createdAt"].as_str().map(str::to_owned),
+                // When it last changed, as for GitHub: a comment edited to mention the bot is news once (PRO-503).
+                at: comment["updatedAt"].as_str().or_else(|| comment["createdAt"].as_str()).map(str::to_owned),
                 kind: "linearMention".into(),
                 summary: one_line(&format!("@{handle} was mentioned on {issue}: {}", comment["issue"]["title"].as_str().unwrap_or_default())),
                 by: one_line(by),
@@ -922,10 +937,15 @@ pub fn forget_bot(bot_id: &str) -> Result<()> {
 
 /// How many times the work of a session stands from a person: the hops of the
 /// message that woke the duty run it is, or that started a session it was
-/// started from (followed up to a bound), or none.
+/// started from, or of the session a hand-off was made from when it is that
+/// hand-off's work chat (PRO-503), followed up to a bound; or none.
 pub fn hops_of_session(entry: &crate::store::index::SessionEntry) -> u32 {
     let mut entry = entry.clone();
+    let handoffs = super::handoffs::read().map(|store| store.handoffs).unwrap_or_default();
     for _ in 0..16 {
+        if let Some(handoff) = handoffs.iter().find(|handoff| handoff.to_session.as_deref() == Some(entry.id.as_str())) {
+            return handoff.hops;
+        }
         if let Some(stamp) = entry.automation.as_ref() {
             return crate::store::automations::list_runs(&stamp.id)
                 .ok()

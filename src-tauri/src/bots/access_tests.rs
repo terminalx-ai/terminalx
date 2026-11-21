@@ -390,7 +390,9 @@ fn only_known_reads_go_unasked() {
         "terminalx bots handoff --to sentry --title 'Check the runner' --scope 'Read only.'", "terminalx bots handoff --retry 4",
         "terminalx bots tell --to lead --text 'Queue is long'", "tnx --json bots tell --to atlas --about 4 --failed --text 'No access'", "terminalx bots handoffs --all",
         // PRO-472: a message to another bot, which its rules tell it to leave this way.
-        "terminalx bots message atlas 'The build is green again.' --kind status", "terminalx bots message b2 'Can you review #12?' --kind question --json"] {
+        "terminalx bots message atlas 'The build is green again.' --kind status", "terminalx bots message b2 'Can you review #12?' --kind question --json",
+        // PRO-492: switching off one of its own duties, which gives it nothing.
+        "terminalx bots duty-off 'Watch CI'", "tnx --json bots duty-off d1"] {
         for access in [BotAccess::Full, ask.clone(), read.clone(), BotAccess::Other("someday".into())] {
             assert_eq!(gate(&access, &shell(command, &cwd)), Gate::Leave, "{command} at {access:?}");
         }

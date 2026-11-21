@@ -557,6 +557,7 @@ fn fail_orphans(app: &impl AutomationHost, automation_id: &str, since: chrono::D
         emit_run(app, &run);
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, automation_id, run.status, &ended_at);
+        crate::bots::duties::ended(app, &run);
     }
 }
 
@@ -623,6 +624,7 @@ fn record_ending(app: &impl AutomationHost, automation: &Automation, pending: Op
         .find(|run| Some(&run.run_id) != pending_id.as_ref())
         .filter(|run| run.trigger == trigger && run.status == status && run.error == error && run.precheck.is_some() && run.issue.is_none() && run.session_id.is_none());
     let now = index::now();
+    let repeat = previous.is_some();
     let run = if let Some(previous) = previous {
         let folded = automation_store::replace_run(id, &previous.run_id, |value| {
             value.repeat_count += 1;
@@ -651,6 +653,11 @@ fn record_ending(app: &impl AutomationHost, automation: &Automation, pending: Op
     };
     emit_run(app, &run);
     update_summary(app, id, status, &now);
+    // A duty's failed check is reported as its duty says, within its bot's quiet hours (PRO-492); a repeat folded into
+    // the row before it tells nobody again, as the window's failure notice did not.
+    if !repeat {
+        crate::bots::duties::ended(app, &run);
+    }
     Ok(run)
 }
 
@@ -737,18 +744,12 @@ pub(super) fn gate(app: &impl AutomationHost, automation: &Automation, run: &mut
     }
 }
 
-/// An issue automation's check gates its poll. With no issues to start, the
-/// check does not run. Nothing new or a failure starts no issue run, marks no
-/// issue as seen and reports nothing on any issue: one history record (with
-/// no issue) says what happened. Output lets every candidate go ahead with
-/// it. `None` when the automation was changed, turned off or deleted while
-/// the check ran: the poll then leaves everything as it is.
 /// An event automation's check gates its read (PRO-485), as an issue
-/// poll's does: run once, only when the read found something to wake. True
-/// to go ahead, with the result handed to each run's gate. False after a
-/// quiet or failing check, which writes its one (folded) history row; the
-/// caller then marks nothing seen. False, with nothing written, when the
-/// automation changed while its check ran.
+/// poll's does: run once, only when the read found something to wake.
+/// [`Gated::Go`](super::sources::Gated) to go ahead, with the result handed to
+/// each run's gate. `Quiet` after a check that found nothing new and `Stopped`
+/// after one that failed, each writing its one (folded) history row; `Stopped`,
+/// with nothing written, when the automation changed while its check ran.
 pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, wakes: &[super::sources::Wake]) -> Result<super::sources::Gated> {
     use super::sources::Gated;
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
@@ -782,6 +783,12 @@ pub(super) fn gate_wakes(app: &impl AutomationHost, automation: &Automation, tri
     }
 }
 
+/// An issue automation's check gates its poll. With no issues to start, the
+/// check does not run. Nothing new or a failure starts no issue run, marks no
+/// issue as seen and reports nothing on any issue: one history record (with
+/// no issue) says what happened. Output lets every candidate go ahead with
+/// it. `None` when the automation was changed, turned off or deleted while
+/// the check ran: the poll then leaves everything as it is.
 pub(super) fn gate_poll(app: &impl AutomationHost, automation: &Automation, candidates: Vec<crate::issues::Issue>) -> Result<Option<Vec<crate::issues::Issue>>> {
     let Some(precheck) = configured(automation.precheck.as_ref()) else {
         return Ok(Some(candidates));

@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { loadAutomationRuns, useAutomationStore } from "@/lib/automations";
 import { relativeNext } from "@/lib/automationSchedule";
-import { checkFound, clockOf, dutiesApi, dutiesOf, reportsToLabel, runAt, runOutcome, todayCounts, wakeFamily, wakeOf, wakesOn } from "@/lib/botDuties";
+import { checkFound, clockOf, dutiesApi, dutiesOf, lastRun, reportsToLabel, runAt, runOutcome, todayCounts, wakeFamily, wakeOf, wakesOn } from "@/lib/botDuties";
 import { useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { sessionSpend } from "@/lib/runFamily";
@@ -93,11 +93,22 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
   const spent = useCallback((sessionId: string) => sessionSpend(sessions.sessions.find((session) => session.id === sessionId)), [sessions.sessions]);
   const leadName = useCallback((id: string) => bots.bots.find((other) => other.id === id)?.name ?? null, [bots.bots]);
 
+  // A duty just saved or copied, as the call answered, until the store lists it (PRO-492): its page opens on it
+  // rather than finding it missing and going back to the list.
+  const [made, setMade] = useState<Automation | null>(null);
+  const listed = screen.kind === "duty" ? duties.find((duty) => duty.id === screen.id) ?? null : null;
+  const shown = listed ?? (screen.kind === "duty" && made?.id === screen.id ? made : null);
+  useEffect(() => {
+    if (made && duties.some((duty) => duty.id === made.id)) setMade(null);
+  }, [made, duties]);
   // A duty that is gone (removed here or elsewhere) leaves its page.
-  const shown = screen.kind === "duty" ? duties.find((duty) => duty.id === screen.id) ?? null : null;
   useEffect(() => {
     if (screen.kind === "duty" && !shown && automations.loaded) setScreen({ kind: "list" });
   }, [screen.kind, shown, automations.loaded]);
+  const open = (id: string, duty?: Automation) => {
+    if (duty) setMade(duty);
+    setScreen({ kind: "duty", id });
+  };
 
   if (screen.kind === "edit") {
     const duty = screen.id ? duties.find((value) => value.id === screen.id) ?? null : null;
@@ -109,7 +120,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         initial={screen.initial}
         home={state?.home ?? duty?.projectPath ?? null}
         start={screen.start}
-        onClose={(saved) => setScreen(saved ? { kind: "duty", id: saved } : duty ? { kind: "duty", id: duty.id } : { kind: "list" })}
+        onClose={(saved) => (saved ? open(saved.id, saved) : setScreen(duty ? { kind: "duty", id: duty.id } : { kind: "list" }))}
       />
     );
   }
@@ -126,7 +137,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         onBack={() => setScreen({ kind: "list" })}
         onEdit={() => setScreen({ kind: "edit", id: shown.id })}
         onOpenSession={onOpenSession}
-        onOpenDuty={(id) => setScreen({ kind: "duty", id })}
+        onOpenDuty={open}
         onChanged={reload}
       />
     );
@@ -178,7 +189,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
               </thead>
               <tbody>
                 {duties.map((duty) => {
-                  const last = (runs[duty.id] ?? [])[0] ?? null;
+                  const last = lastRun(runs[duty.id] ?? []);
                   const WakeIcon = wakeIcon(duty);
                   const wakes = wakesOn(duty, leadName);
                   return (

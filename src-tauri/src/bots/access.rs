@@ -287,11 +287,13 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// work (`handoffs::may_hand_off`), holds a message to the reporting line,
 /// and refuses a paused bot's changes and messages. And `terminalx bots
 /// message` (PRO-472): a hand-off, question or status for another of the
-/// owner's bots that wakes only a duty its owner set to wait for one.
+/// owner's bots that wakes only a duty its owner set to wait for one. And
+/// `terminalx bots duty-off` (PRO-492): switching off one of its own duties,
+/// which gives it nothing (the runtime refuses another bot's).
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message" | "duty-off", ..])
     })
 }
 

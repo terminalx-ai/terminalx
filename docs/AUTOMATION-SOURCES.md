@@ -51,9 +51,17 @@ that has something to wake, before anything is recorded or inserted:
   identical one), nothing reported on any issue, everything read stays unseen;
 - something new: the runs start, and each run's gate reuses that result.
 
-**Reads that leave work for later.** When the per-tick cap, a run in progress
-or the rate limit leaves a match unseen, the next read pages back to just
-before the oldest one left, so a backlog is never starved.
+**Reads that leave work for later.** When the per-tick cap, a run in progress,
+the rate limit or the day's cap leaves a match unseen, the next read pages back
+to just before the oldest one left, so a backlog is never starved.
+
+**Runs a day (PRO-490).** An event automation starts at most 48 runs in any 24
+hours, across everything it wakes on, so a chain that the per-subject limits
+never stop (each run filing the next issue, say) ends there. The editor shows
+it beside "New runs per tick" as "Runs a day, at most" (1 to 1000), and it is
+saved per automation (`eventTrigger.maxRunsPerDay`); one saved before it reads
+as 48. Past it, what was read stays unseen and the status says until when; a
+duty keeps its own bound below instead.
 
 Pull requests:
 
@@ -64,14 +72,20 @@ Pull requests:
 - **While a run is going.** Anything that happens to a pull request while a run
   on it is going waits for that run to end, with no other change to the record.
 - **A run's own push doesn't wake it.** When a run ends, its worktree's HEAD is
-  kept on the run (`leftHeads`). That head is recorded without waking. Nothing
+  kept on the run (`leftHeads`), read before the ending and written in the same
+  update, whether its turn ended it, it failed or timed out, or recovery after
+  a restart did (PRO-490), so no read sees the run ended without its head. That
+  head is recorded without waking. Nothing
   else counts as the run's own: a push by the same GitHub login from elsewhere
   (the owner's own) wakes once the run has ended.
 - **Rate limit.** One pull request wakes at most 4 runs an hour and 12 a day
   for one automation, counting every event kind. Past that its events stay
-  unseen; the automation's status names the pull request and when it resumes,
-  and keeps saying so until then. When the window opens they wake, pushes and
-  failed checks on the newest head only.
+  unseen; the automation's status names the pull request and when it resumes
+  ("4 runs in an hour or 12 in a day"), and keeps saying so until then, on a
+  tick the per-tick cap filled too. A read that covers every open pull request
+  and no longer lists it (closed, or no longer matching) lets the hold go
+  (PRO-490). When the window opens they wake, pushes and failed checks on the
+  newest head only.
 - **Forks are off by default.** Pull requests from forks, or with no fork
   information, are ignored unless the trigger allows them. Branches of the
   repository itself can be pushed by bots such as Dependabot and Renovate; use
@@ -91,6 +105,9 @@ Pull requests:
 - **What the status shows.** `automation_issue_state` carries `lastPollError`
   (the source cannot be read) and `notice` (something to know that isn't a
   failure).
+- **A first check that cannot record its result** (the run history cannot be
+  written) still notes the read's time, so the source is read again at the
+  next interval, not on every tick; what it read stays unseen (PRO-490).
 - **A damaged record.** A damaged `source-seen.json` is moved aside as
   `.json.damaged`, and the trigger starts again from now.
 
@@ -104,14 +121,18 @@ from all its events; past that they stay unseen and the status says until
 when. Its Linear issues are never commented on or moved. When its first check
 finds nothing new in the event it was given, that event is seen and the next
 read checks the one behind it (an ordinary automation's stays unseen). Its
-trigger starts when the duty is switched on, even while its bot is paused,
-and `gh` reads in a folder of the duty's own, never the bot's home.
+trigger starts when the duty is saved on, switched on or its wake is changed
+(PRO-503), even while its bot is paused, and `gh` reads in a folder of the
+duty's own, never the bot's home.
 
 ## Compatibility
 
 - **Unknown kinds and events.** `eventTrigger.source` is tagged by `kind`. A
   kind, or a pull request event, that this build doesn't know is kept as
-  written. It is never polled and is shown as needing a newer TerminalX.
+  written. It is never polled and is shown as needing a newer TerminalX. So is
+  a kind it knows with a value it cannot read (a newer build's field, say):
+  the rest of the automations file still loads (PRO-503), and a save keeps it
+  as it was but cannot bring one in new.
 - **Older desktops.** Event automations are saved with `nextRunAt`
   `9999-01-01`, so a build without event triggers never finds them due. An
   `AutomationInput` without an `eventTrigger` field keeps the stored trigger;

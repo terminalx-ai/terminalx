@@ -397,10 +397,11 @@ export function noteAccountSwitch(notice: AccountSwitchNotice) {
 
 /**
  * A bot's duty reported something to its owner (PRO-471). The app sends this only when the owner is to be told:
- * not for "nothing new", not in quiet hours unless urgent, and not when the report went to the bot's lead.
+ * not for "nothing new", not in quiet hours unless urgent, and not when the report went to the bot's lead. A failed run
+ * comes here too, outside quiet hours (PRO-492): the automation store raises no failure notice of its own for a duty.
  */
 export function noteDutyReport(report: DutyReportEvent) {
-  const title = `${report.botName}: ${report.dutyName}${report.urgent ? " (urgent)" : ""}`;
+  const title = `${report.botName}: ${report.dutyName}${report.failed ? " failed" : report.urgent ? " (urgent)" : ""}`;
   const body = report.text.length > 240 ? `${report.text.slice(0, 239)}…` : report.text;
   if (!looking()) {
     if (!sendsBanner()) return;
@@ -408,11 +409,11 @@ export function noteDutyReport(report: DutyReportEvent) {
     void canNotify().then((ok) => ok && sendNotification({ title, body }));
     return;
   }
-  playSound(report.urgent ? "waiting" : "done");
+  playSound(report.failed ? "failed" : report.urgent ? "waiting" : "done");
   if (!report.sessionId || !report.tabId || getSessions().selectedSessionId === report.sessionId) return;
   const id = `duty:${report.runId}:${Date.now()}`;
   notices = [...notices.filter((notice) => !(notice.sessionId === report.sessionId && notice.tabId === report.tabId)), {
-    id, sessionId: report.sessionId, tabId: report.tabId, kind: report.urgent ? "waiting" : "done", title, body, at: Date.now(),
+    id, sessionId: report.sessionId, tabId: report.tabId, kind: report.failed ? "failed" : report.urgent ? "waiting" : "done", title, body, at: Date.now(),
   }];
   emit();
   expireNotice(id);

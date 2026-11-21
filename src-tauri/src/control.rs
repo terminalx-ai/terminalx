@@ -998,6 +998,7 @@ impl ControlService {
             "bots.suggest" => self.bot_suggest(params),
             "bots.post" | "bots.reply" => self.bot_channels(command, params),
             "bots.message" => self.bot_message(params),
+            "bots.dutyOff" => self.bot_duty_off(params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
             ))),
@@ -1292,6 +1293,49 @@ impl ControlService {
             caller.refuse_while_paused("change its work items")?;
         }
         crate::bots::items::cli(self.sink.as_ref(), &bot, caller.session.clone(), action, &params).map_err(failed)
+    }
+
+    /// Switch one of a bot's duties off (`terminalx bots duty-off`, PRO-492).
+    /// Switching a duty off gives its bot nothing (`duties::needs_person`), so
+    /// a session that works for a bot may do it, for that bot's duties only:
+    /// which bot is the [`Caller`]'s, never what the params say. Anyone else
+    /// names the bot with `--bot`.
+    fn bot_duty_off(&self, params: Value) -> Result<Value, ControlError> {
+        use crate::bots::{self, BotError, Named};
+        if !bots::enabled() {
+            return Err(ControlError::new("bots_off", bots::OFF_MESSAGE, Some("Ask the person to turn Bots on; do not edit settings.json for them.".into())));
+        }
+        let failed = |error: anyhow::Error| match bots::refusal(&error) {
+            Some(BotError::Refused(message)) => ControlError::invalid(message.clone()),
+            Some(BotError::NotFound(_)) => ControlError::not_found(format!("{error}")),
+            Some(BotError::Off) => ControlError::new("bots_off", bots::OFF_MESSAGE, None::<String>),
+            None => ControlError::internal(error),
+        };
+        let named = |selector: &str| -> Result<bots::Bot, ControlError> {
+            match bots::named(selector).map_err(failed)? {
+                Named::One(bot) => Ok(*bot),
+                Named::Several => Err(ControlError::new("ambiguous_selector", bots::several_named(selector), Some("Use the id from `terminalx bots list --json`.".into()))),
+                Named::Nobody => Err(ControlError::not_found(bots::nobody_named(selector))),
+            }
+        };
+        let caller = Caller::of(&self.manager, &params);
+        caller.refuse_gone()?;
+        let asked = optional_string(&params, "bot").filter(|bot| !bot.trim().is_empty());
+        let bot = match (caller.bot.as_deref(), asked) {
+            (Some(own), asked) => {
+                let own = bots::get(own).map_err(failed)?;
+                if let Some(asked) = asked {
+                    if named(&asked).map_or(true, |bot| bot.id != own.id) {
+                        return Err(caller.forbidden("switch off another bot's duties"));
+                    }
+                }
+                own
+            }
+            (None, Some(asked)) => named(&asked)?,
+            (None, None) => return Err(ControlError::invalid("bots duty-off needs --bot BOT outside a bot's own session.")),
+        };
+        let duty = bots::duties::switch_off_named(self.sink.as_ref(), &bot, &required_string(&params, "duty")?).map_err(failed)?;
+        Ok(json!({"bot": bot.id, "duty": {"id": duty.id, "name": duty.name, "enabled": duty.enabled}}))
     }
 
     /// A message from one bot to another (`terminalx bots message`, PRO-472):
@@ -4331,6 +4375,46 @@ mod tests {
         settings.experimental.bots = false;
         crate::store::settings::save(&settings).unwrap();
         assert_eq!(ask("bots.message", json!({"bot": "iris", "text": "Off"})).unwrap_err().code, "bots_off");
+    }
+
+    /// `terminalx bots duty-off` (PRO-492): a bot's own session switches off
+    /// one of its own duties, by name or id, and never another bot's; anyone
+    /// else names the bot. Switching on stays the window's.
+    #[test]
+    fn a_bot_switches_off_its_own_duty_and_no_other_bots() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == atlas && bot.home)).expect("a hire makes the home chat");
+        let from_chat = |params: Value| {
+            let mut params = params;
+            params["caller"] = json!({"session": chat.id, "tab": chat.tabs[0].id});
+            ask("bots.dutyOff", params)
+        };
+        let on = |bot: &str| crate::bots::duties::duties_of(bot).unwrap().into_iter().filter(|duty| duty.enabled).collect::<Vec<_>>();
+        let mine = on(&atlas).into_iter().next().expect("a hire's built-ins are on");
+        let theirs = on(&iris).into_iter().next().unwrap();
+        // By its name, in any letter case, from the bot's own chat.
+        let off = from_chat(json!({"duty": mine.name.to_uppercase()})).unwrap();
+        assert_eq!((off["bot"].as_str(), off["duty"]["id"].as_str(), off["duty"]["enabled"].as_bool()), (Some(atlas.as_str()), Some(mine.id.as_str()), Some(false)));
+        assert!(!crate::store::automations::get(&mine.id).unwrap().enabled);
+        // Never another bot's: named, or by its duty's id.
+        assert_eq!(from_chat(json!({"duty": theirs.name, "bot": "iris"})).unwrap_err().code, "forbidden");
+        assert_eq!(from_chat(json!({"duty": theirs.id})).unwrap_err().code, "invalid_arguments");
+        assert!(crate::store::automations::get(&theirs.id).unwrap().enabled);
+        // Anyone else names the bot.
+        assert_eq!(ask("bots.dutyOff", json!({"duty": theirs.name})).unwrap_err().code, "invalid_arguments");
+        ask("bots.dutyOff", json!({"duty": theirs.id, "bot": "iris"})).unwrap();
+        assert!(!crate::store::automations::get(&theirs.id).unwrap().enabled);
+        assert_eq!(ask("bots.dutyOff", json!({"duty": "No such duty", "bot": "iris"})).unwrap_err().code, "invalid_arguments");
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(from_chat(json!({"duty": mine.id})).unwrap_err().code, "bots_off");
     }
 
     /// `terminalx bots memory …` (PRO-470): who asks is the `Caller`. A

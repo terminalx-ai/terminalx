@@ -399,14 +399,20 @@ describe("Bots: the team table (23.02)", () => {
     mocks.api.pauseAll.mockResolvedValue(listOf(5, [{ ...atlas, paused: pausedAt }, { ...iris, paused: pausedAt }]));
     mocks.api.resumeAll.mockResolvedValue(listOf(6, [atlas, iris]));
     render(<Screen />);
-    fireEvent.click(main().getByTestId("bots-pause-all"));
-    await waitFor(() => expect(main().getByTestId("bots-all-paused")).toBeTruthy());
+    // The call and the store update it makes settle inside `act`, so nothing waits on waitFor's one second, which a
+    // loaded machine can take to render the paused page (PRO-492).
+    await act(async () => {
+      fireEvent.click(main().getByTestId("bots-pause-all"));
+    });
+    expect(main().getByTestId("bots-all-paused")).toBeTruthy();
     expect(mocks.api.pauseAll).toHaveBeenCalledWith("app");
     // Every bot paused: the paused page (23.12), a row per bot with its Resume.
     expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent?.trim())).toEqual(["Paused", "Paused"]);
     expect(main().getAllByTestId("bots-paused-resume")).toHaveLength(2);
-    fireEvent.click(main().getByTestId("bots-resume-all"));
-    await waitFor(() => expect(main().queryByTestId("bots-all-paused")).toBeNull());
+    await act(async () => {
+      fireEvent.click(main().getByTestId("bots-resume-all"));
+    });
+    expect(main().queryByTestId("bots-all-paused")).toBeNull();
     expect(main().getByTestId("bots-pause-all")).toBeTruthy();
   });
 

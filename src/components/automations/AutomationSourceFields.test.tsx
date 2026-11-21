@@ -125,3 +125,27 @@ describe("GitHub pull request trigger", () => {
     expect(eventTriggerSentence(linear)).toBe("Linear: new Engineering issues labelled bot, checked every 5 min");
   });
 });
+
+describe("runs a day (PRO-490)", () => {
+  it("starts at 48, reads an automation saved before it as 48, and keeps what is typed within 1 to 1000", async () => {
+    sourcePreview.mockResolvedValue([]);
+    expect(defaultPullRequestTrigger().maxRunsPerDay).toBe(48);
+    expect(defaultLinearTrigger().maxRunsPerDay).toBe(48);
+    const { maxRunsPerDay: _, ...saved } = defaultPullRequestTrigger("acme/widgets");
+    render(<Harness initial={saved} />);
+    const field = screen.getByRole("spinbutton", { name: "Runs a day, at most" }) as HTMLInputElement;
+    expect(field.value).toBe("48");
+    fireEvent.change(field, { target: { value: "10" } });
+    expect(latest?.maxRunsPerDay).toBe(10);
+    fireEvent.change(field, { target: { value: "5000" } });
+    expect(latest?.maxRunsPerDay).toBe(1000);
+    fireEvent.change(field, { target: { value: "0" } });
+    expect(latest?.maxRunsPerDay).toBe(1);
+  });
+
+  it("is not a duty's to set", () => {
+    sourcePreview.mockResolvedValue([]);
+    render(<div className="grid grid-cols-2"><AutomationSourceFields projectPath="/repo" trigger={defaultPullRequestTrigger("acme/widgets")} onChange={() => {}} forDuty /></div>);
+    expect(screen.queryByRole("spinbutton", { name: "Runs a day, at most" })).toBeNull();
+  });
+});

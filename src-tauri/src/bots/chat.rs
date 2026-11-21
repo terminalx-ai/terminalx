@@ -474,6 +474,8 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: Option<&str>, fi
         "Say plainly what you did, what you did not do, and what you need from your owner.".to_string(),
         // PRO-472: the one thing a bot does to another bot is leave it a message, which wakes only a duty its owner set to wait for one.
         "To hand another of your owner's bots work, a question or a status, run `terminalx bots message <bot> \"<text>\" --kind handoff|question|status`. It reaches that bot as your words, labelled with your name and access, and wakes only a duty set to wait for it. A question or a status goes only to your lead or a bot that reports to you, a hand-off only where `bots handoff` may hand work; a bot does not message itself, and a message passed on too many times wakes nobody.".to_string(),
+        // PRO-492: switching a duty off gives the bot nothing, so it may do that itself.
+        "To stop one of your duties waking you (it keeps waking for nothing, or your owner asked), run `terminalx bots duty-off \"<duty name>\"`: it stays off until your owner switches it on again.".to_string(),
     ];
     // PRO-469: the work list, kept through the app; in plan mode the agent can run nothing, so it reports instead.
     rules.push(if writes_nothing {

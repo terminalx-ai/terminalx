@@ -11,6 +11,7 @@ import {
   clockOf,
   dutiesApi,
   dutySpend,
+  lastRun,
   reported,
   reportsToLabel,
   runAt,
@@ -47,7 +48,8 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
   onBack: () => void;
   onEdit: () => void;
   onOpenSession: (sessionId: string) => void;
-  onOpenDuty: (id: string) => void;
+  /** Open another duty's page: with the duty itself when it was just made, before the store lists it. */
+  onOpenDuty: (id: string, duty?: Automation) => void;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -65,7 +67,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
     const yes = await confirmInApp({ title: `Remove "${duty.name}"?`, body: `${bot.name} stops doing it, and its runs are removed with it. Its note stays in ${bot.name}'s home.`, action: "Remove", destructive: true });
     if (yes) act("remove", () => dutiesApi.remove(bot.id, duty.id).then(onBack));
   };
-  const last = runs[0] ?? null;
+  const last = lastRun(runs);
   const today = todayCounts(runs);
   const spend = dutySpend(runs, spent);
   const note = state?.notes[duty.id] ?? null;
@@ -85,7 +87,7 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
           <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("switch", () => dutiesApi.switch(bot.id, duty.id, !duty.enabled))} data-testid="duty-switch">
             {duty.enabled ? <><Pause /> Pause</> : <><Play /> Switch on</>}
           </Button>
-          {!builtin && <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("duplicate", () => dutiesApi.duplicate(bot.id, duty.id).then((copy) => onOpenDuty(copy.id)))}><Copy /> Duplicate</Button>}
+          {!builtin && <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => act("duplicate", () => dutiesApi.duplicate(bot.id, duty.id).then((copy) => onOpenDuty(copy.id, copy)))}><Copy /> Duplicate</Button>}
           <Button size="sm" disabled={!!busy || !!bot.paused} title={bot.paused ? `${bot.name} is paused` : undefined} onClick={() => act("run", () => dutiesApi.run(bot.id, duty.id))} data-testid="duty-run">
             {busy === "run" ? <Loader2 className="animate-spin" /> : <Play />} Run now
           </Button>
@@ -198,11 +200,12 @@ export function BotDuty({ bot, bots, duty, runs, state, spent, leadName, onBack,
           <section>
             <h3 className="text-[11px] font-medium tracking-[.06em] text-faint uppercase">How it runs</h3>
             <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5">
-              <Fact label="Model">{duty.model || "The agent's default"}</Fact>
+              {/* Its runs use the bot's model as it is now (`duties::bind`), not the one stored with the duty (PRO-492). */}
+              <Fact label="Model">{bot.model || "The agent's default"}</Fact>
               <Fact label="Runs on">This Mac, in {bot.name}'s home</Fact>
               <Fact label="Conversation">New each time</Fact>
               <Fact label="Access">{accessLabel(bot.access)}</Fact>
-              <Fact label="If it fails">You are told</Fact>
+              <Fact label="If it fails">You are told, outside quiet hours</Fact>
             </dl>
           </section>
           <section aria-label="Remembers between runs">

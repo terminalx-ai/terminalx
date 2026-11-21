@@ -43,7 +43,8 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedul
   initial?: DutyInput;
   /** What it wakes on, as the tile it was opened from (PRO-472). */
   start?: WakeGroup;
-  onClose: (saved: string | null) => void;
+  /** The duty as saved, or nothing when the editor was left without saving. */
+  onClose: (saved: Automation | null) => void;
 }) {
   const [input, setInput] = useState<DutyInput>(() => (duty ? dutyInputOf(duty) : initial ?? { ...newDutyInput(), wake: wakeForGroup(start, bot) }));
   const group = wakeGroupOf(input.wake);
@@ -75,7 +76,7 @@ export function BotDutyEditor({ bot, bots, duty, home, initial, start = "schedul
     setError(null);
     try {
       const saved = await dutiesApi.save(bot.id, duty?.id ?? null, { ...input, name: input.name.trim() });
-      onClose(saved.id);
+      onClose(saved);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
