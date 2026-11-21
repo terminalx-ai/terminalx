@@ -1,7 +1,8 @@
 import { invoke } from "@/lib/api";
+import { CRON_WEEKDAYS, cronWeekdayCode, describeSchedule } from "@/lib/automationSchedule";
 import { newDutyInput } from "@/lib/botDuties";
 import type { AutomationSchedule } from "@/types/automations";
-import type { CalendarBlock, DayCount, DutyWeek } from "@/types/botCalendar";
+import type { CalendarBlock, DayCount, DutyLog, DutyWeek } from "@/types/botCalendar";
 import type { DutyInput } from "@/types/botDuties";
 
 /**
@@ -23,10 +24,18 @@ export const SNAP_MINUTES = 15;
 
 export const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 const CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
-const CRON_DAYS = [1, 2, 3, 4, 5, 6, 0];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** `YYYY-MM-DD` plus `days`. */
+/** The Mondays of the first and last weeks the runtime shows (`bots::calendar`); the arrows stop there. */
+export const FIRST_WEEK = "2000-01-03";
+export const LAST_WEEK = "2199-12-30";
+
+/** Whether the week starting `monday` may be asked for. */
+export function weekShown(monday: string): boolean {
+  return monday >= FIRST_WEEK && monday <= LAST_WEEK;
+}
+
 export function addDays(ymd: string, days: number): string {
   const [year, month, day] = ymd.split("-").map(Number);
   const at = new Date(Date.UTC(year, month - 1, day + days));
@@ -93,18 +102,22 @@ export function countWarns(count: DayCount): boolean {
  */
 export function oftenText(count: DayCount, phase: DayPhase, any: boolean, first = true): string {
   if (!any && !count.ran) return "–";
-  if (phase === "future") return count.planned ? `${count.planned} to come` : count.scheduled ? "none to come" : "off that day";
-  if (phase === "today") return count.ran ? `${count.ran} so far · ${reportsText(count)}` : count.planned ? `${count.planned} to come` : "none today";
+  if (phase === "future") return count.planned ? `${count.capped ? "at least " : ""}${count.planned} to come` : count.scheduled ? "none to come" : "off that day";
+  // A day the logs no longer reach back over: what is kept is a floor, and none kept is not none run.
+  const floor = count.notKept > 0 ? "at least " : "";
+  if (count.notKept > 0 && !count.ran) return "history not kept";
+  if (phase === "today") return count.ran ? `${floor}${count.ran} so far · ${reportsText(count)}` : count.planned ? `${count.planned} to come` : "none today";
   if (!count.ran) return count.scheduled ? "none ran" : "off that day";
-  return `${count.ran}${first ? " checks" : ""} · ${reportsText(count)}`;
+  return `${floor}${count.ran}${first ? " checks" : ""} · ${reportsText(count)}`;
 }
 
 /** A day's cell of the "Events" row. */
 export function eventsText(count: DayCount, phase: DayPhase, any: boolean, first = true): string {
   if (phase === "future") return any ? "as they arrive" : "–";
+  if (count.notKept > 0 && !count.ran) return "history not kept";
   if (!count.ran) return any ? (phase === "today" ? "none so far" : "none") : "–";
   const unit = phase === "today" ? " so far" : first ? (count.ran === 1 ? " event" : " events") : "";
-  return `${count.ran}${unit} · ${reportsText(count)}`;
+  return `${count.notKept > 0 ? "at least " : ""}${count.ran}${unit} · ${reportsText(count)}`;
 }
 
 /**
@@ -145,6 +158,33 @@ export function dutyAt(day: number, minute: number, timezone: string): DutyInput
     ...input,
     schedule: { ...input.schedule, kind: "preset", preset: "weekly", cron: undefined, weekdays: [CODES[day] ?? "MO"], hour: Math.floor(minute / 60), minute: minute % 60, timezone },
   };
+}
+
+/** What a duty's log notice says: unreadable, cut back to its oldest run, or with more times than were looked at. */
+export function logWords(log: DutyLog, name: string, timezone: string | undefined): string {
+  if (log.unreadable) return `${name}: its run log could not be read, so its past runs are not shown. ${log.unreadable}`;
+  if (log.keptFrom) {
+    const at = new Date(log.keptFrom);
+    const when = Number.isNaN(at.getTime()) ? log.keptFrom : at.toLocaleString("en-GB", { timeZone: timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+    return `${name}: history not kept before ${when}. Its log keeps its newest 100 runs, so the counts are at least these.`;
+  }
+  return `${name}: wakes more often than the week can show; its runs still to come are at least the counts shown.`;
+}
+
+/** A schedule in a few words, for saying what a move changed: a cron schedule by its expression. */
+export function scheduleWords(schedule: AutomationSchedule): string {
+  return schedule.kind === "cron" ? `cron ${schedule.cron ?? ""}`.trim() : describeSchedule(schedule);
+}
+
+/**
+ * Where a dragged block lands: on the day under the pointer, moved from its own time by whole steps of the pointer's
+ * travel. Less than a full step leaves its time as it is, so a click that wobbles moves nothing.
+ */
+export function dragTarget(block: { day: number; minute: number }, day: number, travelPx: number): { day: number; minute: number } {
+  const step = (HOUR_PX * SNAP_MINUTES) / 60;
+  const steps = Math.trunc(travelPx / step);
+  const minute = Math.min(1440 - SNAP_MINUTES, Math.max(0, block.minute + steps * SNAP_MINUTES));
+  return { day, minute };
 }
 
 /** Why a block cannot be moved by dragging, or the schedule it moves to. */
@@ -199,9 +239,10 @@ export function movedSchedule(schedule: AutomationSchedule, from: { day: number;
   if (new Set(moved).size !== moved.length) return { reason: "It already wakes at that hour." };
   let weekday = dayOfWeek;
   if (days) {
-    if (!/^[0-7]$/.test(dayOfWeek)) return { reason: dayOfWeek === "*" ? "It wakes every day: only its time moves. Drop it on the same day." : CRON_HINT };
-    const current = CRON_DAYS.indexOf(Number(dayOfWeek) % 7);
-    weekday = String(CRON_DAYS[(((current + days) % 7) + 7) % 7]);
+    // The scheduler's numbers (1 = Sunday … 7 = Saturday), never 0.
+    const code = /^\d$/.test(dayOfWeek) ? cronWeekdayCode(Number(dayOfWeek)) : null;
+    if (!code) return { reason: dayOfWeek === "*" ? "It wakes every day: only its time moves. Drop it on the same day." : CRON_HINT };
+    weekday = String(CRON_WEEKDAYS[CODES[(((CODES.indexOf(code) + days) % 7) + 7) % 7]]);
   }
   return { schedule: { ...schedule, cron: [String(next % 60), moved.sort((a, b) => a - b).join(","), dayOfMonth, month, weekday].join(" ") } };
 }

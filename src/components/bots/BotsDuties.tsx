@@ -12,7 +12,7 @@ import type { Bot } from "@/types/bots";
 import type { DutyInput } from "@/types/botDuties";
 import { BotAvatar } from "./BotAvatar";
 import { BotDutyEditor } from "./BotDutyEditor";
-import { useDutyRuns } from "./BotDuties";
+import { useDutyRuns, useDutyState } from "./BotDuties";
 import { DutiesCalendar, DutiesViewSwitch, type DutiesView, type Slot } from "./DutiesCalendar";
 
 /** The view last chosen here, kept while the app runs. */
@@ -63,15 +63,7 @@ export function BotsDuties() {
   if (editing) {
     return (
       <div className="flex min-h-0 flex-1 flex-col" data-testid="bots-duties">
-        <BotDutyEditor
-          key={`${editing.bot.id}:${editing.duty?.id ?? "new"}`}
-          bot={editing.bot}
-          bots={bots}
-          duty={editing.duty}
-          initial={editing.initial ?? undefined}
-          home={editing.duty?.projectPath ?? null}
-          onClose={() => setEditing(null)}
-        />
+        <DutyEditor key={`${editing.bot.id}:${editing.duty?.id ?? "new"}`} editing={editing} bots={bots} onClose={() => setEditing(null)} />
       </div>
     );
   }
@@ -103,6 +95,21 @@ export function BotsDuties() {
         </>
       )}
     </div>
+  );
+}
+
+/** The duty editor, with the bot's home read as its Duties tab reads it, so a new duty's check is placed there too. */
+function DutyEditor({ editing, bots, onClose }: { editing: Editing; bots: readonly Bot[]; onClose: () => void }) {
+  const { state } = useDutyState(editing.bot.id, editing.duty?.id ?? "new");
+  return (
+    <BotDutyEditor
+      bot={editing.bot}
+      bots={bots}
+      duty={editing.duty}
+      initial={editing.initial ?? undefined}
+      home={state?.home ?? editing.duty?.projectPath ?? null}
+      onClose={onClose}
+    />
   );
 }
 

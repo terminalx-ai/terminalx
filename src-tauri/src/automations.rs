@@ -585,11 +585,56 @@ pub fn next_run_after(
     }
 }
 
-fn next_cron(
+/// A schedule's times in `(after, until]`, oldest first, at most `cap` of
+/// them, and whether more were left: what [`next_run_after`] gives again and
+/// again, with the expression and time zone read once (the week of duties,
+/// PRO-473).
+pub fn occurrences_between(
     schedule: &AutomationSchedule,
-    timezone: Tz,
     after: DateTime<Utc>,
-) -> Result<DateTime<Utc>> {
+    until: DateTime<Utc>,
+    cap: usize,
+) -> Result<(Vec<DateTime<Utc>>, bool)> {
+    let timezone: Tz = schedule
+        .timezone
+        .parse()
+        .with_context(|| format!("unknown timezone {}", schedule.timezone))?;
+    let dtstart = DateTime::parse_from_rfc3339(&schedule.dtstart)
+        .context("dtstart must be RFC3339")?
+        .with_timezone(&Utc);
+    let mut at = after.max(dtstart - chrono::TimeDelta::nanoseconds(1));
+    let mut found = Vec::new();
+    match (schedule.kind, schedule.preset) {
+        (ScheduleKind::Cron, _) => {
+            for next in cron_of(schedule)?.after(&at.with_timezone(&timezone)) {
+                let next = next.with_timezone(&Utc);
+                if next > until {
+                    break;
+                }
+                if found.len() == cap {
+                    return Ok((found, true));
+                }
+                found.push(next);
+            }
+        }
+        (ScheduleKind::Preset, Some(preset)) => loop {
+            let next = next_preset(schedule, preset, timezone, dtstart, at)?;
+            if next > until || next <= at {
+                break;
+            }
+            if found.len() == cap {
+                return Ok((found, true));
+            }
+            found.push(next);
+            at = next;
+        },
+        (ScheduleKind::Preset, None) => bail!("schedule preset is required"),
+    }
+    Ok((found, false))
+}
+
+/// A cron schedule's expression, read as the scheduler reads it.
+fn cron_of(schedule: &AutomationSchedule) -> Result<cron::Schedule> {
     let expression = schedule
         .cron
         .as_deref()
@@ -600,8 +645,15 @@ fn next_cron(
         bail!("cron must have five fields");
     }
     // `cron` includes seconds; the product contract deliberately does not.
-    let parsed =
-        cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")?;
+    cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")
+}
+
+fn next_cron(
+    schedule: &AutomationSchedule,
+    timezone: Tz,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let parsed = cron_of(schedule)?;
     parsed
         .after(&after.with_timezone(&timezone))
         .next()

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { addDays, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel } from "@/lib/botCalendar";
+import { CRON_WEEKDAYS, cronWeekdayCode } from "@/lib/automationSchedule";
+import { FIRST_WEEK, LAST_WEEK, addDays, dragTarget, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel, weekShown } from "@/lib/botCalendar";
 import type { AutomationSchedule } from "@/types/automations";
 import type { CalendarBlock } from "@/types/botCalendar";
 
@@ -26,7 +27,7 @@ describe("moving a duty by dragging its block (PRO-473)", () => {
   });
 
   it("moves a simple cron schedule, and says why it leaves others as they are", () => {
-    expect(movedSchedule(cron("0 9 * * 1"), { day: 0, minute: 540 }, { day: 1, minute: 615 }, "UTC")).toEqual({ schedule: cron("15 10 * * 2") });
+    expect(movedSchedule(cron("0 9 * * 2"), { day: 0, minute: 540 }, { day: 1, minute: 615 }, "UTC")).toEqual({ schedule: cron("15 10 * * 3") });
     expect(movedSchedule(cron("0 10,14 * * *"), { day: 2, minute: 840 }, { day: 2, minute: 960 }, "UTC")).toEqual({ schedule: cron("0 10,16 * * *") });
     expect(movedSchedule(cron("0 10,14 * * *"), { day: 2, minute: 840 }, { day: 2, minute: 870 }, "UTC")).toMatchObject({ reason: expect.stringMatching(/share the minute/) });
     expect(movedSchedule(cron("0 10,14 * * *"), { day: 2, minute: 840 }, { day: 2, minute: 600 }, "UTC")).toEqual({ reason: "It already wakes at that hour." });
@@ -48,7 +49,7 @@ describe("the week's grid and rows", () => {
   });
 
   it("words a counted row for the days before today, today and the days to come", () => {
-    const count = { ran: 78, reports: 0, failed: 0, planned: 0, scheduled: 96 };
+    const count = { ran: 78, reports: 0, failed: 0, planned: 0, scheduled: 96, notKept: 0, capped: false };
     expect(oftenText(count, "past", true)).toBe("78 checks · quiet");
     expect(oftenText({ ...count, reports: 2 }, "past", true, false)).toBe("78 · 2 reports");
     expect(oftenText({ ...count, ran: 33, reports: 1 }, "today", true)).toBe("33 so far · 1 report");
@@ -59,6 +60,43 @@ describe("the week's grid and rows", () => {
     expect(eventsText({ ...count, ran: 9, reports: 1 }, "past", true, false)).toBe("9 · 1 report");
     expect(eventsText({ ...count, ran: 0 }, "future", true)).toBe("as they arrive");
     expect(eventsText({ ...count, ran: 0, failed: 0 }, "future", false)).toBe("–");
+    // A day a log no longer reaches back over: never "none ran", and what is kept is a floor.
+    expect(oftenText({ ...count, ran: 0, notKept: 1 }, "past", true)).toBe("history not kept");
+    expect(oftenText({ ...count, ran: 28, notKept: 1 }, "past", true)).toBe("at least 28 checks · quiet");
+    expect(oftenText({ ...count, ran: 5, notKept: 1 }, "today", true)).toBe("at least 5 so far · quiet");
+    expect(eventsText({ ...count, ran: 0, notKept: 1 }, "past", true)).toBe("history not kept");
+    expect(eventsText({ ...count, ran: 3, notKept: 1 }, "past", true)).toBe("at least 3 events · quiet");
+    expect(oftenText({ ...count, ran: 0, planned: 400, capped: true }, "future", true)).toBe("at least 400 to come");
+  });
+
+  it("moves a dragged block by whole steps from its own time", () => {
+    // A step is 15 minutes: 11.5 pixels.
+    expect(dragTarget({ day: 2, minute: 600 }, 2, 11)).toEqual({ day: 2, minute: 600 });
+    expect(dragTarget({ day: 2, minute: 600 }, 2, 11.5)).toEqual({ day: 2, minute: 615 });
+    expect(dragTarget({ day: 2, minute: 600 }, 3, -23)).toEqual({ day: 3, minute: 570 });
+    expect(dragTarget({ day: 2, minute: 610 }, 2, 12)).toEqual({ day: 2, minute: 625 });
+    expect(dragTarget({ day: 2, minute: 10 }, 2, -100)).toEqual({ day: 2, minute: 0 });
+    expect(dragTarget({ day: 2, minute: 1420 }, 2, 100)).toEqual({ day: 2, minute: 1425 });
+  });
+
+  it("numbers cron days as the scheduler does, 1 = Sunday to 7 = Saturday, and moves a duty to every weekday", () => {
+    expect(CRON_WEEKDAYS).toEqual({ SU: 1, MO: 2, TU: 3, WE: 4, TH: 5, FR: 6, SA: 7 });
+    expect(cronWeekdayCode(0)).toBeNull();
+    expect(cronWeekdayCode(8)).toBeNull();
+    // From Monday (2) at 09:00 to each day of the grid, Monday … Sunday.
+    expect([0, 1, 2, 3, 4, 5, 6].map((day) => {
+      const moved = movedSchedule(cron("0 9 * * 2"), { day: 0, minute: 540 }, { day, minute: 540 }, "UTC");
+      return "schedule" in moved ? moved.schedule.cron : moved.reason;
+    })).toEqual(["0 9 * * 2", "0 9 * * 3", "0 9 * * 4", "0 9 * * 5", "0 9 * * 6", "0 9 * * 7", "0 9 * * 1"]);
+    // From Saturday (7) and Sunday (1), across the week's end.
+    expect(movedSchedule(cron("0 9 * * 7"), { day: 5, minute: 540 }, { day: 6, minute: 540 }, "UTC")).toEqual({ schedule: cron("0 9 * * 1") });
+    expect(movedSchedule(cron("0 9 * * 1"), { day: 6, minute: 540 }, { day: 0, minute: 540 }, "UTC")).toEqual({ schedule: cron("0 9 * * 2") });
+    expect(movedSchedule(cron("0 9 * * 0"), { day: 6, minute: 540 }, { day: 0, minute: 540 }, "UTC")).toMatchObject({ reason: expect.stringMatching(/cron schedule/) });
+  });
+
+  it("stops the arrows at the weeks the runtime shows", () => {
+    expect(weekShown(FIRST_WEEK) && weekShown(LAST_WEEK)).toBe(true);
+    expect(weekShown(addDays(FIRST_WEEK, -7)) || weekShown(addDays(LAST_WEEK, 7))).toBe(false);
   });
 
   it("labels and steps weeks, and reads the clock in the owner's time zone", () => {

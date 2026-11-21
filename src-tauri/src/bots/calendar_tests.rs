@@ -55,8 +55,8 @@ fn run(duty: &str, n: u64, status: &str, scheduled: &str, extra: Value) -> Autom
 }
 
 fn read(tz: Tz, now: &str, duties: &[(&Automation, &Bot, Vec<AutomationRun>)]) -> Week {
-    let inputs: Vec<DutyWeek<'_>> = duties.iter().map(|(duty, bot, runs)| DutyWeek { duty, bot, runs }).collect();
-    week(tz, monday(), utc(now), &inputs, BTreeMap::new())
+    let inputs: Vec<DutyWeek<'_>> = duties.iter().map(|(duty, bot, runs)| DutyWeek { duty, bot, runs, unreadable: None }).collect();
+    week(tz, monday(), utc(now), &inputs, BTreeMap::new()).unwrap()
 }
 
 fn states(week: &Week, duty: &str) -> Vec<(u32, u32, BlockState)> {
@@ -94,7 +94,7 @@ fn each_block_says_what_its_run_did_and_the_rest_of_the_week_is_still_to_come() 
     let monday = &week.blocks[0];
     assert_eq!((monday.run_id.as_deref(), monday.session_id.as_deref()), (Some("status-1"), Some("s1")));
     // What ran this week, as the log counts it: the running one too, as Today's counts do.
-    assert_eq!(week.totals, Totals { checks: 4, nothing_new: 1, reports: 1 });
+    assert_eq!(week.totals, Totals { checks: 4, nothing_new: 1, reports: 1, at_least: false });
     assert!(week.next_today.is_empty(), "today's run has started");
 }
 
@@ -117,7 +117,7 @@ fn a_folded_row_puts_each_repeat_at_its_scheduled_time() {
     );
     assert_eq!(week.blocks.iter().find(|block| block.state == BlockState::Failed).and_then(|block| block.note.as_deref()), Some("exit 4"));
     // Every run of the log, once.
-    assert_eq!(week.totals, Totals { checks: 5, nothing_new: 3, reports: 0 });
+    assert_eq!(week.totals, Totals { checks: 5, nothing_new: 3, reports: 0, at_least: false });
 }
 
 #[test]
@@ -131,13 +131,13 @@ fn a_fold_that_began_last_week_counts_only_this_weeks_repeats() {
     assert_eq!(week.totals.checks, 2);
     assert_eq!(states(&week, "drift")[..2], [(0, 540, BlockState::Quiet), (1, 540, BlockState::Quiet)]);
     // Seen from the week before, the same row holds the three before Monday.
-    let inputs = [DutyWeek { duty: &drift, bot: &argus, runs: &runs }];
+    let inputs = [DutyWeek { duty: &drift, bot: &argus, runs: &runs, unreadable: None }];
     let before = week_at(monday() - Duration::days(7), "2026-11-17T12:00:00Z", &inputs);
     assert_eq!(before.totals.checks, 3, "Friday, Saturday and Sunday");
 }
 
 fn week_at(monday: NaiveDate, now: &str, inputs: &[DutyWeek<'_>]) -> Week {
-    week(Tz::UTC, monday, utc(now), inputs, BTreeMap::new())
+    week(Tz::UTC, monday, utc(now), inputs, BTreeMap::new()).unwrap()
 }
 
 #[test]
@@ -161,13 +161,13 @@ fn duties_that_wake_often_or_on_events_are_counted_in_the_two_rows_not_drawn() {
     assert_eq!(week.event_duties, vec!["prs".to_string()]);
     assert!(week.blocks.iter().all(|block| block.duty_id == "twice"), "only the duty that wakes twice a day is drawn");
     assert_eq!(states(&week, "twice").len(), 2 * 5 + 1, "Tuesday 14:00 onwards, as blocks still to come");
-    assert_eq!(week.often[0], DayCount { ran: 48, reports: 0, failed: 0, planned: 0, scheduled: 48 });
+    assert_eq!(week.often[0], DayCount { ran: 48, reports: 0, failed: 0, planned: 0, scheduled: 48, ..Default::default() });
     // Tuesday: 24 nothing new and one report so far, the rest of the day still to come (12:30 … 23:30).
-    assert_eq!(week.often[1], DayCount { ran: 25, reports: 1, failed: 0, planned: 23, scheduled: 48 });
+    assert_eq!(week.often[1], DayCount { ran: 25, reports: 1, failed: 0, planned: 23, scheduled: 48, ..Default::default() });
     assert_eq!(week.often[2].planned, 48);
     assert_eq!(week.events[0], DayCount { ran: 1, reports: 0, ..Default::default() });
     assert_eq!(week.events[1], DayCount { ran: 1, reports: 1, ..Default::default() });
-    assert_eq!(week.totals, Totals { checks: 75, nothing_new: 73, reports: 2 });
+    assert_eq!(week.totals, Totals { checks: 75, nothing_new: 73, reports: 2, at_least: false });
     // Next today: one line per duty, soonest first.
     let next: Vec<_> = week.next_today.iter().map(|next| (next.duty_id.as_str(), next.minute)).collect();
     assert_eq!(next, vec![("stalled", 12 * 60 + 30), ("twice", 14 * 60)]);
@@ -204,6 +204,143 @@ fn the_week_is_in_the_owners_time_zone() {
     assert_eq!(states(&week, "status")[..2], [(0, 23 * 60, BlockState::Reported), (1, 23 * 60, BlockState::Next)]);
     // 00:00 Tuesday in Tokyo is 15:00 Monday UTC.
     assert_eq!((week.today, week.now_minute), (Some(1), Some(0)));
+}
+
+const QUIET: &str = r#"{"stdoutTail": "", "stderrTail": "", "truncated": false, "timedOut": false, "durationMs": 3}"#;
+
+/// M1 (review 1): a duty that wakes every half hour keeps about two days in its log of 100 runs. The days before
+/// the oldest kept run say "not kept", never that nothing ran, and the totals are floors.
+#[test]
+fn days_the_log_no_longer_covers_are_not_kept_never_empty() {
+    let argus = bot("argus", false);
+    let stalled = duty("stalled", "argus", cron("*/30 * * * *"), json!({}));
+    let quiet: Value = serde_json::from_str(QUIET).unwrap();
+    // The newest 100 runs, Friday 11:30 back to Wednesday 10:00, as a full log keeps them (newest first).
+    let newest = utc("2026-11-20T11:30:00Z");
+    let runs: Vec<AutomationRun> = (0..automation_store::RUN_RETENTION as i64)
+        .map(|n| {
+            let at = (newest - Duration::minutes(30 * n)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // Alternating results, so no two are folded into one row.
+            let status = if n % 2 == 0 { "skippedPrecheck" } else { "completed" };
+            run("stalled", 100 - n as u64, status, &at, json!({"precheck": quiet, "duty": {"reportedTo": "nobody"}}))
+        })
+        .collect();
+    let week = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, runs)]);
+    let cells: Vec<(u32, u32)> = week.often.iter().map(|day| (day.ran, day.not_kept)).collect();
+    // Monday and Tuesday not kept; Wednesday kept from 10:00 (28 runs, at least); Thursday and Friday whole.
+    assert_eq!(cells, vec![(0, 1), (0, 1), (28, 1), (48, 0), (24, 0), (0, 0), (0, 0)]);
+    assert_eq!(week.totals.checks, 100);
+    assert!(week.totals.at_least);
+    assert_eq!(week.logs.len(), 1);
+    assert_eq!(week.logs[0].kept_from.as_deref(), Some("2026-11-18T10:00:00Z"));
+    assert!(week.logs[0].unreadable.is_none());
+
+    // A log with fewer runs than it keeps lost nothing: the empty days are days on which nothing ran.
+    let short = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, vec![])]);
+    assert!(short.often.iter().all(|day| day.not_kept == 0) && !short.totals.at_least && short.logs.is_empty());
+}
+
+#[test]
+fn an_unreadable_log_is_said_on_its_duty_and_its_days_are_not_kept() {
+    let atlas = bot("atlas", false);
+    let status = duty("status", "atlas", daily(18, "UTC"), json!({}));
+    let inputs = [DutyWeek { duty: &status, bot: &atlas, runs: &[], unreadable: Some("runs.jsonl: line 3 is not JSON") }];
+    let week = week(Tz::UTC, monday(), utc("2026-11-18T09:30:00Z"), &inputs, BTreeMap::new()).unwrap();
+    let days: Vec<Vec<(String, u32)>> = week.not_kept.iter().map(|day| day.iter().map(|gap| (gap.duty_id.clone(), gap.until_minute)).collect()).collect();
+    // Monday and Tuesday whole, Wednesday up to now; nothing after now.
+    let gap = |minute| vec![("status".to_string(), minute)];
+    assert_eq!(days, vec![gap(1440), gap(1440), gap(9 * 60 + 30), vec![], vec![], vec![], vec![]]);
+    assert_eq!(week.logs[0].unreadable.as_deref(), Some("runs.jsonl: line 3 is not JSON"));
+    assert!(week.totals.at_least);
+    // What is still to come comes from its schedule, which is readable.
+    assert_eq!(states(&week, "status").first(), Some(&(2, 1080, BlockState::Next)));
+}
+
+/// L3: a schedule with more times in the week than are looked at says so. A week in which the clocks go back has
+/// 10,140 minutes, one more hour than the cap.
+#[test]
+fn a_schedule_past_the_cap_says_its_count_is_a_floor() {
+    let argus = bot("argus", false);
+    let every = duty("every", "argus", json!({"kind": "cron", "cron": "* * * * *", "timezone": "Europe/London", "dtstart": "2026-01-01T00:00:00Z"}), json!({}));
+    let london: Tz = "Europe/London".parse().unwrap();
+    let inputs = [DutyWeek { duty: &every, bot: &argus, runs: &[], unreadable: None }];
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let week = week(london, monday, utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
+    assert!(week.often.iter().all(|day| day.capped), "{:?}", week.often);
+    assert!(week.logs.iter().any(|log| log.duty_id == "every" && log.capped));
+    assert_eq!(week.often.iter().map(|day| day.planned).sum::<u32>(), MAX_OCCURRENCES as u32);
+    // A week of ordinary length is not capped.
+    let ordinary = super::week(london, monday + Duration::days(14), utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
+    assert!(ordinary.often.iter().all(|day| !day.capped) && ordinary.logs.is_empty());
+}
+
+/// L3: the shared helper gives the same times as asking `next_run_after` again and again.
+#[test]
+fn occurrences_between_agrees_with_next_run_after() {
+    for schedule in [cron("0 10,14 * * 1-5"), cron("*/45 * * * *"), daily(9, "America/New_York"), json!({"kind": "preset", "preset": "hourly", "minute": 15, "timezone": "Asia/Kolkata", "dtstart": "2026-01-01T00:00:00Z"})] {
+        let schedule: automations::AutomationSchedule = serde_json::from_value(schedule).unwrap();
+        let (from, until) = (utc("2026-11-16T00:00:00Z"), utc("2026-11-23T00:00:00Z"));
+        let (shared, capped) = automations::occurrences_between(&schedule, from, until, MAX_OCCURRENCES).unwrap();
+        let mut one_by_one = Vec::new();
+        let mut at = from;
+        while let Ok(next) = automations::next_run_after(&schedule, at) {
+            if next > until {
+                break;
+            }
+            one_by_one.push(next);
+            at = next;
+        }
+        assert_eq!((shared, capped), (one_by_one, false), "{schedule:?}");
+    }
+}
+
+/// L2: the scheduler's cron numbers the days 1 = Sunday … 7 = Saturday; the window's drag uses the same numbers
+/// (`CRON_WEEKDAYS` in `src/lib/automationSchedule.ts`).
+#[test]
+fn the_schedulers_cron_numbers_sunday_one_to_saturday_seven() {
+    use chrono::Weekday::*;
+    for (number, weekday) in [(1, Sun), (2, Mon), (3, Tue), (4, Wed), (5, Thu), (6, Fri), (7, Sat)] {
+        let schedule: automations::AutomationSchedule = serde_json::from_value(cron(&format!("0 9 * * {number}"))).unwrap();
+        let next = automations::next_run_after(&schedule, utc("2026-11-16T00:00:00Z")).unwrap();
+        assert_eq!(next.weekday(), weekday, "{number}");
+    }
+    let zero: automations::AutomationSchedule = serde_json::from_value(cron("0 9 * * 0")).unwrap();
+    assert!(automations::next_run_after(&zero, utc("2026-11-16T00:00:00Z")).is_err(), "0 is not a day here");
+}
+
+/// L4: a week far off is refused, never a panic, from the dispatch too.
+#[test]
+fn a_week_outside_the_range_is_refused() {
+    for day in ["1999-12-27", "2200-01-05", "9999-12-31"] {
+        let monday = NaiveDate::parse_from_str(day, "%Y-%m-%d").unwrap();
+        assert!(week(Tz::UTC, monday, utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_err(), "{day}");
+    }
+    assert!(week(Tz::UTC, NaiveDate::from_ymd_opt(2199, 12, 30).unwrap(), utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_ok());
+    assert_eq!(monday_of(NaiveDate::MIN), None);
+}
+
+/// L5: when midnight does not exist (Chile moves its clocks from 24:00 to 01:00), the day starts at the first
+/// valid instant after the gap.
+#[test]
+fn a_day_whose_midnight_does_not_exist_starts_after_the_gap() {
+    let santiago: Tz = "America/Santiago".parse().unwrap();
+    let day = NaiveDate::from_ymd_opt(2026, 9, 6).unwrap();
+    assert!(santiago.from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap()).earliest().is_none(), "the gap this test is about");
+    assert_eq!(local_midnight(santiago, day), utc("2026-09-06T04:00:00Z"));
+    assert_eq!(local_midnight(Tz::UTC, day), utc("2026-09-06T00:00:00Z"));
+}
+
+/// L6: a run's reason is capped on a block.
+#[test]
+fn a_blocks_note_is_capped() {
+    let atlas = bot("atlas", false);
+    let status = duty("status", "atlas", daily(18, "UTC"), json!({}));
+    let long = "x".repeat(5000);
+    let runs = vec![run("status", 1, "failed", "2026-11-16T18:00:00Z", json!({"error": long}))];
+    let week = read(Tz::UTC, "2026-11-17T09:00:00Z", &[(&status, &atlas, runs)]);
+    let note = week.blocks[0].note.as_deref().unwrap();
+    assert_eq!(note.chars().count(), NOTE_CHARS);
+    assert!(note.ends_with('…'));
 }
 
 // Through the runtime's own dispatch.
@@ -284,6 +421,11 @@ fn the_week_is_read_through_the_dispatch_for_every_bot_or_one_and_never_with_bot
     assert!(rig.bots("dutyWeek", json!({})).unwrap()["timezone"].is_string());
     assert!(rig.bots("dutyWeek", json!({"timezone": "Mars/Olympus"})).is_err());
     assert!(rig.bots("dutyWeek", json!({"id": "no-such-bot"})).is_err());
+    // A far-off week is refused, not a panic.
+    for far in ["9999-12-31", "1900-01-01"] {
+        let refused = rig.bots("dutyWeek", json!({"week": far})).unwrap_err();
+        assert!(refused.to_string().contains("Weeks from"), "{far}: {refused:#}");
+    }
 
     // Reading the week changes nothing, and needs no person.
     assert!(!crate::bots::enforce::needs_person("dutyWeek", &json!({})));

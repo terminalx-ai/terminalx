@@ -52,7 +52,7 @@ const audit = duty("d3", "Audit of main", "b2", { schedule: { kind: "preset", pr
 const stalled = duty("d4", "Stalled sessions", "b2", { schedule: { kind: "cron", cron: "*/15 * * * *", weekdays: [], timezone: "UTC", dtstart: "2026-01-01T00:00:00Z" } });
 
 const DAYS = ["2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-21", "2026-11-22"];
-const count = (ran: number, reports = 0, planned = 0, scheduled = 96, failed = 0) => ({ ran, reports, failed, planned, scheduled });
+const count = (ran: number, reports = 0, planned = 0, scheduled = 96, failed = 0) => ({ ran, reports, failed, planned, scheduled, notKept: 0, capped: false });
 
 /** The week as the runtime reads it: Friday 20 November, 13:24 UTC. */
 function week(): DutyWeek {
@@ -81,8 +81,10 @@ function week(): DutyWeek {
       { dutyId: "d2", botId: "b1", minute: 14 * 60, at: "2026-11-20T14:00:00Z" },
       { dutyId: "d1", botId: "b1", minute: 18 * 60, at: "2026-11-20T18:00:00Z" },
     ],
-    totals: { checks: 412, nothingNew: 401, reports: 11 },
+    totals: { checks: 412, nothingNew: 401, reports: 11, atLeast: false },
     quietHours: { b1: { from: "22:00", to: "07:00" } },
+    notKept: [[], [], [], [], [], [], []],
+    logs: [],
   };
 }
 
@@ -239,10 +241,11 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     });
     // Friday's Daily status at 18:00, dragged to 16:30 the same day.
     const block = blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
-    fireEvent.pointerDown(block, { button: 0, pointerId: 7, clientX: 450, clientY: 18 * 46 + 5 });
-    fireEvent.pointerMove(block, { pointerId: 7, clientX: 452, clientY: 16.5 * 46 + 11 });
+    // Grabbed low on the block: where it lands is its own time moved by the pointer's travel, 6 steps of 15 minutes up.
+    fireEvent.pointerDown(block, { button: 0, pointerId: 7, clientX: 450, clientY: 18 * 46 + 20 });
+    fireEvent.pointerMove(block, { button: 0, pointerId: 7, clientX: 452, clientY: 18 * 46 + 20 - 1.5 * 46 });
     expect(screen.getByTestId("calendar-drop").textContent).toBe("16:30 Daily status");
-    fireEvent.pointerUp(block, { pointerId: 7, clientX: 452, clientY: 16.5 * 46 + 11 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 7, clientX: 452, clientY: 18 * 46 + 20 - 1.5 * 46 });
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/cannot confirm that you asked/);
     fireEvent.click(within(alert).getByRole("button", { name: /Restart runtime/ }));
@@ -260,14 +263,92 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     fireEvent.pointerDown(ran, { button: 0, pointerId: 2, clientX: 50, clientY: 11 * 46 });
     fireEvent.pointerMove(ran, { pointerId: 2, clientX: 150, clientY: 12 * 46 });
     expect(screen.queryByTestId("calendar-drop")).toBeNull();
-    fireEvent.pointerUp(ran, { pointerId: 2, clientX: 150, clientY: 12 * 46 });
+    fireEvent.pointerUp(ran, { button: 2, pointerId: 2, clientX: 150, clientY: 12 * 46 });
     // Friday's 14:00 Look around, to Saturday: its days are a range.
     const look14 = blocks().find((value) => value.dataset.duty === "d2" && value.dataset.state === "next")!;
     fireEvent.pointerDown(look14, { button: 0, pointerId: 3, clientX: 450, clientY: 14 * 46 + 5 });
     fireEvent.pointerMove(look14, { pointerId: 3, clientX: 550, clientY: 14 * 46 + 11 });
-    fireEvent.pointerUp(look14, { pointerId: 3, clientX: 550, clientY: 14 * 46 + 11 });
+    fireEvent.pointerUp(look14, { button: 0, pointerId: 3, clientX: 550, clientY: 14 * 46 + 11 });
     expect(screen.getByTestId("calendar-notice").textContent).toBe("Look around was not moved. Change its cron schedule on the duty's page.");
     expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(false);
+  });
+
+  it("needs a full step to move a block, says what changed and undoes it", async () => {
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const block = () => blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
+    // Less than a step (11.5 pixels) is a click that wobbled: no target, and it opens the duty.
+    fireEvent.pointerDown(block(), { button: 0, pointerId: 4, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerMove(block(), { button: 0, pointerId: 4, clientX: 451, clientY: 18 * 46 + 15 });
+    expect(screen.queryByTestId("calendar-drop")).toBeNull();
+    fireEvent.pointerUp(block(), { button: 0, pointerId: 4, clientX: 451, clientY: 18 * 46 + 15 });
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(false);
+    // One full step down: 18:15.
+    fireEvent.pointerDown(block(), { button: 0, pointerId: 5, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerMove(block(), { button: 0, pointerId: 5, clientX: 450, clientY: 18 * 46 + 17 });
+    expect(screen.getByTestId("calendar-drop").textContent).toBe("18:15 Daily status");
+    fireEvent.pointerUp(block(), { button: 0, pointerId: 5, clientX: 450, clientY: 18 * 46 + 17 });
+    const moved = await screen.findByTestId("calendar-moved");
+    expect(moved.textContent).toContain("Daily status moved: Daily at 18:00 → Daily at 18:15.");
+    fireEvent.click(within(moved).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(screen.getByTestId("calendar-moved").textContent).toBe("Daily status is back to Daily at 18:00."));
+    const saves = mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_save");
+    expect(saves.map(([, args]) => (args as { input: { schedule: { hour: number; minute: number } } }).input.schedule)).toMatchObject([{ hour: 18, minute: 15 }, { hour: 18, minute: 0 }]);
+  });
+
+  it("opens a duty only with the main button", async () => {
+    const { onOpenDuty } = calendar({ single: atlas });
+    await screen.findAllByTestId("calendar-block");
+    const done = blocks()[0];
+    fireEvent.pointerDown(done, { button: 2, pointerId: 1, clientX: 50, clientY: 500 });
+    fireEvent.pointerUp(done, { button: 2, pointerId: 1, clientX: 50, clientY: 500 });
+    fireEvent.pointerUp(done, { button: 1, pointerId: 1, clientX: 50, clientY: 500 });
+    expect(onOpenDuty).not.toHaveBeenCalled();
+    fireEvent.pointerUp(done, { button: 0, pointerId: 1, clientX: 50, clientY: 500 });
+    expect(onOpenDuty).toHaveBeenCalledWith(atlas, "d2");
+  });
+
+  it("says where a log no longer reaches, never that nothing ran, and an unreadable log on its duty", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command !== "bot_duty_week") return answer(command, args);
+      const value = week();
+      return {
+        ...value,
+        often: [{ ...count(0), notKept: 1 }, { ...count(0), notKept: 1 }, { ...count(28), notKept: 1 }, count(48), count(24, 0, 23), count(0, 0, 0, 0), count(0, 0, 0, 0)],
+        totals: { ...value.totals, atLeast: true },
+        notKept: [[{ dutyId: "d1", untilMinute: 1440 }], [{ dutyId: "d1", untilMinute: 600 }], [], [], [], [], []],
+        logs: [
+          { dutyId: "d4", botId: "b2", keptFrom: "2026-11-18T10:00:00Z" },
+          { dutyId: "d1", botId: "b1", unreadable: "runs.jsonl: line 3 is not JSON" },
+        ],
+      };
+    });
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const often = within(screen.getByTestId("calendar-often")).getAllByTestId("calendar-count").map((cell) => cell.textContent);
+    expect(often.slice(0, 3)).toEqual(["history not kept", "history not kept", "at least 28 · quiet"]);
+    expect(often.join(" ")).not.toMatch(/none ran/);
+    const bands = screen.getAllByTestId("calendar-not-kept");
+    expect(bands.map((band) => band.style.height)).toEqual([`${24 * 46}px`, `${10 * 46}px`]);
+    const logs = screen.getAllByTestId("calendar-log").map((log) => log.textContent);
+    expect(logs[0]).toBe("Stalled sessions: history not kept before Wed 10:00. Its log keeps its newest 100 runs, so the counts are at least these.");
+    expect(logs[1]).toBe("Daily status: its run log could not be read, so its past runs are not shown. runs.jsonl: line 3 is not JSON");
+    expect(screen.getAllByTestId("calendar-total").every((total) => total.textContent?.startsWith("at least"))).toBe(true);
+  });
+
+  it("draws nothing of the week before under a read that failed", async () => {
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_week") throw "The runtime could not read the week.";
+      return answer(command, args);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "The week after" }));
+    await screen.findByText(/could not read the week/);
+    expect(screen.queryAllByTestId("calendar-block")).toHaveLength(0);
+    expect(screen.queryByTestId("calendar-grid")).toBeNull();
   });
 
   it("is reached from the Bots page, where a clicked hour asks which bot and opens the editor there", async () => {
@@ -281,6 +362,8 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     const editor = screen.getByTestId("duty-editor");
     expect(editor.textContent).toContain("Add a duty for Argus");
     expect(editor.textContent).toContain("Mondays at 09:00 · UTC");
+    // The editor knows the bot's home for a new duty too.
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duties", { id: "b2" }));
     // The list shows every bot's duties.
     fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
     fireEvent.click(screen.getByRole("radio", { name: "List" }));

@@ -14,6 +14,17 @@ const DAYS: Record<string, string> = {
   SU: "Sunday",
 };
 
+/**
+ * The scheduler's cron numbers for the days of the week (`automations::next_run_after`, the `cron` crate): 1 = Sunday
+ * … 7 = Saturday; 0 is not a day there. Keyed by the presets' day codes.
+ */
+export const CRON_WEEKDAYS: Record<string, number> = { SU: 1, MO: 2, TU: 3, WE: 4, TH: 5, FR: 6, SA: 7 };
+
+/** The preset day code of a cron day number, or `null` for one the scheduler does not take. */
+export function cronWeekdayCode(number: number): string | null {
+  return Object.keys(CRON_WEEKDAYS).find((code) => CRON_WEEKDAYS[code] === number) ?? null;
+}
+
 export function describeSchedule(schedule: AutomationSchedule): string {
   if (schedule.kind === "cron") {
     const cron = schedule.cron?.trim() ?? "";

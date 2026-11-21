@@ -4,7 +4,7 @@ import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
-import { BLOCK_PX, HOUR_PX, SNAP_MINUTES, WEEKDAYS, addDays, calendarApi, clock, countWarns, dayNumber, dayPhase, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel } from "@/lib/botCalendar";
+import { BLOCK_PX, HOUR_PX, WEEKDAYS, addDays, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown } from "@/lib/botCalendar";
 import { dutiesApi, dutyInputOf, reportsToLabel } from "@/lib/botDuties";
 import { useAutomationStore } from "@/lib/automations";
 import { cn } from "@/lib/cn";
@@ -75,8 +75,9 @@ const KEY_SOMETIMES: BlockState[] = ["running", "failed", "skipped"];
 /** Where a new duty is to go: a clicked hour, or (from Add a duty) none. */
 export type Slot = { day: number; minute: number; timezone: string } | null;
 
-type Drag = { index: number; pointer: number; startX: number; startY: number; moved: boolean; to: { day: number; minute: number } | null };
-type PendingMove = { block: CalendarBlock; duty: Automation; schedule: AutomationSchedule };
+type Drag = { index: number; pointer: number; startY: number; to: { day: number; minute: number } | null };
+/** A move being saved: `before` is the schedule it replaces; `undoing` when it puts one back. */
+type PendingMove = { block: CalendarBlock; duty: Automation; schedule: AutomationSchedule; before: AutomationSchedule; undoing?: boolean };
 
 /**
  * A week of duties (PRO-473, design 23.13): one block per scheduled run in four states (ran and did its work, ran and
@@ -106,6 +107,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const [moveError, setMoveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingMove | null>(null);
+  // The last move saved, said with its Undo.
+  const [moved, setMoved] = useState<PendingMove | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [now, setNow] = useState(() => new Date());
   const grid = useRef<HTMLDivElement>(null);
@@ -117,7 +120,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const changeKey = useMemo(() => automations.automations.filter((value) => value.bot).map((value) => `${value.id}:${value.modified}:${value.lastRunAt ?? ""}:${value.nextRunAt}`).join("|"), [automations.automations]);
   useEffect(() => {
     let live = true;
-    calendarApi.week(botId, week).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) setError(errorMessage(cause)); });
+    // A week that could not be read leaves nothing of the one before drawn under the error.
+    calendarApi.week(botId, week).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) { setData(null); setError(errorMessage(cause)); } });
     return () => { live = false; };
   }, [botId, week, changeKey, tick]);
   useEffect(() => {
@@ -141,57 +145,65 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     scroller.current.scrollTop = Math.max(0, Math.floor(earliest / 60) - 1) * HOUR_PX;
   }, [data]);
 
-  const spot = useCallback((clientX: number, clientY: number) => {
+  /** The day column under the pointer. */
+  const dayAt = useCallback((clientX: number) => {
     const box = grid.current?.getBoundingClientRect();
-    if (!box) return null;
+    if (!box || !box.width) return null;
     const day = Math.floor(((clientX - box.left) / box.width) * 7);
-    const raw = ((clientY - box.top) / HOUR_PX) * 60;
-    const minute = Math.min(1440 - SNAP_MINUTES, Math.max(0, Math.round(raw / SNAP_MINUTES) * SNAP_MINUTES));
-    return day >= 0 && day < 7 ? { day, minute } : null;
+    return day >= 0 && day < 7 ? day : null;
   }, []);
 
   const move = useCallback((value: PendingMove) => {
     setPending(value);
     setMoveError(null);
+    setMoved(null);
     const bot = byId.get(value.block.botId);
     if (!bot) return;
-    dutiesApi.save(bot.id, value.duty.id, { ...dutyInputOf(value.duty), schedule: value.schedule }).then(
-      () => { setPending(null); setTick((current) => current + 1); },
+    // The duty as the store has it now, with only its schedule changed.
+    const current = duties.get(value.duty.id) ?? value.duty;
+    dutiesApi.save(bot.id, value.duty.id, { ...dutyInputOf(current), schedule: value.schedule }).then(
+      () => { setPending(null); setMoved(value); setTick((tick) => tick + 1); },
       (cause) => setMoveError(errorMessage(cause)),
     );
-  }, [byId]);
+  }, [byId, duties]);
 
   const onBlockDown = (event: ReactPointerEvent, index: number) => {
     if (event.button !== 0 || blocks[index]?.state !== "next") return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDrag({ index, pointer: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false, to: null });
+    setDrag({ index, pointer: event.pointerId, startY: event.clientY, to: null });
   };
   const onBlockMove = (event: ReactPointerEvent) => {
     if (!drag || drag.pointer !== event.pointerId) return;
-    const moved = drag.moved || Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 4;
-    if (moved) setDrag({ ...drag, moved, to: spot(event.clientX, event.clientY - BLOCK_PX / 2) });
+    const block = blocks[drag.index];
+    const day = dayAt(event.clientX);
+    if (!block || day === null) return;
+    // From the block's own time by whole steps of the pointer's travel: a wobble is not a move.
+    const to = dragTarget(block, day, event.clientY - drag.startY);
+    setDrag({ ...drag, to: to.day === block.day && to.minute === block.minute ? null : to });
   };
   const onBlockUp = (event: ReactPointerEvent, index: number) => {
     const current = drag;
     setDrag(null);
+    // Only the main button opens or moves a duty.
+    if (event.button !== 0) return;
     const block = blocks[index];
     const bot = block && byId.get(block.botId);
     if (!block || !bot) return;
-    if (!current?.moved) {
+    const to = current?.index === index ? current.to : null;
+    if (!to) {
       onOpenDuty(bot, block.dutyId);
       return;
     }
-    const to = current.to;
     const duty = duties.get(block.dutyId);
-    if (!to || !duty || !data || (to.day === block.day && to.minute === block.minute)) return;
+    if (!duty || !data) return;
+    event.stopPropagation();
     const result = movedSchedule(duty.schedule, block, to, data.timezone);
     if ("reason" in result) {
       setNotice(`${duty.name} was not moved. ${result.reason}`);
       return;
     }
     setNotice(null);
-    move({ block, duty, schedule: result.schedule });
-    event.stopPropagation();
+    move({ block, duty, schedule: result.schedule, before: duty.schedule });
   };
   const onColumnClick = (event: React.MouseEvent<HTMLDivElement>, day: number) => {
     if (event.target !== event.currentTarget || !data) return;
@@ -203,7 +215,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
 
   const counted = (row: DayCount[] | undefined, text: (count: DayCount, phase: ReturnType<typeof dayPhase>, any: boolean, first: boolean) => string, any: boolean) =>
     WEEKDAYS.map((_, day) => {
-      const count = row?.[day] ?? { ran: 0, reports: 0, failed: 0, planned: 0, scheduled: 0 };
+      const count = row?.[day] ?? { ran: 0, reports: 0, failed: 0, planned: 0, scheduled: 0, notKept: 0, capped: false };
       const phase = data && wall ? dayPhase(data.days, day, wall.ymd) : "future";
       return { day, words: text(count, phase, any, day === 0), warn: countWarns(count) };
     });
@@ -211,16 +223,18 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const eventCells = counted(data?.events, eventsText, !!data?.eventDuties.length);
   const states = new Set(blocks.map((block) => block.state));
   const dutyName = (id: string) => duties.get(id)?.name ?? "A duty";
-  const dragged = drag?.moved && drag.to ? blocks[drag.index] : null;
+  const dragged = drag?.to ? blocks[drag.index] : null;
+  const notKept = data?.notKept ?? [];
+  const logs = data?.logs ?? [];
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="duties-calendar">
       <div className="flex min-h-[52px] shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-hairline px-6 py-2" data-testid="calendar-toolbar">
         {lead}
         <span className="flex items-center gap-1 text-[12.5px] text-muted-foreground" data-testid="calendar-week">
-          <Button variant="ghost" size="icon-xs" aria-label="The week before" onClick={() => data && setWeek(addDays(data.days[0], -7))}><ChevronLeft /></Button>
+          <Button variant="ghost" size="icon-xs" aria-label="The week before" disabled={!data || !weekShown(addDays(data.days[0], -7))} onClick={() => data && setWeek(addDays(data.days[0], -7))}><ChevronLeft /></Button>
           <span className="min-w-[88px] text-center tabular-nums">{data ? weekLabel(data.days) : "This week"}</span>
-          <Button variant="ghost" size="icon-xs" aria-label="The week after" onClick={() => data && setWeek(addDays(data.days[0], 7))}><ChevronRight /></Button>
+          <Button variant="ghost" size="icon-xs" aria-label="The week after" disabled={!data || !weekShown(addDays(data.days[0], 7))} onClick={() => data && setWeek(addDays(data.days[0], 7))}><ChevronRight /></Button>
           {week !== null && <Button variant="ghost" size="xs" onClick={() => setWeek(null)}>This week</Button>}
         </span>
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
@@ -252,6 +266,25 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
             <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} className="mb-2" />
           )}
           {notice && <p role="status" className="mb-2 rounded-md bg-warning/10 px-3 py-1.5 text-[12px] text-warning" data-testid="calendar-notice">{notice}</p>}
+          {moved && !pending && (
+            <p role="status" className="mb-2 flex min-w-0 items-center gap-2 rounded-md bg-veil px-3 py-1 text-[12px] text-muted-foreground" data-testid="calendar-moved">
+              <span className="min-w-0 truncate">
+                {moved.undoing ? `${moved.duty.name} is back to ${scheduleWords(moved.schedule)}.` : `${moved.duty.name} moved: ${scheduleWords(moved.before)} → ${scheduleWords(moved.schedule)}.`}
+              </span>
+              {!moved.undoing && (
+                <Button variant="ghost" size="xs" className="ml-auto shrink-0" onClick={() => move({ ...moved, schedule: moved.before, before: moved.schedule, undoing: true })} data-testid="calendar-undo">Undo</Button>
+              )}
+            </p>
+          )}
+          {logs.length > 0 && (
+            <ul className="mb-2 flex flex-col gap-1" data-testid="calendar-logs">
+              {logs.map((log) => (
+                <li key={log.dutyId} className={cn("rounded-md px-3 py-1 text-[12px]", log.unreadable ? "bg-destructive/10 text-destructive" : "bg-veil text-muted-foreground")} data-testid="calendar-log">
+                  {logWords(log, dutyName(log.dutyId), data?.timezone)}
+                </li>
+              ))}
+            </ul>
+          )}
           {!data && !error ? (
             <p className="flex items-center gap-2 py-6 text-[12.5px] text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading the week…</p>
           ) : data && (
@@ -291,6 +324,17 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                             <span className="absolute -top-[3px] -left-[3px] size-[7px] rounded-full bg-primary" />
                           </div>
                         )}
+                        {(notKept[day] ?? []).length > 0 && (
+                          <div
+                            aria-hidden
+                            className="pointer-events-none absolute right-0 left-0 top-0 border-b border-dashed border-hairline bg-[repeating-linear-gradient(135deg,transparent_0_6px,var(--hairline)_6px_7px)]"
+                            style={{ height: (Math.max(...notKept[day].map((gap) => gap.untilMinute)) / 60) * HOUR_PX }}
+                            title={`History not kept: ${notKept[day].map((gap) => dutyName(gap.dutyId)).join(", ")}`}
+                            data-testid="calendar-not-kept"
+                          >
+                            <span className="sticky top-1 ml-1 inline-block rounded bg-background/90 px-1 text-[10.5px] text-faint">history not kept</span>
+                          </div>
+                        )}
                         {blocks.map((block, index) => {
                           if (block.day !== day) return null;
                           const lane = placed.get(index) ?? { lane: 0, of: 1 };
@@ -312,7 +356,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                                 "absolute truncate rounded-[5px] px-1.5 text-left text-[11px] leading-[20px] outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
                                 block.state === "next" ? "cursor-grab touch-none" : "cursor-pointer",
                                 blockLook(block.state, bot),
-                                drag?.index === index && drag.moved && "opacity-40",
+                                drag?.index === index && drag.to && "opacity-40",
                               )}
                               style={{ top: (block.minute / 60) * HOUR_PX + 1, height: BLOCK_PX, left: `calc(${(lane.lane / lane.of) * 100}% + 3px)`, width: `calc(${100 / lane.of}% - 6px)` }}
                               data-testid="calendar-block"
@@ -366,9 +410,9 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
 
           <h3 className="mt-5 mb-2 text-[11px] font-medium tracking-[.06em] text-faint uppercase">{today >= 0 ? "This week so far" : "This week"}</h3>
           <div className="grid grid-cols-3 gap-2 text-center" data-testid="calendar-totals">
-            <Total value={data?.totals.checks} label="checks" />
-            <Total value={data?.totals.nothingNew} label="nothing new" />
-            <Total value={data?.totals.reports} label="reports" />
+            <Total value={data?.totals.checks} label="checks" atLeast={data?.totals.atLeast} />
+            <Total value={data?.totals.nothingNew} label="nothing new" atLeast={data?.totals.atLeast} />
+            <Total value={data?.totals.reports} label="reports" atLeast={data?.totals.atLeast} />
           </div>
 
           <h3 className="mt-5 mb-1 text-[11px] font-medium tracking-[.06em] text-faint uppercase">How to read it</h3>
@@ -402,10 +446,10 @@ function CountedRow({ label, cells, testId }: { label: string; cells: { day: num
   );
 }
 
-function Total({ value, label }: { value: number | undefined; label: string }) {
+function Total({ value, label, atLeast }: { value: number | undefined; label: string; atLeast?: boolean }) {
   return (
-    <div className="min-w-0 rounded-md border border-hairline bg-card py-2" data-testid="calendar-total">
-      <p className="text-[16px] font-semibold text-foreground tabular-nums">{value ?? "–"}</p>
+    <div className="min-w-0 rounded-md border border-hairline bg-card py-2" data-testid="calendar-total" title={atLeast ? "At least: some history is not kept" : undefined}>
+      <p className="text-[16px] font-semibold text-foreground tabular-nums">{atLeast && value !== undefined && <span className="mr-0.5 text-[11px] font-normal text-faint">at least</span>}{value ?? "–"}</p>
       <p className="truncate text-[11px] text-faint">{label}</p>
     </div>
   );

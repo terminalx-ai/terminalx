@@ -11,6 +11,12 @@
 //! A duty that wakes more than [`OFTEN_PER_DAY`] times on some day, and one
 //! that wakes on events, is counted per day in the two rows on top rather
 //! than drawn one block per run.
+//!
+//! A log keeps its newest [`automation_store::RUN_RETENTION`] finished runs,
+//! so a duty that wakes every half hour keeps two or three days. The week
+//! says how far back each log still reaches ([`DutyLog`]), and the days
+//! before that are "not kept" ([`NotKept`], [`DayCount::not_kept`]), never
+//! days on which nothing ran; totals that include them are "at least".
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,6 +35,11 @@ use crate::store::bots as bot_store;
 pub const OFTEN_PER_DAY: usize = 6;
 /// The most times of one schedule looked at for one question: every minute of a week fits.
 const MAX_OCCURRENCES: usize = 10_080;
+/// The most of a run's reason a block carries.
+const NOTE_CHARS: usize = 200;
+/// The weeks that may be asked for: a fixed range, so no date sum can overflow.
+const FIRST_DAY: (i32, u32, u32) = (2000, 1, 3);
+const LAST_DAY: (i32, u32, u32) = (2199, 12, 31);
 /// How many of today's next runs the right column lists.
 const NEXT_TODAY: usize = 8;
 
@@ -87,6 +98,11 @@ pub struct DayCount {
     pub planned: u32,
     /// Runs the schedules of the duties counted here have on this day, whether or not they are on.
     pub scheduled: u32,
+    /// How many of the duties counted here have a log that no longer reaches back over this day (or could not be
+    /// read): what ran is then at least `ran`, and none may mean only that nothing is kept.
+    pub not_kept: u32,
+    /// Some schedule counted here had more times this week than were looked at: `planned` is a floor.
+    pub capped: bool,
 }
 
 /// The week's totals so far, as Today's counts are on a duty's tab.
@@ -96,6 +112,33 @@ pub struct Totals {
     pub checks: u32,
     pub nothing_new: u32,
     pub reports: u32,
+    /// Some log no longer reaches back over the part of the week that has passed, or could not be read: these are floors.
+    pub at_least: bool,
+}
+
+/// A drawn duty whose log does not reach back over (part of) a day: from midnight to `until_minute` nothing is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotKept {
+    pub duty_id: String,
+    pub until_minute: u32,
+}
+
+/// What the week knows of a duty's log, for a duty whose log does not tell the whole week.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DutyLog {
+    pub duty_id: String,
+    pub bot_id: String,
+    /// The oldest instant its log still covers: older runs were dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_from: Option<String>,
+    /// Why its log could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    /// Its schedule had more times this week than were looked at.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
 }
 
 /// A run still to come today, for the right column.
@@ -129,6 +172,10 @@ pub struct Week {
     pub totals: Totals,
     /// Quiet hours by bot id, for the bots that have them.
     pub quiet_hours: BTreeMap<String, duties::QuietHours>,
+    /// Per day, the drawn duties whose log does not reach back over it.
+    pub not_kept: Vec<Vec<NotKept>>,
+    /// The duties whose log does not tell the whole week: cut, unreadable or capped.
+    pub logs: Vec<DutyLog>,
 }
 
 /// One duty as the week reads it.
@@ -137,26 +184,56 @@ pub struct DutyWeek<'a> {
     pub bot: &'a Bot,
     /// Newest first, as the log keeps them.
     pub runs: &'a [AutomationRun],
+    /// Why its log could not be read (and `runs` is empty).
+    pub unreadable: Option<&'a str>,
 }
 
 fn parse(at: Option<&str>) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(at?).ok().map(|at| at.with_timezone(&Utc))
 }
 
-/// A duty's schedule's times in `(after, until]`, at most `cap` of them, oldest first.
-fn occurrences(duty: &Automation, after: DateTime<Utc>, until: DateTime<Utc>, cap: usize) -> Vec<DateTime<Utc>> {
-    let mut found = Vec::new();
-    let mut at = after;
-    while found.len() < cap {
-        match automations::next_run_after(&duty.schedule, at) {
-            Ok(next) if next <= until && next > at => {
-                found.push(next);
-                at = next;
-            }
-            _ => break,
+/// A duty's schedule's times in `(after, until]`, at most `cap` of them, oldest first, and whether more were left.
+/// A schedule this build cannot read has none.
+fn occurrences(duty: &Automation, after: DateTime<Utc>, until: DateTime<Utc>, cap: usize) -> (Vec<DateTime<Utc>>, bool) {
+    automations::occurrences_between(&duty.schedule, after, until, cap).unwrap_or_default()
+}
+
+/// When a run (its first, for a folded row) happened.
+fn first_time(run: &AutomationRun) -> Option<DateTime<Utc>> {
+    match run.trigger {
+        AutomationTrigger::Scheduled => parse(run.scheduled_for.as_deref()),
+        _ => None,
+    }
+    .or_else(|| parse(run.started_at.as_deref()))
+    .or_else(|| parse(run.ended_at.as_deref()))
+}
+
+/// The oldest instant a log still covers, once it is full: the runs before its oldest kept one were dropped.
+/// `None` while it holds fewer finished runs than it keeps, so nothing was dropped.
+fn kept_from(runs: &[AutomationRun]) -> Option<DateTime<Utc>> {
+    let finished: Vec<&AutomationRun> = runs.iter().filter(|run| run.status.is_terminal()).collect();
+    (finished.len() >= automation_store::RUN_RETENTION).then(|| finished.iter().filter_map(|run| first_time(run)).min()).flatten()
+}
+
+/// `text` cut to [`NOTE_CHARS`].
+fn capped_note(text: &str) -> String {
+    if text.chars().count() > NOTE_CHARS {
+        format!("{}…", text.chars().take(NOTE_CHARS - 1).collect::<String>())
+    } else {
+        text.to_owned()
+    }
+}
+
+/// The first instant of `day` in `tz`: midnight, or when midnight does not exist there (a clock moved forward over
+/// it) the first valid instant after the gap.
+pub(crate) fn local_midnight(tz: Tz, day: NaiveDate) -> DateTime<Utc> {
+    let midnight = day.and_hms_opt(0, 0, 0).expect("midnight");
+    for minutes in 0..=24 * 60 {
+        if let Some(at) = tz.from_local_datetime(&(midnight + Duration::minutes(minutes))).earliest() {
+            return at.with_timezone(&Utc);
         }
     }
-    found
+    Utc.from_utc_datetime(&midnight)
 }
 
 fn wakes_on_events(duty: &Automation) -> bool {
@@ -193,13 +270,7 @@ fn woke(run: &AutomationRun) -> bool {
 /// When a run happened, and when each of its folded repeats did in the week
 /// `[start, end)`, as `(time, runs)`.
 fn times_of(duty: &Automation, run: &AutomationRun, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(DateTime<Utc>, u32)> {
-    let first = match run.trigger {
-        AutomationTrigger::Scheduled => parse(run.scheduled_for.as_deref()),
-        _ => None,
-    }
-    .or_else(|| parse(run.started_at.as_deref()))
-    .or_else(|| parse(run.ended_at.as_deref()));
-    let Some(first) = first else { return Vec::new() };
+    let Some(first) = first_time(run) else { return Vec::new() };
     let mut times = vec![(first, 1)];
     let repeats = run.repeat_count.saturating_sub(1);
     if repeats == 0 {
@@ -213,8 +284,8 @@ fn times_of(duty: &Automation, run: &AutomationRun, start: DateTime<Utc>, end: D
     // week's are looked for: those after it are counted (at most `repeats`), those before it are what is left.
     let mut accounted = 0;
     if run.trigger == AutomationTrigger::Scheduled && !wakes_on_events(duty) {
-        let after = if last >= end { occurrences(duty, end - Duration::nanoseconds(1), last, repeats as usize).len() as u32 } else { 0 };
-        let within = occurrences(duty, first.max(start - Duration::nanoseconds(1)), last.min(end - Duration::nanoseconds(1)), MAX_OCCURRENCES);
+        let after = if last >= end { occurrences(duty, end - Duration::nanoseconds(1), last, repeats as usize).0.len() as u32 } else { 0 };
+        let (within, _) = occurrences(duty, first.max(start - Duration::nanoseconds(1)), last.min(end - Duration::nanoseconds(1)), MAX_OCCURRENCES);
         let keep = within.len().min((repeats - after) as usize);
         times.extend(within[within.len() - keep..].iter().map(|at| (*at, 1)));
         accounted = after + keep as u32;
@@ -228,11 +299,18 @@ fn times_of(duty: &Automation, run: &AutomationRun, start: DateTime<Utc>, end: D
     times
 }
 
-/// The week starting on `monday`, in `tz`, read from `duties` at `now`.
-pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek<'_>], quiet_hours: BTreeMap<String, duties::QuietHours>) -> Week {
-    let local_start = |day: NaiveDate| tz.from_local_datetime(&day.and_hms_opt(0, 0, 0).expect("midnight")).earliest().unwrap_or_else(|| Utc.from_utc_datetime(&day.and_hms_opt(0, 0, 0).expect("midnight")).with_timezone(&tz)).with_timezone(&Utc);
-    let start = local_start(monday);
-    let end = local_start(monday + Duration::days(7));
+/// The week starting on `monday`, in `tz`, read from `duties` at `now`. A
+/// Monday outside the weeks that may be asked for is refused.
+pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek<'_>], quiet_hours: BTreeMap<String, duties::QuietHours>) -> Result<Week> {
+    let bounds = |(year, month, day): (i32, u32, u32)| NaiveDate::from_ymd_opt(year, month, day).expect("a fixed day");
+    if monday < bounds(FIRST_DAY) || monday > bounds(LAST_DAY) {
+        return Err(refused(format!("Weeks from {} to {} can be shown.", bounds(FIRST_DAY), bounds(LAST_DAY))));
+    }
+    let date = |offset: u64| monday.checked_add_days(chrono::Days::new(offset)).ok_or_else(|| refused("That week cannot be shown."));
+    let day_dates = (0..=7).map(date).collect::<Result<Vec<NaiveDate>>>()?;
+    // Each day's first instant, and the next Monday's: the week is [starts[0], starts[7]).
+    let starts: Vec<DateTime<Utc>> = day_dates.iter().map(|day| local_midnight(tz, *day)).collect();
+    let (start, end) = (starts[0], starts[7]);
     let place = |at: DateTime<Utc>| -> Option<(u32, u32)> {
         if at < start || at >= end {
             return None;
@@ -241,7 +319,7 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
         let day = (local.date_naive() - monday).num_days();
         (0..7).contains(&day).then(|| (day as u32, local.hour() * 60 + local.minute()))
     };
-    let days: Vec<String> = (0..7).map(|offset| (monday + Duration::days(offset)).format("%Y-%m-%d").to_string()).collect();
+    let days: Vec<String> = day_dates[..7].iter().map(|day| day.format("%Y-%m-%d").to_string()).collect();
     let (today, now_minute) = match place(now) {
         Some((day, minute)) => (Some(day), Some(minute)),
         None => (None, None),
@@ -254,11 +332,13 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
     let mut event_duties = Vec::new();
     let mut next_today = Vec::new();
     let mut totals = Totals::default();
+    let mut not_kept: Vec<Vec<NotKept>> = vec![Vec::new(); 7];
+    let mut logs = Vec::new();
 
     for entry in duties_in {
         let duty = entry.duty;
         let on_events = wakes_on_events(duty);
-        let scheduled = if on_events { Vec::new() } else { occurrences(duty, start - Duration::nanoseconds(1), end - Duration::nanoseconds(1), MAX_OCCURRENCES) };
+        let (scheduled, capped) = if on_events { (Vec::new(), false) } else { occurrences(duty, start - Duration::nanoseconds(1), end - Duration::nanoseconds(1), MAX_OCCURRENCES) };
         let mut per_day = [0usize; 7];
         for at in &scheduled {
             if let Some((day, _)) = place(*at) {
@@ -272,7 +352,39 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
             often_duties.push(duty.id.clone());
             for (day, count) in per_day.iter().enumerate() {
                 often[day].scheduled += *count as u32;
+                often[day].capped |= capped;
             }
+        }
+
+        // How far back its log reaches: an unreadable one reaches nowhere. The days (or the part of today) before
+        // that, up to now, are not kept.
+        let kept = kept_from(entry.runs);
+        let gap_until = if entry.unreadable.is_some() { Some(end) } else { kept };
+        if let Some(gap) = gap_until.map(|gap| gap.min(now)).filter(|gap| *gap > start) {
+            totals.at_least = true;
+            for day in 0..7usize {
+                let (from, to) = (starts[day], starts[day + 1]);
+                if from >= gap {
+                    break;
+                }
+                if on_events {
+                    events[day].not_kept += 1;
+                } else if counted {
+                    often[day].not_kept += 1;
+                } else {
+                    let until_minute = if gap < to { place(gap).map_or(24 * 60, |(_, minute)| minute) } else { 24 * 60 };
+                    not_kept[day].push(NotKept { duty_id: duty.id.clone(), until_minute });
+                }
+            }
+        }
+        if gap_until.is_some_and(|gap| gap > start) || capped {
+            logs.push(DutyLog {
+                duty_id: duty.id.clone(),
+                bot_id: entry.bot.id.clone(),
+                kept_from: kept.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                unreadable: entry.unreadable.map(capped_note),
+                capped,
+            });
         }
 
         let mut ran_at = BTreeSet::new();
@@ -320,7 +432,7 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
                         count,
                         run_id: Some(run.run_id.clone()),
                         session_id: run.session_id.clone(),
-                        note: matches!(state, BlockState::Failed | BlockState::Skipped).then(|| run.error.clone()).flatten(),
+                        note: matches!(state, BlockState::Failed | BlockState::Skipped).then(|| run.error.as_deref().map(capped_note)).flatten(),
                     }),
                 }
             }
@@ -358,12 +470,12 @@ pub fn week(tz: Tz, monday: NaiveDate, now: DateTime<Utc>, duties_in: &[DutyWeek
     blocks.sort_by(|a, b| (a.day, a.minute, &a.duty_id).cmp(&(b.day, b.minute, &b.duty_id)));
     next_today.sort_by(|a, b| (a.minute, &a.duty_id).cmp(&(b.minute, &b.duty_id)));
     next_today.truncate(NEXT_TODAY);
-    Week { timezone: tz.name().to_owned(), days, today, now_minute, blocks, often, often_duties, events, event_duties, next_today, totals, quiet_hours }
+    Ok(Week { timezone: tz.name().to_owned(), days, today, now_minute, blocks, often, often_duties, events, event_duties, next_today, totals, quiet_hours, not_kept, logs })
 }
 
 /// The Monday of the week holding `date`.
-fn monday_of(date: NaiveDate) -> NaiveDate {
-    date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
+fn monday_of(date: NaiveDate) -> Option<NaiveDate> {
+    date.checked_sub_days(chrono::Days::new(u64::from(date.weekday().num_days_from_monday())))
 }
 
 /// The `dutyWeek` operation of the runtime's `bots` call: a read, of one bot
@@ -390,15 +502,21 @@ fn answer(params: &Value) -> Result<Value> {
         None => return Err(refused("id must be a string")),
     };
     let automations = automation_store::list()?;
+    let monday = monday_of(day).ok_or_else(|| refused("That week cannot be shown."))?;
     let mut read = Vec::new();
     for bot in &bots {
         for duty in automations.iter().filter(|duty| duties::owner(duty).is_some_and(|owner| owner.id == bot.id)) {
-            read.push((duty, bot, automation_store::list_runs(&duty.id).unwrap_or_default()));
+            // A log that cannot be read is said on the duty's row, never shown as a week in which nothing ran.
+            let (runs, unreadable) = match automation_store::list_runs(&duty.id) {
+                Ok(runs) => (runs, None),
+                Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+            };
+            read.push((duty, bot, runs, unreadable));
         }
     }
-    let inputs: Vec<DutyWeek<'_>> = read.iter().map(|(duty, bot, runs)| DutyWeek { duty, bot, runs }).collect();
+    let inputs: Vec<DutyWeek<'_>> = read.iter().map(|(duty, bot, runs, unreadable)| DutyWeek { duty, bot, runs, unreadable: unreadable.as_deref() }).collect();
     let quiet = bots.iter().filter_map(|bot| duties::settings(&bot.id).quiet_hours.map(|quiet| (bot.id.clone(), quiet))).collect();
-    Ok(serde_json::to_value(week(tz, monday_of(day), now, &inputs, quiet))?)
+    Ok(serde_json::to_value(week(tz, monday, now, &inputs, quiet)?)?)
 }
 
 #[cfg(test)]

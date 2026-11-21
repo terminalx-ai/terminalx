@@ -30,6 +30,27 @@ export interface DayCount {
   failed: number;
   planned: number;
   scheduled: number;
+  /** How many duties counted here have a log that no longer reaches back over this day, or could not be read. */
+  notKept: number;
+  /** Some schedule counted here had more times than were looked at: `planned` is a floor. */
+  capped: boolean;
+}
+
+/** A drawn duty whose log does not reach back over a day: nothing is kept from midnight to `untilMinute`. */
+export interface NotKept {
+  dutyId: string;
+  untilMinute: number;
+}
+
+/** A duty whose log does not tell the whole week. */
+export interface DutyLog {
+  dutyId: string;
+  botId: string;
+  /** The oldest instant its log still covers. */
+  keptFrom?: string;
+  /** Why its log could not be read. */
+  unreadable?: string;
+  capped?: boolean;
 }
 
 export interface NextRun {
@@ -52,6 +73,11 @@ export interface DutyWeek {
   events: DayCount[];
   eventDuties: string[];
   nextToday: NextRun[];
-  totals: { checks: number; nothingNew: number; reports: number };
+  /** `atLeast`: some log does not reach back over the week so far, or could not be read; these are floors. */
+  totals: { checks: number; nothingNew: number; reports: number; atLeast: boolean };
   quietHours: Record<string, QuietHours>;
+  /** Per day, the drawn duties whose log does not reach back over it. */
+  notKept: NotKept[][];
+  /** The duties whose log is cut, unreadable or capped this week. */
+  logs: DutyLog[];
 }
