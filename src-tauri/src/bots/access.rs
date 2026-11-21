@@ -12,7 +12,7 @@
 //! | -- | -- | -- |
 //! | Full access | the owner's default (bypass) | leaves every call to the agent |
 //! | Ask before outward actions | Ask every time (native Codex: plan) | lets reads through; asks before anything else |
-//! | Read and report | plan | lets reads through; asks before a report leaves; refuses the rest |
+//! | Read and report | plan | lets reads through; asks before a report leaves or a web page is fetched; refuses the rest |
 //! | Paused, or unreadable | plan | lets reads through; refuses the rest |
 //!
 //! The mode is the barrier and the gate only adds to it. A read is a named
@@ -121,6 +121,9 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
         return Gate::Leave;
     }
     let what = describe(tool, input);
+    if FETCH_TOOLS.contains(&tool) {
+        return Gate::Ask(format!("This bot asks before it fetches a web page, since the address can carry what it read off this computer: {what}."));
+    }
     match access {
         BotAccess::AskOutward => Gate::Ask(format!("This bot reads freely and asks before it changes anything or runs a command: {what}.")),
         _ => match single(tool, input, |program, args| app_cli(program, cwd) && report_command(program, args).is_some()) {
@@ -130,19 +133,33 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
     }
 }
 
+/// The tools that fetch a page from a host the call names (PRO-496): what the
+/// address carries (`https://some.host/?d=…`, with what the bot just read)
+/// leaves this computer as a report does, and a page, issue or file the bot
+/// read can tell it to. Below Full access the owner is asked first, at Read
+/// and report as for a report; a paused bot, and a built-in's unattended run,
+/// make none. Claude Code's own mode is no barrier: plan mode fetches any
+/// host unasked, and its default mode some hosts it trusts (checked on
+/// 2.1.330). A web search is not one: the query goes to the model provider's
+/// search, not to a host a page names. No shell command vetted read-only
+/// fetches one (`harness::read_only`: no network program, and Git's helpers
+/// and lazy fetch are refused); every other command already meets the gate.
+const FETCH_TOOLS: &[&str] = &["WebFetch"];
+
 /// The tools that only read, keep the agent's own notes, or only talk to the
 /// owner, by the names the agents send to the hook (Claude Code 2.1.330 and
 /// Codex 0.169.0, from the tool lists each sends its model, and the names in
 /// Claude Code's binary for the tools only an interactive session has). A
 /// Read and report bot keeps its task list, plan and skills; an Ask bot raises
 /// no card for them. A connected server's (MCP) tool is never one: what it
-/// does cannot be told from its name. Left out because they act: Bash and
+/// does cannot be told from its name. Nor is [`FETCH_TOOLS`]'s `WebFetch`.
+/// Left out because they act: Bash and
 /// Monitor (a command), Edit, Write and NotebookEdit, CronCreate and
 /// ScheduleWakeup (later work), SendMessage, PushNotification, Workflow,
 /// EnterWorktree and ExitWorktree, and Codex's apply_patch and write_stdin.
 const READ_TOOLS: &[&str] = &[
-    // Reading files and the web.
-    "Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "WebFetch", "view_image", "web_search",
+    // Reading files, and searching the web.
+    "Read", "Grep", "Glob", "LS", "NotebookRead", "WebSearch", "view_image", "web_search",
     // A connected server's resources, read (not its tools).
     "ListMcpResourcesTool", "ReadMcpResourceTool",
     // The agent's own task list, plan and goals.
@@ -389,7 +406,13 @@ pub(crate) fn describe(tool: &str, input: &Value) -> String {
             let short: String = command.chars().take(120).collect();
             format!("`{short}{}`", if short.len() < command.len() { "…" } else { "" })
         }
-        None => format!("`{tool}`"),
+        None => match input["url"].as_str().filter(|_| FETCH_TOOLS.contains(&tool)) {
+            Some(url) => {
+                let short: String = url.chars().take(120).collect();
+                format!("`{tool}` of {short}{}", if short.len() < url.len() { "…" } else { "" })
+            }
+            None => format!("`{tool}`"),
+        },
     }
 }
 

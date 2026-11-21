@@ -175,8 +175,8 @@ function RunsOn({ bot }: { bot: Bot }) {
 
 const ACCESS: { value: BotAccess; icon: ComponentType<{ className?: string }>; title: string; note: string }[] = [
   { value: "full", icon: ShieldOff, title: "Full access", note: "Runs without asking, like your sessions. May push, merge and post." },
-  { value: "askOutward", icon: ShieldAlert, title: "Ask before outward actions", note: "Reads freely. Asks before it changes anything or runs a command." },
-  { value: "readReport", icon: Eye, title: "Read and report", note: "Reads and runs only commands that read. Asks before a comment or a message. Changes nothing." },
+  { value: "askOutward", icon: ShieldAlert, title: "Ask before outward actions", note: "Reads, searches the web and runs commands that read. Asks before anything else, opening a web page too." },
+  { value: "readReport", icon: Eye, title: "Read and report", note: "Reads, searches the web and runs only commands that read. Asks before a comment, a message or opening a web page. Changes nothing." },
 ];
 
 function Access({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (access: BotAccess) => void }) {
@@ -194,8 +194,10 @@ function Access({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (a
         </p>
       )}
       <p className="text-[12px] text-faint" data-testid="bot-access-hint">
-        The next thing the bot does is held to the level you pick, in a conversation already open too. While it is paused it only reads. On native
-        Codex, which cannot ask before each action, Ask before outward actions runs in plan mode.
+        The next thing the bot does is held to the level you pick, in a conversation already open too. While it is paused it only reads. A web
+        search goes to the agent's provider, and reading a connected server's resources reaches that server: both count as reads, so keep secrets
+        from a bot that should not send them anywhere. On native Codex, which cannot ask before each action, Ask before outward actions runs in plan
+        mode.
       </p>
     </div>
   );
