@@ -35,6 +35,10 @@ export interface BotAsker {
   may: BotAskerMay;
   /** The organisation a person was added from. They are inactive while the bot does not work there. */
   org?: string;
+  /** A person's email, as their organisation lists them: their comments on Linear are known by it (PRO-480). */
+  email?: string;
+  /** A person's GitHub login, as the owner gave it: their comments on GitHub are known by it (PRO-480). */
+  github?: string;
 }
 
 /** Ask and approve (a person only), ask, or hand off work (another bot only). */

@@ -9,6 +9,14 @@ import type { SessionEntry } from "@/types/session";
  * one of its chats started (`parent`).
  */
 
+/** Where a chat that a mention started came from (PRO-480): "GitHub · acme/app#12", or nothing for any other chat. */
+export function chatSource(chat: Pick<SessionEntry, "botChannel">): string | null {
+  const source = chat.botChannel;
+  if (!source || typeof source.label !== "string") return null;
+  const service = source.kind === "github" ? "GitHub" : source.kind === "linear" ? "Linear" : source.kind;
+  return `${service} · ${source.label}`;
+}
+
 /** The bot `session` is a chat of, by id. */
 export function botOf(session: Pick<SessionEntry, "bot">): string | null {
   return session.bot && typeof session.bot.id === "string" ? session.bot.id : null;

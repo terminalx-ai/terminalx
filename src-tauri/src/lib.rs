@@ -881,6 +881,7 @@ pub fn run() {
             commands::bot_item_reopen,
             commands::bot_spent_today,
             commands::bot_handoffs,
+            commands::bot_channels,
             commands::bot_handoff_stop,
             commands::bot_handoff_resend,
             commands::bot_item_hand,

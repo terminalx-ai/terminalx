@@ -37,7 +37,7 @@ extend automations or orchestration runs instead.
 | History of role and memory | `bot-changes/<id>/` outside the home folder: `changes.jsonl`, `known.json`, `texts/` (`src-tauri/src/bots/changes.rs`) |
 | Work items and "Needs you" questions | `bot-items/<id>/items.json`, beside the home folder rather than in it (`src-tauri/src/bots/items.rs`; TypeScript `src/types/botItems.ts`, `src/lib/botItems.ts`). That is no wall: a Full access bot can write the file with its own file tools, the direct-edit class PRO-489 deals with |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, `terminalx bots memory add / forget / list` and `terminalx bots message`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done` |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list` and `terminalx bots message`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done`, and its `terminalx bots post / reply` (PRO-480) |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
@@ -383,6 +383,80 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   4"). The file itself is not guarded against a Full access bot's own file
   tools (PRO-489), so its text is only ever given as a bot's or the app's.
 
+## GitHub and Linear as channels (PRO-480)
+
+`src-tauri/src/bots/channels.rs`, with the commands in
+`control_bot_channels.rs`. It builds on what main has (the owner's `gh`
+login, the Linear key, the bots' chats), not on PRO-472's duty wakes: a
+mention starts a conversation, not a duty run.
+
+- **Posting.** `terminalx bots post github --pr|--issue …` and `terminalx
+  bots post linear --issue …`, from a bot's session only (`Caller`). A
+  review is a `COMMENT` or `REQUEST_CHANGES` review, never `APPROVE`: an
+  approval with the owner's login would count as theirs. Every post ends
+  with "Written by <bot>, a TerminalX bot, on behalf of <owner>"
+  ([`channels::signature`]), added by the app. Posts are recorded in
+  `bot-channels.json` and shown in the bot's settings; at most 20 an hour
+  per bot.
+- **The gate.** `bots post` and `bots reply` are reports
+  (`access::report_command`): Full access posts, the two lower levels ask
+  first, a paused bot is refused. A Full access bot can still post with
+  `gh` by itself, unsigned: the rule tells it not to, nothing stops it
+  (the PRO-489 class).
+- **Reading.** The automation scheduler's tick calls `channels::tick`,
+  which reads at most every two minutes, on a thread of its own: the
+  conversation and review comments of the GitHub repositories of the
+  owner's projects (20 at most), and Linear comments that contain any bot's
+  `@slug`. Each source starts from the moment it is first read; each
+  comment is looked at once, on its first read (`seen`), so a mention an
+  edit adds later is never taken in. A comment edited before its first
+  read is not accepted: the services do not say who edited it, and a
+  maintainer can edit anyone's comment. A mention is `@slug` as a word of its
+  own, outside a quoted line.
+- **Who is accepted (`channels::judge`).** The owner (their `gh` login,
+  their Linear user id), and the people in Who can ask who may ask, known by
+  the GitHub login the owner gives them (`BotAsker.github`, set from the
+  person's row) or on Linear by their email (`BotAsker.email`, kept when
+  they are added from the organisation). Giving or changing a login needs
+  the window's proof, as any new entry does (`gives_more`). A person
+  listed for an organisation the bot does not work in now, and anyone not
+  listed, is kept as "not accepted" with why, shown in the bot's settings,
+  and starts nothing. A comment that carries the signature, or comes from a
+  bot account, is not looked at (a signature only in quoted `>` lines is a
+  person quoting a bot's post, and counts as theirs): a bot's signed post
+  wakes no bot, and is never taken for the owner. A Full access bot that
+  posts unsigned with raw `gh api` is not told apart from the owner (the
+  PRO-489 class); so the agent is told a comment from the owner's account
+  is not always the owner's, and it is a request, never an approval.
+- **Names.** Outside the fence, a mention names its author in the app's
+  words: the name the owner gave a listed person, the owner's own login or
+  Linear name, never a display name the commenter chose. The GitHub login
+  is kept apart (`login`) to name the person in the reply.
+- **Who the owner is** is read with `gh api user` and Linear's viewer and
+  kept for half an hour, but not while the Linear viewer could not be read;
+  without it Linear is not read at all, so no owner's mention is turned
+  away.
+- **The conversation.** An accepted mention becomes a new chat of the bot
+  (`chat::channel_chat`, marked `botChannel` with the thread's kind, label
+  and address, listed under "Chats with <bot>" with its source), or goes to
+  the chat that pull request or issue already has. Its first message has
+  TerminalX as its author ("TerminalX · @ann mentioned you on GitHub
+  (acme/app#7) · a request, not an approval"), with the comment fenced
+  (`channel-message`) as a request from that person, never an approval and
+  never the owner's instruction, even when the owner wrote it.
+  `terminalx bots reply` posts the answer in the thread of the newest
+  mention that reached that chat: a new comment on the pull request or
+  issue (naming who asked), a reply in a review comment's thread, or a reply
+  under the Linear comment's thread.
+- **Bounds.** A paused bot's mentions wait until it is resumed; at most 10
+  reach a bot an hour, and the rest wait. One that cannot reach its chat is
+  tried three times, then shown as failed. A mention's text is capped at
+  4,000 characters and dropped once delivered.
+- **Deleting a bot** drops its mentions and posts; its chats go to the
+  archive with its others.
+- **With Bots off** nothing is read, nothing is delivered, and both
+  commands answer `bots_off`.
+
 ## The week of duties (PRO-473)
 
 The calendar (screen 23.13) is a view of what already exists, not a store of
@@ -457,7 +531,7 @@ issue.
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
 | PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |
-| PRO-480 | GitHub and Linear as channels | 23.07 | Backlog |
+| PRO-480 | GitHub and Linear as channels | 23.07 | In review |
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.07 | Backlog |
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
