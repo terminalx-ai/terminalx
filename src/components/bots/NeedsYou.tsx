@@ -1,8 +1,9 @@
 import { useLayoutEffect, useState, type FormEvent } from "react";
-import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, TriangleAlert } from "@/icons";
+import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, Split, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
 import { answerBotItem, openBotItem, questionKey, refreshNeedsYou, resendBotItem, useNeedsYou } from "@/lib/botItems";
+import { runPlanLine } from "@/lib/botRuns";
 import { cn } from "@/lib/cn";
 import { openBot, selectSession } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
@@ -148,6 +149,8 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
 /** A Needs you card on the bot's Home tab and on an item's page. */
 export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotItem; onOpen?: () => void }) {
   if (!item.question) return null;
+  // A run's approval (PRO-476): its plan in one line on Home; the chat shows the whole plan above the question.
+  const plan = item.question.purpose === "startRun" ? (item.runViews ?? []).find((run) => run.id === item.question?.run && !run.gone) : undefined;
   return (
     <article className="flex min-w-0 gap-3 px-4 py-3" data-testid="needs-you-card" aria-label={`${bot.name} asks: ${item.question.text}`}>
       <CircleQuestionMark className="mt-0.5 size-4 shrink-0 text-accent" />
@@ -163,6 +166,7 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
         ) : null}
         {item.summary && onOpen && <p className="line-clamp-2 text-[12.5px] whitespace-pre-wrap text-muted-foreground">{item.summary}</p>}
         <Answers bot={bot} item={item} compact={false} />
+        {onOpen && plan && <p className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-faint" data-testid="needs-you-run-plan"><Split className="size-3 shrink-0" /> <span className="truncate">Run plan · {runPlanLine(plan)}</span></p>}
       </div>
     </article>
   );

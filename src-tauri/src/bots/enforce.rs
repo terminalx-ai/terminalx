@@ -366,6 +366,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
         // PRO-475: handing an item on makes a bot work; the team brief is what every bot is told.
         "itemHand" | "briefWrite" => true,
+        // PRO-476: an answer that approves a run's plan starts its workers, or lets it merge.
+        "itemAnswer" => super::runs::answer_starts_run(params),
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             // A patch this build cannot read may give more than it can tell.

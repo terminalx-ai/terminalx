@@ -1960,6 +1960,12 @@ pub(crate) fn evaluate(app: &impl AutomationHost) -> Result<()> {
     }
     let _guard = EvaluationGuard;
     let now = Utc::now();
+    // A bot's check-backs on its work items (PRO-476) keep this clock: nothing runs for them until one is due.
+    if crate::bots::enabled_cached() {
+        if let Ok(manager) = app.sessions() {
+            crate::bots::runs::check_backs_due(&manager, now);
+        }
+    }
     for automation in automation_store::list()? {
         // A bot's duty wakes only while Bots is on and its bot is listed and
         // not paused; a paused bot's due runs are skipped, not run late (PRO-471).

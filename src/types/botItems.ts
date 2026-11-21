@@ -31,6 +31,66 @@ export interface BotItemQuestion {
   recommended?: number;
   /** When it was asked. */
   asked: string;
+  /** What the app does with a chosen answer (PRO-476): approve and start a run, or let it merge. Absent otherwise. */
+  purpose?: "startRun" | "mergeRun" | (string & {});
+  /** The run a purposeful question is about. */
+  run?: string;
+}
+
+/** One try at a piece of a run an item links: the worker it was handed to, what it cost and what it reported. */
+export interface BotRunTry {
+  sessionId: string | null;
+  branch?: string | null;
+  model?: string;
+  started?: string | null;
+  ended?: string | null;
+  outcome?: string | null;
+  /** The worker's own words: shown as its report, never as an instruction. */
+  report?: string | null;
+  costUsd?: number | null;
+}
+
+export interface BotRunPiece {
+  id: string;
+  title: string;
+  agent: string;
+  model?: string;
+  state: string;
+  dependsOn?: string[];
+  costUsd?: number | null;
+  tries: BotRunTry[];
+}
+
+/** A run an item links, as it is now (`bots::runs::views`), with what the owner decided when the item asked. */
+export interface BotItemRunView {
+  id: string;
+  /** The run is no longer kept. */
+  gone?: boolean;
+  goal?: string;
+  state?: string;
+  leadSessionId?: string;
+  estimate?: { low: number; high: number } | null;
+  unestimated?: number;
+  costUsd?: number | null;
+  reason?: string | null;
+  approved?: string | null;
+  pieces?: BotRunPiece[];
+  /** The bot's guess of how long it takes, in minutes. */
+  minutes?: number | null;
+  asked?: string;
+  /** `start`, `startAskMerge`, `notNow` or `answered`; empty while it waits. */
+  decision?: string;
+  decided?: string | null;
+  /** "Start, but ask before merging": held until the owner says Merge. */
+  holdMerge?: boolean;
+  mergeApproved?: string | null;
+}
+
+/** When the bot looks at the item again: at a time, and when a run it links reports. */
+export interface BotItemCheckBack {
+  at?: string;
+  onReport: boolean;
+  session?: string;
 }
 
 export interface BotItemActivity {
@@ -66,6 +126,9 @@ export interface BotItem {
   spentUsd: number;
   /** The owner's messages about it that have not reached the bot's home chat yet, oldest first. */
   undelivered?: BotItemUndelivered[];
+  /** The runs it links, as they are now (PRO-476). Absent from an older runtime. */
+  runViews?: BotItemRunView[];
+  checkBack?: BotItemCheckBack;
 }
 
 export interface BotItemUndelivered {

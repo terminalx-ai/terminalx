@@ -251,6 +251,8 @@ fn add_template() -> Item {
         closed: None,
         activity: Vec::new(),
         undelivered: Vec::new(),
+        runs: Vec::new(),
+        check_back: None,
         unknown: BTreeMap::new(),
     }
 }
