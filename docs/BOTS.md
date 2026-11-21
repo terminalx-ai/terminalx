@@ -36,7 +36,7 @@ extend automations or orchestration runs instead.
 | Memory | `bots/<id>/MEMORY.md` and `bots/<id>/memory/` (the bot's own notes), `personal/` and `orgs/<org>/` beside them (each place's), `src-tauri/src/bots/memory.rs` |
 | History of role and memory | `bot-changes/<id>/` outside the home folder: `changes.jsonl`, `known.json`, `texts/` (`src-tauri/src/bots/changes.rs`) |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list` |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, `terminalx bots memory add / forget / list`, and `terminalx bots message` |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
@@ -164,8 +164,10 @@ permission system.
   `consent::guards_request`); switching one off is open. The Automations
   page's own routes refuse a duty. A process in a bot's session reads its own
   bot's duties and no other's, and changes none.
-- **At hire** the role template's duties that wake on a schedule are created
-  switched off; the ones that wake on events wait for PRO-472.
+- **At hire** the role template's duties that wake on a schedule or on
+  another bot's message are created switched off; one that wakes on a pull
+  request or a Linear issue needs its repository or team, and is added on the
+  Duties tab.
 - **With Bots off** a duty does not wake, nothing about it is read, and every
   duty call is refused.
 - **Deleting a bot** removes its duties and its quiet hours. Their definitions
@@ -173,6 +175,41 @@ permission system.
   its home, which goes to the trash; when that copy cannot be kept they are
   removed all the same and the delete says so. A duty left behind when its bot is gone
   for certain is listed on the Automations page, which can remove it.
+
+## What wakes a duty (PRO-472)
+
+A duty wakes on its schedule or on one event source: the automation's
+`eventTrigger` (`docs/AUTOMATION-SOURCES.md`), read by the same poll. Pull
+requests and Linear issues are PRO-485's sources. The ones only a bot has are
+in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
+`githubSecurityAlert`, `githubBranchCheck`, `linearMention`, `botMessage`,
+`watch`); the Automations page refuses them.
+
+- **Once per event.** The trigger's seen record (`source-seen.json`) keeps
+  what woke it; a mention, an alert or a message from before the trigger
+  started is never news. A watch and a branch's checks wake on each change
+  after the first read. A Linear issue a duty wakes on is never commented on
+  or moved: the report goes to the owner or the lead.
+- **What it is given.** The first check gets the events a read would wake on
+  as a JSON file named in `TERMINALX_EVENTS`, in its own folder. The agent
+  gets them after the duty's prompt, under "What woke this duty", with what
+  others wrote capped and fenced (`chat::fenced`) as information.
+- **Paused.** A paused bot's duties are not read, so what arrives waits and
+  wakes them on resume. A schedule's due runs are still skipped, not run late.
+- **Bounded.** One run at a time (a read wakes one); a duty wakes at most
+  6 times an hour and 48 a day from all its events, past which they wait and
+  its status says until when; one pull request wakes at most 4 runs an hour
+  (PRO-485). A watched command runs as the owner in `duty-checks/watch-<id>`.
+- **Another bot.** `terminalx bots message <bot> "<text>" --kind
+  handoff|question|status` runs only from a bot's own session (who sends is
+  `Caller`), and a duty that reports to its lead leaves the lead a status.
+  Messages are kept in `bot-messages.json` at the store root, the newest 100
+  per bot, and go when the bot is deleted. Each carries how many times it has
+  passed between bots: a run woken by a message sends one more, and one that
+  has passed three times wakes nobody (the status says so), so two bots
+  cannot keep waking each other. A bot does not message itself.
+- **Not here yet.** Slack, Telegram or WhatsApp and webhooks need a
+  connector (PRO-480, PRO-481); their tiles stay off.
 
 ## Build map
 
@@ -192,7 +229,7 @@ issue.
 | PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
 | PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | In review |
-| PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
+| PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | In review |
 | PRO-473 | Week calendar of duties | 23.13 | Backlog |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.04 | Backlog |

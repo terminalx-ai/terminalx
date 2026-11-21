@@ -2,7 +2,7 @@ import { invoke } from "@/lib/api";
 import { describeSchedule } from "@/lib/automationSchedule";
 import type { Automation, AutomationPrecheck, AutomationRun, PrecheckTrial } from "@/types/automations";
 import type { Bot } from "@/types/bots";
-import type { DutyInput, DutyReportsTo, DutyState, QuietHours } from "@/types/botDuties";
+import type { DutyInput, DutyReportsTo, DutyState, DutyWake, DutyWakeSource, QuietHours } from "@/types/botDuties";
 
 /**
  * A bot's duties (PRO-471). A duty is an ordinary automation that names its bot (`automation.bot`), so the duties and
@@ -83,9 +83,52 @@ export function reportsToLabel(reportsTo: DutyReportsTo | undefined, bot: Pick<B
   return `${known?.label ?? reportsTo} (TerminalX here)`;
 }
 
+/** The wake a saved duty has, as the duty editor reads it. */
+export function wakeOf(duty: Pick<Automation, "eventTrigger">): DutyWake | null {
+  return (duty.eventTrigger as DutyWake | null | undefined) ?? null;
+}
+
+const PR_EVENT_WORDS: Record<string, string> = { opened: "PR opened", pushed: "PR pushed", reviewRequested: "review requested", checkFailed: "check failed" };
+
+/** Where a wake comes from, for its icon: GitHub, Linear, another bot, a watch, or a kind this app does not know. */
+export function wakeFamily(source: DutyWakeSource): "github" | "linear" | "bot" | "watch" | "unknown" {
+  switch (source.kind as string) {
+    case "githubPullRequest": case "githubMention": case "githubSecurityAlert": case "githubBranchCheck": return "github";
+    case "linearIssue": case "linearMention": return "linear";
+    case "botMessage": return "bot";
+    case "watch": return "watch";
+    default: return "unknown";
+  }
+}
+
+/** A wake in a few words, as the Duties table says it ("GitHub · check failed"). */
+export function wakeWords(source: DutyWakeSource, botName: (id: string) => string | null = () => null): string {
+  const kind = source.kind as string;
+  const s = source as Record<string, unknown>;
+  switch (kind) {
+    case "githubPullRequest": {
+      const events = ((s.events as string[] | undefined) ?? []).map((event) => PR_EVENT_WORDS[event] ?? event);
+      return `GitHub · ${events.join(", ") || "pull requests"}`;
+    }
+    case "githubMention": return `GitHub · @${String(s.handle ?? "").replace(/^@/, "")} mentioned`;
+    case "githubSecurityAlert": return "GitHub · security alert";
+    case "githubBranchCheck": return `GitHub · check failed on ${String(s.branch ?? "a branch")}`;
+    case "linearIssue": return "Linear · issue created";
+    case "linearMention": return `Linear · @${String(s.handle ?? "").replace(/^@/, "")} mentioned`;
+    case "botMessage": {
+      const from = ((s.from as string[] | undefined) ?? []).map((id) => botName(id) ?? "a bot");
+      return `${from.length ? from.join(", ") : "Another bot"} · ${((s.kinds as string[] | undefined) ?? []).join(", ") || "any message"}`;
+    }
+    case "watch": return `Wait until · ${s.target === "url" ? "a URL" : s.target === "file" ? "a file" : "a check"} changes`;
+    default: return `A ${kind} event this version does not know`;
+  }
+}
+
 /** What wakes a duty, in words. */
-export function wakesOn(duty: Pick<Automation, "schedule" | "issueTrigger" | "eventTrigger">): string {
-  if (duty.eventTrigger || duty.issueTrigger) return "An event";
+export function wakesOn(duty: Pick<Automation, "schedule" | "issueTrigger" | "eventTrigger">, botName?: (id: string) => string | null): string {
+  const wake = wakeOf(duty);
+  if (wake) return wakeWords(wake.source, botName);
+  if (duty.issueTrigger) return "An event";
   return describeSchedule(duty.schedule);
 }
 
@@ -238,6 +281,7 @@ export function newDutyInput(): DutyInput {
     precheck: null,
     reportsTo: "terminalx",
     enabled: true,
+    wake: null,
   };
 }
 
@@ -250,5 +294,6 @@ export function dutyInputOf(duty: Automation): DutyInput {
     precheck: duty.precheck ?? null,
     reportsTo: duty.bot?.reportsTo ?? "terminalx",
     enabled: duty.enabled,
+    wake: wakeOf(duty),
   };
 }

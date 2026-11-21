@@ -81,6 +81,22 @@
   Deleting a bot removes its duties, kept with its home in the trash.
   Adding, changing, running or switching on a duty, and quiet hours, are the
   owner's to do from the window (PRO-471).
+- Bots (experimental): a duty wakes on events as well as a schedule. The
+  Duties tab's GitHub, Linear, Another bot and Wait until tiles open the
+  editor on that source: a pull request opened, pushed, asking for your
+  review or failing a check; a comment that mentions the bot, a Dependabot
+  security alert, or a failed check on a branch (read with `gh`); a Linear
+  issue matching a filter or a comment that mentions the bot (read with the
+  Linear key); a hand-off, question or status another bot leaves it
+  (`terminalx bots message`, and a duty reporting to its lead leaves one); or
+  a URL, a file or a command's output that changes. Each event wakes the duty
+  once, and what is there when it starts never does. The first check is given
+  the events (`$TERMINALX_EVENTS`) and the agent is given them fenced, as
+  information. Events that arrive while the bot is paused wait and wake it on
+  resume. A duty wakes at most 6 times an hour and 48 a day, one run at a
+  time; what that holds back waits and the duty says until when, and a
+  message passed between bots three times wakes nobody. Slack, Telegram or
+  WhatsApp and webhooks stay off until they have a connector (PRO-472).
 
 ## 0.2.37
 

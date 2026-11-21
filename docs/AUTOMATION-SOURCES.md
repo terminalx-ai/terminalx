@@ -94,6 +94,15 @@ Pull requests:
 - **A damaged record.** A damaged `source-seen.json` is moved aside as
   `.json.damaged`, and the trigger starts again from now.
 
+## A bot's duty (PRO-472)
+
+A bot's duty uses the same sources and record, and a few more kinds that only
+a duty takes (see [BOTS.md](BOTS.md#what-wakes-a-duty-pro-472)). For a duty a
+read wakes at most one run, the first check is given the events in a file
+(`TERMINALX_EVENTS`), and the duty wakes at most 6 times an hour and 48 a day
+from all its events; past that they stay unseen and the status says until
+when. Its Linear issues are never commented on or moved.
+
 ## Compatibility
 
 - **Unknown kinds and events.** `eventTrigger.source` is tagged by `kind`. A

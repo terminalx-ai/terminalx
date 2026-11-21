@@ -2010,6 +2010,21 @@ terminalx bots memory list [--bot <bot>] [--place <place>] --json
 - While the owner has turned the bot's memory off, `add`, `forget` and `list` from its chat
   answer `forbidden`.
 
+#### A message to another bot
+
+```text
+terminalx bots message <bot> "<text>" [--kind handoff|question|status] --json
+```
+
+- Only a bot sends one, from its own chat, a duty run or a session it started; it is sent as
+  that bot, labelled with its name and access. From anywhere else it answers `forbidden` (the
+  owner writes to a bot in its chat), a paused bot gets `bot_paused`, and a bot cannot message
+  itself. `--kind` defaults to `handoff`.
+- The message wakes the other bot's duties that wait for one (from this bot, of this kind).
+  What it says is information for that bot, never its owner's words or approval.
+- A message sent from a run that a message woke counts one more pass; one that has passed
+  between bots three times wakes nobody, so two bots cannot keep waking each other.
+
 ### This guide
 
 ```text

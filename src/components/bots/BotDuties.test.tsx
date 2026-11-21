@@ -14,7 +14,14 @@ const mocks = vi.hoisted(() => ({
   restart: vi.fn(async () => undefined),
 }));
 
-vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: (error: unknown) => String(error), automationsApi: { tryPrecheck: vi.fn() } }));
+vi.mock("@/lib/api", () => ({
+  invoke: mocks.invoke,
+  errorMessage: (error: unknown) => String(error),
+  automationsApi: { tryPrecheck: vi.fn(), sourcePreview: vi.fn(async () => []) },
+  issues: { linearTeams: vi.fn(async () => [{ id: "t1", name: "Eng" }]), githubRepo: vi.fn(async () => null) },
+}));
+vi.mock("@/lib/issueOps", () => ({ issueOps: { options: vi.fn(async () => ({ states: [], members: [] })) } }));
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/automations", () => ({ useAutomationStore: () => mocks.automations, loadAutomationRuns: mocks.loadRuns }));
 vi.mock("@/lib/bots", () => ({ useBotStore: () => mocks.bots }));
 vi.mock("@/lib/sessions", () => ({ useSessionStore: () => mocks.sessions }));
@@ -99,7 +106,7 @@ describe("a bot's Duties tab (PRO-471, design 23.05)", () => {
     expect(await screen.findByText(/22:00–07:00: only urgent reports reach your notifications/)).toBeTruthy();
   });
 
-  it("counts today's checks, keeps nothing-new runs in the log, and offers only a schedule for now", () => {
+  it("counts today's checks, keeps nothing-new runs in the log, and offers every wake but the ones that need a connector", () => {
     tab();
     const stats = screen.getAllByTestId("duties-stat").map((stat) => stat.textContent);
     expect(stats).toEqual(["4checks", "3nothing new", "1reports"]);
@@ -107,8 +114,9 @@ describe("a bot's Duties tab (PRO-471, design 23.05)", () => {
     expect(log.some((line) => line?.includes("Stalled sessions · nothing new ×3"))).toBe(true);
     expect(log.some((line) => line?.includes("Queue time on main · told atlas") && line.includes("$0.21"))).toBe(true);
     const tiles = screen.getAllByTestId("duty-wake") as HTMLButtonElement[];
-    expect(tiles.map((tile) => tile.disabled)).toEqual([false, true, true, true, true, true, true, true]);
-    expect(tiles[0].textContent).toContain("A schedule");
+    expect(tiles.map((tile) => [tile.querySelector("span > span")?.textContent, tile.disabled])).toEqual([
+      ["A schedule", false], ["GitHub", false], ["Linear", false], ["Slack", true], ["Telegram or WhatsApp", true], ["A webhook", true], ["Another bot", false], ["Wait until", false],
+    ]);
   });
 
   it("changes quiet hours", async () => {
@@ -273,5 +281,100 @@ describe("a duty's first check (PRO-471 review 1)", () => {
     mocks.confirm.mockResolvedValueOnce(false);
     fireEvent.click(screen.getByRole("button", { name: "Remove Release readiness" }));
     await waitFor(() => expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ body: "Argus stops doing it, and its runs are removed with it. Its note stays in Argus's home." })));
+  });
+});
+
+describe("duties that wake on an event (PRO-472)", () => {
+  const savedInput = () => mocks.invoke.mock.calls.find(([command]) => command === "bot_duty_save")![1].input;
+  const fill = (editor: HTMLElement) => {
+    fireEvent.change(within(editor).getByPlaceholderText("Queue time on main"), { target: { value: "Review each pull request" } });
+    fireEvent.change(within(editor).getByPlaceholderText(/Say which jobs are slow/), { target: { value: "Review it." } });
+  };
+  const tile = (label: string) => screen.getAllByTestId("duty-wake").find((value) => value.textContent?.startsWith(label))!;
+
+  it("lists what wakes an event duty and that it runs on an event", () => {
+    const reviews = duty("d6", "Review each pull request", { eventTrigger: { source: { kind: "githubPullRequest", repo: "acme/widgets", events: ["opened"], labels: [] }, pollIntervalMinutes: 5, maxRunsPerTick: 1 }, created: "2026-11-20T13:00:00Z" });
+    const handoffs = duty("d7", "Take hand-offs", { eventTrigger: { source: { kind: "botMessage", from: ["b2"], kinds: ["handoff"] }, pollIntervalMinutes: 1, maxRunsPerTick: 1 } as unknown as Automation["eventTrigger"], created: "2026-11-20T14:00:00Z" });
+    mocks.automations = { ...mocks.automations, automations: [reviews, handoffs] };
+    render(<BotDuties bot={argus} onOpenSession={() => {}} />);
+    const rows = screen.getAllByTestId("duty-row").map((row) => row.textContent);
+    expect(rows[0]).toContain("GitHub · PR opened");
+    expect(rows[0]).toContain("Next: on event");
+    expect(rows[1]).toContain("Atlas · handoff");
+    fireEvent.click(screen.getByRole("button", { name: "Review each pull request" }));
+    const page = screen.getByTestId("bot-duty");
+    expect(within(page).getAllByTestId("duty-step")[0].textContent).toContain("Wakes on an event");
+    expect(page.textContent).toContain("On event");
+    expect(page.textContent).not.toContain("9999");
+  });
+
+  it("adds a duty that wakes on a pull request, then on a mention of the bot, from the GitHub tile", async () => {
+    tab();
+    fireEvent.click(tile("GitHub"));
+    const editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    expect(within(editor).queryByText("New runs per tick")).toBeNull();
+    const save = within(editor).getByTestId("duty-save") as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.change(within(editor).getByPlaceholderText("owner/repo"), { target: { value: "acme/widgets" } });
+    expect(save.disabled).toBe(false);
+    fireEvent.change(within(editor).getByTestId("duty-wake-kind"), { target: { value: "githubMention" } });
+    expect((within(editor).getByPlaceholderText("owner/repo") as HTMLInputElement).value).toBe("acme/widgets");
+    expect(within(editor).getByTestId("duty-wake-note").textContent).toContain("never as instructions");
+    fireEvent.click(save);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake).toMatchObject({ source: { kind: "githubMention", repo: "acme/widgets", handle: "argus" }, maxRunsPerTick: 1 });
+  });
+
+  it("adds a Linear issue duty that never comments on the issue", async () => {
+    tab();
+    fireEvent.click(tile("Linear"));
+    const editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    expect(within(editor).queryByText("Report back")).toBeNull();
+    await waitFor(() => expect((within(editor).getByTestId("duty-save") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake.source).toMatchObject({ kind: "linearIssue", teamId: "t1", report: { comment: false, commentOnFailure: false } });
+  });
+
+  it("adds one that wakes on another bot's hand-off, and one that waits until a file changes", async () => {
+    tab();
+    fireEvent.click(tile("Another bot"));
+    let editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    fireEvent.click(within(editor).getByLabelText("Atlas"));
+    fireEvent.click(within(editor).getByLabelText("Hand-off"));
+    expect(editor.textContent).toContain("terminalx bots message argus");
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake.source).toEqual({ kind: "botMessage", from: ["b2"], kinds: ["handoff"] });
+
+    cleanup();
+    mocks.invoke.mockClear();
+    tab();
+    fireEvent.click(tile("Wait until"));
+    editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    fireEvent.click(within(editor).getByRole("radio", { name: "A file" }));
+    const save = within(editor).getByTestId("duty-save") as HTMLButtonElement;
+    const path = within(editor).getByPlaceholderText("/Users/you/notes/release.md");
+    fireEvent.change(path, { target: { value: "notes.md" } });
+    expect(save.disabled).toBe(true);
+    fireEvent.change(path, { target: { value: "/Users/me/notes.md" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake.source).toEqual({ kind: "watch", target: "file", value: "/Users/me/notes.md" });
+  });
+
+  it("switches an event duty back to a schedule", async () => {
+    tab();
+    fireEvent.click(tile("Another bot"));
+    const editor = screen.getByTestId("duty-editor");
+    fill(editor);
+    fireEvent.click(within(editor).getByRole("radio", { name: "A schedule" }));
+    fireEvent.click(within(editor).getByTestId("duty-save"));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_duty_save", expect.anything()));
+    expect(savedInput().wake).toBeNull();
   });
 });

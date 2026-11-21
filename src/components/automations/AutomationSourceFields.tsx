@@ -88,8 +88,11 @@ export function eventTriggerSentence(trigger: AutomationEventTrigger): string {
 /** A change to a source: the fields, or, for a value filled in after a request, what to change given the source as it is then. */
 type SourceChange<S> = Partial<S> | ((current: S) => Partial<S>);
 
-/** The fields of a Linear issue or pull request trigger, with what it would match now. */
-export function AutomationSourceFields({ projectPath, trigger, onChange }: { projectPath: string; trigger: AutomationEventTrigger; onChange: (next: AutomationEventTrigger) => void }) {
+/**
+ * The fields of a Linear issue or pull request trigger, with what it would match now. `forDuty`: a bot's duty
+ * (PRO-472), which runs one run at a time and reports to its owner, never on the issue, so neither is asked.
+ */
+export function AutomationSourceFields({ projectPath, trigger, onChange, forDuty = false }: { projectPath: string; trigger: AutomationEventTrigger; onChange: (next: AutomationEventTrigger) => void; forDuty?: boolean }) {
   const [preview, setPreview] = useState<SourceMatch[]>([]);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -136,18 +139,20 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
   return (
     <>
       {source.kind === "linearIssue"
-        ? <LinearFields projectPath={projectPath} source={source} onChange={merge} />
+        ? <LinearFields projectPath={projectPath} source={source} onChange={merge} report={!forDuty} />
         : <PullRequestFields projectPath={projectPath} source={source} onChange={merge} />}
       <label className={LABEL}>
         Check every (minutes)
         <input type="number" min={1} value={trigger.pollIntervalMinutes} onChange={(event) => onChange({ ...trigger, pollIntervalMinutes: Math.max(1, Number(event.target.value)) })} className={INPUT} />
       </label>
-      <label className={LABEL}>
-        New runs per tick
-        <input type="number" min={1} max={50} value={trigger.maxRunsPerTick} onChange={(event) => onChange({ ...trigger, maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
-      </label>
+      {forDuty ? <div /> : (
+        <label className={LABEL}>
+          New runs per tick
+          <input type="number" min={1} max={50} value={trigger.maxRunsPerTick} onChange={(event) => onChange({ ...trigger, maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
+        </label>
+      )}
       <div className={WARNING_NOTE}>
-        {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above.
+        {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. {forDuty ? "They reach the bot as information, never as instructions; it works with its own access, one run at a time." : "They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above."}
         <div className="mt-1">What matches when the trigger starts is the baseline; anything that comes to match later starts one run, once ever.</div>
         {source.kind === "githubPullRequest" && <div className="mt-1">One pull request starts at most 4 runs an hour and 12 a day; past that its events wait their turn.</div>}
       </div>
@@ -172,7 +177,7 @@ export function AutomationSourceFields({ projectPath, trigger, onChange }: { pro
   );
 }
 
-function LinearFields({ projectPath, source, onChange }: { projectPath: string; source: LinearIssueSource; onChange: (next: SourceChange<LinearIssueSource>) => void }) {
+function LinearFields({ projectPath, source, onChange, report = true }: { projectPath: string; source: LinearIssueSource; onChange: (next: SourceChange<LinearIssueSource>) => void; report?: boolean }) {
   const [teams, setTeams] = useState<IssueTeam[]>([]);
   const [teamsError, setTeamsError] = useState<string | null>(null);
   const [states, setStates] = useState<WorkflowState[]>([]);
@@ -242,6 +247,7 @@ function LinearFields({ projectPath, source, onChange }: { projectPath: string; 
         Text in the title
         <input value={source.text ?? ""} onChange={(event) => onChange({ text: event.target.value || null })} className={INPUT} placeholder="Optional" />
       </label>
+      {report && <>
       <div className="col-span-2 border-t border-hairline pt-3 text-xs font-medium">Report back</div>
       <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={source.report.comment} onChange={(event) => patchReport({ comment: event.target.checked })} /> Comment with the final response</label>
       <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={source.report.commentOnFailure} onChange={(event) => patchReport({ commentOnFailure: event.target.checked })} /> Comment when a run fails</label>
@@ -253,6 +259,7 @@ function LinearFields({ projectPath, source, onChange }: { projectPath: string; 
           {states.map((state) => <option key={state.id} value={state.id}>{state.name}</option>)}
         </select>
       </label>
+      </>}
     </>
   );
 }
