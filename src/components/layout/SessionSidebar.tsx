@@ -37,7 +37,7 @@ import {
 } from "@/components/ui/menu";
 import { openSessionShare } from "@/lib/localSharing";
 import { showFloatingWindow } from "@/lib/floating";
-import { inScratch, isQuickChat, quickChatPlace } from "@/lib/quickChats";
+import { isQuickChat, quickChatPlace } from "@/lib/quickChats";
 import { listedUnderBot } from "@/lib/botChats";
 import { useBotStore } from "@/lib/bots";
 import { useShortcutKeys } from "@/lib/hotkeys";
@@ -84,7 +84,7 @@ import { RenameBranchDialog } from "./RenameBranchDialog";
 import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import { IssueLinkContextItems, IssueLinkMenuItems } from "@/components/session/IssueLinkMenuItems";
 
-import { compareSidebarSessions, type SidebarSort } from "@/lib/sidebarView";
+import { compareSidebarSessions, quickChatProject, type SidebarSort } from "@/lib/sidebarView";
 import { ManualStatusMenu } from "@/components/session/ManualStatus";
 import { manualStatusLabel } from "@terminalx/portable/manualStatus";
 import { conversationTime } from "@/lib/messageActivity";
@@ -139,37 +139,16 @@ export function conversationLink(
   return { path: session.projectPath, project, name: project?.name ?? (path.split("/").pop() || path), branch };
 }
 
-const holds = (dir: string, path: string) => path === dir || path.startsWith(`${dir}/`);
-
-/**
- * A quick chat is linked to the listed project it was pointed into, its
- * folder or one of its worktrees, as a chat is to the repository its agent
- * works in; the folder never becomes a project. In its scratch folder, or
- * pointed anywhere else, it is linked to nothing and listed under Chats. The
- * deepest folder that holds it wins, so a worktree kept inside its project's
- * folder names its own branch.
- */
+/** A quick chat is linked to the listed project it was pointed into, else to nothing: it is listed under Chats (#1464). */
 function quickChatLink(
   session: SessionEntry,
   projects: Project[],
   chatsPath: string | null,
   workspaces: Record<string, Workspace[]>,
 ): { path: string; project: Project; name: string; branch: string | null } | null {
-  if (inScratch(session)) return null;
-  const cwd = canon(session.cwd);
-  let best: { depth: number; project: Project; branch: string | null } | null = null;
-  for (const project of projects) {
-    const root = canon(project.path);
-    if (project.archived || root === chatsPath) continue;
-    const checkouts = workspaces[project.path] ?? workspaces[root] ?? [];
-    const places = [{ path: root, branch: checkouts.find((checkout) => checkout.isMain)?.branch ?? null }, ...checkouts.map((checkout) => ({ path: canon(checkout.path), branch: checkout.branch }))];
-    for (const place of places) {
-      if (!place.path || !holds(place.path, cwd) || (best && best.depth >= place.path.length)) continue;
-      best = { depth: place.path.length, project, branch: place.branch };
-    }
-  }
-  if (!best) return null;
-  return { path: best.project.path, project: best.project, name: best.project.name, branch: best.branch ?? session.branch ?? null };
+  const inside = quickChatProject(session, projects, chatsPath, workspaces);
+  if (!inside) return null;
+  return { path: inside.project.path, project: inside.project, name: inside.project.name, branch: inside.branch ?? session.branch ?? null };
 }
 
 /** Where a row out of its project lives, for its tooltip: the project, then the branch by the label it was given. */
@@ -732,7 +711,9 @@ function ProjectGroup({
       // original branch name has been reused (or it now resumes on main).
       // Checkouts detached at one commit share a label, not a row: each is its own, so its actions act on it (PRO-367).
       const detached = branch ? detachedCheckout(session, branch) : null;
-      const key = session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : detached ? `detached:${canon(detached.path)}` : `branch:${branch}`;
+      // A quick chat in the project's folder is no session of its branch: its tabs are not in the branch's tab bar
+      // (#721), so it keeps a row of its own, by its title, rather than being folded into the branch's (#1464).
+      const key = isQuickChat(session) ? `quick:${session.id}` : session.worktreeRemoved ? `removed:${session.removedWorkspace?.path ?? session.id}` : detached ? `detached:${canon(detached.path)}` : `branch:${branch}`;
       const entry = byBranch.get(key) ?? { key, branch, sessions: [] };
       entry.sessions.push(session);
       byBranch.set(key, entry);
@@ -745,6 +726,7 @@ function ProjectGroup({
   const removed = branches.filter((entry) => entry.key.startsWith("removed:"));
   const shown = live;
   const sortBranch = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) => {
+    if (key.startsWith("quick:")) return { id: `branch:${key}`, name: conversationTitle(sessions[0]), members: [sessions[0].id] };
     const tabbed = asTabs ? sessions.filter((session) => session.tabs.length > 0) : sessions;
     const represented = tabbed.length ? tabbed : sessions;
     const current = represented.find((session) => session.id === selectedId) ?? represented[0];
@@ -794,7 +776,9 @@ function ProjectGroup({
     );
   };
   const row = ({ key, branch, sessions }: { key: string; branch: string; sessions: SessionEntry[] }) =>
-    sessions.length === 1 || asTabs ? (
+    key.startsWith("quick:") ? (
+      <ConversationRow key={key} sortId={`branch:${key}`} session={sessions[0]} selected={sessions[0].id === selectedId} branch={branch || null} label={labels[branch]} linkTo={null} />
+    ) : sessions.length === 1 || asTabs ? (
       tabsRows(key, branch, sessions)
     ) : (
       <BranchRow

@@ -10,7 +10,7 @@ import { launch, open, report, serve, sidebar } from "./harness.mjs";
 const ID = "01a1ce55-efc8-7be2-9a00-5f1e2a3b4c5d";
 
 function setup(id) {
-  localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, sidebarOpen: true, sidebarLayout: "simple", animations: false }));
+  localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, sidebarOpen: true, sidebarLayout: "simple", branchSessions: "tabs", animations: false }));
   const answers = window.__PW_STUB__.answers;
   const at = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
   const entry = (sessionId, title, projectPath, cwd, minutes, extra = {}) => ({
@@ -52,7 +52,8 @@ try {
       "no sidebar text is a session id": !(await list.textContent()).includes(ID) && !groups.some((name) => name?.includes(ID)),
       "quick chats in scratch and pointed outside are under Chats by title, saying where they run":
         JSON.stringify(chats) === JSON.stringify(["Scratch folder · Review the open diff for missed edge cases", "notes · Summarise the meeting notes"]),
-      "a quick chat pointed into the project is under it": (await project.getByText("Research the router's retry rules").count()) > 0 || (await project.locator('[data-row-sessions*="q-inside"]').count()) > 0,
+      "a quick chat pointed into the project is under it": await project.locator('[data-row-sessions="q-inside"]').getByText("Research the router's retry rules", { exact: true }).isVisible()
+        && await project.locator('[data-row-sessions="work"]').getByText("Fix the login redirect", { exact: true }).isVisible(),
       "a pinned quick chat says where it runs": (await tooltip("Keep an eye on the release checklist")) === "Scratch folder · Keep an eye on the release checklist",
       "every row fits the sidebar": overflow === 0,
       "no page errors": errors.length === 0,

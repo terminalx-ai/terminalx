@@ -1196,6 +1196,22 @@ describe("quick chats (#1464)", () => {
     expect(groupConversations([a, b], projects, chatsPath, checkouts, null, true, false, "updated", undefined, true).chats.map((entry) => entry.id)).toEqual(["a", "b"]);
   });
 
+  it("gives a quick chat pointed into a project a row of its own, by its title, with the branch's sessions as tabs", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    await boot([
+      session("here", "/repos/web", "2026-11-01T10:00:00Z"),
+      quick("older", "2026-11-01T09:00:00Z", { cwd: "/repos/web" }),
+      quick("newer", "2026-11-01T11:00:00Z", { cwd: "/repos/web/src" }),
+    ]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    const rows = [...web.querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rows).toEqual(["newer", "here", "older"]);
+    expect(within(web).getByRole("button", { name: "Talk older" })).toBeTruthy();
+    expect(within(web).getByRole("button", { name: "Talk newer" })).toBeTruthy();
+    expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
+  });
+
   it("lists quick chats by title under Chats, never a group named by an id, and says where each runs in its tooltip", async () => {
     const id = "01a1ce55-efc8-7be2-9a00-5f1e2a3b4c5d";
     const named = quick(id, "2026-11-03", { title: "Review the diff" });
