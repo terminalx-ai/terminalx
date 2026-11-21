@@ -175,6 +175,8 @@ Usage:
   terminalx bots memory add NOTE [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory forget NOTE [--line N] [--bot BOT] [--place PLACE] [--json]
   terminalx bots memory list [--bot BOT] [--place PLACE] [--json]
+  terminalx bots memory tidy --plan JSON [--bot BOT] [--json]
+  terminalx bots suggest --title TITLE --why TEXT [--json]
   terminalx bots items list [--all] [--bot BOT] [--json]
   terminalx bots items show ITEM [--bot BOT] [--json]
   terminalx bots items add --title TITLE [--summary TEXT] [--done "TEXT | HOW"]... [--start] [--asked-by WHO] [--json]
@@ -1597,7 +1599,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// slug, id or name. The app answers `bots_off` while Settings → Experimental
 /// → Bots is off.
 fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell or handoffs";
+    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell, handoffs or suggest";
     let command = tokens.required_front(&format!("bots command ({COMMANDS})"))?;
     let said = |tokens: &mut Tokens, option: &str, what: &str| -> Result<String, ControlError> {
         match tokens.option(option)? {
@@ -1640,6 +1642,7 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "memory" => parse_bot_memory(tokens),
         "items" => parse_bot_items(tokens),
         "handoff" | "tell" | "handoffs" => parse_bot_handoffs(&command, tokens),
+        "suggest" => parse_bot_suggest(tokens),
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
 }
@@ -1793,13 +1796,30 @@ fn parse_bot_items(tokens: &mut Tokens) -> Result<Action, ControlError> {
 }
 
 
+/// A bot's suggestion (PRO-477): work it proposes, which changes nothing
+/// until its owner presses Start on its Home tab. Only from one of the bot's
+/// own sessions, which the app works out from where the command runs.
+fn parse_bot_suggest(tokens: &mut Tokens) -> Result<Action, ControlError> {
+    let mut params = json!({});
+    if let Some(caller) = calling_session() {
+        params["caller"] = caller;
+    }
+    for (option, key, what) in [("--title", "title", "what to do, in one line"), ("--why", "why", "why it is worth doing, in one line")] {
+        match tokens.option(option)? {
+            Some(value) if !value.trim().is_empty() => params[key] = json!(value),
+            _ => return Err(invalid(format!("bots suggest needs {option} TEXT: {what}."))),
+        }
+    }
+    rpc("bots.suggest", params, tokens)
+}
+
 /// A bot's memory (PRO-470): one dated note per line. From a bot's own chat
 /// it is that bot's, and the app records each write as the bot's from that
 /// chat; from anywhere else `--bot` names the bot. PLACE is `bot` (the
 /// default: notes that go with the bot), `personal`, or an organisation the
 /// bot works in.
 fn parse_bot_memory(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    let action = tokens.required_front("bots memory command (add, forget or list)")?;
+    let action = tokens.required_front("bots memory command (add, forget, list or tidy)")?;
     let mut params = json!({});
     for option in ["--bot", "--place"] {
         if let Some(value) = tokens.option(option)? {
@@ -1825,7 +1845,14 @@ fn parse_bot_memory(tokens: &mut Tokens) -> Result<Action, ControlError> {
             rpc(&format!("bots.memory.{action}"), params, tokens)
         }
         "list" => rpc("bots.memory.list", params, tokens),
-        other => Err(invalid(format!("Unknown bots memory command {other}. Use add, forget or list."))),
+        // One whole tidy (PRO-477): notes merged and removed, recorded as one change.
+        "tidy" => {
+            let plan = tokens.option("--plan")?.ok_or_else(|| invalid("bots memory tidy needs --plan JSON: the notes to merge and to remove, by line number and text."))?;
+            let plan: Value = serde_json::from_str(&plan).map_err(|error| invalid(format!("--plan is not JSON: {error}.")))?;
+            params["plan"] = plan;
+            rpc("bots.memory.tidy", params, tokens)
+        }
+        other => Err(invalid(format!("Unknown bots memory command {other}. Use add, forget, list or tidy."))),
     }
 }
 
@@ -2267,6 +2294,26 @@ mod tests {
         }
         for said in ["### Orchestration runs", "terminalx runs create --from <plan.json>", "No command of this CLI approves a run", "`shared_file`", "`dependency_cycle`", "`no_done_check`", "`too_many_pieces`", "`mode_not_allowed`", "`unknown_key`", "A worker gets no issue pipeline", "`awaiting_approval`", "`doneChecks`", "{\"type\": \"command\", \"run\":", "{\"type\": \"review\", \"text\":", "`no_command_check`", "`review_only_without_reason`", "\"reviewOnly\": true", "`owns_outside_repository`", "`readsUntrusted`", "does not\npush, does not merge, and does not deploy", "\"orchestratorRuns\": false", "\"pieceLimit\": 8", "#### Model and effort", "`no_kind`", "`unknown_kind`", "#### When a piece falls short", "#### How a result is checked", "`verifying`", "no verifier session at all", "`reviewDiffLines`", "`verifierTokens`", "does not return each time a\nworker's turn ends", "terminalx runs check-failed <piece>", "never past\n   `high`", "`piece_not_done`", "`modelNote`", "| top | Fable | Astra |", "#### Merging the accepted pieces", "terminalx runs merge --json", "**that merge alone is undone**", "`integrationCheck`", "`lead_checkout_dirty`", "`lead_on_shared_branch`", "`merge_in_progress`", "terminalx runs send-back <piece> --json", "terminalx runs merge --skip <piece> --json", "terminalx runs cleanup --yes --json", "Branches are always kept"] {
             assert!(GUIDE.contains(said), "the guide does not say {said:?}");
+        }
+    }
+
+    /// PRO-477: a bot's suggestion and its memory tidy, from inside its session.
+    #[test]
+    fn bots_suggest_and_memory_tidy_carry_their_session() {
+        let short = Duration::from_secs(30);
+        let caller = json!({"session": "look", "tab": "look-tab"});
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = Some(caller.clone()));
+        let suggested = rpc_of(&["bots", "suggest", "--title", "Close PR #12", "--why", "#14 covers it", "--json"]);
+        let plan = r#"{"remove":[{"line":2,"note":"Ships on Fridays"}]}"#;
+        let tidied = rpc_of(&["bots", "memory", "tidy", "--plan", plan]);
+        CALLING_SESSION.with(|calling| *calling.borrow_mut() = None);
+        assert_eq!(suggested, ("bots.suggest".into(), json!({"title": "Close PR #12", "why": "#14 covers it", "caller": caller}), short));
+        assert_eq!(tidied, ("bots.memory.tidy".into(), json!({"plan": {"remove": [{"line": 2, "note": "Ships on Fridays"}]}, "caller": caller}), short));
+        for refused in [
+            &["bots", "suggest"][..], &["bots", "suggest", "--title", "Close it"], &["bots", "suggest", "--why", "Old"], &["bots", "suggest", "--title", " ", "--why", "Old"],
+            &["bots", "suggest", "--title", "Close it", "--why", "Old", "extra"], &["bots", "memory", "tidy"], &["bots", "memory", "tidy", "--plan", "not json"],
+        ] {
+            assert_eq!(parse(&args(refused)).unwrap_err().code, "invalid_arguments", "{refused:?}");
         }
     }
 

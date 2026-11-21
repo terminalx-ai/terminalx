@@ -250,5 +250,6 @@ export function dutyInputOf(duty: Automation): DutyInput {
     precheck: duty.precheck ?? null,
     reportsTo: duty.bot?.reportsTo ?? "terminalx",
     enabled: duty.enabled,
+    ...(duty.bot?.builtin ? { focus: duty.bot.focus ?? null } : {}),
   };
 }

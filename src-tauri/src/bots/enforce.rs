@@ -200,6 +200,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
     if let Err(error) = super::items::trash(id) {
         log::warn!("move the work items of deleted bot {id} to the trash: {error:#}");
     }
+    // Its suggestions too (PRO-477).
+    if let Err(error) = super::suggestions::trash(id) {
+        log::warn!("move the suggestions of deleted bot {id} to the trash: {error:#}");
+    }
     // Its hand-offs and messages leave with it (PRO-475).
     if let Err(error) = super::handoffs::forget_bot(sink, id) {
         log::warn!("move the hand-offs of deleted bot {id} to the trash: {error:#}");
@@ -227,6 +231,10 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     }
     // Hand-offs, and the team brief (PRO-475).
     if let Some(answer) = super::handoffs::runtime_call(manager, operation, params) {
+        return answer;
+    }
+    // Suggestions, and the look around's status (PRO-477).
+    if let Some(answer) = super::suggestions::runtime_call(manager, operation, params) {
         return answer;
     }
     if operation == "reconcile" {
@@ -302,6 +310,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
         // PRO-475: handing an item on makes a bot work; the team brief is what every bot is told.
         "itemHand" | "briefWrite" => true,
+        // PRO-477: Start makes a bot work, as the owner's message.
+        "suggestionStart" => true,
         "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             // A patch this build cannot read may give more than it can tell.

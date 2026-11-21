@@ -552,7 +552,12 @@ fn owner_work_message(item: &Item) -> String {
     if !item.summary.is_empty() {
         message.push_str(&format!("\n\n{}", item.summary));
     }
-    message.push_str("\n\nWrite down what done means for it, and plan it in your work list.");
+    // An item the owner started (a suggestion's Start, PRO-477) is begun now; one they gave is planned first.
+    message.push_str(if item.state == ItemState::InProgress {
+        "\n\nStart on it now: write down what done means for it, and keep the item up to date as you work."
+    } else {
+        "\n\nWrite down what done means for it, and plan it in your work list."
+    });
     message
 }
 
@@ -1428,6 +1433,16 @@ pub fn runtime_call(manager: &crate::session::SessionManager, operation: &str, p
     Some(owner_call(manager, operation, params))
 }
 
+/// The owner gives `bot` work: a new item they asked for, told to the bot in its home chat as their message. With
+/// `start` it is in progress at once and the bot is told to begin (a suggestion's Start, PRO-477); without, it is
+/// planned. The item's number, and the answer the window shows.
+pub fn give(manager: &crate::session::SessionManager, bot: &Bot, title: &str, summary: &str, start: bool) -> Result<(u64, Value)> {
+    keep_sink(manager.sink());
+    let sink = manager.sink();
+    let item = add(sink.as_ref(), bot, &By::Owner, NewItem { added_by: None, title: title.into(), summary: summary.into(), done_means: Vec::new(), start, asked_by: None })?;
+    Ok((item.number, act(manager, &bot.id, item.number, newest_waiting(&item))))
+}
+
 /// Send what waits, then answer with the item as it now is and how the newest message fared.
 fn act(manager: &crate::session::SessionManager, id: &str, number: u64, newest: Option<String>) -> Value {
     let delivery = deliver(manager, id, newest.as_deref());
@@ -1473,17 +1488,7 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
             let item = reopen(sink, &bot, number(params, "number")?)?;
             act(manager, &bot.id, item.number, newest_waiting(&item))
         }
-        "itemGive" => {
-            let item = add(sink, &bot, &By::Owner, NewItem {
-                added_by: None,
-                title: params["title"].as_str().unwrap_or_default().into(),
-                summary: params["summary"].as_str().unwrap_or_default().into(),
-                done_means: Vec::new(),
-                start: false,
-                asked_by: None,
-            })?;
-            act(manager, &bot.id, item.number, newest_waiting(&item))
-        }
+        "itemGive" => give(manager, &bot, params["title"].as_str().unwrap_or_default(), params["summary"].as_str().unwrap_or_default(), false)?.1,
         _ => {
             // Stop this item: its sessions stop, then it is dropped. Only the bot's own sessions are linked.
             let number = number(params, "number")?;

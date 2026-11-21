@@ -14,9 +14,11 @@ pub mod chat;
 pub mod calendar;
 pub mod duties;
 pub mod brief;
+pub mod builtins;
 pub mod enforce;
 pub mod handoffs;
 pub mod items;
+pub mod suggestions;
 pub mod templates;
 
 use std::collections::BTreeMap;

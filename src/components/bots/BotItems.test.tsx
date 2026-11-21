@@ -104,6 +104,8 @@ function route(command: string, args: Record<string, unknown> = {}) {
     case "bot_item_resend":
     case "bot_item_reopen":
       return Promise.resolve({ item: { ...asking, state: "inProgress", question: undefined }, delivery: { sent: true, sessionId: "home" } });
+    case "bot_suggestions":
+      return Promise.resolve({ suggestions: [], unreadable: 0, status: { lookAround: null, tidyMemory: null, paused: false, readOnly: false } });
     default:
       return Promise.reject(new Error(`unexpected ${command}`));
   }

@@ -790,6 +790,152 @@ pub fn template_diff(bot: &Bot) -> Result<Option<Vec<DiffLine>>> {
     Ok(changes::diff(&changes::lines_of(&super::role_text(&template)), &changes::lines_of(&role.text)))
 }
 
+/// One note a tidy names: its line number as `terminalx bots memory list`
+/// shows it (from 1), and its text, so a file changed since it was read is
+/// never tidied by line numbers that now point elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TidyLine {
+    /// `bot` (the default), `personal`, or an organisation the bot works in.
+    #[serde(default)]
+    pub place: Option<String>,
+    pub line: usize,
+    pub note: String,
+}
+
+/// Notes that say the same thing, made one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TidyMerge {
+    pub lines: Vec<TidyLine>,
+    /// The one note they become.
+    pub into: String,
+}
+
+/// A whole tidy of a bot's memory (PRO-477): notes merged and notes removed
+/// (a duplicate, or one a newer note contradicts), recorded as one change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TidyPlan {
+    #[serde(default)]
+    pub merge: Vec<TidyMerge>,
+    #[serde(default)]
+    pub remove: Vec<TidyLine>,
+}
+
+/// The most notes one tidy names.
+pub const TIDY_MAX_LINES: usize = 200;
+/// What a tidy's change is recorded as.
+pub const TIDY_KIND: &str = "tidied";
+
+/// What a tidy did, in a line.
+fn tidy_text(merges: usize, merged: usize, removed: usize) -> String {
+    let plural = |count: usize, one: &str, many: &str| if count == 1 { format!("1 {one}") } else { format!("{count} {many}") };
+    let mut parts = Vec::new();
+    if merges > 0 {
+        parts.push(format!("merged {} into {}", plural(merged, "note", "notes"), plural(merges, "note", "notes")));
+    }
+    if removed > 0 {
+        parts.push(format!("removed {}", plural(removed, "note", "notes")));
+    }
+    format!("Tidied memory: {}", parts.join(", "))
+}
+
+/// Tidy `bot`'s memory as `plan` says: each merge's notes become its one
+/// note, in the place of the first of them, dated as the newest of them, and
+/// each removed note goes. Every line is named by its number and its text;
+/// one that no longer reads so refuses the whole tidy, and nothing is
+/// written. The whole tidy is one change in the history, which one Undo
+/// puts back. `places` are the places the caller may tidy.
+pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], by: &str, source: Source) -> Result<Vec<Change>> {
+    let named = plan.merge.iter().map(|merge| merge.lines.len()).sum::<usize>() + plan.remove.len();
+    if named == 0 {
+        return Err(refused("Nothing to tidy: name notes to merge or remove. When nothing needs tidying, change nothing."));
+    }
+    if named > TIDY_MAX_LINES {
+        return Err(refused(format!("One tidy names at most {TIDY_MAX_LINES} notes.")));
+    }
+    if plan.merge.iter().any(|merge| merge.lines.len() < 2) {
+        return Err(refused("A merge makes two or more notes one: name each of them."));
+    }
+    let merged: Vec<String> = plan.merge.iter().map(|merge| clean_note(&merge.into)).collect::<Result<_>>()?;
+    let place_of = |line: &TidyLine| -> Result<Place> {
+        let place = Place::parse(bot, line.place.as_deref().unwrap_or(BOT_PLACE))?;
+        if !places.contains(&place) {
+            return Err(refused(format!("This tidy may not change {}.", place_label(&place))));
+        }
+        Ok(place)
+    };
+    let ((), recorded) = changes::commit(sink, &bot.id, |files| {
+        // Each named note, checked against the file as it is now, and named once.
+        let mut texts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut taken: BTreeSet<(String, usize)> = BTreeSet::new();
+        let mut take = |files: &mut changes::Files, texts: &mut BTreeMap<String, Vec<String>>, line: &TidyLine| -> Result<(String, usize)> {
+            let file = place_of(line)?.memory_file();
+            if !texts.contains_key(&file) {
+                texts.insert(file.clone(), files.lines(&file)?);
+            }
+            let lines = &texts[&file];
+            let at = line.line.checked_sub(1).ok_or_else(|| refused("Lines are counted from 1, as `terminalx bots memory list` shows them."))?;
+            let found = lines.get(at).filter(|found| is_note(found) && note_text(found).eq_ignore_ascii_case(line.note.trim()));
+            if found.is_none() {
+                return Err(refused(format!("Line {} of {file} does not read “{}”: memory changed since it was read. List it again and tidy what it says now.", line.line, line.note.trim())));
+            }
+            if !taken.insert((file.clone(), at)) {
+                return Err(refused(format!("Line {} of {file} is named twice: a note is merged or removed once.", line.line)));
+            }
+            Ok((file, at))
+        };
+        // file -> (line index -> what takes its place: nothing, or a merged note)
+        let mut plan_of: BTreeMap<String, BTreeMap<usize, Option<String>>> = BTreeMap::new();
+        for (merge, into) in plan.merge.iter().zip(&merged) {
+            let mut lines = Vec::new();
+            for line in &merge.lines {
+                lines.push(take(files, &mut texts, line)?);
+            }
+            let newest = lines.iter().filter_map(|(file, at)| note_date(&texts[file][*at])).max().map(str::to_owned).unwrap_or_else(today);
+            let (first_file, first) = lines.iter().min().cloned().expect("a merge names two or more notes");
+            for (file, at) in &lines {
+                let replacement = (*file == first_file && *at == first).then(|| format!("- {newest} {into}"));
+                plan_of.entry(file.clone()).or_default().insert(*at, replacement);
+            }
+        }
+        for line in &plan.remove {
+            let (file, at) = take(files, &mut texts, line)?;
+            plan_of.entry(file).or_default().insert(at, None);
+        }
+        let mut edits = Vec::new();
+        for (file, changed) in &plan_of {
+            let before = &texts[file];
+            // Removed from the bottom up, so each index still holds.
+            for (&at, _) in changed.iter().rev() {
+                edits.push(Edit::RemoveLine { file: file.clone(), line: before[at].clone(), index: Some(at), prev: at.checked_sub(1).map(|above| before[above].clone()) });
+            }
+            // Then each merged note in the place of its first note, top down in the file as it will be.
+            let mut after: Vec<String> = Vec::new();
+            for (at, line) in before.iter().enumerate() {
+                match changed.get(&at) {
+                    None => after.push(line.clone()),
+                    Some(None) => {}
+                    Some(Some(note)) => {
+                        edits.push(Edit::AddLine { file: file.clone(), line: note.clone(), index: Some(after.len()), prev: after.last().cloned() });
+                        after.push(note.clone());
+                    }
+                }
+            }
+        }
+        let text = tidy_text(plan.merge.len(), plan.merge.iter().map(|merge| merge.lines.len()).sum(), plan.remove.len());
+        files.record(NewChange::new(TIDY_KIND, text, edits, source, by))
+    })?;
+    Ok(recorded)
+}
+
+/// The places a conversation with `bot` keeps notes in: its own and its working place's.
+pub fn conversation_places(bot: &Bot) -> Vec<Place> {
+    let working = working_place(bot);
+    if working == Place::Bot { vec![Place::Bot] } else { vec![Place::Bot, working] }
+}
+
 /// The memory operations of the runtime's `bots` call, made in the app by
 /// the owner, or `None` for an operation that is not one of them.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Option<Result<Value>> {

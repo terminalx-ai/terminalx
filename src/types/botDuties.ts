@@ -14,6 +14,13 @@ export interface DutyOwner {
   reportsTo: DutyReportsTo;
   /** The role template's duty it was made from at hire, if it was. */
   template?: string | null;
+  /**
+   * A built-in every bot has (PRO-477): `lookAround` or `tidyMemory`, or one a newer app made. Its name and prompt are
+   * TerminalX's; it is switched off, never removed or copied.
+   */
+  builtin?: "lookAround" | "tidyMemory" | (string & {}) | null;
+  /** A built-in Look around's focus line: what to look at first. */
+  focus?: string | null;
 }
 
 /** A new or changed duty. Its agent, model, access and folder are its bot's. */
@@ -24,6 +31,8 @@ export interface DutyInput {
   precheck: AutomationPrecheck | null;
   reportsTo: DutyReportsTo;
   enabled: boolean;
+  /** A built-in Look around's focus line; ignored for any other duty. */
+  focus?: string | null;
 }
 
 /** A bot's quiet hours, local wall time `HH:MM`; across midnight when `to` is earlier. */
