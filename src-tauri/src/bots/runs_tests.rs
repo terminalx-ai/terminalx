@@ -68,3 +68,34 @@ fn an_item_from_an_older_build_reads_with_no_runs_and_keeps_what_a_newer_one_wro
     assert!(older.runs.is_empty() && older.check_back.is_none());
     assert!(serde_json::to_value(&older).unwrap().get("runs").is_none());
 }
+
+#[test]
+fn the_person_check_reads_an_answer_as_the_app_does_and_counts_what_it_cannot_read() {
+    let _home = crate::store::temp_home();
+    // No item list here: anything that names an answer is judged as one that approves.
+    for params in [
+        json!({"id": "b1", "number": "#3", "answer": 0}),
+        json!({"id": "b1", "number": 3.0, "answer": 0}),
+        json!({"id": "b1", "number": 3, "answer": "0"}),
+        json!({"number": 3, "answer": 0}),
+        json!({"id": "b1", "number": 3, "answer": 0}),
+    ] {
+        assert!(answer_starts_run(&params), "{params}");
+    }
+    // Typed words never approve.
+    assert!(!answer_starts_run(&json!({"id": "b1", "number": 3, "text": "Approve and start"})));
+}
+
+#[test]
+fn only_a_persons_answer_to_the_question_they_read_approves_a_run() {
+    let start = question(PURPOSE_START_RUN, "r1");
+    assert!(approves(&start, &Answer::Choice(0)) && approves(&start, &Answer::Choice(1)) && !approves(&start, &Answer::Choice(2)));
+    assert!(!approves(&start, &Answer::Typed("Approve and start".into())));
+    let merge = question(PURPOSE_MERGE_RUN, "r1");
+    assert!(approves(&merge, &Answer::Choice(0)) && !approves(&merge, &Answer::Choice(1)));
+    assert!(!approves(&question("", ""), &Answer::Choice(0)));
+    assert!(refuse_approval(&start, &Answer::Choice(0), false, Some("q")).is_err(), "not shown to be a person");
+    assert!(refuse_approval(&start, &Answer::Choice(0), true, None).is_err(), "names no question");
+    assert!(refuse_approval(&start, &Answer::Choice(0), true, Some("q")).is_ok());
+    assert!(refuse_approval(&start, &Answer::Choice(2), false, None).is_ok(), "Not now needs no proof");
+}

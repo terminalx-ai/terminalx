@@ -1033,7 +1033,14 @@ pub enum Answer {
 /// Record the owner's answer: "You answered …", and the item is in progress again; the answer waits on the item
 /// until it reaches the bot. `question` names the question the owner saw (its id, or when it was asked for one an
 /// older build asked): a question asked since is not answered by it. Returns the item and the words answered.
+#[cfg(test)]
 pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, question: Option<&str>) -> Result<(Item, String)> {
+    answer_as(sink, bot, number, answer, question, true)
+}
+
+/// [`answer`], told whether a person was shown to give it (`bots::BY_PERSON`): an answer that approves a run is
+/// refused under the list's lock when none was, whatever the question looked like when the call was let through.
+pub fn answer_as(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, question: Option<&str>, by_person: bool) -> Result<(Item, String)> {
     let seen = question;
     let typed: Option<String> = match answer {
         Answer::Typed(words) => {
@@ -1052,6 +1059,7 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, que
             (ItemState::NeedsYou, Some(question)) if seen.is_none_or(|seen| names(question, seen)) => question.clone(),
             _ => return Err(refused(format!("{} no longer asks this on item #{number}.", bot.name))),
         };
+        super::runs::refuse_approval(&question, answer, by_person, seen)?;
         // The owner's entry holds the owner's words only: the question is the bot's, in its own "asked" entry, and a
         // chosen label is the bot's text, kept as the entry's detail and shown as the bot's.
         let words = match (answer, typed) {
@@ -1582,10 +1590,13 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
             let seen = params["question"].as_str().or_else(|| params["asked"].as_str());
             // A run's approval (PRO-476): the plan is approved and the run started first; an answer that cannot
             // start it is refused and not recorded, so the question stays.
-            let started = super::runs::before_answer(manager, &bot, number, &chosen, seen)?;
+            // Whether a person was shown to give it: set by the control socket from the window's proof, absent (true)
+            // for the window's own calls.
+            let by_person = params[super::BY_PERSON].as_bool().unwrap_or(true);
+            let started = super::runs::before_answer(manager, &bot, number, &chosen, seen, by_person)?;
             // Sent as the owner's message: only the owner's own words and the item's number. The bot's title and
             // question are its own text and are left out, so they cannot speak for the owner.
-            let (item, _words) = answer(sink, &bot, number, &chosen, seen)?;
+            let (item, _words) = answer_as(sink, &bot, number, &chosen, seen, by_person)?;
             let mut acted = act(manager, &bot.id, number, newest_waiting(&item));
             if let Some(started) = started {
                 acted["run"] = started;

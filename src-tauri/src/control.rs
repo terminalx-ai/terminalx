@@ -2995,6 +2995,19 @@ fn bots_from_a_person(run: &Path, params: &mut Value, window: &crate::serve_cli:
         }
         return Ok(());
     }
+    if operation == "itemAnswer" {
+        // PRO-476: whether the answer approves a run is judged again under the list's lock (`items::answer_as`),
+        // so the question cannot change into one that does after this check: it is told whether a person asked.
+        let mut proved = witnessed && consent::verify_for(run, params, window).is_ok();
+        if !proved && crate::bots::enforce::needs_person(&operation, &params["params"]) {
+            consent::verify_for(run, params, window).map_err(|error| bots_refusal(&operation, error, window))?;
+            proved = true;
+        }
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(proved));
+        }
+        return Ok(());
+    }
     if !crate::bots::enforce::needs_person(&operation, &params["params"]) {
         if let Some(object) = params.as_object_mut() {
             object.remove(consent::PARAM);
@@ -3045,6 +3058,7 @@ fn bots_action(operation: &str) -> &'static str {
         "quietHours" => "change a bot's quiet hours",
         "itemHand" => "hand a bot's item to another bot",
         "briefWrite" => "change the team brief",
+        "itemAnswer" => "approve a bot's run",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
@@ -3063,6 +3077,11 @@ fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
             inner.insert(crate::bots::BY_PERSON.into(), json!(false));
         }
         return Ok(());
+    }
+    if operation == "itemAnswer" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
     }
     if crate::bots::enforce::needs_person(&operation, &params["params"]) {
         let action = bots_action(&operation);

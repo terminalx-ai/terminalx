@@ -166,7 +166,12 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
     lead.bot("bots.items.add", json!({"title": "Runner move", "start": true})).unwrap();
     let run = lead.run("run-held", &lead.chat.id, "planned");
     lead.bot("bots.items.plan", json!({"item": 1, "run": run.id})).unwrap();
-    lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1})).unwrap();
+    let seen = |lead: &Lead| lead.item(1).question.unwrap().id;
+    // An approving answer names the question the owner read; one that names none is refused and starts nothing.
+    let unnamed = lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1})).unwrap_err();
+    assert!(format!("{unnamed:#}").contains("from its question card"), "{unnamed:#}");
+    assert!(started().is_empty());
+    lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1, "question": seen(&lead)})).unwrap();
     // A run of a project that asks for no approval starts as the Run view's Start does.
     assert_eq!(started(), vec![(run.id.clone(), "startPlanned".to_string())]);
     let item = lead.item(1);
@@ -184,7 +189,11 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
     lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1})).unwrap();
     assert_eq!(runs::merge_held(&lead.atlas, &run.id), Some(1), "Not yet keeps it held");
     lead.bot("bots.items.ask-merge", json!({"item": 1})).unwrap();
-    lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 0})).unwrap();
+    // Not given by a person (the control socket says so when the window's proof is missing): refused under the lock.
+    let unproved = lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 0, "question": seen(&lead), crate::bots::BY_PERSON: false})).unwrap_err();
+    assert!(format!("{unproved:#}").contains("needs you in the TerminalX window"), "{unproved:#}");
+    assert_eq!(runs::merge_held(&lead.atlas, &run.id), Some(1));
+    lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 0, "question": seen(&lead)})).unwrap();
     assert_eq!(runs::merge_held(&lead.atlas, &run.id), None);
     assert!(lead.item(1).runs[0].merge_approved.is_some());
     let again = lead.bot("bots.items.ask-merge", json!({"item": 1})).unwrap_err();

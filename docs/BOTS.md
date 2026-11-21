@@ -327,7 +327,12 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   person's proof (`enforce::needs_person`). The run is approved
   (`AwaitingApproval`) or started (`Planned`) before the answer is recorded; a
   failed start leaves the question open and says why. A run that already started
-  is not started again. "Start, but ask before merging" sets the merge hold
+  is not started again. The person check reads the call as the app does and
+  counts anything it cannot read as an approval; it is only a preview, since
+  the question can change before the answer lands. The binding check is under
+  the list's lock: the control socket passes down whether the window's proof
+  held (`bots::BY_PERSON`), and an approving answer is refused unless it did
+  and names the question the owner read. "Start, but ask before merging" sets the merge hold
   first: `runs merge` from the bot is then refused with `merge_held` until the
   bot asks `ask-merge` and the owner answers Merge.
 - **Done means the run ended.** An item that links a run whose state has not

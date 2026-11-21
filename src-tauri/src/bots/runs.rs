@@ -219,7 +219,7 @@ pub fn merge_held(bot: &str, run: &str) -> Option<u64> {
 /// Before the owner's answer is recorded: a chosen "Approve and start" or "Start, but ask before merging" approves
 /// the plan and starts the run, as the Run view's Approve does. Refused, with the answer not recorded, when it
 /// cannot start. `None` for every other answer.
-pub(super) fn before_answer(manager: &SessionManager, bot: &Bot, number: u64, chosen: &Answer, seen: Option<&str>) -> Result<Option<Value>> {
+pub(super) fn before_answer(manager: &SessionManager, bot: &Bot, number: u64, chosen: &Answer, seen: Option<&str>, by_person: bool) -> Result<Option<Value>> {
     let list = items::read(&bot.id)?;
     let Some(item) = list.items.iter().find(|item| item.number == number) else { return Ok(None) };
     let Some(question) = item.question.as_ref().filter(|question| question.purpose == PURPOSE_START_RUN) else { return Ok(None) };
@@ -227,6 +227,7 @@ pub(super) fn before_answer(manager: &SessionManager, bot: &Bot, number: u64, ch
     if seen.is_some_and(|seen| seen != question.id && seen != question.asked) {
         return Ok(None);
     }
+    refuse_approval(question, chosen, by_person, seen)?;
     let ask_first = match chosen {
         Answer::Choice(0) => false,
         Answer::Choice(1) => true,
@@ -296,12 +297,46 @@ fn start(manager: &SessionManager, bot: &Bot, run: &str) -> Result<Value> {
 
 /// What `needs_person` asks of an answer: one that approves a run's plan is a person's act.
 pub fn answer_starts_run(params: &Value) -> bool {
-    let (Some(id), Some(number)) = (params["id"].as_str(), params["number"].as_u64()) else { return false };
-    // Only a chosen answer starts a run; one that cannot be read is judged as one that does.
+    // Read as `items::owner_call` reads them; anything it could read and this cannot counts as an approval.
+    let Some(id) = params["id"].as_str() else { return true };
+    let number = match &params["number"] {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.trim().trim_start_matches('#').parse().ok(),
+        _ => None,
+    };
+    let Some(number) = number else { return true };
+    let answer = match (&params["answer"], params["text"].as_str()) {
+        (Value::Null, Some(_)) => return false,
+        (answer, _) => answer.as_u64(),
+    };
+    let Some(answer) = answer else { return true };
+    // Only a preview: the question may change before the answer is acted on, so the binding check is made again
+    // under the list's lock (`items::answer_as`, with the person's proof passed down as `bots::BY_PERSON`).
     let Ok(list) = items::read(id) else { return true };
-    list.items.iter().find(|item| item.number == number).and_then(|item| item.question.as_ref()).is_some_and(|question| {
-        question.purpose == PURPOSE_START_RUN && params["answer"].as_u64().is_some_and(|answer| answer <= 1) || question.purpose == PURPOSE_MERGE_RUN && params["answer"].as_u64() == Some(0)
-    })
+    list.items.iter().find(|item| item.number == number).and_then(|item| item.question.as_ref()).is_none_or(|question| approves(question, &Answer::Choice(answer as usize)))
+}
+
+/// Whether `answer` to `question` approves a run: starts it, or lets it merge. Only the person may give one.
+pub(super) fn approves(question: &Question, answer: &Answer) -> bool {
+    match (question.purpose.as_str(), answer) {
+        (PURPOSE_START_RUN, Answer::Choice(index)) => *index <= 1,
+        (PURPOSE_MERGE_RUN, Answer::Choice(index)) => *index == 0,
+        _ => false,
+    }
+}
+
+/// Why an approving answer is refused when no person was shown to give it, or it names no question.
+pub(super) fn refuse_approval(question: &Question, answer: &Answer, by_person: bool, seen: Option<&str>) -> Result<()> {
+    if !approves(question, answer) {
+        return Ok(());
+    }
+    if !by_person {
+        return Err(refused(format!("Approving run {} needs you in the TerminalX window.", question.run)));
+    }
+    if seen.is_none() {
+        return Err(refused("Answer a run's plan from its question card, so the answer is to the question you read."));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
