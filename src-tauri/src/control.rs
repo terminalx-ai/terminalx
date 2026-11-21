@@ -5015,7 +5015,8 @@ mod tests {
         assert_eq!(ask("bots.delete", json!({"bot": "kestrel"})).unwrap(), json!({"deleted": id, "name": "Kestrel"}));
         assert!(!home.exists() && crate::store::root().unwrap().join("trash").join("bots").join(&id).join("ROLE.md").is_file());
         assert_eq!(ask("bots.list", json!({})).unwrap()["bots"].as_array().unwrap().len(), 1);
-        assert_eq!(changes(&mut heard), 11);
+        // Each pause is told twice: once paused, once with what it stopped (PRO-474).
+        assert_eq!(changes(&mut heard), 13);
 
         // Refusals name what was wrong.
         assert_eq!(ask("bots.show", json!({"bot": "kestrel"})).unwrap_err().code, "not_found");
