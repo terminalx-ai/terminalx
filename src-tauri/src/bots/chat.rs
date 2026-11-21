@@ -273,6 +273,10 @@ pub fn hire(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Result<
     if let Err(error) = home_chat(sink, &bot.id) {
         log::warn!("bot {} was hired without its home chat: {error:#}", bot.id);
     }
+    // Its role's scheduled duties, each switched off until a person turns it on (PRO-471).
+    if let Err(error) = super::duties::from_template(sink, &bot) {
+        log::warn!("bot {} was hired without its role's duties: {error:#}", bot.id);
+    }
     Ok(bot)
 }
 

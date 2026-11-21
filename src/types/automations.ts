@@ -139,13 +139,15 @@ export interface Automation {
   issueTrigger?: AutomationIssueTrigger | null;
   /** A Linear issue or pull request source; never set with issueTrigger. */
   eventTrigger?: AutomationEventTrigger | null;
+  /** A bot's duty (PRO-471): listed on its bot's Duties tab, not on the Automations page. */
+  bot?: import("@/types/botDuties").DutyOwner | null;
   created: string;
   modified: string;
 }
 
 export type AutomationInput = Omit<
   Automation,
-  "id" | "nextRunAt" | "lastRunAt" | "lastOutcome" | "created" | "modified"
+  "id" | "nextRunAt" | "lastRunAt" | "lastOutcome" | "created" | "modified" | "bot"
 >;
 
 export type AutomationTrigger = "scheduled" | "manual" | "issue" | "linearIssue" | "pullRequest";
@@ -216,6 +218,8 @@ export interface AutomationRun {
   reported?: AutomationReported | null;
   repeatCount: number;
   lastRepeatAt?: string | null;
+  /** A duty's run: what its reply reported, and to whom (PRO-471). */
+  duty?: import("@/types/botDuties").DutyRunReport | null;
 }
 
 export interface AutomationIssueRef {

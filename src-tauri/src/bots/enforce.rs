@@ -210,6 +210,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
 /// A bots operation of the runtime, with what it does to running sessions:
 /// `reconcile` alone holds them again (Settings switching Bots off).
 pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    // A bot's duties (PRO-471) change no running session.
+    if let Some(answer) = super::duties::call(manager, operation, params) {
+        return answer;
+    }
     let sink = manager.sink();
     // A bot's work items and what needs the owner (PRO-469).
     if let Some(answer) = super::items::runtime_call(manager, operation, params) {
@@ -277,6 +281,7 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
     match operation {
         "resume" | "resumeAll" | "dismissResume" | "create" | "delete" => true,
         "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
+        "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours" => super::duties::needs_person(operation, params),
         "update" => {
             let patch = &params["patch"];
             if patch.get("memoryOff").and_then(serde_json::Value::as_bool) == Some(false) {

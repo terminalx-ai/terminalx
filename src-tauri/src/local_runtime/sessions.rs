@@ -152,7 +152,7 @@ impl Sessions {
 
     /// [`Self::bots`] with the whole request, as `window_consent::guarded` sends it again.
     pub fn bots_request<T: DeserializeOwned>(&self, request: Value) -> Result<T> {
-        if matches!(request["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "items" | "item" | "needsYou")) {
+        if matches!(request["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "items" | "item" | "needsYou")) {
             self.quick(crate::serve_cli::consent::BOTS_COMMAND, request)
         } else {
             self.call(crate::serve_cli::consent::BOTS_COMMAND, request)

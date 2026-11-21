@@ -216,6 +216,8 @@ export interface SessionEntry {
   bot?: SessionBotRef | null;
   /** A session that works for a bot without being its chat (PRO-468): one its chats started, or what those started in turn. */
   botStarted?: { id: string } | null;
+  /** A run of one of its bot's duties (PRO-471): the duty's automation id. Listed under its bot apart from its chats. */
+  botDuty?: { id: string } | null;
   /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
   orchestrateStart?: boolean;
   /**
