@@ -40,10 +40,13 @@ pub const HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
-/// How long Codex waits for a hook. The two that can park on a person get the
-/// default timeout; the rest only report and must never hold a
-/// turn up.
+/// How long the app keeps a card for Codex's two hooks that can park on a
+/// person; the rest only report and must never hold a turn up.
 const DECIDING_TIMEOUT_SECS: u64 = 600;
+/// Codex waits on those hooks longer than the card does, so the app's answer,
+/// the card's lapse (a refusal) included, always arrives: a hook Codex gives
+/// up on lets the tool run (PRO-478).
+const DECIDING_HOOK_TIMEOUT_SECS: u64 = DECIDING_TIMEOUT_SECS + 30;
 const REPORT_TIMEOUT_SECS: u64 = 10;
 /// The app-side wait must match, or a card would go on offering buttons for a
 /// request the CLI has already given up on.
@@ -108,7 +111,7 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
 
 fn timeout_for(event: &str) -> u64 {
     if matches!(event, "PermissionRequest" | "PreToolUse") {
-        DECIDING_TIMEOUT_SECS
+        DECIDING_HOOK_TIMEOUT_SECS
     } else {
         REPORT_TIMEOUT_SECS
     }
@@ -421,7 +424,7 @@ mod tests {
             let hook = &local["hooks"][event][0]["hooks"][0];
             assert_eq!(hook["timeout"], crate::local_runtime::permissions::PROVIDER_SECONDS);
             assert!(hook["command"].as_str().unwrap().ends_with(" --local-owner-decision"));
-            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 600);
+            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 630);
             assert!(!default["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
         }
         assert_eq!(local["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
@@ -443,8 +446,9 @@ mod tests {
             assert_eq!(h["command"], format!("'/opt/raccoon' hook {event}"));
         }
         // The two that park on a person wait; the rest only report.
-        assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 600);
-        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["timeout"], 600);
+        assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 630);
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["timeout"], 630);
+        assert!(Duration::from_secs(630) > PERMISSION_WAIT, "Codex outlasts the card");
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
     }
 

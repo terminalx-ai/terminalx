@@ -28,6 +28,10 @@ vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mock
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
 vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: ({ bot }: { bot: Bot }) => <div data-testid="bot-duties">{bot.name}'s duties</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+// The settings page and the header's menu have their own tests (BotSettings.test.tsx): here, only that they are mounted.
+vi.mock("./BotSettings", () => ({ BotSettings: ({ bot }: { bot: Bot }) => <div data-testid="bot-settings">{bot.id}</div> }));
+vi.mock("./BotMenu", () => ({ BotMenu: ({ bot }: { bot: Bot }) => <button type="button" data-testid="bot-menu">{bot.name}'s menu</button> }));
+vi.mock("@/lib/botsPage", () => ({ showBotsTeam: vi.fn() }));
 vi.mock("@/components/bots/BotRoleMemory", () => ({
   BotRoleMemory: ({ bot, bots, unreadable }: { bot: Bot; bots: Bot[]; unreadable: number }) => <div data-testid="bot-role-memory">{`${bot.id} of ${bots.length}, ${unreadable} unreadable`}</div>,
 }));
@@ -71,6 +75,15 @@ describe("a bot's view (PRO-468)", () => {
     // Duties are filled since PRO-471.
     expect(screen.getByTestId("bot-duties").textContent).toBe("Atlas's duties");
     expect(screen.queryByTestId("session-view")).toBeNull();
+  });
+
+  it("has the bot's settings in its Settings tab and its menu in the header (PRO-478)", () => {
+    view();
+    expect(screen.getByTestId("bot-menu").textContent).toBe("Atlas's menu");
+    expect(screen.queryByTestId("bot-settings")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(within(screen.getByRole("tabpanel", { name: "Settings" })).getByTestId("bot-settings").textContent).toBe("b1");
+    expect(screen.queryByText(/are coming/)).toBeNull();
   });
 
   it("shows the bot's role and memory in its Role and memory tab (PRO-470)", () => {
