@@ -638,7 +638,8 @@ export function Composer({
   const reviewsReady = pendingReviewCount(tab.id, draft);
 
   return (
-    <div className="@container mx-auto w-full max-w-3xl px-6 pb-4 pt-2" data-tab-composer={tab.id}>
+    // A column that may shrink (`min-h-0`) when the chat is too short for it: the microphone row gives up its height and scrolls.
+    <div className="@container mx-auto flex min-h-0 w-full max-w-3xl flex-col justify-end px-6 pb-4 pt-2" data-tab-composer={tab.id}>
       {disabledReason && <div className="mb-2 rounded-md bg-warning/10 px-3 py-2 text-xs text-warning">{disabledReason}</div>}
       <DictationStatus dictation={dictation} />
       {reviewsReady > 0 && (
@@ -718,11 +719,14 @@ export function Composer({
           placeholder={placeholder}
           className="max-h-60 w-full resize-none scrollbar-visible bg-transparent px-1.5 py-1 text-[14px] leading-relaxed outline-none placeholder:text-faint"
         />
-        <div className="mt-1 flex items-center gap-1" data-composer-toolbar>
+        {/* Too narrow for one row (a 760 px window with a bot's chat list open), the right-hand controls wrap to a
+            second row instead of leaving the composer. The model picker counts as its 3rem least for that and grows
+            back to its full label (`max-w-max`) whenever there is room, so a row that fits looks as it did. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1" data-composer-toolbar>
           <DropdownMenu {...modelMenu.root}>
             <DropdownMenuTrigger asChild {...modelMenu.trigger}>
               {/* In a narrow composer the label truncates inside the button; its icon and chevron stay (`min-w-12`). */}
-              <Button variant="ghost" size="sm" className="min-w-12 shrink gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
+              <Button variant="ghost" size="sm" className="min-w-12 max-w-max flex-[1_1_3rem] gap-1.5 overflow-hidden px-2 text-muted-foreground" disabled={!!modelLock} title={modelLock ?? modelTitle} aria-label={modelLock ? `Model: ${modelLock}` : undefined} data-testid="model-picker">
                 <AgentMark id={tab.harness} className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate text-foreground">{modelName}</span>
                 {/* The effort is a setting of its own, a step quieter than the model. */}
