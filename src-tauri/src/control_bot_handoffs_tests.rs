@@ -436,9 +436,26 @@ fn work_for_a_paused_bot_waits_and_stop_stops_only_that_bots_work() {
     let count = handoffs::read().unwrap().handoffs.len();
     for to in ["sentry", "argus"] {
         let refused = team.as_home(&team.atlas, "bots.handoff", json!({"to": to, "title": "check the runner\u{2019}s  ACCESS."})).unwrap_err();
-        assert!(refused.message.contains("Your owner stopped hand-off 1") && refused.message.contains("not handed on again unless they ask"), "{to}: {}", refused.message);
+        assert!(refused.message.contains("Your owner stopped hand-off 1 (\"Check the runner's access\") less than 24 hours ago"), "{to}: {}", refused.message);
     }
     assert_eq!(handoffs::read().unwrap().handoffs.len(), count, "nothing was recorded");
+    // Lead review: a title with no letters or digits names no work and is never matched.
+    let blank = |title: &str| team.as_home(&team.atlas, "bots.handoff", json!({"to": "argus", "title": title}));
+    blank("???").unwrap();
+    handoffs::edit_for_tests(|store| {
+        let handoff = store.handoffs.iter_mut().find(|handoff| handoff.title == "???").unwrap();
+        handoff.state = HandoffState::Stopped;
+        handoff.stopped_by = Some(crate::bots::OWNER.into());
+        handoff.closed = Some(index::now());
+    });
+    blank("!!!").unwrap();
+    // Lead review (M1): the hold lasts 24 hours from the stop; recurring work goes on after it.
+    handoffs::edit_for_tests(|store| {
+        let handoff = store.handoffs.iter_mut().find(|handoff| handoff.number == 1).unwrap();
+        handoff.closed = Some((chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339());
+    });
+    let again = team.as_home(&team.atlas, "bots.handoff", json!({"to": "argus", "title": "Check the runner's access"})).unwrap();
+    assert_eq!(again["handoff"]["state"], "working", "{again}");
     // Other work still goes.
     assert_eq!(team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the relay's access"})).unwrap()["handoff"]["state"], "working");
 }

@@ -444,6 +444,11 @@ fn needs_you_does_not_wait_behind_a_launching_tab() {
     let sentry_chat = home_chat(&sentry);
     service.manager.put_question_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id, "AskUserQuestion", json!({"questions": [{"question": "File the finding?", "options": [{"label": "Yes"}, {"label": "No"}]}]}));
     let chat = home_chat(&atlas);
+    let needs = || ask("runtime.session.bots", json!({"operation": "needsYou", "params": {}})).unwrap();
+    assert_eq!(needs()["entries"].as_array().unwrap().len(), 1);
+    // PRO-498 review: while Sentry's own tab is held too, its question stays: it does not drop out for one read and
+    // come back (which would close a card the owner has open, or count it twice).
+    let release_sentry = service.manager.hold_tab_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id);
     let release = service.manager.hold_tab_for_tests(&chat.id, &chat.tabs[0].id);
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
@@ -456,5 +461,9 @@ fn needs_you_does_not_wait_behind_a_launching_tab() {
         assert_eq!(entries.len(), 1, "{needs}");
         assert_eq!((entries[0]["kind"].as_str(), entries[0]["botId"].as_str(), entries[0]["questions"][0]["question"].as_str()), (Some("agentQuestion"), Some(sentry.as_str()), Some("File the finding?")));
         drop(release);
+        drop(release_sentry);
     });
+    // Answered (gone from its tab): it leaves Needs you.
+    service.manager.set_wait_state_for_tests(&sentry_chat.id, &sentry_chat.tabs[0].id, crate::store::index::TabStatus::Idle, false);
+    assert!(needs()["entries"].as_array().unwrap().is_empty());
 }

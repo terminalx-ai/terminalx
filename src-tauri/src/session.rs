@@ -1841,6 +1841,9 @@ pub(crate) struct Placed {
     pub tab: Option<String>,
 }
 
+/// [`SessionManager::pending_permissions_now`]'s last read of each tab, by its key.
+static LAST_PENDING: Mutex<std::collections::BTreeMap<String, Vec<PendingPermission>>> = Mutex::new(std::collections::BTreeMap::new());
+
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
@@ -3513,32 +3516,42 @@ impl SessionManager {
     }
 
     /// [`Self::pending_permissions`] without waiting: a tab whose lock is held (a launch in progress, which can take
-    /// seconds) is left out, so a read of what waits on the owner never waits behind it. Its question is read on
-    /// the next look.
+    /// seconds) gives what the last such read found on it, so a read of what waits on the owner never waits behind
+    /// it, and a question there does not drop out for one read.
     pub fn pending_permissions_now(&self) -> Vec<PendingPermission> {
         self.pending_permissions_as(false)
     }
 
     fn pending_permissions_as(&self, wait: bool) -> Vec<PendingPermission> {
-        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        let runtimes: Vec<(String, Arc<Mutex<TabRuntime>>)> = self.tabs.lock().unwrap().iter().map(|(key, runtime)| (key.clone(), runtime.clone())).collect();
         let mut out = Vec::new();
-        for runtime in runtimes {
+        // What the last read without waiting found on each tab: a tab whose lock is held now gives that, so a question
+        // does not drop out of Needs you for one read and come back (PRO-498).
+        let mut last = LAST_PENDING.lock().unwrap_or_else(|error| error.into_inner());
+        if !wait {
+            last.retain(|key, _| runtimes.iter().any(|(live, _)| live == key));
+        }
+        for (key, runtime) in runtimes {
             let runtime = if wait {
                 runtime.lock().unwrap()
             } else {
                 match runtime.try_lock() {
                     Ok(runtime) => runtime,
                     Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => continue,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        out.extend(last.get(&key).cloned().unwrap_or_default());
+                        continue;
+                    }
                 }
             };
+            let mut found = Vec::new();
             for (request_id, pending) in &runtime.pending {
                 let mut options = vec!["allow".to_string(), "deny".to_string()];
                 options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
                 if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
                     options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
                 }
-                out.push(PendingPermission {
+                found.push(PendingPermission {
                     session_id: runtime.session_id.clone(),
                     tab_id: runtime.tab_id.clone(),
                     request_id: request_id.clone(),
@@ -3547,6 +3560,12 @@ impl SessionManager {
                     options,
                 });
             }
+            if found.is_empty() {
+                last.remove(&key);
+            } else {
+                last.insert(key, found.clone());
+            }
+            out.extend(found);
         }
         out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
         out
