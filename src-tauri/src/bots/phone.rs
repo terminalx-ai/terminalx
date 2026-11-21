@@ -49,8 +49,9 @@ pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Result
             }
             super::enforce::call(manager, "itemAnswer", &call)
         }
-        "pause" | "resume" => super::enforce::call(manager, operation, &json!({"id": id()?})),
-        "pauseAll" => super::enforce::call(manager, "pauseAll", &json!({})),
+        "pause" => super::enforce::call(manager, "pause", &json!({"id": id()?, "from": super::pause::FROM_PHONE})),
+        "resume" => super::enforce::call(manager, "resume", &json!({"id": id()?})),
+        "pauseAll" => super::enforce::call(manager, "pauseAll", &json!({"from": super::pause::FROM_PHONE})),
         other => Err(super::refused(format!("Unknown bots operation {other}"))),
     }
 }

@@ -303,6 +303,48 @@ permission system.
   4"). The file itself is not guarded against a Full access bot's own file
   tools (PRO-489), so its text is only ever given as a bot's or the app's.
 
+## Pause (PRO-474)
+
+Pause is a thin layer over the pause record (`BotPause` in `bots.json`) and
+`bots::enforce::reconcile`. Nothing else decides what a paused bot may do.
+
+- **Where it came from and what it stopped.** `bots::enforce::pause` looks at
+  the bot's sessions before pausing (`bots::pause::look`), records the pause
+  with `from` (`app`, `shortcut`, `phone`, `cli`), reconciles, and then writes
+  `stopped` once: what it was doing (`was`), its chats, workers and duty runs
+  in a turn, and what it had spent today. A second pause keeps the first one's
+  record. The `terminalx` CLI pauses with `from: cli`; the window cannot claim
+  it.
+- **A worker finishes its step.** A run worker's tab in a turn is not stopped.
+  `reconcile` asks for plan mode, applied when the turn ends, and keeps the
+  mode it had for resume. Every other tab in a turn is stopped, as before.
+  The orchestration engine starts no worker in a run led by a paused bot
+  (`Host::held_by_pause`; starting one by hand fails with `bot_paused`, and a
+  run not started yet counts as started, so its resume starts it). On
+  resume, `orchestration::engine::bot_resumed` starts what became ready, once,
+  and tells the lead.
+- **What is kept and what is skipped.** Due scheduled duty runs are skipped
+  (PRO-471). A paused bot's event duties are not read, so events wait at their
+  source and wake it on resume (PRO-472). Hand-offs and messages to it wait
+  (PRO-475). The owner's answers, comments and work on its items are kept on
+  the item (`undelivered`) and sent on resume (`items::deliver_waiting`).
+- **Direct chat.** A paused bot still answers in its chats, in plan mode, and
+  its rules tell it to say first that it is paused.
+- **What is held.** `bots_pause_held` (`bots::pause::held`) reads, where each
+  is kept: skipped runs since the pause, event duties, waiting hand-offs and
+  messages, and kept answers, with every bot's run workers still in a turn
+  (not its chats answering the owner) and open questions. A part that cannot be read is listed in `errors`. Spend is read
+  apart (`bot_spent_today`); since the pause is today's spend less the pause's
+  record. The window reads it only while some bot is paused
+  (`src/lib/botPause.ts`).
+- **Screens.** The 23.12 page shows when every bot is paused
+  (`BotsPaused.tsx`). With some paused, the team table gives each paused bot's
+  state and what it holds, with "Held while paused" under it. The sidebar
+  row, the bot header and the chat banner say it too. The row's context menu
+  (Open, Pause or Resume) is built from the app's menu parts; no board shows
+  it. The design's ⇧⌘P is the markdown preview's, so Pause all is ⌥⇧⌘P.
+- **Resume.** Anyone, a bot included, may pause. A resume from the CLI waits
+  for the owner in the app (PRO-468).
 ## GitHub and Linear as channels (PRO-480)
 
 `src-tauri/src/bots/channels.rs`, with the commands in
@@ -484,7 +526,7 @@ issue.
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Merged |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
 | PRO-473 | Week calendar of duties | 23.13 | In review |
-| PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
+| PRO-474 | Pause and Pause all that say what they stopped | 23.12 | In review |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
 | PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |

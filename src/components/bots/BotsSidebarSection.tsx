@@ -1,8 +1,12 @@
-import { Plus, RotateCw, Users } from "@/icons";
+import { useState } from "react";
+import { MessageSquare, Pause, Play, Plus, RotateCw, Users } from "@/icons";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "@/components/ui/menu";
+import { errorMessage } from "@/lib/api";
+import { usePauseHeld, pausedStatus } from "@/lib/botPause";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { ListSection } from "@/components/layout/SessionSidebar";
-import { reloadBots, useBotStore } from "@/lib/bots";
+import { pauseBot, reloadBots, resumeBot, useBotStore } from "@/lib/bots";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { showHireBot } from "@/lib/botsPage";
 import { openBot, useSessionStore } from "@/lib/sessions";
@@ -85,9 +89,20 @@ function BotRow({ bot }: { bot: Bot }) {
   const trouble = needsYouTrouble(needs, useNeedsYouError(), bot.id);
   const open = store.view === "bot" ? store.selectedBotId === bot.id : !!store.selectedSessionId && store.sessions.find((session) => session.id === store.selectedSessionId)?.bot?.id === bot.id;
   const place = runsOnLabel(bot.runsOn);
-  const status = statusLine(bot);
+  // A paused bot's row says what its pause holds (PRO-474): "Paused · 2 workers stopped".
+  const held = usePauseHeld();
+  const status = bot.paused ? pausedStatus(bot, held) : statusLine(bot);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const toggle = () => {
+    setBusy(true);
+    setError(null);
+    (bot.paused ? resumeBot(bot.id) : pauseBot(bot.id)).catch((cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+  };
   return (
     <li>
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
       <button
         type="button"
         onClick={() => openBot(bot.id)}
@@ -115,6 +130,19 @@ function BotRow({ bot }: { bot: Bot }) {
           </span>
         )}
       </button>
+      </ContextMenuTrigger>
+      {/* The row's menu (PRO-474): Pause or Resume it from the sidebar, as from its header. */}
+      <ContextMenuContent className="w-52" data-testid="bot-row-menu">
+        <ContextMenuItem onSelect={() => openBot(bot.id)}>
+          <MessageSquare /> Open {bot.name}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem disabled={busy} onSelect={toggle} data-testid="bot-row-pause">
+          {bot.paused ? <><Play /> Resume {bot.name}</> : <><Pause /> Pause {bot.name}</>}
+        </ContextMenuItem>
+      </ContextMenuContent>
+      </ContextMenu>
+      {error && <p role="alert" className="px-2.5 py-1 text-[12px] text-destructive" data-testid="bot-row-pause-error">{error}</p>}
     </li>
   );
 }

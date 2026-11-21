@@ -1358,6 +1358,14 @@ fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&s
     // launch's own delivery (on its own thread) waits here, then finds them sent.
     let lock = delivery_lock(id);
     let _delivering = lock.lock().unwrap_or_else(|error| error.into_inner());
+    // A paused bot starts no work from what its owner sends (PRO-474): an answer, a comment or work given waits on
+    // its item, and is sent when it is resumed (`pause::resumed`). One that cannot be read is held too.
+    match crate::store::bots::get(id) {
+        Ok(Some(bot)) if bot.paused.is_none() => {}
+        Ok(Some(bot)) => return json!({"sent": false, "kept": true, "error": format!("{} is paused: it gets this when you resume it.", bot.name)}),
+        Ok(None) => return json!({"sent": false, "error": "This bot is no longer here."}),
+        Err(error) => return json!({"sent": false, "kept": true, "error": format!("The bot could not be read, so this waits: {error:#}")}),
+    }
     let waiting: Vec<(String, u64, String, String)> = match read(id) {
         Ok(list) => {
             let mut waiting: Vec<_> = list.items.iter().flat_map(|item| item.undelivered.iter().map(|message| (message.at.clone(), item.number, message.id.clone(), message.text.clone()))).collect();

@@ -103,11 +103,12 @@ fn pause_resume_and_pause_all_are_the_owners_and_say_so() {
     let iris = crate::bots::create(&*sink, "ux-designer", "Iris").unwrap();
     let paused = call(&manager, "pause", &json!({"id": atlas.id})).unwrap();
     assert_eq!(paused["paused"]["by"], crate::bots::OWNER);
+    assert_eq!(paused["paused"]["from"], crate::bots::pause::FROM_PHONE, "a phone pause says it came from the phone");
     assert!(crate::bots::get(&iris.id).unwrap().paused.is_none(), "only the bot named");
     let resumed = call(&manager, "resume", &json!({"id": atlas.id})).unwrap();
     assert!(resumed["paused"].is_null());
     let all = call(&manager, "pauseAll", &json!({})).unwrap();
-    assert!(all["bots"].as_array().unwrap().iter().all(|bot| bot["paused"]["by"] == crate::bots::OWNER));
+    assert!(all["bots"].as_array().unwrap().iter().all(|bot| bot["paused"]["by"] == crate::bots::OWNER && bot["paused"]["from"] == crate::bots::pause::FROM_PHONE));
     assert!(call(&manager, "pause", &json!({})).is_err(), "a pause names its bot");
 }
 

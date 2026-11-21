@@ -174,6 +174,18 @@
   list, the sheet or a notification, goes through the same route as the
   app's, the Mac's own `bots.answer` for a paired phone that may drive, which
   no bot's session can call. With Bots off the phone is as it was (PRO-479).
+- Bots (experimental): Pause and Pause all say what they stopped. Pause a bot
+  from its header or its sidebar row's menu, and every bot from the Bots page
+  or with ⌥⇧⌘P from anywhere (⇧⌘P stays the markdown preview's). A pause
+  records where it came from and what the bot was doing. A run's worker
+  finishes the step it is on, then takes plan mode; no new worker starts in a
+  run a paused bot leads. Due scheduled checks are skipped, events wait at
+  their source, and work handed to it and your answers on its items are kept
+  and used on resume, each once. A message to a paused bot is answered, and
+  the answer says it is paused. With every bot paused, the Bots page shows
+  who paused them, from where and when, what is working, what needs you,
+  what is held and what was spent since, each bot's state and what is held
+  for it, with Resume one by one and Resume all (PRO-474).
 - Bots (experimental): GitHub and Linear are a bot's channels. A bot posts
   its review or finding on a pull request, a comment on a GitHub issue, or a
   comment on a Linear issue with `terminalx bots post`, through your `gh`
