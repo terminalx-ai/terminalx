@@ -6,7 +6,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
 import { loadAutomationRuns, useAutomationStore } from "@/lib/automations";
 import { relativeNext } from "@/lib/automationSchedule";
-import { checkFound, clockOf, dutiesApi, dutiesOf, reportsToLabel, runAt, runOutcome, todayCounts, wakesOn } from "@/lib/botDuties";
+import { checkFound, clockOf, dutiesApi, dutiesOf, reportsToLabel, runAt, runOutcome, todayCounts, wakeFamily, wakeOf, wakesOn } from "@/lib/botDuties";
 import { useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
 import { sessionSpend } from "@/lib/runFamily";
@@ -19,24 +19,35 @@ import { dutyAt } from "@/lib/botCalendar";
 import { builtinOf } from "@/lib/botSuggestions";
 import { BotDuty } from "./BotDuty";
 import { BotDutyEditor } from "./BotDutyEditor";
+import type { WakeGroup } from "./BotDutyWake";
 import { DutiesCalendar, DutiesViewSwitch, type DutiesView } from "./DutiesCalendar";
 
-type Screen = { kind: "list" } | { kind: "duty"; id: string } | { kind: "edit"; id: string | null; initial?: DutyInput };
+type Screen = { kind: "list" } | { kind: "duty"; id: string } | { kind: "edit"; id: string | null; initial?: DutyInput; start?: WakeGroup };
 
 /** List or Calendar (PRO-473), as last chosen on a bot's Duties tab while the app runs. */
 let lastView: DutiesView = "list";
 
-/** What wakes a bot, as the "Add a duty" tiles offer it. Only a schedule is built here; the rest come with the triggers ticket. */
-const WAKES: { label: string; note: string; icon: typeof CalendarClock; ready: boolean }[] = [
-  { label: "A schedule", note: "daily, hourly, cron", icon: CalendarClock, ready: true },
-  { label: "GitHub", note: "PR, check, alert, mention", icon: Github, ready: false },
-  { label: "Linear", note: "issue, comment, mention", icon: CircleDot, ready: false },
-  { label: "Slack", note: "message, mention, reaction", icon: Hash, ready: false },
-  { label: "Telegram or WhatsApp", note: "a message to this bot", icon: Send, ready: false },
-  { label: "A webhook", note: "any service that can POST", icon: Link, ready: false },
-  { label: "Another bot", note: "handoff, question, status", icon: Users, ready: false },
-  { label: "Wait until", note: "a URL, file or check changes", icon: Hourglass, ready: false },
+/**
+ * What wakes a bot, as the "Add a duty" tiles offer it (PRO-472). Each ready one opens the editor on its source;
+ * Slack, Telegram or WhatsApp and webhooks need a connector, which comes with the channel tickets.
+ */
+const WAKES: { label: string; note: string; icon: typeof CalendarClock; group: WakeGroup | null }[] = [
+  { label: "A schedule", note: "daily, hourly, cron", icon: CalendarClock, group: "schedule" },
+  { label: "GitHub", note: "PR, check, alert, mention", icon: Github, group: "github" },
+  { label: "Linear", note: "issue, comment, mention", icon: CircleDot, group: "linear" },
+  { label: "Slack", note: "message, mention, reaction", icon: Hash, group: null },
+  { label: "Telegram or WhatsApp", note: "a message to this bot", icon: Send, group: null },
+  { label: "A webhook", note: "any service that can POST", icon: Link, group: null },
+  { label: "Another bot", note: "handoff, question, status", icon: Users, group: "bot" },
+  { label: "Wait until", note: "a URL, file or check changes", icon: Hourglass, group: "watch" },
 ];
+
+/** The icon for what wakes a duty. */
+function wakeIcon(duty: Automation): typeof CalendarClock {
+  const wake = wakeOf(duty);
+  if (!wake) return CalendarClock;
+  return { github: Github, linear: CircleDot, bot: Users, watch: Hourglass, unknown: Zap }[wakeFamily(wake.source)];
+}
 
 /** The bot's duty settings and notes, read again whenever its duties or their runs change. */
 export function useDutyState(botId: string, key: string): { state: DutyState | null; error: string | null; reload: () => void } {
@@ -97,6 +108,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         duty={duty}
         initial={screen.initial}
         home={state?.home ?? duty?.projectPath ?? null}
+        start={screen.start}
         onClose={(saved) => setScreen(saved ? { kind: "duty", id: saved } : duty ? { kind: "duty", id: duty.id } : { kind: "list" })}
       />
     );
@@ -152,7 +164,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         {!automations.loaded ? (
           <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading the duties…</p>
         ) : duties.length === 0 ? (
-          <p className="mt-6 rounded-lg border border-dashed border-hairline px-4 py-8 text-center text-[12.5px] text-muted-foreground">{bot.name} has no duties yet. Add one that wakes it on a schedule.</p>
+          <p className="mt-6 rounded-lg border border-dashed border-hairline px-4 py-8 text-center text-[12.5px] text-muted-foreground">{bot.name} has no duties yet. Add one that wakes it on a schedule or an event.</p>
         ) : (
           <div className="mt-4 min-w-0 overflow-x-auto scrollbar-thin" data-testid="duties-table-scroll">
             <table className="w-full min-w-[520px] table-fixed border-collapse text-[12.5px]" aria-label={`${bot.name}'s duties`} data-testid="duties-table">
@@ -167,6 +179,8 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
               <tbody>
                 {duties.map((duty) => {
                   const last = (runs[duty.id] ?? [])[0] ?? null;
+                  const WakeIcon = wakeIcon(duty);
+                  const wakes = wakesOn(duty, leadName);
                   return (
                     <tr key={duty.id} className="group cursor-pointer border-b border-hairline hover:bg-veil" onClick={() => setScreen({ kind: "duty", id: duty.id })} data-testid="duty-row" data-duty={duty.id}>
                       <td className="px-2 py-2.5 align-top">
@@ -178,11 +192,11 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
                           <span className="truncate" title={duty.precheck?.command}>{builtinOf(duty) ? `Built in · ${builtinCheck(duty)}` : duty.precheck ? `First checks: ${duty.precheck.command}` : "No first check: the model looks each time"}</span>
                         </span>
                       </td>
-                      <td className="px-2 py-2.5 align-top text-muted-foreground"><span className="block truncate" title={wakesOn(duty)}><CalendarClock className="mr-1.5 inline size-3.5 align-[-2px]" />{wakesOn(duty)}</span></td>
+                      <td className="px-2 py-2.5 align-top text-muted-foreground"><span className="block truncate" title={wakes}><WakeIcon className="mr-1.5 inline size-3.5 align-[-2px]" />{wakes}</span></td>
                       <td className="px-2 py-2.5 align-top text-muted-foreground"><span className="block truncate" title={reportsToLabel(duty.bot?.reportsTo, bot, bots.bots)}><AppWindow className="mr-1.5 inline size-3.5 align-[-2px]" />{reportsToLabel(duty.bot?.reportsTo, bot, bots.bots)}</span></td>
                       <td className="px-2 py-2.5 align-top">
                         <span className="block truncate text-foreground">{last ? `${runOutcome(last, leadName)} · ${clockOf(runAt(last))}` : "Never ran"}</span>
-                        <span className="block truncate text-[11.5px] text-faint">{duty.enabled ? (bot.paused ? "Paused with its bot" : `Next: ${relativeNext(duty.nextRunAt) || "soon"}`) : "Off"}</span>
+                        <span className="block truncate text-[11.5px] text-faint">{duty.enabled ? (bot.paused ? (wakeOf(duty) ? "Paused: events wait" : "Paused with its bot") : wakeOf(duty) ? "Next: on event" : `Next: ${relativeNext(duty.nextRunAt) || "soon"}`) : "Off"}</span>
                       </td>
                     </tr>
                   );
@@ -193,13 +207,14 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
         )}
         <h3 className="mt-7 text-[11px] font-medium tracking-[.06em] text-faint uppercase">Add a duty that wakes on</h3>
         <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(168px,1fr))] gap-2" data-testid="duty-wakes">
-          {WAKES.map(({ label, note, icon: Icon, ready }) => {
+          {WAKES.map(({ label, note, icon: Icon, group }) => {
+            const ready = group !== null;
             const tile = (
               <button
                 key={label}
                 type="button"
                 disabled={!ready}
-                onClick={() => setScreen({ kind: "edit", id: null })}
+                onClick={() => group && setScreen({ kind: "edit", id: null, start: group })}
                 className={cn("flex w-full min-w-0 items-start gap-2.5 rounded-lg border border-hairline bg-card px-3 py-2.5 text-left", ready ? "hover:bg-veil" : "cursor-not-allowed opacity-55")}
                 data-testid="duty-wake"
               >
@@ -210,7 +225,7 @@ export function BotDuties({ bot, onOpenSession }: { bot: Bot; onOpenSession: (se
                 </span>
               </button>
             );
-            return ready ? tile : <WithTooltip key={label} label="Coming with the triggers that wake a bot">{tile}</WithTooltip>;
+            return ready ? tile : <WithTooltip key={label} label="Needs a connector">{tile}</WithTooltip>;
           })}
         </div>
       </section>

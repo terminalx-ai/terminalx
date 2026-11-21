@@ -512,7 +512,7 @@ pub(crate) fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     }
     // Unicode's own line and paragraph separators break a line as a newline does; bidirectional overrides and
     // isolates, and zero-width characters, make a line read other than it is.
-    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}')) {
+    if value.chars().any(super::chat::breaks_line) {
         return Err(refused(format!("{what} is one line.")));
     }
     if value.chars().count() > max {

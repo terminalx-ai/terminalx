@@ -194,6 +194,7 @@ Usage:
   terminalx bots post github --pr PR|--issue ISSUE [--repo OWNER/NAME] [--request-changes] --text TEXT [--json]
   terminalx bots post linear --issue ISSUE --text TEXT [--json]
   terminalx bots reply --text TEXT [--json]
+  terminalx bots message BOT TEXT [--kind handoff|question|status] [--json]
   terminalx vm inventory|status|start|stop [--json]
   terminalx vm tools [TOOL] [--target JSON] [--json]
   terminalx vm call TOOL [ARGUMENTS_JSON] [--target JSON] [--json]
@@ -1604,7 +1605,7 @@ fn parse_pipelines(tokens: &mut Tokens) -> Result<Action, ControlError> {
 /// slug, id or name. The app answers `bots_off` while Settings → Experimental
 /// → Bots is off.
 fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell, handoffs, suggest, post or reply";
+    const COMMANDS: &str = "list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell, handoffs, suggest, post, reply or message";
     let command = tokens.required_front(&format!("bots command ({COMMANDS})"))?;
     let said = |tokens: &mut Tokens, option: &str, what: &str| -> Result<String, ControlError> {
         match tokens.option(option)? {
@@ -1649,6 +1650,19 @@ fn parse_bots(tokens: &mut Tokens) -> Result<Action, ControlError> {
         "handoff" | "tell" | "handoffs" => parse_bot_handoffs(&command, tokens),
         "suggest" => parse_bot_suggest(tokens),
         "post" | "reply" => parse_bot_channels(&command, tokens),
+        // From a bot's own chat or duty run (PRO-472): a hand-off, a question or a status for another bot.
+        "message" => {
+            let kind = tokens.option("--kind")?.unwrap_or_else(|| "handoff".into());
+            if !matches!(kind.as_str(), "handoff" | "question" | "status") {
+                return Err(invalid("--kind is handoff, question or status."));
+            }
+            let bot = tokens.required_front("bot")?;
+            let text = tokens.required_front("message")?;
+            if text.trim().is_empty() {
+                return Err(invalid("bots message needs the message's text."));
+            }
+            rpc("bots.message", from_caller(json!({"bot": bot, "text": text, "kind": kind})), tokens)
+        }
         other => Err(invalid(format!("Unknown bots command {other}. Use {COMMANDS}."))),
     }
 }
@@ -2422,7 +2436,7 @@ mod tests {
         assert_eq!(inside[4], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[5], json!({"bot": "atlas", "caller": caller}));
         assert_eq!(inside[6], json!({"role": "cto", "name": "Echo", "caller": caller}));
-        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell, handoffs, suggest, post or reply"));
+        assert!(parse(&args(&["bots", "hire"])).unwrap_err().message.contains("Use list, show, create, rename, pause, resume, delete, pause-all, resume-all, memory, items, handoff, tell, handoffs, suggest, post, reply or message"));
         // PRO-470: a bot's memory, from its own chat (the caller is sent for the app to check) or naming the bot.
         assert_eq!(rpc_of(&["bots", "memory", "add", "Status updates go in a table.", "--bot", "atlas"]), ("bots.memory.add".into(), json!({"bot": "atlas", "text": "Status updates go in a table."}), short));
         assert_eq!(rpc_of(&["bots", "memory", "forget", "--line", "3", "Twice", "--bot", "atlas"]), ("bots.memory.forget".into(), json!({"bot": "atlas", "line": "Twice", "number": 3}), short));
