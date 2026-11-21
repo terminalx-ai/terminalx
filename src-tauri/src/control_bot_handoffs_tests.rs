@@ -828,3 +828,52 @@ fn two_hand_offs_sent_at_once_into_the_last_room_one_goes_in() {
     assert!(results.iter().any(|result| result.as_ref().is_err_and(|message| message.contains("already working on"))), "{results:?}");
     assert_eq!(handoffs::read().unwrap().handoffs.iter().filter(|handoff| handoff.to == team.sentry && handoff.state == HandoffState::Working).count(), handoffs::MAX_RUNNING_WORK);
 }
+
+/// Lead review 3 (N1): a start that delivers, where that delivery is a third failed try and gives a hand-off up,
+/// does not lock the start a second time on its own thread: the hand-off waiting for room starts.
+#[test]
+fn a_start_whose_delivery_gives_a_hand_off_up_starts_the_next_without_hanging() {
+    use std::sync::atomic::Ordering;
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let sink = team.service.sink.clone();
+    // Iris hands Atlas work (its Who can ask lets it); Atlas's chats take nothing: one try, then a second.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.iris, "may": "handOff"}]));
+    handoffs::FAIL_SENDS_FOR_TESTS.store(true, Ordering::SeqCst);
+    let first = team.as_home(&team.iris, "bots.handoff", json!({"to": "atlas", "title": "Review the copy"})).unwrap()["handoff"].clone();
+    let first: handoffs::Handoff = serde_json::from_value(first).unwrap();
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": "Status."})).unwrap();
+    assert_eq!(handoffs::read().unwrap().messages.iter().find(|message| message.handoff == Some(first.number)).unwrap().tries, 2);
+    // A hand-off to Atlas waits for room (as one left waiting by the cap would).
+    let waiting = handoffs::read().unwrap().next;
+    handoffs::edit_for_tests(|store| {
+        let mut next = store.handoffs.iter().find(|handoff| handoff.number == first.number).unwrap().clone();
+        next.number = store.next;
+        next.title = "Review the next copy".into();
+        next.state = HandoffState::Waiting;
+        next.to_session = None;
+        next.item = None;
+        next.started = None;
+        store.next += 1;
+        store.handoffs.push(next);
+    });
+    // Atlas hands paused Sentry work, then the owner takes Sentry off Atlas's line and resumes it: that start is
+    // refused and tells Atlas, which is the third try of Iris's hand-off: it is given up, and the waiting one starts.
+    crate::bots::pause(sink.as_ref(), &team.sentry, crate::bots::OWNER).unwrap();
+    team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Rotate the token"})).unwrap();
+    crate::bots::update(sink.as_ref(), &team.sentry, crate::bots::BotPatch { reports_to: Some(crate::bots::OWNER.into()), ..Default::default() }).unwrap();
+    crate::bots::resume(sink.as_ref(), &team.sentry).unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    let manager = team.service.manager.clone();
+    let sentry = team.sentry.clone();
+    std::thread::spawn(move || {
+        handoffs::resumed(&manager, Some(&sentry));
+        let _ = done.send(());
+    });
+    finished.recv_timeout(std::time::Duration::from_secs(60)).expect("the start hung on its own lock");
+    handoffs::FAIL_SENDS_FOR_TESTS.store(false, Ordering::SeqCst);
+    assert_eq!(team.handoff(first.number).state, HandoffState::Failed, "Iris's hand-off was given up");
+    let next = team.handoff(waiting);
+    assert!(next.state == HandoffState::Working && next.to_session.is_some(), "{next:?}");
+}

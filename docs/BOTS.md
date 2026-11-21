@@ -240,11 +240,13 @@ permission system.
   lock. Between the same two bots, either way and closed ones counted, at
   most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
   counted under the lock from its open working ones (claimed ones whose chat
-  is not made yet included): a fifth is refused, and on a resume the rest
-  wait and start as those are answered. When a hand-off closes, the chat
-  made for it (never a home chat or another of the bot's chats) is stopped
-  once its turn has ended (`SessionManager::stop_if_idle`); its conversation
-  stays.
+  is not made yet included, and, for a bot that is not paused, the waiting
+  ones about to be claimed): a fifth is refused, and on a resume the rest
+  wait and start as those are answered or their sender is deleted. When a
+  hand-off closes, the chat made for it (never a home chat or another of
+  the bot's chats) is stopped once its turn has ended and its agent left
+  nothing running in the background (`SessionManager::stop_if_idle`, as
+  the idle sweep does); its conversation stays.
   Closed hand-offs are trimmed to 300, the bots' before the owner's;
   delivered messages to 400, and a delivered message keeps no text (its words
   are in the chat); a waiting message is never trimmed. A write past the

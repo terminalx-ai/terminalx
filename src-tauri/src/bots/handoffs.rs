@@ -441,6 +441,16 @@ fn trim_bytes(store: &mut Store) -> bool {
     true
 }
 
+/// Change the store as a test sets it up.
+#[cfg(test)]
+pub fn edit_for_tests(f: impl FnOnce(&mut Store)) {
+    change(None, usize::MAX, |store| {
+        f(store);
+        Ok(())
+    })
+    .unwrap();
+}
+
 fn find(store: &mut Store, number: u64) -> Result<&mut Handoff> {
     store.handoffs.iter_mut().find(|handoff| handoff.number == number).ok_or_else(|| refused(format!("No hand-off {number}.")))
 }
@@ -661,6 +671,14 @@ fn release_work_chat(manager: &SessionManager, handoff: &Handoff) {
         let deadline = std::time::Instant::now() + RELEASE_WAIT;
         for tab in &entry.tabs {
             loop {
+                // Work its agent left running (a background command, a monitor) keeps it, as the idle sweep does.
+                if manager.background_work(&entry.id, &tab.id).is_some() {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(RELEASE_QUIET);
+                    continue;
+                }
                 match manager.stop_if_idle(&entry.id, &tab.id, &note, RELEASE_QUIET) {
                     Ok(crate::session::AgentStop::Busy) if std::time::Instant::now() < deadline => std::thread::sleep(RELEASE_QUIET),
                     Ok(_) => break,
@@ -757,7 +775,9 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
                 PAIR_WINDOW.as_secs() / 60
             )));
         }
-        let working = working_for(store, &to.id);
+        // Waiting ones of a bot that is not paused are about to be claimed: counted too, so two sends at once
+        // into the last room cannot both go in.
+        let working = working_for(store, &to.id) + if to.paused.is_none() { store.handoffs.iter().filter(|handoff| handoff.to == to.id && handoff.state == HandoffState::Waiting).count() } else { 0 };
         if working >= MAX_RUNNING_WORK {
             return Err(refused(format!("{} is already working on {working} hand-offs, and a bot works on at most {MAX_RUNNING_WORK} at once. Wait for one to be answered.", to.name)));
         }
@@ -1101,7 +1121,9 @@ fn start_and_deliver(manager: &SessionManager, number: u64, line: &str) -> Optio
 /// Give a waiting hand-off its chat and its item, and its message its text: it is worked on from now. A paused bot's
 /// waits. Whether it started.
 fn start(manager: &SessionManager, number: u64) -> bool {
-    let _one = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+    // Held while it starts, never while it delivers: a delivery can give up a hand-off, and what closes then may
+    // start the next one on this thread (`closed_now`).
+    let one = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let sink = manager.sink();
     // Claimed first, under the store's lock: only a waiting hand-off of a bot that is not paused starts, and a Stop
     // that lands after this sees it working. Its chat and item are made after.
@@ -1145,6 +1167,7 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         Ok(Claim::Claimed(claimed)) => *claimed,
         Ok(Claim::Not) => return false,
         Ok(Claim::Refused(closed)) => {
+            drop(one);
             status_lines(manager, &closed, &format!("Hand-off {number} did not start: the line or Who can ask changed"));
             deliver(manager, &closed.from);
             return false;
@@ -1238,10 +1261,8 @@ fn start(manager: &SessionManager, number: u64) -> bool {
             false
         }
     };
-    if !started && handoff.by != OWNER {
-        // A note left for the sender above goes now.
-        deliver(manager, &handoff.from);
-    }
+    // A note left for the sender above goes once the start is over.
+    let tell_from = !started && handoff.by != OWNER;
     match &made {
         Err(error) => log::warn!("start hand-off {number} for bot {}: {error:#}", to.id),
         // Made, but not recorded: the hand-off was stopped meanwhile, or the save failed. Nothing is left behind.
@@ -1252,6 +1273,10 @@ fn start(manager: &SessionManager, number: u64) -> bool {
             discard_chat(sink.as_ref(), &entry.id);
         }
         Ok(_) => {}
+    }
+    drop(one);
+    if tell_from {
+        deliver(manager, &handoff.from);
     }
     started
 }
@@ -1571,7 +1596,8 @@ pub fn before_delete(manager: &SessionManager, id: &str) {
 /// After bot `id` is deleted: its closed hand-offs, and every message it is part of, leave the store for
 /// `trash/bot-handoffs/<id>.json`. An open one it gave is stopped (`stopped_by` `deleted`), its work and item are
 /// dropped, and the bot that worked on it keeps it on its list and is told; an open one given to it fails, stays on
-/// its sender's list, and its sender is told. `deliver_waiting_all` sends those notes.
+/// its sender's list, and its sender is told. `deliver_waiting_all` starts what waited for the room made, and
+/// sends those notes.
 pub fn forget_bot(sink: &dyn EventSink, id: &str) -> Result<()> {
     let mut stopped_items: Vec<(String, u64)> = Vec::new();
     let removed = change(Some(sink), usize::MAX, |store| {
@@ -1633,7 +1659,14 @@ pub fn deliver_waiting_all(manager: &SessionManager) {
         return;
     }
     let Ok(store) = read() else { return };
-    let bots: BTreeSet<String> = store.messages.iter().filter(|message| message.pending).map(|message| message.to.clone()).collect();
+    // A delete closes the hand-offs of the bot gone: room is made for what waited for the bots they went to.
+    let waiting: BTreeSet<String> = store.handoffs.iter().filter(|handoff| handoff.state == HandoffState::Waiting).map(|handoff| handoff.to.clone()).collect();
+    for id in &waiting {
+        start_waiting(manager, id);
+    }
+    let Ok(store) = read() else { return };
+    let mut bots: BTreeSet<String> = store.messages.iter().filter(|message| message.pending).map(|message| message.to.clone()).collect();
+    bots.extend(waiting);
     for id in bots {
         deliver(manager, &id);
     }
