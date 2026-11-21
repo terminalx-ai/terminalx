@@ -138,7 +138,7 @@ function DeleteDialog({ bot, onClose, onDeleted }: { bot: Bot; onClose: () => vo
       onAction={() => run(() => deleteBot(bot.id))}
       onCancel={onClose}
     >
-      {`Its home folder, with its role and memory, goes to TerminalX's trash. Its chats stay as ordinary chats. Bots that report to ${bot.name} report to you.`}
+      {`Every session working for ${bot.name} stops now. Its chats go to the archive, where you can still read them; a session it started stays where it is, in plan mode. Its home folder, with its role and memory, goes to TerminalX's trash. Bots that report to ${bot.name} report to you.`}
     </ConfirmDialog>
   );
 }

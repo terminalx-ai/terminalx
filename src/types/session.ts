@@ -197,6 +197,12 @@ export interface SessionParent {
   tabId?: string | null;
 }
 
+/** Which bot a session belongs to: its id only, since a bot's name and slug can change. */
+export interface SessionBotRef {
+  id: string;
+  home?: boolean;
+}
+
 export interface SessionEntry {
   /** Live presentation facts supplied by the owning runtime. */
   rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
@@ -206,6 +212,10 @@ export interface SessionEntry {
   kind?: SessionKind;
   /** Absent for a session no other session started. */
   parent?: SessionParent | null;
+  /** The bot this session is a chat of (PRO-468): its id, and whether it is the bot's home chat. */
+  bot?: SessionBotRef | null;
+  /** A session that works for a bot without being its chat (PRO-468): one its chats started, or what those started in turn. */
+  botStarted?: { id: string } | null;
   /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
   orchestrateStart?: boolean;
   /**

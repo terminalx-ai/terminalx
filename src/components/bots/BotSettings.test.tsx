@@ -273,6 +273,9 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
 
     mouseClick(screen.getByTestId("bot-menu"));
     fireEvent.click(await screen.findByTestId("bot-menu-delete"));
+    // What happens to its sessions and chats (PRO-468's delete), said before it happens.
+    expect(await screen.findByText(/^Every session working for Sentinel stops now\./)).toBeTruthy();
+    expect(document.body.textContent).toContain("Every session working for Sentinel stops now. Its chats go to the archive, where you can still read them; a session it started stays where it is, in plan mode.");
     mocks.api.remove.mockResolvedValue(undefined);
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await waitFor(() => expect(mocks.api.remove).toHaveBeenCalledWith("b1"));

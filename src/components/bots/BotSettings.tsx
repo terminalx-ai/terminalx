@@ -163,7 +163,10 @@ function Access({ bot, busy, onChange }: { bot: Bot; busy: boolean; onChange: (a
           A newer version of TerminalX set this bot's access to “{bot.access}”. Here it is held to Read and report until you pick a level.
         </p>
       )}
-      <p className="text-[12px] text-faint">The next thing the bot does is held to the level you pick, in a conversation already open too.</p>
+      <p className="text-[12px] text-faint" data-testid="bot-access-hint">
+        The next thing the bot does is held to the level you pick, in a conversation already open too. While it is paused it only reads. On native
+        Codex, which cannot ask before each action, Ask before outward actions runs in plan mode.
+      </p>
     </div>
   );
 }

@@ -2158,6 +2158,13 @@ export const botsApi = {
   /** The bot's standing instructions, its `ROLE.md`. */
   roleRead: (id: string) => invoke<string>("bot_role_read", { id }),
   roleWrite: (id: string, text: string) => invoke<Bot>("bot_role_write", { id, text }),
+  /** The bot's home chat (PRO-468), made again when it is missing. */
+  homeChat: (id: string) => invoke<SessionEntry>("bot_home_chat", { id }),
+  /** Another conversation with the bot, in its home folder. */
+  newChat: (id: string) => invoke<SessionEntry>("bot_new_chat", { id }),
+  /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
+  dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
+  spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
 };
 
 export function errorMessage(e: unknown): string {

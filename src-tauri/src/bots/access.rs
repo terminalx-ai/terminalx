@@ -1,17 +1,19 @@
 //! What a bot's access lets its chats do (PRO-478), enforced outside the
 //! agent's own judgment.
 //!
-//! A bot's chat starts in the permission mode its access maps to
-//! ([`launch_mode`]), and every tool call its agent makes passes through the
-//! app's `PreToolUse` gate ([`session_gate`]), which reads the bot's access
-//! as it is now: a change on the settings page reaches the very next call,
-//! in a conversation already running or the next one.
+//! A session that acts for a bot runs in a permission mode no wider than the
+//! bot's access allows (`chat::permission_mode`, held by `chat::mode_limit`
+//! and `enforce::reconcile`, PRO-468). On top of that mode, every tool call
+//! its agent makes passes through this gate ([`session_gate`]): the hooks'
+//! `PreToolUse` and `PermissionRequest`, and native Codex's approval
+//! requests, which read the bot's access as it is now.
 //!
 //! | Access | Mode | The gate |
 //! | -- | -- | -- |
 //! | Full access | the owner's default (bypass) | leaves every call to the agent |
-//! | Ask before outward actions | Ask every time | lets reads through; asks before anything else |
+//! | Ask before outward actions | Ask every time (native Codex: plan) | lets reads through; asks before anything else |
 //! | Read and report | plan | lets reads through; asks before a report leaves; refuses the rest |
+//! | Paused, or unreadable | plan | lets reads through; refuses the rest |
 //!
 //! The mode is the barrier and the gate only adds to it. A read is a named
 //! read tool, a shell command vetted read-only, or a `terminalx` read; a
@@ -19,10 +21,9 @@
 //!
 //! At every level a bot is refused a write to `bots.json` or the app's
 //! `settings.json` (resolved against its folder, through links, in any letter
-//! case), a shell command naming either, any `terminalx bots` change but
-//! pausing itself, and an answer to a permission card: a bot does not raise
-//! its own access, change its reporting line, resume itself or approve its
-//! own ask.
+//! case), and a shell command naming either. Who may change a bot, approve a
+//! card or write to the runtime is settled where the command arrives, by who
+//! sent it (`control::Caller`), not here.
 //!
 //! None of this is a sandbox. Like the run worker's limits
 //! (`orchestration::guard`), it stops what a bot not trying to get around it
@@ -33,10 +34,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::BotAccess;
+use super::{chat, BotAccess};
 use crate::orchestration::guard;
 use crate::store::bots as bot_store;
-use crate::store::index::{self, SessionEntry};
+use crate::store::index;
 
 /// What becomes of one tool call of a bot's chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,87 +50,62 @@ pub enum Gate {
     Refuse(String),
 }
 
-/// The permission mode a bot's chat runs in at `access`. A level this build
-/// does not know runs as read and report.
-pub fn launch_mode(access: &BotAccess) -> &'static str {
-    match access.effective() {
-        BotAccess::Full => index::DEFAULT_PERMISSION_MODE,
-        // Ask every time is the barrier; the gate asks about what the mode would not.
-        BotAccess::AskOutward => "manual",
-        BotAccess::ReadReport | BotAccess::Other(_) => guard::VERIFIER_MODE,
-    }
-}
-
-/// The bot a session is a chat of: the id its entry carries under `bot`
-/// (PRO-468). An entry that carries none, or one this build cannot read, is
-/// no bot's.
-pub fn session_bot_id(entry: &SessionEntry) -> Option<String> {
-    entry.unknown.get("bot")?.get("id")?.as_str().filter(|id| !id.is_empty()).map(str::to_owned)
-}
-
-/// The agent tabs of `bot_id`'s chats in a wider mode than `mode`, as
-/// (session, tab). Lowering a bot's access narrows them, so the next
-/// conversation in any of them starts in the mode the new access maps to; a
-/// change never widens a tab, which stays as the owner set it.
-pub fn tabs_to_switch(bot_id: &str, mode: &str) -> Vec<(String, String)> {
-    let sessions = index::load().unwrap_or_else(|error| {
-        log::warn!("bot {bot_id}'s chats cannot be read to switch their mode: {error:#}");
-        Vec::new()
-    });
-    sessions
-        .iter()
-        .filter(|entry| !entry.archived && session_bot_id(entry).as_deref() == Some(bot_id))
-        .flat_map(|entry| entry.tabs.iter().filter(|tab| !tab.is_terminal() && width(&tab.permission_mode) > width(mode)).map(|tab| (entry.id.clone(), tab.id.clone())))
-        .collect()
-}
-
-/// How much a permission mode lets an agent do unasked. A mode this build
-/// does not know counts as the widest, so it is narrowed.
-fn width(mode: &str) -> u8 {
-    match mode.trim() {
-        "plan" => 0,
-        "manual" | "default" | "ask" => 1,
-        "acceptEdits" | "accept_edits" | "auto" => 2,
-        _ => 3,
-    }
-}
-
-/// The gate for a `PreToolUse` of `session_id`, whose frame carried its
-/// launch's token. Nothing for a session that is no bot's chat, nor while
-/// Bots is off, nor for a bot that is gone. Bots that cannot be read are
-/// gated as read and report: not knowing never reads as full access.
+/// The gate for one tool call of `session_id`, whose frame carried its
+/// launch's token, as the bot it acts for is now (`chat::acting_bot`: its
+/// chats and the sessions they started). Nothing for any other session, nor
+/// while Bots is off (its chats are stopped, `enforce::reconcile`), nor for a
+/// bot that is gone (the mode it was held to stays). A paused bot, or one
+/// that cannot be read, is gated as read and report with nothing asked: not
+/// knowing never reads as full access.
 pub fn session_gate(session_id: &str, payload: &Value) -> Gate {
     if !super::enabled() {
         return Gate::Leave;
     }
-    let Some(bot_id) = index::get(session_id).ok().as_ref().and_then(session_bot_id) else {
+    let Some(bot_id) = index::get(session_id).ok().as_ref().and_then(chat::acting_bot) else {
         return Gate::Leave;
     };
     match bot_store::get(&bot_id) {
-        Ok(Some(bot)) => gate(Some(&bot.id), &bot.access, payload),
+        Ok(Some(bot)) if bot.paused.is_some() => held(payload, &format!("{} is paused", bot.name)),
+        Ok(Some(bot)) => gate(&bot.access, payload),
         Ok(None) => Gate::Leave,
         Err(error) => {
-            log::warn!("bot {bot_id}'s access cannot be read, so its chat is held to read and report: {error:#}");
-            gate(Some(&bot_id), &BotAccess::ReadReport, payload)
+            log::warn!("bot {bot_id}'s access cannot be read, so its session is held to read and report: {error:#}");
+            held(payload, "its bot cannot be read")
         }
     }
 }
 
-/// What a `PreToolUse` with `payload` comes to at `access`, in a chat of
-/// the bot `bot_id` (`None`: a bot this build cannot name).
+/// [`session_gate`] for an approval native Codex asks for: it runs no hooks,
+/// so its requests to run a command or change files are where its calls meet
+/// the gate. Plan mode's read-only sandbox runs the rest without asking.
+pub fn approval_gate(session_id: &str, method: &str, params: &Value, cwd: Option<&str>) -> Gate {
+    let payload = match method {
+        "item/commandExecution/requestApproval" => json!({"tool_name": "Bash", "tool_input": {"command": params["command"]}, "cwd": cwd}),
+        "item/fileChange/requestApproval" => json!({"tool_name": "apply_patch", "tool_input": params, "cwd": cwd}),
+        other => json!({"tool_name": other, "tool_input": params, "cwd": cwd}),
+    };
+    session_gate(session_id, &payload)
+}
+
+/// A paused bot, or one that cannot be read: it reads, and nothing else runs, nor is asked.
+fn held(payload: &Value, why: &str) -> Gate {
+    match gate(&BotAccess::ReadReport, payload) {
+        Gate::Ask(_) => Gate::Refuse(format!("TerminalX refused {}: {why}, so it only reads until your owner resumes it. This did not run. Say in the chat what you wanted to do.", describe(payload["tool_name"].as_str().unwrap_or_default(), &payload["tool_input"]))),
+        gate => gate,
+    }
+}
+
+/// What a tool call with `payload` comes to at `access`.
 ///
-/// The chat's permission mode is the barrier ([`launch_mode`]); this adds to
-/// it and never widens it. It lets through unasked only what is known to read:
+/// The session's permission mode is the barrier (`chat::permission_mode`,
+/// held by `chat::mode_limit`); this adds to it and never widens it. It lets through unasked only what is known to read:
 /// a named read tool, a shell command vetted read-only, a `terminalx` read.
-pub fn gate(bot_id: Option<&str>, access: &BotAccess, payload: &Value) -> Gate {
+pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
     let tool = payload["tool_name"].as_str().unwrap_or_default();
     let input = &payload["tool_input"];
     let cwd = payload["cwd"].as_str();
     if let Some(what) = own_settings(tool, input, cwd) {
         return Gate::Refuse(format!("TerminalX refused this: it names {what}, where your owner keeps your access, your reporting line and whether you are paused. A bot does not change them, and runs no command on them; read them with the Read tool if you must. Ask your owner in the chat if something there should change."));
-    }
-    if let Some(what) = shell_command(tool, input).and_then(|command| guard::find_command(&command, &|program, args| owners_command(program, args, bot_id))) {
-        return Gate::Refuse(format!("TerminalX refused `{what}`: changing the bots and answering permission cards are your owner's. A bot pauses only itself, and never resumes itself or approves an ask. This did not run. Ask your owner in the chat."));
     }
     let access = access.effective();
     if access == BotAccess::Full || reads(tool, input, cwd) {
@@ -203,30 +179,6 @@ fn shell_command(tool: &str, input: &Value) -> Option<String> {
         return None;
     }
     input["command"].as_str().map(str::to_owned).or_else(|| input["command"].as_array().map(|words| words.iter().filter_map(Value::as_str).map(quote).collect::<Vec<_>>().join(" ")))
-}
-
-/// A `terminalx` command that is the owner's to run: one that changes the
-/// bots (but a bot's pause of itself), or answers a permission card.
-fn owners_command(program: &str, args: &[&str], bot_id: Option<&str>) -> Option<String> {
-    if !matches!(program, "terminalx" | "tnx") {
-        return None;
-    }
-    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
-    // `terminalx --machine m bots …`: an option's value may come before the group.
-    let at = plain.iter().take(3).position(|word| matches!(*word, "bots" | "permissions"))?;
-    match &plain[at..] {
-        ["bots"] | ["bots", "list" | "show" | "help", ..] => None,
-        ["bots", "pause", selector, ..] if pauses_itself(selector, bot_id) => None,
-        ["bots", sub, ..] => Some(format!("{program} bots {sub}")),
-        ["permissions", decision @ ("allow" | "deny"), ..] => Some(format!("{program} permissions {decision}")),
-        _ => None,
-    }
-}
-
-/// Whether `selector` names the bot `bot_id` itself, as `terminalx bots` reads a name.
-fn pauses_itself(selector: &str, bot_id: Option<&str>) -> bool {
-    let Some(bot_id) = bot_id else { return false };
-    matches!(super::named(selector), Ok(super::Named::One(bot)) if bot.id == bot_id)
 }
 
 /// A report: a comment, an issue or a message, which says something and changes nothing else.

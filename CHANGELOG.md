@@ -13,19 +13,55 @@
   page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
   no bots it offers three roles to hire in one click, and Hire a bot lists
   every role with its duties and skills and asks only for a name (PRO-467).
-- Bots: each bot has a settings page (PRO-478): where it runs (this Mac;
-  cloud and another machine come later), its access, the organisations it
-  works in, its channels (TerminalX, and the state of the GitHub and Linear
-  connections), and who besides you may ask it for work. Access sets the
-  mode the bot's chats run in, and every tool call is also checked against
-  the access as it is set now: Ask before outward actions reads freely and
-  asks you on a card before it changes anything or runs a command; Read and
-  report reads and runs only commands known to read, asks before a comment or
-  a message, and refuses the rest. At every level a bot is refused writes to
-  its own record and the app's settings, `terminalx bots` changes other than
-  pausing itself, and answers to permission cards. This is not a sandbox: a
-  bot with full access can still write files on this Mac by other means.
-  Agent and model, rename and delete are under the page's menu.
+- Bots (experimental): each bot has a home chat, made at hire, that runs in its
+  home folder; its agent is given the bot's role, the first 200 lines of its
+  memory and a few fixed rules each time it starts, so an edited `ROLE.md`
+  reaches the next conversation. A bot's view has its header and tabs, with
+  Chat filled: its chats and the sessions they started beside the transcript.
+  Its chats leave the sidebar's lists, and are never archived for being quiet
+  or removed by retention. A bot's sessions, and what they start, run in no
+  wider a permission mode than its access allows, and in plan mode while it is
+  paused; a paused bot still answers. A resume from the `terminalx` CLI waits
+  for the owner to confirm it in the app (shown on the team page and the
+  sidebar for a day), and a bot's own sessions cannot hire, delete or resume
+  bots, start cloud, pipeline or other-computer work, approve permissions, or
+  change sessions through the runtime's calls while they run in its tabs. The
+  app places a command in the pane that started it where it can (by its
+  process, its session and its terminal) and then ignores the session it
+  names; a command it cannot place counts as the owner's only from a terminal
+  of the person's own, one whose process has already exited or closed its
+  connection is refused, and one that has made itself a terminal of its own
+  (`script`, tmux) is not placed. While Bots is on, the runtime's own calls
+  that change sessions or terminals are taken from the window (by its
+  process and start time, carried across a runtime update), from a session
+  no bot works for, or from a terminal of the person's own, and refused
+  otherwise. Not held (PRO-489): a bot's process that has left its tab and
+  runs code of its own choosing, such as one with a terminal of its own. A bot's work on an agent that cannot
+  be given its rules (ACP, OpenCode) is refused at launch.
+  Hiring, resuming, deleting and raising access are confirmed by the
+  TerminalX window on a Mac, which restarts its runtime to do so when needed,
+  as pairing does. A resume or more access gives each tab back its own mode,
+  within the bot's limit, unless it was set by hand since. Deleting a bot
+  stops every session that works for it and archives its chats; turning Bots
+  off stops them. A bot's memory reaches its agent as its own notes, read safely
+  and capped (PRO-468).
+- Bots: each bot has a settings page (PRO-478), reached from the team table
+  and from the bot's own view: where it runs (this Mac; cloud and another
+  machine come later), its access, the organisations it works in, its
+  channels (TerminalX, and the state of the GitHub and Linear connections),
+  and who besides you may ask it for work. On top of the mode its access
+  holds a bot's sessions to, every tool call they make, including native
+  Codex's approval requests, is checked against the access as it is set now:
+  Ask before outward actions reads freely and asks you on a card before it
+  changes anything or runs a command; Read and report reads and runs only
+  commands known to read, asks before a comment or a message, and refuses the
+  rest; a paused bot only reads. At every level a bot is refused writes to
+  its own record and the app's settings. Adding an organisation, someone new
+  or more able in Who can ask, another agent or model, and a rename are
+  confirmed by the TerminalX window, as raising access is; taking any of them
+  away is not. This is not a sandbox: a bot with full access can still write
+  files on this Mac by other means. Agent and model, rename and delete are
+  under the page's menu.
 
 ## 0.2.37
 

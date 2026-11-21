@@ -38,11 +38,13 @@ interface State {
   /** Explicit navigation also reveals a destination that was collapsed. */
   navigationVersion: number;
   /** What the workspace shows when no session is selected. */
-  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project" | "bots";
+  view: "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills" | "project" | "bots" | "bot";
   /** The issues browser opens its new-issue form when it next shows; it sets this back. */
   newIssueRequested: boolean;
   /** A cross-workspace navigation request can open one automation directly. */
   selectedAutomationId: string | null;
+  /** The bot whose view is open (PRO-468): its id, the one stable reference to it. */
+  selectedBotId: string | null;
   /** A tab menu can open Skills already narrowed to that tab's reach. */
   skillsFilter: { agent: string; projectPath: string } | null;
   showArchived: boolean;
@@ -102,6 +104,7 @@ let state: State = {
   view: "welcome",
   newIssueRequested: false,
   selectedAutomationId: null,
+  selectedBotId: null,
   skillsFilter: null,
   showArchived: getPrefs().sidebarShowArchived,
   selectedProject: null,
@@ -419,6 +422,11 @@ export function openBots() {
 /** Saved agent runs share the full workspace with issues and the dashboard. */
 export function openAutomations() {
   set({ selectedSessionId: null, view: "automations", selectedAutomationId: null });
+}
+
+/** A bot's view (PRO-468): its header, tabs and chats. */
+export function openBot(id: string) {
+  set({ selectedSessionId: null, view: "bot", selectedBotId: id, selectedAutomationId: null, navigationVersion: state.navigationVersion + 1 });
 }
 
 /** Open a saved automation after creating it from another workspace. */

@@ -347,6 +347,77 @@ while IFS= read -r line; do
 done
 "#;
 
+/// PRO-478: native Codex runs no hooks, so a bot's gate meets its approval
+/// requests. At Read and report a `git push` is refused: the card says why and
+/// Codex is told no at once. At Ask before outward actions it waits on the card,
+/// which says why it asks.
+#[test]
+fn a_bots_gate_answers_native_codex_approvals() {
+    for case in ["bot-approval-refused", "bot-approval-asked"] {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+            .env(CASE, case).output().unwrap();
+        assert!(out.status.success(), "{case}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+fn bot_approval_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap().canonicalize().unwrap();
+    let mut settings = store::settings::load();
+    settings.experimental.bots = true;
+    store::settings::save(&settings).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+    let bot = crate::bots::create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let access = if case == "bot-approval-refused" { crate::bots::BotAccess::ReadReport } else { crate::bots::BotAccess::AskOutward };
+    crate::bots::update(sink.as_ref(), &bot.id, crate::bots::BotPatch { access: Some(access), harness: Some("codex".into()), ..Default::default() }).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = RESUMING_CODEX.replace("      printf '{\"method\":\"item/agentMessage/delta\"", "      printf '{\"id\":\"approval\",\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-%s\",\"itemId\":\"tool\",\"command\":\"git push origin main\"}}\\n' \"$id\"\n      continue\n      printf '{\"method\":\"item/agentMessage/delta\"");
+    assert_ne!(script, RESUMING_CODEX);
+    std::fs::write(bin.join("codex"), script).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), "thread-1").unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(), "bot": {"id": bot.id},
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"plan", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(sink, Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    struct Owner(SessionManager);
+    impl Drop for Owner { fn drop(&mut self) { let _ = self.0.stop("stdio-owner", "tab"); } }
+    let _owner = Owner(manager.clone());
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default();
+    let frames = || std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let wait = |why: &str, done: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(8);
+        while !done() {
+            assert!(Instant::now() < until, "{why}: {:?}; provider received: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>(), frames());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    manager.send("stdio-owner", "tab", "ship it".into(), Vec::new()).unwrap();
+    wait("the card", &|| events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
+    let reason = events().iter().find_map(|event| match &event.payload { Payload::PermissionRequested { reason, .. } => reason.clone(), _ => None }).unwrap_or_default();
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    if case == "bot-approval-refused" {
+        assert!(reason.contains("Read and report") && reason.contains("`git push origin main`"), "{reason}");
+        wait("Codex told no", &|| frames().iter().any(|frame| frame["id"] == "approval" && frame["result"]["decision"] == "decline"));
+        wait("the card settled", &|| rt.lock().unwrap().pending.is_empty());
+        assert!(events().iter().any(|event| matches!(event.payload, Payload::PermissionDecided { allowed: false, .. })));
+    } else {
+        assert!(reason.contains("asks before it changes anything") && reason.contains("`git push origin main`"), "{reason}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(rt.lock().unwrap().pending.len(), 1, "it waits for the owner");
+        assert!(!frames().iter().any(|frame| frame["id"] == "approval"), "nothing answered for them");
+    }
+}
+
 /// A tab whose connection ended (app restart, Stop) keeps its thread: the next
 /// send resumes that thread in a new connection, and a reply naming any other
 /// thread gets no prompt.
@@ -1757,6 +1828,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart" | "resend-no-helper-tools") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
+    if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }

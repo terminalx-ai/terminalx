@@ -131,6 +131,25 @@ describe("Bots: the sidebar section and the first-bot page (PRO-467)", () => {
   });
 });
 
+describe("Bots: a bot's own view (PRO-468)", () => {
+  it("opens from its sidebar row and its name in the table", async () => {
+    await boot(listOf(2, [bot("b1", "Atlas"), bot("b2", "Argus")]));
+    render(<Screen />);
+    const [first, second] = await waitFor(() => {
+      const rows = sidebar().getAllByTestId("bot-row");
+      expect(rows).toHaveLength(2);
+      return rows;
+    });
+    fireEvent.click(first);
+    expect([getSessionStore().view, getSessionStore().selectedBotId]).toEqual(["bot", first.dataset.bot]);
+    expect(first.getAttribute("aria-current")).toBe("page");
+    act(() => showBotsTeam());
+    const open = main().getAllByTestId("bot-open");
+    fireEvent.click(open[1]);
+    expect([getSessionStore().view, getSessionStore().selectedBotId]).toEqual(["bot", second.dataset.bot]);
+  });
+});
+
 describe("Bots: states (PRO-467 review)", () => {
   it("says it is reading until the list arrives, with no counts or table", async () => {
     mocks.api.list.mockReturnValue(new Promise(() => {}));
@@ -259,6 +278,19 @@ describe("Bots: hiring (23.03)", () => {
     expect(main().getByTestId("bots-hire-page")).toBeTruthy();
   });
 
+  it("offers Restart runtime when the runtime cannot confirm a hire, as pairing does", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restarting stops what it runs: Atlas's chat.");
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    const alert = await main().findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot confirm that you asked/);
+    expect(alert.textContent).not.toMatch(/runtime_restart_required/);
+    expect(main().getByRole("button", { name: /Restart runtime/ })).toBeTruthy();
+  });
+
   it("starts with the defaults the new bot really gets, focuses the name and keeps it when the role changes", async () => {
     await boot(listOf(0, []));
     act(() => showHireBot("watcher"));
@@ -361,6 +393,16 @@ describe("Bots: the team table (23.02)", () => {
     fireEvent.click(main().getByTestId("bots-resume-all"));
     await waitFor(() => expect(main().queryByTestId("bots-all-paused")).toBeNull());
     expect(main().getByTestId("bots-pause-all")).toBeTruthy();
+  });
+
+  it("shows a resume a bot asked for from the CLI on the team page and its sidebar row", async () => {
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    await boot(listOf(4, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }]));
+    render(<Screen />);
+    await waitFor(() => expect(main().getAllByTestId("bot-doing-now")).toHaveLength(2));
+    expect(main().getAllByTestId("bot-doing-now").map((cell) => cell.textContent?.trim())).toEqual(["Paused · asks to resume", "Paused"]);
+    expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · asks to resume, runs on/ })).toBeTruthy();
+    expect(sidebar().getByRole("button", { name: /Iris, .*, Paused, runs on/ })).toBeTruthy();
   });
 
   it("pauses and resumes one bot from its row", async () => {

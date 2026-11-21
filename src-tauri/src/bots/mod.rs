@@ -8,6 +8,8 @@
 //! every operation here refuses, and nothing about the app changes.
 
 pub mod access;
+pub mod chat;
+pub mod enforce;
 pub mod templates;
 
 use std::collections::BTreeMap;
@@ -114,7 +116,6 @@ impl BotAccess {
 
     /// The level this build acts on: one it does not know counts as the
     /// most restrictive one it knows.
-    #[allow(dead_code)] // Nothing acts on access yet; the bot's sessions do from PRO-468.
     pub fn effective(&self) -> Self {
         match self {
             Self::Other(_) => Self::ReadReport,
@@ -168,10 +169,9 @@ string_serde!(BotRunsOn);
 #[serde(rename_all = "camelCase")]
 pub struct BotPause {
     pub at: String,
-    /// [`OWNER`], or the id of the bot that paused it. Today every caller is
-    /// the owner: the app and the `terminalx` CLI both record `owner`. Once a
-    /// session carries a bot reference (PRO-468), a bot's own pause must be
-    /// recorded as that bot, and a bot must not be able to resume itself.
+    /// [`OWNER`], or the id of the bot that paused it: `terminalx bots pause`
+    /// run from a bot's own chat is that bot's (PRO-468), and that chat may
+    /// not resume it.
     pub by: String,
     /// What a newer build records about a pause (its source, a reason) survives a save by this one.
     #[serde(flatten, default)]
@@ -318,6 +318,25 @@ pub fn enabled() -> bool {
     crate::store::settings::load().experimental.bots
 }
 
+/// [`enabled`] for a path taken on every keystroke (the runtime's guard):
+/// read again after any settings write in this process, and at least once a
+/// second for a change another process made; a stat and a clone otherwise.
+pub fn enabled_cached() -> bool {
+    use std::time::{Duration, Instant};
+    static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, Instant, bool)>> = std::sync::Mutex::new(None);
+    let Ok(path) = crate::store::root() else { return enabled() };
+    let writes = crate::store::settings::writes();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((cached, at_writes, at, on)) = cache.as_ref() {
+        if *cached == path && *at_writes == writes && at.elapsed() < Duration::from_secs(1) {
+            return *on;
+        }
+    }
+    let on = enabled();
+    *cache = Some((path, writes, Instant::now(), on));
+    on
+}
+
 pub fn require_enabled() -> Result<()> {
     if enabled() { Ok(()) } else { Err(BotError::Off.into()) }
 }
@@ -372,7 +391,9 @@ fn memory_text() -> String {
 fn change_listed<T>(sink: &dyn EventSink, f: impl FnOnce(&mut Vec<Bot>) -> Result<T>) -> Result<(T, BotList)> {
     let mut saved = None;
     let out = bot_store::change(f, |snapshot| {
-        let list = BotList::from(snapshot);
+        let mut list = BotList::from(snapshot);
+        let now = chrono::Utc::now();
+        list.bots.iter_mut().for_each(|bot| forget_stale_request(bot, now));
         sink.emit("bots_changed", &list);
         saved = Some(list);
     })?;
@@ -391,12 +412,47 @@ pub fn list() -> Result<Vec<Bot>> {
 /// The bots with the revision they were read at.
 pub fn listing() -> Result<BotList> {
     require_enabled()?;
-    Ok(BotList::from(&bot_store::snapshot()?))
+    let mut list = BotList::from(&bot_store::snapshot()?);
+    let now = chrono::Utc::now();
+    list.bots.iter_mut().for_each(|bot| forget_stale_request(bot, now));
+    Ok(list)
 }
 
 pub fn get(id: &str) -> Result<Bot> {
     require_enabled()?;
-    bot_store::get(id)?.ok_or_else(|| not_found(id))
+    let mut bot = bot_store::get(id)?.ok_or_else(|| not_found(id))?;
+    forget_stale_request(&mut bot, chrono::Utc::now());
+    Ok(bot)
+}
+
+/// What the sessions working for bot `id` (its chats, and what they
+/// started) spent today, at Stats' prices: shown, never a cap (PRO-459).
+pub fn spent_today(id: &str) -> Result<f64> {
+    require_enabled()?;
+    get(id)?;
+    let day = crate::stats::today();
+    let sessions = crate::store::index::load()?;
+    Ok(sessions
+        .iter()
+        .filter(|entry| chat::acting_bot(entry).as_deref() == Some(id))
+        .flat_map(|entry| entry.tabs.iter().map(move |tab| (entry, tab)))
+        .filter(|(_, tab)| !tab.is_terminal())
+        .map(|(entry, tab)| crate::session_usage::spent_on_day(&entry.cwd, tab, &crate::session_usage::AgentHomes(tab), &day))
+        .sum())
+}
+
+/// How long a resume asked for from the CLI waits for the owner's answer.
+pub const RESUME_REQUEST_LASTS: chrono::Duration = chrono::Duration::hours(24);
+
+/// A resume request older than [`RESUME_REQUEST_LASTS`] (or with no time
+/// that can be read) is no longer shown: the agent that asked is long gone.
+fn forget_stale_request(bot: &mut Bot, now: chrono::DateTime<chrono::Utc>) {
+    let fresh = bot.unknown.get(RESUME_REQUEST_KEY).and_then(|request| request["at"].as_str())
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .is_some_and(|at| now - at.with_timezone(&chrono::Utc) < RESUME_REQUEST_LASTS);
+    if !fresh {
+        bot.unknown.remove(RESUME_REQUEST_KEY);
+    }
 }
 
 pub fn role_templates() -> Result<Vec<templates::RoleTemplate>> {
@@ -488,10 +544,66 @@ pub fn create(sink: &dyn EventSink, role_template_id: &str, name: &str) -> Resul
 }
 
 pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
+    update_as(sink, id, patch, true)
+}
+
+/// The field of an `update`'s parameters that says a person was shown to have
+/// asked; the runtime's control route sets it, after removing any sent.
+pub const BY_PERSON: &str = "byPerson";
+
+/// What an update [`PERSON_REQUIRED`] for names: what [`gives_more`] finds.
+pub const PERSON_REQUIRED: &str = "Giving a bot more (more access, another reporting line, an organisation to work in, someone new or more able in Who can ask, another agent or model, or a new name) needs you to confirm it in the TerminalX window.";
+
+/// How much an entry of Who can ask may do; a value this build does not know is the most.
+fn may_rank(may: &str) -> u8 {
+    match may {
+        MAY_ASK => 0,
+        MAY_HAND_OFF => 1,
+        MAY_ASK_APPROVE => 2,
+        _ => 3,
+    }
+}
+
+/// Whether `patch` gives `bot` more than it has, so only a person may make
+/// it (PRO-468, PRO-478): more access, another reporting line, a place it
+/// does not work in yet, an entry of Who can ask that is new or may do more,
+/// another agent, model or effort, or another name. Taking any of them away
+/// gives nothing, and needs no one.
+pub fn gives_more(bot: &Bot, patch: &BotPatch) -> bool {
+    let raises = patch.access.as_ref().is_some_and(|access| matches!(access, BotAccess::Other(_)) || access_rank(access) > access_rank(&bot.access));
+    let reports_elsewhere = patch.reports_to.as_ref().is_some_and(|reports_to| *reports_to != bot.reports_to);
+    let new_place = patch.works_in.as_ref().is_some_and(|places| places.iter().any(|place| !bot.works_in.contains(place)));
+    let new_asker = patch.who_can_ask.as_ref().is_some_and(|askers| {
+        askers.iter().any(|asker| !bot.who_can_ask.iter().any(|had| had.kind == asker.kind && had.id == asker.id && may_rank(&had.may) >= may_rank(&asker.may)))
+    });
+    let other_agent = patch.harness.as_ref().is_some_and(|harness| *harness != bot.harness)
+        || patch.model.as_ref().is_some_and(|model| *model != bot.model)
+        || patch.effort.as_ref().is_some_and(|effort| *effort != bot.effort);
+    let renamed = patch.name.as_ref().is_some_and(|name| clean_name(name).map_or(true, |name| name != bot.name));
+    raises || reports_elsewhere || new_place || new_asker || other_agent || renamed
+}
+
+/// How much an access level lets a bot do; a level this build does not know is the least.
+pub fn access_rank(access: &BotAccess) -> u8 {
+    match access.effective() {
+        BotAccess::Full => 2,
+        BotAccess::AskOutward => 1,
+        BotAccess::ReadReport | BotAccess::Other(_) => 0,
+    }
+}
+
+/// [`update`], where `by_person` says whether a person was shown to have
+/// asked. Without that, an update that gives the bot more access or another
+/// reporting line is refused, judged against the record under the store's
+/// lock (PRO-468).
+pub fn update_as(sink: &dyn EventSink, id: &str, patch: BotPatch, by_person: bool) -> Result<Bot> {
     require_enabled()?;
     change(sink, |bots| {
         let index = bots.iter().position(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
         let mut bot = bots[index].clone();
+        if !by_person {
+            refuse_unless!(!gives_more(&bot, &patch), "{PERSON_REQUIRED}");
+        }
         if patch.works_in.is_some() || patch.who_can_ask.is_some() {
             refuse_unless!(patch.if_modified.as_ref().is_none_or(|seen| *seen == bot.modified), "{} changed since this was read. The latest is shown now; make the change again.", bot.name);
         }
@@ -509,6 +621,7 @@ pub fn update(sink: &dyn EventSink, id: &str, patch: BotPatch) -> Result<Bot> {
         }
         if let Some(harness) = &patch.harness {
             refuse_unless!(crate::harness::binary_of(harness).is_some(), "Unknown agent {harness}.");
+            refuse_unless!(chat::takes_bot_instructions(harness), "A bot runs on Claude Code or Codex for now: {harness} cannot be given its role and memory.");
             if *harness != bot.harness {
                 // A model and an effort belong to the agent they were chosen for.
                 bot.model = String::new();
@@ -645,10 +758,38 @@ fn set_paused(bot: &mut Bot, pause: Option<&BotPause>) -> bool {
         }
         (true, None) => {
             bot.paused = None;
+            bot.unknown.remove(RESUME_REQUEST_KEY);
             bot.modified = crate::store::index::now();
             true
         }
     }
+}
+
+/// A resume asked for from the `terminalx` CLI, which waits on the owner's
+/// answer in the app (PRO-468): `{"at", "by"}` on the bot, where `by` is who
+/// the request claims to come from. Only the window's own Resume applies it.
+pub const RESUME_REQUEST_KEY: &str = "resumeRequest";
+
+/// Ask the owner to resume `id`. A bot that is not paused has nothing to ask.
+pub fn request_resume(sink: &dyn EventSink, id: &str, by: &str) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        if bot.paused.is_some() {
+            bot.unknown.insert(RESUME_REQUEST_KEY.into(), json!({"at": crate::store::index::now(), "by": by}));
+        }
+        Ok(bot.clone())
+    })
+}
+
+/// The owner said no to a resume the CLI asked for: the bot stays paused.
+pub fn dismiss_resume(sink: &dyn EventSink, id: &str) -> Result<Bot> {
+    require_enabled()?;
+    change(sink, |bots| {
+        let bot = bots.iter_mut().find(|bot| bot.id == id).ok_or_else(|| not_found(id))?;
+        bot.unknown.remove(RESUME_REQUEST_KEY);
+        Ok(bot.clone())
+    })
 }
 
 fn pause_one(sink: &dyn EventSink, id: &str, pause: Option<BotPause>) -> Result<Bot> {
@@ -718,15 +859,21 @@ pub fn home(bot: &Bot) -> Option<std::path::PathBuf> {
 /// The app's commands, as the runtime that owns the store answers them
 /// (`runtime.session.bots`). A change made in the app is by the owner.
 pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Value> {
+    if let Some(answer) = chat::call(sink, operation, params) {
+        return answer;
+    }
     let string = |key: &str| params[key].as_str().ok_or_else(|| refused(format!("{key} must be a string")));
     Ok(match operation {
         "list" => serde_json::to_value(listing()?)?,
         "get" => serde_json::to_value(get(string("id")?)?)?,
         "templates" => serde_json::to_value(role_templates()?)?,
-        "create" => serde_json::to_value(create(sink, string("roleTemplateId")?, string("name")?)?)?,
+        // A hire makes the bot's home chat too (PRO-468).
+        "create" => serde_json::to_value(chat::hire(sink, string("roleTemplateId")?, string("name")?)?)?,
         "update" => {
             let patch: BotPatch = serde_json::from_value(params["patch"].clone()).map_err(|error| refused(format!("Invalid change: {error}")))?;
-            serde_json::to_value(update(sink, string("id")?, patch)?)?
+            // Set by the runtime's control route, which alone takes requests from outside this process.
+            let by_person = params[BY_PERSON].as_bool().unwrap_or(true);
+            serde_json::to_value(update_as(sink, string("id")?, patch, by_person)?)?
         }
         "delete" => {
             delete(sink, string("id")?)?;
@@ -737,7 +884,9 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Result<Val
         "resume" => serde_json::to_value(resume(sink, string("id")?)?)?,
         "pauseAll" => serde_json::to_value(pause_all(sink, OWNER)?)?,
         "resumeAll" => serde_json::to_value(resume_all(sink)?)?,
+        "dismissResume" => serde_json::to_value(dismiss_resume(sink, string("id")?)?)?,
         "roleRead" => json!(role_read(string("id")?)?),
+        "spentToday" => json!({"usd": spent_today(string("id")?)?, "day": crate::stats::today()}),
         "roleWrite" => serde_json::to_value(role_write(sink, string("id")?, string("text")?)?)?,
         other => return Err(refused(format!("Unknown bots operation {other}"))),
     })

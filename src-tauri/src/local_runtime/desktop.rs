@@ -297,6 +297,29 @@ impl Desktop {
         super::window_consent::guarded(self, command, params, |runtime, params| runtime.machine_host_once(command, params), relaunch)
     }
 
+    /// A Bots action from this window (PRO-468). One that gives a bot more
+    /// carries this window's proof, and a runtime that cannot verify it is
+    /// repaired as for pairing: a fresh runtime when nothing would stop, else
+    /// Restart runtime offered (`window_consent::guarded`). An update that
+    /// gives nothing more asks for no proof: the runtime judges it again itself.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        use crate::serve_cli::consent;
+        let mut request = serde_json::json!({"operation": operation, "params": params});
+        // An update that gives the bot nothing more (`bots::gives_more`) is sent without a proof.
+        if operation == "update" {
+            if let Ok(patch) = serde_json::from_value::<crate::bots::BotPatch>(request["params"]["patch"].clone()) {
+                let current = self.sessions()?.bots::<crate::bots::Bot>("get", serde_json::json!({"id": request["params"]["id"]})).ok();
+                request[consent::GIVES_MORE] = serde_json::json!(current.is_none_or(|bot| crate::bots::gives_more(&bot, &patch)));
+            }
+        }
+        if !consent::guards_request(consent::BOTS_COMMAND, &request) {
+            return self.sessions()?.bots_request(request);
+        }
+        let relaunch = super::window_consent::installed().map(|relaunch| relaunch.as_ref() as super::window_consent::Relaunching<'_, Self>);
+        super::window_consent::guarded(self, consent::BOTS_COMMAND, request, |runtime, request| runtime.sessions()?.bots_request(request), relaunch)
+    }
+
     /// [`Self::machine_host`] with no one at the window to ask, as for an
     /// account pairing grant: a runtime that cannot verify the window is not
     /// restarted for it, and Settings → Machines offers the restart instead

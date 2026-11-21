@@ -128,6 +128,9 @@ fn inherit_run_limits(entry: &mut SessionEntry) {
     if crate::orchestration::guard::limited(entry) {
         entry.mark_run_worker();
     }
+    // So does one started by a session that works for a bot: it works for
+    // the bot too, held to its access (PRO-468).
+    crate::bots::chat::inherit(entry);
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
@@ -593,7 +596,19 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
     create_quick_chat_entry_on(req, None)
 }
 
+/// Create a quick chat whose entry `mark` finishes before it is first saved
+/// (a bot's chat, PRO-468, carries its bot from its first moment), and tell listeners.
+pub(crate) fn create_quick_chat_marked(sink: &dyn EventSink, req: NewQuickChat, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    let entry = create_quick_chat_entry_marked(req, None, mark)?;
+    sink.emit("session_created", &entry);
+    Ok(entry)
+}
+
 fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
+    create_quick_chat_entry_marked(req, account, |_| {})
+}
+
+fn create_quick_chat_entry_marked(req: NewQuickChat, account: Option<&str>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
@@ -635,6 +650,7 @@ fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Resul
         };
         let mut entry = entry;
         inherit_run_limits(&mut entry);
+        mark(&mut entry);
         index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
         Ok(entry)
     })();
@@ -832,7 +848,9 @@ pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, b
         let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
         // Archived by the idle sweep (#718) is not set aside on purpose.
         let set_aside = session.archived && !session.archive.auto_archived;
-        session.is_quick() && !session.pinned && !set_aside && !working && last.is_some_and(|last| last < cutoff)
+        // A bot's chat (PRO-468) stands as long as its bot does: retention never takes it.
+        let bot = crate::bots::chat::session_bot(session).is_some();
+        session.is_quick() && !session.pinned && !bot && !set_aside && !working && last.is_some_and(|last| last < cutoff)
     };
     let candidates: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
     if candidates.is_empty() {
@@ -1596,6 +1614,10 @@ pub(crate) fn add_tab_entry_on(session_id: &str, tab: &NewTab, account: Option<&
     let account = requested_account(account)?;
     let mut t = new_tab_entry(tab);
     index::update_session(session_id, |s| {
+        // A new tab of a session that works for a bot starts within its access (PRO-468).
+        if let Some(limit) = crate::bots::chat::tab_limit(s, &t) {
+            t.permission_mode = limit.clamp(&t.permission_mode);
+        }
         let harness = t.harness.clone();
         set_tab_account(&mut t, account.as_deref().or_else(|| inherited_account(s, &harness)));
         s.tabs.push(t.clone());
@@ -2774,6 +2796,34 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// A bot's chats stand as long as their bot (PRO-468): retention takes
+    /// none, archived by the idle sweep or not, however long it was quiet.
+    #[test]
+    fn retention_never_takes_a_bots_chat() {
+        let _home = crate::store::temp_home();
+        let home = quick_chat(None);
+        let swept = quick_chat(None);
+        let plain = quick_chat(None);
+        for session in [&home, &swept, &plain] {
+            aged(session, 45);
+        }
+        index::update(|sessions| {
+            for session in sessions.iter_mut().filter(|session| session.id != plain.id) {
+                crate::bots::chat::set_session_bot(session, &crate::bots::chat::BotRef { id: "b".into(), home: session.id == home.id });
+            }
+            let by_the_sweep = sessions.iter_mut().find(|s| s.id == swept.id).unwrap();
+            by_the_sweep.archived = true;
+            by_the_sweep.archive.auto_archived = true;
+            Ok(())
+        })
+        .unwrap();
+        let removed = sweep_idle_quick_chats(&sink(), 30, &|_| false, &|_| {}).unwrap();
+        assert_eq!(removed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [plain.id.as_str()]);
+        let kept: Vec<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(kept.contains(&home.id) && kept.contains(&swept.id));
+        assert!(Path::new(&home.cwd).exists());
     }
 
     #[test]

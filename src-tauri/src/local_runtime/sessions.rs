@@ -147,11 +147,15 @@ impl Sessions {
 
     /// Bots (`bots`, PRO-466). A read fails fast on a wedged owner; a change waits for its answer.
     pub fn bots<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
-        let request = json!({"operation": operation, "params": params});
-        if matches!(operation, "list" | "get" | "templates" | "roleRead") {
-            self.quick("runtime.session.bots", request)
+        self.bots_request(json!({"operation": operation, "params": params}))
+    }
+
+    /// [`Self::bots`] with the whole request, as `window_consent::guarded` sends it again.
+    pub fn bots_request<T: DeserializeOwned>(&self, request: Value) -> Result<T> {
+        if matches!(request["operation"].as_str(), Some("list" | "get" | "templates" | "roleRead" | "spentToday")) {
+            self.quick(crate::serve_cli::consent::BOTS_COMMAND, request)
         } else {
-            self.call("runtime.session.bots", request)
+            self.call(crate::serve_cli::consent::BOTS_COMMAND, request)
         }
     }
 
