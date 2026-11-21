@@ -656,3 +656,52 @@ fn the_prompt_carries_the_output_under_its_own_heading() {
     assert!(prompt.contains("````\na ``` b\n````"));
     assert!(prompt.ends_with("only its start is shown.)"));
 }
+
+/// PRO-490 review: a run ended by something else while the orphans are failed
+/// is not ended or reported again.
+#[test]
+fn an_orphan_ended_meanwhile_is_not_ended_again() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = saved(project.path(), Some("echo x"), 30, "2099-01-01T00:00:00Z");
+    let since = chrono::Utc::now() - chrono::TimeDelta::seconds(1);
+    let mut orphan = pending(&automation, AutomationTrigger::Manual);
+    orphan = automation_store::replace_run(&automation.id, &orphan.run_id, |run| {
+        run.started_at = Some(index::now());
+        Ok(())
+    })
+    .unwrap();
+    let id = automation.id.clone();
+    BEFORE_ORPHAN.with(|hook| *hook.borrow_mut() = Some(Box::new(move |run_id: &str| {
+        automation_store::replace_run(&id, run_id, |run| {
+            run.status = AutomationRunStatus::Completed;
+            run.ended_at = Some(index::now());
+            Ok(())
+        })
+        .unwrap();
+    })));
+    let app = host();
+    let mut events_seen = app.0.subscribe();
+    fail_orphans(&app, &automation.id, since);
+    BEFORE_ORPHAN.with(|hook| *hook.borrow_mut() = None);
+    let run = only_run(&automation);
+    assert_eq!((run.run_id, run.status), (orphan.run_id, AutomationRunStatus::Completed));
+    assert!(events(&mut events_seen, "automation_run").is_empty(), "nothing was ended or reported again");
+    assert!(automation_store::get(&automation.id).unwrap().last_outcome.is_none());
+}
+
+/// PRO-490 review: a Run now whose thread cannot start fails, and is ended as
+/// any failed run: in the automation's summary (and a duty's report).
+#[test]
+fn a_run_now_that_cannot_start_its_thread_ends_as_failed() {
+    let _home = crate::store::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let automation = saved(project.path(), Some("echo x"), 30, "2099-01-01T00:00:00Z");
+    NO_THREAD.with(|no| no.set(true));
+    let run = run_now(&host(), &automation.id);
+    NO_THREAD.with(|no| no.set(false));
+    let run = run.unwrap();
+    assert_eq!(run.status, AutomationRunStatus::Failed);
+    assert!(run.error.as_deref().unwrap_or_default().starts_with("The run could not start"), "{run:?}");
+    assert_eq!(automation_store::get(&automation.id).unwrap().last_outcome, Some(AutomationRunStatus::Failed));
+}

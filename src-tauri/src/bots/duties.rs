@@ -1084,7 +1084,8 @@ fn switch(sink: &dyn EventSink, duty: &Automation, on: bool) -> Result<Automatio
 /// Switch off a duty of `bot` named by its id or its name (any letter case),
 /// for `terminalx bots duty-off` (PRO-492). Switching off gives the bot
 /// nothing, so its own sessions may do it; a name two duties share is refused.
-pub fn switch_off_named(sink: &dyn EventSink, bot: &Bot, selector: &str) -> Result<Automation> {
+/// `by_itself`: the bot asked, from its own session, and its home chat says so.
+pub fn switch_off_named(app: &impl AutomationHost, bot: &Bot, selector: &str, by_itself: bool) -> Result<Automation> {
     super::require_enabled()?;
     let selector = selector.trim();
     let duties = duties_of(&bot.id)?;
@@ -1099,7 +1100,17 @@ pub fn switch_off_named(sink: &dyn EventSink, bot: &Bot, selector: &str) -> Resu
             }
         }
     };
-    switch(sink, &duty, false)
+    let off = switch(app.sink().as_ref(), &duty, false)?;
+    // Left where its owner reads it, in TerminalX's words (PRO-490 review): the bot did this, not the owner.
+    if by_itself && duty.enabled {
+        note_in_home_chat(app, &bot.id, &switched_off_note(bot, &duty));
+    }
+    Ok(off)
+}
+
+/// The home chat's line for a duty its bot switched off.
+pub(crate) fn switched_off_note(bot: &Bot, duty: &Automation) -> String {
+    format!("TerminalX · {} switched off its duty \"{}\". It wakes nobody until you switch it on again on {}'s Duties tab.", bot.name, duty.name, bot.name)
 }
 
 /// The owner's time zone: this computer's, UTC when it cannot be told.
@@ -1137,7 +1148,7 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
                 }),
                 poll_interval_minutes: 1,
                 max_runs_per_tick: 1,
-                max_runs_per_day: crate::automations::sources::RUNS_PER_DAY,
+                max_runs_per_day: None,
             })),
             DutyWake::Github { .. } | DutyWake::Linear { .. } | DutyWake::Message => continue,
         };

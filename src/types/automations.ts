@@ -40,6 +40,8 @@ export interface AutomationIssueTrigger {
   maxRunsPerTick: number;
   runOnExisting: boolean;
   report: AutomationIssueReport;
+  /** The most runs the search starts in any 24 hours, across issues (PRO-490 review). Read as 48 when absent. */
+  maxRunsPerDay?: number;
 }
 
 export type PullRequestEvent = "opened" | "pushed" | "reviewRequested" | "checkFailed";

@@ -632,6 +632,31 @@ describe("event trigger sources", () => {
     await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, eventTrigger })));
   });
 
+  it("sets an issue search's runs a day, empty for the default, and shows its day's hold (PRO-490 review)", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub issues" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "acme/widgets" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Fix issues" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Fix it." } });
+    const field = screen.getByRole("textbox", { name: "Runs a day, at most" });
+    fireEvent.change(field, { target: { value: "1.5" } });
+    expect((screen.getByRole("button", { name: "Create automation" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(field, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Fix issues" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ issueTrigger: expect.objectContaining({ maxRunsPerDay: 20 }) }));
+  });
+
+  it("shows an issue search's notice, as an event trigger's", async () => {
+    automationStore.automations = automationStore.automations.map((value) => value.id === "automation-1" ? { ...value, workspace: "newWorktree", issueTrigger: { provider: "github" as const, repo: "acme/widgets", query: "label:bot", pollIntervalMinutes: 5, maxRunsPerTick: 3, runOnExisting: false, report: { comment: true, addLabels: [], removeLabels: [], openPr: false, onFailure: { comment: true, addLabels: [] } } } } as never : value);
+    automationStore.issueStates = { "automation-1": { automationId: "automation-1", notice: "Holding what it read until 2026-11-23 10:00 UTC: it started 48 runs in a day, the most this automation starts." } };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText(/it started 48 runs in a day/)).toBeTruthy();
+  });
+
   it("links a pull request run to its pull request", async () => {
     automationStore.runs = { "automation-1": [run({ trigger: "pullRequest", pullRequest: { number: 12, title: "Add cache", url: "https://github.com/acme/widgets/pull/12", head: "cache", headSha: "abc", base: "main", event: "pushed" } })] };
     render(<AutomationsView />);

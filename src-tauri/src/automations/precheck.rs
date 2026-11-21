@@ -536,6 +536,17 @@ fn finishing(app: &impl AutomationHost, automation_id: &str, work: impl FnOnce()
     fail_orphans(app, automation_id, since);
 }
 
+/// For tests: what happens to a run between its being listed as an orphan and its being failed.
+#[cfg(test)]
+pub(super) type OrphanHook = Box<dyn Fn(&str)>;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_ORPHAN: std::cell::RefCell<Option<OrphanHook>> = const { std::cell::RefCell::new(None) };
+    /// For tests: Run now's thread cannot be started.
+    pub(super) static NO_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn fail_orphans(app: &impl AutomationHost, automation_id: &str, since: chrono::DateTime<chrono::Utc>) {
     let Ok(runs) = automation_store::list_runs(automation_id) else {
         return;
@@ -544,16 +555,24 @@ fn fail_orphans(app: &impl AutomationHost, automation_id: &str, since: chrono::D
         run.started_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).is_some_and(|at| at >= since)
     };
     for orphan in runs.into_iter().filter(|run| run.status == AutomationRunStatus::Pending && run.session_id.is_none() && started_since(run)) {
+        #[cfg(test)]
+        BEFORE_ORPHAN.with(|hook| hook.borrow().as_ref().map(|hook| hook(&orphan.run_id)));
+        let mut failed = false;
         let Ok(run) = automation_store::replace_run(automation_id, &orphan.run_id, |value| {
             if value.status == AutomationRunStatus::Pending && value.session_id.is_none() {
                 value.status = AutomationRunStatus::Failed;
                 value.ended_at = Some(index::now());
                 value.error = Some("The run stopped after its first check without starting.".into());
+                failed = true;
             }
             Ok(())
         }) else {
             continue;
         };
+        // Ended here, or by something else meanwhile, which reported it: reported once (PRO-490 review).
+        if !failed {
+            continue;
+        }
         emit_run(app, &run);
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, automation_id, run.status, &ended_at);
@@ -590,11 +609,19 @@ pub(crate) fn run_now_of(app: &impl AutomationHost, automation: Automation) -> R
     let worktree_name = (automation.workspace == AutomationWorkspace::NewWorktree)
         .then(|| super::automation_worktree_name(&automation, chrono::Utc::now()));
     let (worker, pending) = (app.clone(), run.clone());
-    let spawned = std::thread::Builder::new().name("automation-run-now".into()).spawn(move || {
-        let _claim = claim;
-        let prompt = automation.prompt.clone();
-        finishing(&worker, &automation.id, || super::start_run(&worker, &automation, pending, prompt, None, worktree_name).map(|_| ()));
-    });
+    #[cfg(test)]
+    let no_thread = NO_THREAD.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let no_thread = false;
+    let spawned = if no_thread {
+        Err(std::io::Error::other("no thread for tests"))
+    } else {
+        std::thread::Builder::new().name("automation-run-now".into()).spawn(move || {
+            let _claim = claim;
+            let prompt = automation.prompt.clone();
+            finishing(&worker, &automation.id, || super::start_run(&worker, &automation, pending, prompt, None, worktree_name).map(|_| ()));
+        }).map(|_| ())
+    };
     if let Err(error) = spawned {
         let run = automation_store::replace_run(automation_id, &run.run_id, |value| {
             value.status = AutomationRunStatus::Failed;
@@ -603,6 +630,10 @@ pub(crate) fn run_now_of(app: &impl AutomationHost, automation: Automation) -> R
             Ok(())
         })?;
         emit_run(app, &run);
+        // Ended as any failed run is: in its summary, and a duty's reported (PRO-490 review).
+        let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+        update_summary(app, automation_id, run.status, &ended_at);
+        crate::bots::duties::ended(app, &run);
         return Ok(run);
     }
     Ok(run)

@@ -66,7 +66,67 @@ export function defaultPullRequestTrigger(repo = ""): AutomationEventTrigger {
 
 /** Whether this version knows the trigger's kind; a newer TerminalX may have written another. */
 export function eventTriggerKnown(trigger: AutomationEventTrigger): boolean {
-  return (trigger.source.kind as string) === "linearIssue" || (trigger.source.kind as string) === "githubPullRequest";
+  const kind = trigger.source.kind as string;
+  return (kind === "linearIssue" || kind === "githubPullRequest") && sourceReadable(trigger.source);
+}
+
+/**
+ * Whether a source of a kind this version knows has the fields it reads, as the runtime reads them (PRO-490 review):
+ * one a newer TerminalX wrote with a value of another shape is kept and never checked there, so it is shown read-only
+ * here, as an unknown kind is, not as fields to edit.
+ */
+function sourceReadable(source: AutomationEventTrigger["source"]): boolean {
+  const value = source as unknown as Record<string, unknown>;
+  const text = (key: string) => typeof value[key] === "string";
+  const maybeText = (key: string) => value[key] === undefined || value[key] === null || typeof value[key] === "string";
+  const maybe = (key: string, type: "boolean" | "object") => value[key] === undefined || typeof value[key] === type && value[key] !== null;
+  const texts = (key: string) => value[key] === undefined || (Array.isArray(value[key]) && (value[key] as unknown[]).every((item) => typeof item === "string"));
+  if (value.kind === "linearIssue") {
+    const report = (value.report ?? {}) as Record<string, unknown>;
+    const reportOk = maybe("report", "object")
+      && ["comment", "commentOnFailure"].every((key) => report[key] === undefined || typeof report[key] === "boolean")
+      && ["moveToStateId", "moveToStateName"].every((key) => report[key] === undefined || report[key] === null || typeof report[key] === "string");
+    return text("teamId") && ["teamName", "state", "assignee", "text"].every(maybeText) && texts("labels") && reportOk;
+  }
+  return text("repo") && Array.isArray(value.events) && texts("events") && ["base", "author"].every(maybeText) && texts("labels")
+    && (value.draft === undefined || value.draft === null || typeof value.draft === "boolean") && maybe("fromForks", "boolean");
+}
+
+/** Runs a day as typed: empty is the default, else a whole number in range (PRO-490 review). */
+export function runsPerDayValid(value: number | undefined): boolean {
+  return value === undefined || (Number.isInteger(value) && value >= 1 && value <= MAX_RUNS_PER_DAY);
+}
+
+/**
+ * "Runs a day, at most", for an event trigger and an issue search. Empty means the default (48), saved as absent; a
+ * decimal or a number out of range is said here and holds Save, rather than reaching the runtime.
+ */
+export function RunsPerDayField({ value, onChange }: { value: number | undefined; onChange: (value: number | undefined) => void }) {
+  const [text, setText] = useState(value === undefined ? "" : String(value));
+  useEffect(() => {
+    if (value !== undefined && Number(text) !== value) setText(String(value));
+  }, [value]);
+  const valid = runsPerDayValid(value);
+  return (
+    <>
+      <label className={LABEL}>
+        Runs a day, at most
+        <input
+          inputMode="numeric" value={text} placeholder={`${RUNS_PER_DAY}`} aria-invalid={!valid || undefined} className={INPUT}
+          onChange={(event) => {
+            const typed = event.target.value;
+            setText(typed);
+            onChange(typed.trim() === "" ? undefined : Number(typed.trim()));
+          }}
+        />
+      </label>
+      <div className={`self-end pb-1.5 text-[11px] leading-snug ${valid ? "text-faint" : "text-destructive"}`} role={valid ? undefined : "alert"}>
+        {valid
+          ? `In any 24 hours, across everything it wakes on; empty is ${RUNS_PER_DAY}. Past that, what it reads waits until a run leaves the day.`
+          : `Runs a day is a whole number from 1 to ${MAX_RUNS_PER_DAY}, or empty for ${RUNS_PER_DAY}.`}
+      </div>
+    </>
+  );
 }
 
 export const NEEDS_NEWER = "This trigger needs a newer TerminalX: it is kept as it is and not checked.";
@@ -75,6 +135,7 @@ export const NEEDS_NEWER = "This trigger needs a newer TerminalX: it is kept as 
 export function eventTriggerReady(trigger: AutomationEventTrigger): boolean {
   const source = trigger.source;
   if (!eventTriggerKnown(trigger)) return true;
+  if (!runsPerDayValid(trigger.maxRunsPerDay)) return false;
   return source.kind === "linearIssue" ? !!source.teamId.trim() : !!source.repo.trim() && source.events.length > 0;
 }
 
@@ -157,15 +218,7 @@ export function AutomationSourceFields({ projectPath, trigger, onChange, forDuty
           <input type="number" min={1} max={50} value={trigger.maxRunsPerTick} onChange={(event) => onChange({ ...trigger, maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
         </label>
       )}
-      {!forDuty && (
-        <>
-          <label className={LABEL}>
-            Runs a day, at most
-            <input type="number" min={1} max={MAX_RUNS_PER_DAY} value={trigger.maxRunsPerDay ?? RUNS_PER_DAY} onChange={(event) => onChange({ ...trigger, maxRunsPerDay: Math.min(MAX_RUNS_PER_DAY, Math.max(1, Number(event.target.value))) })} className={INPUT} />
-          </label>
-          <div className="self-end pb-1.5 text-[11px] leading-snug text-faint">In any 24 hours, across everything it wakes on. Past that, what it reads waits until a run leaves the day.</div>
-        </>
-      )}
+      {!forDuty && <RunsPerDayField value={trigger.maxRunsPerDay} onChange={(maxRunsPerDay) => onChange({ ...trigger, maxRunsPerDay })} />}
       <div className={WARNING_NOTE}>
         {source.kind === "linearIssue" ? "Issue titles and descriptions" : "Pull request titles"} can be untrusted. {forDuty ? "They reach the bot as information, never as instructions; it works with its own access, one run at a time." : "They are given as context, not followed as instructions, and each run uses the Permissions mode chosen above."}
         <div className="mt-1">What matches when the trigger starts is the baseline; anything that comes to match later starts one run, once ever.</div>

@@ -7,7 +7,7 @@ import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
-import { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerReady } from "@/components/automations/AutomationSourceFields";
+import { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerReady, RunsPerDayField, runsPerDayValid } from "@/components/automations/AutomationSourceFields";
 import { PrecheckSection, precheckReady } from "@/components/automations/PrecheckSection";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
 import { createAutomation, updateAutomation } from "@/lib/automations";
@@ -298,7 +298,7 @@ export function AutomationEditor({
     && !selection.unavailableModel
     && (input.workspace === "newWorktree" || !!input.sessionId)
     && precheckReady(input.precheck)
-    && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim()))
+    && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim() && runsPerDayValid(input.issueTrigger.maxRunsPerDay)))
     && (!input.eventTrigger || eventTriggerReady(input.eventTrigger));
 
   const triggerOptions: { value: TriggerKind; label: string }[] = isGit
@@ -396,6 +396,8 @@ export function AutomationEditor({
                 New runs per tick
                 <input type="number" min={1} max={50} value={input.issueTrigger.maxRunsPerTick} onChange={(event) => patchIssueTrigger({ maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
               </label>
+              {/* A run that files an issue its search matches wakes another: the day bounds that chain (PRO-490 review). */}
+              <RunsPerDayField value={input.issueTrigger.maxRunsPerDay} onChange={(maxRunsPerDay) => patchIssueTrigger({ maxRunsPerDay })} />
               <div className={WARNING_NOTE}>
                 Issue titles and descriptions can be untrusted. Descriptions are quoted as context, not followed as instructions, and each run uses the Permissions mode chosen above.
               </div>

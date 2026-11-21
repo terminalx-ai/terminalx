@@ -18,7 +18,9 @@
   chain of runs that each make the next event stops there. The editor shows
   "Runs a day, at most" (1 to 1000) beside "New runs per tick", saved per
   automation; ones saved before read as 48. Past it, what was read waits and
-  the status says until when (PRO-490). A pull request held by its own rate
+  the status says until when (PRO-490). A GitHub issue search has the same
+  cap, field and notice; an empty field is the default, and a decimal is
+  refused in the editor. A pull request held by its own rate
   limit stays held on a tick the per-tick cap filled, and lets go once it is
   closed; a run's last head is written with its ending.
 - Bots (experimental): a bot switches off one of its own duties from its own

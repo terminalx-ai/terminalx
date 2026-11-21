@@ -55,13 +55,18 @@ that has something to wake, before anything is recorded or inserted:
 the rate limit or the day's cap leaves a match unseen, the next read pages back
 to just before the oldest one left, so a backlog is never starved.
 
-**Runs a day (PRO-490).** An event automation starts at most 48 runs in any 24
-hours, across everything it wakes on, so a chain that the per-subject limits
-never stop (each run filing the next issue, say) ends there. The editor shows
-it beside "New runs per tick" as "Runs a day, at most" (1 to 1000), and it is
-saved per automation (`eventTrigger.maxRunsPerDay`); one saved before it reads
-as 48. Past it, what was read stays unseen and the status says until when; a
-duty keeps its own bound below instead.
+**Runs a day (PRO-490).** An event automation, and a GitHub issue search,
+starts at most 48 runs in any 24 hours, across everything it wakes on, so a
+chain that the per-subject limits never stop (each run filing the next issue
+its search matches, say) ends there. The editor shows it beside "New runs per
+tick" as "Runs a day, at most": a whole number from 1 to 1000, or empty for 48;
+a decimal or a number out of range is said there and holds Save. It is saved
+per automation (`eventTrigger.maxRunsPerDay`, `issueTrigger.maxRunsPerDay`);
+one saved before it, or saved from a window that does not send it, keeps what
+was stored, else reads as 48. Past it, what was read stays unseen and the
+status says until when ("Holding what it read until …"); an issue search
+keeps its runs' start times and the hold in its seen record. A duty keeps its
+own bound below instead.
 
 Pull requests:
 
