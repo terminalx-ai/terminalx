@@ -342,9 +342,20 @@ mention starts a conversation, not a duty run.
   listed for an organisation the bot does not work in now, and anyone not
   listed, is kept as "not accepted" with why, shown in the bot's settings,
   and starts nothing. A comment that carries the signature, or comes from a
-  bot account, is not looked at: bots do not wake each other through
-  comments, and a bot's post made with the owner's login is never taken for
-  the owner.
+  bot account, is not looked at (a signature only in quoted `>` lines is a
+  person quoting a bot's post, and counts as theirs): a bot's signed post
+  wakes no bot, and is never taken for the owner. A Full access bot that
+  posts unsigned with raw `gh api` is not told apart from the owner (the
+  PRO-489 class); so the agent is told a comment from the owner's account
+  is not always the owner's, and it is a request, never an approval.
+- **Names.** Outside the fence, a mention names its author in the app's
+  words: the name the owner gave a listed person, the owner's own login or
+  Linear name, never a display name the commenter chose. The GitHub login
+  is kept apart (`login`) to name the person in the reply.
+- **Who the owner is** is read with `gh api user` and Linear's viewer and
+  kept for half an hour, but not while the Linear viewer could not be read;
+  without it Linear is not read at all, so no owner's mention is turned
+  away.
 - **The conversation.** An accepted mention becomes a new chat of the bot
   (`chat::channel_chat`, marked `botChannel` with the thread's kind, label
   and address, listed under "Chats with <bot>" with its source), or goes to

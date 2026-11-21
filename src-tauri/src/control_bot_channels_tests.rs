@@ -32,6 +32,7 @@ fn mention(bot: &str, id: &str, by: &str, from: &str) -> Mention {
         bot: bot.into(),
         thread: Thread { kind: "github".into(), repo: "acme/app".into(), number: Some(7), title: "Move CI to our runner".into(), url: format!("https://github.com/acme/app/pull/7#{id}"), ..Thread::default() },
         by: by.into(),
+        login: by.trim_start_matches('@').into(),
         from: from.into(),
         at: "2026-11-21T10:00:00Z".into(),
         state: channels::WAITING.into(),
