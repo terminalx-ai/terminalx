@@ -2325,6 +2325,9 @@ export interface KillResult {
 export interface LocalRuntimeUnproven {
   why: string;
   pinned: boolean;
+  /** The runtime pinned another key than the one this window's Keychain holds now: Try again cannot repair that, and
+   * Restart runtime is offered instead, as `runtime_restart_required:<epoch>: <message>` (PRO-507). */
+  restart?: string;
 }
 
 /**
