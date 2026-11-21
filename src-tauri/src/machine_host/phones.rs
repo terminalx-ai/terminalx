@@ -1084,7 +1084,8 @@ impl Phones {
 }
 
 fn phone_endpoints(port: Option<u16>) -> Vec<String> {
-    port.map(|port| crate::direct_endpoints::machine_endpoints(port, "")).unwrap_or_default()
+    // Only addresses the listen setting binds (PRO-487).
+    port.map(|port| crate::direct_endpoints::listening_endpoints(port, "")).unwrap_or_default()
 }
 
 fn opaque_param<'a>(params: &'a Value, name: &str) -> Result<&'a str> {

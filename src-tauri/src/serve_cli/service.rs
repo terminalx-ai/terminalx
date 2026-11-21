@@ -241,6 +241,11 @@ fn install(home: &Path, plan: &Plan) -> Result<i32> {
         Err(error) => eprintln!("warning: the running runtime was not handed over to this version ({error:#}); it runs its old version until it restarts."),
     }
     println!("Other computers may not operate this server until you run `terminalx-serve pair`.");
+    let (user, root) = crate::listen::current_user();
+    if root {
+        eprintln!("warning: this service runs as {user} (root): every paired computer and every agent on this server will act as root.");
+        eprintln!("         docs/HEADLESS-SERVER.md, \"Which user to run as\", describes the alternatives.");
+    }
     Ok(0)
 }
 
@@ -265,6 +270,10 @@ fn status(home: &Path, plan: &Plan) -> Result<i32> {
         Some(false) => "off (`terminalx-serve pair` turns it on)",
         None => "unknown: the settings file cannot be read",
     });
+    // Where it listens, who it answers and who it runs as (PRO-487).
+    for line in super::hosting::lines(&super::hosting::View::read(&plan.data)) {
+        println!("{line}");
+    }
     println!("Data       {}", plan.data.display());
     println!("Log        {}", plan.log.display());
     Ok(if state.running { 0 } else { 3 })

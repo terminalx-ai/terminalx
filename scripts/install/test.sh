@@ -246,6 +246,23 @@ else
   bad "says how to put ~/.local/bin on PATH when it is missing" "$WORK/install-a.log"
 fi
 
+# The commands that work as printed come first: by full path, before the PATH advice.
+full_line=$(grep -n -F "  $TX/current/terminalx-serve pair" "$WORK/install-a.log" | head -n 1 | cut -d: -f1)
+path_line=$(grep -n 'not on your PATH' "$WORK/install-a.log" | head -n 1 | cut -d: -f1)
+if [ -n "$full_line" ] && [ -n "$path_line" ] && [ "$full_line" -lt "$path_line" ] \
+  && grep -q -F "  $TX/current/terminalx-serve login" "$WORK/install-a.log" \
+  && grep -q 'opens no port' "$WORK/install-a.log"; then
+  pass "off PATH, the full-path login and pair commands come before the PATH advice"
+else
+  bad "off PATH, the full-path login and pair commands come before the PATH advice" "$WORK/install-a.log"
+fi
+
+if ! grep -q 'installing as root' "$WORK/install-a.log"; then
+  pass "an ordinary user is not warned about root"
+else
+  bad "an ordinary user is not warned about root" "$WORK/install-a.log"
+fi
+
 if [ -n "$(find "$TX" -maxdepth 0 -type d -perm 700 -print)" ]; then
   pass "the install folder (.terminalx) is private to the user"
 else
@@ -332,10 +349,32 @@ fi
 # 5. With ~/.local/bin on PATH, it goes straight to pairing.
 if run_install on-path.log only-a.json PATH="$HOME_DIR/.local/bin:$WORK/bin:$PATH" \
   && ! grep -q 'not on your PATH' "$WORK/on-path.log" \
+  && grep -qx '  terminalx-serve login' "$WORK/on-path.log" \
+  && grep -qx '  terminalx-serve pair' "$WORK/on-path.log" \
   && grep -q 'Settings → Machines → Add a machine → Headless server' "$WORK/on-path.log"; then
   pass "with ~/.local/bin on PATH it says to run terminalx-serve pair"
 else
   bad "with ~/.local/bin on PATH it says to run terminalx-serve pair" "$WORK/on-path.log"
+fi
+
+# 6. Root may install (PRO-487): it is warned what that means, nothing asks
+# for another user, and the service is installed all the same.
+mkdir -p "$WORK/rootbin"
+cat >"$WORK/rootbin/id" <<'ID'
+#!/bin/sh
+if [ "${1:-}" = -u ]; then echo 0; else exec /usr/bin/id "$@"; fi
+ID
+chmod 755 "$WORK/rootbin/id"
+: >"$HOME_DIR/stub-calls.log"
+if run_install root.log only-a.json PATH="$WORK/rootbin:$WORK/bin:$PATH" \
+  && grep -q 'warning: installing as root: the runtime will run as root, so every paired computer and every agent on this server will act as root' "$WORK/root.log" \
+  && grep -q 'Which user to run as' "$WORK/root.log" \
+  && grep -qx '0.1.0 service install' "$HOME_DIR/stub-calls.log" \
+  && ! grep -q -i 'sudo\|useradd\|adduser' "$WORK/root.log" \
+  && grep -q 'terminalx-serve pair' "$WORK/root.log"; then
+  pass "installing as root works, warns that everything acts as root, and creates no user"
+else
+  bad "installing as root works, warns that everything acts as root, and creates no user" "$WORK/root.log"
 fi
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
