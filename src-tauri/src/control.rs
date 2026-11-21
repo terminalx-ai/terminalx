@@ -1042,6 +1042,8 @@ impl ControlService {
                 shown(&bots::chat::hire(sink, &required_string(&params, "role")?, &required_string(&params, "name")?).map_err(failed)?)
             }
             "bots.rename" => {
+                // A new name is the owner's to give (`bots::gives_more`).
+                caller.person_only("rename bots")?;
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
                 json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?})
             }
@@ -3950,7 +3952,8 @@ mod tests {
         crate::store::settings::save(&settings).unwrap();
         let sink = crate::sink::BroadcastSink::new(8);
         let id = crate::bots::create(&sink, "cto", "Atlas").unwrap().id;
-        crate::bots::update(&sink, &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), memory_off: Some(true), ..Default::default() }).unwrap();
+        let asker = |may: &str| serde_json::from_value::<crate::bots::BotAsker>(json!({"kind": "person", "id": "u1", "name": "Someone", "may": may})).unwrap();
+        crate::bots::update(&sink, &id, crate::bots::BotPatch { access: Some(crate::bots::BotAccess::AskOutward), memory_off: Some(true), works_in: Some(vec!["personal".into(), "org-a".into()]), who_can_ask: Some(vec![asker("ask")]), ..Default::default() }).unwrap();
         let other = crate::bots::create(&sink, "watcher", "Argus").unwrap().id;
         let run = tempfile::Builder::new().prefix("tx").tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(run.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
@@ -3972,6 +3975,18 @@ mod tests {
             json!({"id": id, "patch": {"access": "full"}}),
             json!({"id": id, "patch": {"reportsTo": other}, "byPerson": true}),
             json!({"id": id, "patch": {"access": "somethingNew"}}),
+            // PRO-478: a new place to work, someone new or more able in Who can ask, another agent or model, a new name.
+            json!({"id": id, "patch": {"worksIn": ["personal", "org-a", "org-b"]}}),
+            json!({"id": id, "patch": {"whoCanAsk": [{"kind": "person", "id": "u1", "may": "ask"}, {"kind": "bot", "id": other, "may": "handOff"}]}}),
+            json!({"id": id, "patch": {"whoCanAsk": [{"kind": "person", "id": "u1", "may": "askApprove"}]}}),
+            json!({"id": id, "patch": {"whoCanAsk": [{"kind": "person", "id": "u1", "may": "someday"}]}}),
+            json!({"id": id, "patch": {"harness": "codex"}}),
+            json!({"id": id, "patch": {"model": "claude-opus-5-5"}}),
+            json!({"id": id, "patch": {"effort": "high"}}),
+            json!({"id": id, "patch": {"name": "Atlas II"}}),
+            // An asker it had, changed other than to do less; and another place to run.
+            json!({"id": id, "patch": {"whoCanAsk": [{"kind": "person", "id": "u1", "name": "Someone else", "may": "ask"}]}}),
+            json!({"id": id, "patch": {"runsOn": "cloudWorkspace"}}),
         ];
         let windows = [crate::serve_cli::consent::Window::Headless, crate::serve_cli::consent::Window::Keyed([7; 32])];
         for window in &windows {
@@ -4005,17 +4020,20 @@ mod tests {
                 drop(witness);
             }
         }
-        assert_eq!(crate::bots::get(&id).unwrap().access, crate::bots::BotAccess::AskOutward, "never raised");
-        assert!(crate::bots::get(&id).unwrap().memory_off, "its memory stays off");
-        assert!(!std::fs::read_to_string(crate::bots::home(&crate::bots::get(&id).unwrap()).unwrap().join("ROLE.md")).unwrap().contains("resume yourself"));
-        // A rename, or less access, asks for no proof, and is applied with none.
-        for patch in [json!({"name": "Atlas II"}), json!({"access": "readReport"})] {
+        let bot = crate::bots::get(&id).unwrap();
+        assert_eq!(bot.access, crate::bots::BotAccess::AskOutward, "never raised");
+        assert_eq!((bot.name.as_str(), bot.harness.as_str(), bot.works_in.len(), bot.who_can_ask.iter().map(|asker| asker.may.as_str()).collect::<Vec<_>>()), ("Atlas", "claude", 2, vec!["ask"]), "nothing given");
+        assert!(bot.memory_off, "its memory stays off");
+        assert!(!std::fs::read_to_string(crate::bots::home(&bot).unwrap().join("ROLE.md")).unwrap().contains("resume yourself"));
+        // Less access, a place or an asker taken away, or the same name again, ask for no proof, and are applied with none.
+        for patch in [json!({"access": "readReport"}), json!({"worksIn": ["personal"]}), json!({"whoCanAsk": []}), json!({"name": "Atlas"})] {
             let mut request = json!({"operation": "update", "params": {"id": id, "patch": patch}, crate::serve_cli::consent::GIVES_MORE: false});
             assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &request), "{patch}");
             bots_from_a_person(run.path(), &mut request, &windows[1]).unwrap();
             crate::bots::call(&sink, "update", &request["params"]).unwrap();
         }
-        assert_eq!(crate::bots::get(&id).unwrap().access, crate::bots::BotAccess::ReadReport);
+        let bot = crate::bots::get(&id).unwrap();
+        assert_eq!((bot.access, bot.works_in, bot.who_can_ask.len()), (crate::bots::BotAccess::ReadReport, vec!["personal".to_owned()], 0));
         for (operation, params) in [
             ("pause", json!({"id": id})),
             ("pauseAll", json!({})),
@@ -4220,6 +4238,15 @@ mod tests {
 
         // Another bot's memory is refused; a claim with no secret, a forged one or the control token is no proof, and is not the owner either.
         assert_eq!(from_chat("bots.memory.add", json!({"bot": "iris", "text": "x"}), proved).unwrap_err().code, "forbidden");
+        // PRO-478: the access gate lets each of the three through at every level, so each must refuse another bot here,
+        // by name or by id, and each must refuse another place (below).
+        for bot in ["iris", iris.as_str()] {
+            for (command, params) in [("bots.memory.list", json!({"bot": bot})), ("bots.memory.forget", json!({"bot": bot, "line": "x"})), ("bots.memory.add", json!({"bot": bot, "text": "x"}))] {
+                assert_eq!(from_chat(command, params, proved).unwrap_err().code, "forbidden", "{command} {bot}");
+            }
+        }
+        // Its own, named, is its own.
+        assert!(from_chat("bots.memory.list", json!({"bot": atlas}), proved).is_ok());
         for token in [None, Some(""), Some("forged"), Some(service.endpoint.token.as_str())] {
             for (command, params) in [("bots.memory.add", json!({"text": "Spoofed"})), ("bots.memory.add", json!({"bot": "iris", "text": "Spoofed"})), ("bots.memory.list", json!({"bot": "iris"}))] {
                 assert_eq!(from_chat(command, params, token).unwrap_err().code, "unauthorized", "{command} {token:?}");
@@ -4254,6 +4281,7 @@ mod tests {
         for place in ["personal", "Kestrel"] {
             assert_eq!(from_chat("bots.memory.list", json!({"place": place}), proved).unwrap_err().code, "forbidden", "{place}");
             assert_eq!(from_chat("bots.memory.add", json!({"text": "Copied over", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
+            assert_eq!(from_chat("bots.memory.forget", json!({"line": "Acme", "place": place}), proved).unwrap_err().code, "forbidden", "{place}");
         }
         assert!(ask("bots.memory.list", json!({"bot": "atlas", "place": "Kestrel"})).is_ok(), "the owner manages every place");
 

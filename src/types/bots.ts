@@ -21,6 +21,25 @@ export interface BotPause {
   by: string;
 }
 
+/**
+ * Someone besides the owner who may give a bot work (PRO-478), and what they may do. The owner is never listed: they
+ * always ask and approve. A `kind` or `may` a newer app wrote arrives as its own string, is shown as it is, and grants
+ * nothing here.
+ */
+export interface BotAsker {
+  kind: "person" | "bot" | (string & {});
+  /** A person's account user id, or a bot's id. */
+  id: string;
+  /** How a person is shown, as they were named when added. A bot is shown by its own name. */
+  name?: string;
+  may: BotAskerMay;
+  /** The organisation a person was added from. They are inactive while the bot does not work there. */
+  org?: string;
+}
+
+/** Ask and approve (a person only), ask, or hand off work (another bot only). */
+export type BotAskerMay = "askApprove" | "ask" | "handOff" | (string & {});
+
 export interface Bot {
   /** The one stable reference to a bot: keep this, never the slug. */
   id: string;
@@ -40,6 +59,8 @@ export interface Bot {
   /** `personal` when it works for its owner alone. */
   worksIn: string[];
   paused?: BotPause;
+  /** Who besides the owner may give it work. Absent or empty: the owner alone. */
+  whoCanAsk?: BotAsker[];
   /** The owner turned its memory off: a conversation is given none, and the bot writes none. */
   memoryOff?: boolean;
   /** A resume asked for from the `terminalx` CLI, waiting for the owner's answer in the app (PRO-468). */
@@ -67,6 +88,10 @@ export interface BotPatch {
   runsOn?: BotRunsOn;
   reportsTo?: string;
   worksIn?: string[];
+  /** The whole list: an entry left out is removed. */
+  whoCanAsk?: BotAsker[];
+  /** The bot's `modified` as read: a whole-list change is refused when the bot changed since. */
+  ifModified?: string;
   memoryOff?: boolean;
 }
 

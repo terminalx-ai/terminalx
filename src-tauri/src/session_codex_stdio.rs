@@ -882,8 +882,28 @@ impl SessionManager {
                     if let Payload::TurnStarted { prompt_seq, .. } = &mut payload {
                         *prompt_seq = rt.stdio_followups.active.take().map(|(seq, _)| seq);
                     }
+                    // A bot's session (PRO-478): native Codex runs no hooks, so its approval
+                    // requests are where the bot's gate meets its calls. The card says why it
+                    // asks; one the gate refuses is shown with the reason and denied at once.
+                    let mut refused = None;
+                    if let Payload::PermissionRequested { request_id, tool_name, input, cwd, reason, .. } = &mut payload {
+                        match crate::bots::access::approval_gate(rt.acting_bot.as_deref(), tool_name, input, cwd.as_deref()) {
+                            crate::bots::access::Gate::Leave => {}
+                            crate::bots::access::Gate::Ask(why) => *reason = Some(why),
+                            crate::bots::access::Gate::Refuse(why) => {
+                                log::info!("bot session {}/{}: {why}", rt.session_id, rt.tab_id);
+                                *reason = Some(why);
+                                refused = Some(request_id.clone());
+                            }
+                        }
+                    }
                     let turn_end = matches!(payload, Payload::TurnCompleted { .. });
                     self.apply(rt, payload, None);
+                    if let Some(request) = refused {
+                        let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
+                        let actions = engine.answer(&request, "deny")?;
+                        self.apply_codex_actions_with_approval(rt, actions, None)?;
+                    }
                     if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) { self.retire_codex_stdio_later(rt); }
                 }
                 StdioAction::Accepted => {
