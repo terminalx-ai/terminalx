@@ -20,6 +20,7 @@ impl Drop for Switches {
         runs::STARTED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
         runs::WOKEN_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
         runs::FAIL_WAKES_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
+        runs::REAL_STARTS_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
         crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
     }
 }
@@ -86,6 +87,19 @@ impl Lead {
         .unwrap();
         crate::orchestration::store::insert(&run).unwrap();
         run
+    }
+
+    /// [`Lead::run`] with pieces no worker starts for, so the engine's real approve or start launches nothing.
+    fn blocked_run(&self, id: &str, state: &str) -> crate::orchestration::Run {
+        let run = self.run(id, &self.chat.id, state);
+        crate::orchestration::store::update(&run.id, |run| {
+            for piece in &mut run.pieces {
+                piece.state = crate::orchestration::PieceState::Blocked;
+            }
+            Ok(())
+        })
+        .unwrap();
+        crate::orchestration::store::get(&run.id).unwrap()
     }
 
     fn set_run_state(&self, id: &str, state: crate::orchestration::RunState) {
@@ -292,6 +306,82 @@ fn a_run_its_owner_starts_from_the_run_view_settles_the_item_and_the_lead_steers
     let before = approvals(&lead);
     runs::started_from_run_view(lead.service.sink.as_ref(), &run.id);
     assert_eq!(approvals(&lead), before);
+}
+
+/// PRO-506: an item's own answer starts the run through the engine, and the engine's start does not settle the item
+/// as a Run view's start would. "Start, but ask before merging" keeps its merge hold and records its answer.
+#[test]
+fn start_but_ask_before_merging_answered_on_the_item_keeps_its_hold_through_the_real_start() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    runs::REAL_STARTS_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lead = Lead::new();
+    lead.bot("bots.items.add", json!({"title": "Runner move", "start": true})).unwrap();
+    let run = lead.blocked_run("run-real-held", "awaitingApproval");
+    lead.bot("bots.items.plan", json!({"item": 1, "run": run.id})).unwrap();
+    let seen = lead.item(1).question.unwrap().id;
+
+    let answered = lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 1, "question": seen})).unwrap();
+    assert_eq!(answered["run"]["started"], true, "{answered}");
+    assert!(answered["run"]["start"].is_object(), "started by the engine, not the test's stand-in: {answered}");
+    assert!(started().is_empty(), "the test's stand-in was not used");
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap().state, crate::orchestration::RunState::Running);
+
+    let item = lead.item(1);
+    assert_eq!((item.state.as_str(), item.question.is_none(), item.runs[0].decision.as_str(), item.runs[0].hold_merge), ("inProgress", true, "startAskMerge", true));
+    assert_eq!(runs::merge_held(&lead.atlas, &run.id), Some(1), "the merge hold is still in place");
+    let approvals: Vec<&str> = item.activity.iter().filter(|entry| entry.kind == "approved").map(|entry| entry.text.as_str()).collect();
+    assert_eq!(approvals, vec!["You approved the plan, and TerminalX started the run; it asks you before it merges"]);
+}
+
+/// PRO-506: "Approve and start" answered on the item, through the engine's real approve, records that answer once and
+/// not a Run view's start.
+#[test]
+fn approve_and_start_answered_on_the_item_records_the_answer_through_the_real_start() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    runs::REAL_STARTS_FOR_TESTS.store(true, std::sync::atomic::Ordering::SeqCst);
+    let lead = Lead::new();
+    lead.bot("bots.items.add", json!({"title": "Runner move", "start": true})).unwrap();
+    let run = lead.blocked_run("run-real-start", "awaitingApproval");
+    lead.bot("bots.items.plan", json!({"item": 1, "run": run.id})).unwrap();
+    let seen = lead.item(1).question.unwrap().id;
+
+    let answered = lead.window("itemAnswer", json!({"id": lead.atlas, "number": 1, "answer": 0, "question": seen})).unwrap();
+    assert!(answered["run"]["start"].is_object(), "started by the engine, not the test's stand-in: {answered}");
+    assert!(started().is_empty());
+    assert_eq!(crate::orchestration::store::get(&run.id).unwrap().state, crate::orchestration::RunState::Running);
+
+    let item = lead.item(1);
+    assert_eq!((item.state.as_str(), item.question.is_none(), item.runs[0].decision.as_str(), item.runs[0].hold_merge), ("inProgress", true, "start", false));
+    let approvals: Vec<&str> = item.activity.iter().filter(|entry| entry.kind == "approved").map(|entry| entry.text.as_str()).collect();
+    assert_eq!(approvals, vec!["You approved the plan, and TerminalX started the run"]);
+}
+
+/// PRO-506: a Run view start settles only the items still open; a dropped one that links the run is left as it closed.
+#[test]
+fn a_run_view_start_leaves_a_closed_item_that_links_the_run_unchanged() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let lead = Lead::new();
+    let run = lead.blocked_run("run-closed-item", "awaitingApproval");
+    for title in ["Runner move", "Runner move, again"] {
+        lead.bot("bots.items.add", json!({"title": title})).unwrap();
+    }
+    for number in [1, 2] {
+        lead.bot("bots.items.plan", json!({"item": number, "run": run.id})).unwrap();
+    }
+    let bot = crate::bots::get(&lead.atlas).unwrap();
+    crate::bots::items::stop(lead.service.sink.as_ref(), &bot, 1).unwrap();
+    let dropped = lead.item(1);
+    assert_eq!((dropped.state.as_str(), dropped.runs[0].decision.as_str()), ("dropped", ""));
+
+    // The Run view's Approve and start, as the window sends it.
+    lead.service.manager.orchestration("approve", json!({"id": run.id})).unwrap();
+    assert_eq!(lead.item(1), dropped, "a closed item is unchanged");
+    let open = lead.item(2);
+    assert_eq!((open.state.as_str(), open.question.is_none(), open.runs[0].decision.as_str()), ("inProgress", true, "start"));
+    assert!(open.activity.iter().any(|entry| entry.kind == "approved" && entry.text.contains("Run view")));
 }
 
 /// The switches and the bot's own rules hold: Orchestrator runs off, a run its bot does not lead, a run that started,

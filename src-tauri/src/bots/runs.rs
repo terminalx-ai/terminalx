@@ -242,7 +242,7 @@ fn chose_start(entry: &ItemRun) -> bool {
 }
 
 /// The owner approved or started `run` from its Run view, not from the item that asked them (PRO-501): each item of
-/// its bot's that holds no start for it is settled as their "Approve and start" there would settle it. The start is
+/// its bot's that is still open and holds no start for it is settled as their "Approve and start" there would settle it. The start is
 /// recorded, and the item's question about the run is closed, so it does not go on asking for what is done. That
 /// answer and not "Start, but ask before merging": the Run view's start holds no merge. The lead is told of the
 /// start by the engine, as every approval tells it.
@@ -250,7 +250,7 @@ pub fn started_from_run_view(sink: &dyn EventSink, run: &str) {
     let Ok(run) = runs_store::get(run) else { return };
     for bot in bots_of(&run, None) {
         let Ok(list) = items::read(&bot) else { continue };
-        if !list.items.iter().any(|item| item.runs.iter().any(|entry| entry.run == run.id && !chose_start(entry))) {
+        if !list.items.iter().any(|item| !item.state.closed() && item.runs.iter().any(|entry| entry.run == run.id && !chose_start(entry))) {
             continue;
         }
         let settled = items::change_as_owner(sink, &bot, |items, _| {
@@ -266,7 +266,11 @@ pub fn started_from_run_view(sink: &dyn EventSink, run: &str) {
 }
 
 /// [`started_from_run_view`] on one item: what [`answered`] and `items::answer_as` record for "Approve and start".
+/// A done or dropped item is left as it closed (PRO-506): the start is not its to record.
 pub(super) fn settle_started(item: &mut Item, run: &str) {
+    if item.state.closed() {
+        return;
+    }
     let Some(entry) = item.runs.iter_mut().find(|entry| entry.run == run && !chose_start(entry)) else { return };
     entry.decision = "start".into();
     entry.decided = Some(index::now());
