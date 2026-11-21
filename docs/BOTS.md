@@ -299,7 +299,8 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   tells its lead and the bots that report to it, and answers whoever handed
   it work. Who can ask lets a bot hand work, not send messages off the line.
   The line is judged under the store's lock when the tell is recorded, and a
-  tell still waiting whose line is gone by delivery is dropped.
+  tell still waiting whose line is gone by delivery is dropped, and its
+  sender is told so by TerminalX, in its home chat (PRO-498).
 - **Labels.** Each bot's message is sent with the sending bot as its
   author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
   answer to / status to / message to <Name> · a bot's words, not an
@@ -319,13 +320,15 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   hand-offs and 20 waiting messages per bot, 200 open overall, and 20
   hand-offs and messages per bot in 10 minutes, reserved under the rate's
   lock. Between the same two bots, either way and closed ones counted, at
-  most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
+  most 6 hand-offs an hour; items the owner handed on in the window are not
+  counted (PRO-498). A bot works on at most 4 hand-offs at once,
   counted under the lock from its open working ones (claimed ones whose chat
   is not made yet included, and, for a bot that is not paused, the waiting
   ones about to be claimed): a fifth is refused, and on a resume the rest
   wait and start as those are answered or their sender is deleted. When a
   hand-off closes, the chat made for it (never a home chat or another of
-  the bot's chats) is stopped once its turn has ended and its agent left
+  the bot's chats) has its own agent tab stopped (never another agent tab
+  the owner added to it, PRO-498) once its turn has ended and its agent left
   nothing running in the background (`SessionManager::stop_if_idle`, as
   the idle sweep does); its conversation stays.
   Closed hand-offs are trimmed to 300, the bots' before the owner's;
@@ -336,7 +339,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   (the owner's go to 6 MB; reads stop at 8 MB).
 - **Pause.** A paused bot sends nothing. Work handed to it is recorded as
   waiting, with no chat or item, and starts when the owner resumes it; what
-  is sent to it waits too. It is never started by a bot.
+  is sent to it waits too. It is never started by a bot. The resume answers
+  at once: what waited starts after it, on a thread of its own
+  (`handoffs::resumed_later`, PRO-498).
 - **Start.** A hand-off is claimed (waiting to working) under the store's
   lock before its chat and item are made; a Stop that lands meanwhile
   archives that chat and drops the item, so nothing is left behind. The
@@ -362,6 +367,10 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   hand-off is open, then stops the receiving bot's chat for that hand-off
   and the sessions it started for its item, drops the item, and tells the
   sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
+  Work the owner stopped is not handed on again: a new hand-off from the
+  same sender with the same title (case, spacing and punctuation aside), to
+  any bot, is refused while the stopped one is kept, and its sender is told
+  to ask the owner, who hands it on from the window (PRO-498).
 - **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
   (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
   most. Every launch of a bot's chat is given it as the owner's standing

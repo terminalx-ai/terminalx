@@ -224,6 +224,10 @@ window.__PW_FIXTURE__ = window.__PW_FIXTURE__ || { cloud: true, localProjects: 3
     emit(event, payload) {
       for (const { eventId, handler } of listening.get(event) ?? []) callbacks.get(handler)?.({ event, id: eventId, payload });
     },
+    /** How many of the app's listeners wait for `event`: a check waits for one before it emits. */
+    listeners(event) {
+      return (listening.get(event) ?? []).length;
+    },
   };
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args) => {

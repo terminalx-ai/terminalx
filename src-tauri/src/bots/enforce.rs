@@ -328,8 +328,8 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     }
     // Work handed to it while it was paused starts now, and what waited for it is sent (PRO-475).
     match operation {
-        "resume" => super::handoffs::resumed(manager, params["id"].as_str()),
-        "resumeAll" => super::handoffs::resumed(manager, None),
+        "resume" => super::handoffs::resumed_later(manager, params["id"].as_str()),
+        "resumeAll" => super::handoffs::resumed_later(manager, None),
         _ => {}
     }
     // The owner's answers kept on its items are sent, and its runs start the workers they held (PRO-474).

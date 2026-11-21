@@ -1232,7 +1232,8 @@ pub fn needs_you(manager: &crate::session::SessionManager) -> Result<Value> {
             }
         }
     }
-    for ask in manager.pending_permissions().into_iter().filter(|ask| is_agent_question(&ask.tool_name)) {
+    // Read without waiting on a tab's lock: a slow launch holds one for seconds, and the window waits on this read.
+    for ask in manager.pending_permissions_now().into_iter().filter(|ask| is_agent_question(&ask.tool_name)) {
         let Some(entry) = sessions.iter().find(|entry| entry.id == ask.session_id) else { continue };
         let Some(bot) = super::chat::acting_bot(entry).filter(|id| counts.contains_key(id)) else { continue };
         counts.entry(bot.clone()).or_default().0 += 1;
