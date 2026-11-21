@@ -223,13 +223,61 @@ fn bots_of(run: &Run, caller_bot: Option<&str>) -> Vec<String> {
     bots
 }
 
-/// The item whose owner has not approved `run` yet, or said Not now: no one but the owner's answer starts it, from
-/// the control socket or anywhere else a bot can reach (PRO-476). `None` once they chose a start.
+/// The item whose owner has not approved `run` yet, or said Not now: no one but the owner starts it, from the
+/// control socket or anywhere else a bot can reach (PRO-476). `None` once they chose a start on the item, and once
+/// the run has started by any route, the Run view's Approve and Start too (PRO-501): from then on the lead's
+/// `runs start` launches pieces that became ready, or goes on after a stop, as any lead's does.
 pub fn start_awaits_owner(run: &Run, caller_bot: Option<&str>) -> Option<u64> {
+    if !matches!(run.state, RunState::AwaitingApproval | RunState::Planned) {
+        return None;
+    }
     bots_of(run, caller_bot).iter().find_map(|bot| {
         let list = items::read(bot).ok()?;
-        list.items.iter().find(|item| item.runs.iter().any(|entry| entry.run == run.id && !matches!(entry.decision.as_str(), "start" | "startAskMerge"))).map(|item| item.number)
+        list.items.iter().find(|item| item.runs.iter().any(|entry| entry.run == run.id && !chose_start(entry))).map(|item| item.number)
     })
+}
+
+fn chose_start(entry: &ItemRun) -> bool {
+    matches!(entry.decision.as_str(), "start" | "startAskMerge")
+}
+
+/// The owner approved or started `run` from its Run view, not from the item that asked them (PRO-501): each item of
+/// its bot's that holds no start for it is settled as their "Approve and start" there would settle it. The start is
+/// recorded, and the item's question about the run is closed, so it does not go on asking for what is done. That
+/// answer and not "Start, but ask before merging": the Run view's start holds no merge. The lead is told of the
+/// start by the engine, as every approval tells it.
+pub fn started_from_run_view(sink: &dyn EventSink, run: &str) {
+    let Ok(run) = runs_store::get(run) else { return };
+    for bot in bots_of(&run, None) {
+        let Ok(list) = items::read(&bot) else { continue };
+        if !list.items.iter().any(|item| item.runs.iter().any(|entry| entry.run == run.id && !chose_start(entry))) {
+            continue;
+        }
+        let settled = items::change_as_owner(sink, &bot, |items, _| {
+            for item in items.iter_mut() {
+                settle_started(item, &run.id);
+            }
+            Ok(())
+        });
+        if let Err(error) = settled {
+            log::warn!("record the Run view's start of run {} on {bot}'s items: {error:#}", run.id);
+        }
+    }
+}
+
+/// [`started_from_run_view`] on one item: what [`answered`] and `items::answer_as` record for "Approve and start".
+pub(super) fn settle_started(item: &mut Item, run: &str) {
+    let Some(entry) = item.runs.iter_mut().find(|entry| entry.run == run && !chose_start(entry)) else { return };
+    entry.decision = "start".into();
+    entry.decided = Some(index::now());
+    entry.hold_merge = false;
+    if item.question.as_ref().is_some_and(|question| question.purpose == PURPOSE_START_RUN && question.run == run) {
+        item.question = None;
+        if item.state == items::ItemState::NeedsYou {
+            item.state = items::ItemState::InProgress;
+        }
+    }
+    items::log(item, OWNER, "approved", "You started the run from its Run view".to_string(), format!("run {run}"));
 }
 
 /// [`merge_held`] for every bot `run` is for, whoever asks: a process a bot starts outside its sessions is not
@@ -315,7 +363,8 @@ fn start(manager: &SessionManager, bot: &Bot, run: &str) -> Result<Value> {
         STARTED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push((run.id.clone(), method.to_string()));
         return Ok(json!({"run": run.id, "started": true}));
     }
-    let started = manager.orchestration(method, json!({"id": run.id})).map_err(|error| {
+    // The answer itself is recorded by `items::answer_as`, after this: not settled as a Run view's start.
+    let started = manager.orchestration(method, json!({"id": run.id, ANSWERING_ITEM: true})).map_err(|error| {
         // The engine's refusal is its JSON: its message is what the owner reads.
         let text = format!("{error:#}");
         let message = serde_json::from_str::<Value>(&text).ok().and_then(|value| value["message"].as_str().map(str::to_owned)).unwrap_or(text);
@@ -367,6 +416,10 @@ pub(super) fn refuse_approval(question: &Question, answer: &Answer, by_person: b
     }
     Ok(())
 }
+
+/// Set on the engine's approve or start that an item's answer makes ([`start`]), so the window's `orchestration`
+/// leaves the item to that answer rather than settling it as the Run view's start ([`started_from_run_view`]).
+pub const ANSWERING_ITEM: &str = "answeringItem";
 
 #[cfg(test)]
 pub static STARTED_FOR_TESTS: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());

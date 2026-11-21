@@ -28,8 +28,21 @@
 //! Anyone else's mention is kept as "not accepted", shown in the bot's
 //! settings, and starts nothing. A comment that carries a bot's signature,
 //! or comes from a bot account, starts nothing either: bots do not wake each
-//! other through comments, and a post made with the owner's login is never
-//! taken for the owner.
+//! other through signed posts, and a signed post is never taken for the owner.
+//!
+//! **An unsigned post** (PRO-502). A bot posts with the owner's own login and
+//! key, so what it posts unsigned looks like the owner's. Two checks stand
+//! against that, and neither is a guarantee. The access gate refuses a bot's
+//! session, at every level, the `gh` commands that post a comment or a
+//! review unsigned (`access::unsigned_post`); it reads commands, and a
+//! command it does not recognise still posts. And a mention from the owner's
+//! account written while one of their bots at Full access was in a turn
+//! ([`Working`], from [`working`] to [`worked`], give or take
+//! [`WORK_MARGIN_SECONDS`]) is kept as "not accepted" and asked for again, as
+//! an edited one is; this reads no command. What neither catches: a post made
+//! outside a turn (a process the bot left running, a scheduled job), or one
+//! the owner approved on a lower level's card. So the agent is still told
+//! the owner's account is not always the owner's.
 //!
 //! **The conversation.** An accepted mention becomes one of the bot's chats
 //! (marked [`SESSION_KEY`] with where it came from, listed under "Chats with
@@ -74,6 +87,12 @@ const MAX_TRIES: u32 = 3;
 const KEEP_CLOSED: usize = 300;
 const KEEP_POSTS: usize = 200;
 const KEEP_SEEN: usize = 4000;
+const KEEP_WORKING: usize = 500;
+const KEEP_WORKING_HOURS: i64 = 24;
+/// How far before a bot's spell of work starts, and after it ends, a comment
+/// still counts as written in it: the services' clocks and ours differ, and a
+/// post sent at the end of a turn is saved a little after it.
+pub const WORK_MARGIN_SECONDS: i64 = 120;
 /// Repositories read on one poll.
 const MAX_REPOS: usize = 20;
 const PAGE: usize = 100;
@@ -201,6 +220,24 @@ pub struct Post {
     pub unknown: BTreeMap<String, Value>,
 }
 
+/// A spell in which one of the owner's bots at Full access was at work in
+/// one of its tabs: from its turn's start (or the first sign of work in it)
+/// to its end. A mention from the owner's account written in one is not taken
+/// as the owner's ([`take_in`]): the bot could have posted it with their login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Working {
+    pub bot: String,
+    pub session: String,
+    pub tab: String,
+    pub from: String,
+    /// Empty while it lasts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
 /// How far a source has been read: from when it counts (`started`) and up to when (`read`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +282,9 @@ pub struct Store {
     pub mentions: Vec<Kept<Mention>>,
     #[serde(default)]
     pub posts: Vec<Kept<Post>>,
+    /// When the owner's bots at Full access were at work, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub working: Vec<Kept<Working>>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -256,6 +296,23 @@ impl Store {
 
     fn posts(&self) -> impl Iterator<Item = &Post> {
         self.posts.iter().filter_map(Kept::known)
+    }
+
+    fn spells(&self) -> impl Iterator<Item = &Working> {
+        self.working.iter().filter_map(Kept::known)
+    }
+
+    /// A bot at Full access that was at work when a comment written `at` was
+    /// written, give or take [`WORK_MARGIN_SECONDS`]. One whose time cannot
+    /// be read was at work: not knowing never reads as the owner's.
+    pub fn working_at(&self, at: &str) -> Option<&Working> {
+        let Some(at) = parse_time(at) else { return self.spells().next() };
+        let margin = chrono::TimeDelta::seconds(WORK_MARGIN_SECONDS);
+        self.spells().find(|spell| {
+            let from = parse_time(&spell.from);
+            let to = spell.to.as_deref().map(parse_time);
+            from.is_none_or(|from| from - margin <= at) && to.is_none_or(|to| to.is_none_or(|to| at <= to + margin))
+        })
     }
 
     /// The oldest closed mentions, sent posts and seen comments past what is kept go.
@@ -274,6 +331,12 @@ impl Store {
         }
         if self.seen.len() > KEEP_SEEN {
             self.seen.drain(..self.seen.len() - KEEP_SEEN);
+        }
+        // A spell over a day ago judges no comment read now; one still open stays until it ends.
+        let old = Utc::now() - chrono::TimeDelta::hours(KEEP_WORKING_HOURS);
+        self.working.retain(|kept| kept.known().is_none_or(|spell| spell.to.as_deref().and_then(parse_time).is_none_or(|to| to > old)));
+        if self.working.len() > KEEP_WORKING {
+            self.working.drain(..self.working.len() - KEEP_WORKING);
         }
     }
 }
@@ -566,6 +629,13 @@ pub fn take_in(store: &mut Store, bots: &[Bot], me: &Me, started: &str, comments
                 Verdict::Owner | Verdict::Person(_) if comment.edited => {
                     (NOT_ACCEPTED, String::new(), format!("{}'s comment was edited after it was written, and who edited it is not known: mention @{} again in a new comment", comment.author.name, bot.slug))
                 }
+                // A bot posts with the owner's login, and one at Full access can do so unsigned by means the
+                // access gate does not recognise: what the owner's account wrote while one was at work may be its.
+                Verdict::Owner if store.working_at(&comment.at).is_some() => {
+                    let spell = store.working_at(&comment.at).map(|spell| spell.bot.clone()).unwrap_or_default();
+                    let worker = bots.iter().find(|known| known.id == spell).map(|known| known.name.clone()).unwrap_or_else(|| "one of your bots".into());
+                    (NOT_ACCEPTED, String::new(), format!("{}'s comment was written while {worker} was at work with Full access, and a bot can post with your login: mention @{} again in a new comment once it has finished", comment.author.name, bot.slug))
+                }
                 Verdict::Owner => (WAITING, OWNER.to_string(), String::new()),
                 Verdict::Person(_) => (WAITING, ASKER_PERSON.to_string(), String::new()),
                 Verdict::NotAccepted(why) => (NOT_ACCEPTED, String::new(), why),
@@ -779,6 +849,7 @@ pub fn tick(manager: SessionManager) {
                 due
             };
             if due {
+                close_idle(&manager);
                 let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                 let home = super::home(&bots[0]).unwrap_or_else(std::env::temp_dir);
                 let me = me(&home);
@@ -917,6 +988,96 @@ pub fn deliver(manager: &SessionManager) -> usize {
         }
     }
     sent
+}
+
+// ------------------------------------------------------------------ bots at work
+
+/// The tabs this process knows a spell is open for, by store, so the events of a turn read the store once.
+static OPEN: Mutex<Vec<(PathBuf, String, String)>> = Mutex::new(Vec::new());
+
+fn open_key(session: &str, tab: &str) -> Option<(PathBuf, String, String)> {
+    Some((crate::store::root().ok()?, session.to_owned(), tab.to_owned()))
+}
+
+fn stamp(at: DateTime<Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// A tab of a session that acts for `bot_id` shows it is at work: a prompt
+/// reached it, its turn started, or it called a tool (`SessionManager`'s
+/// events). When the bot is at Full access, and not paused, a spell opens
+/// for the tab, unless one is open already. Nothing while Bots is off.
+pub fn working(bot_id: &str, session: &str, tab: &str) {
+    let Some(key) = open_key(session, tab) else { return };
+    if OPEN.lock().unwrap_or_else(|error| error.into_inner()).contains(&key) || !super::enabled_cached() {
+        return;
+    }
+    let Ok(Some(bot)) = crate::store::bots::get(bot_id) else { return };
+    if bot.paused.is_some() || bot.access.effective() != super::BotAccess::Full {
+        return;
+    }
+    let opened = change(|store| {
+        if !store.spells().any(|spell| spell.to.is_none() && spell.session == session && spell.tab == tab) {
+            store.working.push(Kept::Known(Working { bot: bot.id.clone(), session: session.into(), tab: tab.into(), from: stamp(Utc::now()), to: None, unknown: BTreeMap::new() }));
+        }
+        Ok(())
+    });
+    match opened {
+        Ok(()) => OPEN.lock().unwrap_or_else(|error| error.into_inner()).push(key),
+        Err(error) => log::warn!("bot channels: note that {bot_id} is at work: {error:#}"),
+    }
+}
+
+/// The turn of that tab ended: its spell closes now.
+pub fn worked(session: &str, tab: &str) {
+    let Some(key) = open_key(session, tab) else { return };
+    let known = {
+        let mut open = OPEN.lock().unwrap_or_else(|error| error.into_inner());
+        let before = open.len();
+        open.retain(|held| *held != key);
+        open.len() != before
+    };
+    if known {
+        close(|spell| spell.session == session && spell.tab == tab);
+    }
+}
+
+/// End now the open spells `which` picks.
+fn close(which: impl Fn(&Working) -> bool) {
+    let now = stamp(Utc::now());
+    let closed = change(|store| {
+        for spell in store.working.iter_mut().filter_map(Kept::known_mut) {
+            if spell.to.is_none() && which(spell) {
+                spell.to = Some(now.clone());
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = closed {
+        log::warn!("bot channels: note that a bot's turn ended: {error:#}");
+    }
+}
+
+/// Close the spells whose tab has no turn open now, started a poll ago or
+/// more: a turn whose end was never seen (the app quit, the agent was killed)
+/// ends here, at the latest, rather than holding the owner's mentions back.
+fn close_idle(manager: &SessionManager) {
+    let Ok(store) = read() else { return };
+    let since = Utc::now() - chrono::TimeDelta::seconds(POLL_SECONDS);
+    let idle: Vec<(String, String, String)> = store
+        .spells()
+        .filter(|spell| spell.to.is_none() && parse_time(&spell.from).is_none_or(|from| from <= since))
+        .filter(|spell| !manager.turn_open(&spell.session, &spell.tab))
+        .map(|spell| (spell.session.clone(), spell.tab.clone(), spell.from.clone()))
+        .collect();
+    if idle.is_empty() {
+        return;
+    }
+    if let Ok(root) = crate::store::root() {
+        OPEN.lock().unwrap_or_else(|error| error.into_inner()).retain(|(held, session, tab)| *held != root || !idle.iter().any(|(s, t, _)| s == session && t == tab));
+    }
+    // The spells read above, not one a turn opened since.
+    close(|spell| idle.iter().any(|(session, tab, from)| spell.session == *session && spell.tab == *tab && spell.from == *from));
 }
 
 /// A deleted bot's mentions and posts go; its chats go to the archive with its others.

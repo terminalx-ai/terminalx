@@ -9,6 +9,9 @@ name: Machines e2e break check
 # patch must apply, the scenarios must then fail, and fail with the marker in
 # its .expect file. This workflow fails when a patch no longer applies or
 # builds, or the scenarios pass with it (scripts/machine-e2e/run.py breaks).
+# Each patch carries one line of context on either side of the line it
+# changes (git diff -U1), so an unrelated edit near the check does not stop
+# it applying.
 
 on:
   schedule:
@@ -28,7 +31,7 @@ env:
 
 jobs:
   breaks:
-    runs-on: ubuntu-latest
+    runs-on: instabox-medium
     # Two patches, each an incremental build and a run of the scenarios.
     timeout-minutes: 60
     env:
@@ -38,8 +41,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # The rustc in CI's cache key, as CI's machines-e2e job computes it.
+      - name: Show the Rust toolchain
+        id: toolchain
+        run: |
+          rustup show && cargo --version
+          echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
       # Restore only, from CI's machines-e2e cache on main; nothing is saved.
+      # The key must follow CI's (.github/workflows/ci.yml, machines-e2e), or
+      # every night builds cold.
       - name: Restore the cargo cache
+        id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -47,8 +59,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ci-v3-machines-e2e-breaks-${{ github.run_id }}
-          restore-keys: |
-            ci-v3-machines-e2e-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
+          key: ci-v4-machines-e2e-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ steps.toolchain.outputs.rustc }}
+      - name: Say whether the cache was warm
+        env:
+          MATCHED: ${{ steps.cargo-cache.outputs.cache-matched-key }}
+        run: |
+          if [ -n "$MATCHED" ]; then echo "cargo cache: warm ($MATCHED)"; else echo "::warning::no ci-v4-machines-e2e-main cache for this Cargo.lock and rustc: building cold"; fi
       - name: Each deliberate break fails the scenarios
         run: python3 -I scripts/machine-e2e/run.py breaks

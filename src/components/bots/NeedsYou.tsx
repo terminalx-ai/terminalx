@@ -2,7 +2,7 @@ import { useLayoutEffect, useState, type FormEvent } from "react";
 import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, Split, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
-import { answerBotItem, openBotItem, questionKey, refreshNeedsYou, resendBotItem, useNeedsYou } from "@/lib/botItems";
+import { answerBotItem, openBotItem, questionKey, refreshNeedsYou, replyDraftKey, resendBotItem, useBotItemDraft, useNeedsYou } from "@/lib/botItems";
 import { runPlanLine } from "@/lib/botRuns";
 import { cn } from "@/lib/cn";
 import { openBot, selectSession } from "@/lib/sessions";
@@ -77,8 +77,9 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
   const question = item.question;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [replying, setReplying] = useState(false);
-  const [reply, setReply] = useState("");
+  // A reply typed and not sent is kept across pages; the box is open again when one is kept.
+  const [reply, setReply] = useBotItemDraft(replyDraftKey(bot.id, item.number, question));
+  const [replying, setReplying] = useState(() => reply !== "");
   if (!question) return null;
   // In the bot's own order and numbered as it numbered them, so "You chose answer 2" is the button marked 2.
   const order = question.answers.map((_, index) => index);
@@ -308,7 +309,9 @@ function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; 
   };
   return (
     <>
-      <span className="relative inline-flex min-w-0 max-w-[260px]">
+      {/* Both buttons share one grid cell, so the cell is as wide as the wider of them: "Read and answer" never
+          spills past a short recommended label it stands in for. */}
+      <span className="inline-grid min-w-0 max-w-[260px] items-center" data-testid="needs-you-answer-cell">
         <Button
           size="xs"
           variant="accent"
@@ -317,14 +320,14 @@ function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; 
           title={error ?? undefined}
           aria-hidden={!whole}
           tabIndex={whole ? undefined : -1}
-          className={cn("max-w-full", !whole && "invisible")}
+          className={cn("col-start-1 row-start-1 max-w-full", !whole && "invisible")}
           data-testid={whole ? "needs-you-answer" : "needs-you-answer-measured"}
         >
           <span ref={labelRef} className="truncate">{label}</span>
           <span className="text-[10px] font-normal opacity-75">recommended</span>
         </Button>
         {!whole && (
-          <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} className="absolute top-1/2 left-0 -translate-y-1/2" data-testid="needs-you-read">
+          <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} className="col-start-1 row-start-1 justify-self-start" data-testid="needs-you-read">
             Read and answer
           </Button>
         )}

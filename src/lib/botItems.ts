@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@/lib/api";
 import { actingBotOf } from "@/lib/botChats";
@@ -354,6 +354,27 @@ export function sameDay(iso: string | undefined, now = new Date()): boolean {
   return !Number.isNaN(at.getTime()) && at.toDateString() === now.toDateString();
 }
 
+/**
+ * Unsent text typed on an item (a reply to its question, a comment), kept for the window's life by `key`, so going
+ * to another page and back does not lose it (PRO-493). Cleared when it is sent: an empty text forgets it.
+ */
+const drafts = new Map<string, string>();
+
+export function useBotItemDraft(key: string): [string, (text: string) => void] {
+  const [held, setHeld] = useState(() => ({ key, text: drafts.get(key) ?? "" }));
+  const text = held.key === key ? held.text : drafts.get(key) ?? "";
+  const write = useCallback((next: string) => {
+    if (next) drafts.set(key, next);
+    else drafts.delete(key);
+    setHeld({ key, text: next });
+  }, [key]);
+  return [text, write];
+}
+
+/** The key of a reply typed to one question of an item: a new question starts with an empty box. */
+export const replyDraftKey = (botId: string, number: number, question: BotItemQuestion | undefined) => `reply\u0000${botId}\u0000${number}\u0000${question ? questionKey(question) : ""}`;
+export const commentDraftKey = (botId: string, number: number) => `comment\u0000${botId}\u0000${number}`;
+
 /** For tests: what was read, and the item a bot view should open. */
 export function getNeedsForTests(): NeedsYou | null {
   return state.needs;
@@ -372,6 +393,7 @@ export function resetBotItemsForTests() {
   shutBotItems();
   state = EMPTY;
   listeners.clear();
+  drafts.clear();
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

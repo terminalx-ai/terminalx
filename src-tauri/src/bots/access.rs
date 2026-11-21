@@ -21,7 +21,12 @@
 //!
 //! At every level a bot is refused a write to `bots.json` or the app's
 //! `settings.json` (resolved against its folder, through links, in any letter
-//! case), and a shell command naming either. Who may change a bot, approve a
+//! case), and a shell command naming either. It is refused too a `gh`
+//! command that posts a comment or a review without its signature
+//! ([`unsigned_post`], PRO-502): it posts with `terminalx bots post` and
+//! `bots reply`, which sign it. That reads commands, so a bot can get around
+//! it; `channels` does not take a mention from the owner's account written
+//! while a Full-access bot was working, which reads none. Who may change a bot, approve a
 //! card or write to the runtime is settled where the command arrives, by who
 //! sent it (`control::Caller`), not here.
 //!
@@ -107,6 +112,9 @@ pub fn gate(access: &BotAccess, payload: &Value) -> Gate {
     let cwd = payload["cwd"].as_str();
     if let Some(what) = own_settings(tool, input, cwd) {
         return Gate::Refuse(format!("TerminalX refused this: it names {what}, where your owner keeps your access, your reporting line and whether you are paused. A bot does not change them, and runs no command on them; read them with the Read tool if you must. Ask your owner in the chat if something there should change."));
+    }
+    if let Some(what) = shell_command(tool, input).and_then(|command| guard::find_command(&command, &unsigned_post)) {
+        return Gate::Refuse(format!("TerminalX refused `{what}`: it would post on GitHub with your owner's login and no line saying a bot wrote it, so it could be taken for your owner's own words. This did not run. Post with `terminalx bots post github --pr PR|--issue ISSUE --text \"…\"` or `terminalx bots post linear --issue ISSUE --text \"…\"`, or answer a mention with `terminalx bots reply --text \"…\"`: they sign the post as yours."));
     }
     let access = access.effective();
     if access == BotAccess::Full || reads(tool, input, cwd) || single(tool, input, own_notes) {
@@ -279,11 +287,13 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// work (`handoffs::may_hand_off`), holds a message to the reporting line,
 /// and refuses a paused bot's changes and messages. And `terminalx bots
 /// message` (PRO-472): a hand-off, question or status for another of the
-/// owner's bots that wakes only a duty its owner set to wait for one.
+/// owner's bots that wakes only a duty its owner set to wait for one. And
+/// `terminalx bots duty-off` (PRO-492): switching off one of its own duties,
+/// which gives it nothing (the runtime refuses another bot's).
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"
-            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message", ..])
+            && matches!(rest.as_slice(), ["memory", "add" | "forget" | "list" | "tidy", ..] | ["items", "list" | "show" | "add" | "set" | "ask" | "plan" | "ask-merge" | "check" | "comment" | "done", ..] | ["handoff" | "tell" | "handoffs" | "suggest" | "message" | "duty-off", ..])
     })
 }
 
@@ -310,13 +320,98 @@ fn shell_command(tool: &str, input: &Value) -> Option<String> {
 fn report_command(program: &str, args: &[&str]) -> Option<String> {
     let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
     match (program, plain.as_slice()) {
-        ("gh", ["pr" | "issue", "comment", ..] | ["issue", "create", ..]) => Some(format!("gh {} {}", plain[0], plain[1])),
+        // Not `gh pr comment` or `gh issue comment`: unsigned, they are refused at every level ([`unsigned_post`]).
+        ("gh", ["issue", "create", ..]) => Some("gh issue create".into()),
         ("terminalx" | "tnx", ["send", ..]) => Some(format!("{program} send")),
         ("terminalx" | "tnx", ["issues", "comment" | "create", ..]) => Some(format!("{program} issues {}", plain[1])),
         // A bot's post or reply on GitHub or Linear, signed as its own (PRO-480).
         ("terminalx" | "tnx", ["bots", "post" | "reply", ..]) => Some(format!("{program} bots {}", plain[1])),
         _ => None,
     }
+}
+
+/// A `gh` command that posts a comment or a review on GitHub without the
+/// bot's signature (PRO-502): `gh pr comment`, `gh issue comment`, `gh pr
+/// review`, and a `gh api` call that writes to a comments or reviews
+/// endpoint, or a GraphQL mutation that adds or changes a comment or a
+/// review. What it is, as the refusal names it.
+///
+/// It reads only what is written as such a command, anywhere in a command
+/// line (`guard::find_command`: lists, pipes, `sh -c`, `env`, `sudo`). A
+/// script, another program, a connected server's tool or a call spelt some
+/// other way is not recognised; `channels` keeps a second check that reads no
+/// command.
+fn unsigned_post(program: &str, args: &[&str]) -> Option<String> {
+    if program != "gh" {
+        return None;
+    }
+    let plain: Vec<&str> = args.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+    match plain.as_slice() {
+        ["pr" | "issue", "comment", ..] | ["pr", "review", ..] => Some(format!("gh {} {}", plain[0], plain[1])),
+        ["api", ..] => gh_api_writes_comment(&args[args.iter().position(|arg| *arg == "api")? + 1..]).then(|| "gh api".to_string()),
+        _ => None,
+    }
+}
+
+/// `gh api`'s arguments write a comment or a review: a method other than GET
+/// (a field or `--input` makes it POST unless `-X GET` says otherwise) to a
+/// path with a `comments` or `reviews` part (`repos/o/r/issues/7/comments`,
+/// `repos/o/r/pulls/7/reviews/1/events`, `…/comments/9/replies`), or to
+/// `graphql` with a mutation that names a comment or a review.
+fn gh_api_writes_comment(args: &[&str]) -> bool {
+    const VALUE_OPTIONS: &[&str] = &["-X", "--method", "-f", "--raw-field", "-F", "--field", "-H", "--header", "--input", "-q", "--jq", "-t", "--template", "--hostname", "--cache", "-p", "--preview"];
+    const FIELDS: &[&str] = &["-f", "--raw-field", "-F", "--field"];
+    let mut method: Option<String> = None;
+    let mut sends = false;
+    let mut endpoint: Option<&str> = None;
+    let mut values: Vec<&str> = Vec::new();
+    let mut at = 0;
+    while let Some(arg) = args.get(at).copied() {
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+            _ => (arg, None),
+        };
+        // `-XPOST`, `-fbody=x`: a short option with its value joined on.
+        let (name, inline) = match (name.len() > 2 && !name.starts_with("--") && name.starts_with('-'), inline) {
+            (true, None) => (&name[..2], Some(&name[2..])),
+            _ => (name, inline),
+        };
+        if VALUE_OPTIONS.contains(&name) {
+            let value = match inline {
+                Some(value) => value,
+                None => {
+                    at += 1;
+                    args.get(at).copied().unwrap_or_default()
+                }
+            };
+            match name {
+                "-X" | "--method" => method = Some(value.to_ascii_uppercase()),
+                "--input" => sends = true,
+                _ if FIELDS.contains(&name) => {
+                    sends = true;
+                    values.push(value);
+                }
+                _ => {}
+            }
+        } else if !arg.starts_with('-') && endpoint.is_none() {
+            endpoint = Some(arg);
+        }
+        at += 1;
+    }
+    let writes = match method.as_deref() {
+        Some(method) => method != "GET" && method != "HEAD",
+        None => sends,
+    };
+    let Some(endpoint) = endpoint else { return false };
+    let path = endpoint.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    if path.trim_matches('/') == "graphql" {
+        // A GraphQL call is a POST whatever it does; a mutation is what writes.
+        return values.iter().any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("mutation") && (value.contains("comment") || value.contains("review"))
+        });
+    }
+    writes && path.split('/').any(|part| part == "comments" || part == "reviews")
 }
 
 /// A word as a shell reads it back as one word.

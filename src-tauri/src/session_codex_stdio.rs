@@ -639,7 +639,7 @@ impl SessionManager {
             rt.child = Some(child.clone());
             cancelled
         };
-        crate::bots::chat::launched(self, &chat, !cancelled);
+        crate::bots::chat::launched(self, &chat, tab, !cancelled);
         if cancelled {
             crate::harness::host::terminate(child.pid);
             bail!("Codex startup cancelled; no input was sent");

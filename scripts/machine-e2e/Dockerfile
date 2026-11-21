@@ -5,7 +5,7 @@
 # temporary directories at the same paths, and runs the container as the
 # runner's uid and gid.
 #
-# ubuntu:24.04 because the binary is built on ubuntu-latest (24.04): glibc
+# ubuntu:24.04 because the binary is built on CI's Linux runner (24.04): glibc
 # 2.39 or newer, and OpenSSL 3 (libssl3t64), which native-tls links. python3
 # runs fake-claude, git serves the project, procps gives the runtime `ps`.
 FROM ubuntu:24.04

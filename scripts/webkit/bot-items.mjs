@@ -43,6 +43,13 @@ const fixture = `
     { at, by: "b1", kind: "checked", text: "Kestrel checked “macOS jobs run on the Mac mini runner”" },
   ] });
   backend.answers.bots_needs_you = () => ({ entries: [{ kind: "item", botId: "b1", at, item: asking }], counts: [{ botId: "b1", needsYou: 1, inProgress: 2 }] });
+  // PRO-493, for the Bots page's queue only: a question its three lines cut, with a one-letter recommended answer, so
+  // "Read and answer" stands in for a button narrower than itself.
+  const cut = item(16, "Pick the runner's region", "needsYou", { question: { text: "Which region?\\n".repeat(6) + "Say which one, and why, before I order the machine.", answers: ["N", "Y"], recommended: 1, asked: at } });
+  window.__askCutQuestion = () => {
+    backend.answers.bots_needs_you = () => ({ entries: [{ kind: "item", botId: "b1", at, item: asking }, { kind: "item", botId: "b1", at, item: cut }], counts: [{ botId: "b1", needsYou: 2, inProgress: 2 }] });
+    backend.emit("bot_items_changed", { botId: "b1" });
+  };
 `;
 
 const box = (locator) => locator.evaluate((element) => {
@@ -151,7 +158,9 @@ try {
       // 23.02: the Bots page's Needs you queue.
       await rail.getByTestId("destination-list").getByRole("button", { name: /^Bots/ }).click();
       const queue = page.locator("main [data-testid=bots-needs-you]");
-      await queue.getByTestId("needs-you-row").waitFor();
+      await queue.getByTestId("needs-you-row").first().waitFor();
+      await page.evaluate(() => window.__askCutQuestion());
+      await queue.getByTestId("needs-you-read").waitFor();
       const queueProblems = await page.evaluate(() => {
         const main = document.querySelector("main").getBoundingClientRect();
         const problems = [];
@@ -160,9 +169,18 @@ try {
           const rect = element.getBoundingClientRect();
           if (rect.width && (rect.left < main.left - 1 || rect.right > main.right + 1)) problems.push(`"${element.textContent.trim().slice(0, 40)}" leaves the main slot`);
         }
+        // "Read and answer" sits inside its cell, not over the Open button beside it (PRO-493).
+        for (const read of document.querySelectorAll("[data-testid=bots-needs-you] [data-testid=needs-you-read]")) {
+          const cell = read.closest("[data-testid=needs-you-answer-cell]").getBoundingClientRect();
+          const box = read.getBoundingClientRect();
+          if (box.left < cell.left - 0.5 || box.right > cell.right + 0.5) problems.push(`"Read and answer" spills out of its cell (${box.left}–${box.right} in ${cell.left}–${cell.right})`);
+          const open = read.closest("[data-testid=needs-you-row]").querySelector("[data-testid=needs-you-open]").getBoundingClientRect();
+          if (box.left < open.right - 0.5 && open.left < box.right - 0.5) problems.push('"Read and answer" overlaps Open');
+        }
         return problems;
       });
-      failed += report(`needs you queue ${name}`, { "fits the main slot": queueProblems.length === 0 }, queueProblems);
+      const reads = await queue.getByTestId("needs-you-read").count();
+      failed += report(`needs you queue ${name}`, { "fits the main slot": queueProblems.length === 0, "the cut question offers Read and answer": reads >= 1 }, queueProblems);
       await page.close();
     }
   }

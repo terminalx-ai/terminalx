@@ -474,7 +474,7 @@ fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
 
 /// The `bots` operations that only read, and so fail fast on a wedged owner.
 fn bots_read(operation: &str) -> bool {
-    matches!(operation, "list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "dutyWeek" | "items" | "item" | "needsYou")
+    matches!(operation, "list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "dutyWeek" | "items" | "item" | "needsYou" | "handoffs" | "brief")
 }
 
 #[cfg(test)]
@@ -486,6 +486,14 @@ mod tests {
     fn the_week_of_duties_is_a_fast_read_and_a_change_is_not() {
         assert!(bots_read("dutyWeek") && bots_read("duties"));
         assert!(!bots_read("dutySave") && !bots_read("dutyRun") && !bots_read("dutyDelete"));
+    }
+
+    /// PRO-498: the hand-offs and the team brief are reads; stopping, resending, handing an item and writing the
+    /// brief are not.
+    #[test]
+    fn the_hand_offs_and_the_brief_are_fast_reads_and_their_changes_are_not() {
+        assert!(bots_read("handoffs") && bots_read("brief"));
+        assert!(!bots_read("handoffStop") && !bots_read("handoffResend") && !bots_read("itemHand") && !bots_read("briefWrite"));
     }
 
     #[test]

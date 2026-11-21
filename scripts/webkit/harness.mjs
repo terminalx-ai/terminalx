@@ -93,21 +93,16 @@ export async function sidebar(page) {
 
 /**
  * Open session `sessionId` as the native menu does (`open_session`) and resolve with its view, `main` named `name`.
- * The app takes the event only once its listener is set and the session is in its list (`openTarget` drops it
- * before), so on a loaded runner the first one can go unheard: it is sent again until the view shows, 30 s at most.
+ * The app sets its listener only once its sessions are listed (`bootSessions`), and drops the event before that
+ * (`openTarget`), so this waits for the listener and then sends the event once. It is never sent again: an app that
+ * needed it twice would fail here rather than be hidden by a retry (PRO-498).
  */
 export async function openSession(page, sessionId, name, { timeout = 30_000 } = {}) {
+  await page.waitForFunction(() => window.__PW_STUB__.listeners("open_session") > 0, null, { timeout });
+  await page.evaluate((id) => window.__PW_STUB__.emit("open_session", { sessionId: id }), sessionId);
   const view = page.getByRole("main", { name });
-  const deadline = Date.now() + timeout;
-  for (;;) {
-    await page.evaluate((id) => window.__PW_STUB__.emit("open_session", { sessionId: id }), sessionId);
-    try {
-      await view.waitFor({ timeout: Math.min(2_000, Math.max(1, deadline - Date.now())) });
-      return view;
-    } catch (error) {
-      if (Date.now() >= deadline) throw error;
-    }
-  }
+  await view.waitFor({ timeout });
+  return view;
 }
 
 /**
