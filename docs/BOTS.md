@@ -193,12 +193,26 @@ minute they fall on.
   the week, for a duty that is on and a bot that is not paused.
 - **Counted, not drawn.** A duty due more than six times on some day, and one
   that wakes on events (or a run an event started), go in the "Often" and
-  "Events" rows as counts per day.
+  "Events" rows as counts per day. A schedule with more times in the week than
+  are looked at (10,080) says so, and its count is "at least".
+- **History not kept.** A log keeps its newest 100 finished runs, so a duty
+  that wakes every half hour keeps about two days. The week returns, per duty,
+  the oldest instant its log still covers (`logs[].keptFrom`); the days before
+  it show "history not kept", never "none ran", and the totals say "at
+  least". A log that cannot be read is said on its duty's row
+  (`logs[].unreadable`) and its past days are not kept either.
+- **Which weeks.** Weeks from 3 January 2000 to the end of 2199 can be shown;
+  others are refused, and the arrows stop there. A day whose midnight does not
+  exist (clocks moved forward over it) starts at the first valid instant.
 - **Changing from the calendar** uses the duties' own guarded routes: a
   click on an empty hour opens the duty editor with a weekly schedule at that
   day and hour, and dragging a block still to come saves its duty with the
-  schedule shifted (`dutySave`, which needs the window's proof). A cron
-  schedule moves only when its minute and hours are plain numbers.
+  schedule shifted (`dutySave`, which needs the window's proof). A block moves
+  from its own time by whole 15-minute steps of the pointer's travel, and only
+  with the main button; what changed is said with an Undo. A cron schedule
+  moves only when its minute and hours are plain numbers, its days numbered
+  as the scheduler numbers them (1 = Sunday … 7 = Saturday,
+  `CRON_WEEKDAYS`).
 - **Who may read it.** The window and a person's terminal read any bot's
   week or every bot's. A process in a bot's session reads its own bot's week
   only (`control.rs`, `own_duties_read`).

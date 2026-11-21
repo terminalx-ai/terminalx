@@ -215,17 +215,20 @@ fn days_the_log_no_longer_covers_are_not_kept_never_empty() {
     let argus = bot("argus", false);
     let stalled = duty("stalled", "argus", cron("*/30 * * * *"), json!({}));
     let quiet: Value = serde_json::from_str(QUIET).unwrap();
-    // The newest 100 runs, Friday 11:30 back to Wednesday 10:00, as a full log keeps them (newest first).
+    // The newest 100 runs (numbers 101 … 200: the first 100 were dropped), Friday 11:30 back to Wednesday 10:00, as
+    // a log cut at 100 keeps them (newest first).
     let newest = utc("2026-11-20T11:30:00Z");
-    let runs: Vec<AutomationRun> = (0..automation_store::RUN_RETENTION as i64)
-        .map(|n| {
-            let at = (newest - Duration::minutes(30 * n)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            // Alternating results, so no two are folded into one row.
-            let status = if n % 2 == 0 { "skippedPrecheck" } else { "completed" };
-            run("stalled", 100 - n as u64, status, &at, json!({"precheck": quiet, "duty": {"reportedTo": "nobody"}}))
-        })
-        .collect();
-    let week = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, runs)]);
+    let kept = |first_number: u64| -> Vec<AutomationRun> {
+        (0..automation_store::RUN_RETENTION as i64)
+            .map(|n| {
+                let at = (newest - Duration::minutes(30 * n)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                // Alternating results, so no two are folded into one row.
+                let status = if n % 2 == 0 { "skippedPrecheck" } else { "completed" };
+                run("stalled", first_number + 99 - n as u64, status, &at, json!({"precheck": quiet, "duty": {"reportedTo": "nobody"}}))
+            })
+            .collect()
+    };
+    let week = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, kept(101))]);
     let cells: Vec<(u32, u32)> = week.often.iter().map(|day| (day.ran, day.not_kept)).collect();
     // Monday and Tuesday not kept; Wednesday kept from 10:00 (28 runs, at least); Thursday and Friday whole.
     assert_eq!(cells, vec![(0, 1), (0, 1), (28, 1), (48, 0), (24, 0), (0, 0), (0, 0)]);
@@ -238,6 +241,9 @@ fn days_the_log_no_longer_covers_are_not_kept_never_empty() {
     // A log with fewer runs than it keeps lost nothing: the empty days are days on which nothing ran.
     let short = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, vec![])]);
     assert!(short.often.iter().all(|day| day.not_kept == 0) && !short.totals.at_least && short.logs.is_empty());
+    // Nor did a log holding exactly its first 100 runs (numbers 1 … 100).
+    let whole = read(Tz::UTC, "2026-11-20T12:00:00Z", &[(&stalled, &argus, kept(1))]);
+    assert!(whole.often.iter().all(|day| day.not_kept == 0) && !whole.totals.at_least && whole.logs.is_empty());
 }
 
 #[test]
@@ -431,8 +437,26 @@ fn the_week_is_read_through_the_dispatch_for_every_bot_or_one_and_never_with_bot
     assert!(!crate::bots::enforce::needs_person("dutyWeek", &json!({})));
     assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "dutyWeek", "params": {}})));
 
-    switch(false);
-    let refused = rig.bots("dutyWeek", json!({})).unwrap_err();
-    assert!(refused.to_string().contains("Bots"), "{refused:#}");
-    switch(true);
+    {
+        let _off = BotsOff::now();
+        let refused = rig.bots("dutyWeek", json!({})).unwrap_err();
+        assert!(refused.to_string().contains("Bots"), "{refused:#}");
+    }
+    assert!(rig.bots("dutyWeek", json!({})).is_ok());
+}
+
+/// The Bots switch is off while this lives, and on again after, whatever the test does.
+struct BotsOff;
+
+impl BotsOff {
+    fn now() -> Self {
+        switch(false);
+        Self
+    }
+}
+
+impl Drop for BotsOff {
+    fn drop(&mut self) {
+        switch(true);
+    }
 }

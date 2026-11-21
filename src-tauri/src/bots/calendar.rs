@@ -208,11 +208,13 @@ fn first_time(run: &AutomationRun) -> Option<DateTime<Utc>> {
     .or_else(|| parse(run.ended_at.as_deref()))
 }
 
-/// The oldest instant a log still covers, once it is full: the runs before its oldest kept one were dropped.
-/// `None` while it holds fewer finished runs than it keeps, so nothing was dropped.
+/// The oldest instant a log still covers, once it has dropped runs: those before its oldest kept one. Runs are
+/// numbered from 1, one past the highest kept, so a full log whose lowest number is above 1 has dropped some.
+/// `None` while nothing was dropped.
 fn kept_from(runs: &[AutomationRun]) -> Option<DateTime<Utc>> {
     let finished: Vec<&AutomationRun> = runs.iter().filter(|run| run.status.is_terminal()).collect();
-    (finished.len() >= automation_store::RUN_RETENTION).then(|| finished.iter().filter_map(|run| first_time(run)).min()).flatten()
+    let dropped = finished.len() >= automation_store::RUN_RETENTION && runs.iter().map(|run| run.run_number).min().is_some_and(|lowest| lowest > 1);
+    dropped.then(|| finished.iter().filter_map(|run| first_time(run)).min()).flatten()
 }
 
 /// `text` cut to [`NOTE_CHARS`].

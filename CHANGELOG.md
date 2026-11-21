@@ -111,7 +111,9 @@
   read from the run logs and the schedules, in your time zone, so it agrees
   with both. Filter by bot, step between weeks, click an empty hour to add a
   duty there, or drag a block still to come to move its duty's time. Beside
-  it: what is next today, the week so far, the key and quiet hours (PRO-473).
+  it: what is next today, the week so far, the key and quiet hours. Days a
+  duty's log no longer reaches back over say "history not kept" and the
+  totals "at least"; a move says what changed, with an Undo (PRO-473).
 
 ## 0.2.37
 

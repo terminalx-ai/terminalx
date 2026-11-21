@@ -55,16 +55,25 @@ const fixture = `
     // Two at once share the column.
     if (day === 0) blocks.push(block("d4", "b3", day, 10, state("reported")));
   }
-  const count = (day, ran, reports, perDay) => day < today ? { ran, reports, failed: 0, planned: 0, scheduled: perDay } : day === today ? { ran: Math.floor(ran / 2), reports, failed: 0, planned: perDay / 2, scheduled: perDay } : { ran: 0, reports: 0, failed: 0, planned: perDay, scheduled: perDay };
+  const count = (day, ran, reports, perDay) => ({ notKept: 0, capped: false, ...(day < today ? { ran, reports, failed: 0, planned: 0, scheduled: perDay } : day === today ? { ran: Math.floor(ran / 2), reports, failed: 0, planned: perDay / 2, scheduled: perDay } : { ran: 0, reports: 0, failed: 0, planned: perDay, scheduled: perDay }) });
+  // The often duty's log no longer reaches back over Monday, and part of Tuesday (when they have passed).
+  const often = days.map((_, day) => count(day, 96, day % 2, 96));
+  if (today > 0) often[0] = { ...often[0], ran: 0, reports: 0, notKept: 1 };
+  if (today > 1) often[1] = { ...often[1], ran: 28, notKept: 1 };
   const week = (id) => ({
     timezone: "UTC", days, today, nowMinute: now.getUTCHours() * 60 + now.getUTCMinutes(),
     blocks: id ? blocks.filter((value) => value.botId === id) : blocks,
-    often: days.map((_, day) => count(day, 96, day % 2, 96)), oftenDuties: ["d6"],
+    often, oftenDuties: ["d6"],
     events: days.map((_, day) => count(day, 6 + day, day % 2, 0)), eventDuties: ["d7"],
     nextToday: [{ dutyId: "d6", botId: "b4", minute: 13 * 60 + 30, at }, { dutyId: "d1", botId: "b1", minute: 14 * 60, at }, { dutyId: "d2", botId: "b1", minute: 18 * 60, at }]
       .filter((next) => next.minute >= now.getUTCHours() * 60 + now.getUTCMinutes()),
-    totals: { checks: 412, nothingNew: 401, reports: 11 },
+    totals: { checks: 4120, nothingNew: 4010, reports: 110, atLeast: true },
     quietHours: { b1: { from: "22:00", to: "07:00" }, b4: { from: "20:00", to: "08:00" } },
+    notKept: days.map((_, day) => day === 0 && today > 0 ? [{ dutyId: "d1", untilMinute: 1440 }] : day === 1 && today > 1 ? [{ dutyId: "d1", untilMinute: 600 }] : []),
+    logs: [
+      { dutyId: "d6", botId: "b4", keptFrom: days[Math.min(1, today)] + "T10:00:00Z" },
+      { dutyId: "d2", botId: "b1", unreadable: "runs.jsonl: line 3 is not JSON: expected value at line 1 column 1, and the rest of a long reason that has to wrap or cut inside its row" },
+    ].filter((log) => !id || log.botId === id),
   });
   backend.answers.bot_duty_week = ({ id }) => week(id);
 `;
@@ -103,6 +112,14 @@ async function measure(page, calendar, viewport) {
     return boxes.every((a, i) => boxes.every((b, j) => i >= j || !(a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5)));
   }));
   const asideParts = await Promise.all(["calendar-totals", "calendar-key"].map((id) => box(calendar.getByTestId(id))));
+  const logs = await Promise.all((await calendar.getByTestId("calendar-log").all()).map(box));
+  const headBox = await box(calendar.getByTestId("calendar-head"));
+  const totalsFit = await calendar.getByTestId("calendar-totals").evaluate((row) => [...row.querySelectorAll("[data-testid=calendar-total] p")].every((text) => text.scrollWidth <= text.clientWidth + 1));
+  const bands = await calendar.getByTestId("calendar-grid").evaluate((grid) => [...grid.querySelectorAll("[data-testid=calendar-not-kept]")].every((band) => {
+    const r = band.getBoundingClientRect();
+    const outer = band.parentElement.getBoundingClientRect();
+    return r.left >= outer.left - 0.5 && r.right <= outer.right + 0.5;
+  }));
   const totals = await Promise.all((await calendar.getByTestId("calendar-total").all()).map(box));
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
   const lined = (cells) => cells.length === 7 && cells.every((cell, i) => Math.abs(cell.left - columns[i].left) < 1.5 && Math.abs(cell.right - columns[i].right) < 1.5);
@@ -120,6 +137,9 @@ async function measure(page, calendar, viewport) {
       "the grid scrolls inside its own box": inside({ ...scrollBox, bottom: scrollBox.top + 1 }, calendarBox) && scrollBox.bottom <= calendarBox.bottom + 0.5,
       "the three totals stand side by side inside the right column": totals.length === 3 && disjoint(totals) && totals.every((total) => inside(total, asideBox)),
       "the key sits below the totals": asideParts[1].top >= asideParts[0].bottom - 0.5,
+      "the log notices stand above the grid, inside it and apart": disjoint(logs) && logs.every((log) => inside(log, mainBox) && log.bottom <= headBox.top + 0.5),
+      "an \"at least\" total fits its tile": totalsFit,
+      "a history-not-kept band stays inside its day": bands,
     },
     boxes: { calendarBox, toolbarBox, mainBox, asideBox, gridBox, scrollBox, columns: columns.map((c) => [c.left, c.right]), headCells },
   };
