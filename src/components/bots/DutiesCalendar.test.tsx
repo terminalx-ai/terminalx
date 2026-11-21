@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   restart: vi.fn(async () => undefined),
   showTeam: vi.fn(),
+  runtime: { state: { state: "connected", epoch: "e7" } } as { state: Record<string, unknown> | null },
+  runtimeListeners: new Set<() => void>(),
+  replace: vi.fn(async (_epoch: string, _stop: unknown[]) => undefined),
 }));
 
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: (error: unknown) => String(error), automationsApi: { tryPrecheck: vi.fn() } }));
@@ -26,6 +29,19 @@ vi.mock("@/lib/machines", () => ({
     return match ? { epoch: match[1], message: match[2] } : null;
   },
 }));
+vi.mock("@/lib/localRuntime", async (importOriginal) => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    ...(await importOriginal<object>()),
+    useLocalRuntime: () => useSyncExternalStore((listener) => { mocks.runtimeListeners.add(listener); return () => { mocks.runtimeListeners.delete(listener); }; }, () => mocks.runtime),
+    replaceLocalRuntime: mocks.replace,
+  };
+});
+/** Another runtime is attached, as after a restart. */
+const attach = (state: Record<string, unknown>) => {
+  mocks.runtime = { state };
+  mocks.runtimeListeners.forEach((listener) => listener());
+};
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { DutiesCalendar } = await import("./DutiesCalendar");
@@ -91,6 +107,8 @@ function week(): DutyWeek {
 const RESTART = "runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked.";
 
 beforeEach(() => {
+  mocks.runtime = { state: { state: "connected", epoch: "e7" } };
+  mocks.replace.mockReset();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-20T13:24:00Z"));
   mocks.automations = { loaded: true, automations: [status, look, audit, stalled], runs: {}, loadingRuns: {}, issueStates: {} };
@@ -335,6 +353,160 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     expect(logs[0]).toBe("Stalled sessions: history not kept before Wed 10:00. Its log keeps its newest 100 runs, so the counts are at least these.");
     expect(logs[1]).toBe("Daily status: its run log could not be read, so its past runs are not shown. runs.jsonl: line 3 is not JSON");
     expect(screen.getAllByTestId("calendar-total").every((total) => total.textContent?.startsWith("at least"))).toBe(true);
+  });
+
+  it("covers a day's column as not kept only when that is true of every duty drawn (PRO-497)", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    let gaps = [[{ dutyId: "d1", untilMinute: 1440 }], [], [], [], [], [], []];
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command !== "bot_duty_week") return answer(command, args);
+      const value = week();
+      return { ...value, notKept: gaps };
+    });
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    // Daily status lacks Monday, Look around and the audit do not: a strip at the column's edge, not the column.
+    let band = screen.getByTestId("calendar-not-kept");
+    expect(band.dataset.whole).toBe("false");
+    expect(band.textContent).toBe("");
+    expect(band.title).toBe("History not kept: Daily status");
+    // Every duty drawn lacks it: the column, said in it.
+    gaps = [["d1", "d2", "d3"].map((dutyId) => ({ dutyId, untilMinute: 1440 })), [], [], [], [], [], []];
+    fireEvent.click(screen.getByRole("button", { name: "The week after" }));
+    await waitFor(() => expect(screen.getByTestId("calendar-not-kept").dataset.whole).toBe("true"));
+    band = screen.getByTestId("calendar-not-kept");
+    expect(band.textContent).toBe("history not kept");
+  });
+
+  it("says a stopped run stopped, draws a long run at its length and keeps one near midnight inside its day (PRO-497)", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command !== "bot_duty_week") return answer(command, args);
+      const value = week();
+      return {
+        ...value,
+        blocks: [
+          { dutyId: "d1", botId: "b1", day: 0, minute: 540, at: "2026-11-16T09:00:00Z", state: "stopped", count: 1, runId: "r1", minutes: 20, note: "Stopped by you" },
+          { dutyId: "d2", botId: "b1", day: 1, minute: 600, at: "2026-11-17T10:00:00Z", state: "done", count: 1, runId: "r2", minutes: 150 },
+          { dutyId: "d3", botId: "b2", day: 1, minute: 660, at: "2026-11-17T11:00:00Z", state: "done", count: 1, runId: "r3" },
+          { dutyId: "d1", botId: "b1", day: 2, minute: 23 * 60 + 50, at: "2026-11-18T23:50:00Z", state: "done", count: 1, runId: "r4" },
+        ],
+      };
+    });
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const [stopped, long, beside, late] = blocks();
+    expect(stopped.dataset.state).toBe("stopped");
+    expect(stopped.title).toBe("Daily status · Atlas · 09:00 · Stopped before it finished · ran 20 min · Stopped by you");
+    expect(screen.getAllByTestId("calendar-key-row").map((row) => row.textContent)).toContain("Stopped before it finished");
+    // Two and a half hours tall, and the audit at 11:00 goes beside it rather than under it.
+    expect(long.style.height).toBe(`${Math.round(2.5 * 46) - 2}px`);
+    expect(long.title).toContain("ran 2 h 30 min");
+    expect([long.style.width, beside.style.width]).toEqual(["calc(50% - 6px)", "calc(50% - 6px)"]);
+    // 23:50 would end below midnight: moved up to end inside the day.
+    expect(Number.parseFloat(late.style.top) + Number.parseFloat(late.style.height)).toBeLessThanOrEqual(24 * 46);
+  });
+
+  it("puts a block dragged away and brought back where it was, and opens nothing (PRO-497)", async () => {
+    const { onOpenDuty } = calendar();
+    await screen.findAllByTestId("calendar-block");
+    const block = blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
+    fireEvent.pointerDown(block, { button: 0, pointerId: 6, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerMove(block, { button: 0, pointerId: 6, clientX: 450, clientY: 18 * 46 + 5 + 46 });
+    expect(screen.getByTestId("calendar-drop").textContent).toBe("19:00 Daily status");
+    fireEvent.pointerMove(block, { button: 0, pointerId: 6, clientX: 450, clientY: 18 * 46 + 6 });
+    expect(screen.queryByTestId("calendar-drop")).toBeNull();
+    fireEvent.pointerUp(block, { button: 0, pointerId: 6, clientX: 450, clientY: 18 * 46 + 6 });
+    expect(onOpenDuty).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(false);
+    // A plain click still opens it.
+    fireEvent.pointerDown(block, { button: 0, pointerId: 8, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 8, clientX: 450, clientY: 18 * 46 + 5 });
+    expect(onOpenDuty).toHaveBeenCalledWith(atlas, "d1");
+  });
+
+  it("shows the minute a block will be saved at when dragged to the end of the day, drawn inside it (PRO-497)", async () => {
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const block = blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
+    // From 18:00 six hours down: the last step of the day, 23:45.
+    fireEvent.pointerDown(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerMove(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 + 6 * 46 });
+    const drop = screen.getByTestId("calendar-drop");
+    expect(drop.textContent).toBe("23:45 Daily status");
+    expect(Number.parseFloat(drop.style.top) + Number.parseFloat(drop.style.height)).toBeLessThanOrEqual(24 * 46);
+    fireEvent.pointerUp(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 + 6 * 46 });
+    await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(true));
+    const [, save] = mocks.invoke.mock.calls.find(([command]) => command === "bot_duty_save")!;
+    expect((save as { input: { schedule: { hour: number; minute: number } } }).input.schedule).toMatchObject({ hour: 23, minute: 45 });
+  });
+
+  it("offers a runtime older than this app its Restart now, which replaces it, and then reads the week again (PRO-497)", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_week" && mocks.runtime.state?.epoch === "old") throw "Unknown bots operation dutyWeek";
+      return answer(command, args);
+    });
+    const outdated = { running: "0.2.30", app: "0.2.37", work: ["Claude in api, mid-turn"], problem: null, failed: false, keeps: false, unkept: [] };
+    attach({ state: "connected", epoch: "old", generation: 1, view: 1, outdated });
+    mocks.replace.mockImplementation(async () => { attach({ state: "connected", epoch: "fresh", generation: 2, view: 1 }); });
+    calendar();
+    const notice = await screen.findByTestId("calendar-older-runtime");
+    expect(notice.textContent).toMatch(/does not know the week of duties: it is older than this app/);
+    // What restarting stops is named, as in the status bar.
+    expect(notice.textContent).toContain("Claude in api, mid-turn");
+    fireEvent.click(within(notice).getByRole("button", { name: "Restart now" }));
+    await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith("old", []));
+    // The window's own restart (offered only for a guarded command) is never asked.
+    expect(mocks.restart).not.toHaveBeenCalled();
+    await screen.findAllByTestId("calendar-block");
+    expect(screen.queryByTestId("calendar-older-runtime")).toBeNull();
+  });
+
+  it("offers nothing to restart when the runtime does not say it is older (PRO-497)", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_week") throw "Unknown bots operation dutyWeek";
+      return answer(command, args);
+    });
+    calendar();
+    const notice = await screen.findByTestId("calendar-older-runtime");
+    expect(within(notice).queryByRole("button")).toBeNull();
+    expect(notice.textContent).toMatch(/nothing is offered to restart/);
+  });
+
+  it("names the week's days as groups, and its year when it is not this year's (PRO-497)", async () => {
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    expect(screen.getByRole("group", { name: "The week of 16–22 Nov, by day" })).toBeTruthy();
+    expect(within(screen.getByRole("group", { name: "Mon 16" })).getAllByTestId("calendar-block").length).toBe(2);
+  });
+
+  it("does not tick while the window is hidden, and reads the week again when it is shown (PRO-497)", async () => {
+    let hidden = false;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    const set = vi.spyOn(window, "setInterval");
+    const clear = vi.spyOn(window, "clearInterval");
+    try {
+      calendar();
+      await screen.findAllByTestId("calendar-block");
+      const reads = () => mocks.invoke.mock.calls.filter(([command]) => command === "bot_duty_week").length;
+      const before = reads();
+      // The calendar's own: the now line each minute, the week every five.
+      const ours = () => set.mock.calls.flatMap((call, index) => (call[1] === 60_000 || call[1] === 5 * 60_000 ? [set.mock.results[index].value] : []));
+      const started = ours();
+      hidden = true;
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      expect(started).toHaveLength(2);
+      expect(started.every((timer) => clear.mock.calls.some(([id]) => id === timer))).toBe(true);
+      expect(reads()).toBe(before);
+      hidden = false;
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      await waitFor(() => expect(reads()).toBe(before + 1));
+      expect(ours()).toHaveLength(4);
+    } finally {
+      delete (document as { hidden?: boolean }).hidden;
+    }
   });
 
   it("draws nothing of the week before under a read that failed", async () => {
