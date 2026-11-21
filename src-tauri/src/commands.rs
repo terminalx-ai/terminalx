@@ -6323,6 +6323,12 @@ pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<ser
     bots_call(state, "duties", serde_json::json!({"id": id})).await
 }
 
+/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`).
+#[tauri::command]
+pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week})).await
+}
+
 /// Add a duty (`duty_id` absent) or change one.
 #[tauri::command]
 pub async fn bot_duty_save(state: State<'_, AppState>, id: String, duty_id: Option<String>, input: serde_json::Value) -> CmdResult<crate::automations::Automation> {

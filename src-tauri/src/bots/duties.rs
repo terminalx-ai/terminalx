@@ -902,7 +902,8 @@ fn switch(sink: &dyn EventSink, duty: &Automation, on: bool) -> Result<Automatio
     Ok(saved)
 }
 
-fn local_timezone() -> String {
+/// The owner's time zone: this computer's, UTC when it cannot be told.
+pub(crate) fn local_timezone() -> String {
     let known = |name: &str| name.parse::<chrono_tz::Tz>().is_ok();
     if let Ok(name) = std::env::var("TZ") {
         if known(&name) {
@@ -943,6 +944,10 @@ pub fn from_template(sink: &dyn EventSink, bot: &Bot) -> Result<()> {
 /// The duty operations of the runtime's `bots` call, or `None` for another
 /// operation. `id` is the bot's; `dutyId` names one of its duties.
 pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Option<Result<Value>> {
+    // The week of duties (PRO-473): a read.
+    if let Some(answer) = super::calendar::call(operation, params) {
+        return Some(answer);
+    }
     if !matches!(operation, "duties" | "dutySave" | "dutySwitch" | "dutyDelete" | "dutyDuplicate" | "dutyRun" | "dutyTryCheck" | "quietHours") {
         return None;
     }

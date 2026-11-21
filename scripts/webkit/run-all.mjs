@@ -42,6 +42,7 @@ const checks = [
   "bots-screens", "bot-role-memory",
   "bot-chat",
   "bot-duties",
+  "bot-calendar",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

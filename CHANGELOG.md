@@ -81,6 +81,16 @@
   Deleting a bot removes its duties, kept with its home in the trash.
   Adding, changing, running or switching on a duty, and quiet hours, are the
   owner's to do from the window (PRO-471).
+- Bots (experimental): a week calendar of duties. The Bots page's Calendar
+  button, and a List | Calendar switch on a bot's Duties tab, show the week
+  with one block per scheduled run: ran and did its work, ran and reported,
+  ran and found nothing new, or still to come (and failed or skipped when the
+  log says so), with a line at now. Duties that wake many times a day, and
+  those that wake on events, are counted per day in two rows on top. It is
+  read from the run logs and the schedules, in your time zone, so it agrees
+  with both. Filter by bot, step between weeks, click an empty hour to add a
+  duty there, or drag a block still to come to move its duty's time. Beside
+  it: what is next today, the week so far, the key and quiet hours (PRO-473).
 
 ## 0.2.37
 

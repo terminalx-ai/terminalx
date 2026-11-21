@@ -174,6 +174,34 @@ permission system.
   removed all the same and the delete says so. A duty left behind when its bot is gone
   for certain is listed on the Automations page, which can remove it.
 
+## The week of duties (PRO-473)
+
+The calendar (screen 23.13) is a view of what already exists, not a store of
+its own. `dutyWeek` (`src-tauri/src/bots/calendar.rs`, a read of the
+runtime's `bots` call) reads each duty's run log and its schedule, through
+the scheduler's own `next_run_after`, for one bot or every bot, in the
+owner's time zone (this computer's), and returns each day's blocks with the
+minute they fall on.
+
+- **What ran** comes from the log. A row that folds repeats ("Nothing new"
+  again) stands for that many runs: its repeats are put at the schedule's
+  times up to its last one, and those with no time the schedule gives (Run
+  now, a changed schedule) at the last. So the week counts every run the log
+  counts, and "This week so far" agrees with the duty's own counts.
+- **What is still to come** comes from the schedule, from now to the end of
+  the week, for a duty that is on and a bot that is not paused.
+- **Counted, not drawn.** A duty due more than six times on some day, and one
+  that wakes on events (or a run an event started), go in the "Often" and
+  "Events" rows as counts per day.
+- **Changing from the calendar** uses the duties' own guarded routes: a
+  click on an empty hour opens the duty editor with a weekly schedule at that
+  day and hour, and dragging a block still to come saves its duty with the
+  schedule shifted (`dutySave`, which needs the window's proof). A cron
+  schedule moves only when its minute and hours are plain numbers.
+- **Who may read it.** The window and a person's terminal read any bot's
+  week or every bot's. A process in a bot's session reads its own bot's week
+  only (`control.rs`, `own_duties_read`).
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -193,7 +221,7 @@ issue.
 | PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | In review |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
-| PRO-473 | Week calendar of duties | 23.13 | Backlog |
+| PRO-473 | Week calendar of duties | 23.13 | In review |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.04 | Backlog |
 | PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
