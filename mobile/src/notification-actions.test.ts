@@ -104,8 +104,8 @@ describe("answering on the Mac", () => {
 
 // PRO-479: a bot's question from a notification: buttons answer as the app does, a tap opens its sheet.
 describe("a bot's question", () => {
-  const shown = (fields: Partial<NotificationPresentation["data"]> = {}, subtitle: string | undefined = "Studio"): NotificationPresentation => ({
-    title: "Sentry asks", body: "Fix now or file it?", subtitle, thread: "mac:bot:b1", sound: true,
+  const shown = (fields: Partial<NotificationPresentation["data"]> = {}, subtitle: string | null = "Studio"): NotificationPresentation => ({
+    title: "Sentry asks", body: "Fix now or file it?", subtitle: subtitle ?? undefined, thread: "mac:bot:b1", sound: true,
     data: { hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: false, botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue", "Not a problem"], recommended: 1, ...fields },
   });
 
@@ -115,7 +115,7 @@ describe("a bot's question", () => {
     expect(category?.actions.every((each) => each.options?.isAuthenticationRequired)).toBe(true);
     expect(categoryFor(shown({ recommended: 0 }))?.identifier).not.toBe(category?.identifier);
     // Not on a lock screen that hides the question, and not with more answers than buttons.
-    expect(categoryFor(shown({}, undefined))).toBeNull();
+    expect(categoryFor(shown({}, null))).toBeNull();
     expect(categoryFor(shown({ detailsHidden: true }))).toBeNull();
     expect(categoryFor(shown({ answers: ["A", "B", "C", "D", "E"] }))).toBeNull();
   });

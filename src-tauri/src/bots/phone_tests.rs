@@ -142,7 +142,8 @@ fn with_bots_off_the_phone_is_refused_everything() {
     for (operation, params) in [("list", json!({})), ("home", json!({"id": bot.id})), ("answer", json!({"id": bot.id, "number": 1, "answer": 0})), ("pause", json!({"id": bot.id})), ("pauseAll", json!({}))] {
         assert_eq!(refusal(call(&manager, operation, &params).unwrap_err()), crate::bots::OFF_MESSAGE, "{operation}");
     }
-    assert!(crate::bots::get(&bot.id).unwrap().paused.is_none());
+    // Read from the store itself: the bots' own reads are refused too while Bots is off.
+    assert!(crate::store::bots::get(&bot.id).unwrap().expect("the bot is still saved").paused.is_none());
 }
 
 #[test]
