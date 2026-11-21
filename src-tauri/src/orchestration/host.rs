@@ -567,6 +567,8 @@ impl Host for ManagerHost {
         if let Err(error) = self.manager.send(&lead.id, &tab.id, text.to_string(), Vec::new()) {
             log::warn!("tell the lead {} about run {}: {error:#}", lead.id, run.id);
         }
+        // A bot's item that waits to check back when this run reports (PRO-476).
+        crate::bots::runs::lead_told(&self.manager, run);
     }
 
     fn changed(&self, run: &Run) {

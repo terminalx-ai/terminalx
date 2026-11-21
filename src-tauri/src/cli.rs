@@ -178,8 +178,10 @@ Usage:
   terminalx bots items list [--all] [--bot BOT] [--json]
   terminalx bots items show ITEM [--bot BOT] [--json]
   terminalx bots items add --title TITLE [--summary TEXT] [--done "TEXT | HOW"]... [--start] [--asked-by WHO] [--json]
-  terminalx bots items set ITEM [--title TITLE] [--summary TEXT] [--state planned|inProgress|waiting|dropped] [--done "TEXT | HOW"]... [--link KIND:TARGET[=TITLE]]... [--snooze TIME|off] [--json]
+  terminalx bots items set ITEM [--title TITLE] [--summary TEXT] [--state planned|inProgress|waiting|dropped] [--done "TEXT | HOW"]... [--link KIND:TARGET[=TITLE]]... [--snooze TIME|off] [--check-back TIME|report|off] [--json]
   terminalx bots items ask ITEM --question TEXT --answer TEXT --answer TEXT [--answer TEXT]... [--recommend N] [--json]
+  terminalx bots items plan ITEM --run RUN [--note TEXT] [--minutes N] [--recommend 1|2|3] [--json]
+  terminalx bots items ask-merge ITEM [--run RUN] [--note TEXT] [--json]
   terminalx bots items check ITEM LINE --met|--unmet [--how TEXT] [--json]
   terminalx bots items comment ITEM --text TEXT [--json]
   terminalx bots items done ITEM [--text NOTE] [--json]
@@ -1707,7 +1709,7 @@ fn parse_bot_handoffs(command: &str, tokens: &mut Tokens) -> Result<Action, Cont
 /// bot's own, which the app works out from where the command runs; from
 /// anywhere else `--bot` names the bot, to read only.
 fn parse_bot_items(tokens: &mut Tokens) -> Result<Action, ControlError> {
-    const ITEM_COMMANDS: &str = "list, show, add, set, ask, check, comment or done";
+    const ITEM_COMMANDS: &str = "list, show, add, set, ask, plan, ask-merge, check, comment or done";
     let action = tokens.required_front(&format!("bots items command ({ITEM_COMMANDS})"))?;
     let mut params = json!({});
     if let Some(bot) = tokens.option("--bot")? {
@@ -1745,7 +1747,7 @@ fn parse_bot_items(tokens: &mut Tokens) -> Result<Action, ControlError> {
             params["start"] = json!(tokens.flag("--start")?);
         }
         "set" => {
-            for (option, key) in [("--title", "title"), ("--summary", "summary"), ("--state", "state"), ("--snooze", "snooze")] {
+            for (option, key) in [("--title", "title"), ("--summary", "summary"), ("--state", "state"), ("--snooze", "snooze"), ("--check-back", "checkBack")] {
                 text_option(tokens, &mut params, option, key)?;
             }
             params["done"] = json!(tokens.options("--done")?);
@@ -1762,6 +1764,29 @@ fn parse_bot_items(tokens: &mut Tokens) -> Result<Action, ControlError> {
                 let number: u64 = recommend.trim().parse().ok().filter(|number| *number > 0).ok_or_else(|| invalid("--recommend is the recommended answer's number, counted from 1."))?;
                 params["recommend"] = json!(number);
             }
+            params["item"] = item(tokens)?;
+        }
+        // PRO-476: ask the owner to approve a run's plan, with the app's three answers; or, once they asked to be
+        // asked before it merges, whether it may merge now.
+        "plan" => {
+            match tokens.option("--run")? {
+                Some(run) if !run.trim().is_empty() => params["run"] = json!(run),
+                _ => return Err(invalid("bots items plan needs --run RUN: the run `terminalx runs create` made.")),
+            }
+            text_option(tokens, &mut params, "--note", "question")?;
+            if let Some(minutes) = tokens.option("--minutes")? {
+                let minutes: u64 = minutes.trim().parse().ok().filter(|minutes| *minutes > 0).ok_or_else(|| invalid("--minutes is a whole number of minutes."))?;
+                params["minutes"] = json!(minutes);
+            }
+            if let Some(recommend) = tokens.option("--recommend")? {
+                let number: u64 = recommend.trim().parse().ok().filter(|number| (1..=3).contains(number)).ok_or_else(|| invalid("--recommend is 1 (Approve and start), 2 (Start, but ask before merging) or 3 (Not now)."))?;
+                params["recommend"] = json!(number);
+            }
+            params["item"] = item(tokens)?;
+        }
+        "ask-merge" => {
+            text_option(tokens, &mut params, "--run", "run")?;
+            text_option(tokens, &mut params, "--note", "question")?;
             params["item"] = item(tokens)?;
         }
         "check" => {

@@ -303,6 +303,57 @@ permission system.
   4"). The file itself is not guarded against a Full access bot's own file
   tools (PRO-489), so its text is only ever given as a bot's or the app's.
 
+## A bot leads orchestration runs (PRO-476)
+
+A lead bot coordinates; its workers build. Large work becomes an
+orchestration run the owner approves from the bot's chat. Nothing new is in
+the engine: the bot drives the existing `terminalx runs …` commands, and
+`bots::runs` only links a run to a work item, asks, and wakes the bot.
+
+- **Who leads.** A bot's chat lives in its home folder, which is not a git
+  project, and `engine::create` needs one. The bot starts a session in the
+  project (`sessions create --project`); it is marked `botStarted`, so it works
+  for the bot, and it runs `runs create` as the lead. `Caller::gate` and
+  `may_steer` are unchanged: a bot steers only runs led by its own sessions,
+  and a run's workers inherit the bot through their parent, so they are held to
+  its access and its pause and cannot create or steer runs (`guard::limited`).
+- **The plan and the question.** `bots items plan ITEM --run RUN` checks that
+  the bot leads the run and that it has not started, links it, keeps the bot's
+  minutes, and asks "Approve the plan and start the run?" with "Approve and
+  start" (recommended by default), "Start, but ask before merging" and "Not
+  now". The question carries its purpose (`startRun`) and the run's id, so the
+  app acts on the answer's number, never on its words.
+- **The approval is the owner's act.** Answering with 1 or 2 needs the
+  person's proof (`enforce::needs_person`). The run is approved
+  (`AwaitingApproval`) or started (`Planned`) before the answer is recorded; a
+  failed start leaves the question open and says why. A run that already started
+  is not started again. "Start, but ask before merging" sets the merge hold
+  first: `runs merge` from the bot is then refused with `merge_held` until the
+  bot asks `ask-merge` and the owner answers Merge.
+- **Done means the run ended.** An item that links a run whose state has not
+  ended cannot be closed with `done`.
+- **Checking back.** `set ITEM --check-back TIME|report|off`. The automation
+  scheduler's tick (about every 30 s) wakes a bot whose time has come, and the
+  orchestrator's `tell_lead` wakes it when a worker of a linked run reports;
+  nothing else runs while it waits. The wake goes to the session that set it,
+  or the home chat, as TerminalX's own words, never a worker's; a lead already
+  told by the run is not woken twice. A wake that cannot be sent is tried again
+  five minutes later and logged.
+- **What the owner sees.** The run plan card above the chat the plan was asked
+  from (or the home chat, for a plan asked from a project session): the goal,
+  "3 pieces · est. $4–$6 · 40 min", each piece and its worker, and the question.
+  "Started by <bot>" shows each run once ("Run · goal", "plan waits for you",
+  "2 workers running") with its lead and workers folded under it. The item's
+  page lists the run and its workers under "Sessions and links", each hand-off
+  to a worker in its activity with the worktree, the worker's report (as its
+  words, not an approval) and its cost, and "Checks back" with the line
+  "Nothing runs and nothing is spent while it waits." Home shows "Run plan · N
+  pieces" or "N workers running".
+- **The two switches.** Bots off: nothing of this exists. Bots on and
+  Orchestrator runs off: `plan` and an approving answer are refused with the
+  reason, the run rows in "Started by" are not read, and items keep what they
+  link. Both on: all of the above.
+
 ## The week of duties (PRO-473)
 
 The calendar (screen 23.13) is a view of what already exists, not a store of
@@ -367,7 +418,7 @@ issue.
 | PRO-473 | Week calendar of duties | 23.13 | In review |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |
 | PRO-475 | Hand-offs, the reporting line and the team brief | 23.01, 23.04, 23.09 | In review |
-| PRO-476 | A bot plans and starts orchestration runs | 23.04 | Backlog |
+| PRO-476 | A bot plans and starts orchestration runs | 23.01, 23.04, 23.09 | In review |
 | PRO-477 | Look around, suggestions, nightly memory tidy | n/a | Backlog |
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | Backlog |
 | PRO-480 | GitHub and Linear as channels | 23.07 | Backlog |

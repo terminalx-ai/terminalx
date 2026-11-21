@@ -149,6 +149,11 @@ export async function bootBotItems() {
       listen("bots_changed", () => {
         if (mine === generation) refresh(null);
       }),
+      // A run an item links moved on (PRO-476): its item shows the run as it is now.
+      listen<{ id?: string }>("orchestration_run", (event) => {
+        if (mine !== generation || typeof event.payload?.id !== "string") return;
+        for (const botId of botsLinkingRun(event.payload.id)) refresh(botId);
+      }),
     ]);
     if (mine === generation) unlisten = stops;
     else for (const stop of stops) stop();
@@ -156,6 +161,15 @@ export async function bootBotItems() {
     /* outside a webview */
   }
   await readNeeds(mine);
+}
+
+/** The bots whose lists or open items shown here link run `id`. */
+function botsLinkingRun(id: string): Set<string> {
+  const links = (item: BotItem) => (item.runViews ?? []).some((run) => run.id === id);
+  const bots = new Set<string>();
+  for (const [botId, list] of Object.entries(state.lists)) if (list.items.some(links)) bots.add(botId);
+  for (const [key, item] of Object.entries(state.items)) if (links(item)) bots.add(key.split("#")[0]);
+  return bots;
 }
 
 /** The switch went off: stop listening and forget what was read. */

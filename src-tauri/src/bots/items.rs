@@ -181,6 +181,65 @@ pub struct Question {
     pub recommended: Option<usize>,
     #[serde(default)]
     pub asked: String,
+    /// What the app does with the owner's answer (PRO-476): [`PURPOSE_START_RUN`] or [`PURPOSE_MERGE_RUN`]; empty
+    /// for a question whose answer only goes to the bot. Only the app sets it, from `bots items plan|ask-merge`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub purpose: String,
+    /// The run the question is about, with a purpose.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run: String,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+/// A question whose chosen answer approves a run's plan and starts it (PRO-476).
+pub const PURPOSE_START_RUN: &str = "startRun";
+/// A question whose chosen answer lets the bot merge a run its owner asked to be asked about first.
+pub const PURPOSE_MERGE_RUN: &str = "mergeRun";
+/// The answers of a run's approval, in this order: the app acts on the number chosen, never on the words.
+pub const RUN_ANSWERS: [&str; 3] = ["Approve and start", "Start, but ask before merging", "Not now"];
+pub const RUN_QUESTION: &str = "Approve the plan and start the run?";
+pub const MERGE_ANSWERS: [&str; 2] = ["Merge", "Not yet"];
+
+/// A run an item asked its owner to approve (PRO-476), and what they decided. The run itself is the
+/// orchestration store's; this is only what the item asked and was answered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemRun {
+    #[serde(default)]
+    pub run: String,
+    /// How long the bot thinks it takes, in its own words of minutes: shown on the plan, never a limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<u32>,
+    #[serde(default)]
+    pub asked: String,
+    /// `start`, `startAskMerge`, `notNow`, or `answered` (the owner's own words); empty while it waits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided: Option<String>,
+    /// "Start, but ask before merging": the bot's sessions do not `runs merge` it until the owner says Merge.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hold_merge: bool,
+    /// When the owner said Merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_approved: Option<String>,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+/// When the bot looks at an item again (PRO-476): at a time, and when a run it links tells its lead something new
+/// (a worker reported). Nothing runs and nothing is spent until then: the app wakes the bot's chat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckBack {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub on_report: bool,
+    /// The session that set it: the one woken while it still works for the bot, else the home chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -268,6 +327,11 @@ pub struct Item {
     /// The owner's messages about this item that have not reached the bot yet, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undelivered: Vec<Undelivered>,
+    /// The runs it asked its owner to approve (PRO-476).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<ItemRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_back: Option<CheckBack>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -351,12 +415,12 @@ pub fn read(id: &str) -> Result<List> {
 
 /// Read, change and save bot `id`'s list as one step, and announce it. Nothing is saved when `f` fails.
 /// A change by the bot that would make the list larger than [`BOT_WRITE_BYTES`] is refused.
-fn change<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
+pub(super) fn change<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
     change_within(Some(sink), id, BOT_WRITE_BYTES, f)
 }
 
 /// [`change`] for the owner's own acts, which still go in up to [`OWNER_WRITE_BYTES`].
-fn change_as_owner<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
+pub(super) fn change_as_owner<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
     change_within(Some(sink), id, OWNER_WRITE_BYTES, f)
 }
 
@@ -556,7 +620,7 @@ fn owner_work_message(item: &Item) -> String {
     message
 }
 
-fn log(item: &mut Item, by: &str, kind: &str, text: String, detail: String) {
+pub(super) fn log(item: &mut Item, by: &str, kind: &str, text: String, detail: String) {
     let now = index::now();
     item.activity.push(Activity { at: now.clone(), by: by.into(), kind: kind.into(), text, detail, unknown: BTreeMap::new() });
     trim_activity(&mut item.activity);
@@ -580,11 +644,11 @@ fn trim_activity(activity: &mut Vec<Activity>) {
     }
 }
 
-fn find(items: &mut [Item], number: u64) -> Result<&mut Item> {
+pub(super) fn find(items: &mut [Item], number: u64) -> Result<&mut Item> {
     items.iter_mut().find(|item| item.number == number).ok_or_else(|| refused(format!("No item #{number}.")))
 }
 
-fn refuse_closed(item: &Item) -> Result<()> {
+pub(super) fn refuse_closed(item: &Item) -> Result<()> {
     if item.state.closed() {
         return Err(refused(format!("Item #{} is {}: add a new item for more work.", item.number, item.state.as_str())));
     }
@@ -640,7 +704,7 @@ pub fn parse_link(value: &str) -> Result<Link> {
     })
 }
 
-fn add_link(bot: &Bot, item: &mut Item, link: Link, by: &str) -> Result<()> {
+pub(super) fn add_link(bot: &Bot, item: &mut Item, link: Link, by: &str) -> Result<()> {
     if item.links.iter().any(|known| known.kind == link.kind && known.target == link.target) {
         return Ok(());
     }
@@ -698,6 +762,8 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             closed: None,
             activity: Vec::new(),
             undelivered: Vec::new(),
+            runs: Vec::new(),
+            check_back: None,
             unknown: BTreeMap::new(),
         };
         *next += 1;
@@ -735,6 +801,10 @@ pub struct ItemPatch {
     pub links: Vec<String>,
     /// A time, or `off`.
     pub snooze: Option<String>,
+    /// A time, `report` (only when a run it links reports), or `off` (PRO-476).
+    pub check_back: Option<String>,
+    /// The session the change comes from: the one a check-back wakes.
+    pub session: Option<String>,
 }
 
 pub fn set(sink: &dyn EventSink, bot: &Bot, number: u64, patch: ItemPatch) -> Result<Item> {
@@ -755,8 +825,9 @@ pub fn set(sink: &dyn EventSink, bot: &Bot, number: u64, patch: ItemPatch) -> Re
         Some("off" | "") => Some(None),
         Some(until) => Some(Some(chrono::DateTime::parse_from_rfc3339(until).map_err(|_| refused("--snooze takes a time like 2026-11-22T09:00:00Z, or off."))?.with_timezone(&chrono::Utc).to_rfc3339())),
     };
+    let check_back = patch.check_back.as_deref().map(|value| super::runs::check_back(value, patch.session.clone())).transpose()?;
     // Only a change of state, which a full list needs to make room, goes in up to the owner's limit.
-    let only_state = title.is_none() && summary.is_none() && done_means.is_empty() && links.is_empty() && snooze.is_none();
+    let only_state = title.is_none() && summary.is_none() && done_means.is_empty() && links.is_empty() && snooze.is_none() && check_back.is_none();
     let limit = if only_state { OWNER_WRITE_BYTES } else { BOT_WRITE_BYTES };
     change_within(Some(sink), &bot.id, limit, |items, _| {
         let item = find(items, number)?;
@@ -793,6 +864,13 @@ pub fn set(sink: &dyn EventSink, bot: &Bot, number: u64, patch: ItemPatch) -> Re
                 log(item, &who, "changed", said, String::new());
             }
         }
+        if let Some(check_back) = check_back {
+            if check_back != item.check_back {
+                let said = super::runs::check_back_words(bot, check_back.as_ref());
+                item.check_back = check_back;
+                log(item, &who, "changed", said, String::new());
+            }
+        }
         if let Some(state) = state {
             if state != item.state {
                 if item.question.take().is_some() {
@@ -824,6 +902,19 @@ pub fn state_label(state: &ItemState) -> &str {
 
 /// Ask the owner, once: the item needs them until they answer.
 pub fn ask(sink: &dyn EventSink, bot: &Bot, number: u64, question: &str, answers: &[String], recommended: Option<usize>) -> Result<Item> {
+    ask_as(sink, bot, number, question, answers, recommended, Purpose::None, |_| Ok(()))
+}
+
+/// What the app does with an answer: nothing (it only goes to the bot), or act on a run (PRO-476).
+pub(super) enum Purpose<'a> {
+    None,
+    StartRun(&'a str),
+    MergeRun(&'a str),
+}
+
+/// [`ask`], for any purpose: `before` changes the item first, under the same lock, and nothing is saved when it fails.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn ask_as(sink: &dyn EventSink, bot: &Bot, number: u64, question: &str, answers: &[String], recommended: Option<usize>, purpose: Purpose<'_>, before: impl FnOnce(&mut Item) -> Result<()>) -> Result<Item> {
     let question = text("A question", question, TEXT_CHARS)?;
     if question.is_empty() {
         return Err(refused("A question is empty."));
@@ -840,16 +931,22 @@ pub fn ask(sink: &dyn EventSink, bot: &Bot, number: u64, question: &str, answers
     if recommended.is_some_and(|index| index >= answers.len()) {
         return Err(refused(format!("The recommended answer is one of the {} given, counted from 1.", answers.len())));
     }
+    let (purpose, run) = match purpose {
+        Purpose::None => (String::new(), String::new()),
+        Purpose::StartRun(run) => (PURPOSE_START_RUN.to_string(), run.to_string()),
+        Purpose::MergeRun(run) => (PURPOSE_MERGE_RUN.to_string(), run.to_string()),
+    };
     let who = bot.id.clone();
     change(sink, &bot.id, |items, _| {
         let item = find(items, number)?;
         refuse_closed(item)?;
+        before(item)?;
         if item.question.is_some() {
             log(item, &who, "withdrew", format!("{} replaced its question", bot.name), String::new());
         }
         let detail = answers.iter().enumerate().map(|(index, answer)| if Some(index) == recommended { format!("{answer} (recommended)") } else { answer.clone() }).collect::<Vec<_>>().join(" · ");
         log(item, &who, "asked", format!("{} asked: {question}", bot.name), detail);
-        item.question = Some(Question { id: uuid::Uuid::now_v7().to_string(), text: question, answers, recommended, asked: item.modified.clone(), unknown: BTreeMap::new() });
+        item.question = Some(Question { id: uuid::Uuid::now_v7().to_string(), text: question, answers, recommended, asked: item.modified.clone(), purpose, run, unknown: BTreeMap::new() });
         item.state = ItemState::NeedsYou;
         item.snoozed_until = None;
         Ok(item.clone())
@@ -908,6 +1005,9 @@ pub fn done(sink: &dyn EventSink, bot: &Bot, number: u64, note: Option<&str>) ->
         refuse_closed(item)?;
         if item.question.is_some() {
             return Err(refused(format!("Item #{number} waits on your owner's answer: it is not done until they answer, or you withdraw the question (`set {number} --state inProgress`).")));
+        }
+        if let Some(open) = super::runs::open_run(item) {
+            return Err(refused(format!("Item #{number} is not done: {open} Finish or stop the run first (`terminalx runs show RUN --json`).")));
         }
         let unmet: Vec<String> = item.done_means.iter().enumerate().filter(|(_, line)| !line.met).map(|(index, line)| format!("{}. {}", index + 1, line.text)).collect();
         if !unmet.is_empty() {
@@ -971,6 +1071,7 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, que
             }
             (Answer::Typed(_), None) => unreachable!("a typed answer is checked first"),
         };
+        super::runs::answered(item, &question, answer);
         item.question = None;
         item.state = ItemState::InProgress;
         Ok((item.clone(), words))
@@ -1018,6 +1119,7 @@ fn brief(item: &Item, sessions: &[SessionEntry]) -> Value {
         object.insert("activityCount".into(), json!(item.activity.len()));
         object.insert("lastActivity".into(), json!(last));
         object.insert("spentUsd".into(), json!(spent(item, sessions)));
+        object.insert("runViews".into(), super::runs::views(item));
     }
     value
 }
@@ -1026,23 +1128,27 @@ fn full(item: &Item, sessions: &[SessionEntry]) -> Value {
     let mut value = serde_json::to_value(item).unwrap_or(Value::Null);
     if let Some(object) = value.as_object_mut() {
         object.insert("spentUsd".into(), json!(spent(item, sessions)));
+        object.insert("runViews".into(), super::runs::views(item));
     }
     value
 }
 
 /// What the sessions started for an item spent, at Stats' prices: shown, never a cap.
-/// The bot's chats are left out: they work on many items.
+/// The bot's chats are left out: they work on many items. The workers of a run it links are counted once, from the
+/// run (PRO-476), whether or not their sessions are linked too.
 fn spent(item: &Item, sessions: &[SessionEntry]) -> f64 {
-    item.links
+    let (runs, workers) = super::runs::spent(item, sessions);
+    runs + item
+        .links
         .iter()
-        .filter(|link| link.kind == "session")
+        .filter(|link| link.kind == "session" && !workers.contains(&link.target))
         .filter_map(|link| sessions.iter().find(|entry| entry.id == link.target))
         .filter(|entry| super::chat::session_bot(entry).is_none())
         .flat_map(|entry| entry.tabs.iter())
         .filter_map(|tab| tab.usage.as_ref())
         .flat_map(|usage| usage.models.iter())
         .filter_map(|model| model.cost_usd)
-        .sum()
+        .sum::<f64>()
 }
 
 fn sessions() -> Vec<SessionEntry> {
@@ -1217,6 +1323,14 @@ fn optional<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params[key].as_str()
 }
 
+/// `--recommend N`, counted from 1, as an index.
+fn recommend(params: &Value) -> Result<Option<usize>> {
+    match &params["recommend"] {
+        Value::Null => Ok(None),
+        value => Ok(Some(value.as_u64().filter(|n| *n > 0).ok_or_else(|| refused("--recommend is the answer's number, counted from 1"))? as usize - 1)),
+    }
+}
+
 static RATE: Mutex<BTreeMap<String, std::collections::VecDeque<std::time::Instant>>> = Mutex::new(BTreeMap::new());
 
 /// A bot adds, asks and withdraws at most [`RATE_LIMIT`] times in [`RATE_WINDOW`]: each of those reaches its owner
@@ -1225,7 +1339,7 @@ static RATE: Mutex<BTreeMap<String, std::collections::VecDeque<std::time::Instan
 /// for [`unrated`] to give back if the command is then refused. `None` for a command that is not counted.
 fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<Option<std::time::Instant>> {
     let counted = match command {
-        "add" | "ask" => true,
+        "add" | "ask" | "plan" | "ask-merge" | "askMerge" => true,
         // A change of state is how a bot withdraws a question or drops an item.
         "set" => params.get("state").is_some_and(|state| !state.is_null()),
         _ => false,
@@ -1300,12 +1414,23 @@ fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command
             add_done_means: strings(params, "done"),
             links: strings(params, "link"),
             snooze: optional(params, "snooze").map(str::to_owned),
+            check_back: optional(params, "checkBack").map(str::to_owned),
+            session: match &by {
+                By::Bot { session } => session.clone(),
+                By::Owner => None,
+            },
         })?),
-        "ask" => {
-            let recommended = match &params["recommend"] {
+        "plan" => {
+            let recommended = recommend(params)?;
+            let minutes = match &params["minutes"] {
                 Value::Null => None,
-                value => Some(value.as_u64().filter(|n| *n > 0).ok_or_else(|| refused("--recommend is the answer's number, counted from 1"))? as usize - 1),
+                value => Some(value.as_u64().filter(|n| (1..=10_000).contains(n)).ok_or_else(|| refused("--minutes is a whole number of minutes, 1 to 10000"))? as u32),
             };
+            item(super::runs::plan(sink, bot, number(params, "item")?, optional(params, "run").unwrap_or_default(), optional(params, "question"), minutes, recommended)?)
+        }
+        "ask-merge" | "askMerge" => item(super::runs::ask_merge(sink, bot, number(params, "item")?, optional(params, "run"), optional(params, "question"))?),
+        "ask" => {
+            let recommended = recommend(params)?;
             item(ask(sink, bot, number(params, "item")?, optional(params, "question").unwrap_or_default(), &strings(params, "answers"), recommended)?)
         }
         "check" => {
@@ -1455,10 +1580,17 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
             };
             // Which question the owner saw: its id (`asked`, its time, from an older window).
             let seen = params["question"].as_str().or_else(|| params["asked"].as_str());
+            // A run's approval (PRO-476): the plan is approved and the run started first; an answer that cannot
+            // start it is refused and not recorded, so the question stays.
+            let started = super::runs::before_answer(manager, &bot, number, &chosen, seen)?;
             // Sent as the owner's message: only the owner's own words and the item's number. The bot's title and
             // question are its own text and are left out, so they cannot speak for the owner.
             let (item, _words) = answer(sink, &bot, number, &chosen, seen)?;
-            act(manager, &bot.id, number, newest_waiting(&item))
+            let mut acted = act(manager, &bot.id, number, newest_waiting(&item));
+            if let Some(started) = started {
+                acted["run"] = started;
+            }
+            acted
         }
         "itemComment" => {
             let number = number(params, "number")?;

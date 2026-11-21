@@ -993,7 +993,7 @@ impl ControlService {
             "runs.create" | "runs.start" | "runs.show" | "runs.list" | "runs.stop" | "runs.checkFailed" | "runs.merge" | "runs.sendBack" | "runs.takeOver" | "runs.finish" | "runs.widen" | "runs.note" | "runs.skip" | "runs.cleanup" => Err(ControlError::new("unsupported", "Orchestration runs need projects on this computer: this runtime serves one cloud workspace.", None::<String>)),
             "bots.list" | "bots.show" | "bots.create" | "bots.rename" | "bots.pause" | "bots.resume" | "bots.delete" | "bots.pauseAll" | "bots.resumeAll" => self.bots(command, params),
             "bots.memory.list" | "bots.memory.add" | "bots.memory.forget" => self.bot_memory(command, params),
-            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
+            "bots.items.list" | "bots.items.show" | "bots.items.add" | "bots.items.set" | "bots.items.ask" | "bots.items.plan" | "bots.items.ask-merge" | "bots.items.check" | "bots.items.comment" | "bots.items.done" => self.bot_items(command, params),
             "bots.handoff" | "bots.tell" | "bots.handoffs" => self.bot_handoffs(command, params),
             other => Err(ControlError::invalid(format!(
                 "Unknown control command {other}."
@@ -1325,6 +1325,16 @@ impl ControlService {
         // A bot's session steers only the runs led for the same bot.
         if matches!(command, "runs.start" | "runs.note" | "runs.sendBack" | "runs.widen" | "runs.takeOver" | "runs.merge" | "runs.checkFailed" | "runs.stop" | "runs.finish" | "runs.skip" | "runs.cleanup") {
             placement.may_steer(&run)?;
+        }
+        // "Start, but ask before merging" (PRO-476): the bot's sessions merge it only once its owner said Merge.
+        if command == "runs.merge" {
+            if let Some(number) = placement.bot.as_deref().and_then(|bot| crate::bots::runs::merge_held(bot, &run.id)) {
+                return Err(ControlError::new(
+                    "merge_held",
+                    format!("Your owner asked to be asked before run {} merges (item #{number}).", run.id),
+                    Some(format!("Ask them with `terminalx bots items ask-merge {number}`, end your turn, and merge once they answer Merge.")),
+                ));
+            }
         }
         match command {
             "runs.show" => Ok(engine::shown(&engine::refreshed(&host, &run.id).map_err(ControlError::of_run)?)),
@@ -5923,6 +5933,10 @@ mod wait_tests;
 #[cfg(test)]
 #[path = "control_bot_items_tests.rs"]
 mod bot_items_tests;
+
+#[cfg(test)]
+#[path = "control_bot_runs_tests.rs"]
+mod bot_runs_tests;
 
 // Bots hand-offs from the command line (PRO-475).
 #[path = "control_bot_handoffs.rs"]
