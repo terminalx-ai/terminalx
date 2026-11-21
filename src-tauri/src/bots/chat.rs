@@ -471,6 +471,14 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
         text.push_str(&items);
         text.push('\n');
     }
+    // The owner's messages that could not be sent to the home chat reach it as it starts, once (PRO-469).
+    if reference.home {
+        if let Some(waiting) = super::items::take_undelivered(&bot.id) {
+            text.push('\n');
+            text.push_str(&waiting);
+            text.push('\n');
+        }
+    }
     Some(text)
 }
 

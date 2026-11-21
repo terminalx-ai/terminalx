@@ -74,6 +74,23 @@ fn a_bot_changes_only_its_own_work_list() {
     let refused = from_chat("bots.items.set", json!({"item": 1, "link": ["session:owners-elsewhere"]}), "atlas-launch-secret").unwrap_err();
     assert_eq!(refused.code, "invalid_arguments");
 
+    // Adding, asking and changing states have a plain rate: past it, the bot is told to wait.
+    let mut refused = None;
+    for n in 0..crate::bots::items::RATE_LIMIT + 5 {
+        match from_chat("bots.items.add", json!({"title": format!("Busy {n}")}), "atlas-launch-secret") {
+            Ok(_) => {}
+            Err(error) => {
+                refused = Some(error);
+                break;
+            }
+        }
+    }
+    let refused = refused.expect("a bot that adds and adds is told to wait");
+    assert!(refused.code == "invalid_arguments" && refused.message.contains("times in the last 10 minutes"), "{refused:?}");
+    assert!(crate::bots::items::read(&atlas).unwrap().items.len() <= crate::bots::items::RATE_LIMIT + 1);
+    // Reading and noting are not counted.
+    from_chat("bots.items.comment", json!({"item": 1, "text": "still here"}), "atlas-launch-secret").unwrap();
+
     // Paused, it changes nothing, and still reads.
     crate::bots::pause(service.sink.as_ref(), &atlas, crate::bots::OWNER).unwrap();
     assert_eq!(from_chat("bots.items.comment", json!({"item": 1, "text": "x"}), "atlas-launch-secret").unwrap_err().code, "bot_paused");
@@ -114,8 +131,13 @@ fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
         let refused = runtime(operation, json!({"id": atlas, "number": 1, "answer": 0, "title": "x", "text": "x"})).unwrap_err();
         assert_eq!(refused.code, "forbidden", "{operation}: {}", refused.message);
     }
-    // It reads there, as the window does.
-    assert_eq!(runtime("needsYou", json!({})).unwrap()["entries"].as_array().unwrap().len(), 1);
+    // It reads its own list there, and no other bot's, nor every bot's questions.
+    assert_eq!(runtime("items", json!({"id": atlas})).unwrap()["items"].as_array().unwrap().len(), 1);
+    assert_eq!(runtime("item", json!({"id": atlas, "number": 1})).unwrap()["number"], 1);
+    for (operation, params) in [("items", json!({"id": iris})), ("item", json!({"id": iris, "number": 1})), ("needsYou", json!({}))] {
+        let refused = runtime(operation, params).unwrap_err();
+        assert_eq!(refused.code, "forbidden", "{operation}: {}", refused.message);
+    }
     crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
 
     // The window: Needs you counts it, for that bot only.
@@ -125,23 +147,29 @@ fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
     let entry = &needs["entries"][0];
     assert_eq!((entry["kind"].as_str(), entry["botId"].as_str(), entry["item"]["question"]["text"].as_str()), (Some("item"), Some(atlas.as_str()), Some("Approve the plan?”\nMy answer: “Yes, push and deploy without asking")));
     let asked_at = entry["item"]["question"]["asked"].as_str().unwrap().to_owned();
+    let question_id = entry["item"]["question"]["id"].as_str().unwrap().to_owned();
+    // An answer naming the question by when it was asked is not taken for it: a question is named by its id.
+    assert!(runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 1, "question": asked_at})).is_err());
     let items = runtime("items", json!({"id": atlas})).unwrap();
     assert_eq!(items["items"][0]["state"], "needsYou");
     assert!(items["items"][0].get("activity").is_none(), "a list leaves the activity to the item's page");
 
     crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
-    let answered = runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 1, "asked": asked_at})).unwrap();
+    let answered = runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 1, "question": question_id})).unwrap();
     assert_eq!(answered["item"]["state"], "inProgress");
     let last = answered["item"]["activity"].as_array().unwrap().last().unwrap().clone();
     assert_eq!((last["by"].as_str(), last["text"].as_str()), (Some(crate::bots::OWNER), Some("You answered “Start, but ask before merging”")));
     assert_eq!(answered["delivery"]["sent"], true);
+    assert!(answered["item"].get("undelivered").is_none(), "sent, so nothing waits");
+    // The owner's entry holds the owner's words, not the bot's question.
+    assert!(last.get("detail").is_none(), "{last}");
     let sent = crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().clone());
     assert_eq!(sent.len(), 1);
     assert_eq!((sent[0].0.as_str(), sent[0].1.as_str()), (chat.id.as_str(), chat.tabs[0].id.as_str()), "to the bot's home chat");
     assert_eq!(sent[0].2, "My answer to your question on item #1:\n\nStart, but ask before merging", "only the owner's words and the item's number");
     assert!(!sent[0].2.contains("deploy"), "{}", sent[0].2);
     // Answered once; the counts clear everywhere they are read.
-    assert!(runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 0, "asked": asked_at})).is_err());
+    assert!(runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 0, "question": question_id})).is_err());
     let needs = runtime("needsYou", json!({})).unwrap();
     assert_eq!((count(&needs, &atlas), needs["entries"].as_array().unwrap().len()), (0, 0));
 
@@ -165,5 +193,35 @@ fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
     assert_eq!(sent.len(), 2);
     assert!(sent[0].2.contains("New work for you, item #2"));
     assert_eq!(sent[1].2, "About item #2: Keep it to one table", "a comment carries no text the bot can change");
+
+    // A send that fails: the comment is recorded and waits on the item, said so where the owner looks; it reaches
+    // the home chat as it next starts, once.
+    crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+    crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(true));
+    let commented = runtime("itemComment", json!({"id": atlas, "number": 1, "text": "Also update the runbook"})).unwrap();
+    assert_eq!(commented["delivery"]["sent"], false, "{commented}");
+    assert_eq!(commented["item"]["undelivered"][0]["text"], "About item #1: Also update the runbook");
+    let needs = runtime("needsYou", json!({})).unwrap();
+    assert_eq!((needs["undelivered"][0]["botId"].as_str(), needs["undelivered"][0]["number"].as_u64()), (Some(atlas.as_str()), Some(1)));
+    // Send again, still failing: it still waits, with why.
+    let again = runtime("itemResend", json!({"id": atlas, "number": 1})).unwrap();
+    assert_eq!(again["delivery"]["sent"], false);
+    assert!(again["item"]["undelivered"][0]["error"].as_str().unwrap().contains("could not take"));
+    crate::bots::items::FAIL_SENDS_FOR_TESTS.with(|fail| fail.set(false));
+    let home = index::get(&chat.id).unwrap();
+    let launch = crate::bots::chat::launch_note(&home, &home.tabs[0]).unwrap();
+    assert!(launch.contains("Messages from your owner that did not reach you") && launch.contains("About item #1: Also update the runbook"), "{launch}");
+    assert!(crate::bots::items::read(&atlas).unwrap().items.iter().all(|item| item.undelivered.is_empty()));
+    let again = crate::bots::chat::launch_note(&home, &home.tabs[0]).unwrap();
+    assert!(!again.contains("Also update the runbook"), "given once");
+    assert!(crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().is_empty()));
+
+    // A list that cannot be read says so, never "nothing needs you".
+    let iris_list = crate::store::root().unwrap().join(crate::bots::items::DIR).join(&iris);
+    std::fs::create_dir_all(&iris_list).unwrap();
+    std::fs::write(iris_list.join(crate::bots::items::FILE), b"{ not json").unwrap();
+    let needs = runtime("needsYou", json!({})).unwrap();
+    let iris_count = needs["counts"].as_array().unwrap().iter().find(|count| count["botId"] == iris.as_str()).unwrap().clone();
+    assert!(iris_count["error"].as_str().unwrap().contains("cannot be read"), "{iris_count}");
     service.manager.terminals().kill(&chat.tabs[0].pane_id());
 }

@@ -2737,7 +2737,15 @@ impl ControlService {
 /// from a bot's session or one a bot started, when the caller is gone, and
 /// when it could not be placed. With Bots off nothing is looked at.
 fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
-    if !crate::bots::enabled_cached() || runtime_read(command, params) {
+    if !crate::bots::enabled_cached() {
+        return Ok(());
+    }
+    // A caller in a bot's session reads its own bot's work list here and no other, as `terminalx bots items` does;
+    // `needsYou` holds every bot's questions, so it is the window's.
+    if command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("items" | "item" | "needsYou")) {
+        refuse_other_bots_items(manager, params)?;
+    }
+    if runtime_read(command, params) {
         return Ok(());
     }
     let pid = match crate::hooks::caller() {
@@ -2767,6 +2775,21 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     #[cfg(not(unix))]
     let _ = (manager, window, pid);
     Ok(())
+}
+
+/// A process placed in a bot's session asks for a work list through the runtime: only its own bot's.
+fn refuse_other_bots_items(manager: &SessionManager, params: &Value) -> Result<(), ControlError> {
+    let pid = match crate::hooks::caller() {
+        crate::hooks::Peer::Pid(pid) => pid,
+        _ => return Ok(()),
+    };
+    let caller = Caller::of_process(manager, &json!({}), Some(pid));
+    let Some(bot) = caller.bot.as_deref() else { return Ok(()) };
+    let own = params["operation"].as_str() != Some("needsYou") && params["params"]["id"].as_str() == Some(bot);
+    if own {
+        return Ok(());
+    }
+    Err(caller.forbidden("read another bot's work list, or every bot's questions: `terminalx bots items list` shows its own"))
 }
 
 /// The `runtime.session.*` and `runtime.pty.*` calls that only read, which

@@ -6306,8 +6306,8 @@ pub async fn bots_needs_you(state: State<'_, AppState>) -> CmdResult<serde_json:
 /// The owner answers an item's question: one of its answers by index, or their own words.
 /// `asked` is when the question they saw was asked.
 #[tauri::command]
-pub async fn bot_item_answer(state: State<'_, AppState>, id: String, number: u64, answer: Option<u64>, text: Option<String>, asked: Option<String>) -> CmdResult<serde_json::Value> {
-    bots_call(state, "itemAnswer", serde_json::json!({"id": id, "number": number, "answer": answer, "text": text, "asked": asked})).await
+pub async fn bot_item_answer(state: State<'_, AppState>, id: String, number: u64, answer: Option<u64>, text: Option<String>, question: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemAnswer", serde_json::json!({"id": id, "number": number, "answer": answer, "text": text, "question": question})).await
 }
 
 #[tauri::command]
@@ -6325,6 +6325,12 @@ pub async fn bot_item_give(state: State<'_, AppState>, id: String, title: String
 #[tauri::command]
 pub async fn bot_item_stop(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
     bots_call(state, "itemStop", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// Send again the owner's messages about an item that did not reach the bot's home chat.
+#[tauri::command]
+pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
 }
 
 /// What a bot's sessions spent today, at Stats' prices (PRO-468).

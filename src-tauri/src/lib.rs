@@ -860,6 +860,7 @@ pub fn run() {
             commands::bot_item_comment,
             commands::bot_item_give,
             commands::bot_item_stop,
+            commands::bot_item_resend,
             commands::bot_spent_today,
             commands::session_summaries,
             commands::stats_usage_snapshot,

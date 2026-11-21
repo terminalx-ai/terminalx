@@ -126,19 +126,27 @@ fn a_question_has_two_to_four_answers_and_the_owners_answer_moves_the_item_on() 
 
     // An answer to an older question is not taken for this one.
     assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(1), Some("2020-01-01T00:00:00Z")).unwrap_err()).contains("no longer asks"));
-    assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(7), Some(&question.asked)).unwrap_err()).contains("has 3 answers"));
+    // A question is named by its id, not by when it was asked.
+    assert!(!question.id.is_empty());
+    assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(1), Some(&question.asked)).unwrap_err()).contains("no longer asks"));
+    assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(7), Some(&question.id)).unwrap_err()).contains("has 3 answers"));
     assert!(refusal(answer(&sink, &bot, 1, &Answer::Typed("  ".into()), None).unwrap_err()).contains("empty"));
-    let (item, words, said) = answer(&sink, &bot, 1, &Answer::Choice(1), Some(&question.asked)).unwrap();
-    assert_eq!((words.as_str(), said.as_str()), ("Start, but ask before merging", "Approve the plan?"));
+    let (item, words) = answer(&sink, &bot, 1, &Answer::Choice(1), Some(&question.id)).unwrap();
+    assert_eq!(words, "Start, but ask before merging");
     assert_eq!((&item.state, item.question.is_none()), (&ItemState::InProgress, true));
     let last = item.activity.last().unwrap();
     assert_eq!((last.by.as_str(), last.kind.as_str(), last.text.as_str()), (OWNER, "answered", "You answered “Start, but ask before merging”"));
+    // The owner's entry holds the owner's words only: the bot's question is in the bot's own entry.
+    assert_eq!(last.detail, "");
+    // The answer waits on the item, as the home chat gets it, until it is sent.
+    assert_eq!(item.undelivered.len(), 1);
+    assert_eq!((item.undelivered[0].kind.as_str(), item.undelivered[0].text.as_str()), ("answer", "My answer to your question on item #1:\n\nStart, but ask before merging"));
     // Answered once: a second answer finds nothing to answer.
     assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(0), None).unwrap_err()).contains("no longer asks"));
 
     // A typed reply, then a question withdrawn by moving on.
     ask(&sink, &bot, 1, "Which runner label?", &answers(&["mac-mini", "self-hosted"]), None).unwrap();
-    let (_, typed, _) = answer(&sink, &bot, 1, &Answer::Typed("Use macos-arm64".into()), None).unwrap();
+    let (_, typed) = answer(&sink, &bot, 1, &Answer::Typed("Use macos-arm64".into()), None).unwrap();
     assert_eq!(typed, "Use macos-arm64");
     ask(&sink, &bot, 1, "Merge now?", &answers(&["Yes", "No"]), None).unwrap();
     let moved = set(&sink, &bot, 1, ItemPatch { state: Some("inProgress".into()), ..Default::default() }).unwrap();
@@ -242,8 +250,82 @@ fn add_template() -> Item {
         modified: String::new(),
         closed: None,
         activity: Vec::new(),
+        undelivered: Vec::new(),
         unknown: BTreeMap::new(),
     }
+}
+
+#[test]
+fn a_bot_cannot_push_its_owners_entries_out_of_an_items_history() {
+    let (_home, sink, bot) = bots_on();
+    add(&sink, &bot, &as_bot(), new("Chatty", &[])).unwrap();
+    comment(&sink, &bot, &By::Owner, 1, "Keep it to one table").unwrap();
+    ask(&sink, &bot, 1, "Which table?", &["A".into(), "B".into()], None).unwrap();
+    answer(&sink, &bot, 1, &Answer::Choice(1), None).unwrap();
+    for n in 0..MAX_ACTIVITY * 2 {
+        comment(&sink, &bot, &as_bot(), 1, &format!("note {n}")).unwrap();
+    }
+    let item = &read(&bot.id).unwrap().items[0];
+    assert_eq!(item.activity.len(), MAX_ACTIVITY);
+    let owners: Vec<&str> = item.activity.iter().filter(|entry| entry.by == OWNER).map(|entry| entry.kind.as_str()).collect();
+    assert_eq!(owners, ["comment", "answered"], "the owner's comment and answer stay");
+    assert_eq!(item.activity[0].kind, "added");
+    assert_eq!(item.activity.last().unwrap().detail, format!("note {}", MAX_ACTIVITY * 2 - 1));
+    // Bounded in bytes too: long notes keep fewer entries.
+    let long = "é".repeat(TEXT_CHARS);
+    for _ in 0..40 {
+        comment(&sink, &bot, &as_bot(), 1, &long).unwrap();
+    }
+    let item = &read(&bot.id).unwrap().items[0];
+    assert!(activity_bytes(&item.activity) <= MAX_ACTIVITY_BYTES + 2 * long.len(), "{}", activity_bytes(&item.activity));
+    assert!(item.activity.len() < 20);
+    assert_eq!(item.activity.iter().filter(|entry| entry.by == OWNER).count(), 2);
+}
+
+#[test]
+fn closed_items_the_owner_took_part_in_outlast_the_bots_own() {
+    let owners = |number: u64, at: &str| Item {
+        number,
+        state: ItemState::Done,
+        closed: Some(at.into()),
+        added_by: "bot".into(),
+        activity: vec![Activity { at: at.into(), by: OWNER.into(), kind: "answered".into(), text: "You answered".into(), detail: String::new(), unknown: BTreeMap::new() }],
+        ..add_template()
+    };
+    let bots = |number: u64, at: &str| Item { number, state: ItemState::Dropped, closed: Some(at.into()), added_by: "bot".into(), ..add_template() };
+    // The owner's are the oldest; the bot then cycles add and drop past the limit.
+    let mut items: Vec<Item> = vec![owners(1, "2026-01-01T00:00:00Z"), owners(2, "2026-01-02T00:00:00Z")];
+    items.extend((3..=MAX_CLOSED as u64 + 10).map(|n| bots(n, &format!("2026-11-{:02}T00:00:00Z", 1 + n % 28))));
+    trim_closed(&mut items);
+    assert_eq!(items.len(), MAX_CLOSED);
+    assert!(items.iter().any(|item| item.number == 1) && items.iter().any(|item| item.number == 2));
+}
+
+#[test]
+fn a_full_list_refuses_to_grow_but_can_shrink_and_still_takes_the_owners_answer() {
+    let (_home, sink, bot) = bots_on();
+    WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(24 * 1024)));
+    let summary = "x".repeat(TEXT_CHARS);
+    let mut refused_at = None;
+    for n in 0..20 {
+        match add(&sink, &bot, &as_bot(), NewItem { summary: summary.clone(), ..new(&format!("Item {n}"), &[]) }) {
+            Ok(_) => {}
+            Err(error) => {
+                refused_at = Some(n);
+                assert!(refusal(error).contains("This work list is full"));
+                break;
+            }
+        }
+    }
+    let full = refused_at.expect("a list stops growing at its limit");
+    assert!(full > 0);
+    assert!(std::fs::metadata(path(&bot.id).unwrap()).unwrap().len() <= 24 * 1024);
+    // The bot's question still goes nowhere; the owner's comment and answer go in.
+    comment(&sink, &bot, &By::Owner, 1, "Still here").unwrap();
+    // A drop makes room.
+    set(&sink, &bot, 1, ItemPatch { state: Some("dropped".into()), ..Default::default() }).unwrap();
+    WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(None));
+    assert_eq!(read(&bot.id).unwrap().items.len(), full);
 }
 
 #[test]

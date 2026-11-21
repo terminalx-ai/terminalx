@@ -12,9 +12,10 @@
 //! `control::Caller`, never taken from what it says), and the owner answers,
 //! comments, gives work and stops items in the window. It is kept in
 //! `bot-items/<id>/items.json`, beside the bot's home folder rather than in
-//! it: the bot's agent works in its home with the owner's access, and could
-//! otherwise write "You answered" into its own log. A deleted bot's list goes
-//! to `trash/bot-items/<id>/` with its home.
+//! it, so the bot's own notes and files are not where its owner's answers
+//! are kept. That is no wall: a bot with Full access can still write the
+//! file with its own file tools, the direct-edit class PRO-489 deals with.
+//! A deleted bot's list goes to `trash/bot-items/<id>/` with its home.
 //!
 //! Who did something is set here, from who called: an entry by the owner is
 //! only ever written by the owner's own calls. Text a bot wrote (titles,
@@ -52,6 +53,17 @@ pub const MIN_ANSWERS: usize = 2;
 pub const MAX_ANSWERS: usize = 4;
 /// A list file larger than this is not read.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// A bot's change that would make its list larger than this is refused, well under what a read takes.
+const BOT_WRITE_BYTES: usize = 8 * 1024 * 1024;
+/// The owner's answers, comments and stops still go in up to this; a change that does not grow the list always does.
+const OWNER_WRITE_BYTES: usize = 12 * 1024 * 1024;
+/// An item's activity, in bytes of text as well as in entries.
+const MAX_ACTIVITY_BYTES: usize = 64 * 1024;
+/// The owner's messages kept on an item while they wait to reach the bot.
+const MAX_UNDELIVERED: usize = 10;
+/// How many adds, questions and withdrawals a bot may make in [`RATE_WINDOW`].
+pub const RATE_LIMIT: usize = 40;
+const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const TITLE_CHARS: usize = 200;
 const LINE_CHARS: usize = 400;
 const ANSWER_CHARS: usize = 200;
@@ -157,6 +169,9 @@ pub struct Link {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Question {
+    /// Names this question: an answer says which question it answers by it. Empty on one an older build asked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     #[serde(default)]
     pub text: String,
     #[serde(default)]
@@ -166,6 +181,26 @@ pub struct Question {
     pub recommended: Option<usize>,
     #[serde(default)]
     pub asked: String,
+    #[serde(flatten, default)]
+    pub unknown: BTreeMap<String, Value>,
+}
+
+/// The owner's message to the bot about an item, recorded and not yet sent to the bot's home chat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Undelivered {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub at: String,
+    /// `answer`, `comment` or `work`.
+    #[serde(default)]
+    pub kind: String,
+    /// The message as the home chat gets it: the owner's own words.
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub error: String,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -224,6 +259,9 @@ pub struct Item {
     pub closed: Option<String>,
     #[serde(default)]
     pub activity: Vec<Activity>,
+    /// The owner's messages about this item that have not reached the bot yet, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undelivered: Vec<Undelivered>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -306,8 +344,38 @@ pub fn read(id: &str) -> Result<List> {
 }
 
 /// Read, change and save bot `id`'s list as one step, and announce it. Nothing is saved when `f` fails.
+/// A change by the bot that would make the list larger than [`BOT_WRITE_BYTES`] is refused.
 fn change<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
+    change_within(Some(sink), id, BOT_WRITE_BYTES, f)
+}
+
+/// [`change`] for the owner's own acts, which still go in up to [`OWNER_WRITE_BYTES`].
+fn change_as_owner<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
+    change_within(Some(sink), id, OWNER_WRITE_BYTES, f)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A small [`BOT_WRITE_BYTES`] for tests (the owner's limit is half as much again), so a full list is quick to make.
+    pub static WRITE_LIMIT_FOR_TESTS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+fn write_limit(limit: usize) -> usize {
+    #[cfg(test)]
+    if let Some(small) = WRITE_LIMIT_FOR_TESTS.with(|small| small.get()) {
+        return match limit {
+            BOT_WRITE_BYTES => small,
+            OWNER_WRITE_BYTES => small * 3 / 2,
+            other => other,
+        };
+    }
+    limit
+}
+
+fn change_within<T>(sink: Option<&dyn EventSink>, id: &str, limit: usize, f: impl FnOnce(&mut Vec<Item>, &mut u64) -> Result<T>) -> Result<T> {
+    let limit = write_limit(limit);
     let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let before = std::fs::metadata(path(id)?).map(|meta| meta.len() as usize).unwrap_or(0);
     let mut file = read_file(id)?;
     let (mut items, unreadable) = split(std::mem::take(&mut file.items));
     let out = f(&mut items, &mut file.next)?;
@@ -315,20 +383,34 @@ fn change<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Vec<Item>, &mut
     file.items = items.iter().map(serde_json::to_value).collect::<Result<_, _>>()?;
     file.items.extend(unreadable);
     file.revision += 1;
+    // Written as `write_json` writes it. A change that does not grow the list always goes in, so a full list can be
+    // made smaller; one that grows it past the limit is refused before the file can pass what a read takes.
+    let bytes = serde_json::to_vec_pretty(&file)?;
+    if bytes.len() > limit && bytes.len() > before {
+        return Err(refused(format!(
+            "This work list is full ({} MB of {} MB): drop or finish items, or keep notes shorter, before adding more.",
+            bytes.len().div_ceil(1024 * 1024),
+            limit.div_ceil(1024 * 1024)
+        )));
+    }
     crate::store::ensure_dir(folder(id)?)?;
-    crate::store::write_json(&path(id)?, &file)?;
-    sink.emit(EVENT, &json!({"botId": id, "revision": file.revision}));
+    crate::store::write_atomic(&path(id)?, &bytes)?;
+    if let Some(sink) = sink {
+        sink.emit(EVENT, &json!({"botId": id, "revision": file.revision}));
+    }
     Ok(out)
 }
 
-/// Keep at most [`MAX_CLOSED`] closed items: the ones closed longest ago go.
+/// Keep at most [`MAX_CLOSED`] closed items. The bot's own go first, closed longest ago first; an item the owner
+/// gave, answered, commented on or stopped goes only once none of the bot's own is left to go.
 fn trim_closed(items: &mut Vec<Item>) {
-    let mut closed: Vec<(String, u64)> = items.iter().filter(|item| item.state.closed()).map(|item| (item.closed.clone().unwrap_or_default(), item.number)).collect();
+    let owners = |item: &Item| item.added_by == OWNER || item.activity.iter().any(|entry| entry.by == OWNER);
+    let mut closed: Vec<(bool, String, u64)> = items.iter().filter(|item| item.state.closed()).map(|item| (owners(item), item.closed.clone().unwrap_or_default(), item.number)).collect();
     if closed.len() <= MAX_CLOSED {
         return;
     }
     closed.sort();
-    let gone: Vec<u64> = closed[..closed.len() - MAX_CLOSED].iter().map(|(_, number)| *number).collect();
+    let gone: Vec<u64> = closed[..closed.len() - MAX_CLOSED].iter().map(|(_, _, number)| *number).collect();
     items.retain(|item| !gone.contains(&item.number));
 }
 
@@ -410,17 +492,69 @@ impl By {
             Self::Bot { .. } => &bot.id,
         }
     }
+
+    fn write_limit(&self) -> usize {
+        match self {
+            Self::Owner => OWNER_WRITE_BYTES,
+            Self::Bot { .. } => BOT_WRITE_BYTES,
+        }
+    }
+}
+
+/// Keep the owner's message about `item` until it reaches the bot; the oldest goes past [`MAX_UNDELIVERED`].
+fn queue(item: &mut Item, kind: &str, text: String) -> String {
+    let id = uuid::Uuid::now_v7().to_string();
+    item.undelivered.push(Undelivered { id: id.clone(), at: index::now(), kind: kind.into(), text, error: String::new(), unknown: BTreeMap::new() });
+    if item.undelivered.len() > MAX_UNDELIVERED {
+        let excess = item.undelivered.len() - MAX_UNDELIVERED;
+        item.undelivered.drain(..excess);
+    }
+    id
+}
+
+/// The owner's answer as it reaches the bot's home chat: the item's number and the owner's words. Nothing the bot
+/// wrote goes in but the answer the owner chose: not its title, not its question.
+pub(crate) fn owner_answer_message(number: u64, words: &str) -> String {
+    format!("My answer to your question on item #{number}:\n\n{}", words.trim())
+}
+
+/// The owner's comment on an item, as the home chat gets it: the item's number and the owner's words.
+fn owner_comment_message(number: u64, note: &str) -> String {
+    format!("About item #{number}: {}", note.trim())
+}
+
+/// The work the owner gave, as the home chat gets it. Its title and summary are the owner's words.
+fn owner_work_message(item: &Item) -> String {
+    let mut message = format!("New work for you, item #{}: {}", item.number, quoted(&item.title));
+    if !item.summary.is_empty() {
+        message.push_str(&format!("\n\n{}", item.summary));
+    }
+    message.push_str("\n\nWrite down what done means for it, and plan it in your work list.");
+    message
 }
 
 fn log(item: &mut Item, by: &str, kind: &str, text: String, detail: String) {
     let now = index::now();
     item.activity.push(Activity { at: now.clone(), by: by.into(), kind: kind.into(), text, detail, unknown: BTreeMap::new() });
-    if item.activity.len() > MAX_ACTIVITY {
-        // The first entry says how the item began; the newest say where it is.
-        let excess = item.activity.len() - MAX_ACTIVITY;
-        item.activity.drain(1..1 + excess);
-    }
+    trim_activity(&mut item.activity);
     item.modified = now;
+}
+
+fn activity_bytes(activity: &[Activity]) -> usize {
+    activity.iter().map(|entry| entry.text.len() + entry.detail.len() + entry.kind.len() + entry.by.len() + entry.at.len()).sum()
+}
+
+/// At most [`MAX_ACTIVITY`] entries and [`MAX_ACTIVITY_BYTES`] of text. The first entry says how the item began and
+/// the newest where it is: both stay. Of the others the bot's own go first, oldest first, so a bot cannot push its
+/// owner's answers and comments out of the history; the owner's go only once no entry of the bot's is left between.
+fn trim_activity(activity: &mut Vec<Activity>) {
+    let mut bytes = activity_bytes(activity);
+    while activity.len() > 2 && (activity.len() > MAX_ACTIVITY || bytes > MAX_ACTIVITY_BYTES) {
+        let last = activity.len() - 1;
+        let at = (1..last).find(|&at| activity[at].by != OWNER).unwrap_or(1);
+        let gone = activity.remove(at);
+        bytes -= gone.text.len() + gone.detail.len() + gone.kind.len() + gone.by.len() + gone.at.len();
+    }
 }
 
 fn find(items: &mut [Item], number: u64) -> Result<&mut Item> {
@@ -518,7 +652,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
         (Some(asked), _) => one_line("Who asked", asked, ANSWER_CHARS)?,
         (None, _) => OWNER.to_string(),
     };
-    change(sink, &bot.id, |items, next| {
+    change_within(Some(sink), &bot.id, by.write_limit(), |items, next| {
         if items.iter().filter(|item| !item.state.closed()).count() >= MAX_OPEN {
             return Err(refused(format!("{} already has {MAX_OPEN} open items: finish or drop some first.", bot.name)));
         }
@@ -538,12 +672,17 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             modified: now,
             closed: None,
             activity: Vec::new(),
+            undelivered: Vec::new(),
             unknown: BTreeMap::new(),
         };
         *next += 1;
         let who = by.id(bot);
         match by {
-            By::Owner => log(&mut item, who, "gave", format!("You gave {} this work", bot.name), String::new()),
+            By::Owner => {
+                log(&mut item, who, "gave", format!("You gave {} this work", bot.name), String::new());
+                let message = owner_work_message(&item);
+                queue(&mut item, "work", message);
+            }
             By::Bot { .. } => {
                 let lines = item.done_means.len();
                 log(&mut item, who, "added", format!("{} added this item", bot.name), if lines == 0 { String::new() } else { format!("{lines} lines of done means") });
@@ -591,7 +730,10 @@ pub fn set(sink: &dyn EventSink, bot: &Bot, number: u64, patch: ItemPatch) -> Re
         Some("off" | "") => Some(None),
         Some(until) => Some(Some(chrono::DateTime::parse_from_rfc3339(until).map_err(|_| refused("--snooze takes a time like 2026-11-22T09:00:00Z, or off."))?.with_timezone(&chrono::Utc).to_rfc3339())),
     };
-    change(sink, &bot.id, |items, _| {
+    // Only a change of state, which a full list needs to make room, goes in up to the owner's limit.
+    let only_state = title.is_none() && summary.is_none() && done_means.is_empty() && links.is_empty() && snooze.is_none();
+    let limit = if only_state { OWNER_WRITE_BYTES } else { BOT_WRITE_BYTES };
+    change_within(Some(sink), &bot.id, limit, |items, _| {
         let item = find(items, number)?;
         refuse_closed(item)?;
         if let Some(title) = title {
@@ -682,7 +824,7 @@ pub fn ask(sink: &dyn EventSink, bot: &Bot, number: u64, question: &str, answers
         }
         let detail = answers.iter().enumerate().map(|(index, answer)| if Some(index) == recommended { format!("{answer} (recommended)") } else { answer.clone() }).collect::<Vec<_>>().join(" · ");
         log(item, &who, "asked", format!("{} asked: {question}", bot.name), detail);
-        item.question = Some(Question { text: question, answers, recommended, asked: item.modified.clone(), unknown: BTreeMap::new() });
+        item.question = Some(Question { id: uuid::Uuid::now_v7().to_string(), text: question, answers, recommended, asked: item.modified.clone(), unknown: BTreeMap::new() });
         item.state = ItemState::NeedsYou;
         item.snoozed_until = None;
         Ok(item.clone())
@@ -717,12 +859,15 @@ pub fn comment(sink: &dyn EventSink, bot: &Bot, by: &By, number: u64, note: &str
         return Err(refused("A comment is empty."));
     }
     let who = by.id(bot).to_owned();
-    change(sink, &bot.id, |items, _| {
+    change_within(Some(sink), &bot.id, by.write_limit(), |items, _| {
         let item = find(items, number)?;
         let text = match by {
             By::Owner => "You commented".to_string(),
             By::Bot { .. } => format!("{} noted", bot.name),
         };
+        if *by == By::Owner {
+            queue(item, "comment", owner_comment_message(number, &note));
+        }
         log(item, &who, "comment", text, note);
         Ok(item.clone())
     })
@@ -732,7 +877,8 @@ pub fn comment(sink: &dyn EventSink, bot: &Bot, by: &By, number: u64, note: &str
 pub fn done(sink: &dyn EventSink, bot: &Bot, number: u64, note: Option<&str>) -> Result<Item> {
     let note = note.map(|note| text("A note", note, TEXT_CHARS)).transpose()?.unwrap_or_default();
     let who = bot.id.clone();
-    change(sink, &bot.id, |items, _| {
+    // Finishing makes room: it goes in up to the owner's limit.
+    change_within(Some(sink), &bot.id, OWNER_WRITE_BYTES, |items, _| {
         let item = find(items, number)?;
         refuse_closed(item)?;
         if item.question.is_some() {
@@ -759,10 +905,11 @@ pub enum Answer {
     Typed(String),
 }
 
-/// Record the owner's answer: "You answered …", and the item is in progress again.
-/// `asked` is when the question the owner saw was asked: a question asked since is not answered by it.
-/// Returns the item and the words answered.
-pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, asked: Option<&str>) -> Result<(Item, String, String)> {
+/// Record the owner's answer: "You answered …", and the item is in progress again; the answer waits on the item
+/// until it reaches the bot. `question` names the question the owner saw (its id, or when it was asked for one an
+/// older build asked): a question asked since is not answered by it. Returns the item and the words answered.
+pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, question: Option<&str>) -> Result<(Item, String)> {
+    let seen = question;
     let typed: Option<String> = match answer {
         Answer::Typed(words) => {
             let words = text("An answer", words, TEXT_CHARS)?;
@@ -773,10 +920,11 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, ask
         }
         Answer::Choice(_) => None,
     };
-    change(sink, &bot.id, |items, _| {
+    change_as_owner(sink, &bot.id, |items, _| {
         let item = find(items, number)?;
+        let names = |question: &Question, seen: &str| if question.id.is_empty() { seen == question.asked } else { seen == question.id };
         let question = match (&item.state, &item.question) {
-            (ItemState::NeedsYou, Some(question)) if asked.is_none_or(|asked| asked == question.asked) => question.clone(),
+            (ItemState::NeedsYou, Some(question)) if seen.is_none_or(|seen| names(question, seen)) => question.clone(),
             _ => return Err(refused(format!("{} no longer asks this on item #{number}.", bot.name))),
         };
         let words = match (answer, typed) {
@@ -784,16 +932,18 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, ask
             (Answer::Typed(_), Some(typed)) => typed,
             (Answer::Typed(_), None) => unreachable!("a typed answer is checked first"),
         };
-        log(item, OWNER, "answered", format!("You answered {}", quoted(&words)), question.text.clone());
+        // The owner's entry holds the owner's words only: the question is the bot's, in its own "asked" entry.
+        log(item, OWNER, "answered", format!("You answered {}", quoted(&words)), String::new());
+        queue(item, "answer", owner_answer_message(number, &words));
         item.question = None;
         item.state = ItemState::InProgress;
-        Ok((item.clone(), words, question.text))
+        Ok((item.clone(), words))
     })
 }
 
 /// The owner stops an item: it is dropped. Its sessions are stopped by the caller.
 pub fn stop(sink: &dyn EventSink, bot: &Bot, number: u64) -> Result<Item> {
-    change(sink, &bot.id, |items, _| {
+    change_as_owner(sink, &bot.id, |items, _| {
         let item = find(items, number)?;
         refuse_closed(item)?;
         item.question = None;
@@ -875,14 +1025,29 @@ pub fn needs_you(manager: &crate::session::SessionManager) -> Result<Value> {
     let sessions = sessions();
     let mut entries: Vec<Value> = Vec::new();
     let mut counts: BTreeMap<String, (usize, usize)> = bots.iter().map(|bot| (bot.id.clone(), (0, 0))).collect();
+    // A list that cannot be read is said to be, never counted as nothing waiting.
+    let mut errors: BTreeMap<String, String> = BTreeMap::new();
+    let mut undelivered: Vec<Value> = Vec::new();
     for bot in &bots {
         let list = match read(&bot.id) {
             Ok(list) => list,
             Err(error) => {
                 log::warn!("read the work items of bot {}: {error:#}", bot.id);
+                errors.insert(bot.id.clone(), format!("{error:#}"));
                 continue;
             }
         };
+        for item in list.items.iter().filter(|item| !item.undelivered.is_empty()) {
+            let last = item.undelivered.last();
+            undelivered.push(json!({
+                "botId": bot.id,
+                "number": item.number,
+                "count": item.undelivered.len(),
+                "kind": last.map(|message| message.kind.as_str()).unwrap_or_default(),
+                "error": last.map(|message| message.error.as_str()).unwrap_or_default(),
+                "at": last.map(|message| message.at.as_str()).unwrap_or_default(),
+            }));
+        }
         for item in &list.items {
             let count = counts.entry(bot.id.clone()).or_default();
             match item.state {
@@ -913,8 +1078,14 @@ pub fn needs_you(manager: &crate::session::SessionManager) -> Result<Value> {
         }));
     }
     entries.sort_by(|a, b| b["at"].as_str().unwrap_or_default().cmp(a["at"].as_str().unwrap_or_default()));
-    let counts: Vec<Value> = counts.into_iter().map(|(id, (needs, working))| json!({"botId": id, "needsYou": needs, "inProgress": working})).collect();
-    Ok(json!({"entries": entries, "counts": counts}))
+    let counts: Vec<Value> = counts
+        .into_iter()
+        .map(|(id, (needs, working))| match errors.get(&id) {
+            Some(error) => json!({"botId": id, "needsYou": needs, "inProgress": working, "error": error}),
+            None => json!({"botId": id, "needsYou": needs, "inProgress": working}),
+        })
+        .collect();
+    Ok(json!({"entries": entries, "counts": counts, "undelivered": undelivered}))
 }
 
 /// What a launch of the bot's chat is told of its list: its open items, as its own notes.
@@ -946,6 +1117,46 @@ pub fn launch_note(id: &str) -> Option<String> {
     Some(text)
 }
 
+/// The sink the runtime's calls announce changes on, kept for what a launch changes (it is given none).
+static SINK: Mutex<Option<std::sync::Arc<dyn EventSink>>> = Mutex::new(None);
+
+fn keep_sink(sink: &std::sync::Arc<dyn EventSink>) {
+    let mut kept = SINK.lock().unwrap_or_else(|error| error.into_inner());
+    if kept.is_none() {
+        *kept = Some(sink.clone());
+    }
+}
+
+/// What a launch of bot `id`'s home chat is given of its owner's messages that did not reach the chat, and they are
+/// marked delivered: given once. These are the owner's own words (an answer, a comment, work given), not the bot's.
+pub fn take_undelivered(id: &str) -> Option<String> {
+    let has = read(id).ok()?.items.iter().any(|item| !item.undelivered.is_empty());
+    if !has {
+        return None;
+    }
+    let sink = SINK.lock().unwrap_or_else(|error| error.into_inner()).clone();
+    let taken = change_within(sink.as_deref(), id, usize::MAX, |items, _| {
+        let mut taken: Vec<(String, String)> = Vec::new();
+        for item in items.iter_mut().filter(|item| !item.undelivered.is_empty()) {
+            let count = item.undelivered.len();
+            taken.extend(item.undelivered.drain(..).map(|message| (message.at, message.text)));
+            let said = if count == 1 { "Your message reached the bot as its chat started".to_string() } else { format!("Your {count} messages reached the bot as its chat started") };
+            log(item, OWNER, "delivered", said, String::new());
+        }
+        Ok(taken)
+    });
+    let mut taken = match taken {
+        Ok(taken) => taken,
+        Err(error) => {
+            log::warn!("bot {id}'s chat starts without its owner's undelivered messages: {error:#}");
+            return None;
+        }
+    };
+    taken.sort();
+    let messages = taken.into_iter().map(|(at, text)| format!("[{at}]\n{text}")).collect::<Vec<_>>().join("\n\n");
+    Some(format!("# Messages from your owner that did not reach you\n\nYour owner sent these while this chat could not take them. They are your owner's own words, oldest first.\n\n{messages}"))
+}
+
 // ---------------------------------------------------------------- calls
 
 fn number(params: &Value, key: &str) -> Result<u64> {
@@ -966,8 +1177,42 @@ fn optional<'a>(params: &'a Value, key: &str) -> Option<&'a str> {
     params[key].as_str()
 }
 
+static RATE: Mutex<BTreeMap<String, std::collections::VecDeque<std::time::Instant>>> = Mutex::new(BTreeMap::new());
+
+/// A bot adds, asks and withdraws at most [`RATE_LIMIT`] times in [`RATE_WINDOW`]: each of those reaches its owner
+/// (a question waits on them) or pushes history out, and a bot looping on them would flood both.
+fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<()> {
+    let counted = match command {
+        "add" | "ask" => true,
+        // A change of state is how a bot withdraws a question or drops an item.
+        "set" => params.get("state").is_some_and(|state| !state.is_null()),
+        _ => false,
+    };
+    if !counted {
+        return Ok(());
+    }
+    let now = std::time::Instant::now();
+    let mut rate = RATE.lock().unwrap_or_else(|error| error.into_inner());
+    let recent = rate.entry(bot.id.clone()).or_default();
+    while recent.front().is_some_and(|at| now.duration_since(*at) > RATE_WINDOW) {
+        recent.pop_front();
+    }
+    if recent.len() >= RATE_LIMIT {
+        let wait = recent.front().map(|at| RATE_WINDOW.saturating_sub(now.duration_since(*at)).as_secs().div_ceil(60)).unwrap_or(1).max(1);
+        return Err(refused(format!(
+            "{} added, asked or changed the state of items {RATE_LIMIT} times in the last {} minutes. Wait {wait} minute{} and go on; fewer, larger items keep the list readable.",
+            bot.name,
+            RATE_WINDOW.as_secs() / 60,
+            if wait == 1 { "" } else { "s" }
+        )));
+    }
+    recent.push_back(now);
+    Ok(())
+}
+
 /// `terminalx bots items …` for bot `bot`, from its session `session` (`control::Caller` placed it).
 pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
+    within_rate(bot, command, params)?;
     let by = By::Bot { session };
     let item = |value: Item| -> Result<Value> { Ok(json!({"botId": bot.id, "item": full(&value, &sessions())})) };
     match command {
@@ -1018,6 +1263,8 @@ pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &s
 thread_local! {
     /// What the owner's calls sent to bots' home chats, in tests: (session, tab, text).
     pub static SENT_FOR_TESTS: std::cell::RefCell<Vec<(String, String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Set in a test to make the next sends fail, as a runtime that exits or a chat that cannot take them would.
+    pub static FAIL_SENDS_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Send `text` to bot `id`'s home chat as the owner's message, and say where.
@@ -1027,6 +1274,7 @@ fn to_home_chat(manager: &crate::session::SessionManager, id: &str, text: String
     let tab = home.tabs.iter().find(|tab| !tab.is_terminal()).with_context(|| "the home chat has no agent tab")?;
     #[cfg(test)]
     {
+        anyhow::ensure!(!FAIL_SENDS_FOR_TESTS.with(|fail| fail.get()), "the home chat could not take the message");
         SENT_FOR_TESTS.with(|sent| sent.borrow_mut().push((home.id.clone(), tab.id.clone(), text)));
         Ok(home.id)
     }
@@ -1037,15 +1285,65 @@ fn to_home_chat(manager: &crate::session::SessionManager, id: &str, text: String
     }
 }
 
-/// The sent message's outcome, as a reply carries it: the change stands either way.
-fn delivered(result: Result<String>) -> Value {
-    match result {
-        Ok(session) => json!({"sent": true, "sessionId": session}),
-        Err(error) => {
-            log::warn!("send to a bot's home chat: {error:#}");
-            json!({"sent": false, "error": format!("{error:#}")})
+/// Send bot `id`'s waiting messages to its home chat, oldest first, each once: a message sent is taken off its item;
+/// on the first that cannot be sent the rest wait, with why, for the next send or the chat's next launch. Says how
+/// the message `newest` (the one just recorded) fared. The owner's act stands either way.
+fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&str>) -> Value {
+    let waiting: Vec<(String, u64, String, String)> = match read(id) {
+        Ok(list) => {
+            let mut waiting: Vec<_> = list.items.iter().flat_map(|item| item.undelivered.iter().map(|message| (message.at.clone(), item.number, message.id.clone(), message.text.clone()))).collect();
+            waiting.sort();
+            waiting
+        }
+        Err(error) => return json!({"sent": false, "error": format!("{error:#}")}),
+    };
+    if waiting.is_empty() {
+        return json!({"sent": true});
+    }
+    let mut sent: Vec<String> = Vec::new();
+    let mut failure: Option<String> = None;
+    let mut session = None;
+    for (_, _, message, text) in &waiting {
+        match to_home_chat(manager, id, text.clone()) {
+            Ok(home) => {
+                session = Some(home);
+                sent.push(message.clone());
+            }
+            Err(error) => {
+                log::warn!("send to bot {id}'s home chat: {error:#}");
+                failure = Some(format!("{error:#}"));
+                break;
+            }
         }
     }
+    let sink = manager.sink().clone();
+    let marked = change_within(Some(sink.as_ref()), id, usize::MAX, |items, _| {
+        for item in items.iter_mut() {
+            item.undelivered.retain(|message| !sent.contains(&message.id));
+            if let Some(error) = &failure {
+                for message in &mut item.undelivered {
+                    message.error = error.clone();
+                }
+            }
+        }
+        Ok(())
+    });
+    if let Err(error) = marked {
+        // Sent, but still marked waiting: the next send or launch may give it again.
+        log::warn!("mark bot {id}'s messages delivered: {error:#}");
+    }
+    match newest {
+        Some(newest) if !sent.iter().any(|message| message == newest) => json!({"sent": false, "error": failure.unwrap_or_else(|| "not sent yet".into())}),
+        _ => match session {
+            Some(session) => json!({"sent": true, "sessionId": session}),
+            None => json!({"sent": failure.is_none(), "error": failure}),
+        },
+    }
+}
+
+/// The id of the newest message waiting on item `number`.
+fn newest_waiting(item: &Item) -> Option<String> {
+    item.undelivered.last().map(|message| message.id.clone())
 }
 
 /// The owner's item operations of the runtime's `bots` call (the window's),
@@ -1053,17 +1351,19 @@ fn delivered(result: Result<String>) -> Value {
 /// guarded as a message to the bot is: `control::refuse_bot_runtime_call`
 /// keeps every process in a bot's session from making them.
 pub fn runtime_call(manager: &crate::session::SessionManager, operation: &str, params: &Value) -> Option<Result<Value>> {
-    let known = matches!(operation, "items" | "item" | "needsYou" | "itemAnswer" | "itemComment" | "itemGive" | "itemStop");
+    let known = matches!(operation, "items" | "item" | "needsYou" | "itemAnswer" | "itemComment" | "itemGive" | "itemStop" | "itemResend");
     if !known {
         return None;
     }
+    keep_sink(manager.sink());
     Some(owner_call(manager, operation, params))
 }
 
-/// The owner's answer as it reaches the bot's home chat: the item's number and the owner's words, nothing the bot wrote
-/// besides the answer the owner chose.
-pub(crate) fn owner_answer_message(number: u64, words: &str) -> String {
-    format!("My answer to your question on item #{number}:\n\n{}", words.trim())
+/// Send what waits, then answer with the item as it now is and how the newest message fared.
+fn act(manager: &crate::session::SessionManager, id: &str, number: u64, newest: Option<String>) -> Value {
+    let delivery = deliver(manager, id, newest.as_deref());
+    let item = read(id).ok().and_then(|list| list.items.into_iter().find(|item| item.number == number));
+    json!({"item": item.map(|item| full(&item, &sessions())), "delivery": delivery})
 }
 
 fn owner_call(manager: &crate::session::SessionManager, operation: &str, params: &Value) -> Result<Value> {
@@ -1084,18 +1384,21 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
                 (None, Some(text)) => Answer::Typed(text.into()),
                 (None, None) => return Err(refused("Choose an answer, or write one.")),
             };
-            let (item, words, _question) = answer(sink, &bot, number, &chosen, params["asked"].as_str())?;
+            // Which question the owner saw: its id (`asked`, its time, from an older window).
+            let seen = params["question"].as_str().or_else(|| params["asked"].as_str());
             // Sent as the owner's message: only the owner's own words and the item's number. The bot's title and
-            // question are its own text and are left out, so they cannot speak for the owner here.
-            let message = owner_answer_message(number, &words);
-            json!({"item": full(&item, &sessions()), "delivery": delivered(to_home_chat(manager, &bot.id, message))})
+            // question are its own text and are left out, so they cannot speak for the owner.
+            let (item, _words) = answer(sink, &bot, number, &chosen, seen)?;
+            act(manager, &bot.id, number, newest_waiting(&item))
         }
         "itemComment" => {
             let number = number(params, "number")?;
-            let note = params["text"].as_str().unwrap_or_default();
-            let item = comment(sink, &bot, &By::Owner, number, note)?;
-            let message = format!("About item #{number}: {}", note.trim());
-            json!({"item": full(&item, &sessions()), "delivery": delivered(to_home_chat(manager, &bot.id, message))})
+            let item = comment(sink, &bot, &By::Owner, number, params["text"].as_str().unwrap_or_default())?;
+            act(manager, &bot.id, number, newest_waiting(&item))
+        }
+        "itemResend" => {
+            let number = number(params, "number")?;
+            act(manager, &bot.id, number, None)
         }
         "itemGive" => {
             let item = add(sink, &bot, &By::Owner, NewItem {
@@ -1105,12 +1408,7 @@ fn owner_call(manager: &crate::session::SessionManager, operation: &str, params:
                 start: false,
                 asked_by: None,
             })?;
-            let mut message = format!("New work for you, item #{}: {}", item.number, quoted(&item.title));
-            if !item.summary.is_empty() {
-                message.push_str(&format!("\n\n{}", item.summary));
-            }
-            message.push_str("\n\nWrite down what done means for it, and plan it in your work list.");
-            json!({"item": full(&item, &sessions()), "delivery": delivered(to_home_chat(manager, &bot.id, message))})
+            act(manager, &bot.id, item.number, newest_waiting(&item))
         }
         _ => {
             // Stop this item: its sessions stop, then it is dropped. Only the bot's own sessions are linked.
