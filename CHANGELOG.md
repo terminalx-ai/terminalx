@@ -24,9 +24,6 @@
   query with `--input` or reads it from a file (`-F query=@file`), since what
   it sends cannot be read. Whether a bot is at Full access is read at most
   once a second, not on every tool call (PRO-505).
-- CI: every Linux job runs on Instabox (`instabox-medium`), pull requests
-  included. The macOS jobs and the runtime release stay on GitHub's runners
-  (docs/CI-RUNNERS.md).
 - Bots (experimental): a bot posts on GitHub only signed. At every access
   level its session is refused `gh pr comment`, `gh issue comment`, `gh pr
   review` and `gh api` calls that write a comment or a review, and is told to

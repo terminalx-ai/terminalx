@@ -31,7 +31,7 @@ env:
 
 jobs:
   breaks:
-    runs-on: instabox-medium
+    runs-on: ubuntu-latest
     # Two patches, each an incremental build and a run of the scenarios.
     timeout-minutes: 60
     env:
