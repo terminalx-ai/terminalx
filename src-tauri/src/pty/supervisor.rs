@@ -19,7 +19,6 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use crate::paths::Canonical;
 
 /// The helper is always this process's own running image: `/proc/self/exe`
 /// names the exact executable mapped now, even when its path was replaced or
@@ -116,7 +115,9 @@ pub(super) fn launch_parts(program: &OsStr, args: &[OsString], env: std::collect
     let cwd = cwd.filter(|cwd| cwd.is_dir()).unwrap_or(&home);
     let cwd = if cwd.is_absolute() { cwd.to_path_buf() } else { std::env::current_dir()?.join(cwd) };
     // Fails rather than treating a path it cannot resolve as some other one.
-    let identity = cwd.canonical()?;
+    // Linux-only, and in the serve crate's tests too (`local_supervisor.rs`),
+    // which has no `crate::paths`: there it is std's canonicalize anyway.
+    let identity = cwd.canonicalize()?;
     let program_path = Path::new(program);
     let path = if program_path.is_absolute() { program_path.to_path_buf() }
         else if matches!(program_path.components().next(), Some(std::path::Component::CurDir | std::path::Component::ParentDir)) {
