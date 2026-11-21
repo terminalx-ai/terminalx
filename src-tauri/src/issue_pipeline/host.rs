@@ -3,6 +3,7 @@
 //! the reader's own; in a cloud workspace's runtime, git and `gh` run on the
 //! token the workspace is given (`cloud_github`).
 
+use crate::paths::Canonical;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -149,7 +150,7 @@ fn diff(cwd: &Path, base: &str, head: &str) -> Result<Diff> {
 /// How long a push may take before it is given up on.
 const PUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn privacy_transfer_entry(cwd: &Path, action: &str) -> Result<()> {
     match action {
         "push" => push(cwd),
@@ -159,7 +160,7 @@ pub(crate) fn privacy_transfer_entry(cwd: &Path, action: &str) -> Result<()> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn privacy_resolution(cwd: &Path) -> Result<Option<super::Resolution>> {
     resolution_needed(cwd, "privacy-conflict", "main", false, None)
 }
@@ -419,7 +420,7 @@ impl Host for LocalHost {
     }
 
     fn workspace_idle(&self, pipeline: &Pipeline, cwd: &Path) -> Result<bool> {
-        let cwd = cwd.canonicalize()?;
+        let cwd = cwd.canonical()?;
         // Closed for work that is no conversation's turn: an orchestration run is being merged into it.
         if super::admission::closed(&cwd) { return Ok(false); }
         // Another pipeline's detached recorder also owns the checkout while

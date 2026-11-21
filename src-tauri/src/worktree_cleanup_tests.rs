@@ -48,7 +48,7 @@ impl Fixture {
     fn new() -> Self {
         let home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
         let mut fixture = Self { _home: home, _dir: dir, base, projects: Vec::new(), live: Mutex::new(Live::default()), events: Arc::new(Events::default()), stopped: Mutex::new(Vec::new()), refuse_stop: Mutex::new(None) };
         fixture.project("alpha");
         fixture

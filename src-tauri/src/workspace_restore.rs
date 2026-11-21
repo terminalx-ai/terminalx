@@ -74,16 +74,16 @@ pub(crate) fn preview(session_id: &str) -> Result<Preview> {
     let session = index::get(session_id)?;
     let removed = source(&session)?;
     let project_path = removed.repository.as_deref().unwrap_or(&session.project_path);
-    let project = std::fs::canonicalize(project_path).context("The original repository cannot be reached.")?;
+    let project = crate::paths::canonicalize(project_path).context("The original repository cannot be reached.")?;
     let top = git::run(&project, &["rev-parse", "--show-toplevel"]).context("The original project is no longer a Git checkout.")?;
-    if std::fs::canonicalize(top.trim())? != project {
+    if crate::paths::canonicalize(top.trim())? != project {
         bail!("The original project is no longer the repository root.");
     }
     let path = Path::new(&removed.path);
     if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir) || part.as_os_str() == ".git") {
         bail!("The recorded workspace path is not a safe checkout path.");
     }
-    let parent = std::fs::canonicalize(path.parent().context("The workspace has no parent folder.")?)
+    let parent = crate::paths::canonicalize(path.parent().context("The workspace has no parent folder.")?)
         .context("The workspace's parent folder is missing or unavailable. Recreate or mount it before restoring.")?;
     let target = parent.join(path.file_name().context("The workspace path has no folder name.")?);
     if target.components().any(|part| part.as_os_str() == ".git") {

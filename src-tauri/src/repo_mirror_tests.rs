@@ -28,8 +28,8 @@ impl Repo {
         git(&root, &["commit", "-m", "base"]).unwrap();
         git(&root, &["worktree", "add", "-b", "feature", source.to_str().unwrap()]).unwrap();
         Self {
-            root: fs::canonicalize(root).unwrap(),
-            source: fs::canonicalize(source).unwrap(),
+            root: crate::paths::canonicalize(root).unwrap(),
+            source: crate::paths::canonicalize(source).unwrap(),
             _temp: temp,
         }
     }

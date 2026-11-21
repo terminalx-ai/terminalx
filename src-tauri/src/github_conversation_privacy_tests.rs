@@ -16,7 +16,7 @@ fn privacy_conversation_entrypoints_keep_one_authority() {
             .args(["--exact", "github_process::tests::conversation::conversation_privacy_child", "--nocapture"])
             .env("TERMINALX_TEST_CONVERSATION_PRIVACY", kind)
             .env_remove("TERMINALX_TEST_MANAGED_PRIVACY")
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "{kind}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }

@@ -11,8 +11,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Result};
@@ -29,7 +27,7 @@ type Views = HashMap<String, (String, SizedTap)>;
 pub type Lost = Box<dyn FnOnce(String) + Send>;
 
 struct State {
-    write: UnixStream,
+    write: crate::ipc::Stream,
     views: Views,
     connected: bool,
     detached: bool,
@@ -55,7 +53,7 @@ impl State {
     fn close(&mut self) {
         self.connected = false;
         self.views.clear();
-        let _ = self.write.shutdown(Shutdown::Both);
+        let _ = crate::ipc::shutdown(&self.write);
     }
 }
 

@@ -204,7 +204,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
     let real = |p: &Path| {
         let dir = p.parent().unwrap_or(Path::new(""));
-        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).join(p.file_name().unwrap_or_default())
+        crate::paths::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).join(p.file_name().unwrap_or_default())
     };
     real(a) == real(b)
 }
@@ -282,7 +282,7 @@ pub fn copy_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<boo
 /// `false` when `target` already has the newest, or no home has it.
 pub fn bring_rollout(target: &Path, homes: &[PathBuf], session_id: &str) -> Result<bool> {
     let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    let real = |path: &Path| std::fs::canonicalize(path).ok();
+    let real = |path: &Path| crate::paths::canonicalize(path).ok();
     let here = find_rollout(target, session_id).filter(|path| path.is_file());
     let newest = homes.iter()
         .filter_map(|home| find_rollout(home, session_id).filter(|path| path.is_file()).map(|path| (home, path)))
@@ -772,7 +772,7 @@ url = "https://example.test/mcp"
         let ours = real.path().join("hooks.json");
         std::fs::write(&ours, "{}").unwrap();
         // What Codex reports: the directory resolved, the leaf as written.
-        let reported = std::fs::canonicalize(real.path()).unwrap().join("hooks.json");
+        let reported = crate::paths::canonicalize(real.path()).unwrap().join("hooks.json");
         let result = json!({"data": [{"hooks": [
             {"key": "k", "currentHash": "sha256:aa", "sourcePath": reported.to_string_lossy()}
         ]}]});

@@ -183,6 +183,7 @@ struct Tabs(HashMap<String, Mirror>);
 /// to the one that replaces it (#765).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(unix, test))]
 pub struct CarriedTab {
     pub key: String,
     pub state: TabStatus,
@@ -219,7 +220,7 @@ fn handover_clock_ms() -> Option<u64> {
 }
 
 // Exec handovers are Unix-only; keep the activity store portable.
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 fn handover_clock_ms() -> Option<u64> {
     None
 }
@@ -261,6 +262,7 @@ impl Tabs {
     }
 
     /// Each tab's state, as a handover carries it.
+    #[cfg(any(unix, test))]
     fn carried(&self, clock: Instant, captured_monotonic_ms: Option<u64>) -> Vec<CarriedTab> {
         let ago = |started: Instant| u64::try_from(clock.saturating_duration_since(started).as_millis()).unwrap_or(u64::MAX);
         self.0.iter().map(|(key, mirror)| CarriedTab {
@@ -273,6 +275,7 @@ impl Tabs {
 
     /// Go on from the states a handover carried, as if this process had
     /// counted them itself.
+    #[cfg(any(unix, test))]
     fn carry_on(&mut self, tabs: Vec<CarriedTab>, clock: Instant, monotonic_ms: Option<u64>) {
         for tab in tabs {
             let during = tab.captured_monotonic_ms.zip(monotonic_ms)
@@ -652,6 +655,7 @@ impl Owner {
 
     /// Each tab's last state, whether this process writes history now or
     /// keeps its work aside.
+    #[cfg(any(unix, test))]
     fn tabs(&mut self) -> &mut Tabs {
         match &mut self.store {
             Store::Writer(collector) => &mut collector.tabs,
@@ -757,7 +761,7 @@ fn wait_for_lease(root: PathBuf) {
 }
 
 fn root() -> Result<PathBuf> {
-    Ok(std::fs::canonicalize(super::root()?)?)
+    Ok(crate::paths::canonicalize(super::root()?)?)
 }
 
 fn writer() -> bool {
@@ -867,6 +871,7 @@ pub fn transition(key: &str, state: TabStatus, source: Source) -> Option<usize> 
 /// handover replaces it with (#765). Read with every tab held, so that no
 /// transition changes it before the exec. Nothing is closed: the work goes
 /// on in the processes the handover keeps.
+#[cfg(any(unix, test))]
 pub fn carried() -> Vec<CarriedTab> {
     if !writer() {
         return Vec::new();
@@ -884,6 +889,7 @@ pub fn carried() -> Vec<CarriedTab> {
 /// over (#765), before any tab taken over can change: an exec keeps none of
 /// that process's memory. Work under way is then no new start when it is
 /// seen again, and when it ends it counts the time it ran there too.
+#[cfg(any(unix, test))]
 pub fn carry_on(tabs: Vec<CarriedTab>) {
     if !writer() || tabs.is_empty() {
         return;

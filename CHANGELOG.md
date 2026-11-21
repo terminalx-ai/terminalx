@@ -137,6 +137,14 @@
   time; what that holds back waits and the duty says until when, and a
   message passed between bots three times wakes nobody. Slack, Telegram or
   WhatsApp and webhooks stay off until they have a connector (PRO-472).
+- TerminalX runs on Windows 10 and 11: the desktop app, its background
+  runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
+  machines, phone pairing and the headless `terminalx-serve` tools. Named
+  pipes with owner-only access stand in for Unix sockets, DPAPI for the
+  Keychain, Job Objects and ConPTY for process groups and terminals, and Git
+  for Windows' `sh` runs setup, archive and action scripts. Not yet on
+  Windows: keeping agents running through a runtime update (an update
+  restarts the runtime), Local VM tasks, and the runtime's self-update.
 
 ## 0.2.37
 

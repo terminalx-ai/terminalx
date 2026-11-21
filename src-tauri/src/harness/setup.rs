@@ -368,6 +368,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_wrapper_survives_quotes_in_its_arguments() {
         assert_eq!(quote("it's"), r#"'it'\''s'"#);

@@ -32,7 +32,7 @@ pub const FINISHED_KEPT_FOR: Duration = Duration::from_secs(10 * 60);
 /// The home directory of the user this runtime runs as, canonical.
 pub fn home() -> Result<PathBuf, RpcError> {
     let home = dirs::home_dir().ok_or_else(|| RpcError::internal("this runtime's user has no home directory"))?;
-    std::fs::canonicalize(&home).map_err(|error| RpcError::internal(format!("resolve {}: {error}", home.display())))
+    crate::paths::canonicalize(&home).map_err(|error| RpcError::internal(format!("resolve {}: {error}", home.display())))
 }
 
 /// A folder a call names, by the rules of `machine.browse`: absolute, and
@@ -47,7 +47,7 @@ pub fn resolve_folder(home: &Path, path: Option<&str>) -> Result<PathBuf, RpcErr
     // A path that does not exist is `not_found` only under home: outside it,
     // the answer must not say whether something is there.
     let under_home = Path::new(path).starts_with(home) || dirs::home_dir().is_some_and(|raw| Path::new(path).starts_with(raw));
-    let resolved = std::fs::canonicalize(path).map_err(|_| if under_home { RpcError::not_found(format!("{path} does not exist")) } else { forbidden() })?;
+    let resolved = crate::paths::canonicalize(path).map_err(|_| if under_home { RpcError::not_found(format!("{path} does not exist")) } else { forbidden() })?;
     if !resolved.starts_with(home) {
         return Err(forbidden());
     }
@@ -91,7 +91,7 @@ pub fn browse(home: &Path, params: &Value) -> Result<Value, RpcError> {
             entry.path()
         } else if kind.is_symlink() {
             // A link counts as the folder it leads to, while that stays under home.
-            match std::fs::canonicalize(entry.path()) {
+            match crate::paths::canonicalize(entry.path()) {
                 Ok(target) if target.starts_with(home) && target.is_dir() => target,
                 _ => continue,
             }

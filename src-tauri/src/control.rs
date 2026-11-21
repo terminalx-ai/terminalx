@@ -293,7 +293,6 @@ impl WindowControl {
         Self { sink, computer, browser, pairing: None, questions: None, machines: None }
     }
 
-    #[cfg(unix)]
     pub(crate) fn serve(mut self, app: tauri::AppHandle, endpoint: ControlEndpoint, pairing: Arc<crate::pairing::PairingManager>, ask: crate::issue_control::Ask) -> anyhow::Result<()> {
         use tauri::Manager;
         self.pairing = Some(pairing);
@@ -333,7 +332,6 @@ impl WindowControl {
         Ok(())
     }
 
-    #[cfg(unix)]
     fn execute(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         if command == "environment.snapshot" {
             let key = params["key"].as_str().ok_or_else(|| ControlError::invalid("Environment scope required."))?;
@@ -522,11 +520,12 @@ impl ControlService {
         if matches!(command, "sessions.create" | "runs.create" | "runs.start" | "runs.sendBack" | "runs.widen" | "runs.checkFailed" | "runs.takeOver" | "pipelines.start" | "send" | "permissions.allow" | "cloud.sessions.create" | "cloud.send" | "cloud.resume") || command.starts_with("machine.") {
             Caller::of(&self.manager, &params).gate(command, &params)?;
         }
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             if command == "runtime.window.register" {
                 let registered = lifetime.window.register(lifetime, params)?;
                 // The registrant is the window from now on, unless it runs in a pane or under this runtime (PRO-468).
+                // Only the Unix bot guard reads it (`refuse_bot_runtime_call`).
+                #[cfg(unix)]
                 if let Some(pid) = crate::hooks::caller_pid() {
                     match crate::serve_cli::consent::started_at(pid) {
                         Some(started) if self.may_be_the_window(pid) => lifetime.window.recognise((pid, started)),
@@ -547,12 +546,15 @@ impl ControlService {
                     // Only a person makes a pairing code or lets a computer
                     // in: never an agent or terminal this runtime started
                     // (docs/MACHINES.md, "Who may answer"; `consent`).
-                    #[cfg(unix)]
                     let params = {
                         let mut params = params;
                         if crate::serve_cli::consent::guards(command) {
-                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
-                            crate::serve_cli::consent::verify(run, &mut params)?;
+                            #[cfg(unix)]
+                            let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?.to_owned();
+                            // A pipe has no directory: the witness belongs to this home's `run`.
+                            #[cfg(windows)]
+                            let run = crate::store::root().map_err(ControlError::internal)?.join("run");
+                            crate::serve_cli::consent::verify(&run, &mut params)?;
                         }
                         params
                     };
@@ -605,6 +607,14 @@ impl ControlService {
                         if command == crate::serve_cli::consent::BOTS_COMMAND {
                             let run = self.endpoint.socket.parent().ok_or_else(|| ControlError::internal("the control socket has no directory"))?;
                             bots_from_a_person(run, &mut params, &crate::serve_cli::consent::Window::current())?;
+                        }
+                        params
+                    };
+                    #[cfg(not(unix))]
+                    let params = {
+                        let mut params = params;
+                        if command == crate::serve_cli::consent::BOTS_COMMAND {
+                            bots_without_a_window(&mut params)?;
                         }
                         params
                     };
@@ -1467,7 +1477,6 @@ impl ControlService {
     /// from the webview when there is one and it answers in time.
     fn terminal_status(&self) -> Value {
         let mut terminals = json!({ "backend": self.manager.terminals().stats() });
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             terminals["webview"] = if lifetime.window.available() {
                 lifetime.window.call("window.terminalCounters", json!({})).unwrap_or(Value::Null)
@@ -1547,11 +1556,10 @@ impl ControlService {
 
     /// A window service from the control socket: the attached desktop's.
     fn window_call(&self, command: &str, params: Value) -> Result<Value, ControlError> {
-        #[cfg(unix)]
         if let Some(lifetime) = &self.local_lifetime {
             return lifetime.window.call(command, params);
         }
-        #[cfg(all(feature = "desktop", unix))]
+        #[cfg(feature = "desktop")]
         if let Some(desktop) = &self.desktop {
             return desktop.execute(command, params, "");
         }
@@ -2449,7 +2457,7 @@ impl ControlService {
             return Err(refuse(&orphans, &[]));
         }
         if !force {
-            let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+            let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
             let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
             if !landed.safe {
                 let losses = if landed.losses.is_empty() { "It is not known to be clean and merged.".to_string() } else { landed.losses.join("\n") };
@@ -2483,7 +2491,7 @@ impl ControlService {
     /// What deleting `worktree` would do: the sessions it holds, with what
     /// each still runs, and its git state checked as the delete checks it.
     fn worktree_delete_preview(&self, project: &Project, worktree: crate::workspaces::Workspace, held: &[SessionEntry]) -> crate::worktree_control::DeletePreview {
-        let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        let canonical = |path: &str| crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
         let landed = crate::landed::check(&canonical(&project.path), &canonical(&worktree.path), crate::landed::Fetch::Fresh);
         let terminals = self.manager.terminals();
         let sessions = held
@@ -3050,7 +3058,6 @@ fn resume_confirmable() -> bool {
 }
 
 /// What a Bots action is called where it is refused.
-#[cfg(unix)]
 fn bots_action(operation: &str) -> &'static str {
     match operation {
         "resume" => "resume a bot",
@@ -3069,6 +3076,32 @@ fn bots_action(operation: &str) -> &'static str {
         "quietHours" => "change a bot's quiet hours",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
+}
+
+/// [`bots_from_a_person`] where no window can sign, as on Linux
+/// (`window_can_confirm`): what needs a person is refused, and an `update`
+/// is never a person's, so `bots::update_as` gives the bot nothing more.
+#[cfg(not(unix))]
+fn bots_without_a_window(params: &mut Value) -> Result<(), ControlError> {
+    let operation = params["operation"].as_str().unwrap_or_default().to_owned();
+    if let Some(object) = params.as_object_mut() {
+        object.remove(crate::serve_cli::consent::PARAM);
+    }
+    if operation == "update" {
+        if let Some(inner) = params["params"].as_object_mut() {
+            inner.insert(crate::bots::BY_PERSON.into(), json!(false));
+        }
+        return Ok(());
+    }
+    if crate::bots::enforce::needs_person(&operation, &params["params"]) {
+        let action = bots_action(&operation);
+        return Err(ControlError::new(
+            "pairing_unavailable",
+            format!("To {action} needs the TerminalX window on a Mac, which confirms that you asked. This TerminalX has none that can."),
+            Some("Use TerminalX on a Mac for this.".into()),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a person can confirm a Bots action here at all: only the TerminalX
@@ -3602,7 +3635,7 @@ fn optional_string(params: &Value, name: &str) -> Option<String> {
 }
 
 fn canonical_or_original(path: &str) -> String {
-    std::fs::canonicalize(path)
+    crate::paths::canonicalize(path)
         .unwrap_or_else(|_| PathBuf::from(path))
         .to_string_lossy()
         .into_owned()
@@ -4931,7 +4964,7 @@ mod tests {
         let add = |path: &Path| service.execute("projects.add", json!({"path": path, "refuseExisting": true}), "r");
 
         let added = add(&repository).unwrap();
-        let path = std::fs::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
+        let path = crate::paths::canonicalize(&repository).unwrap().to_string_lossy().into_owned();
         assert_eq!((added["project"]["path"].as_str(), added["project"]["name"].as_str(), added["project"]["kind"].as_str()), (Some(path.as_str()), Some("api"), Some("git")));
         assert_eq!(&*heard.try_recv().unwrap().event, "projects_changed");
         assert_eq!(add(&gateway).unwrap()["project"]["kind"], "folder");

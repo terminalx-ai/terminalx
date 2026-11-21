@@ -1,5 +1,6 @@
 //! Personal diff review notes, scoped to a workspace (including its repository).
 //! Transactions lock a stable sidecar across windows/processes and replace JSON atomically.
+use crate::paths::Canonical;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -243,7 +244,7 @@ fn locate(comment: &Comment, content: Option<&str>) -> (bool, Option<usize>) {
 /// The common key for desktop, control API and pipeline callers. Resolve it
 /// while the worktree still exists, including when scheduling its deletion.
 pub fn workspace_key(path: &Path) -> Result<String> {
-    Ok(format!("local:{}", path.canonicalize()?.to_string_lossy()))
+    Ok(format!("local:{}", path.canonical()?.to_string_lossy()))
 }
 
 fn file(root: &Path, workspace: &str) -> Result<PathBuf> {
@@ -524,6 +525,7 @@ pub fn remove_workspace(root: &Path, canonical_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
     fn save(note: &str, expected: Option<Revision>) -> Action {
         Action::Save {
@@ -784,7 +786,7 @@ mod tests {
     fn deletion_removes_json_and_legacy_lock_and_late_saves_cannot_recreate_them() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let canonical = workspace.path().canonicalize().unwrap();
+        let canonical = workspace.path().canonical().unwrap();
         let key = workspace_key(workspace.path()).unwrap();
         apply(root.path(), &key, save("note", None)).unwrap();
         let path = file(root.path(), &key).unwrap();

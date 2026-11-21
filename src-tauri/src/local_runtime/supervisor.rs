@@ -417,7 +417,7 @@ fn log_report(target: &Target, report: &Report) {
 
 /// The runtime bundled with this app.
 fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
-    Ok(app.path().resource_dir()?.join("local-runtime/terminalx-serve"))
+    Ok(app.path().resource_dir()?.join("local-runtime").join(if cfg!(windows) { "terminalx-serve.exe" } else { "terminalx-serve" }))
 }
 
 /// The runtime bundled with this app, installed in `home` as one is started
@@ -428,7 +428,7 @@ fn source(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
 /// it and checks its signature. Installed again if the copy has gone.
 pub(crate) fn bundled(app: &AppHandle, home: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
     static INSTALLED: std::sync::Mutex<Option<(std::path::PathBuf, std::path::PathBuf)>> = std::sync::Mutex::new(None);
-    let home = std::fs::canonicalize(home)?;
+    let home = crate::paths::canonicalize(home)?;
     let mut installed = INSTALLED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some((_, binary)) = installed.as_ref().filter(|(for_home, binary)| *for_home == home && binary.is_file()) {
         return Ok(binary.clone());

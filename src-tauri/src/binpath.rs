@@ -236,6 +236,78 @@ fn scan(name: &str) -> Option<PathBuf> {
     resolve_uncached(name)
 }
 
+/// The POSIX shell a setup, archive or action script runs in on Windows:
+/// Git for Windows' `sh.exe`, which every Git install has. Found from the
+/// `git` on the login PATH (`<git>/cmd/git.exe` or `<git>/bin/git.exe` has
+/// `<git>/bin/sh.exe`), else in the standard install folders. Never
+/// `System32\bash.exe`, the WSL launcher, which runs a different machine.
+#[cfg(windows)]
+pub fn posix_sh() -> Option<PathBuf> {
+    let from_git = resolve("git").and_then(|git| {
+        let root = git.parent()?.parent()?.to_path_buf();
+        Some(root.join("bin").join("sh.exe"))
+    });
+    let installed = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"].into_iter()
+        .filter_map(|var| std::env::var_os(var).map(PathBuf::from))
+        .flat_map(|base| [base.join("Git").join("bin").join("sh.exe"), base.join("Programs").join("Git").join("bin").join("sh.exe")]);
+    from_git.into_iter().chain(installed).find(|path| path.is_file() && git_sh(path))
+}
+
+/// Whether `path` is a Git for Windows `sh.exe`: beside its own Git.
+#[cfg(windows)]
+fn git_sh(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("sh.exe"))
+        && path.parent().and_then(std::path::Path::parent).is_some_and(|root| root.join("usr").join("bin").is_dir())
+}
+
+/// A Python 3 interpreter itself, when one is installed: on Windows a real
+/// `python3` or `python`, never the Store's stub (see [`python3`]).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn python3_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        resolve("python3").filter(|path| !in_windows_apps(path)).or_else(|| resolve("python").filter(|path| !in_windows_apps(path)))
+    }
+    #[cfg(not(windows))]
+    {
+        resolve("python3")
+    }
+}
+
+/// Whether `path` is in a `WindowsApps` folder, where the Store's stubs are.
+#[cfg(windows)]
+fn in_windows_apps(path: &std::path::Path) -> bool {
+    path.components().any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+}
+
+/// A command that runs Python 3, its own leading arguments included.
+///
+/// On Windows `python3` is often only the Microsoft Store's installer stub
+/// (under `WindowsApps`), which opens the Store instead of running a script:
+/// a real `python3`, then `python`, then the `py -3` launcher is used.
+pub fn python3() -> std::process::Command {
+    #[cfg(windows)]
+    {
+        if let Some(path) = python3_path() {
+            return std::process::Command::new(path);
+        }
+        if let Some(launcher) = resolve("py").filter(|path| !in_windows_apps(path)) {
+            let mut command = std::process::Command::new(launcher);
+            command.arg("-3");
+            return command;
+        }
+        std::process::Command::new("python")
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(resolve("python3").unwrap_or_else(|| "python3".into()))
+    }
+}
+
+/// What a script that needs [`posix_sh`] says when there is none.
+#[cfg(windows)]
+pub const POSIX_SH_MISSING: &str = "Scripts run in a POSIX shell, and on Windows that is Git for Windows' sh.exe, which was not found. Install Git for Windows (https://git-scm.com/download/win) and run this again.";
+
 #[cfg(test)]
 mod tests {
     use super::*;

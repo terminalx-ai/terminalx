@@ -16,6 +16,7 @@ pub(crate) mod rpc;
 pub(crate) mod send_ids;
 #[cfg(test)]
 mod serve_tests;
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) mod sink;
 mod sync_cache;
 pub(crate) mod wire;

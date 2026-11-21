@@ -76,7 +76,7 @@ impl Rig {
             crate::hooks::prepare_control().unwrap(),
         );
         manager.follow_pane_exits();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
         let remote = base.join("app.git");
         std::fs::create_dir(&remote).unwrap();
         git(&remote, &["init", "-q", "--bare", "-b", "main"]);
@@ -91,7 +91,7 @@ impl Rig {
         git(&project, &["remote", "add", "origin", remote.to_str().unwrap()]);
         git(&project, &["push", "-q", "-u", "origin", "main"]);
         store::projects::add(project.to_str().unwrap()).unwrap();
-        let worktree = std::fs::canonicalize(git::create_worktree(&project, "feature", Some("main")).unwrap().path).unwrap();
+        let worktree = crate::paths::canonicalize(git::create_worktree(&project, "feature", Some("main")).unwrap().path).unwrap();
         let mut settings = store::settings::load();
         settings.merged_cleanup.enabled = true;
         store::settings::save(&settings).unwrap();

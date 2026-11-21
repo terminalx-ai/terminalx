@@ -13,7 +13,7 @@ impl Rig {
     fn new() -> Self {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonicalize(dir.path()).unwrap();
         assert!(std::process::Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&root).status().unwrap().success());
         projects::add(root.to_str().unwrap()).unwrap();
         let manager = SessionManager::new(

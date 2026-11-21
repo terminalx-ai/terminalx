@@ -62,7 +62,7 @@ impl Fixture {
     fn new() -> Self {
         let home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
         let remote = base.join("alpha.git");
         std::fs::create_dir_all(&remote).unwrap();
         sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
@@ -118,7 +118,7 @@ impl Fixture {
         let path = PathBuf::from(git::create_worktree(&self.alpha(), name, Some("main")).unwrap().path);
         commit(&path, &format!("{name}.txt"));
         sh(&path, &["push", "-q", "origin", "HEAD"]);
-        std::fs::canonicalize(path).unwrap()
+        crate::paths::canonicalize(path).unwrap()
     }
 
     /// GitHub's answer for the worktree's branch: a pull request in `state`

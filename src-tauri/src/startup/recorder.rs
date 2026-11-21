@@ -114,6 +114,7 @@ pub(super) fn export(exit: &RecorderExit) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     #[test]

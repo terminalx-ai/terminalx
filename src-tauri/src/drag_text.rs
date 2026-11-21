@@ -35,6 +35,20 @@ pub fn on_drag_drop(event: &tauri::DragDropEvent) {
     }
 }
 
+/// How a path dropped on a terminal is quoted: as the shell its terminals
+/// run reads it. `cmd` expands `%VAR%` even inside quotes, so the frontend
+/// refuses what it cannot quote for it.
+#[tauri::command]
+pub fn terminal_quote_style() -> &'static str {
+    let shell = crate::pty::shell();
+    let name = std::path::Path::new(&shell).file_stem().map(|stem| stem.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match name.as_str() {
+        "cmd" => "cmd",
+        "powershell" | "pwsh" => "powershell",
+        _ => "posix",
+    }
+}
+
 /// The plain text of the drop that just happened, once.
 #[tauri::command]
 pub fn dropped_text() -> Option<String> {

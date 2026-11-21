@@ -1,5 +1,7 @@
 //! One private operation file and one interpreter process per request.
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -105,14 +107,19 @@ fn io_error(error: std::io::Error) -> ComputerError {
 }
 
 fn private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    #[cfg(windows)]
+    if path.exists() {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "the operation file exists"));
+    }
+    #[cfg(windows)]
+    return crate::win::fs::create_private(path, true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        options.open(path)
     }
-    options.open(path)
 }
 
 /// Drop kills/reaps before the operation directory is removed, including on I/O errors.
@@ -171,10 +178,14 @@ fn execute_observed(
         use std::os::unix::fs::PermissionsExt;
         builder.permissions(std::fs::Permissions::from_mode(0o700));
     }
-    // Explicit permissions create owner-only directories on Unix. The default Windows
-    // user temp directory supplies the inherited user ACL.
+    // Explicit permissions create owner-only directories on Unix. On Windows
+    // each operation's directory is made in an owner-only folder of the temp
+    // directory, whose access it inherits.
     let directory = match temp_root {
         Some(root) => builder.tempdir_in(root),
+        #[cfg(windows)]
+        None => crate::win::fs::private_temp("terminalx-computer-use").and_then(|base| builder.tempdir_in(base)),
+        #[cfg(not(windows))]
         None => builder.tempdir(),
     }
     .map_err(io_error)?;

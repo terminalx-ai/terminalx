@@ -709,7 +709,7 @@ impl PairingManager {
         self.phone.set_owner(Some(owner));
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_phone_port_for_test(self: &mut Arc<Self>, port: u16) {
         Arc::get_mut(self).unwrap().direct_port = port;
     }
@@ -721,6 +721,20 @@ impl PairingManager {
         self.secrets.window_consent_key(create)
             .map_err(|_| anyhow!(crate::serve_cli::consent::KEYCHAIN_DENIED))?
             .ok_or_else(|| anyhow::Error::new(crate::serve_cli::consent::WindowKeyMissing))
+    }
+
+    /// Windows' consent (`consent_windows.rs`) has no `WindowKeyMissing` or
+    /// `KEYCHAIN_DENIED`: those belong to the macOS relaunch repair
+    /// (`local_runtime::window_consent`, PRO-486), which Windows lacks.
+    #[cfg(windows)]
+    pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
+        self.secrets.window_consent_key(create)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+            })
     }
 
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
@@ -2156,6 +2170,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// Through the router a phone actually reaches, with a real local runtime
     /// as owner: a viewer may read the new-session choices and the settings but
     /// neither start a session nor change one, a driver may do all four, and a
@@ -2187,6 +2202,7 @@ mod tests {
         assert!(result.success(), "{}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn phone_router_child_fixture() {
         if std::env::var("TERMINALX_TEST_PHONE_ROUTER").as_deref() != Ok("1") { return; }

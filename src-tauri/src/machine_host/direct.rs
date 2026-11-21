@@ -22,7 +22,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+#[cfg(any(unix, test))]
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
@@ -31,7 +33,9 @@ use tokio_tungstenite::tungstenite::Message;
 use super::pairing::{Asking, Decision, Outcome};
 use super::registry::token_hash;
 use super::MachineHost;
-use crate::machine_wire::{encode_header, ComputerRoute, Forwarded, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
+use crate::machine_wire::{ComputerRoute, MACHINE_PATH, REFUSED_CODE_INACTIVE, REFUSED_NOT_APPROVED};
+#[cfg(unix)]
+use crate::machine_wire::{encode_header, Forwarded};
 use crate::relay_e2ee::{begin_e2ee_session, E2eeHello, PayloadKind};
 use crate::remote::protocol::Authority;
 use crate::remote::server::{Peer, WorkspaceRpc};

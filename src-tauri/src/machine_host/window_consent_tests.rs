@@ -53,7 +53,7 @@ fn pinned_consent_key_authorizes_only_the_window_after_runtime_adoption() {
         .prefix("wc")
         .tempdir_in("/tmp")
         .unwrap();
-    let root = home.path().canonicalize().unwrap();
+    let root = crate::paths::canonicalize(home.path()).unwrap();
     for (launch, caller) in [
         ("runtime", "window"),
         ("runtime-restarted", "window-restarted"),

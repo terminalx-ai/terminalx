@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -54,7 +55,7 @@ fn quiet_agent(dir: &Path) -> String {
 fn fixture() -> Fixture {
     let home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let root = base.join("workspace");
     std::fs::create_dir(&root).unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
@@ -93,6 +94,7 @@ fn fixture() -> Fixture {
 }
 
 impl Fixture {
+    #[cfg(unix)]
     async fn assert_claude_launched(&self, created: &Value) {
         assert!(created["startError"].is_null(), "stand-in Claude launch refused: {created}");
         let session = crate::store::index::get(created["sessionId"].as_str().unwrap()).unwrap();
@@ -133,6 +135,7 @@ async fn peer(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authority, want:
 }
 
 /// The pipelines announced to a connection within a short wait.
+#[cfg(unix)]
 async fn announced(events: &mut Notifications) -> Vec<Value> {
     let mut heard = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
@@ -171,6 +174,7 @@ async fn a_non_issue_cloud_branch_uses_conflict_automation_but_never_workspace_a
     assert_eq!(changed["pipeline"]["autoMerge"], false);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_started_from_an_issue_is_carried_on_by_the_runtime_and_read_and_steered_from_a_desktop() {
     let f = fixture();
@@ -339,6 +343,7 @@ async fn the_list_of_pipelines_fits_one_frame_newest_first() {
     assert!(pipelines.iter().all(|pipeline| pipeline.get("issueBody").is_none()));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_first_prompt_returns_an_openable_session_and_stops_only_its_pipeline() {
     let f = fixture();
@@ -404,6 +409,7 @@ async fn a_failed_first_prompt_returns_an_openable_session_and_stops_only_its_pi
     assert_eq!(crate::store::index::load().unwrap().len(), 7);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_start_cleanup_reports_storage_failure_without_losing_the_session() {
     let f = fixture();
@@ -434,6 +440,7 @@ async fn failed_start_cleanup_reports_storage_failure_without_losing_the_session
 /// `handoff/1` (#1327): a second opinion, Retry in a new chat or the agent
 /// handoff is one call that adds the tab and sends its first prompt. It uses
 /// this file's runtime, whose stand-in Claude is what a sent prompt launches.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handoff_opens_one_tab_with_its_first_prompt_and_reads_the_context_it_hands_on() {
     let f = fixture();
