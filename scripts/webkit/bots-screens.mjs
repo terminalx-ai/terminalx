@@ -41,9 +41,34 @@ const extra = (on) => `(() => {
     changed();
     return structuredClone(bot);
   };
-  const pauseAll = (paused) => { for (const bot of state.bots) { if (paused) bot.paused = { at: new Date().toISOString(), by: "owner" }; else delete bot.paused; } changed(); return list(); };
-  answers.bots_pause_all = () => pauseAll(true);
+  // A pause as the runtime records it (PRO-474): where it came from and what it stopped, the first bot with a run's
+  // workers finishing their step and an 80-character duty name, to see the paused page's rows and held list truncate.
+  const today = new Date().toISOString().slice(0, 10);
+  const pauseAll = (paused, from = "app") => {
+    state.bots.forEach((bot, index) => {
+      if (!paused) { delete bot.paused; return; }
+      if (bot.paused) return;
+      bot.paused = { at: new Date(Date.now() - 18 * 60_000).toISOString(), by: "owner", from,
+        stopped: index === 0 ? { was: "was running 2 workers", workers: 2, spent: { day: today, usd: 4.1 } } : { was: index === 1 ? "was working on “" + LONG + "”" : "was quiet", spent: { day: today, usd: 1.2 } } };
+    });
+    changed();
+    return list();
+  };
+  const LONG = "Review the relay key rotation and every dependency upgrade it pulls in with it";
+  answers.bots_pause_all = ({ from } = {}) => pauseAll(true, from);
   answers.bots_resume_all = () => pauseAll(false);
+  answers.bot_spent_today = ({ id }) => ({ usd: id === state.bots[0]?.id ? 6.4 : 1.2, day: today });
+  answers.bots_pause_held = () => {
+    const paused = state.bots.filter((bot) => bot.paused);
+    const at = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
+    const entries = paused.length === 0 ? [] : [
+      { kind: "skipped", source: "duty", botId: paused[0].id, dutyId: "d1", name: "Stalled sessions and runs", at: at(15), count: 3 },
+      { kind: "kept", source: "events", botId: paused[0].id, dutyId: "d2", name: LONG, at: at(18) },
+      ...(paused[1] ? [{ kind: "kept", source: "handoff", botId: paused[1].id, fromId: paused[0].id, by: paused[0].id, number: 12, title: LONG, at: at(9) },
+        { kind: "kept", source: "answer", botId: paused[1].id, number: 4, messageKind: "answer", at: at(4) }] : []),
+    ];
+    return { bots: state.bots.map((bot, index) => ({ id: bot.id, inTurn: bot.paused && index === 0 ? 1 : 0, needsYou: 0 })), entries, errors: [] };
+  };
 })();`;
 
 const viewports = [
@@ -189,6 +214,30 @@ try {
   await main.getByTestId("bots-all-paused").waitFor();
   const pausedProblems = await measure(page);
   failed += report("team, all paused", { "fits the main slot": pausedProblems.length === 0, "Resume all offered": (await main.getByTestId("bots-resume-all").count()) === 1 }, pausedProblems);
+  // The paused page (23.12) at every size: banner, stats, rows with what is held, the held list, what pause does.
+  await main.getByTestId("bots-held-entry").first().waitFor();
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await page.waitForTimeout(150);
+    const problems = await measure(page);
+    const rows = await main.getByTestId("bots-paused-row").count();
+    const held = await main.getByTestId("bots-held-entry").count();
+    const banner = (await main.getByTestId("bots-paused-by").textContent()) ?? "";
+    failed += report(`paused page ${viewport.width}x${viewport.height}`, {
+      "fits the main slot": problems.length === 0,
+      "a row per bot": rows > 0 && rows === (await main.getByTestId("bots-paused-resume").count()),
+      "held list shows what was skipped and kept": held >= 2 && (await main.locator("[data-testid=bots-held-entry][data-kind=skipped]").count()) === 1,
+      "banner says who paused them and when": /^You paused them in TerminalX at \d\d:\d\d, 18 minutes ago\./.test(banner),
+      "names the Pause all shortcut": /⌥⇧⌘P|Alt\+Shift\+/.test((await main.getByTestId("bots-pause-where").textContent()) ?? ""),
+    }, { problems, banner });
+  }
+  await page.setViewportSize(viewports[0]);
+  await shot(page, "2312-paused");
+  await page.setViewportSize(viewports[3]);
+  await shot(page, "2312-paused-small");
+  await main.getByTestId("bots-paused-resume-all").click();
+  await main.getByTestId("bots-pause-all").waitFor();
+  failed += report("resume all leaves the paused page", { "team is back": (await main.getByTestId("bots-paused").count()) === 0 }, {});
   await page.close();
 } finally {
   await browser.close();

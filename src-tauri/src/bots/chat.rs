@@ -483,7 +483,7 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: Option<&str>, fi
         BotAccess::Full => {}
     }
     if bot.paused.is_some() {
-        rules.push("Your owner has paused you. You run in plan mode: answer this conversation, but change nothing and start no work of your own (no sessions, runs or scheduled work) until they resume you. Never resume yourself.".into());
+        rules.push("Your owner has paused you. You run in plan mode: answer this conversation, but change nothing and start no work of your own (no sessions, runs or scheduled work) until they resume you. Every answer you give while paused says first that you are paused, and what you would do once resumed. Never resume yourself.".into());
     }
     text.push_str(&format!("\n\n# Bot rules\n\n{}\n", rules.iter().map(|rule| format!("- {rule}")).collect::<Vec<_>>().join("\n")));
     if first_run {

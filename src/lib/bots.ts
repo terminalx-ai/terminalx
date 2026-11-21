@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { botsApi } from "@/lib/api";
-import type { Bot, BotList, BotPatch, BotRoleTemplate } from "@/types/bots";
+import type { Bot, BotList, BotPatch, BotPauseFrom, BotRoleTemplate } from "@/types/bots";
 
 /**
  * The bots (PRO-466), as every view sees them. Booted only while Settings →
@@ -152,16 +152,17 @@ export async function deleteBot(id: string) {
   await changed(() => botsApi.remove(id), () => set({ bots: state.bots.filter((value) => value.id !== id) }));
 }
 
-export function pauseBot(id: string) {
-  return changed(() => botsApi.pause(id), upsert);
+/** `from`: where in the window it was paused, said on the pause (PRO-474). */
+export function pauseBot(id: string, from: BotPauseFrom = "app") {
+  return changed(() => botsApi.pause(id, from), upsert);
 }
 
 export function resumeBot(id: string) {
   return changed(() => botsApi.resume(id), upsert);
 }
 
-export async function pauseAllBots() {
-  const list = await botsApi.pauseAll();
+export async function pauseAllBots(from: BotPauseFrom = "app") {
+  const list = await botsApi.pauseAll(from);
   take(list);
   return list.bots;
 }
