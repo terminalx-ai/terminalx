@@ -1,12 +1,57 @@
 import { MANUAL_STATUSES, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
 import { compareMessageActivity } from "@/lib/messageActivity";
-import type { SessionEntry } from "@/types/session";
+import type { Project, SessionEntry, Workspace } from "@/types/session";
 
 export type SidebarSort = "updated" | "created" | "custom";
 export const canonicalProject = (path: string) => path === "/" ? path : path.replace(/\/+$/, "");
 
-/** Chats follow the project they are linked to, as in the project sidebar. */
-export function sidebarProjectOf(session: Pick<SessionEntry, "kind" | "projectPath" | "link">, chatsPath: string | null): string | null {
+const holds = (dir: string, path: string) => path === dir || path.startsWith(`${dir}/`);
+
+/**
+ * The listed project a quick chat was pointed into, its folder or one of its
+ * worktrees, with the branch checked out there; a chat is linked to the
+ * repository its agent works in the same way, and the folder never becomes a
+ * project. In its scratch folder, or pointed anywhere else, it is in none
+ * (#1464). The deepest folder that holds it wins, so a worktree kept inside
+ * its project's folder names its own branch.
+ */
+export function quickChatProject(
+  session: Pick<SessionEntry, "kind" | "projectPath" | "cwd">,
+  projects: readonly Project[],
+  chatsPath: string | null,
+  workspaces: Readonly<Record<string, Workspace[]>>,
+): { project: Project; branch: string | null } | null {
+  const cwd = canonicalProject(session.cwd);
+  if (session.kind !== "quick" || cwd === canonicalProject(session.projectPath)) return null;
+  const chats = chatsPath && canonicalProject(chatsPath);
+  let best: { depth: number; project: Project; branch: string | null } | null = null;
+  for (const project of projects) {
+    const root = canonicalProject(project.path);
+    if (project.archived || root === chats) continue;
+    const checkouts = workspaces[project.path] ?? workspaces[root] ?? [];
+    const places = [{ path: root, branch: checkouts.find((checkout) => checkout.isMain)?.branch ?? null }, ...checkouts.map((checkout) => ({ path: canonicalProject(checkout.path), branch: checkout.branch }))];
+    for (const place of places) {
+      if (!place.path || !holds(place.path, cwd) || (best && best.depth >= place.path.length)) continue;
+      best = { depth: place.path.length, project, branch: place.branch };
+    }
+  }
+  return best && { project: best.project, branch: best.branch };
+}
+
+/**
+ * Chats follow the project they are linked to, as in the project sidebar. A
+ * quick chat is in the listed project it was pointed into (`quickChatProject`),
+ * when the projects are given, else in the one it is linked to.
+ */
+export function sidebarProjectOf(
+  session: Pick<SessionEntry, "kind" | "projectPath" | "link"> & Partial<Pick<SessionEntry, "cwd">>,
+  chatsPath: string | null,
+  listed?: { projects: readonly Project[]; workspaces: Readonly<Record<string, Workspace[]>> },
+): string | null {
+  if (session.kind === "quick" && listed && session.cwd != null) {
+    const inside = quickChatProject({ kind: session.kind, projectPath: session.projectPath, cwd: session.cwd }, listed.projects, chatsPath, listed.workspaces);
+    if (inside) return canonicalProject(inside.project.path);
+  }
   if (session.kind === "quick" || canonicalProject(session.projectPath) === (chatsPath && canonicalProject(chatsPath))) {
     return session.link ? canonicalProject(session.link.path) : null;
   }

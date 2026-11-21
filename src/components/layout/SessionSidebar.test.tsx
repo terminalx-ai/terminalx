@@ -1134,6 +1134,101 @@ describe("row extras and unread reminders (PRO-179)", () => {
   });
 });
 
+describe("quick chats (#1464)", () => {
+  const scratch = (id: string) => `/store/quick/${id}`;
+  const quick = (id: string, modified: string, extra: Partial<SessionEntry> = {}) => session(id, scratch(id), modified, { kind: "quick", ...extra });
+  const checkouts = { "/repos/web": [
+    { path: "/repos/web", name: "web", branch: "main", head: "abc", isMain: true, managed: false, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 },
+    { path: "/repos/web/.worktrees/fix", name: "fix", branch: "raccoon/fix", head: "def", isMain: false, managed: true, uncommitted: 0, additions: 0, deletions: 0, unpushed: 0, ahead: 0, behind: 0 },
+  ] };
+
+  it("links a quick chat in scratch, or pointed outside every project, to nothing, and one pointed inside a project to it", async () => {
+    const { conversationLink } = await import("./SessionSidebar");
+    expect(conversationLink(quick("q1", "2026-11-01"), projects, chatsPath, checkouts)).toBeNull();
+    expect(conversationLink(quick("q2", "2026-11-01", { cwd: "/Users/me/notes" }), projects, chatsPath, checkouts)).toBeNull();
+    // A folder whose name only starts like the project's is not inside it.
+    expect(conversationLink(quick("q3", "2026-11-01", { cwd: "/repos/website" }), projects, chatsPath, checkouts)).toBeNull();
+    expect(conversationLink(quick("q4", "2026-11-01", { cwd: "/repos/web/src" }), projects, chatsPath, checkouts)).toMatchObject({ path: "/repos/web", name: "web", branch: "main" });
+    // A worktree kept inside the project's folder names its own branch.
+    expect(conversationLink(quick("q5", "2026-11-01", { cwd: "/repos/web/.worktrees/fix" }), projects, chatsPath, checkouts)).toMatchObject({ path: "/repos/web", name: "web", branch: "raccoon/fix" });
+    // A project taken out of TerminalX does not take its quick chats back.
+    expect(conversationLink(quick("q6", "2026-11-01", { cwd: "/repos/web" }), [{ ...projects[0], archived: true }], chatsPath, checkouts)).toBeNull();
+  });
+
+  it("makes no project of a quick chat: it is under Chats, or under the listed project it works in, archived ones too", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const entries = [
+      quick("scratch", "2026-11-04"),
+      quick("outside", "2026-11-03", { cwd: "/Users/me/notes" }),
+      quick("inside", "2026-11-02", { cwd: "/repos/web/.worktrees/fix" }),
+      quick("old", "2026-11-01", { archived: true }),
+      quick("old-inside", "2026-11-01", { archived: true, cwd: "/repos/web" }),
+      session("work", "/repos/web", "2026-11-01"),
+    ];
+    const { groups, chats, archivedChats } = groupConversations(entries, projects, chatsPath, checkouts, null, true, true);
+    expect(groups.map((group) => group.path)).toEqual(["/repos/web"]);
+    expect(groups[0].sessions.map((entry) => entry.id)).toEqual(["inside", "work"]);
+    expect(groups[0].branches.inside).toBe("raccoon/fix");
+    expect(groups[0].archived.map((entry) => entry.id)).toEqual(["old-inside"]);
+    expect(chats.map((entry) => entry.id)).toEqual(["scratch", "outside"]);
+    expect(archivedChats.map((entry) => entry.id)).toEqual(["old"]);
+  });
+
+  it("never brings a saved order's scratch path back as an empty project", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const order = { custom: true, sessions: ["scratch"], projects: [scratch("scratch"), "/repos/web"], revision: 1 };
+    const { groups, chats } = groupConversations([quick("scratch", "2026-11-01")], projects, chatsPath, checkouts, null, true, false, "updated", order);
+    expect(groups.map((group) => group.path)).toEqual(["/repos/web"]);
+    expect(chats.map((entry) => entry.id)).toEqual(["scratch"]);
+  });
+
+  it("puts a quick chat another session started with its parent's project while the sidebar nests children", async () => {
+    const { groupConversations } = await import("./SessionSidebar");
+    const parent = session("lead", "/repos/web", "2026-11-01");
+    const helper = quick("helper", "2026-11-02", { parent: { sessionId: "lead" } });
+    expect(groupConversations([parent, helper], projects, chatsPath, checkouts, null, true, false, "updated", undefined, true).groups[0].sessions.map((entry) => entry.id)).toEqual(["helper", "lead"]);
+    // Off, or with its parent not in the list, it is a chat like any other.
+    expect(groupConversations([parent, helper], projects, chatsPath, checkouts, null, true, false).chats.map((entry) => entry.id)).toEqual(["helper"]);
+    expect(groupConversations([helper], projects, chatsPath, checkouts, null, true, false, "updated", undefined, true).chats.map((entry) => entry.id)).toEqual(["helper"]);
+    // Parents that loop nest nothing.
+    const a = quick("a", "2026-11-02", { parent: { sessionId: "b" } });
+    const b = quick("b", "2026-11-01", { parent: { sessionId: "a" } });
+    expect(groupConversations([a, b], projects, chatsPath, checkouts, null, true, false, "updated", undefined, true).chats.map((entry) => entry.id)).toEqual(["a", "b"]);
+  });
+
+  it("gives a quick chat pointed into a project a row of its own, by its title, with the branch's sessions as tabs", async () => {
+    prefs.setPrefs({ branchSessions: "tabs" });
+    await boot([
+      session("here", "/repos/web", "2026-11-01T10:00:00Z"),
+      quick("older", "2026-11-01T09:00:00Z", { cwd: "/repos/web" }),
+      quick("newer", "2026-11-01T11:00:00Z", { cwd: "/repos/web/src" }),
+    ]);
+    mount();
+    const web = screen.getByRole("group", { name: "web" });
+    const rows = [...web.querySelectorAll("[data-row-sessions]")].map((row) => row.getAttribute("data-row-sessions"));
+    expect(rows).toEqual(["newer", "here", "older"]);
+    expect(within(web).getByRole("button", { name: "Talk older" })).toBeTruthy();
+    expect(within(web).getByRole("button", { name: "Talk newer" })).toBeTruthy();
+    expect(within(web).getByRole("button", { name: "main, Talk here" })).toBeTruthy();
+  });
+
+  it("lists quick chats by title under Chats, never a group named by an id, and says where each runs in its tooltip", async () => {
+    const id = "01a1ce55-efc8-7be2-9a00-5f1e2a3b4c5d";
+    const named = quick(id, "2026-11-03", { title: "Review the diff" });
+    await boot([
+      { ...named, tabs: named.tabs.map((tab) => ({ ...tab, title: "Review the diff" })) },
+      quick("pointed", "2026-11-02", { cwd: "/Users/me/notes" }),
+      quick("pinned", "2026-11-01", { pinned: true }),
+      session("here", "/repos/web", "2026-11-01"),
+    ]);
+    mount();
+    expect(screen.queryByRole("group", { name: id })).toBeNull();
+    expect(screen.getByTestId("conversation-list").textContent).not.toContain(id);
+    expect(rowsIn(screen.getByRole("region", { name: "Chats" }))).toEqual(["Scratch folder · Review the diff", "notes · Talk pointed"]);
+    expect(screen.getAllByRole("group").map((group) => group.getAttribute("aria-label")).filter(Boolean)).not.toContain(id);
+  });
+});
+
 describe("custom order (PRO-169)", () => {
   it("uses the saved order inside the archive and restores recency when off", async () => {
     const { archivedConversations, groupConversations } = await import("./SessionSidebar");

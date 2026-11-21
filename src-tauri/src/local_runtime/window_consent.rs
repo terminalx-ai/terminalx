@@ -145,6 +145,14 @@ pub(crate) fn attached_in_place_of(gone: &str, attached: &str) {
     }
 }
 
+/// Offer Restart runtime for `runtime`, which pinned a key other than this
+/// window's (the Keychain's was replaced since it started): registering again
+/// cannot repair that, so the window's notice offers the restart, as
+/// Settings → Machines would (PRO-507). The offer, as the notice shows it.
+pub(crate) fn offer_restart(runtime: &Desktop) -> String {
+    offer(RestartRequired { epoch: runtime.epoch().to_owned(), work: in_use(runtime) }).to_string()
+}
+
 #[cfg(test)]
 pub(crate) fn offer_for_test(required: RestartRequired) {
     let _ = offer(required);

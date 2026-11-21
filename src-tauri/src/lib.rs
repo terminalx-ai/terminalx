@@ -929,6 +929,8 @@ pub fn run() {
             commands::tab_state,
             commands::sidebar_order,
             commands::set_sidebar_order,
+            commands::cloud_pins,
+            commands::edit_cloud_pins,
             commands::set_tab_layout,
             commands::tab_resume_conversation,
             commands::pane_agents,

@@ -317,18 +317,24 @@ pub struct AppendedPrompt {
 pub const APPENDED_PROMPT_LIMIT: usize = 127 * 1024;
 
 impl AppendedPrompt {
-    /// Refused when the prompt is longer than [`APPENDED_PROMPT_LIMIT`]: the
-    /// launch would fail with no word of why (`E2BIG`) on Linux, so it is
-    /// not made, and the reader is told what to shorten: for a tab that
-    /// works for a bot (`bot`), its role and memory too; for any other, the
-    /// workspace's prompts alone.
-    pub fn fits_for(&self, bot: bool) -> Result<()> {
-        let longest = self.value.as_ref().map_or(0, |value| APPENDED_PROMPT_ENV.len() + 1 + value.len()).max(self.args.len());
-        let shorten = if bot { "Shorten the workspace's prompts, or the bot's ROLE.md or MEMORY.md." } else { "Shorten the workspace's prompts in its settings." };
+    /// Whether one launch can carry the prompt: no longer than [`APPENDED_PROMPT_LIMIT`].
+    pub fn fits(&self) -> bool {
+        self.longest() <= APPENDED_PROMPT_LIMIT
+    }
+
+    fn longest(&self) -> usize {
+        self.value.as_ref().map_or(0, |value| APPENDED_PROMPT_ENV.len() + 1 + value.len()).max(self.args.len())
+    }
+
+    /// Refused when a bot's chat is told more than [`APPENDED_PROMPT_LIMIT`]:
+    /// the launch would fail with no word of why (`E2BIG`) on Linux, so it
+    /// is not made, and the reader is told what to shorten. Only what Bots
+    /// adds is held to it (`session::cli_prompt`, PRO-507).
+    pub fn fits_for_bot(&self) -> Result<()> {
         anyhow::ensure!(
-            longest <= APPENDED_PROMPT_LIMIT,
-            "What this agent is told besides your messages comes to {} KB, more than the {} KB one launch can carry. {shorten}",
-            longest.div_ceil(1024),
+            self.fits(),
+            "What this agent is told besides your messages comes to {} KB, more than the {} KB one launch can carry. Shorten the workspace's prompts, or the bot's ROLE.md or MEMORY.md.",
+            self.longest().div_ceil(1024),
             APPENDED_PROMPT_LIMIT / 1024
         );
         Ok(())
@@ -1062,19 +1068,17 @@ mod tests {
     fn a_prompt_past_the_argument_limit_is_refused() {
         let room = APPENDED_PROMPT_LIMIT - APPENDED_PROMPT_ENV.len() - 1;
         for shell in [LaunchShell::Posix, LaunchShell::Csh] {
-            assert!(prompt_args_for(shell, "claude", &[Some(&"x".repeat(room))]).fits_for(false).is_ok());
-            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits_for(true).unwrap_err().to_string();
+            assert!(prompt_args_for(shell, "claude", &[Some(&"x".repeat(room))]).fits_for_bot().is_ok());
+            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits_for_bot().unwrap_err().to_string();
             assert!(error.contains("ROLE.md or MEMORY.md") && error.contains("127 KB"), "{error}");
-            // A tab no bot works for hears of nothing Bots adds (PRO-489 review, low).
-            let error = prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits_for(false).unwrap_err().to_string();
-            assert!(error.contains("workspace's prompts in its settings") && !error.contains("ROLE.md") && !error.contains("bot"), "{error}");
+            assert!(!prompt_args_for(shell, "claude", &[Some(&"x".repeat(room + 1))]).fits());
         }
         // Codex's value is TOML, and it is that length which counts: a control character is always escaped (`\u0001`).
         let escaped = "\u{1}".repeat(room / 4);
         let codex = prompt_args_for(LaunchShell::Posix, "codex", &[Some(&escaped)]);
-        assert!(codex.value.as_ref().unwrap().len() > room && codex.fits_for(true).is_err());
-        assert!(prompt_args_for(LaunchShell::Windows, "claude", &[Some(&"x".repeat(APPENDED_PROMPT_LIMIT))]).fits_for(false).is_err());
-        assert!(AppendedPrompt::default().fits_for(false).is_ok());
+        assert!(codex.value.as_ref().unwrap().len() > room && codex.fits_for_bot().is_err());
+        assert!(!prompt_args_for(LaunchShell::Windows, "claude", &[Some(&"x".repeat(APPENDED_PROMPT_LIMIT))]).fits());
+        assert!(AppendedPrompt::default().fits_for_bot().is_ok());
     }
 
     /// Text the agent is told reaches it word for word through every login

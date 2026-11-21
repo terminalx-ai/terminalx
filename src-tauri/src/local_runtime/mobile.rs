@@ -759,8 +759,10 @@ impl ApprovalPhone {
 ///   resolves setup and archive scripts and the archive timeout from them.
 /// - `bots`: `bots`, the reads and the owner's acts a phone makes on the bots
 ///   (`bots::phone`, PRO-479). The desktop names it only while Bots is on.
+/// - `pin`: `pin` and `cloudPin`, pinning a session or a cloud project as the
+///   sidebar does (#1403).
 pub fn features() -> Value {
-    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1, "bots": 1 })
+    serde_json::json!({ "sendIds": 1, "sessionControls": 1, "sessionCreate": 1, "macSettings": 1, "terminal": 1, "closeTab": 1, "layeredConfiguration": 2, "questions": 1, "sessionAccounts": 1, "bots": 1, "pin": 1 })
 }
 
 /// What a runtime too old to name its features serves, by its version
@@ -914,6 +916,27 @@ pub fn execute(manager: &crate::session::SessionManager, lifetime: &Lifetime, me
             if !crate::bots::phone::OPERATIONS.contains(&operation) { bail!(UNSUPPORTED); }
             if crate::bots::phone::acts(operation) { grant.driver()?; }
             crate::bots::phone::call(manager, operation, &params)
+        }
+        // Pinning as the sidebar does (#1403): the windows, and every other
+        // phone, follow at once. Only a phone that may drive sessions pins.
+        "pin" => {
+            grant.driver()?;
+            let pinned = params["pinned"].as_bool().context("pinned must be true or false")?;
+            let session = string("sessionId")?;
+            if !crate::store::index::load()?.iter().any(|entry| entry.id == session) {
+                bail!("This session is no longer on this Mac.");
+            }
+            let patch = crate::session_ops::SessionPatch { pinned: Some(pinned), ..Default::default() };
+            let updated = crate::session_ops::update_session_meta(session, &patch).map_err(anyhow::Error::msg)?;
+            manager.sink().emit("session_updated", &updated);
+            Ok(serde_json::json!({"sessionId": updated.id, "pinned": updated.pinned}))
+        }
+        "cloudPin" => {
+            grant.driver()?;
+            let pinned = params["pinned"].as_bool().context("pinned must be true or false")?;
+            let pins = crate::store::cloud_pins::set(string("orgId")?, string("identity")?, pinned)?;
+            manager.sink().emit(crate::store::cloud_pins::CHANGED, &pins);
+            Ok(serde_json::json!({"orgs": pins.orgs}))
         }
         "setSettings" => {
             grant.driver()?;
