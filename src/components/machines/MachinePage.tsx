@@ -13,6 +13,7 @@ import { MachineIcon, MachineStateMark, machineTone, routeText, toneText } from 
 import { MachinePageAgents } from "./MachinePageAgents";
 import { MachinePageProjects } from "./MachinePageProjects";
 import { MachinePageResources } from "./MachinePageResources";
+import { MachinePageHosting } from "./MachinePageHosting";
 import { RemoveMachineDialog } from "./RemoveMachineDialog";
 import { MachineVersionBanner } from "./MachineUpdate";
 import { keyLabel, osLabel, shortDate } from "./machineText";
@@ -99,6 +100,8 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
   const setupGranted = machineHasFeature(view.granted ?? [], "machine/4") && !!view.granted;
   // Adding and removing projects need `machine/6`; without it the projects are listed and nothing is offered.
   const projectsGranted = machineHasFeature(view.granted ?? [], "machine/6") && !!view.granted;
+  // Choosing where it listens needs `machine/9` and a computer that manages it; without them it is shown only.
+  const listenGranted = !!view.granted && view.granted.includes("machine/9") && view.client?.connection.state === "connected" && view.client.connection.authority === "manage";
   return (
     <div className="grid gap-6" data-testid="machine-page" data-machine={machineId}>
       <div className="grid gap-5">
@@ -147,6 +150,7 @@ export function MachinePage({ machineId, onBack }: { machineId: string; onBack: 
       <MachinePageAgents machine={machine} client={view.client} connected={connected} setupGranted={setupGranted} />
       <MachinePageProjects machine={machine} client={view.client} connected={connected} manage={projectsGranted} projects={catalog.projects} ready={catalog.entry?.source === "live"} />
       <MachinePageResources name={machine.name} client={view.client} connected={connected} />
+      <MachinePageHosting name={machine.name} client={view.client} connected={connected} manage={listenGranted} />
       <section className="flex items-center gap-6 border-t border-hairline pt-4" data-testid="machine-remove" aria-label="Remove this machine">
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-medium">Remove this machine</div>

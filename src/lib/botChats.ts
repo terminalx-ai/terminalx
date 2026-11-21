@@ -53,6 +53,13 @@ export interface BotChats {
   chats: SessionEntry[];
   /** Sessions that work for this bot without being its chats (started by a chat, or by what one started), newest first. */
   startedBy: SessionEntry[];
+  /** The runs of its duties (PRO-471), newest first: its sessions too, listed apart from the chats. */
+  dutyRuns: SessionEntry[];
+}
+
+/** Whether `session` is a run of one of its bot's duties. */
+export function isDutyRun(session: Pick<SessionEntry, "botDuty">): boolean {
+  return !!session.botDuty && typeof session.botDuty.id === "string";
 }
 
 const newest = (a: SessionEntry, b: SessionEntry) => (b.modified || b.created).localeCompare(a.modified || a.created);
@@ -63,12 +70,13 @@ export function botChats(sessions: readonly SessionEntry[], botId: string): BotC
   const own = sessions.filter((session) => botOf(session) === botId && !session.archived);
   const ids = new Set(own.map((session) => session.id));
   const home = own.filter((session) => session.bot?.home).sort(newestMade);
-  const others = own.filter((session) => !session.bot?.home).sort(newest);
+  const others = own.filter((session) => !session.bot?.home && !isDutyRun(session)).sort(newest);
+  const dutyRuns = own.filter((session) => !session.bot?.home && isDutyRun(session)).sort(newest);
   // Marked by the app as working for the bot (`botStarted`), or, from before the mark, started by one of its chats.
   const startedBy = sessions
     .filter((session) => !session.archived && !ids.has(session.id) && (actingBotOf(session) === botId || (!!session.parent && ids.has(session.parent.sessionId))))
     .sort(newest);
-  return { chats: [...home, ...others], startedBy };
+  return { chats: [...home, ...others], startedBy, dutyRuns };
 }
 
 /** The bot's home chat, made again by the app when it is missing. */

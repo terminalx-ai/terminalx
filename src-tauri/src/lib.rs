@@ -161,6 +161,8 @@ mod computer_targets;
 pub mod local_vm;
 mod machine_name;
 mod direct_endpoints;
+/// Where TCP 6768 listens and who it answers (PRO-487).
+pub mod listen;
 mod pairing_fingerprint;
 mod memory_baseline;
 mod merged_cleanup;
@@ -388,6 +390,8 @@ pub fn run() {
     let workspace_config = Arc::new(organization_workspace_config::WorkspaceConfigService::new(account.clone()));
     let organization_environment = Arc::new(organization_environment::OrganizationEnvironmentService::new(account.clone()));
     let cloud_remote = cloud_remote::CloudRemote::new(account.clone(), cloud_workspaces.clone(), cloud_agents.clone());
+    machines.set_account(account.clone());
+    machines.set_phones(pairing.clone());
     let machine_connections = machines::connect::MachineConnections::new(machines.clone(), account.clone());
     let account_machines = Arc::new(machines::account::AccountPairing::new(machines.clone(), account.clone(), pairing.clone()));
     // The resource directory is only known once Tauri is up; the service
@@ -777,6 +781,7 @@ pub fn run() {
             commands::pairing_status,
             machines::machines_host_status,
             machines::machines_set_allow_operating,
+            machines::machines_set_listen,
             machines::machines_create_code,
             machines::machines_approve,
             machines::machines_decline,
@@ -854,7 +859,24 @@ pub fn run() {
             commands::bot_home_chat,
             commands::bot_new_chat,
             commands::bot_dismiss_resume,
+            commands::bot_items,
+            commands::bot_item,
+            commands::bots_needs_you,
+            commands::bot_item_answer,
+            commands::bot_item_comment,
+            commands::bot_item_give,
+            commands::bot_item_stop,
+            commands::bot_item_resend,
+            commands::bot_item_reopen,
             commands::bot_spent_today,
+            commands::bot_duties,
+            commands::bot_duty_save,
+            commands::bot_duty_switch,
+            commands::bot_duty_delete,
+            commands::bot_duty_duplicate,
+            commands::bot_duty_run,
+            commands::bot_duty_try_check,
+            commands::bot_quiet_hours,
             commands::session_summaries,
             commands::stats_usage_snapshot,
             commands::app_activity_summary,

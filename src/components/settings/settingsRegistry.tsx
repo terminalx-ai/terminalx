@@ -348,6 +348,12 @@ export const SETTINGS_ROWS = [
     storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.allowOperating" },
   }),
   defineSetting({
+    id: "machines.listen", section: "machines", title: "Where this Mac listens",
+    description: "Relay only opens no port. Tailscale, Local network and All interfaces open TCP 6768 on those addresses for paired computers and phones. Callers from public addresses are refused unless you allow them.",
+    searchTerms: ["machines", "listen", "listening", "port", "6768", "relay", "tailscale", "local network", "lan", "all interfaces", "public", "address", "bind", "firewall", "root", "sudo"], scope: "user",
+    storage: { kind: "file", location: "$TERMINALX_HOME/settings.json#machines.listen, machines.allowPublic" }, layout: "content",
+  }),
+  defineSetting({
     id: "machines.thisMac", section: "machines", title: "This Mac",
     description: "The name other computers see for this Mac (the same as Account → This Mac’s name), and the label of its key.",
     searchTerms: ["machines", "this", "mac", "name", "rename", "fingerprint", "key"], scope: "user",

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
+import { BotDuties } from "@/components/bots/BotDuties";
 import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
@@ -10,11 +11,14 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
 import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
+import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { conversationTitle, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
+import { BotHome } from "./BotHome";
+import { BotItemPage } from "./BotItemPage";
 
 export type BotTab = "home" | "chat" | "duties" | "role" | "settings";
 
@@ -27,9 +31,7 @@ const TABS: { id: BotTab; label: string; icon: typeof Home }[] = [
 ];
 
 /** What a tab this ticket does not fill says, until its own ticket does. */
-const COMING: Record<Exclude<BotTab, "chat" | "role">, string> = {
-  home: "The bot's work list (what needs you, what is in progress and what is planned) is coming.",
-  duties: "Duties, the schedules and events that wake the bot, are coming.",
+const COMING: Record<Exclude<BotTab, "chat" | "home" | "duties" | "role">, string> = {
   settings: "The bot's settings (its agent, where it runs, what it works in and its access) are coming.",
 };
 
@@ -62,12 +64,26 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   const store = useSessionStore();
   const [tab, setTab] = useState<BotTab>("chat");
   const bot = bots.bots.find((value) => value.id === botId) ?? null;
-  const { chats, startedBy } = useMemo(() => botChats(store.sessions, botId), [store.sessions, botId]);
+  const { chats, startedBy, dutyRuns } = useMemo(() => botChats(store.sessions, botId), [store.sessions, botId]);
   // A session one of the bot's chats started, opened here rather than in its project.
   const [startedId, setStartedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => setStartedId(null), [chatId]);
+  // The Home tab's open item (PRO-469); another bot opens on its own Home.
+  const [item, setItem] = useState<number | null>(null);
+  useEffect(() => setItem(null), [botId]);
+  const opening = useOpeningItem(botId);
+  useEffect(() => {
+    if (opening === null) return;
+    setTab("home");
+    setItem(opening);
+    tookOpening();
+  }, [opening]);
+  const needs = useNeedsYou();
+  const asking = needsYouCount(needs, botId);
+  const trouble = needsYouTrouble(needs, useNeedsYouError(), botId);
+  const working = needs?.counts.find((count) => count.botId === botId)?.inProgress ?? 0;
 
   // The home chat is made at hire; a bot hired before, or whose home chat was archived, gets one when it is opened.
   const hasHome = chats.some((chat) => chat.bot?.home);
@@ -99,9 +115,9 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
     return () => { live = false; };
   }, [botId, botKnown, spentKey, day]);
 
-  const open = startedBy.find((chat) => chat.id === startedId) ?? chats.find((chat) => chat.id === chatId) ?? chats[0] ?? null;
+  const open = startedBy.find((chat) => chat.id === startedId) ?? [...chats, ...dutyRuns].find((chat) => chat.id === chatId) ?? chats[0] ?? null;
   const select = (chat: SessionEntry) => {
-    if (chats.includes(chat)) selectSession(chat.id);
+    if (chats.includes(chat) || dutyRuns.includes(chat)) selectSession(chat.id);
     else setStartedId(chat.id);
   };
 
@@ -129,7 +145,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-chat" aria-label={`${bot.name}, ${bot.roleTitle}`}>
       <TitleStrip sidebarOpen={sidebarOpen} onToggleSidebar={onToggleSidebar} inset={titlebarInset} />
-      <BotHeader bot={bot} spent={spentTodayLabel(spent?.usd ?? null)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
+      <BotHeader bot={bot} working={working} asking={asking} spent={spentTodayLabel(spent?.usd ?? null)} busy={busy} onPause={() => act(() => pauseBot(bot.id))} onResume={() => act(() => resumeBot(bot.id))} harnessName={store.harnesses.find((harness) => harness.id === bot.harness)?.name ?? bot.harness} />
       <div role="tablist" aria-label={`${bot.name}'s view`} className="flex shrink-0 items-center gap-1 border-b border-hairline px-5">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
@@ -137,17 +153,22 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
             type="button"
             role="tab"
             aria-selected={tab === id}
-            onClick={() => setTab(id)}
+            onClick={() => {
+              setTab(id);
+              if (id === "home") setItem(null);
+            }}
             className={cn("-mb-px flex h-9 items-center gap-1.5 border-b-2 px-2 text-[13px]", tab === id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}
           >
             <Icon className="size-3.5" /> {label}
+            {id === "home" && trouble && <span className="text-[11px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-home-count-error">!</span>}
+            {id === "home" && !trouble && asking > 0 && <span className="text-[11px] font-medium text-accent" aria-label={`${asking} need you`} data-testid="bot-home-count">{asking}</span>}
           </button>
         ))}
       </div>
       {error && <MachineHostError error={error} onRestarted={() => setError(null)} onFailed={setError} className="shrink-0 px-5 py-2 text-xs" />}
       {tab === "chat" ? (
         <div role="tabpanel" aria-label="Chat" className="flex min-h-0 flex-1">
-          <ChatList bot={bot} chats={chats} startedBy={startedBy} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
+          <ChatList bot={bot} chats={chats} startedBy={startedBy} dutyRuns={dutyRuns} openId={open?.id ?? null} onOpen={select} onNewChat={newChat} busy={busy} />
           <section className="flex min-h-0 min-w-0 flex-1 flex-col">
             {bot.paused && (
               <PausedBanner bot={bot} busy={busy} onResume={() => act(() => resumeBot(bot.id))} onDismiss={() => act(() => botsApi.dismissResume(bot.id))} />
@@ -164,6 +185,15 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
               )
             )}
           </section>
+        </div>
+      ) : tab === "home" ? (
+        <div role="tabpanel" aria-label="Home" className="flex min-h-0 flex-1 flex-col">
+          {item !== null ? <BotItemPage bot={bot} number={item} onBack={() => setItem(null)} /> : <BotHome bot={bot} onOpenItem={setItem} />}
+        </div>
+      ) : tab === "duties" ? (
+        <div role="tabpanel" aria-label="Duties" className="flex min-h-0 flex-1 flex-col">
+          {/* A duty's run opens on Chat, among the bot's duty runs. */}
+          <BotDuties key={bot.id} bot={bot} onOpenSession={(sessionId) => { selectSession(sessionId); setTab("chat"); }} />
         </div>
       ) : tab === "role" ? (
         <div role="tabpanel" aria-label="Role and memory" className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
@@ -191,7 +221,13 @@ function TitleStrip({ sidebarOpen, onToggleSidebar, inset }: { sidebarOpen: bool
   );
 }
 
-function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: Bot; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
+/** "Working on 2 things · 2 need you", or Ready. */
+function workLine(working: number, asking: number): string {
+  const parts = [working > 0 ? `Working on ${working === 1 ? "1 thing" : `${working} things`}` : "", asking > 0 ? `${asking} need${asking === 1 ? "s" : ""} you` : ""].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Ready";
+}
+
+function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, onResume }: { bot: Bot; working: number; asking: number; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
   const full = effectiveAccess(bot.access) === "full";
   return (
     <div data-tauri-drag-region="deep" className="flex shrink-0 flex-wrap items-center gap-3 px-5 pt-4 pb-3">
@@ -201,9 +237,9 @@ function BotHeader({ bot, spent, busy, harnessName, onPause, onResume }: { bot: 
           <h1 className="truncate text-lg font-semibold text-foreground">{bot.name}</h1>
           <span className="truncate text-[13px] text-muted-foreground">{bot.roleTitle}</span>
         </div>
-        <p className={cn("flex min-w-0 items-center gap-1.5 text-[12.5px]", bot.paused ? "text-warning" : "text-muted-foreground")}>
-          {bot.paused ? <Pause className="size-3.5 shrink-0" /> : <CircleDot className="size-3.5 shrink-0" />}
-          <span className="truncate">{bot.paused ? `Paused ${relativeTime(bot.paused.at)}` : "Ready"}</span>
+        <p className={cn("flex min-w-0 items-center gap-1.5 text-[12.5px]", bot.paused || asking > 0 ? "text-warning" : "text-muted-foreground")}>
+          {bot.paused ? <Pause className="size-3.5 shrink-0" /> : working > 0 ? <Loader2 className="size-3.5 shrink-0" /> : <CircleDot className="size-3.5 shrink-0" />}
+          <span className="truncate" data-testid="bot-work-line">{bot.paused ? `Paused ${relativeTime(bot.paused.at)}` : workLine(working, asking)}</span>
         </p>
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
@@ -248,10 +284,11 @@ function PausedBanner({ bot, busy, onResume, onDismiss }: { bot: Bot; busy: bool
   );
 }
 
-function ChatList({ bot, chats, startedBy, openId, onOpen, onNewChat, busy }: {
+function ChatList({ bot, chats, startedBy, dutyRuns = [], openId, onOpen, onNewChat, busy }: {
   bot: Bot;
   chats: SessionEntry[];
   startedBy: SessionEntry[];
+  dutyRuns?: SessionEntry[];
   openId: string | null;
   onOpen: (chat: SessionEntry) => void;
   onNewChat: () => void;
@@ -269,6 +306,11 @@ function ChatList({ bot, chats, startedBy, openId, onOpen, onNewChat, busy }: {
       {startedBy.length > 0 && (
         <ChatGroup label={`Started by ${bot.name}`}>
           {startedBy.map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
+        </ChatGroup>
+      )}
+      {dutyRuns.length > 0 && (
+        <ChatGroup label="Duty runs">
+          {dutyRuns.slice(0, 20).map((chat) => <ChatRow key={chat.id} chat={chat} selected={chat.id === openId} onOpen={onOpen} home={false} />)}
         </ChatGroup>
       )}
     </nav>

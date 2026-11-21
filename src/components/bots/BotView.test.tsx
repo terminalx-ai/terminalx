@@ -26,6 +26,7 @@ vi.mock("@/lib/sessions", () => ({
 }));
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume, spentToday: mocks.spentToday }, errorMessage: (error: unknown) => String(error) }));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
+vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: ({ bot }: { bot: Bot }) => <div data-testid="bot-duties">{bot.name}'s duties</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/bots/BotRoleMemory", () => ({
   BotRoleMemory: ({ bot, bots, unreadable }: { bot: Bot; bots: Bot[]; unreadable: number }) => <div data-testid="bot-role-memory">{`${bot.id} of ${bots.length}, ${unreadable} unreadable`}</div>,
@@ -67,7 +68,8 @@ describe("a bot's view (PRO-468)", () => {
     expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Home", "Chat", "Duties", "Role and memory", "Settings"]);
     expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
     fireEvent.click(screen.getByRole("tab", { name: "Duties" }));
-    expect(screen.getByText(/Duties, the schedules and events that wake the bot, are coming/)).toBeTruthy();
+    // Duties are filled since PRO-471.
+    expect(screen.getByTestId("bot-duties").textContent).toBe("Atlas's duties");
     expect(screen.queryByTestId("session-view")).toBeNull();
   });
 

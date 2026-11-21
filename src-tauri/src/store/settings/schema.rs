@@ -35,6 +35,14 @@ pub(crate) enum Rule {
     Cap { max: f64 },
     /// A string, or null for turned off.
     StringOrNull,
+    /// A string or null; the schema lists the words this build knows. Any
+    /// other string is still accepted, and read as the safest of them
+    /// (`machines.listen`: a mistyped word opens no port), where refusing it
+    /// would fall back to the previous or default value instead.
+    /// The words are read by the schema generator only, which the tests run.
+    KnownWords(#[cfg_attr(not(test), allow(dead_code))] &'static [&'static str]),
+    /// True, false, or null for not answered.
+    BoolOrNull,
 }
 
 pub(crate) struct Constraint {
@@ -106,6 +114,9 @@ pub(crate) const CONSTRAINTS: &[Constraint] = &[
     whole("floating.retentionDays", 0, super::MAX_RETENTION_DAYS, "expected days from 0 to 3650"),
     // Turned off is written as null, and null is not "use the default".
     Constraint { key: "floating.shortcut", rule: Rule::StringOrNull, why: "expected a string" },
+    // PRO-487: where a machine listens, and whether public callers are answered. Unset until someone chooses.
+    Constraint { key: "machines.listen", rule: Rule::KnownWords(&["relay", "tailscale", "lan", "all"]), why: "expected one of relay, tailscale, lan or all" },
+    Constraint { key: "machines.allowPublic", rule: Rule::BoolOrNull, why: "expected true or false" },
 ];
 
 pub(crate) fn constraint(key: &str) -> Option<&'static Constraint> {
@@ -127,7 +138,8 @@ impl Rule {
             Rule::Intervals(values) => value.as_u64().is_some_and(|n| values.iter().any(|v| u64::from(*v) == n)),
             Rule::Whole { min, max } => value.as_u64().is_some_and(|n| (u64::from(*min)..=u64::from(*max)).contains(&n)),
             Rule::Cap { max } => super::Cap::from_value(value).is_some_and(|cap| cap.at().is_none_or(|v| v.is_finite() && v > 0.0 && v <= *max)),
-            Rule::StringOrNull => value.is_string() || value.is_null(),
+            Rule::StringOrNull | Rule::KnownWords(_) => value.is_string() || value.is_null(),
+            Rule::BoolOrNull => value.is_boolean() || value.is_null(),
         }
     }
 }
@@ -170,6 +182,12 @@ pub(crate) mod generator {
                     {"type": "string", "pattern": "^\\s*[Nn][Oo][Nn][Ee]\\s*$", "description": "No limit."},
                 ]}),
                 Rule::StringOrNull => json!({"type": ["string", "null"]}),
+                Rule::KnownWords(words) => {
+                    let mut choices: Vec<Value> = words.iter().map(|word| json!(word)).collect();
+                    choices.push(Value::Null);
+                    json!({"type": ["string", "null"], "enum": choices})
+                }
+                Rule::BoolOrNull => json!({"type": ["boolean", "null"]}),
             }
         }
     }
@@ -332,6 +350,14 @@ mod tests {
         super::super::file::check(&json!({"orchestrator": {"budgetDollars": "none", "windowCeiling": 100}})).unwrap();
         assert!(super::super::file::check(&json!({"orchestrator": {"windowCeiling": 0}})).is_err());
         assert_eq!(schema_at(&schema, &["floating", "shortcut"])["type"], json!(["string", "null"]));
+        // PRO-487: where a machine listens. The schema lists the choices; the file is not refused for
+        // another word (it reads as "relay", which opens no port), only for another type.
+        assert_eq!(schema_at(&schema, &["machines", "listen"])["enum"], json!(["relay", "tailscale", "lan", "all", null]));
+        for ok in [json!("lan"), json!("everywhere"), Value::Null] { super::super::file::check(&json!({"machines": {"listen": ok}})).unwrap(); }
+        assert!(super::super::file::check(&json!({"machines": {"listen": 4}})).unwrap_err().to_string().contains("machines.listen"));
+        assert_eq!(schema_at(&schema, &["machines", "allowPublic"])["type"], json!(["boolean", "null"]));
+        for ok in [json!(true), json!(false), Value::Null] { super::super::file::check(&json!({"machines": {"allowPublic": ok}})).unwrap(); }
+        assert!(super::super::file::check(&json!({"machines": {"allowPublic": "yes"}})).unwrap_err().to_string().contains("machines.allowPublic"));
         // The defaults are valid, and every key of them is described by the schema.
         super::super::file::check(&TEMPLATE).unwrap();
         for name in TEMPLATE.as_object().unwrap().keys() { assert!(schema["properties"].get(name).is_some(), "{name}"); }

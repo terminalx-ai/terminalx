@@ -6307,10 +6307,114 @@ pub async fn bot_dismiss_resume(state: State<'_, AppState>, id: String) -> CmdRe
     bots_call(state, "dismissResume", serde_json::json!({"id": id})).await
 }
 
+/// A bot's work items, newest first (PRO-469).
+#[tauri::command]
+pub async fn bot_items(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "items", serde_json::json!({"id": id})).await
+}
+
+/// One work item with its activity.
+#[tauri::command]
+pub async fn bot_item(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "item", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// What waits on the owner across the bots: items that ask, and question cards in their sessions.
+#[tauri::command]
+pub async fn bots_needs_you(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "needsYou", serde_json::json!({})).await
+}
+
+/// The owner answers an item's question: one of its answers by index, or their own words.
+/// `asked` is when the question they saw was asked.
+#[tauri::command]
+pub async fn bot_item_answer(state: State<'_, AppState>, id: String, number: u64, answer: Option<u64>, text: Option<String>, question: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemAnswer", serde_json::json!({"id": id, "number": number, "answer": answer, "text": text, "question": question})).await
+}
+
+#[tauri::command]
+pub async fn bot_item_comment(state: State<'_, AppState>, id: String, number: u64, text: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemComment", serde_json::json!({"id": id, "number": number, "text": text})).await
+}
+
+/// "Give <bot> work": a new item the owner asked for, told to the bot in its home chat.
+#[tauri::command]
+pub async fn bot_item_give(state: State<'_, AppState>, id: String, title: String, summary: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemGive", serde_json::json!({"id": id, "title": title, "summary": summary})).await
+}
+
+/// Stop this item: its sessions stop and it is dropped.
+#[tauri::command]
+pub async fn bot_item_stop(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemStop", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// Reopen a done or dropped item: the owner's act, told to the bot.
+#[tauri::command]
+pub async fn bot_item_reopen(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemReopen", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// Send again the owner's messages about an item that did not reach the bot's home chat.
+#[tauri::command]
+pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
+}
+
 /// What a bot's sessions spent today, at Stats' prices (PRO-468).
 #[tauri::command]
 pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
     bots_call(state, "spentToday", serde_json::json!({"id": id})).await
+}
+
+// A bot's duties (PRO-471). The duties themselves arrive as automations
+// (`automations_changed`); these change them, each through the window's own
+// path, which carries a person's proof for what gives the bot more.
+
+/// The bot's quiet hours and each of its duties' notes.
+#[tauri::command]
+pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "duties", serde_json::json!({"id": id})).await
+}
+
+/// Add a duty (`duty_id` absent) or change one.
+#[tauri::command]
+pub async fn bot_duty_save(state: State<'_, AppState>, id: String, duty_id: Option<String>, input: serde_json::Value) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySave", serde_json::json!({"id": id, "dutyId": duty_id, "input": input})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_switch(state: State<'_, AppState>, id: String, duty_id: String, on: bool) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySwitch", serde_json::json!({"id": id, "dutyId": duty_id, "on": on})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_delete(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<()> {
+    bots_call(state, "dutyDelete", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// A copy of a duty, switched off.
+#[tauri::command]
+pub async fn bot_duty_duplicate(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutyDuplicate", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Run a duty now: its first check, then the bot only when the check found something.
+#[tauri::command]
+pub async fn bot_duty_run(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::AutomationRun> {
+    bots_call(state, "dutyRun", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Try a duty's first check once, where its runs run it (its own folder, not the bot's home). Nothing is recorded.
+#[tauri::command]
+pub async fn bot_duty_try_check(state: State<'_, AppState>, id: String, duty_id: Option<String>, precheck: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    bots_call(state, "dutyTryCheck", serde_json::json!({"id": id, "dutyId": duty_id, "precheck": precheck})).await
+}
+
+/// The bot's quiet hours, or `null` for none.
+#[tauri::command]
+pub async fn bot_quiet_hours(state: State<'_, AppState>, id: String, quiet_hours: serde_json::Value) -> CmdResult<serde_json::Value> {
+    bots_call(state, "quietHours", serde_json::json!({"id": id, "quietHours": quiet_hours})).await
 }
 
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
