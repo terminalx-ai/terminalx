@@ -672,12 +672,16 @@ pub fn actor(params: &Value) -> Result<Actor> {
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct ApprovalPhone {
     lifetime: Arc<Lifetime>,
     actor: Actor,
 }
 
 #[cfg(test)]
+// Only Unix-only tests use it.
+#[cfg_attr(not(unix), allow(dead_code))]
 impl ApprovalPhone {
     pub(crate) fn register(manager: &crate::session::SessionManager) -> Self {
         use serde_json::json;
@@ -1287,7 +1291,8 @@ mod repeat_tests {
 /// against real grants: a read-only phone is refused, and a driver's moves a
 /// native Codex tab to Codex's terminal and starts it there. A stand-in Codex
 /// on the lookup path is what launches; runs in a child process.
-#[cfg(test)]
+// A stand-in Codex written as a POSIX shell script.
+#[cfg(all(test, unix))]
 mod open_terminal_tests {
     use super::*;
     use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
@@ -1323,6 +1328,7 @@ mod open_terminal_tests {
         assert!(log.contains("1 passed"), "the fixture did not run: {log}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_terminal_child() {
         use std::os::unix::fs::PermissionsExt;
@@ -1458,7 +1464,7 @@ mod create_tests;
 thread_local! {
     static CONTROL_ADMITTED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn observe_control_admission(callback: Box<dyn FnOnce()>) {
     CONTROL_ADMITTED.with(|slot| *slot.borrow_mut() = Some(callback));
 }

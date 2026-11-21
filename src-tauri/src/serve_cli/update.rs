@@ -69,6 +69,7 @@ const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 /// A new version must answer on a scratch data directory within this.
 const TRIAL_WITHIN: Duration = Duration::from_secs(60);
 /// The runtime that took over must say the new version within this.
+#[cfg(unix)]
 const READY_WITHIN: Duration = Duration::from_secs(90);
 /// Versions kept below `current` (so at most three in all).
 const KEEP_BELOW_CURRENT: usize = 2;
@@ -145,10 +146,13 @@ fn update(args: &[String]) -> Result<i32> {
         println!("terminalx-serve {installed} is installed, and it is the newest signed runtime.");
         // A runtime still running an older version (an update that had to
         // wait for its work) takes this one over now.
-        let current = root.join("current").join("terminalx-serve");
-        let outcome = super::handover::hand_over(&data, &current, &installed.to_string())?;
-        if outcome != super::handover::Outcome::Current && outcome != super::handover::Outcome::NotRunning {
-            return Ok(if super::handover::report(&outcome, &installed.to_string()) { 0 } else { 1 });
+        #[cfg(unix)]
+        {
+            let current = root.join("current").join("terminalx-serve");
+            let outcome = super::handover::hand_over(&data, &current, &installed.to_string())?;
+            if outcome != super::handover::Outcome::Current && outcome != super::handover::Outcome::NotRunning {
+                return Ok(if super::handover::report(&outcome, &installed.to_string()) { 0 } else { 1 });
+            }
         }
         return Ok(0);
     }
@@ -284,6 +288,7 @@ struct Steps {
     #[cfg(unix)]
     ready: fn(&Path, &str, &semver::Version) -> Result<()>,
     /// Run the version `current` names again: [`restart`].
+    #[cfg_attr(not(unix), allow(dead_code))]
     restart: fn(&Path, &Path) -> Result<()>,
 }
 
@@ -305,6 +310,7 @@ struct Update<'a> {
     fetch: &'a dyn Fn(&str) -> Result<Vec<u8>>,
     release: &'a Release,
     /// Blocker ids (`machine_update::Blocker::of`) agreed to stop.
+    #[cfg_attr(not(unix), allow(dead_code))]
     stop: &'a [String],
     steps: &'a Steps,
 }
@@ -380,8 +386,8 @@ impl Update<'_> {
 
 /// Remove a version folder this update made, unless `current` names it.
 fn remove_version(root: &Path, dest: &Path) {
-    let named = std::fs::read_link(root.join("current")).ok().and_then(|target| std::fs::canonicalize(root.join(target)).ok());
-    if named.is_some() && named == std::fs::canonicalize(dest).ok() {
+    let named = std::fs::read_link(root.join("current")).ok().and_then(|target| crate::paths::canonicalize(root.join(target)).ok());
+    if named.is_some() && named == crate::paths::canonicalize(dest).ok() {
         return;
     }
     if let Err(error) = std::fs::remove_dir_all(dest) {
@@ -392,6 +398,8 @@ fn remove_version(root: &Path, dest: &Path) {
 /// Start `binary` on a scratch data directory and wait until it answers as
 /// version `version`; stop it either way.
 fn trial(binary: &Path, version: &semver::Version, data: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = version;
     // Its sockets go under `<scratch>/data/run/`, which must fit.
     let scratch = tempfile::Builder::new().prefix("trial-").tempdir_in(data.join("run")).ok().filter(|dir| super::check_socket_room(&dir.path().join("data")).is_ok());
     let scratch = match scratch {
@@ -509,6 +517,8 @@ pub fn versions_on_disk(root: &Path) -> Vec<semver::Version> {
 /// only the installed runtimes of those and the one the running process
 /// executes. Returns what was kept, newest first.
 pub fn prune(root: &Path, data: &Path, running: Option<&semver::Version>) -> Result<Vec<semver::Version>> {
+    #[cfg(not(unix))]
+    let _ = data;
     let current = installed_version(root)?;
     let on_disk = versions_on_disk(root);
     let mut keep = vec![current.clone()];
@@ -549,8 +559,8 @@ pub fn prune(root: &Path, data: &Path, running: Option<&semver::Version>) -> Res
 /// The installed runtime (`data/runtime/<digest>/`) `executable` is.
 #[cfg(unix)]
 fn installed_digest(runtimes: &Path, executable: &Path) -> Option<String> {
-    let runtimes = std::fs::canonicalize(runtimes).ok()?;
-    let executable = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+    let runtimes = crate::paths::canonicalize(runtimes).ok()?;
+    let executable = crate::paths::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
     let inside = executable.strip_prefix(&runtimes).ok()?;
     inside.components().next().map(|digest| digest.as_os_str().to_string_lossy().into_owned())
 }
@@ -833,15 +843,46 @@ fn install(root: &Path, source: &Source, release: &Release, asset: &str, fetch: 
 }
 
 /// Point the symlink `link` at `target` in one rename.
+#[cfg(unix)]
 fn swap_link(link: &Path, target: &Path) -> Result<()> {
     let next = link.with_file_name(format!(".current.next.{}", std::process::id()));
     let _ = std::fs::remove_file(&next);
-    #[cfg(unix)]
     std::os::unix::fs::symlink(target, &next).with_context(|| format!("create {}", next.display()))?;
     std::fs::rename(&next, link).inspect_err(|_| {
         let _ = std::fs::remove_file(&next);
     })
     .with_context(|| format!("swap {} to {}", link.display(), target.display()))
+}
+
+/// Point the directory junction `link` at `target`. A junction needs no
+/// privilege, where a symlink needs an administrator or Developer Mode.
+/// Windows will not rename one directory entry over another, so the old
+/// junction is moved aside, the new one renamed in, and the old one put back
+/// if that fails: `link` names the old version or the new one throughout,
+/// apart from the instant between the two renames.
+#[cfg(windows)]
+fn swap_link(link: &Path, target: &Path) -> Result<()> {
+    let next = link.with_file_name(format!(".current.next.{}", std::process::id()));
+    let aside = link.with_file_name(format!(".current.old.{}", std::process::id()));
+    let _ = std::fs::remove_dir(&next);
+    let _ = std::fs::remove_dir(&aside);
+    crate::win::fs::junction(&next, target).with_context(|| format!("create {}", next.display()))?;
+    let had = crate::win::fs::is_reparse_point(link).unwrap_or(false);
+    if had {
+        std::fs::rename(link, &aside).with_context(|| format!("move {} aside", link.display()))?;
+    }
+    if let Err(error) = std::fs::rename(&next, link) {
+        let _ = std::fs::remove_dir(&next);
+        if had {
+            let _ = std::fs::rename(&aside, link);
+        }
+        return Err(anyhow::Error::new(error).context(format!("swap {} to {}", link.display(), target.display())));
+    }
+    if had {
+        // Only the junction itself: what it pointed at is kept.
+        let _ = std::fs::remove_dir(&aside);
+    }
+    Ok(())
 }
 
 /// Run a binary this process has just written. Closing it is not enough on

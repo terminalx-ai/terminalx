@@ -4,6 +4,7 @@
 //! secrets, or the Keychain switch was off) live in the index's `plain` map.
 //! A transaction switches the index only after the new item is safely stored.
 //! No repository file is evaluated or trusted implicitly.
+use crate::paths::Canonical;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -169,7 +170,7 @@ fn repository(cwd: &Path) -> Option<String> {
     let path = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
     Some(format!(
         "repository:{}",
-        path.canonicalize().ok()?.to_str()?
+        path.canonical().ok()?.to_str()?
     ))
 }
 
@@ -377,6 +378,7 @@ impl Stamp {
 
     /// A pane handed over by a runtime predating environment overrides never
     /// received any. Keep its repository identity so later edits still warn.
+    #[cfg(unix)]
     pub fn unconfigured(cwd: &str) -> Self {
         Self {
             repository: repository(Path::new(cwd)),
@@ -403,6 +405,7 @@ struct Cache {
 }
 
 impl Cache {
+    #[cfg(any(unix, test))]
     fn install(&mut self, key: &str, snapshot: Snapshot, index: &Index) -> Result<()> {
         let scope = index.get(key).context("Unknown environment scope.")?;
         ensure!(snapshot.revision == scope.revision, "Environment changed.");
@@ -481,11 +484,13 @@ pub(crate) fn desktop_snapshot(key: &str, revision: &str) -> Result<Snapshot> {
     store()?.snapshot(key, revision)
 }
 
+#[cfg(any(unix, test))]
 struct Retry {
     after: std::time::Instant,
     delay: Duration,
 }
 
+#[cfg(any(unix, test))]
 impl Retry {
     fn failed(previous: Option<&Self>, now: std::time::Instant) -> Self {
         let delay = previous.map_or(Duration::from_secs(5), |retry| {
@@ -495,6 +500,7 @@ impl Retry {
     }
 }
 
+#[cfg(any(unix, test))]
 fn refresh_cache(
     cache: &std::sync::Mutex<Cache>,
     store: &Store<'_>,
@@ -820,10 +826,10 @@ pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
 pub fn read_env_file(project: &str, path: &str) -> Result<String> {
     scope_key(Some(project))?;
     let root = Path::new(project)
-        .canonicalize()
+        .canonical()
         .context("Choose a local repository.")?;
     let path = Path::new(path)
-        .canonicalize()
+        .canonical()
         .context("Choose an existing .env file.")?;
     ensure!(
         path.starts_with(&root)

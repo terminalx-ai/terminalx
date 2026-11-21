@@ -194,7 +194,7 @@ pub fn preview(session: &SessionEntry, working: bool, mode: Refresh) -> Result<S
     let remote = git::remote_url(cwd);
     if !supported(&work, remote.as_deref()) { return Ok(hidden(session, revision)); }
     let branch = work.branch.as_deref().unwrap();
-    let key = format!("{}\0{branch}\0{}", std::fs::canonicalize(cwd)?.display(), remote.as_deref().unwrap());
+    let key = format!("{}\0{branch}\0{}", crate::paths::canonicalize(cwd)?.display(), remote.as_deref().unwrap());
     let fetch = !working && HOSTED.lock().unwrap().entry(key.clone()).or_default().start(mode, Instant::now());
     if fetch {
         let result = (|| {
@@ -278,7 +278,7 @@ static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(H
 pub struct RunGuard(String);
 impl RunGuard {
     pub fn acquire(cwd: &str) -> Result<Self> {
-        let key = std::fs::canonicalize(cwd)?.to_string_lossy().into_owned();
+        let key = crate::paths::canonicalize(cwd)?.to_string_lossy().into_owned();
         if !RUNNING.lock().unwrap().insert(key.clone()) { bail!("Another Git action is running in this checkout."); }
         Ok(Self(key))
     }

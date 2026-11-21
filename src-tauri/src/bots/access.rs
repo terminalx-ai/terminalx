@@ -348,7 +348,7 @@ struct Guarded {
 
 impl Guarded {
     fn new(root: &Path) -> Self {
-        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = crate::paths::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let key = |name: &str| root.join(name).to_string_lossy().to_lowercase();
         Self { files: [(key("bots.json"), "bots.json"), (key("settings.json"), "TerminalX's settings.json")] }
     }
@@ -391,21 +391,21 @@ fn resolved(path: &Path, cwd: Option<&str>) -> PathBuf {
         Some(cwd) if path.is_relative() => Path::new(cwd).join(path),
         _ => path.to_path_buf(),
     };
-    if let Ok(real) = std::fs::canonicalize(&joined) {
+    if let Ok(real) = crate::paths::canonicalize(&joined) {
         return real;
     }
     let mut out = PathBuf::new();
     for part in joined.components() {
         match part {
             Component::ParentDir => {
-                out = std::fs::canonicalize(&out).unwrap_or(out);
+                out = crate::paths::canonicalize(&out).unwrap_or(out);
                 out.pop();
             }
             Component::CurDir => {}
             other => out.push(other),
         }
     }
-    match (out.parent().and_then(|parent| std::fs::canonicalize(parent).ok()), out.file_name()) {
+    match (out.parent().and_then(|parent| crate::paths::canonicalize(parent).ok()), out.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => out,
     }

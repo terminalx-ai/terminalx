@@ -25,7 +25,9 @@ use anyhow::{bail, Context, Result};
 
 #[cfg(unix)]
 pub mod consent;
-#[cfg(unix)]
+#[cfg(windows)]
+#[path = "consent_windows.rs"]
+pub mod consent;
 pub mod control_client;
 pub mod devices;
 #[cfg(unix)]
@@ -33,7 +35,6 @@ pub mod handover;
 pub mod hosting;
 pub mod login;
 pub mod pair;
-#[cfg(unix)]
 pub mod projects;
 pub mod service;
 pub mod update;

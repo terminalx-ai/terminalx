@@ -453,6 +453,7 @@ impl ConnectionOpen {
 
     /// A phone's relay connection that the runtime's registration passed to
     /// this window (PRO-341, `crate::machine_wire::Forwarded::Relay`).
+    #[cfg(unix)]
     pub(super) fn forwarded(connection: crate::machine_wire::RelayConnection) -> Result<Self> {
         let open = Self {
             kind_name: "conn-open".into(),

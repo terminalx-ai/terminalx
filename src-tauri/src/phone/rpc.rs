@@ -4,6 +4,7 @@
 //! and tab identifiers against local state on every operation, and it never
 //! returns a checkout path, pane id, or process handle to the phone.
 
+use crate::paths::Canonical;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1009,8 +1010,8 @@ const MAX_PROMPT_IMAGE_BYTES: usize = 7 * 1024 * 1024;
 /// path, a link out of that folder among them, is refused.
 fn prompt_image(params: &PromptImageParams) -> Result<Value> {
     validate_session_tab(&params.session_id, &params.tab_id)?;
-    let folder = store::attachments_dir(&params.session_id)?.canonicalize()?;
-    let path = Path::new(&params.path).canonicalize().map_err(|_| anyhow!("The image is no longer on the Mac."))?;
+    let folder = store::attachments_dir(&params.session_id)?.canonical()?;
+    let path = Path::new(&params.path).canonical().map_err(|_| anyhow!("The image is no longer on the Mac."))?;
     if !path.starts_with(&folder) {
         bail!("That image is not one of this session's attachments.");
     }

@@ -347,10 +347,11 @@ pub struct Host<'a> {
 pub type StopAgents<'a> = &'a dyn Fn(&SessionEntry) -> Result<(), String>;
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether two paths are one directory, however each is spelled.
+#[cfg_attr(not(unix), allow(clippy::needless_bool))]
 pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -470,7 +471,7 @@ pub(crate) struct Repository<'a> {
 impl<'a> Repository<'a> {
     pub(crate) fn open(project: &'a Project, fetch: Fetch) -> Result<Self, String> {
         let privacy = crate::github_process::ticket();
-        let root = std::fs::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
+        let root = crate::paths::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
         if !root.is_dir() || !git::is_repo(&root) {
             return Err("Not a Git repository, so it has no worktrees.".into());
         }
@@ -1237,7 +1238,7 @@ fn walk_size(path: &Path, stop: &AtomicBool) -> Option<u64> {
 pub fn estimate_size(host: &Host<'_>, jobs: &Jobs, job: &str, project_path: &str, path: &str) -> anyhow::Result<Option<u64>> {
     let asked = canonical(Path::new(project_path));
     let project = host.projects.iter().find(|project| same_dir(&canonical(Path::new(&project.path)), &asked)).ok_or_else(|| anyhow::anyhow!("that project is not open on this host"))?;
-    let target = std::fs::canonicalize(path)?;
+    let target = crate::paths::canonicalize(path)?;
     let known = list_worktrees(Path::new(&project.path))?.iter().any(|entry| same_dir(&canonical(Path::new(&entry.path)), &target));
     anyhow::ensure!(known, "{path} is not a worktree of this project");
     let stop = jobs.start(job);

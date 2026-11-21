@@ -368,7 +368,7 @@ impl Guest {
         }
         #[cfg(target_os = "linux")]
         require_linux_worker_runtime()?;
-        if fs::canonicalize(root)? != fs::canonicalize(base.join("runtime"))? {
+        if crate::paths::canonicalize(root)? != crate::paths::canonicalize(base.join("runtime"))? {
             bail!("Guest runtime must use the installed private runtime directory");
         }
         Ok(true)
@@ -1824,8 +1824,8 @@ impl Guest {
         let path = self.base.join("workspaces").join(&task.target.workspace_id);
         if Path::new(&task.guest_cwd) != path
             || fs::symlink_metadata(&path)?.file_type().is_symlink()
-            || fs::canonicalize(&path)?
-                != fs::canonicalize(self.base.join("workspaces"))?.join(&task.target.workspace_id)
+            || crate::paths::canonicalize(&path)?
+                != crate::paths::canonicalize(self.base.join("workspaces"))?.join(&task.target.workspace_id)
         {
             bail!("Guest workspace binding changed; refusing filesystem operation");
         }

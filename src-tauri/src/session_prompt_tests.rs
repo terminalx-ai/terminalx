@@ -693,12 +693,14 @@ fn a_queued_prompt_the_cli_takes_is_never_flagged() {
 impl Rig {
     /// Run `script` in the tab's pane, in place of the CLI, once it has
     /// said `CLI-IS-UP`.
+    #[cfg(unix)]
     fn run_in_pane(&self, script: &str) {
         self.run_in_pane_sized(script, 80, 24);
     }
 
     /// [`Self::run_in_pane`], in a terminal `cols` by `rows`: the size a
     /// recording of a real CLI's screen was made at.
+    #[cfg(unix)]
     fn run_in_pane_sized(&self, script: &str, cols: u16, rows: u16) {
         let path = self._dir.path().join("cli.sh");
         std::fs::write(&path, script).unwrap();
@@ -710,6 +712,7 @@ impl Rig {
     }
 
     /// Wait until the chat has been told `said`, as [`Self::said`] puts it.
+    #[cfg(unix)]
     fn chat_says(&self, said: &str) {
         let deadline = Instant::now() + Duration::from_secs(120);
         while !self.said().iter().any(|line| line == said) {
@@ -719,11 +722,13 @@ impl Rig {
     }
 
     /// Whether the pane has printed `needle`, by now.
+    #[cfg(unix)]
     fn pane_has_said(&self, needle: &str) -> bool {
         String::from_utf8_lossy(&self.manager.terminals.read_output(&self.pane).unwrap_or_default()).contains(needle)
     }
 
     /// Wait until the pane has printed one of `needles`, and say which.
+    #[cfg(unix)]
     fn pane_says(&self, needles: &[&str]) -> String {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
@@ -738,6 +743,7 @@ impl Rig {
 
     /// Type the newest composer prompt into the pane as `send` would, its
     /// CLI having said it is up.
+    #[cfg(unix)]
     fn type_composed(&self, text: &str) -> u64 {
         let (ready, seq, stops) = {
             let rt = self.rt.lock().unwrap();
@@ -750,6 +756,7 @@ impl Rig {
     }
 
     /// Wait for the writer to let go of the pane: the typing is over.
+    #[cfg(unix)]
     fn typed(&self) {
         let writer = self.manager.writers.lock().unwrap().get(&self.pane).unwrap().clone();
         drop(writer.lock().unwrap());
@@ -2533,6 +2540,7 @@ const DROPPED: &str = "so I want you to understand this scenario and create a pr
 const QUEUED: &str = "and same is happening when I am clicking any of the old sessions related that toolquant.";
 
 /// A message sent while the first waits on the input box.
+#[cfg(unix)]
 const LATER: &str = "and run the linter after that";
 
 /// A prompt as Claude Code 2.1.316 records it: chained to the record before
@@ -2855,6 +2863,7 @@ fn a_replaced_prompt_is_not_replaced_again_by_a_later_rewind() {
 /// never empties unless the test says so: it says `TYPED` if anything but
 /// the lone Escape of a stop is written into it (a slash command is typed as
 /// keys, a prompt pasted), and draws the box empty once `emptied` exists.
+#[cfg(unix)]
 fn box_held_script(emptied: &Path) -> String {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/claude/fixtures");
     format!(
@@ -3102,6 +3111,7 @@ fn handover_busy_prompt_can_settle_and_the_same_tab_is_carried() {
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_pty_final_writer_fences_policy_modes_and_ownership_after_dispatch() {
     use crate::remote::collab::{Collaboration, v2::{Action, Snapshot, Permit}};
@@ -3185,6 +3195,7 @@ fn phase2_collaboration_v2_handover_retains_required_provenance_and_refuses_unst
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_at_pty_writer() {
     use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
@@ -3215,6 +3226,7 @@ fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_a
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_pty_capacity_wait_releases_runtime_and_rechecks_mode_before_more_bytes() {
     use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
@@ -3297,6 +3309,7 @@ fn phase2_collaboration_v2_legacy_submit_retries_a_full_pty_buffer() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure() {
     use crate::remote::collab::v2::{Action, Snapshot, Permit};

@@ -55,8 +55,8 @@ impl MediaServer {
         let mime = &media_type(Path::new(rel))
             .ok_or_else(|| anyhow::anyhow!("Unsupported media format"))?
             .mime;
-        let root = tokio::fs::canonicalize(root).await?;
-        let path = tokio::fs::canonicalize(root.join(rel)).await?;
+        let root = crate::paths::simplified(&tokio::fs::canonicalize(root).await?).to_path_buf();
+        let path = crate::paths::simplified(&tokio::fs::canonicalize(root.join(rel)).await?).to_path_buf();
         anyhow::ensure!(
             path.starts_with(&root),
             "Media path is outside the selected workspace"
@@ -144,9 +144,7 @@ async fn serve(
         )
     };
     // An authorized path cannot later be replaced with a symlink to another file.
-    if tokio::fs::canonicalize(&path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?
+    if crate::paths::simplified(&tokio::fs::canonicalize(&path).await.map_err(|_| StatusCode::NOT_FOUND)?)
         != path
     {
         return Err(StatusCode::FORBIDDEN);

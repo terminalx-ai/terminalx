@@ -314,6 +314,7 @@ fn key_entry(entry: &Entry) -> Entry {
     Entry { mode: Mode::ApiKey, base_url: entry.base_url.clone(), ..Default::default() }
 }
 
+#[cfg(any(unix, test))]
 type Index = BTreeMap<String, Entry>;
 
 fn account(agent: Agent, revision: &str) -> String {
@@ -370,6 +371,7 @@ impl<'a> Store<'a> {
         value.map(|value| serde_json::from_value(value.clone()).map_err(|_| unreadable())).transpose().map(Option::unwrap_or_default)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn index(&self) -> Result<Index> {
         let raw = self.raw()?;
         Agent::ALL.into_iter().filter_map(|agent| raw.get(agent.id()).map(|value| Ok((agent.id().to_string(), Self::parse(Some(value))?)))).collect()
@@ -898,6 +900,7 @@ fn requested() -> &'static Mutex<std::collections::HashSet<(Agent, String)>> {
 /// The keys new tabs may use: each agent's default account's, each project
 /// default's, and those a launch asked for. A key kept for later while
 /// another login is chosen is not among them.
+#[cfg(any(unix, test))]
 fn wanted(index: &Index) -> Vec<(Agent, String)> {
     let asked = requested().lock().unwrap().clone();
     let mut wanted = Vec::new();
@@ -924,6 +927,7 @@ impl Keys {
     /// Bring the keys in line with the index: drop what is no longer saved
     /// or no longer wanted, fetch what is missing. No lock is held while
     /// fetching.
+    #[cfg(any(unix, test))]
     fn refresh(&self, index: &Index, fetch: impl Fn(Agent, &str) -> Result<Zeroizing<String>>) {
         requested().lock().unwrap().retain(|(agent, revision)| index.get(agent.id()).is_some_and(|entry| entry.key_revisions().any(|saved| saved == revision)));
         let wanted = wanted(index);
@@ -1236,7 +1240,7 @@ pub fn running(harness: &str) -> Vec<RunningTab> {
 
 /// Save `key` for `harness` as the desktop does, into `secrets`, and give
 /// this process's runtime memory the current keys, as its desktop would.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn save_for_test(harness: &str, key: &str, secrets: &crate::keychain::testing::MemorySecrets) {
     let store = Store { root: crate::store::root().unwrap(), secrets };
     store.save_key(Agent::of(harness).unwrap(), key, None).unwrap();

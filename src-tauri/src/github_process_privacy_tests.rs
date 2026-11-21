@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::{data_privacy, github_identity, issue_ops, issues, store};
+use crate::paths::Canonical;
 
 const OPERATIONS: &[&str] = &["ssh", "https", "list", "legacy-read", "legacy-write", "details", "write", "repositories", "overview", "disposition", "review-list", "review-files", "review-resolve", "review-reply"];
 
@@ -16,7 +17,7 @@ fn privacy_covers_identity_and_issue_entry_points() {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command.args(["--exact", &format!("github_process::tests::{child}"), "--nocapture"])
                 .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-                .env("TERMINALX_HOME", root.path().canonicalize().unwrap());
+                .env("TERMINALX_HOME", root.path().canonical().unwrap());
             let (output, timed_out) = fixture_output(&mut command, Duration::from_secs(300));
             assert!(!timed_out, "policy={managed}/{child} exceeded 300 seconds; child killed and reaped\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             assert!(output.status.success(), "policy={managed}/{child}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -426,7 +427,7 @@ fn workspace_rpc(root: &Path, cwd: &Path, managed: bool) {
 
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2)
         .max_blocking_threads(1).enable_all().build().unwrap();
-    let cwd = std::fs::canonicalize(cwd).unwrap();
+    let cwd = crate::paths::canonicalize(cwd).unwrap();
     let workspace = WorkspaceGit::new(cwd.clone(), Arc::new(WorkspaceFiles::new(cwd.clone())));
     let terminals = Arc::new(crate::pty::Terminals::new());
     let rpc = WorkspaceRpc::new(&cwd, 1, Arc::new(crate::sink::BroadcastSink::new(64)), terminals, None).unwrap();
@@ -594,7 +595,7 @@ fn fresh_fixture(root: &Path) -> FetchFixture {
     real_git(root, &["clone", "-q", "--bare", "fetch-seed", "fetch-origin.git"]);
     real_git(root, &["clone", "-q", "fetch-origin.git", "fetch-project"]);
     real_git(&seed, &["remote", "add", "origin", root.join("fetch-origin.git").to_str().unwrap()]);
-    let project = std::fs::canonicalize(root.join("fetch-project")).unwrap();
+    let project = crate::paths::canonicalize(root.join("fetch-project")).unwrap();
     let entry = crate::session_ops::create_session_entry(crate::session_ops::NewSession {
         checkout_pr: None, parent: None,
         section_id: None,
@@ -883,7 +884,7 @@ fn privacy_contains_identity_and_simple_openssh() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "github_process::tests::privacy_native_ssh_child", "--nocapture"])
             .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }
@@ -919,7 +920,7 @@ fn native3_git_case(case: &str) {
             .args(["--exact", "github_process::tests::privacy_native3_git_child", "--nocapture"])
             .env("TERMINALX_TEST_GITHUB_ENTRIES", if managed { "managed" } else { "personal" })
             .env("TERMINALX_TEST_NATIVE3_GIT", case)
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "{case}/policy={managed}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 }

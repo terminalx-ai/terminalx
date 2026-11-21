@@ -11,7 +11,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let home = crate::paths::canonicalize(dir.path()).unwrap();
         let mirror = Mirror::at(&home, "org-1", "workspace-1").unwrap();
         mirror.enable().unwrap();
         Self { _dir: dir, home, mirror, remote: BTreeMap::new() }
@@ -231,6 +231,7 @@ fn a_publish_that_fails_part_way_records_what_it_did_and_leaves_no_journal() {
     }
     let error = {
         // Divergence is checked before the journal; make the failure happen after it.
+        #[cfg(unix)]
         let late = f.files().join("z/late.txt");
         let record = f.mirror.working_record().unwrap();
         assert!(record.owned.contains_key("z/late.txt"));
@@ -580,7 +581,7 @@ fn names_that_are_one_file_on_this_disk_are_settled_before_anything_is_written()
 #[test]
 fn none_of_the_mirrors_own_directories_may_be_a_link() {
     let dir = tempfile::tempdir().unwrap();
-    let home = std::fs::canonicalize(dir.path()).unwrap();
+    let home = crate::paths::canonicalize(dir.path()).unwrap();
     let elsewhere = home.join("elsewhere");
     std::fs::create_dir_all(elsewhere.join("precious")).unwrap();
     std::fs::write(elsewhere.join("precious/file.txt"), "keep\n").unwrap();
@@ -601,7 +602,7 @@ fn none_of_the_mirrors_own_directories_may_be_a_link() {
 
     // The workspace's directory, the organization's, and `cloud-mirrors` itself.
     for link in ["cloud-mirrors/org-2/workspace-2", "cloud-mirrors/org-3", "cloud-mirrors"] {
-        let home = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let home = crate::paths::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
         let at = home.join(link);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(elsewhere.join("precious"), &at).unwrap();
@@ -633,7 +634,7 @@ fn a_mirror_is_never_a_project_or_an_agents_working_directory() {
 #[test]
 fn a_mirror_belongs_to_one_workspace_and_is_off_until_enabled() {
     let dir = tempfile::tempdir().unwrap();
-    let home = std::fs::canonicalize(dir.path()).unwrap();
+    let home = crate::paths::canonicalize(dir.path()).unwrap();
     for (org, workspace) in [("..", "w"), ("o", "../w"), ("o/x", "w"), ("", "w"), ("o", "w w"), ("-o", "w")] {
         assert!(Mirror::at(&home, org, workspace).is_err(), "{org:?} {workspace:?}");
     }
@@ -692,7 +693,7 @@ fn the_app_refuses_a_mirror_as_a_project_with_the_reason() {
         assert!(refused.contains("local mirror of a cloud workspace") && refused.contains("cannot be opened as a project"), "{refused}");
     }
     // An agent's working directory goes through the same check.
-    let canonical = std::fs::canonicalize(&files).unwrap();
+    let canonical = crate::paths::canonicalize(&files).unwrap();
     assert!(crate::store::projects::refuse_mirror(&canonical.to_string_lossy()).is_err());
     assert!(crate::store::projects::list().unwrap().0.is_empty());
     // Any other folder is a project as before.
@@ -1013,7 +1014,7 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
     // The reproduced gap. Launch as A with no mirrors: the claim finds
     // nothing and writes nothing.
     let dir = tempfile::tempdir().unwrap();
-    let home = std::fs::canonicalize(dir.path()).unwrap();
+    let home = crate::paths::canonicalize(dir.path()).unwrap();
     assert_eq!(claim_owner(&home, "ada@example.com", None).unwrap(), 0);
     assert!(!home.join("cloud-mirrors/owner").exists());
     // A turns a mirror on later in that session, and it syncs.
@@ -1043,7 +1044,7 @@ fn a_mirror_turned_on_after_launch_is_not_inherited_by_the_next_account() {
 
     // Mirrors found with no owner recorded are nobody's here: removed, not adopted.
     let other = tempfile::tempdir().unwrap();
-    let other_home = std::fs::canonicalize(other.path()).unwrap();
+    let other_home = crate::paths::canonicalize(other.path()).unwrap();
     let orphan = Mirror::at(&other_home, "org-1", "workspace-1").unwrap();
     orphan.enable_as("ada@example.com").unwrap();
     std::fs::remove_file(other_home.join("cloud-mirrors/owner")).unwrap();

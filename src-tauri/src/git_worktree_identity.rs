@@ -40,12 +40,12 @@ fn directory_identity(_: &Path) -> Option<DirectoryIdentity> {
 
 fn git_dir(root: &Path) -> Option<PathBuf> {
     let out = super::run(root, &["rev-parse", "--absolute-git-dir"]).ok()?;
-    std::fs::canonicalize(out.strip_suffix('\n')?).ok()
+    crate::paths::canonicalize(out.strip_suffix('\n')?).ok()
 }
 
 impl WorktreeIdentity {
     pub(crate) fn capture(project: &Path, root: &Path) -> Option<Self> {
-        let root = std::fs::canonicalize(root).ok()?;
+        let root = crate::paths::canonicalize(root).ok()?;
         if !super::is_worktree_of(project, &root) {
             return None;
         }
@@ -89,7 +89,7 @@ impl WorktreeIdentity {
 
 fn registrations(common: &Path) -> Option<PathBuf> {
     let path = common.join("worktrees");
-    (std::fs::canonicalize(&path).ok()? == path).then_some(path)
+    (crate::paths::canonicalize(&path).ok()? == path).then_some(path)
 }
 
 // Git can store either absolute paths or paths relative to the directory

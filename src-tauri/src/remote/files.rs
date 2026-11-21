@@ -140,7 +140,7 @@ impl WorkspaceFiles {
             return Ok(());
         }
         let project_roots = super::machine::registered()?.into_iter().map(|project| {
-            std::fs::canonicalize(&project.path).unwrap_or_else(|_| PathBuf::from(project.path))
+            crate::paths::canonicalize(&project.path).unwrap_or_else(|_| PathBuf::from(project.path))
         });
         let contains_checkout = std::iter::once(self.root.clone())
             .chain(project_roots.filter(|root| root != &self.root))
@@ -165,7 +165,9 @@ impl WorkspaceFiles {
             match component {
                 Component::Normal(part) => clean.push(part),
                 Component::CurDir => {}
-                Component::RootDir if index == 0 => {
+                // On Windows an absolute path is a drive (`C:`) and then its root.
+                Component::Prefix(_) if index == 0 && Path::new(relative).is_absolute() => clean.push(component),
+                Component::RootDir if index == 0 || (index == 1 && matches!(clean.components().next(), Some(Component::Prefix(_)))) => {
                     absolute = true;
                     clean.push(Component::RootDir);
                 }
@@ -185,7 +187,7 @@ impl WorkspaceFiles {
     /// An existing path, resolved through symlinks, still inside the workspace.
     pub fn existing_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
         let path = self.lexical(relative)?;
-        let resolved = std::fs::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
+        let resolved = crate::paths::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
         if self.base(&resolved).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
@@ -200,7 +202,7 @@ impl WorkspaceFiles {
             return Err(RpcError::new("path_forbidden", "the workspace root cannot be replaced"));
         }
         let parent = path.parent().ok_or_else(|| RpcError::new("path_forbidden", "invalid path"))?;
-        let parent = std::fs::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
+        let parent = crate::paths::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
         if self.base(&parent).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
@@ -223,7 +225,13 @@ impl WorkspaceFiles {
     /// How a client names `path`: relative to the root, or, in an outside
     /// worktree, absolute.
     pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
+        match path.strip_prefix(&self.root) {
+            // Workspace paths go to a client with `/` whatever this computer
+            // spells them with: it may be another system.
+            Ok(inside) => inside.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            // An outside worktree by its absolute path, as this computer names it.
+            Err(_) => path.to_string_lossy().into_owned(),
+        }
     }
 
     /// Whether a changed path may be named to a client: none of its existing
@@ -237,7 +245,7 @@ impl WorkspaceFiles {
             let Component::Normal(part) = component else { return false };
             at.push(part);
             match std::fs::symlink_metadata(&at) {
-                Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(&at) {
+                Ok(meta) if meta.file_type().is_symlink() => match crate::paths::canonicalize(&at) {
                     Ok(target) if self.base(&target).is_some() => {}
                     // Dangling or outside: the link itself may be named, nothing under it.
                     _ => return at == path,
@@ -275,7 +283,7 @@ impl WorkspaceFiles {
             let path = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
             let Ok(own) = entry.metadata() else { continue };
             let mut described = if own.file_type().is_symlink() {
-                let mut link = match std::fs::canonicalize(entry.path()).ok().filter(|target| self.base(target).is_some()) {
+                let mut link = match crate::paths::canonicalize(entry.path()).ok().filter(|target| self.base(target).is_some()) {
                     Some(target) => match std::fs::metadata(&target) {
                         Ok(meta) => stat_json(&name, &meta),
                         Err(_) => continue,

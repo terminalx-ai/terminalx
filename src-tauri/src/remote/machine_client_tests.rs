@@ -98,6 +98,7 @@ fn the_relay_is_skipped_signed_out_on_this_network_only_and_without_a_credential
     assert!(relay_allowed(MachineRoute::RelayAndNearby, Some(&credential("user-1").info), Some("user-1")));
 }
 
+#[cfg(unix)]
 #[test]
 fn local_network_access_refused_is_host_unreachable_to_a_private_or_link_local_address() {
     let unreachable = std::io::Error::from_raw_os_error(libc::EHOSTUNREACH);

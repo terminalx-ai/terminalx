@@ -7,6 +7,7 @@
 //! project is made from them, so editing the folder changes what the next
 //! project gets.
 
+use crate::paths::Canonical;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -194,7 +195,7 @@ pub fn add_in(file: &Path, path: &str) -> Result<TemplateInfo, Failure> {
     if !folder.is_absolute() || !folder.is_dir() {
         return Err(Failure::new(INVALID_TEMPLATE, format!("{} is not a folder on this computer.", folder.display())));
     }
-    let folder = folder.canonicalize().map_err(|error| Failure::io("Could not read the folder", error))?;
+    let folder = folder.canonical().map_err(|error| Failure::io("Could not read the folder", error))?;
     if dirs::home_dir().is_some_and(|home| home == folder) || folder.parent().is_none() {
         return Err(Failure::new(INVALID_TEMPLATE, format!("{} holds too much to be a template. Choose the folder of one project.", folder.display())));
     }
@@ -466,9 +467,9 @@ mod tests {
             if entry.file_type().unwrap().is_dir() {
                 on_disk(dir, &path, out);
             } else if entry.file_name() == "gitignore" {
-                out.insert(relative.join(".gitignore").to_string_lossy().into_owned());
+                out.insert(relative.join(".gitignore").to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
             } else {
-                out.insert(path.to_string_lossy().into_owned());
+                out.insert(path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"));
             }
         }
     }
@@ -560,7 +561,7 @@ mod tests {
     }
 
     fn listed(folder: &Path) -> BTreeSet<String> {
-        files_of(folder).unwrap().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        files_of(folder).unwrap().iter().map(|p| p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")).collect()
     }
 
     fn commit_all(repo: &Path) {

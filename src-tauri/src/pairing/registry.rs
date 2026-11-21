@@ -57,7 +57,7 @@ impl PairingSecrets {
         Ok(Some(keypair))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(super) fn window_consent_key(&self, create: bool) -> Result<Option<ring::signature::Ed25519KeyPair>> {
         use ring::signature::Ed25519KeyPair;
         use ring::rand::{SecureRandom, SystemRandom};

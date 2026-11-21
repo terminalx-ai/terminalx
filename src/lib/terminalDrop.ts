@@ -25,9 +25,57 @@ export function shellQuotePath(path: string): string {
   return out;
 }
 
-/** The text typed for dropped files: each path quoted, a space after each, no Enter. */
-export function droppedPathsText(paths: readonly string[]): string {
-  return paths.map((path) => `${shellQuotePath(path)} `).join("");
+/**
+ * `path` as one PowerShell word: a single-quoted string, in which nothing is
+ * expanded or run (`$`, `$(…)`, backticks and `;` are only characters).
+ * PowerShell reads the typographic single quotes as quotes too, so each of
+ * them is doubled as `'` is. A path with a control character (NTFS allows
+ * DEL and the C1 range) cannot be typed as itself without one reaching the
+ * terminal as a key: `null`.
+ */
+export function powershellQuotePath(path: string): string | null {
+  if (!path || /[\x00-\x1f\x7f-\x9f]/.test(path)) return null;
+  let out = "'";
+  for (const ch of path) {
+    if (ch === "'" || ch === "‘" || ch === "’" || ch === "‚" || ch === "‛") out += ch + ch;
+    else out += ch;
+  }
+  return `${out}'`;
+}
+
+/**
+ * `path` as one cmd.exe word: double-quoted, inside which `& | < > ^` are only
+ * characters. cmd expands `%VAR%` even there and nothing escapes it, so a
+ * path with `%` (or a control character) cannot be typed safely: `null`.
+ * A Windows file name never holds `"`.
+ */
+export function cmdQuotePath(path: string): string | null {
+  if (!path || /[%"\x00-\x1f\x7f-\x9f]/.test(path)) return null;
+  return `"${path}"`;
+}
+
+/** Which shell's quoting dropped paths get: the shell the terminals run. */
+export type QuoteStyle = "posix" | "powershell" | "cmd";
+
+export const defaultQuoteStyle: QuoteStyle =
+  typeof navigator !== "undefined" && /^Win/.test(navigator.platform) ? "powershell" : "posix";
+
+/**
+ * The text typed for dropped files: each path quoted, a space after each, no
+ * Enter. `null` when a path cannot be quoted safely for `style`'s shell.
+ */
+export function droppedPathsText(paths: readonly string[], style: QuoteStyle = defaultQuoteStyle): string | null {
+  const quote = style === "cmd" ? cmdQuotePath : style === "powershell" ? powershellQuotePath : shellQuotePath;
+  const quoted = paths.map(quote);
+  if (quoted.some((path) => path === null)) return null;
+  return quoted.map((path) => `${path} `).join("");
+}
+
+/** Why dropped paths that `droppedPathsText` refused for `style` were not typed. */
+export function unquotableMessage(style: QuoteStyle): string {
+  return style === "cmd"
+    ? "That file's name can't be typed into this terminal's shell safely (cmd expands % in it). Rename it, or use PowerShell."
+    : "That file's name holds a control character, so it can't be typed into this terminal safely. Rename it.";
 }
 
 /** More dragged text than this is refused, not typed. */

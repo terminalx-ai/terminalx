@@ -83,6 +83,8 @@ impl Process {
         if let Some(id) = self.0.id() {
             #[cfg(unix)]
             unsafe { libc::kill(-(id as i32), libc::SIGKILL); }
+            #[cfg(not(unix))]
+            let _ = id;
             let _ = self.0.start_kill();
             return true;
         }
@@ -103,7 +105,7 @@ async fn developer_tools_available() -> bool {
 #[cfg(not(target_os = "macos"))]
 async fn developer_tools_available() -> bool { true }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn probe(tool: &Tool<'_>, allowed: &impl Fn() -> bool) -> Value {
     probe_with_developer_tools(tool, allowed, developer_tools_available().await).await
 }
@@ -234,6 +236,7 @@ mod tests {
         assert!(request_id(&json!({"requestId": "../../etc"})).is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelled_authority_never_starts_a_probe() {
         assert_eq!(report(1, &json!({"requestId": uuid::Uuid::new_v4().to_string()}), || false).await.unwrap_err().code, "cancelled");

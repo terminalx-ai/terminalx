@@ -661,10 +661,17 @@ pub(super) fn run_command(cwd: &std::path::Path, run: &str, project: bool, timeo
     if let Some((_, found)) = super::guard::refused(run) {
         return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(format!("TerminalX did not run it: `{found}` pushes, merges or deploys, and a check of a result does none of those.")), on_base: None };
     }
-    let mut process = std::process::Command::new("/bin/sh");
+    // A plan's commands are POSIX shell, as a worker ran them: on Windows,
+    // in Git for Windows' sh.
+    #[cfg(unix)]
+    let sh = std::path::PathBuf::from("/bin/sh");
+    #[cfg(windows)]
+    let Some(sh) = crate::binpath::posix_sh() else {
+        return CommandRun { run: run.to_string(), project, exit_code: None, passed: false, millis: 0, output: Some(crate::binpath::POSIX_SH_MISSING.to_string()), on_base: None };
+    };
+    let mut process = std::process::Command::new(sh);
     // Both streams in the order they were written: the end of a test run is on either.
     process.args(["-c", &format!("exec 2>&1\n{run}")]).current_dir(cwd);
-    #[cfg(unix)]
     process.env("PATH", crate::binpath::login_path());
     let (exit_code, output) = match crate::git::capture_within(process, timeout) {
         Ok(out) => (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()),

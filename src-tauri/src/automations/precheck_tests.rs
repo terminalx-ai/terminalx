@@ -127,6 +127,8 @@ fn a_command_in_a_missing_folder_cannot_start_and_fails() {
     assert!(trial.reason.unwrap().contains("could not start"));
 }
 
+// `pwd -P` and a login PATH are written the POSIX way.
+#[cfg(unix)]
 #[test]
 fn the_check_gets_a_panes_environment_in_its_folder() {
     let project = tempfile::tempdir().unwrap();

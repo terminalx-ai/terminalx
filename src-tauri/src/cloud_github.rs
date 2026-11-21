@@ -605,9 +605,9 @@ fn is_executable(path: &Path) -> bool {
 /// The real `gh`: the first one on the inherited `PATH` or in the usual
 /// install directories that is not the shim itself.
 pub fn find_real_gh(search: impl IntoIterator<Item = PathBuf>, shim_dir: &Path) -> Option<PathBuf> {
-    let shim_dir = fs::canonicalize(shim_dir).unwrap_or_else(|_| shim_dir.to_path_buf());
+    let shim_dir = crate::paths::canonicalize(shim_dir).unwrap_or_else(|_| shim_dir.to_path_buf());
     search.into_iter().filter(|dir| !dir.as_os_str().is_empty()).find_map(|dir| {
-        let resolved = fs::canonicalize(&dir).unwrap_or(dir);
+        let resolved = crate::paths::canonicalize(&dir).unwrap_or(dir);
         if resolved == shim_dir {
             return None;
         }
@@ -1293,7 +1293,7 @@ mod tests {
         // The shim's own directory is skipped even when it comes first.
         let bin = state.join(DIR_NAME).join(BIN_DIR);
         let installed = install(&state, "http://127.0.0.1:1", None, &exe, vec![bin, real.clone()], &git).unwrap();
-        assert_eq!(installed.gh.as_deref(), Some(fs::canonicalize(&real).unwrap().join("gh").as_path()));
+        assert_eq!(installed.gh.as_deref(), Some(crate::paths::canonicalize(&real).unwrap().join("gh").as_path()));
         let output = std::process::Command::new(installed.bin_dir.join("gh")).args(["pr", "list"]).env("GH_TOKEN", "user_set").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "token=ghs_from_helper args=pr list");
 

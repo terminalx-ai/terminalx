@@ -9,8 +9,11 @@
 //! the parser expects a decimal point in `%CPU`.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(unix)]
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -20,6 +23,7 @@ use crate::pty::{PaneInfo, Terminals};
 use crate::store::{index, projects};
 
 pub const CHANGED_EVENT: &str = "status_resources_changed";
+#[cfg_attr(windows, allow(dead_code))]
 const PS: &str = "/bin/ps";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -127,6 +131,7 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_ps(input: &str) -> ProcessTable {
     let mut by_pid = HashMap::new();
     for line in input.lines() {
@@ -170,6 +175,43 @@ fn attribute_roots(roots: &[(String, u32)], table: &ProcessTable, claimed: &mut 
     roots.iter().map(|(key, pid)| (key.clone(), aggregate(*pid, table, claimed))).collect()
 }
 
+/// Windows has no `ps`: the table is Toolhelp's, with each process's working
+/// set, and its processor share since the last sample (none on the first),
+/// as `ps` reports `%CPU` of one core.
+#[cfg(windows)]
+fn ps_table() -> Result<ProcessTable> {
+    use std::time::Instant;
+    type Sample = (Instant, HashMap<u32, (u64, u64)>);
+    /// Each process's (start, processor time) at the last sample, and when.
+    static LAST: Mutex<Option<Sample>> = Mutex::new(None);
+    let entries = crate::win::process::processes().context("sample processes")?;
+    let now = Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let elapsed = last.as_ref().map(|(at, _)| now.duration_since(*at).as_nanos() as f64 / 100.0).filter(|ticks| *ticks > 0.0);
+    let mut seen = HashMap::new();
+    let mut by_pid = HashMap::new();
+    for entry in entries {
+        if entry.pid == 0 {
+            continue;
+        }
+        let (started, used, resident) = crate::win::process::usage(entry.pid).unwrap_or_default();
+        let before = last.as_ref().and_then(|(_, times)| times.get(&entry.pid)).filter(|(start, _)| *start == started && started != 0);
+        let cpu_percent = match (before, elapsed) {
+            (Some((_, earlier)), Some(ticks)) => (used.saturating_sub(*earlier) as f64 / ticks * 100.0) as f32,
+            _ => 0.0,
+        };
+        seen.insert(entry.pid, (started, used));
+        by_pid.insert(entry.pid, Process { pid: entry.pid, ppid: entry.parent, cpu_percent, rss_bytes: resident });
+    }
+    *last = Some((now, seen));
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for process in by_pid.values() {
+        children.entry(process.ppid).or_default().push(process.pid);
+    }
+    Ok(ProcessTable { by_pid, children })
+}
+
+#[cfg(unix)]
 fn ps_table() -> Result<ProcessTable> {
     let output = Command::new(PS)
         .args(["-eo", "pid=,ppid=,pcpu=,rss="])
@@ -182,16 +224,19 @@ fn ps_table() -> Result<ProcessTable> {
     Ok(parse_ps(&String::from_utf8_lossy(&output.stdout)))
 }
 
+#[cfg(unix)]
 fn sysctl_u64(name: &str) -> Option<u64> {
     let output = Command::new("/usr/sbin/sysctl").args(["-n", name]).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().parse().ok()).flatten()
 }
 
+#[cfg(unix)]
 fn host_total() -> Option<u64> {
     static TOTAL: OnceLock<Option<u64>> = OnceLock::new();
     *TOTAL.get_or_init(|| sysctl_u64("hw.memsize"))
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_vm_available(input: &str) -> Option<u64> {
     let page_size = input.lines().next()?.split("page size of ").nth(1)?.split_whitespace().next()?.parse::<u64>().ok()?;
     let wanted = ["Pages free", "Pages inactive", "Pages speculative"];
@@ -211,6 +256,17 @@ pub(crate) fn host_memory() -> Option<(u64, u64)> {
     Some((sample.total_bytes?, sample.available_bytes?))
 }
 
+#[cfg(windows)]
+fn host_sample() -> HostSample {
+    let memory = crate::win::process::memory();
+    HostSample {
+        total_bytes: memory.map(|(total, _)| total),
+        available_bytes: memory.map(|(_, available)| available),
+        cores: std::thread::available_parallelism().map(usize::from).unwrap_or(1),
+    }
+}
+
+#[cfg(unix)]
 fn host_sample() -> HostSample {
     let available_bytes = Command::new("/usr/bin/vm_stat")
         .output()

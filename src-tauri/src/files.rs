@@ -4,6 +4,7 @@
 //! when asked; searches are fuzzy over the relative path with a bias toward
 //! filename matches. Capped so a monorepo can't pin a core.
 
+use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -436,7 +437,7 @@ pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Res
     match (from, content) {
         (Some(from), None) => {
             anyhow::ensure!(std::fs::metadata(from)?.is_file(), "{} is not a file", from.display());
-            if let (Ok(a), Ok(b)) = (from.canonicalize(), to.canonicalize()) {
+            if let (Ok(a), Ok(b)) = (from.canonical(), to.canonical()) {
                 // Copying a file onto itself would truncate it first.
                 if a == b {
                     return Ok(std::fs::metadata(from)?.len());
@@ -496,7 +497,7 @@ pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo
         anyhow::bail!("Destination {} is not a regular file or folder", path.display());
     };
 
-    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let canonical_base = base.canonical().unwrap_or_else(|_| base.to_path_buf());
     let (root, rel) = if let Ok(relative) = path.strip_prefix(&canonical_base) {
         (canonical_base, relative.to_path_buf())
     } else if path.parent().is_none() {
@@ -537,7 +538,7 @@ pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo
 /// exists and is a regular file or folder. It never accepts a program name.
 pub fn existing_local_path(candidate: &Path) -> Result<PathBuf> {
     let path = candidate
-        .canonicalize()
+        .canonical()
         .map_err(|error| anyhow::anyhow!("Destination {} is unavailable: {error}", candidate.display()))?;
     let metadata = path.metadata()?;
     anyhow::ensure!(metadata.is_file() || metadata.is_dir(), "Destination {} is not a regular file or folder", path.display());
@@ -872,13 +873,13 @@ pub fn replace_text(
         return Ok(ReplaceReport { files: 0, replacements: 0 });
     }
     let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive, whole_word)?;
-    let root = root.canonicalize()?;
+    let root = root.canonical()?;
     let jobs: Vec<(PathBuf, Option<Vec<u32>>)> = match targets {
         Some(targets) => targets
             .into_iter()
             .map(|t| {
                 let abs = root.join(&t.path);
-                let real = abs.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", t.path))?;
+                let real = abs.canonical().map_err(|e| anyhow::anyhow!("{}: {e}", t.path))?;
                 if !real.starts_with(&root) {
                     anyhow::bail!("{} is outside the project", t.path);
                 }
@@ -928,6 +929,7 @@ fn rewrite_text(rw: &Rewriter, text: &str, lines: Option<&[u32]>) -> (String, us
 
 #[cfg(test)]
 mod tree_tests {
+    use crate::paths::Canonical;
     use super::*;
 
     /// The All files filter sees what the tree shows: hidden files and
@@ -1016,16 +1018,16 @@ mod tree_tests {
 
         let inside = inspect_local_path(workspace.path(), Path::new("src/main.rs")).unwrap();
         assert_eq!(inside.kind, LocalPathKind::File);
-        assert_eq!(inside.root, workspace.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(inside.root, workspace.path().canonical().unwrap().to_string_lossy());
         assert_eq!(inside.rel, "src/main.rs");
         assert!(inside.text);
 
         let external = inspect_local_path(workspace.path(), &outside.path().join("report.pdf")).unwrap();
-        assert_eq!(external.root, outside.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(external.root, outside.path().canonical().unwrap().to_string_lossy());
         assert_eq!(external.rel, "report.pdf");
         assert!(!external.text);
         assert_eq!(inspect_local_path(workspace.path(), outside.path()).unwrap().kind, LocalPathKind::Directory);
-        let filesystem_root = workspace.path().canonicalize().unwrap().ancestors().last().unwrap().to_path_buf();
+        let filesystem_root = workspace.path().canonical().unwrap().ancestors().last().unwrap().to_path_buf();
         let root_folder = inspect_local_path(workspace.path(), &filesystem_root).unwrap();
         assert_eq!(root_folder.kind, LocalPathKind::Directory);
         assert_eq!(root_folder.path, filesystem_root.to_string_lossy());
@@ -1040,7 +1042,7 @@ mod tree_tests {
         assert!(!inspect_local_path(workspace.path(), Path::new("invalid.txt")).unwrap().text);
         std::fs::write(workspace.path().join("incomplete.txt"), [b'a', 0xc3]).unwrap();
         assert!(!inspect_local_path(workspace.path(), Path::new("incomplete.txt")).unwrap().text);
-        assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonicalize().unwrap().join("src/main.rs"));
+        assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonical().unwrap().join("src/main.rs"));
         assert!(existing_local_path(&workspace.path().join("not-there")).is_err());
     }
 

@@ -21,6 +21,7 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn screen(rig: &Rig) -> String {
     String::from_utf8_lossy(&rig.manager.terminals.read_output(&rig.pane).unwrap_or_default()).into_owned()
 }
@@ -54,6 +55,7 @@ impl Rig {
         self.manager.interrupt(SESSION, TAB).unwrap()
     }
 
+    #[cfg(unix)]
     fn pane_is_running(&self) -> bool {
         self.manager.terminals.is_running(&self.pane)
     }
@@ -75,6 +77,7 @@ impl Rig {
     }
 
     /// The "Session closed" line only a hard stop writes.
+    #[cfg(unix)]
     fn said_session_closed(&self) -> bool {
         self.events().iter().any(|e| matches!(&e.payload, Payload::Status { text } if text == recovery::SESSION_CLOSED_MESSAGE))
     }
@@ -267,12 +270,14 @@ fn the_hard_stop_is_what_ends_the_process_and_says_so() {
 
 /// An ACP tab mid-turn. Its agent is a process that records every line it is
 /// written; the test answers for it with `agent`.
+#[cfg(unix)]
 struct Headless {
     rig: Rig,
     wire: PathBuf,
     pid: u32,
 }
 
+#[cfg(unix)]
 impl Headless {
     fn acp() -> Self {
         let rig = Rig::of(CliKind::Claude, "");
@@ -352,6 +357,7 @@ impl Headless {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Headless {
     fn drop(&mut self) {
         self.rig.manager.host.kill(&key_of(SESSION, TAB));

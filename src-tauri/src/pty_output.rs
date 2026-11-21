@@ -49,6 +49,7 @@ impl OutputQueue {
         !pending.closed
     }
 
+    #[cfg(unix)]
     pub(super) fn has_read_room(&self) -> bool {
         let pending = self.pending.lock().unwrap();
         !pending.closed && pending.batches.len() < READ_BATCHES && pending.bytes < READ_BYTES * READ_BATCHES

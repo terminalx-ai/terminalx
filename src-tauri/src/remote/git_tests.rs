@@ -65,6 +65,7 @@ impl Fixture {
         target
     }
 
+    #[cfg(unix)]
     fn fault(&self, name: &str) {
         std::fs::write(self.state.join(name), "").unwrap();
     }
@@ -76,7 +77,7 @@ impl Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let root = base.join("workspace");
     let state = base.join("github");
     std::fs::create_dir_all(&root).unwrap();
@@ -681,6 +682,7 @@ fn expired_credentials_and_an_unreachable_remote_are_told_apart() {
     assert_eq!(error.code, "outcome_unknown", "{}", error.message);
 }
 
+#[cfg(unix)]
 #[test]
 fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_base() {
     let f = fixture();
@@ -719,6 +721,7 @@ fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_bas
     assert_eq!(f.code("git.prs", json!({ "repo": "app", "number": 0 })), "invalid_params");
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_enterprise_pr_creation_retains_verified_repository_routing() {
     let _home = crate::store::temp_home();
@@ -840,6 +843,7 @@ fn machine_enterprise_pr_creation_retains_verified_repository_routing() {
     assert!(unavailable["associations"][0]["repo"].is_null());
 }
 
+#[cfg(unix)]
 #[test]
 fn legacy_machine_pull_request_locators_bind_numeric_actions_to_the_public_github_pr() {
     let _home = crate::store::temp_home();
@@ -875,6 +879,7 @@ fn legacy_machine_pull_request_locators_bind_numeric_actions_to_the_public_githu
     assert!(!f.gh_calls()[before.len()..].contains("mutation("));
 }
 
+#[cfg(unix)]
 #[test]
 fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
     let _home = crate::store::temp_home();
@@ -900,6 +905,7 @@ fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
     assert_eq!(std::fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(), [recorded.to_str().unwrap(), fallback.to_str().unwrap()]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_stalled_recorded_batch_cannot_skip_the_next_checkout() {
     let _home = crate::store::temp_home();
@@ -926,6 +932,7 @@ fn a_stalled_recorded_batch_cannot_skip_the_next_checkout() {
     assert_eq!(valid["repo"], "valid");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
     let f = fixture();
@@ -961,6 +968,7 @@ fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
     assert_eq!(untouched, replacement);
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_pr_creation_records_the_native_session_association() {
     let _home = crate::store::temp_home();
@@ -1043,6 +1051,7 @@ fn machine_pr_creation_records_the_native_session_association() {
     assert_eq!(rows("native"), owned);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
     let _home = crate::store::temp_home();
@@ -1101,6 +1110,7 @@ fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
 }
 
 /// A create whose readback was lost leaves `checkout` guarded by PR #1.
+#[cfg(unix)]
 fn unverified_machine_pr(f: &mut Fixture, name: &str) -> (PathBuf, PathBuf) {
     let remote = f.remote("origin");
     f.clone(&remote, ".");
@@ -1115,6 +1125,7 @@ fn unverified_machine_pr(f: &mut Fixture, name: &str) -> (PathBuf, PathBuf) {
     (remote, checkout)
 }
 
+#[cfg(unix)]
 fn set_pr_state(f: &Fixture, state: &str) {
     let path = f.state.join("pr-1.json");
     let mut pr: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1122,6 +1133,7 @@ fn set_pr_state(f: &Fixture, state: &str) {
     std::fs::write(path, serde_json::to_vec(&pr).unwrap()).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn a_merged_pending_pr_is_reconciled_by_url_after_its_branch_and_session_are_gone() {
     let _home = crate::store::temp_home();
@@ -1155,6 +1167,7 @@ fn a_merged_pending_pr_is_reconciled_by_url_after_its_branch_and_session_are_gon
     assert!(f.gh_calls().contains(&format!("\"{url}\"")));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_closed_pending_pr_keeps_its_surviving_session_association() {
     let _home = crate::store::temp_home();
@@ -1170,6 +1183,7 @@ fn a_closed_pending_pr_keeps_its_surviving_session_association() {
     assert!(rows.get("pendingCreation").is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn an_open_or_unreachable_pending_pr_stays_protected() {
     let _home = crate::store::temp_home();
@@ -1211,6 +1225,7 @@ fn an_open_or_unreachable_pending_pr_stays_protected() {
     assert_eq!(f.code("git.prReconcileCreation", json!({ "url": url })), "invalid_params");
 }
 
+#[cfg(unix)]
 #[test]
 fn bulk_cleanup_keeps_a_worktree_whose_pr_readback_failed_after_a_switch_to_a_merged_branch() {
     use crate::worktree_cleanup as cleanup;
@@ -1258,6 +1273,7 @@ fn bulk_cleanup_keeps_a_worktree_whose_pr_readback_failed_after_a_switch_to_a_me
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_nested_project_session_cannot_create_its_parents_pr() {
     let _home = crate::store::temp_home();
@@ -1331,6 +1347,7 @@ fn machine_pr_request(f: &Fixture, checkout: &Path) -> Value {
     json!({ "repo": repo, "sessionId": "native", "branch": "feature/pr", "pushHead": git(checkout, &["rev-parse", "HEAD"]), "title": "Add pr", "base": "main" })
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head() {
     let _home = crate::store::temp_home();
@@ -1382,6 +1399,7 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
     assert_eq!(f.code("git.prCreateForSession", request), "conflict");
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     for replace_checkout in [false, true] {
@@ -1428,6 +1446,7 @@ fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_concurrent_machine_pr_is_reported_as_existing_and_keeps_its_single_session() {
     let _home = crate::store::temp_home();
@@ -1467,6 +1486,7 @@ fn a_concurrent_machine_pr_is_reported_as_existing_and_keeps_its_single_session(
     assert_eq!(f.gh_calls().matches(r#"["pr", "create","#).count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn machine_branch_pr_links_are_verified_durable_and_removable() {
     let _home = crate::store::temp_home();
@@ -1606,6 +1626,7 @@ fn machine_branch_pr_links_are_verified_durable_and_removable() {
     assert!(!f.gh_calls().contains(r#"["pr", "create","#));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
@@ -1624,6 +1645,7 @@ fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     let f = fixture();
@@ -1646,6 +1668,7 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
     let f = fixture();
@@ -1666,6 +1689,7 @@ fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
     assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")));
 }
 
+#[cfg(unix)]
 #[test]
 fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let f = fixture();
@@ -1717,6 +1741,7 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     assert!(listed["prs"][0]["mergeQueueEntry"].is_null());
 }
 
+#[cfg(unix)]
 #[test]
 fn disposition_facts_report_unpublished_work_per_repository() {
     let f = fixture();
@@ -1793,6 +1818,7 @@ fn a_root_inside_a_checkout_is_that_repository() {
     assert_eq!(inner.handle("git.status", &json!({})).unwrap().unwrap()["branch"], "main");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_forks_pull_request_from_a_branch_of_the_same_name_is_not_this_branchs() {
     let f = fixture();
@@ -1837,6 +1863,7 @@ fn workspace_review_range_includes_committed_modified_and_untracked() {
     assert!(f.call("git.reviewRange", json!({ "repo": "app", "target": "missing" })).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     let _home = crate::store::temp_home();
@@ -1942,6 +1969,7 @@ fn remote_landed_verification_recognizes_rewritten_merges_but_not_new_work() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() {
     let f = fixture();

@@ -191,7 +191,13 @@ impl Homes {
 
     fn pretty(&self, path: &Path) -> String {
         match path.strip_prefix(&self.home) {
-            Ok(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.to_string_lossy()),
+            Ok(rest) if !rest.as_os_str().is_empty() => {
+                let rest = rest.to_string_lossy();
+                // Shown as the rest of the app writes these paths: `~/.codex/config.toml`.
+                #[cfg(windows)]
+                let rest = rest.replace('\\', "/");
+                format!("~/{rest}")
+            }
             _ => path.to_string_lossy().into_owned(),
         }
     }

@@ -17,7 +17,7 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+    let root = crate::paths::canonicalize(dir.path()).unwrap().join("workspace");
     std::fs::create_dir(&root).unwrap();
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
     listed(&rpc);

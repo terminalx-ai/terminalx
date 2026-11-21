@@ -43,7 +43,7 @@ fn projects(args: &[String]) -> Result<i32> {
         }
         ["add", folder] => {
             // The runtime runs elsewhere: it is given the full path.
-            let path = std::fs::canonicalize(folder).with_context(|| format!("{folder} is not a folder here"))?;
+            let path = crate::paths::canonicalize(folder).with_context(|| format!("{folder} is not a folder here"))?;
             if !path.is_dir() {
                 anyhow::bail!("{} is not a folder", path.display());
             }

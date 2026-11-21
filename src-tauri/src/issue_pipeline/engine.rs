@@ -233,8 +233,10 @@ impl Running {
 }
 
 /// No step starts until this is dropped (#765).
+#[cfg(unix)]
 pub(crate) struct PausedSteps(());
 
+#[cfg(unix)]
 impl Drop for PausedSteps {
     fn drop(&mut self) {
         *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = false;
@@ -244,6 +246,7 @@ impl Drop for PausedSteps {
 
 /// Hold back every step that would start, once none is running: `None` when
 /// one is still running after `within`, and then nothing is held back.
+#[cfg(unix)]
 pub(crate) fn pause_steps(within: std::time::Duration) -> Option<PausedSteps> {
     *PAUSED.lock().unwrap_or_else(|error| error.into_inner()) = true;
     let paused = PausedSteps(());

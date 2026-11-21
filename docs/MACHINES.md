@@ -2811,7 +2811,7 @@ runs on macOS against previous runtime releases.
 | Dictation into a machine's terminal | Hidden; dictation fills the composer only |
 | Moving a session between machines | No control offers it; a session's key names its machine (decision 8) |
 | Sharing a machine with other people | `collab/1` not served; sharing, presence and notes hidden |
-| A Windows host | Not built: no Windows runtime |
+| A Windows host | The runtime builds and serves the local desktop on Windows (`docs/LOCAL-RUNTIME.md`, "Windows"); serving paired computers from one is not yet verified |
 
 ### Remaining coverage and route limits
 

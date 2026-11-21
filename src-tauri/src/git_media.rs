@@ -1,5 +1,6 @@
 //! Bounded, binary-safe reads of immutable diff revisions. No text decoding,
 //! external diff driver, workspace-wide asset scope, or temporary files.
+use crate::paths::Canonical;
 use anyhow::{bail, ensure, Context, Result};
 use base64::Engine;
 use serde::Serialize;
@@ -49,8 +50,8 @@ pub fn read(
             Some(crate::git::BlobContents::TooLarge(_)) => bail!("Media preview exceeds the {} KiB limit", limit / 1024),
         }
     } else {
-        let root = cwd.canonicalize()?;
-        let resolved = match root.join(path).canonicalize() {
+        let root = cwd.canonical()?;
+        let resolved = match root.join(path).canonical() {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -97,6 +98,7 @@ pub fn read(
 mod tests {
     use super::*;
     use crate::git::run;
+    #[cfg(unix)]
     use std::process::Command;
 
     #[test]

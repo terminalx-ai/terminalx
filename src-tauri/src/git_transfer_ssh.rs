@@ -9,6 +9,7 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use crate::paths::Canonical;
 
 const ENTRY: &str = "--terminalx-git-ssh";
 
@@ -52,7 +53,7 @@ fn clone_context(command: &Command, args: &[&OsStr]) -> Result<Option<CloneConte
     // App clones always name their staging destination explicitly. Refuse
     // ambiguous invocations rather than reading an enclosing repository.
     anyhow::ensure!(paths.len() == 2, "App clone requires an explicit destination for SSH configuration");
-    let from = command.get_current_dir().map(std::path::PathBuf::from).unwrap_or(std::env::current_dir()?).canonicalize()?;
+    let from = command.get_current_dir().map(std::path::PathBuf::from).unwrap_or(std::env::current_dir()?).canonical()?;
     let destination = from.join(paths[1]);
     Ok(Some(CloneContext { from, git_dir: if bare { destination } else { destination.join(".git") } }))
 }
@@ -115,7 +116,7 @@ impl Settings {
             else { command.env_remove(key); }
         }
         if let Some(clone) = &self.clone {
-            if std::env::current_dir()?.canonicalize()? == clone.from {
+            if std::env::current_dir()?.canonical()? == clone.from {
                 // Read the newly initialized clone, including clone -c values
                 // and gitdir-conditional includes, never the enclosing checkout.
                 command.arg("--git-dir").arg(&clone.git_dir);

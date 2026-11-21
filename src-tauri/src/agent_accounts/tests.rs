@@ -2,7 +2,9 @@
 //! Sign-ins run real processes: stand-ins for `claude` and `codex` that
 //! write a login where the real ones do.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
@@ -11,13 +13,16 @@ use super::*;
 use crate::agent_keys::{Agent, Store};
 use crate::keychain::testing::MemorySecrets;
 
+#[cfg(unix)]
 const TOKEN: &str = "sk-ant-oat01-ThisIsTheAccountsOwnAccessToken-0123456789";
+#[cfg(unix)]
 const REFRESH: &str = "sk-ant-ort01-ThisIsTheAccountsRefreshToken-9876543210";
 
 fn store<'a>(root: &Path, secrets: &'a MemorySecrets) -> Store<'a> {
     Store::new(root.to_path_buf(), secrets)
 }
 
+#[cfg(unix)]
 fn everything_under(root: &Path) -> String {
     let mut text = String::new();
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
@@ -59,6 +64,7 @@ impl SignOut for Recorded {
 }
 
 /// The person's own Claude Code configuration, in a scratch home.
+#[cfg(unix)]
 fn person(root: &Path) -> claude_dir::Person {
     let home = root.join("home");
     let person = claude_dir::Person::in_home(&home);
@@ -76,6 +82,7 @@ fn person(root: &Path) -> claude_dir::Person {
 }
 
 /// Write what Claude Code writes into a directory it signed in to.
+#[cfg(unix)]
 fn claude_signs_in(dir: &Path, email: &str, organization: &str) {
     std::fs::write(dir.join(".credentials.json"), json!({ "claudeAiOauth": { "accessToken": TOKEN, "refreshToken": REFRESH, "expiresAt": 4_000_000_000_000i64 } }).to_string()).unwrap();
     let path = dir.join(".claude.json");
@@ -260,7 +267,7 @@ esac
     script
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(unix, feature = "desktop"))]
 fn settle(store: &Store<'_>, attempt: &str, sign_out: &dyn SignOut, local: &Identity) -> Finished {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -369,7 +376,7 @@ fn signing_in_again_runs_in_that_accounts_directory_only() {
     assert!(login::start_in(&store, Agent::Claude, Some(LOCAL), &programs, Some(&person), &sign_out).is_err(), "This Mac's login signs in with the agent itself");
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(unix, feature = "desktop"))]
 fn identity_of(root: &Path, id: &str) -> Identity {
     crate::agent_local_login::identity_in("claude", &account_dir(root, Agent::Claude, id))
 }

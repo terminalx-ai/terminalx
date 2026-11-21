@@ -33,7 +33,7 @@ pub struct Sources {
 impl Sources {
     /// The real machine. `transcript_path` is what Claude's hook reported:
     /// `<config>/projects/<project>/<conversation>.jsonl`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn from_env(transcript_path: Option<&str>) -> Self {
         Self::from_env_on(transcript_path, None, None)
     }
@@ -232,6 +232,7 @@ mod tests {
         assert!(claude_may_restrict(&[&m.project], &m.sources), "a managed profile is not decoded, so it could");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_config_directory_claude_reports_is_consulted_first() {
         let sources = Sources::from_env(Some("/tab/config/projects/-w-app/conversation.jsonl"));

@@ -7,6 +7,7 @@
 //! The status bar asks again at the user's automatic interval; the gates here
 //! decide whether an ask becomes a provider request.
 
+use crate::paths::Canonical;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -884,7 +885,7 @@ pub fn claude_account_identity() -> Option<String> {
         Some(dir) => std::path::PathBuf::from(dir).join(".claude.json"),
         None => dirs::home_dir()?.join(".claude.json"),
     };
-    let path = path.canonicalize().ok()?;
+    let path = path.canonical().ok()?;
     let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
     let account = config.pointer("/oauthAccount/accountUuid")?.as_str()?;
     if account.is_empty() { return None; }
