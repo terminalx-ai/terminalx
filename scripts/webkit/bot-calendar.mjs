@@ -145,11 +145,15 @@ async function measure(page, calendar, viewport) {
   };
 }
 
+// One fixed instant, a Wednesday morning in UTC: the week, today, the now line and the counted rows do not hang on when
+// the check runs.
+const NOW = new Date("2026-11-18T10:30:00Z");
+
 try {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }]) {
     for (const colorScheme of ["dark", "light"]) {
       const name = `${viewport.width}×${viewport.height} ${colorScheme}`;
-      const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme });
+      const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, viewport, { extra: fixture, colorScheme, now: NOW });
       const errors = [];
       page.on("pageerror", (error) => errors.push(error.message));
 
@@ -172,7 +176,8 @@ try {
       }, { ...team.boxes, chips, errors });
 
       // A clicked empty hour asks which bot.
-      await calendar.getByTestId("calendar-day").nth(6).click({ position: { x: 20, y: 12 * 46 + 10 } });
+      // The hour itself: since PRO-499 the day columns let clicks through to the hour cells laid over them.
+      await calendar.getByRole("gridcell", { name: /^Sun \d+, 12:00/ }).click();
       const choose = main.getByTestId("bots-duties-choose");
       await choose.waitFor();
       const chooseBox = await box(choose);
