@@ -2286,6 +2286,33 @@ mod tests {
         assert_eq!(ask(&driver, &phone, "sessions.create", create.clone()).await["result"]["sessionId"], session.as_str());
         assert_eq!(crate::store::index::load().unwrap().len(), 1);
 
+        // PRO-510: the calls built for the phone after the gate's lists were
+        // written reach their handlers, one of each group, and an acting one
+        // only as a driver. Each was refused as `forbidden` before its handler.
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let answered = |response: serde_json::Value| { assert_eq!(response["ok"], true, "{response}"); response["result"].clone() };
+        // The phone's prefetch, and the configuration its form shows: reads.
+        let targets = answered(ask(&viewer, &tablet, "sync.prefetchTargets", json!({})).await);
+        assert!(targets["targets"].as_array().unwrap().iter().any(|target| target["sessionId"] == session.as_str()), "{targets}");
+        assert_eq!(answered(ask(&viewer, &tablet, "sync.prefetch", json!({"enabled": true})).await)["enabled"], true);
+        assert_eq!(answered(ask(&viewer, &tablet, "sync.prefetch", json!({"enabled": false})).await)["enabled"], false);
+        assert!(answered(ask(&viewer, &tablet, "configuration.resolve", json!({})).await).is_object());
+        // The Bots tab: a viewer reads it, only a driver pauses the bots.
+        assert!(answered(ask(&viewer, &tablet, "bots.list", json!({})).await)["bots"].is_object());
+        assert_eq!(refused(&ask(&viewer, &tablet, "bots.pauseAll", json!({})).await), (json!(false), json!("forbidden")));
+        answered(ask(&driver, &phone, "bots.pauseAll", json!({})).await);
+        // Pins: a viewer reads the cloud pins, only a driver pins a session or a cloud project.
+        assert_eq!(refused(&ask(&viewer, &tablet, "sessions.pin", json!({"sessionId": session, "pinned": true})).await), (json!(false), json!("forbidden")));
+        assert_eq!(refused(&ask(&viewer, &tablet, "cloud.pin", json!({"orgId": "org-1", "identity": "github.com/acme/web", "pinned": true})).await), (json!(false), json!("forbidden")));
+        assert!(!crate::store::index::get(&session).unwrap().pinned);
+        assert_eq!(answered(ask(&viewer, &tablet, "cloud.pins", json!({})).await), json!({"orgs": {}}));
+        assert_eq!(answered(ask(&driver, &phone, "sessions.pin", json!({"sessionId": session, "pinned": true})).await)["pinned"], true);
+        assert!(crate::store::index::get(&session).unwrap().pinned);
+        answered(ask(&driver, &phone, "cloud.pin", json!({"orgId": "org-1", "identity": "github.com/acme/web", "pinned": true})).await);
+        assert_eq!(answered(ask(&viewer, &tablet, "cloud.pins", json!({})).await), json!({"orgs": {"org-1": ["github.com/acme/web"]}}));
+
         // A revoked phone reads and changes nothing, and starts nothing.
         pairing.fence_runtime_mobile("revoke", json!({"deviceId": "driver"})).unwrap();
         for (method, params) in [("mac.settings", json!({})), ("sessions.options", json!({})), ("mac.setSettings", json!({"nativeCodex": false})),

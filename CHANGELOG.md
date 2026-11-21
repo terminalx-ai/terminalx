@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Mobile: the Bots tab, pinning from the phone and the Pinned section's
+  cloud projects, and the phone's prefetch of recent conversations now reach
+  the Mac. Their calls (`bots.*`, `sessions.pin`, `cloud.pins`, `cloud.pin`,
+  `sync.prefetch`, `sync.prefetchTargets` and `configuration.resolve`) were
+  missing from the list of what a paired phone may call, so the Mac refused
+  each one ("not available to this paired device") before it was handled,
+  since they were added. Reads are open to every paired phone; answering or
+  pausing a bot and pinning stay with a phone allowed to drive (PRO-510).
 - Bots (experimental): message a bot from Slack or Telegram. Connect your own
   Slack app (Socket Mode) or Telegram bot in Settings → the bot → Channels,
   then link a chat by sending it the one-time code shown there; messages from
