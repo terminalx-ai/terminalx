@@ -346,6 +346,14 @@ fn access_maps_to_the_permission_mode_and_the_rules() {
     assert!(note.contains("You read and report only") && note.contains("(keeping notes with `terminalx bots memory add` and `forget` aside)"), "{note}");
     assert!(note.contains("these two commands are the one exception") && note.contains("tell your owner what to remember"), "{note}");
     assert!(!note.contains("paused"));
+    // PRO-493: it cannot run `terminalx bots items ask` in plan mode, so it asks with its own question tool, which
+    // its access lets through and Needs you shows (`needs_you_does_not_wait_behind_a_launching_tab`).
+    assert!(note.contains("ask it with your own question tool (AskUserQuestion, or request_user_input in Codex)") && note.contains("in Needs you"), "{note}");
+    assert!(!note.contains("what you would add, ask or finish"), "{note}");
+    for tool in ["AskUserQuestion", "request_user_input"] {
+        let call = serde_json::json!({"tool_name": tool, "tool_input": {"questions": []}});
+        assert!(matches!(super::super::access::gate(&BotAccess::ReadReport, &call), super::super::access::Gate::Leave), "{tool}");
+    }
 }
 
 #[test]

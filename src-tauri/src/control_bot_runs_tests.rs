@@ -228,6 +228,72 @@ fn start_but_ask_before_merging_holds_the_bots_merge_until_its_owner_says_merge(
     assert!(crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().iter().any(|(_, _, text)| text.contains("I chose answer 3 of your question on item #2"))));
 }
 
+/// PRO-501: the owner starts the run from its Run view rather than the item's question. The item is settled as their
+/// "Approve and start" there would settle it, and the lead goes on steering the run with `runs start`. Before any
+/// start, and after "Not now", the run stays held for the lead and for a process no session places.
+#[test]
+fn a_run_its_owner_starts_from_the_run_view_settles_the_item_and_the_lead_steers_it_on() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let lead = Lead::new();
+    // Pieces no worker starts for, so the real Approve and the lead's start launch nothing in the test.
+    let blocked = |lead: &Lead, id: &str, state: &str| {
+        let run = lead.run(id, &lead.chat.id, state);
+        crate::orchestration::store::update(&run.id, |run| {
+            for piece in &mut run.pieces {
+                piece.state = crate::orchestration::PieceState::Blocked;
+            }
+            Ok(())
+        })
+        .unwrap();
+        run
+    };
+    // The engine tells the lead of a start, which launches its tab anew: its test secret is installed again.
+    let reprove = |lead: &Lead| lead.service.manager.install_review_test_cli(&lead.chat.id, &lead.chat.tabs[0].id, "atlas-secret");
+    let held = |lead: &Lead, run: &str| {
+        assert_eq!(lead.bot("runs.start", json!({"run": run})).unwrap_err().code, "awaits_owner");
+        assert_eq!(lead.service.execute("runs.start", json!({"run": run}), "r").unwrap_err().code, "awaits_owner");
+    };
+
+    lead.bot("bots.items.add", json!({"title": "Runner move", "start": true})).unwrap();
+    let run = blocked(&lead, "run-from-view", "awaitingApproval");
+    lead.bot("bots.items.plan", json!({"item": 1, "run": run.id})).unwrap();
+    held(&lead, &run.id);
+
+    // The Run view's Approve and start, as the window sends it.
+    let approved = lead.service.manager.orchestration("approve", json!({"id": run.id})).unwrap();
+    assert_eq!(approved["run"]["state"], "running");
+    reprove(&lead);
+    let item = lead.item(1);
+    assert_eq!((item.state.as_str(), item.question.is_none(), item.runs[0].decision.as_str(), item.runs[0].hold_merge), ("inProgress", true, "start", false));
+    assert!(item.runs[0].decided.is_some());
+    assert!(item.activity.iter().any(|entry| entry.kind == "approved" && entry.by == crate::bots::OWNER && entry.text.contains("Run view")));
+    // The lead's own start goes through now: for pieces that became ready, or after a stop that needed the owner.
+    let steered = lead.bot("runs.start", json!({"run": run.id})).unwrap();
+    assert_eq!(steered["run"]["id"], run.id.as_str());
+    lead.service.execute("runs.start", json!({"run": run.id}), "r").unwrap();
+    assert!(started().is_empty(), "the item's own start was not used");
+    reprove(&lead);
+
+    // "Not now" holds a planned run; the Run view's Start then settles the item as well.
+    lead.bot("bots.items.add", json!({"title": "Another plan"})).unwrap();
+    let other = blocked(&lead, "run-not-now-view", "planned");
+    lead.bot("bots.items.plan", json!({"item": 2, "run": other.id})).unwrap();
+    let seen = lead.item(2).question.unwrap().id;
+    lead.window("itemAnswer", json!({"id": lead.atlas, "number": 2, "answer": 2, "question": seen})).unwrap();
+    assert_eq!(lead.item(2).runs[0].decision, "notNow");
+    held(&lead, &other.id);
+    lead.service.manager.orchestration("startPlanned", json!({"id": other.id})).unwrap();
+    assert_eq!(lead.item(2).runs[0].decision, "start");
+    reprove(&lead);
+    lead.bot("runs.start", json!({"run": other.id})).unwrap();
+    // Item 1 was settled once: a second settling records nothing more.
+    let approvals = |lead: &Lead| lead.item(1).activity.iter().filter(|entry| entry.kind == "approved").count();
+    let before = approvals(&lead);
+    runs::started_from_run_view(lead.service.sink.as_ref(), &run.id);
+    assert_eq!(approvals(&lead), before);
+}
+
 /// The switches and the bot's own rules hold: Orchestrator runs off, a run its bot does not lead, a run that started,
 /// a paused bot.
 #[test]

@@ -411,7 +411,8 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   tells its lead and the bots that report to it, and answers whoever handed
   it work. Who can ask lets a bot hand work, not send messages off the line.
   The line is judged under the store's lock when the tell is recorded, and a
-  tell still waiting whose line is gone by delivery is dropped.
+  tell still waiting whose line is gone by delivery is dropped, and its
+  sender is told so by TerminalX, in its home chat (PRO-498).
 - **Labels.** Each bot's message is sent with the sending bot as its
   author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
   answer to / status to / message to <Name> · a bot's words, not an
@@ -431,13 +432,15 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   hand-offs and 20 waiting messages per bot, 200 open overall, and 20
   hand-offs and messages per bot in 10 minutes, reserved under the rate's
   lock. Between the same two bots, either way and closed ones counted, at
-  most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
+  most 6 hand-offs an hour; items the owner handed on in the window are not
+  counted (PRO-498). A bot works on at most 4 hand-offs at once,
   counted under the lock from its open working ones (claimed ones whose chat
   is not made yet included, and, for a bot that is not paused, the waiting
   ones about to be claimed): a fifth is refused, and on a resume the rest
   wait and start as those are answered or their sender is deleted. When a
   hand-off closes, the chat made for it (never a home chat or another of
-  the bot's chats) is stopped once its turn has ended and its agent left
+  the bot's chats) has its own agent tab stopped (never another agent tab
+  the owner added to it, PRO-498) once its turn has ended and its agent left
   nothing running in the background (`SessionManager::stop_if_idle`, as
   the idle sweep does); its conversation stays.
   Closed hand-offs are trimmed to 300, the bots' before the owner's;
@@ -448,7 +451,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   (the owner's go to 6 MB; reads stop at 8 MB).
 - **Pause.** A paused bot sends nothing. Work handed to it is recorded as
   waiting, with no chat or item, and starts when the owner resumes it; what
-  is sent to it waits too. It is never started by a bot.
+  is sent to it waits too. It is never started by a bot. The resume answers
+  at once: what waited starts after it, on a thread of its own
+  (`handoffs::resumed_later`, PRO-498).
 - **Start.** A hand-off is claimed (waiting to working) under the store's
   lock before its chat and item are made; a Stop that lands meanwhile
   archives that chat and drops the item, so nothing is left behind. The
@@ -474,6 +479,10 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   hand-off is open, then stops the receiving bot's chat for that hand-off
   and the sessions it started for its item, drops the item, and tells the
   sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
+  Work the owner stopped is not handed on again: a new hand-off from the
+  same sender with the same title (case, spacing and punctuation aside), to
+  any bot, is refused while the stopped one is kept, and its sender is told
+  to ask the owner, who hands it on from the window (PRO-498).
 - **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
   (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
   most. Every launch of a bot's chat is given it as the owner's standing
@@ -528,13 +537,21 @@ the engine: the bot drives the existing `terminalx runs …` commands, and
   and names the question the owner read. "Start, but ask before merging" sets the merge hold
   first: `runs merge` from the bot is then refused with `merge_held` until the
   bot asks `ask-merge` and the owner answers Merge.
-- **Only the owner's answer starts it.** A run an item asked about is refused
-  `runs start` (`awaits_owner`) until the owner chose a start, and a held run
-  is refused `runs merge` (`merge_held`) until they said Merge. Both are judged
-  by the run, whoever calls the control socket, so a process a bot starts
-  outside its sessions is held too; the owner's own Start and Merge are the
-  window's and do not come that way. The window witnesses every chosen answer
-  (`consent::guards_request`), so its proof reaches the runtime.
+- **Only the owner starts it.** A run an item asked about is refused
+  `runs start` (`awaits_owner`) while it has not started (`AwaitingApproval`
+  or `Planned`) and the owner chose no start, "Not now" included, and a held
+  run is refused `runs merge` (`merge_held`) until they said Merge. Both are
+  judged by the run, whoever calls the control socket, so a process a bot
+  starts outside its sessions is held too; the owner's own Start and Merge are
+  the window's and do not come that way. The window witnesses every chosen
+  answer (`consent::guards_request`), so its proof reaches the runtime.
+- **Started from the Run view.** The owner may approve or start the run from
+  its Run view instead of the item's question. The item is then settled as
+  "Approve and start" there would settle it (`runs::started_from_run_view`):
+  the start is recorded with no merge hold, since the Run view's start holds
+  none, and the item's question about the run is closed. Once the run has
+  started by any route, the lead's `runs start` goes through, to launch pieces
+  that became ready or to go on after a stop (PRO-501).
 - **Done means the run ended.** An item that links a run that is not done or
   stopped cannot be closed with `done`. A failed run counts as open: its pieces
   may still merge, so it also keeps its merge hold and its place on the item.
@@ -620,9 +637,18 @@ mention starts a conversation, not a duty run.
   per bot.
 - **The gate.** `bots post` and `bots reply` are reports
   (`access::report_command`): Full access posts, the two lower levels ask
-  first, a paused bot is refused. A Full access bot can still post with
-  `gh` by itself, unsigned: the rule tells it not to, nothing stops it
-  (the PRO-489 class).
+  first, a paused bot is refused. At every level, Full access included, a
+  bot's session is refused the `gh` commands that post a comment or a
+  review unsigned (`access::unsigned_post`, PRO-502): `gh pr comment`,
+  `gh issue comment`, `gh pr review`, and a `gh api` call that writes to a
+  `comments` or `reviews` path or sends a GraphQL mutation that names a
+  comment or a review. The refusal names `bots post` and `bots reply`. It
+  finds them anywhere in a command line (lists, pipes, `sh -c`, `env`,
+  `sudo`), but it reads commands: a script, another program (`curl` to
+  the API, a Linear client), a connected server's (MCP) tool, or a call
+  spelt another way still posts. The bot holds the owner's credentials,
+  so this stops habit and a prompt that asks for it, not a bot set on
+  getting around it.
 - **Reading.** The automation scheduler's tick calls `channels::tick`,
   which reads at most every two minutes, on a thread of its own: the
   conversation and review comments of the GitHub repositories of the
@@ -644,10 +670,34 @@ mention starts a conversation, not a duty run.
   and starts nothing. A comment that carries the signature, or comes from a
   bot account, is not looked at (a signature only in quoted `>` lines is a
   person quoting a bot's post, and counts as theirs): a bot's signed post
-  wakes no bot, and is never taken for the owner. A Full access bot that
-  posts unsigned with raw `gh api` is not told apart from the owner (the
-  PRO-489 class); so the agent is told a comment from the owner's account
-  is not always the owner's, and it is a request, never an approval.
+  wakes no bot, and is never taken for the owner.
+- **While a bot is at work (PRO-502).** A mention from the owner's account
+  written while one of the owner's bots at Full access was in a turn is
+  kept as "not accepted", with the bot's name and "mention @slug again in a
+  new comment once it has finished", as an edited comment is. It reads no
+  command. A spell (`Working` in `bot-channels.json`) opens on a bot tab's
+  first sign of work in a turn (its prompt, turn start or a tool call,
+  `SessionManager::publish_event`) while the bot is at Full access and not
+  paused, and closes at the turn's end; one whose end was never seen closes
+  on the next read when the tab has no turn open. A comment counts as
+  written in a spell from two minutes before it starts to two minutes after
+  it ends (`WORK_MARGIN_SECONDS`: the services' clocks and posting delay).
+  Spells are kept a day. Bots at the two lower levels open none: they ask
+  before every command, and the card shows it. Comments from people in Who
+  can ask are not affected: a bot posts with the owner's login, not theirs.
+  The trade-off: the owner's mention made while any Full access bot is
+  working is turned away and must be made again. A narrower rule (only
+  turns that ran a command not known to read, or comments whose text a
+  tool call carried) would read the bot's commands, which is what this
+  check is there not to depend on.
+- **What is not guaranteed.** A bot's unsigned post with the owner's login
+  is still taken for the owner when it is made outside a turn: by a
+  process the bot left running in the background, by a scheduled job, or
+  through a session the app does not know acts for a bot. A bot at a lower
+  level can post unsigned with a command the owner approves on the card.
+  So the agent is still told a comment from the owner's account is not
+  always the owner's, its text reaches it fenced as a request, never an
+  approval, and at most ten mentions an hour reach one bot.
 - **Names.** Outside the fence, a mention names its author in the app's
   words: the name the owner gave a listed person, the owner's own login or
   Linear name, never a display name the commenter chose. The GitHub login

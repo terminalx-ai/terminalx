@@ -512,7 +512,9 @@ pub fn instructions(bot: &Bot, home: &str, role: &Read, memory: Option<&str>, fi
     ];
     // PRO-469: the work list, kept through the app; in plan mode the agent can run nothing, so it reports instead.
     rules.push(if writes_nothing {
-        "You cannot change your work list in plan mode (its open items, if any, are shown below). Tell your owner in the chat what you would add, ask or finish.".into()
+        // PRO-493: a Read and report bot (or a paused one) runs in plan mode, where `terminalx bots items ask` cannot
+        // run; its agent's own question tool can, and its question is shown in the owner's Needs you.
+        "You cannot change your work list in plan mode (its open items, if any, are shown below). Tell your owner in the chat what you would add or finish. When you need your owner's decision, ask it with your own question tool (AskUserQuestion, or request_user_input in Codex), with the answers to choose from: it waits for them in Needs you, and their answer comes back here.".into()
     } else {
         "Keep your work list with `terminalx bots items` (`list`, `show`, `add`, `set`, `ask`, `check`, `comment`, `done`): add an item for each piece of work you take on, with what done means (`--done \"text | how it is checked\"`), and keep its state and links current. When you need a decision, ask once with `terminalx bots items ask ITEM --question \"…\" --answer \"…\" --answer \"…\" [--recommend N]` and wait: your owner's answer arrives here as their message. An item is done (`terminalx bots items done ITEM`) only once every line of its done means is checked met.".into()
     });
@@ -599,19 +601,31 @@ pub(crate) fn with_sections(mut text: String, sections: impl IntoIterator<Item =
 /// reach it are sent now, as messages (`bots::items::deliver_waiting`), and cleared only once sent: a launch prompt
 /// would hold them only until the next relaunch. On a thread of its own, after this launch lets go of its tab. Nothing
 /// is read for any other session.
-pub fn launched(manager: &crate::session::SessionManager, entry: &SessionEntry, started: bool) {
+pub fn launched(manager: &crate::session::SessionManager, entry: &SessionEntry, tab: &str, started: bool) {
     let Some(reference) = session_bot(entry) else { return };
     if !started || !super::enabled() {
         return;
     }
-    let (manager, id, home) = (manager.clone(), reference.id.clone(), reference.home);
+    // Only the chat's own agent tab, the one its messages go to: another agent tab the owner added to the chat is not
+    // the bot's, and its launch sends nothing (PRO-493).
+    if entry.tabs.iter().find(|candidate| !candidate.is_terminal()).is_none_or(|own| own.id != tab) {
+        return;
+    }
+    let (manager, id, home, session) = (manager.clone(), reference.id.clone(), reference.home, entry.id.clone());
     std::thread::spawn(move || {
-        if home {
+        // The owner's waiting messages go to the bot's current home chat (`items::to_home_chat`): an older home chat
+        // that starts sends nothing on (PRO-493).
+        if home && current_home(&id).as_deref() == Some(session.as_str()) {
             super::items::deliver_waiting(&manager, &id);
         }
         // What other bots sent this bot (PRO-475), for any of its chats.
         super::handoffs::deliver_waiting(&manager, &id);
     });
+}
+
+/// The id of bot `id`'s home chat, as `home_chat` finds it (the newest), without making or unarchiving one.
+fn current_home(id: &str) -> Option<String> {
+    index::load().ok()?.into_iter().filter(|entry| session_bot(entry).is_some_and(|reference| reference.id == id && reference.home)).max_by(|a, b| a.created.cmp(&b.created)).map(|entry| entry.id)
 }
 
 /// Before a launch of a bot's chat (PRO-470): edits made to the bot's files

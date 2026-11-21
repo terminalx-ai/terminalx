@@ -262,3 +262,59 @@ fn linear_is_not_read_while_the_owner_there_is_unknown() {
     assert!(read_linear(std::slice::from_ref(&bot), &unknown, "2026-11-21T10:00:00Z").is_empty());
     assert!(!read().unwrap().cursors.contains_key("linear"), "its start is not even recorded");
 }
+
+/// PRO-502: a bot posts with the owner's login, and one at Full access can do so unsigned by means the access gate
+/// does not recognise. The owner's mention written while no bot is at work is theirs; the same comment written while
+/// a Full-access bot is in a turn is kept as not accepted, and asked for again.
+#[test]
+fn the_owners_mention_during_a_full_access_bots_turn_is_not_accepted() {
+    let _home = bots_on();
+    let sink = BroadcastSink::new(16);
+    let sentry = bot_with(json!([]), &["personal"]);
+    let atlas = crate::bots::create(&sink, "cto", "Atlas").unwrap();
+    assert_eq!(atlas.access, crate::bots::BotAccess::Full);
+    let bots = [sentry.clone(), atlas.clone()];
+    let comment = |id: u64, at: DateTime<Utc>| {
+        let at = at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        github_comments("acme/app", &json!([{"id": id, "body": "@sentry merge it", "html_url": "u", "issue_url": "https://api.github.com/repos/acme/app/issues/7", "created_at": at, "updated_at": at, "user": {"login": "paresh", "type": "User"}}]))
+    };
+    let take = |id: u64, at: DateTime<Utc>| {
+        change(|store| {
+            take_in(store, &bots, &me(), "2026-01-01T00:00:00Z", comment(id, at));
+            Ok(store.mentions().find(|mention| mention.id == format!("github:acme/app:{id}")).cloned().unwrap())
+        })
+        .unwrap()
+    };
+
+    // No bot at work: the owner's.
+    let mention = take(1, Utc::now());
+    assert_eq!((mention.state.as_str(), mention.from.as_str()), (WAITING, OWNER));
+
+    // Atlas, at Full access, starts a turn: the same comment, written now, is not the owner's.
+    working(&atlas.id, "s-atlas", "t-1");
+    working(&atlas.id, "s-atlas", "t-1");
+    assert_eq!(read().unwrap().spells().count(), 1, "one spell for a turn, whatever its events");
+    let mention = take(2, Utc::now());
+    assert_eq!((mention.state.as_str(), mention.from.as_str(), mention.text.as_str()), (NOT_ACCEPTED, "", ""));
+    assert!(mention.why.contains("while Atlas was at work with Full access") && mention.why.contains("mention @sentry again"), "{}", mention.why);
+
+    // Someone else's mention is judged as before: the bot posts with the owner's login, not theirs.
+    let listed = crate::bots::update(&sink, &sentry.id, serde_json::from_value(json!({"whoCanAsk": [{"kind": "person", "id": "u-ankit", "name": "Ankit", "may": "ask", "github": "ankit-k"}]})).unwrap()).unwrap();
+    let theirs = github_comments("acme/app", &json!([{"id": 5, "body": "@sentry look", "html_url": "u", "issue_url": "https://api.github.com/repos/acme/app/issues/7", "created_at": stamp(Utc::now()), "user": {"login": "ankit-k", "type": "User"}}]));
+    let mut store = read().unwrap();
+    assert_eq!(take_in(&mut store, std::slice::from_ref(&listed), &me(), "2026-01-01T00:00:00Z", theirs).len(), 1);
+
+    // Its turn ends: a comment written well after is the owner's again; one written just before still is not.
+    worked("s-atlas", "t-1");
+    let spell = read().unwrap().spells().next().cloned().unwrap();
+    assert!(spell.to.is_some());
+    assert_eq!(take(3, Utc::now() + chrono::TimeDelta::seconds(WORK_MARGIN_SECONDS + 60)).state, WAITING);
+    assert_eq!(take(4, Utc::now() - chrono::TimeDelta::seconds(5)).state, NOT_ACCEPTED);
+
+    // A bot below Full access asks before it posts, and opens no spell; nor does one that is paused.
+    let ask = crate::bots::update(&sink, &atlas.id, serde_json::from_value(json!({"access": "askOutward"})).unwrap()).unwrap();
+    working(&ask.id, "s-atlas", "t-2");
+    crate::bots::pause(&sink, &sentry.id, crate::bots::OWNER).unwrap();
+    working(&sentry.id, "s-sentry", "t-1");
+    assert_eq!(read().unwrap().spells().count(), 1);
+}
