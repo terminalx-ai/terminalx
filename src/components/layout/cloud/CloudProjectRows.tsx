@@ -58,6 +58,8 @@ import { createCloudSection, isBuiltInSection, keepFocusForNameField, moveProjec
 import { errorCode } from "@/lib/cloudTerminals";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { setCloudProjectPinned } from "@/lib/cloudPins";
+import { reportError } from "@/lib/errorToasts";
 import { useReducedMotion } from "@/lib/reducedMotion";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
 import { getSessionStore, selectCloudSession, selectCloudWorkspace, openWelcome, startCloudSessionIn, useSessionStore } from "@/lib/sessions";
@@ -157,7 +159,7 @@ function useRowError(): [string | null, (work: () => Promise<void>) => Promise<v
   return [error, run];
 }
 
-function updateOrgList(key: "cloudProjects" | "cloudPinned" | "cloudBlankProjects", orgId: string, change: (list: string[]) => string[]) {
+function updateOrgList(key: "cloudProjects" | "cloudBlankProjects", orgId: string, change: (list: string[]) => string[]) {
   const current = getPrefs()[key];
   setPrefs({ [key]: { ...current, [orgId]: change(current[orgId] ?? []) } });
 }
@@ -259,7 +261,7 @@ export function CloudProjectGroup({ project, onLifecycle }: { project: CloudProj
                 {mayStart === false && <span className="ml-auto pl-3 text-[10px] text-faint">admins only</span>}
               </DropdownMenuItem>
               <DropdownMenuItem
-                onSelect={() => updateOrgList("cloudPinned", project.orgId, (list) => (project.pinned ? list.filter((id) => id !== project.identity) : [...list, project.identity]))}
+                onSelect={() => void setCloudProjectPinned(project.orgId, project.identity, !project.pinned).catch(reportError(`Couldn't ${project.pinned ? "unpin" : "pin"} “${project.fullName}”`))}
               >
                 {project.pinned ? <PinOff /> : <Pin />} {project.pinned ? "Unpin project" : "Pin project"}
               </DropdownMenuItem>

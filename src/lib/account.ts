@@ -16,6 +16,7 @@ import { forgetOrganizationRoster, setRosterContext } from "@/lib/organizationRo
 import { resetPeople } from "@/lib/cloudPeople";
 import { dropEditors } from "@/lib/editors";
 import { getPrefs, setPrefs } from "@/lib/prefs";
+import { pruneCloudPins } from "@/lib/cloudPins";
 import { resetCloudFiles, resetCloudFilesIn } from "@/lib/workspaceFiles";
 
 interface AccountState {
@@ -157,7 +158,7 @@ function dropCloudOrg(orgId: string) {
 
 const CLOUD_PREFS = ["cloudPinned", "cloudProjects", "cloudBlankProjects"] as const;
 
-/** Drop the per-organization cloud prefs of organizations `keep` does not name. */
+/** Drop the per-organization cloud prefs (and pins) of organizations `keep` does not name. */
 function pruneCloudPrefs(keep: (orgId: string) => boolean) {
   const prefs = getPrefs();
   const patch: Partial<Record<(typeof CLOUD_PREFS)[number], Record<string, string[]>>> = {};
@@ -167,6 +168,8 @@ function pruneCloudPrefs(keep: (orgId: string) => boolean) {
     patch[key] = Object.fromEntries(Object.entries(current).filter(([orgId]) => keep(orgId)));
   }
   if (Object.keys(patch).length) setPrefs(patch);
+  // Pinned cloud projects are kept by the app since #1403; they go with the rest.
+  void pruneCloudPins(keep).catch((cause) => console.warn("Could not forget the cloud pins of organizations left", cause));
 }
 
 /**

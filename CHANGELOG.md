@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Mobile: the Sessions list has a Pinned section, after Needs you and before
+  the projects, holding what the Mac pinned: its sessions, out of their
+  projects as on the sidebar, in the sidebar's own order when it is in its
+  custom order and newest first otherwise, and the workspaces of cloud
+  projects pinned on the Mac, with a cloud mark. A pinned session waiting on
+  you stays in Needs you only, with a pin; under Working and in a search
+  pinned sessions keep their projects and their pin. A long press on a row
+  pins or unpins it on the Mac (a cloud workspace's project, also from the
+  Cloud tab), and the row moves once the Mac has confirmed; a phone that may
+  only watch is told no. Pinned cloud projects are now kept by the app rather
+  than a window's preferences, so the phone reads and changes them too; those
+  pinned before are moved over once (#1403).
 - Bots (experimental): a bot's Claude Code sessions run no inline `!` command
   of a skill or custom slash command, which runs as it loads with no tool call
   the access gate could see; the command is replaced by a placeholder and the

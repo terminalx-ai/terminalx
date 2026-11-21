@@ -2,6 +2,7 @@ import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, t
 import { isPlaceholderBranch } from "@terminalx/portable/worktreeNames";
 import { conversationLabel, providerName, tabTitle } from "./conversations";
 import type { SessionSummary } from "./host-api";
+import type { CloudWorkspaceItem } from "../cloud/api";
 
 /** What a chat asks of the reader: an answer, patience, or nothing. The session's tab strip marks its tabs by it. */
 export type ChatState = "needs" | "working" | "done";
@@ -60,6 +61,10 @@ export interface ChatRow {
   status: RowStatus;
   /** Whether it waits on the person for an answer or an approval. */
   needsYou: boolean;
+  /** Pinned on the Mac (#1403); an older Mac sends nothing, which is not pinned. */
+  pinned: boolean;
+  /** Its place in the Mac's Pinned group while the sidebar is in its custom order; null otherwise. */
+  pinnedRank: number | null;
   tabs: TabRow[];
   /** Last activity, in ms; 0 when unknown. */
   time: number;
@@ -132,6 +137,8 @@ function chatRow(session: SessionSummary): ChatRow {
     branch: named.branched ? named.name : null,
     status,
     needsYou: needsYou(status.status),
+    pinned: session.pinned === true,
+    pinnedRank: session.pinned === true && typeof session.pinnedRank === "number" && Number.isFinite(session.pinnedRank) ? session.pinnedRank : null,
     tabs,
     time: parsedTime(session.modified),
   };
@@ -175,22 +182,80 @@ export function filterCounts(rows: ChatRow[]): Record<ListFilter, number> {
 }
 
 /** A run of rows under a heading; an empty title has none. */
-export interface RowSection { key: string; title: string; data: ChatRow[] }
+export interface RowSection<Row = ChatRow> { key: string; title: string; data: Row[] }
+
+/** The Pinned section's key: the screen draws its header with a pin. */
+export const PINNED_SECTION = "pinned";
+
+/**
+ * The Pinned section's order, as the Mac's Pinned group has it: its custom
+ * order while the sidebar is in one (rows the Mac has not placed yet first,
+ * newest first, as it places them), else the newest activity first.
+ */
+export function pinnedOrder(rows: ChatRow[]): ChatRow[] {
+  const custom = rows.some((row) => row.pinnedRank !== null);
+  return [...rows].sort((left, right) => custom
+    ? (left.pinnedRank ?? -1) - (right.pinnedRank ?? -1) || right.time - left.time
+    : right.time - left.time);
+}
 
 /**
  * The list as 22.04 lays it out. Under All, what waits on the person comes
- * first in its own section, across projects, and the rest stay by project.
- * "Needs you" is that section alone; "Working" keeps its rows by project.
+ * first in its own section, across projects; then what the Mac pinned, out
+ * of its project as on the Mac's sidebar (#1403); and the rest stay by
+ * project. A pinned session waiting on the person is in "Needs you" only, so
+ * no session is listed twice. "Needs you" is that section alone; "Working"
+ * and a search keep their rows by project, pinned ones among them.
  */
-export function listSections(rows: ChatRow[], filter: ListFilter): RowSection[] {
+export function listSections(rows: ChatRow[], filter: ListFilter, searching = false): RowSection[] {
   const shown = rows.filter((row) => inFilter(row, filter));
   if (filter === "needs") return shown.length ? [{ key: "needs", title: "", data: shown }] : [];
-  const waiting = filter === "all" ? shown.filter((row) => row.needsYou) : [];
-  const rest = filter === "all" ? shown.filter((row) => !row.needsYou) : shown;
+  const all = filter === "all";
+  const waiting = all ? shown.filter((row) => row.needsYou) : [];
+  const pinned = all && !searching ? pinnedOrder(shown.filter((row) => !row.needsYou && row.pinned)) : [];
+  const rest = all ? shown.filter((row) => !row.needsYou && !(row.pinned && !searching)) : shown;
   return [
     ...(waiting.length ? [{ key: "needs", title: "Needs you", data: waiting }] : []),
+    ...(pinned.length ? [{ key: PINNED_SECTION, title: "Pinned", data: pinned }] : []),
     ...projectGroups(rest).map((group) => ({ key: `project:${group.project}`, title: group.project, data: group.rows })),
   ];
+}
+
+/** A cloud workspace of a project the Mac pinned, as the Pinned section lists it beside the Mac's own sessions. */
+export interface CloudPinRow {
+  kind: "cloud";
+  key: string;
+  orgId: string;
+  /** The pinned project's repository identity, as the Mac names it. */
+  identity: string;
+  item: CloudWorkspaceItem;
+  title: string;
+  /** Last activity, in ms; 0 when unknown. */
+  time: number;
+}
+
+export type ListRow = ChatRow | CloudPinRow;
+export const isCloudRow = (row: ListRow): row is CloudPinRow => "kind" in row && row.kind === "cloud";
+
+/**
+ * The sections with the pinned cloud workspaces added to Pinned (#1403),
+ * which is made for them after "Needs you" when nothing of the Mac's own is
+ * pinned. In the Mac's custom order its own sessions keep their places and
+ * the cloud ones follow; otherwise all go by their latest activity. Only the
+ * All list, out of a search, has a Pinned section.
+ */
+export function withPinnedCloud(sections: RowSection[], cloud: CloudPinRow[], filter: ListFilter, searching = false): RowSection<ListRow>[] {
+  if (filter !== "all" || searching || !cloud.length) return sections;
+  const byTime = [...cloud].sort((left, right) => right.time - left.time);
+  const at = sections.findIndex((section) => section.key === PINNED_SECTION);
+  if (at < 0) {
+    const after = sections[0]?.key === "needs" ? 1 : 0;
+    return [...sections.slice(0, after), { key: PINNED_SECTION, title: "Pinned", data: byTime }, ...sections.slice(after)];
+  }
+  const own = sections[at].data;
+  const custom = own.some((row) => row.pinnedRank !== null);
+  const data: ListRow[] = custom ? [...own, ...byTime] : [...own, ...byTime].sort((left, right) => right.time - left.time);
+  return sections.map((section, index) => index === at ? { ...section, data } : section);
 }
 
 /** When, as a chat list says it: "now", "5m", "3h", a weekday, then a date. */

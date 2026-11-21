@@ -33,6 +33,7 @@ import { cloudAgentRan } from "@/lib/cloudSessions";
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { cloudControlNative } from "@/lib/cloudControlNative";
 import { getPrefs } from "@/lib/prefs";
+import { getCloudPins } from "@/lib/cloudPins";
 import { FIRST_RUN_PERMISSION_MODE, pickerMode } from "@/lib/models";
 import { recoveryFromEvents } from "@/lib/recovery";
 import { cloudAsleep, cloudSessionBackend } from "@/lib/sessionBackend";
@@ -285,7 +286,7 @@ function projectsOf(orgId: string): CloudProject[] {
   const catalog = getCloudCatalog();
   const prefs = getPrefs();
   return placeCloudProjects(catalog.orgs[orgId] ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {
-    pinned: prefs.cloudPinned[orgId],
+    pinned: getCloudPins()[orgId],
     added: prefs.cloudProjects[orgId],
     blank: prefs.cloudBlankProjects[orgId],
   }).projects;
