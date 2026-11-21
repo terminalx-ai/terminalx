@@ -40,7 +40,12 @@ const fixture = `
     handoff(6, { to: "b3", state: "waiting", toSession: undefined, item: undefined, title: "Watch the queue time on main", waitingMessages: 1 }),
     handoff(5, { state: "answered", title: "Look at the relay token", closed: at, answer: { at, by: "b2", text: "No secret reaches the logs. The relay token is read from the keychain and never printed; the cache keys hold no secret either." } }),
   ];
-  backend.answers.bot_handoffs = () => ({ revision: 3, handoffs, waitingMessages: 1, unreadable: 0 });
+  // A held answer on a card and a loose message in the strip (lead review 1): both with a Resend.
+  const undelivered = [
+    { id: "m1", at: "2026-11-21T10:00:00Z", from: "b2", to: "b1", kind: "answer", handoff: handoffs[0].number, tries: 3, error: "the chat could not take the message because its tab is gone", held: true },
+    { id: "m2", at: "2026-11-21T10:01:00Z", from: "b2", to: "b1", kind: "tell", handoff: null, tries: 1, error: "the tab is gone", held: false },
+  ];
+  backend.answers.bot_handoffs = () => ({ revision: 3, handoffs, waitingMessages: 1, undelivered, unreadable: 0 });
   backend.answers.bot_brief = () => ({ text: "- Ask before anything leaves this Mac.\\n- Status updates go in a table.\\n", hash: "h1", lines: 2, modified: at, outside: true, cut: false, unreadable: null, limit: 8192 });
   const item = (number, title, state, extra = {}) => ({ number, title, state, askedBy: "owner", addedBy: "b1", created: at, modified: at, spentUsd: 1.25, ...extra });
   const items = [item(12, "Phase 2: merge main into phase-2 and fix what breaks", "inProgress", { summary: "Main moved by 40 commits." }), item(10, "Sort the open issues by area", "planned")];
@@ -132,6 +137,7 @@ try {
         "fits the view": chatProblems.length === 0,
         "the cards leave room for the chat": cardsBox.height <= panel.height * 0.45,
         "each open card has its Stop, the answered one none": (await cards.getByTestId("bot-handoff-stop").count()) === 2,
+        "what did not reach its chat shows, each with a Resend": (await cards.getByTestId("bot-handoff-undelivered-message").count()) === 2 && (await cards.getByTestId("bot-handoff-resend").count()) === 2,
         "the states read as the design says": states[0]?.startsWith("Working") && states[1] === "Waiting · Argus with a rather long name is paused" && states[2] === "Answered",
         "Every bot reads lists the brief": (await view.getByTestId("bot-team-brief-row").textContent())?.includes("2 lines · changed outside"),
         "no page errors": errors.length === 0,
