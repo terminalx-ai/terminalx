@@ -2065,6 +2065,12 @@ pub(crate) fn start_recovered_scheduler(app: impl AutomationHost) {
                     if let Err(error) = evaluate(&app) {
                         log::warn!("automation scheduler: {error:#}");
                     }
+                    // Bots' GitHub and Linear channels (PRO-480): read when due, on a thread of their own.
+                    if crate::bots::enabled() {
+                        if let Ok(manager) = app.sessions() {
+                            crate::bots::channels::tick(manager);
+                        }
+                    }
                 }
                 if let Err(error) = reconcile_deferred(&app, Utc::now()) {
                     log::warn!("automation reconciliation: {error:#}");

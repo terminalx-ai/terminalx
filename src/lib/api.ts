@@ -2166,6 +2166,8 @@ export const botsApi = {
   /** Say no to a resume asked for from the `terminalx` CLI: the bot stays paused. */
   dismissResume: (id: string) => invoke<Bot>("bot_dismiss_resume", { id }),
   spentToday: (id: string) => invoke<{ usd: number; day: string }>("bot_spent_today", { id }),
+  /** Its newest mentions on GitHub and Linear (none of their text) and what it posted there (PRO-480). */
+  channels: (id: string) => invoke<import("@/types/botChannels").BotChannelsView>("bot_channels", { id }),
 };
 
 export function errorMessage(e: unknown): string {

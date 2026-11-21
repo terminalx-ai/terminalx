@@ -2063,6 +2063,37 @@ terminalx bots handoffs [--all] [--bot <bot>] --json
 - Kept in `$TERMINALX_HOME/bot-handoffs.json`. The team brief every bot reads is
   `$TERMINALX_HOME/bot-team/BRIEF.md`, written by the owner in the window.
 
+#### A bot's posts on GitHub and Linear
+
+A bot posts on its owner's behalf through their `gh` login and Linear key, and answers a
+mention in its own thread. Run from a bot's own sessions only; from anywhere else these answer
+`forbidden` (post as yourself with `gh` or `terminalx issues comment`).
+
+```text
+terminalx bots post github --pr <url>|<n> [--repo <owner/name>] [--request-changes] --text "<review>" --json
+terminalx bots post github --issue <url>|<n> [--repo <owner/name>] --text "<comment>" --json
+terminalx bots post linear --issue <PRO-123> --text "<comment>" --json
+terminalx bots reply --text "<answer>" --json
+```
+
+- `--pr` posts a review (a comment, or with `--request-changes` a request for changes; a bot
+  never approves: an approval with the owner's login would count as theirs). `--issue`
+  comments on an issue. Every post ends with "Written by <bot>, a TerminalX bot, on behalf of
+  <owner>", which the bot cannot leave out. Post only with these commands, not with `gh`.
+- A mention as `@<slug>` in a comment on a pull request or issue of the owner's projects'
+  GitHub repositories (conversation or review comments), or on Linear, starts a conversation
+  with the bot, or goes to the chat that pull request or issue already has. It is accepted from
+  the owner and from the people in the bot's Who can ask (by the GitHub login the owner gave
+  them, and on Linear by their email); anyone else's is shown in the bot's settings as not
+  accepted. A comment that carries a bot's signature starts nothing.
+- `reply` answers, in its thread, the newest mention that reached the chat it runs in (or the
+  chat that started its session). On GitHub it names the person who asked.
+- A post is a report to the access gate: Full access posts, Ask before outward actions and Read
+  and report ask the owner first, and a paused bot posts nothing (`bot_paused`). At most 20
+  posts per bot an hour; at most 10 mentions reach one bot an hour, and the rest wait.
+- The channels are read every two minutes while Bots is on; only what is written after a
+  source is first read counts. Kept in `$TERMINALX_HOME/bot-channels.json`.
+
 #### A bot's memory
 
 ```text

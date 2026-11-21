@@ -238,7 +238,16 @@ pub(crate) fn work_chat(sink: &dyn EventSink, bot: &Bot, title: String) -> Resul
     create_chat_titled(sink, bot, false, Some(title))
 }
 
+/// A chat of `bot` that a mention on GitHub or Linear started (PRO-480), marked by `mark` with where it came from.
+pub(crate) fn channel_chat(sink: &dyn EventSink, bot: &Bot, title: String, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    create_chat_marked(sink, bot, false, Some(title), mark)
+}
+
 fn create_chat_titled(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option<String>) -> Result<SessionEntry> {
+    create_chat_marked(sink, bot, home, title, |_| {})
+}
+
+fn create_chat_marked(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option<String>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
     if !takes_bot_instructions(&bot.harness) {
         return Err(super::refused(unheld_agent(&bot.name, &bot.harness)));
     }
@@ -250,7 +259,11 @@ fn create_chat_titled(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option
         ..Default::default()
     };
     let reference = BotRef { id: bot.id.clone(), home };
-    crate::session_ops::create_quick_chat_marked(sink, req, |entry| set_session_bot(entry, &reference)).map_err(anyhow::Error::msg)
+    crate::session_ops::create_quick_chat_marked(sink, req, |entry| {
+        set_session_bot(entry, &reference);
+        mark(entry);
+    })
+    .map_err(anyhow::Error::msg)
 }
 
 /// The bot's home chat: the newest made (the rule the bot's view lists them
@@ -504,6 +517,10 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
         text.push_str(&team);
         text.push('\n');
     }
+    // PRO-480: where people mention it, and how it posts there.
+    text.push('\n');
+    text.push_str(&super::channels::launch_note(&bot));
+    text.push('\n');
     Some(text)
 }
 

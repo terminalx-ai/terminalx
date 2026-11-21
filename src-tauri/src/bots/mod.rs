@@ -9,6 +9,7 @@
 
 pub mod access;
 pub mod changes;
+pub mod channels;
 pub mod memory;
 pub mod chat;
 pub mod calendar;
@@ -205,6 +206,15 @@ pub struct BotAsker {
     /// [`MAY_ASK_APPROVE`], [`MAY_ASK`] or [`MAY_HAND_OFF`].
     #[serde(default)]
     pub may: String,
+    /// The organisation a person was added from: they may ask only while the bot works there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    /// A person's email, as their organisation lists them: their comments on Linear are known by it (PRO-480).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// A person's GitHub login, as the owner gave it: their comments on GitHub are known by it (PRO-480).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -723,12 +733,26 @@ fn clean_askers(askers: &[BotAsker], bot: &Bot, bots: &[Bot]) -> Result<Vec<BotA
             }
             ASKER_PERSON => {
                 refuse_unless!(asker.may == MAY_ASK_APPROVE || asker.may == MAY_ASK, "A person may ask, or ask and approve.");
+                if let Some(login) = asker.github.as_deref() {
+                    refuse_unless!(github_login(login), "A GitHub login is 1 to 39 letters, digits or dashes, not starting or ending with a dash.");
+                }
+                if let Some(email) = asker.email.as_deref() {
+                    refuse_unless!(email.len() <= 254 && email.contains('@') && !email.chars().any(|c| c.is_whitespace() || c.is_control()), "{email} is not an email address.");
+                }
             }
             other => return Err(refused(format!("Unknown kind {other}. Use {ASKER_PERSON} or {ASKER_BOT}."))),
         }
-        kept.push(BotAsker { id: id.into(), name: asker.name.trim().into(), ..asker.clone() });
+        let github = asker.github.as_deref().map(|login| login.trim().trim_start_matches('@').to_owned()).filter(|login| !login.is_empty());
+        let email = asker.email.as_deref().map(|email| email.trim().to_owned()).filter(|email| !email.is_empty());
+        kept.push(BotAsker { id: id.into(), name: asker.name.trim().into(), github, email, ..asker.clone() });
     }
     Ok(kept)
+}
+
+/// A GitHub login as GitHub allows one, with or without its `@`.
+fn github_login(login: &str) -> bool {
+    let login = login.trim().trim_start_matches('@');
+    login.is_empty() || (login.len() <= 39 && !login.starts_with('-') && !login.ends_with('-') && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
 /// Whether following `from`'s reporting line reaches `target`.
