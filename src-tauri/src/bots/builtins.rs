@@ -50,6 +50,10 @@ const FOCUS_CHARS: usize = 200;
 pub const LOOK_CRON: &str = "0 8,12,16,20 * * *";
 /// Tidy memory wakes at night.
 pub const TIDY_CRON: &str = "0 2 * * *";
+/// The longest a look around is skipped as nothing new: what it reads beyond this
+/// computer (pull requests, issues, CI) is not in its fingerprint, so at least
+/// one look a day reaches the model.
+pub const LOOK_QUIET_MAX: chrono::TimeDelta = chrono::TimeDelta::hours(24);
 /// A look around waits while this many of its suggestions wait on the owner.
 pub const WAITING_LIMIT: usize = suggestions::PER_LOOK;
 
@@ -271,6 +275,11 @@ pub fn nothing_to_do(kind: Builtin, bot: &Bot) -> Option<String> {
             if waiting >= WAITING_LIMIT {
                 return Some(format!("Nothing new: {waiting} suggestions are still waiting for you on the Home tab."));
             }
+            // Only a look that ended lately counts: past the longest quiet, it looks again whatever the fingerprint says.
+            let lately = file.looked_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()).is_some_and(|at| chrono::Utc::now().signed_duration_since(at) < LOOK_QUIET_MAX);
+            if !lately {
+                return None;
+            }
             let seen = look_fingerprint(bot);
             (file.looked.as_deref() == Some(seen.as_str())).then(|| "Nothing new: nothing it can see has changed since its last look.".into())
         }
@@ -299,6 +308,7 @@ pub fn ended(kind: Builtin, bot: &Bot, run: &AutomationRun) {
     let saved = suggestions::change(None, &bot.id, |file| {
         if looked.is_some() {
             file.looked = looked;
+            file.looked_at = Some(chrono::Utc::now().to_rfc3339());
         }
         if tidied.is_some() {
             file.tidied = tidied;

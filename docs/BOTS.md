@@ -510,7 +510,10 @@ free check, its prompt and its report.
   since its last finished look: a SHA-256 over the projects' `.git` state
   files, its own prompt and focus line, the person's sessions (not any
   bot's) by what lasts in them (made, renamed, archived, tabs opened or
-  closed; not their tabs' states), its open items and its open suggestions. A tidy is skipped when memory is off, holds fewer than two
+  closed; not their tabs' states), its open items and its open suggestions. A
+  look is never skipped this way more than 24 hours after the last one that
+  ran (`LOOK_QUIET_MAX`): what it reads beyond this computer, such as pull
+  requests and CI, is not in the fingerprint. A tidy is skipped when memory is off, holds fewer than two
   notes, or is as the last tidy left it. A skipped run is logged as "Nothing
   new" (one folded row) and starts no session; the Home tab says why.
 - **Suggestions** are kept at the store root, `bot-suggestions/<bot id>.json`,

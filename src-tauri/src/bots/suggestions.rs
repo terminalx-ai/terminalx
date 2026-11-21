@@ -119,6 +119,9 @@ pub struct File {
     /// as the last tidy left it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub looked: Option<String>,
+    /// When that look ended: past [`super::builtins::LOOK_QUIET_MAX`], a look goes ahead even when nothing changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub looked_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tidied: Option<String>,
     #[serde(flatten, default)]

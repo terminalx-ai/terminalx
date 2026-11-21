@@ -178,6 +178,21 @@ fn a_look_around_with_nothing_new_to_see_costs_no_model_and_is_logged_as_nothing
     assert_eq!(nothing_to_do(Builtin::LookAround, &atlas), None, "the focus changed");
     ended(Builtin::LookAround, &atlas, &completed(&look));
     assert!(nothing_to_do(Builtin::LookAround, &atlas).is_some());
+    // Past the longest quiet it looks again, though nothing on this computer changed: what it reads elsewhere
+    // (pull requests, issues, CI) is not in the fingerprint.
+    let aged = |hours: i64| {
+        super::super::suggestions::change(None, &atlas.id, |file| {
+            file.looked_at = Some((chrono::Utc::now() - chrono::TimeDelta::hours(hours)).to_rfc3339());
+            Ok(())
+        })
+        .unwrap()
+    };
+    aged(23);
+    assert!(nothing_to_do(Builtin::LookAround, &atlas).is_some(), "within a day");
+    aged(25);
+    assert_eq!(nothing_to_do(Builtin::LookAround, &atlas), None, "a day without a look");
+    ended(Builtin::LookAround, &atlas, &completed(&look));
+    assert!(nothing_to_do(Builtin::LookAround, &atlas).is_some());
     // A change it can see (a new item on its list) and it goes ahead.
     super::super::items::add(rig.sink.as_ref(), &atlas, &super::super::items::By::Owner, super::super::items::NewItem { title: "Ship it".into(), summary: String::new(), done_means: Vec::new(), start: false, asked_by: None, added_by: None }).unwrap();
     assert_eq!(nothing_to_do(Builtin::LookAround, &atlas), None);
