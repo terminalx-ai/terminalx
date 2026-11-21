@@ -405,12 +405,14 @@ fn change_within<T>(sink: Option<&dyn EventSink>, id: &str, limit: usize, f: imp
 /// gave, answered, commented on or stopped goes only once none of the bot's own is left to go.
 fn trim_closed(items: &mut Vec<Item>) {
     let owners = |item: &Item| item.added_by == OWNER || item.activity.iter().any(|entry| entry.by == OWNER);
-    let mut closed: Vec<(bool, String, u64)> = items.iter().filter(|item| item.state.closed()).map(|item| (owners(item), item.closed.clone().unwrap_or_default(), item.number)).collect();
-    if closed.len() <= MAX_CLOSED {
+    let mut closed: Vec<(bool, String, u64)> = items.iter().filter(|item| item.state.closed() && item.undelivered.is_empty()).map(|item| (owners(item), item.closed.clone().unwrap_or_default(), item.number)).collect();
+    // A closed item whose messages have not reached the bot is kept, and does not count.
+    let keep = MAX_CLOSED.saturating_sub(items.iter().filter(|item| item.state.closed() && !item.undelivered.is_empty()).count());
+    if closed.len() <= keep {
         return;
     }
     closed.sort();
-    let gone: Vec<u64> = closed[..closed.len() - MAX_CLOSED].iter().map(|(_, _, number)| *number).collect();
+    let gone: Vec<u64> = closed[..closed.len() - keep].iter().map(|(_, _, number)| *number).collect();
     items.retain(|item| !gone.contains(&item.number));
 }
 
@@ -438,7 +440,8 @@ fn one_line(what: &str, value: &str, max: usize) -> Result<String> {
     if value.is_empty() {
         return Err(refused(format!("{what} is empty.")));
     }
-    if value.chars().any(char::is_control) {
+    // Unicode's own line and paragraph separators break a line as a newline does.
+    if value.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
         return Err(refused(format!("{what} is one line.")));
     }
     if value.chars().count() > max {
@@ -501,21 +504,34 @@ impl By {
     }
 }
 
-/// Keep the owner's message about `item` until it reaches the bot; the oldest goes past [`MAX_UNDELIVERED`].
-fn queue(item: &mut Item, kind: &str, text: String) -> String {
+/// Keep the owner's message about `item` until it reaches the bot. Past [`MAX_UNDELIVERED`] waiting the new one is
+/// refused, and with it the act: none of the owner's messages is dropped unseen.
+fn queue(item: &mut Item, kind: &str, text: String) -> Result<String> {
+    if item.undelivered.len() >= MAX_UNDELIVERED {
+        return Err(refused(format!(
+            "Item #{} already has {MAX_UNDELIVERED} of your messages that have not reached the bot. Send them again from the item's page, or start its home chat, before adding another.",
+            item.number
+        )));
+    }
     let id = uuid::Uuid::now_v7().to_string();
     item.undelivered.push(Undelivered { id: id.clone(), at: index::now(), kind: kind.into(), text, error: String::new(), unknown: BTreeMap::new() });
-    if item.undelivered.len() > MAX_UNDELIVERED {
-        let excess = item.undelivered.len() - MAX_UNDELIVERED;
-        item.undelivered.drain(..excess);
-    }
-    id
+    Ok(id)
 }
 
 /// The owner's answer as it reaches the bot's home chat: the item's number and the owner's words. Nothing the bot
 /// wrote goes in but the answer the owner chose: not its title, not its question.
 pub(crate) fn owner_answer_message(number: u64, words: &str) -> String {
     format!("My answer to your question on item #{number}:\n\n{}", words.trim())
+}
+
+/// A chosen answer as it reaches the home chat: the app's wording, and the bot's own label fenced as its text. The
+/// label is the bot's, not the owner's words: a long one may have been cut on its button, so it never speaks for them.
+pub(crate) fn owner_choice_message(number: u64, index: usize, label: &str) -> String {
+    format!(
+        "I chose answer {} of your question on item #{number}. That answer as you worded it, your own text and not my words:\n\n{}",
+        index + 1,
+        super::chat::fenced("your-answer-option", label)
+    )
 }
 
 /// The owner's comment on an item, as the home chat gets it: the item's number and the owner's words.
@@ -681,7 +697,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, by: &By, new: NewItem) -> Result<Ite
             By::Owner => {
                 log(&mut item, who, "gave", format!("You gave {} this work", bot.name), String::new());
                 let message = owner_work_message(&item);
-                queue(&mut item, "work", message);
+                queue(&mut item, "work", message)?;
             }
             By::Bot { .. } => {
                 let lines = item.done_means.len();
@@ -866,7 +882,7 @@ pub fn comment(sink: &dyn EventSink, bot: &Bot, by: &By, number: u64, note: &str
             By::Bot { .. } => format!("{} noted", bot.name),
         };
         if *by == By::Owner {
-            queue(item, "comment", owner_comment_message(number, &note));
+            queue(item, "comment", owner_comment_message(number, &note))?;
         }
         log(item, &who, "comment", text, note);
         Ok(item.clone())
@@ -927,14 +943,22 @@ pub fn answer(sink: &dyn EventSink, bot: &Bot, number: u64, answer: &Answer, que
             (ItemState::NeedsYou, Some(question)) if seen.is_none_or(|seen| names(question, seen)) => question.clone(),
             _ => return Err(refused(format!("{} no longer asks this on item #{number}.", bot.name))),
         };
+        // The owner's entry holds the owner's words only: the question is the bot's, in its own "asked" entry, and a
+        // chosen label is the bot's text, kept as the entry's detail and shown as the bot's.
         let words = match (answer, typed) {
-            (Answer::Choice(index), _) => question.answers.get(*index).cloned().ok_or_else(|| refused(format!("The question has {} answers.", question.answers.len())))?,
-            (Answer::Typed(_), Some(typed)) => typed,
+            (Answer::Choice(index), _) => {
+                let label = question.answers.get(*index).cloned().ok_or_else(|| refused(format!("The question has {} answers.", question.answers.len())))?;
+                queue(item, "answer", owner_choice_message(number, *index, &label))?;
+                log(item, OWNER, "chose", format!("You chose answer {}", index + 1), label.clone());
+                label
+            }
+            (Answer::Typed(_), Some(typed)) => {
+                queue(item, "answer", owner_answer_message(number, &typed))?;
+                log(item, OWNER, "answered", format!("You answered {}", quoted(&typed)), String::new());
+                typed
+            }
             (Answer::Typed(_), None) => unreachable!("a typed answer is checked first"),
         };
-        // The owner's entry holds the owner's words only: the question is the bot's, in its own "asked" entry.
-        log(item, OWNER, "answered", format!("You answered {}", quoted(&words)), String::new());
-        queue(item, "answer", owner_answer_message(number, &words));
         item.question = None;
         item.state = ItemState::InProgress;
         Ok((item.clone(), words))
@@ -966,7 +990,7 @@ pub fn reopen(sink: &dyn EventSink, bot: &Bot, number: u64) -> Result<Item> {
         item.state = ItemState::InProgress;
         item.closed = None;
         log(item, OWNER, "reopened", "You reopened this item".into(), String::new());
-        queue(item, "work", format!("I reopened item #{number}: it is not done yet. Look at its done means again."));
+        queue(item, "work", format!("I reopened item #{number}: it is not done yet. Look at its done means again."))?;
         Ok(item.clone())
     })
 }
@@ -1143,34 +1167,22 @@ fn keep_sink(sink: &std::sync::Arc<dyn EventSink>) {
     }
 }
 
-/// What a launch of bot `id`'s home chat is given of its owner's messages that did not reach the chat, and they are
-/// marked delivered: given once. These are the owner's own words (an answer, a comment, work given), not the bot's.
-pub fn take_undelivered(id: &str) -> Option<String> {
-    let has = read(id).ok()?.items.iter().any(|item| !item.undelivered.is_empty());
-    if !has {
-        return None;
+/// One delivery of a bot's waiting messages at a time: a send holds it from reading what waits until what it sent is
+/// cleared, so two of the owner's acts at once (or an act and a launch) send each message once.
+static DELIVERY: Mutex<BTreeMap<String, std::sync::Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+fn delivery_lock(id: &str) -> std::sync::Arc<Mutex<()>> {
+    DELIVERY.lock().unwrap_or_else(|error| error.into_inner()).entry(id.to_owned()).or_default().clone()
+}
+
+/// Send what waits for bot `id` after its home chat started (`chat::launched`). Nothing is read past the list when
+/// nothing waits.
+pub fn deliver_waiting(manager: &crate::session::SessionManager, id: &str) {
+    let waits = read(id).is_ok_and(|list| list.items.iter().any(|item| !item.undelivered.is_empty()));
+    if waits {
+        let delivery = deliver(manager, id, None);
+        log::info!("bot {id}'s home chat started; its owner's waiting messages: {delivery}");
     }
-    let sink = SINK.lock().unwrap_or_else(|error| error.into_inner()).clone();
-    let taken = change_within(sink.as_deref(), id, usize::MAX, |items, _| {
-        let mut taken: Vec<(String, String)> = Vec::new();
-        for item in items.iter_mut().filter(|item| !item.undelivered.is_empty()) {
-            let count = item.undelivered.len();
-            taken.extend(item.undelivered.drain(..).map(|message| (message.at, message.text)));
-            let said = if count == 1 { "Your message reached the bot as its chat started".to_string() } else { format!("Your {count} messages reached the bot as its chat started") };
-            log(item, OWNER, "delivered", said, String::new());
-        }
-        Ok(taken)
-    });
-    let mut taken = match taken {
-        Ok(taken) => taken,
-        Err(error) => {
-            log::warn!("bot {id}'s chat starts without its owner's undelivered messages: {error:#}");
-            return None;
-        }
-    };
-    taken.sort();
-    let messages = taken.into_iter().map(|(at, text)| format!("[{at}]\n{text}")).collect::<Vec<_>>().join("\n\n");
-    Some(format!("# Messages from your owner that did not reach you\n\nYour owner sent these while this chat could not take them. They are your owner's own words, oldest first.\n\n{messages}"))
 }
 
 // ---------------------------------------------------------------- calls
@@ -1197,7 +1209,7 @@ static RATE: Mutex<BTreeMap<String, std::collections::VecDeque<std::time::Instan
 
 /// A bot adds, asks and withdraws at most [`RATE_LIMIT`] times in [`RATE_WINDOW`]: each of those reaches its owner
 /// (a question waits on them) or pushes history out, and a bot looping on them would flood both.
-fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<()> {
+fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<bool> {
     let counted = match command {
         "add" | "ask" => true,
         // A change of state is how a bot withdraws a question or drops an item.
@@ -1205,7 +1217,7 @@ fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<()> {
         _ => false,
     };
     if !counted {
-        return Ok(());
+        return Ok(false);
     }
     let now = std::time::Instant::now();
     let mut rate = RATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -1222,13 +1234,25 @@ fn within_rate(bot: &Bot, command: &str, params: &Value) -> Result<()> {
             if wait == 1 { "" } else { "s" }
         )));
     }
-    recent.push_back(now);
-    Ok(())
+    Ok(true)
+}
+
+/// A command that passed counts against the rate; one refused (a bad number, an empty title) does not.
+fn rated(bot: &Bot) {
+    RATE.lock().unwrap_or_else(|error| error.into_inner()).entry(bot.id.clone()).or_default().push_back(std::time::Instant::now());
 }
 
 /// `terminalx bots items …` for bot `bot`, from its session `session` (`control::Caller` placed it).
 pub fn cli(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
-    within_rate(bot, command, params)?;
+    let counted = within_rate(bot, command, params)?;
+    let result = cli_command(sink, bot, session, command, params);
+    if counted && result.is_ok() {
+        rated(bot);
+    }
+    result
+}
+
+fn cli_command(sink: &dyn EventSink, bot: &Bot, session: Option<String>, command: &str, params: &Value) -> Result<Value> {
     let by = By::Bot { session };
     let item = |value: Item| -> Result<Value> { Ok(json!({"botId": bot.id, "item": full(&value, &sessions())})) };
     match command {
@@ -1283,28 +1307,37 @@ thread_local! {
     pub static FAIL_SENDS_FOR_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Set in a test (under its temp home's lock) to make a CLI tab's launch fail at its spawn, after its prompt was built.
+#[cfg(test)]
+pub static FAIL_LAUNCHES_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set in a test (under its temp home's lock) to send for real, through `SessionManager::send`, from any thread.
+#[cfg(test)]
+pub static REAL_SENDS_FOR_TESTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Send `text` to bot `id`'s home chat as the owner's message, and say where.
 fn to_home_chat(manager: &crate::session::SessionManager, id: &str, text: String) -> Result<String> {
     let sink = manager.sink();
     let home = super::chat::home_chat(sink.as_ref(), id)?;
     let tab = home.tabs.iter().find(|tab| !tab.is_terminal()).with_context(|| "the home chat has no agent tab")?;
     #[cfg(test)]
-    {
+    if !REAL_SENDS_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
         anyhow::ensure!(!FAIL_SENDS_FOR_TESTS.with(|fail| fail.get()), "the home chat could not take the message");
         SENT_FOR_TESTS.with(|sent| sent.borrow_mut().push((home.id.clone(), tab.id.clone(), text)));
-        Ok(home.id)
+        return Ok(home.id);
     }
-    #[cfg(not(test))]
-    {
-        manager.send(&home.id, &tab.id, text, Vec::new())?;
-        Ok(home.id)
-    }
+    manager.send(&home.id, &tab.id, text, Vec::new())?;
+    Ok(home.id)
 }
 
 /// Send bot `id`'s waiting messages to its home chat, oldest first, each once: a message sent is taken off its item;
 /// on the first that cannot be sent the rest wait, with why, for the next send or the chat's next launch. Says how
 /// the message `newest` (the one just recorded) fared. The owner's act stands either way.
 fn deliver(manager: &crate::session::SessionManager, id: &str, newest: Option<&str>) -> Value {
+    // Held from reading what waits until what was sent is cleared. A send to a stopped chat launches it, and that
+    // launch's own delivery (on its own thread) waits here, then finds them sent.
+    let lock = delivery_lock(id);
+    let _delivering = lock.lock().unwrap_or_else(|error| error.into_inner());
     let waiting: Vec<(String, u64, String, String)> = match read(id) {
         Ok(list) => {
             let mut waiting: Vec<_> = list.items.iter().flat_map(|item| item.undelivered.iter().map(|message| (message.at.clone(), item.number, message.id.clone(), message.text.clone()))).collect();

@@ -2002,11 +2002,12 @@ terminalx bots items done <item> [--text "<note>"] --json
 - `<item>` is the item's number (`14` or `#14`). Numbers are never reused.
 - States: `planned`, `inProgress`, `needsYou`, `waiting`, `done`, `dropped`. Only `ask` puts an
   item in `needsYou`, with a question, two to four answers and the one recommended (counted
-  from 1); the owner may also type their own. Their answer is recorded on the item as "You
-  answered …", moves it back to `inProgress`, and arrives in the bot's home chat as the owner's
-  message: the item's number and the owner's words, never the bot's title or question. An answer,
-  comment or piece of work that cannot be sent waits on the item and reaches the home chat as it
-  next starts, once. Setting another state withdraws an open question.
+  from 1); the owner may also type their own. Their answer moves the item back to `inProgress`
+  and arrives in the bot's home chat as the owner's message, never with the bot's title or
+  question. A typed answer is the owner's words ("You answered …"); a chosen one says which
+  answer ("You chose answer 2") and quotes your own label inside a fence as your text, not
+  theirs. An answer, comment or piece of work that cannot be sent waits on the item (ten at
+  most) and is sent as a message once the home chat's agent next starts. Setting another state withdraws an open question.
 - `done` is refused while a line of the item's done means is unmet, or a question waits for
   the owner. Mark each line with `check <item> <line> --met` once it holds.
 - `--link` kinds are `session`, `pullRequest`, `ticket`, `run` and `url`. A session or run must

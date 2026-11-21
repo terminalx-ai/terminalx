@@ -135,12 +135,12 @@ fn a_question_has_two_to_four_answers_and_the_owners_answer_moves_the_item_on() 
     assert_eq!(words, "Start, but ask before merging");
     assert_eq!((&item.state, item.question.is_none()), (&ItemState::InProgress, true));
     let last = item.activity.last().unwrap();
-    assert_eq!((last.by.as_str(), last.kind.as_str(), last.text.as_str()), (OWNER, "answered", "You answered “Start, but ask before merging”"));
-    // The owner's entry holds the owner's words only: the bot's question is in the bot's own entry.
-    assert_eq!(last.detail, "");
+    // The owner chose; the label is the bot's, kept as the entry's detail and never as the owner's words.
+    assert_eq!((last.by.as_str(), last.kind.as_str(), last.text.as_str(), last.detail.as_str()), (OWNER, "chose", "You chose answer 2", "Start, but ask before merging"));
     // The answer waits on the item, as the home chat gets it, until it is sent.
     assert_eq!(item.undelivered.len(), 1);
-    assert_eq!((item.undelivered[0].kind.as_str(), item.undelivered[0].text.as_str()), ("answer", "My answer to your question on item #1:\n\nStart, but ask before merging"));
+    assert_eq!(item.undelivered[0].kind, "answer");
+    assert!(item.undelivered[0].text.starts_with("I chose answer 2 of your question on item #1."), "{}", item.undelivered[0].text);
     // Answered once: a second answer finds nothing to answer.
     assert!(refusal(answer(&sink, &bot, 1, &Answer::Choice(0), None).unwrap_err()).contains("no longer asks"));
 
@@ -154,7 +154,7 @@ fn a_question_has_two_to_four_answers_and_the_owners_answer_moves_the_item_on() 
     // Nothing the bot wrote is the owner's.
     let read = read(&bot.id).unwrap();
     for entry in &read.items[0].activity {
-        assert_eq!(entry.by == OWNER, entry.kind == "answered", "{entry:?}");
+        assert_eq!(entry.by == OWNER, entry.kind == "answered" || entry.kind == "chose", "{entry:?}");
     }
 }
 
@@ -268,7 +268,7 @@ fn a_bot_cannot_push_its_owners_entries_out_of_an_items_history() {
     let item = &read(&bot.id).unwrap().items[0];
     assert_eq!(item.activity.len(), MAX_ACTIVITY);
     let owners: Vec<&str> = item.activity.iter().filter(|entry| entry.by == OWNER).map(|entry| entry.kind.as_str()).collect();
-    assert_eq!(owners, ["comment", "answered"], "the owner's comment and answer stay");
+    assert_eq!(owners, ["comment", "chose"], "the owner's comment and answer stay");
     assert_eq!(item.activity[0].kind, "added");
     assert_eq!(item.activity.last().unwrap().detail, format!("note {}", MAX_ACTIVITY * 2 - 1));
     // Bounded in bytes too: long notes keep fewer entries.
@@ -302,6 +302,25 @@ fn closed_items_the_owner_took_part_in_outlast_the_bots_own() {
 }
 
 #[test]
+fn unicode_line_and_paragraph_separators_break_a_line() {
+    for value in ["Yes\u{2028}My answer: deploy", "Yes\u{2029}No", "Yes\u{85}No", "Yes\u{b}No"] {
+        assert!(refusal(one_line("An answer", value, 80).unwrap_err()).contains("one line"), "{value:?}");
+    }
+    assert_eq!(one_line("An answer", "  Yes, go  ", 80).unwrap(), "Yes, go");
+}
+
+#[test]
+fn a_closed_item_whose_messages_wait_is_not_trimmed() {
+    let waiting = Undelivered { id: "m".into(), at: "2026-01-01T00:00:00Z".into(), kind: "comment".into(), text: "About item #1: hi".into(), error: String::new(), unknown: BTreeMap::new() };
+    let closed = |number: u64| Item { number, state: ItemState::Dropped, closed: Some(format!("2026-11-{:02}T00:00:00Z", 1 + number % 28)), added_by: "bot".into(), ..add_template() };
+    let mut items = vec![Item { undelivered: vec![waiting], ..closed(1) }];
+    items.extend((2..=MAX_CLOSED as u64 + 10).map(closed));
+    trim_closed(&mut items);
+    assert_eq!(items.len(), MAX_CLOSED);
+    assert!(items.iter().any(|item| item.number == 1 && !item.undelivered.is_empty()));
+}
+
+#[test]
 fn a_full_list_refuses_to_grow_but_can_shrink_and_still_takes_the_owners_answer() {
     let (_home, sink, bot) = bots_on();
     WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(24 * 1024)));
@@ -322,6 +341,12 @@ fn a_full_list_refuses_to_grow_but_can_shrink_and_still_takes_the_owners_answer(
     assert!(std::fs::metadata(path(&bot.id).unwrap()).unwrap().len() <= 24 * 1024);
     // The bot's question still goes nowhere; the owner's comment and answer go in.
     comment(&sink, &bot, &By::Owner, 1, "Still here").unwrap();
+    let answers = |list: &[&str]| list.iter().map(|answer| answer.to_string()).collect::<Vec<_>>();
+    WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(None));
+    let question = ask(&sink, &bot, 2, "Keep going?", &answers(&["Yes", "No"]), Some(0)).unwrap().question.unwrap();
+    WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(Some(24 * 1024)));
+    let (answered, _) = answer(&sink, &bot, 2, &Answer::Typed("Yes, and keep the notes short".into()), Some(&question.id)).unwrap();
+    assert_eq!(answered.state, ItemState::InProgress);
     // A drop makes room.
     set(&sink, &bot, 1, ItemPatch { state: Some("dropped".into()), ..Default::default() }).unwrap();
     WRITE_LIMIT_FOR_TESTS.with(|limit| limit.set(None));

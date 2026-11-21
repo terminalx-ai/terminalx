@@ -280,9 +280,10 @@ function LinkRow({ link, session }: { link: BotItemLink; session: SessionEntry |
 function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
   const owners = entry.by === "owner";
   // A bot's notes are its own words: shown as such, never as an instruction or an approval.
-  const words = entry.kind === "comment" || entry.kind === "answered" || entry.kind === "asked" || entry.kind === "done" || entry.kind === "added";
-  // An answer is the owner's; the question it answers, kept as its detail, is the bot's own text.
-  const detailLabel = entry.kind === "answered" ? `${bot.name}'s question` : owners ? "your words" : `${bot.name}'s words · not an approval`;
+  const words = entry.kind === "comment" || entry.kind === "chose" || entry.kind === "asked" || entry.kind === "done" || entry.kind === "added";
+  // A typed answer is the owner's words, in the entry's text. A chosen answer's label, kept as its detail, is the
+  // bot's own wording of that answer: shown as the bot's, never as the owner's.
+  const detailLabel = entry.kind === "chose" ? `${bot.name}'s wording of that answer` : owners ? "your words" : `${bot.name}'s words · not an approval`;
   return (
     <li className="flex min-w-0 gap-3 border-b border-hairline py-2 last:border-b-0" data-testid="bot-item-activity-row" data-by={owners ? "owner" : "bot"}>
       <span className="w-12 shrink-0 pt-0.5 font-mono text-[11.5px] text-faint" title={entry.at}>{clock(entry.at)}</span>
@@ -303,8 +304,8 @@ function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
 const SAID: Record<string, string> = { answer: "Your answer", comment: "Your comment", work: "The work you gave" };
 
 /**
- * The owner's messages about this item that have not reached the bot yet, as the app keeps them: each is given to the
- * home chat when it next starts, once, or now with Send again.
+ * The owner's messages about this item that have not reached the bot yet, as the app keeps them: each is sent to the
+ * home chat once its agent next starts, or now with Send again, and cleared only once sent.
  */
 function NotDelivered({ bot, item }: { bot: Bot; item: BotItem }) {
   const [busy, setBusy] = useState(false);

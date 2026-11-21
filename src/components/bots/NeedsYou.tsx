@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useLayoutEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { CircleQuestionMark, Loader2, MessageSquare, RotateCw, Send, TriangleAlert } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { agent, errorMessage } from "@/lib/api";
@@ -108,9 +108,10 @@ function Answers({ bot, item, compact }: { bot: Bot; item: BotItem; compact: boo
               disabled={busy}
               onClick={() => send({ answer: index })}
               data-testid="needs-you-answer"
-              className="max-w-full"
+              className="h-auto max-w-full py-1 text-left whitespace-normal"
             >
-              <span className="truncate">{question.answers[index]}</span>
+              {/* Whole, wrapped: the owner clicks what they read, never a label cut short. */}
+              <span className="min-w-0 break-words">{question.answers[index]}</span>
               {recommended && <span className="text-[10.5px] font-normal opacity-75">recommended</span>}
             </Button>
           );
@@ -165,20 +166,34 @@ export function ItemQuestionCard({ bot, item, onOpen }: { bot: Bot; item: BotIte
   );
 }
 
-/** Past this a question is clamped on its card, with Show all. */
-const LONG_QUESTION = { chars: 280, lines: 4 };
-
-export function longText(text: string, limit: { chars: number; lines: number }): boolean {
-  return text.length > limit.chars || text.split("\n").length > limit.lines;
+/**
+ * Whether the element shows less than it holds, measured as laid out: lines clamped (its height) or a line cut (its
+ * width). Measured again when `key` changes or the element is resized.
+ */
+export function useCutOff<T extends HTMLElement>(key: string): [RefObject<T | null>, boolean] {
+  const ref = useRef<T | null>(null);
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setCut(element.scrollHeight > element.clientHeight + 1 || element.scrollWidth > element.clientWidth + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [key]);
+  return [ref, cut];
 }
 
+/** A question on its card: four lines, and Show all when the four cut it short. */
 function QuestionText({ text }: { text: string }) {
   const [all, setAll] = useState(false);
-  const long = longText(text, LONG_QUESTION);
+  const [ref, cut] = useCutOff<HTMLParagraphElement>(`${all}\u0000${text}`);
   return (
     <div className="min-w-0 flex-1">
-      <p className={cn("text-[13.5px] font-medium break-words whitespace-pre-wrap text-foreground", long && !all && "line-clamp-4")} data-testid="needs-you-question">{text}</p>
-      {long && (
+      <p ref={ref} className={cn("text-[13.5px] font-medium break-words whitespace-pre-wrap text-foreground", !all && "line-clamp-4")} data-testid="needs-you-question">{text}</p>
+      {(cut || all) && (
         <button type="button" onClick={() => setAll((value) => !value)} className="text-[12px] text-faint hover:text-foreground" aria-expanded={all}>
           {all ? "Show less" : "Show all"}
         </button>
@@ -239,16 +254,20 @@ export function AgentQuestionCard({ bot, entry, compact = false }: { bot: Bot; e
 /** One row of the Bots page's Needs you queue (23.02): the question, whose it is, the recommended answer and Open. */
 export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) {
   if (entry.kind === "agentQuestion") return <AgentQuestionCard bot={bot} entry={entry} compact />;
-  const item = entry.item;
+  return <ItemRow bot={bot} item={entry.item} />;
+}
+
+function ItemRow({ bot, item }: { bot: Bot; item: BotItem }) {
+  const [questionRef, questionCut] = useCutOff<HTMLParagraphElement>(item.question?.text ?? "");
   return (
     <article className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2" data-testid="needs-you-row" data-bot={bot.id}>
       <BotAvatar roleTemplateId={bot.roleTemplateId} size="md" />
       <div className="min-w-[200px] flex-1">
-        <p className="line-clamp-3 text-[13px] break-words whitespace-pre-wrap text-foreground" title={item.question?.text} data-testid="needs-you-question">{item.question?.text}</p>
+        <p ref={questionRef} className="line-clamp-3 text-[13px] break-words whitespace-pre-wrap text-foreground" title={item.question?.text} data-testid="needs-you-question">{item.question?.text}</p>
         <p className="truncate text-[11.5px] text-faint">{bot.name} · #{item.number} {item.title}</p>
       </div>
       <div className="flex min-w-0 max-w-full items-center gap-2">
-        <RecommendedOnly bot={bot} item={item} />
+        <RecommendedOnly bot={bot} item={item} questionCut={questionCut} />
         <Button size="xs" variant="outline" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-open">Open</Button>
         <span className="w-8 shrink-0 text-right text-[11.5px] text-faint" title={item.question?.asked}>{item.question ? waited(item.question.asked) : ""}</span>
       </div>
@@ -256,26 +275,25 @@ export function NeedsYouRow({ bot, entry }: { bot: Bot; entry: NeedsYouEntry }) 
   );
 }
 
-/** What a Bots page row shows whole: three lines of its question, and an answer that fits its button. */
-const ROW_QUESTION = { chars: 180, lines: 3 };
-const ROW_ANSWER_CHARS = 36;
-
 /**
  * The row's one answer button: the answer the bot recommends, the rest on the item's page. With no recommendation
  * there is no one-click answer: every answer is read on the item's page first.
  */
-function RecommendedOnly({ bot, item }: { bot: Bot; item: BotItem }) {
+function RecommendedOnly({ bot, item, questionCut }: { bot: Bot; item: BotItem; questionCut: boolean }) {
   const question = item.question;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const index = question?.recommended;
+  const label = index == null ? "" : question?.answers[index] ?? "";
+  // Measured on the button as laid out; once cut, the row offers Read and answer until the label changes.
+  const [labelRef, labelCut] = useCutOff<HTMLSpanElement>(label);
   if (!question) return null;
   if (index == null || !question.answers[index]) {
     return <span className="shrink-0 text-[11.5px] text-faint" data-testid="needs-you-choose">{question.answers.length} answers · open to choose</span>;
   }
-  // One click answers only what the row shows whole: a question past three lines, or an answer the button cuts off,
+  // One click answers only what the row shows whole: a question its three lines cut, or an answer its button cuts,
   // is read on the item's page first.
-  if (longText(question.text, ROW_QUESTION) || question.answers[index].length > ROW_ANSWER_CHARS) {
+  if (questionCut || labelCut) {
     return (
       <Button size="xs" variant="accent" onClick={() => openBotItem(bot.id, item.number, openBot)} data-testid="needs-you-read">
         Read and answer
@@ -290,7 +308,7 @@ function RecommendedOnly({ bot, item }: { bot: Bot; item: BotItem }) {
   return (
     <>
       <Button size="xs" variant="accent" disabled={busy} onClick={send} title={error ?? undefined} className="max-w-[260px]" data-testid="needs-you-answer">
-        <span className="truncate">{question.answers[index]}</span>
+        <span ref={labelRef} className="truncate">{label}</span>
         <span className="text-[10px] font-normal opacity-75">recommended</span>
       </Button>
       {error && <span role="alert" className="max-w-[200px] truncate text-[11.5px] text-destructive" title={error}>{error}</span>}

@@ -7,6 +7,15 @@ impl SessionManager {
         self.runtime(session, tab).unwrap().lock().unwrap().turn_open = true;
     }
 
+    /// Claude Code's `SessionStart` hook, for a stand-in that has none: the tab's CLI is up.
+    pub(crate) fn mark_cli_ready_for_test(&self, session: &str, tab: &str) {
+        if let Ok(rt) = self.runtime(session, tab) {
+            if let Engine::Cli(cli) = &rt.lock().unwrap().engine {
+                cli.ready.mark();
+            }
+        }
+    }
+
     pub(crate) fn install_review_test_cli(&self, session: &str, tab: &str, token: &str) {
         self.runtime(session, tab).unwrap().lock().unwrap().engine = Engine::Cli(CliTab {
             usage_account: None,

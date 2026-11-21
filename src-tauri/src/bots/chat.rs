@@ -485,15 +485,20 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
         text.push_str(&items);
         text.push('\n');
     }
-    // The owner's messages that could not be sent to the home chat reach it as it starts, once (PRO-469).
-    if reference.home {
-        if let Some(waiting) = super::items::take_undelivered(&bot.id) {
-            text.push('\n');
-            text.push_str(&waiting);
-            text.push('\n');
-        }
-    }
     Some(text)
+}
+
+/// A launch of `entry`'s tab settled. In a bot's home chat whose agent `started`, the owner's messages that did not
+/// reach it are sent now, as messages (`bots::items::deliver_waiting`), and cleared only once sent: a launch prompt
+/// would hold them only until the next relaunch. On a thread of its own, after this launch lets go of its tab. Nothing
+/// is read for any other session.
+pub fn launched(manager: &crate::session::SessionManager, entry: &SessionEntry, started: bool) {
+    let Some(reference) = session_bot(entry).filter(|reference| reference.home) else { return };
+    if !started || !super::enabled() {
+        return;
+    }
+    let (manager, id) = (manager.clone(), reference.id.clone());
+    std::thread::spawn(move || super::items::deliver_waiting(&manager, &id));
 }
 
 /// Before a launch of a bot's chat (PRO-470): edits made to the bot's files

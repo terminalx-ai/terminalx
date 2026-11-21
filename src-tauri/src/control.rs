@@ -2853,7 +2853,7 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
     // A caller in a bot's session reads its own bot's work list here and no other, as `terminalx bots items` does;
     // `needsYou` holds every bot's questions, so it is the window's.
     if command == "runtime.session.bots" && matches!(params["operation"].as_str(), Some("items" | "item" | "needsYou")) {
-        refuse_other_bots_items(manager, params)?;
+        refuse_other_bots_items(manager, params, window)?;
     }
     if runtime_read(command, params) {
         return Ok(());
@@ -2888,12 +2888,21 @@ fn refuse_bot_runtime_call(manager: &SessionManager, command: &str, params: &Val
 }
 
 /// A process placed in a bot's session asks for a work list through the runtime: only its own bot's.
-fn refuse_other_bots_items(manager: &SessionManager, params: &Value) -> Result<(), ControlError> {
+/// The window's own reads are not placed; a caller that cannot be placed is refused, never let through.
+fn refuse_other_bots_items(manager: &SessionManager, params: &Value, window: Option<(i32, u64)>) -> Result<(), ControlError> {
     let pid = match crate::hooks::caller() {
+        crate::hooks::Peer::InProcess => return Ok(()),
+        crate::hooks::Peer::Unreadable => return Err(gone()),
         crate::hooks::Peer::Pid(pid) => pid,
-        _ => return Ok(()),
     };
+    #[cfg(unix)]
+    if window.is_some_and(|(window, started)| window == pid && crate::serve_cli::consent::started_at(pid) == Some(started)) {
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    let _ = window;
     let caller = Caller::of_process(manager, &json!({}), Some(pid));
+    caller.refuse_gone()?;
     let Some(bot) = caller.bot.as_deref() else { return Ok(()) };
     let own = params["operation"].as_str() != Some("needsYou") && params["params"]["id"].as_str() == Some(bot);
     if own {

@@ -6478,7 +6478,15 @@ impl SessionManager {
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(&entry.cwd)?);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
-        self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
+        #[cfg(test)]
+        let refused = crate::bots::items::FAIL_LAUNCHES_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let refused = false;
+        let started = if refused { Err(anyhow!("the agent's CLI could not start (a test refused it)")) } else { self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI").map(|_| ()) };
+        // The agent is running with its appended prompt, or never will: a bot's waiting messages in it are delivered
+        // or wait again (`bots::items::launched`).
+        crate::bots::chat::launched(self, entry, started.is_ok());
+        started?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
