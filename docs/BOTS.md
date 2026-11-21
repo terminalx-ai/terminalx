@@ -234,16 +234,27 @@ permission system.
   (`chat::launched`), three tries at most; then a hand-off it carried fails
   and its sender is told. Pending messages are never put in a launch note.
 - **Stop.** The card's Stop (`handoffStop`, which narrows and needs no
-  proof) stops the receiving bot's chat for that hand-off and the sessions
-  it started for its item, drops the item, and tells the sender in the
-  owner's words. Its other chats, and the sender's, go on.
+  proof) is recorded first, under the store's lock and only while the
+  hand-off is open, then stops the receiving bot's chat for that hand-off
+  and the sessions it started for its item, drops the item, and tells the
+  sender, as TerminalX, that the owner stopped it. Its other chats, and the sender's, go on.
 - **Team brief.** `bot-team/BRIEF.md`, written by the owner in the window
   (`briefWrite`, guarded) under "Every bot reads"; 8 KB and 200 lines at
   most. Every launch of a bot's chat is given it as the owner's standing
   instruction, or, when the file no longer has the hash the owner saved, as
-  information only.
+  information only. The hash in `bot-team/brief.json` is a plain record,
+  not a secret: a Full access bot that rewrites both files with its own
+  tools is not held (PRO-489).
 - **Deleting a bot** stops other bots' work on what it handed them and moves
-  its hand-offs and messages to `trash/bot-handoffs/<id>.json`.
+  those hand-offs and its messages to `trash/bot-handoffs/<id>.json`. A
+  hand-off given to it and still open fails, stays on its sender's list, and
+  its sender is told.
+- **Who a message is from** is worked out when it is sent, from the sending
+  and receiving bots' records, never from the stored label. Nothing kept in
+  `bot-handoffs.json` is ever sent as the owner's own message: the owner's
+  acts reach a bot as TerminalX's ("TerminalX · your owner stopped hand-off
+  4"). The file itself is not guarded against a Full access bot's own file
+  tools (PRO-489), so its text is only ever given as a bot's or the app's.
 
 ## Build map
 

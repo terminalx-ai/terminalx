@@ -243,6 +243,7 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     let answer = super::call(sink.as_ref(), operation, params)?;
     if let Some(id) = &deleting {
         after_delete(sink.as_ref(), id);
+        super::handoffs::deliver_waiting_all(manager);
     }
     // What changed reaches the sessions of the bot that changed (every bot for the switches over all).
     match operation {

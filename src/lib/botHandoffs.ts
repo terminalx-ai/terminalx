@@ -73,6 +73,7 @@ export function handoffStateLabel(handoff: Handoff, toName: string, now = Date.n
     case "answered":
       return "Answered";
     case "failed":
+      if (handoff.stoppedBy === "deleted") return "Failed · its bot was deleted";
       return handoff.answer?.by === "terminalx" ? "Failed · not started" : "Could not do it";
     case "stopped":
       return handoff.stoppedBy === "owner" ? "Stopped by you" : "Stopped";

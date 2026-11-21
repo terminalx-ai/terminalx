@@ -141,6 +141,7 @@ describe("hand-off cards in a bot's chat (23.04)", () => {
     expect(chatHandoffs(many, "atlas-home").map((value) => value.number)).toEqual([9, 1, 2]);
     expect(handoffStateLabel(handoff(1, { state: "failed", answer: { at: "", text: "x", by: "terminalx", failed: true } }), "Sentry")).toBe("Failed · not started");
     expect(handoffStateLabel(handoff(1, { state: "stopped", stoppedBy: "owner" }), "Sentry")).toBe("Stopped by you");
+    expect(handoffStateLabel(handoff(1, { state: "failed", stoppedBy: "deleted", answer: { at: "", text: "x", by: "terminalx", failed: true } }), "a bot no longer here")).toBe("Failed · its bot was deleted");
   });
 });
 

@@ -1064,6 +1064,7 @@ impl ControlService {
                 bots::enforce::before_delete(&self.manager, &bot.id);
                 bots::delete(sink, &bot.id).map_err(failed)?;
                 bots::enforce::after_delete(sink, &bot.id);
+                bots::handoffs::deliver_waiting_all(&self.manager);
                 json!({"deleted": bot.id, "name": bot.name})
             }
             "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),

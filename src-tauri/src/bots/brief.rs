@@ -5,10 +5,15 @@
 //! when the owner last saved it and the hash of what they saved.
 //!
 //! What the owner saved is their standing instruction to the whole team. A
-//! file that no longer has the hash they saved was changed outside TerminalX,
-//! so a bot is given it as information, never as the owner's words. A Full
-//! access bot that writes the file with its own tools is that class of edit
-//! (PRO-489).
+//! file that no longer has the hash they saved was changed outside TerminalX
+//! (by hand, by another program, or by a bot's file tools writing `BRIEF.md`),
+//! so a bot is given it as information, never as the owner's words.
+//!
+//! The hash is a plain record beside the brief, not a secret: it tells the
+//! owner's save from an edit that leaves `brief.json` alone, and nothing more.
+//! A Full access bot that rewrites both files with its own tools is not held
+//! here; that class of edit, a bot writing the app's store files directly, is
+//! PRO-489's.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
