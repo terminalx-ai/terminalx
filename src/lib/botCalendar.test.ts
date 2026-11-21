@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { CRON_WEEKDAYS, cronWeekdayCode } from "@/lib/automationSchedule";
-import { restartOffer, restartRequired } from "@/lib/machines";
 import { FIRST_WEEK, LAST_WEEK, addDays, blockBox, dragTarget, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
 import type { AutomationSchedule } from "@/types/automations";
 import type { CalendarBlock } from "@/types/botCalendar";
@@ -64,10 +63,6 @@ describe("the week's grid and rows", () => {
     // Two near midnight still go side by side where they are drawn.
     const ends = lanes([block(23 * 60 + 40), block(23 * 60 + 55)]);
     expect([0, 1].map((index) => ends.get(index)?.of)).toEqual([2, 2]);
-  });
-
-  it("builds the restart offer MachineHostError reads back", () => {
-    expect(restartRequired(restartOffer("e7", "Older: restart it."))).toEqual({ epoch: "e7", message: "Older: restart it." });
   });
 
   it("knows an older runtime's answer to the week it does not know", () => {

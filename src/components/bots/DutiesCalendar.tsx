@@ -6,7 +6,7 @@ import { Segmented } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { HOUR_PX, WEEKDAYS, addDays, blockBox, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
 import { useLocalRuntime } from "@/lib/localRuntime";
-import { restartOffer } from "@/lib/machines";
+import { OutdatedRuntimeDetails } from "@/components/layout/RuntimeStatus";
 import { dutiesApi, dutyInputOf, reportsToLabel } from "@/lib/botDuties";
 import { useAutomationStore } from "@/lib/automations";
 import { cn } from "@/lib/cn";
@@ -131,6 +131,9 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const scroller = useRef<HTMLDivElement>(null);
   const scrolled = useRef(false);
   const botId = single?.id ?? only;
+  // The runtime attached: once another replaces it (an older one restarted), the week is read again.
+  const runtime = useLocalRuntime().state;
+  const epoch = runtime?.state === "connected" ? runtime.epoch : null;
 
   // Read again when a duty or its last run changes, and every few minutes; the now line moves every minute.
   const changeKey = useMemo(() => automations.automations.filter((value) => value.bot).map((value) => `${value.id}:${value.modified}:${value.lastRunAt ?? ""}:${value.nextRunAt}`).join("|"), [automations.automations]);
@@ -139,7 +142,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     // A week that could not be read leaves nothing of the one before drawn under the error.
     calendarApi.week(botId, week).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) { setData(null); setError(errorMessage(cause)); } });
     return () => { live = false; };
-  }, [botId, week, changeKey, tick]);
+  }, [botId, week, changeKey, tick, epoch]);
   // Only while the window is shown: hidden, nothing ticks, and on coming back the week is read again at once.
   useEffect(() => {
     let timers: number[] = [];
@@ -478,14 +481,22 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
 }
 
 /**
- * The week could not be read. An older runtime, one that does not know the week of duties, is offered a restart: the
- * app's own runtime knows it.
+ * The week could not be read. A runtime older than this app, one that does not know the week of duties, is offered the
+ * status bar's own Restart now (#730), which names what it stops and replaces it with the app's runtime; the week is
+ * read again once another runtime is attached. Any other failure is a guarded command's (`MachineHostError`).
  */
 function WeekError({ error, onRestarted }: { error: string; onRestarted: () => void }) {
   const { state } = useLocalRuntime();
-  if (weekUnknown(error) && state?.state === "connected") {
-    const offer = restartOffer(state.epoch, "The TerminalX runtime running is older than this app and cannot read a week of duties. Restart runtime starts the app's own.");
-    return <MachineHostError error={offer} onRestarted={onRestarted} className="mb-2" />;
+  if (weekUnknown(error)) {
+    const outdated = state?.state === "connected" ? state.outdated : undefined;
+    return (
+      <div role="alert" className="mb-2 grid gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[12.5px]" data-testid="calendar-older-runtime">
+        <p className="text-destructive">The TerminalX runtime running does not know the week of duties: it is older than this app.</p>
+        {outdated && state?.state === "connected"
+          ? <OutdatedRuntimeDetails epoch={state.epoch} outdated={outdated} />
+          : <p className="text-muted-foreground">It does not say it is older, so nothing is offered to restart: this app and the runtime running are different builds.</p>}
+      </div>
+    );
   }
   return <MachineHostError error={error} onRestarted={onRestarted} className="mb-2" />;
 }

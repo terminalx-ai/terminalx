@@ -211,11 +211,6 @@ export async function createMachineCode(): Promise<MachinePairingCode> {
  * A command only a person may send failed because the runtime running was not started by this window, so it cannot
  * verify it, and restarting it would stop work (PRO-486): `runtime_restart_required:<epoch>: <message>`.
  */
-/** The failure `MachineHostError` shows with Restart runtime beside it, for runtime `epoch`: the inverse of {@link restartRequired}. */
-export function restartOffer(epoch: string, message: string): string {
-  return `runtime_restart_required:${epoch}: ${message}`;
-}
-
 export function restartRequired(error: string | null | undefined): { epoch: string; message: string } | null {
   const match = /^runtime_restart_required:([^:\s]+): ([\s\S]*)$/.exec(error ?? "");
   return match ? { epoch: match[1], message: match[2] } : null;

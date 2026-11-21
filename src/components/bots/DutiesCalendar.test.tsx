@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   restart: vi.fn(async () => undefined),
   showTeam: vi.fn(),
-  runtime: { state: { state: "connected", epoch: "e7" } } as { state: { state: string; epoch: string } | null },
+  runtime: { state: { state: "connected", epoch: "e7" } } as { state: Record<string, unknown> | null },
+  runtimeListeners: new Set<() => void>(),
+  replace: vi.fn(async (_epoch: string, _stop: unknown[]) => undefined),
 }));
 
 vi.mock("@/lib/api", () => ({ invoke: mocks.invoke, errorMessage: (error: unknown) => String(error), automationsApi: { tryPrecheck: vi.fn() } }));
@@ -22,13 +24,24 @@ vi.mock("@/lib/runFamily", () => ({ sessionSpend: () => 0 }));
 vi.mock("@/lib/botsPage", () => ({ showBotsTeam: mocks.showTeam }));
 vi.mock("@/lib/machines", () => ({
   machinesApi: { restartRuntimeForWindow: mocks.restart },
-  restartOffer: (epoch: string, message: string) => `runtime_restart_required:${epoch}: ${message}`,
   restartRequired: (error: string | null) => {
     const match = /^runtime_restart_required:([^:\s]+): ([\s\S]*)$/.exec(error ?? "");
     return match ? { epoch: match[1], message: match[2] } : null;
   },
 }));
-vi.mock("@/lib/localRuntime", async (importOriginal) => ({ ...(await importOriginal<object>()), useLocalRuntime: () => mocks.runtime }));
+vi.mock("@/lib/localRuntime", async (importOriginal) => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    ...(await importOriginal<object>()),
+    useLocalRuntime: () => useSyncExternalStore((listener) => { mocks.runtimeListeners.add(listener); return () => { mocks.runtimeListeners.delete(listener); }; }, () => mocks.runtime),
+    replaceLocalRuntime: mocks.replace,
+  };
+});
+/** Another runtime is attached, as after a restart. */
+const attach = (state: Record<string, unknown>) => {
+  mocks.runtime = { state };
+  mocks.runtimeListeners.forEach((listener) => listener());
+};
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
 
 const { DutiesCalendar } = await import("./DutiesCalendar");
@@ -94,6 +107,8 @@ function week(): DutyWeek {
 const RESTART = "runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked.";
 
 beforeEach(() => {
+  mocks.runtime = { state: { state: "connected", epoch: "e7" } };
+  mocks.replace.mockReset();
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-20T13:24:00Z"));
   mocks.automations = { loaded: true, automations: [status, look, audit, stalled], runs: {}, loadingRuns: {}, issueStates: {} };
@@ -426,21 +441,38 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     expect((save as { input: { schedule: { hour: number; minute: number } } }).input.schedule).toMatchObject({ hour: 23, minute: 45 });
   });
 
-  it("offers an older runtime that does not know the week a restart, then reads it again (PRO-497)", async () => {
+  it("offers a runtime older than this app its Restart now, which replaces it, and then reads the week again (PRO-497)", async () => {
     const answer = mocks.invoke.getMockImplementation()!;
-    let older = true;
     mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
-      if (command === "bot_duty_week" && older) throw "Unknown bots operation dutyWeek";
+      if (command === "bot_duty_week" && mocks.runtime.state?.epoch === "old") throw "Unknown bots operation dutyWeek";
+      return answer(command, args);
+    });
+    const outdated = { running: "0.2.30", app: "0.2.37", work: ["Claude in api, mid-turn"], problem: null, failed: false, keeps: false, unkept: [] };
+    attach({ state: "connected", epoch: "old", generation: 1, view: 1, outdated });
+    mocks.replace.mockImplementation(async () => { attach({ state: "connected", epoch: "fresh", generation: 2, view: 1 }); });
+    calendar();
+    const notice = await screen.findByTestId("calendar-older-runtime");
+    expect(notice.textContent).toMatch(/does not know the week of duties: it is older than this app/);
+    // What restarting stops is named, as in the status bar.
+    expect(notice.textContent).toContain("Claude in api, mid-turn");
+    fireEvent.click(within(notice).getByRole("button", { name: "Restart now" }));
+    await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith("old", []));
+    // The window's own restart (offered only for a guarded command) is never asked.
+    expect(mocks.restart).not.toHaveBeenCalled();
+    await screen.findAllByTestId("calendar-block");
+    expect(screen.queryByTestId("calendar-older-runtime")).toBeNull();
+  });
+
+  it("offers nothing to restart when the runtime does not say it is older (PRO-497)", async () => {
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: Record<string, unknown>) => {
+      if (command === "bot_duty_week") throw "Unknown bots operation dutyWeek";
       return answer(command, args);
     });
     calendar();
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toMatch(/older than this app and cannot read a week of duties/);
-    older = false;
-    fireEvent.click(within(alert).getByRole("button", { name: /Restart runtime/ }));
-    await waitFor(() => expect(mocks.restart).toHaveBeenCalledWith("e7"));
-    await screen.findAllByTestId("calendar-block");
-    expect(screen.queryByRole("alert")).toBeNull();
+    const notice = await screen.findByTestId("calendar-older-runtime");
+    expect(within(notice).queryByRole("button")).toBeNull();
+    expect(notice.textContent).toMatch(/nothing is offered to restart/);
   });
 
   it("names the week's days as groups, and its year when it is not this year's (PRO-497)", async () => {
