@@ -162,6 +162,18 @@
   it: what is next today, the week so far, the key and quiet hours. Days a
   duty's log no longer reaches back over say "history not kept" and the
   totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): the bots on the phone. While a paired Mac has Bots on,
+  the phone gets a Bots tab: what needs you across every bot first, the
+  newest question answerable from the list with its recommended answer, then
+  the team with what each bot is doing, and Pause all. A bot's page has Home
+  (its questions and open work), Chat, Duties and Role, with Pause or Resume
+  in its header. A question opens as a sheet with the recommended answer on
+  top and room to type a reply. Each new question notifies the phone while it
+  is connected, under the Questions choice; its buttons answer it and a tap
+  opens the sheet over the bot's home chat. An answer from the phone, from the
+  list, the sheet or a notification, goes through the same route as the
+  app's, the Mac's own `bots.answer` for a paired phone that may drive, which
+  no bot's session can call. With Bots off the phone is as it was (PRO-479).
 
 ## 0.2.37
 

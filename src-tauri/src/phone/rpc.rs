@@ -90,6 +90,10 @@ struct MobileNotification {
     /// For an `approval`: what `permission.respond` takes besides the option.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     approval: Option<ApprovalNotice>,
+    /// For a `bot_question`. Its `sessionId` and `tabId` name the bot's home
+    /// chat, so a phone that does not know the kind opens that chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bot_question: Option<BotQuestionNotice>,
 }
 
 /// The kinds of notice a phone can be sent (#990). A phone's filter names
@@ -104,6 +108,8 @@ enum NoticeKind {
     UsageLimit,
     PrChecksFailed,
     PrMerged,
+    /// A bot asks its owner a question on one of its work items (PRO-479).
+    BotQuestion,
 }
 
 impl NoticeKind {
@@ -116,12 +122,13 @@ impl NoticeKind {
             Self::UsageLimit => "usage_limit",
             Self::PrChecksFailed => "pr_checks_failed",
             Self::PrMerged => "pr_merged",
+            Self::BotQuestion => "bot_question",
         }
     }
 
     /// Whether the notice waits on the person: what `needsMe` sends.
     fn needs_me(self) -> bool {
-        matches!(self, Self::Question | Self::Approval)
+        matches!(self, Self::Question | Self::Approval | Self::BotQuestion)
     }
 }
 
@@ -147,6 +154,21 @@ const APPROVAL_DENY: &str = "deny";
 #[serde(rename_all = "camelCase")]
 struct ApprovalNotice {
     request_id: String,
+}
+
+/// For a `bot_question` (PRO-479): which question of which bot's item, and its
+/// answers, so the phone opens it as a sheet or answers it from the notice
+/// with `bots.answer`, the way the app answers it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BotQuestionNotice {
+    bot_id: String,
+    number: u64,
+    /// The question's id, or when it was asked for one an older build asked: `bots.answer`'s `question`.
+    question: String,
+    answers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recommended: Option<usize>,
 }
 
 /// The notices a phone asked for (#990), held only by the subscription that
@@ -194,6 +216,8 @@ impl NotificationFilter {
             None => {}
         }
         let in_scope = match &self.sessions {
+            // A bot's question is the bot's, not one session's (PRO-479).
+            _ if notification.kind == NoticeKind::BotQuestion => true,
             None | Some(SessionScope::All) => true,
             Some(SessionScope::Only { ids }) => session.is_some_and(|id| ids.iter().any(|only| only == id)),
         };
@@ -254,6 +278,12 @@ pub(crate) struct MobileRuntime {
     /// memory only: news from before `started` is not sent at all, as an
     /// earlier run of the app may have sent it.
     pipeline_notices: Mutex<VecDeque<String>>,
+    /// Bots' questions already noticed, by bot, item and question (PRO-479).
+    /// Only questions asked since `started` are noticed at all.
+    bot_notices: Mutex<VecDeque<String>>,
+    /// Whether Bots was on when last looked at: a change tells phones to read
+    /// their capabilities again.
+    bots_on: std::sync::atomic::AtomicBool,
     started: chrono::DateTime<Utc>,
     notes: Mutex<()>,
     /// Shared by every connection: the retry of a send whose reply was lost
@@ -275,6 +305,8 @@ impl MobileRuntime {
             asked: Mutex::new(VecDeque::new()),
             turns: Mutex::new(HashMap::new()),
             pipeline_notices: Mutex::new(VecDeque::new()),
+            bot_notices: Mutex::new(VecDeque::new()),
+            bots_on: std::sync::atomic::AtomicBool::new(crate::bots::enabled()),
             started: Utc::now(),
             notes: Mutex::new(()),
             send_ids: SendIds::new(),
@@ -292,6 +324,33 @@ impl MobileRuntime {
             let runtime = Arc::downgrade(self);
             sink.listen(event, Box::new(move |_| {
                 if let Some(runtime) = runtime.upgrade() { runtime.broadcast_sessions_changed(); }
+            }));
+        }
+        // The bots (PRO-479): a phone reads them again when they or a list
+        // change, and is told of each question newly asked of the owner.
+        for event in ["bots_changed", crate::bots::items::EVENT] {
+            let runtime = Arc::downgrade(self);
+            sink.listen(event, Box::new(move |payload| {
+                let Some(runtime) = runtime.upgrade() else { return };
+                runtime.invalidate(super::Invalidation::Bots);
+                if event != crate::bots::items::EVENT { return; }
+                let Some(bot) = serde_json::from_str::<Value>(payload).ok().and_then(|payload| payload["botId"].as_str().map(str::to_owned)) else { return };
+                // Off the writer's thread: it announces the change under its list's lock.
+                let weak = Arc::downgrade(&runtime);
+                let spawned = std::thread::Builder::new().name("bot-notices".into()).spawn(move || {
+                    let Some(runtime) = weak.upgrade() else { return };
+                    for notification in runtime.bot_notifications(&bot) {
+                        runtime.publish(runtime.sink.get().map(|sink| &**sink), notification);
+                    }
+                });
+                if let Err(error) = spawned { log::warn!("notice a bot's questions: {error}"); }
+            }));
+        }
+        // Bots switched on or off: what a phone is offered changes with it.
+        for event in ["experimental_settings_changed", "settings_file_changed", "bots_changed"] {
+            let runtime = Arc::downgrade(self);
+            sink.listen(event, Box::new(move |_| {
+                if let Some(runtime) = runtime.upgrade() { runtime.watch_bots_switch(crate::bots::enabled()); }
             }));
         }
         // An issue's pipeline, written: its pull request's checks failing, or its merge (#990).
@@ -396,6 +455,7 @@ impl MobileRuntime {
             session_title,
             question: None,
             approval: None,
+            bot_question: None,
         }
     }
 
@@ -507,7 +567,7 @@ impl MobileRuntime {
             NoticeKind::Finished => format!("{name} finished"),
             NoticeKind::Failed => format!("{name} stopped on an error"),
             NoticeKind::UsageLimit => format!("{name} reached a usage limit"),
-            NoticeKind::PrChecksFailed | NoticeKind::PrMerged => unreachable!("agent events make no pull request notice"),
+            NoticeKind::PrChecksFailed | NoticeKind::PrMerged | NoticeKind::BotQuestion => unreachable!("agent events make no pull request or bot notice"),
         };
         let mut notification = self.notification(kind, title, body, &event.session_id, &event.tab_id, session_title);
         notification.question = question;
@@ -532,6 +592,58 @@ impl MobileRuntime {
         };
         let session_title = author_title.filter(|title| !title.trim().is_empty());
         Some(self.notification(kind, title, collapse_notification_text(&notice.detail), &notice.author.session_id, &notice.author.tab_id, session_title))
+    }
+
+    /// Tell every phone to read its capabilities again when Bots was switched
+    /// on or off since last looked at (PRO-479).
+    fn watch_bots_switch(&self, on: bool) {
+        if self.bots_on.swap(on, std::sync::atomic::Ordering::SeqCst) != on {
+            self.broadcast_capabilities_changed();
+        }
+    }
+
+    /// The notices bot `bot_id`'s list makes now: one for each question it
+    /// asks its owner that was asked since this app started and has not been
+    /// noticed (PRO-479). None while Bots is off.
+    fn bot_notifications(&self, bot_id: &str) -> Vec<MobileNotification> {
+        if !crate::bots::enabled() { return Vec::new(); }
+        let (Ok(bot), Ok(list)) = (crate::bots::get(bot_id), crate::bots::items::read(bot_id)) else { return Vec::new() };
+        let chat = crate::bots::phone::home_chat_of(&bot.id);
+        let mut notices = Vec::new();
+        for item in list.items.iter().filter(|item| item.state == crate::bots::items::ItemState::NeedsYou) {
+            let Some(question) = &item.question else { continue };
+            let asked = chrono::DateTime::parse_from_rfc3339(&question.asked).ok().map(|at| at.with_timezone(&Utc));
+            // Times are kept to the millisecond: one asked as this app started is news.
+            if asked.is_none_or(|at| at + chrono::TimeDelta::seconds(1) < self.started) { continue; }
+            let named = if question.id.is_empty() { question.asked.clone() } else { question.id.clone() };
+            let key = format!("{}/{}/{named}", bot.id, item.number);
+            {
+                let mut sent = self.bot_notices.lock().unwrap();
+                if sent.contains(&key) { continue; }
+                sent.push_back(key);
+                while sent.len() > NOTIFICATION_LIMIT { sent.pop_front(); }
+            }
+            notices.push(MobileNotification {
+                seq: self.next_seq(),
+                epoch: self.notification_epoch.clone(),
+                title: format!("{} asks", bot.name),
+                body: collapse_notification_text(&question.text),
+                session_id: chat.as_ref().map(|(session, _)| session.clone()),
+                tab_id: chat.as_ref().map(|(_, tab)| tab.clone()),
+                kind: NoticeKind::BotQuestion,
+                session_title: None,
+                question: None,
+                approval: None,
+                bot_question: Some(BotQuestionNotice {
+                    bot_id: bot.id.clone(),
+                    number: item.number,
+                    question: named,
+                    answers: question.answers.clone(),
+                    recommended: question.recommended.filter(|index| *index < question.answers.len()),
+                }),
+            });
+        }
+        notices
     }
 
     /// Whether this is the first notice of this tab's ask by its request id.
@@ -869,7 +981,7 @@ pub(crate) fn dispatch(
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let sink = manager.sink().cloned();
     let result = match method {
-        "sync.capabilities" => no_params(&params).map(|_| capabilities(connection.owner.build())),
+        "sync.capabilities" => no_params(&params).map(|_| capabilities_for(connection.owner.build(), crate::bots::enabled())),
         "transport.negotiate" => parse_params(params).map(|params| negotiate(connection, params)),
         "sessions.summaries" => parse_params(params).and_then(|params: ConditionalParams| conditional(session_summaries(connection)?, params.version)),
         "session.sync" => parse_params(params).and_then(|params| session_sync(connection, request_id(request), params)),
@@ -936,6 +1048,17 @@ pub(crate) fn dispatch(
         "mac.setSettings" => {
             require_driver(device).and_then(|_| parse_params(params).and_then(|params: MacSettingsPatch| connection.call("setSettings", json!({"nativeCodex": params.native_codex}))))
         }
+        // The bots (PRO-479), while Bots is on: reads, and the owner's acts, which
+        // the runtime makes through the window's own operations.
+        "bots.list" => no_params(&params).and_then(|_| connection.call("bots", json!({"operation": "list"}))),
+        "bots.home" | "bots.items" => parse_params(params).and_then(|params: BotParams| {
+            connection.call("bots", json!({"operation": method.trim_start_matches("bots."), "id": params.id}))
+        }),
+        "bots.answer" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: BotAnswerParams| connection.call("bots", params.into_call()))),
+        "bots.pause" | "bots.resume" => require_driver(device).and_then(|_| parse_params(params).and_then(|params: BotParams| {
+            connection.call("bots", json!({"operation": method.trim_start_matches("bots."), "id": params.id}))
+        })),
+        "bots.pauseAll" => require_driver(device).and_then(|_| no_params(&params).and_then(|_| connection.call("bots", json!({"operation": "pauseAll"})))),
         "notifications.missedSince" => parse_params(params).map(|params| missed_notifications(manager, params)),
         "notifications.subscribe" => sink
             .as_ref()
@@ -953,7 +1076,11 @@ pub(crate) fn dispatch(
 /// one that the app knows and its runtime does not would be offered and then
 /// refused (#730), so those are named only as far as the runtime serves them
 /// (`local_runtime::mobile::features`).
-fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
+///
+/// `bots` is named only while Settings → Experimental → Bots is on
+/// (`bots_on`): with it off, a phone shows nothing of the bots (PRO-479).
+/// Turning it on or off tells every phone to ask again (`watch_bots_switch`).
+fn capabilities_for(runtime: &crate::local_runtime::client::Build, bots_on: bool) -> Value {
     // `transcript`, `conditionalLists` and `promptImages` (`session.image`) are this app's own.
     // `notificationFilters`: notices carry a `kind`, and `notifications.subscribe`
     // and `notifications.missedSince` take a `filter` (#990).
@@ -972,12 +1099,51 @@ fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
     // pane's size, so the phone can emulate the screen and drive it.
     // `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
     // `questions`: `questions.respond` answers an agent's question as the desktop's card does (#979).
-    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1), ("questions", 1)] {
+    // `bots`: `bots.list`, `bots.home`, `bots.items`, `bots.answer`, `bots.pause`,
+    // `bots.resume` and `bots.pauseAll`, and `bot_question` notices (PRO-479).
+    for (feature, level) in [("sendIds", 1), ("sessionControls", 1), ("sessionCreate", 1), ("macSettings", 1), ("terminal", 1), ("closeTab", 1), ("layeredConfiguration", 1), ("questions", 1), ("bots", 1)] {
+        if feature == "bots" && !bots_on { continue; }
         if runtime.mobile.get(feature).and_then(Value::as_u64).is_some_and(|served| served >= level) {
             named[feature] = json!(level);
         }
     }
     named
+}
+
+/// One bot, for a read or a pause.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BotParams {
+    id: String,
+}
+
+/// The owner's answer to a bot's question, from the phone (PRO-479): one of
+/// its answers by index, or their own words, to the question they saw.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BotAnswerParams {
+    id: String,
+    number: u64,
+    #[serde(default)]
+    answer: Option<u64>,
+    #[serde(default)]
+    text: Option<String>,
+    /// The question's id as the phone was shown it (its `asked` time, for one an older build asked).
+    #[serde(default)]
+    question: Option<String>,
+}
+
+impl BotAnswerParams {
+    fn into_call(self) -> Value {
+        let mut call = json!({"operation": "answer", "id": self.id, "number": self.number});
+        match (self.answer, self.text) {
+            (Some(index), _) => call["answer"] = json!(index),
+            (None, Some(text)) => call["text"] = json!(text),
+            (None, None) => {}
+        }
+        if let Some(question) = self.question { call["question"] = json!(question); }
+        call
+    }
 }
 
 /// What a phone is told when the runtime refuses an operation it does not
@@ -2617,6 +2783,12 @@ fn collapse_notification_text(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// What a phone is offered with Bots off, as a new install has it: the
+    /// tests below do not depend on this computer's own settings.
+    fn capabilities(runtime: &crate::local_runtime::client::Build) -> Value {
+        capabilities_for(runtime, false)
+    }
+
     fn phone_account(id: &str, label: &str, missing: bool) -> crate::agent_accounts::Account {
         crate::agent_accounts::Account {
             id: id.into(), agent: "claude", kind: crate::agent_accounts::Kind::Subscription, label: label.into(),
@@ -4251,7 +4423,7 @@ mod tests {
     }
 
     fn of(kind: NoticeKind, session: &str) -> MobileNotification {
-        MobileNotification { seq: 1, epoch: "e".into(), title: "t".into(), body: "b".into(), session_id: Some(session.into()), tab_id: Some("tab".into()), kind, session_title: None, question: None, approval: None }
+        MobileNotification { seq: 1, epoch: "e".into(), title: "t".into(), body: "b".into(), session_id: Some(session.into()), tab_id: Some("tab".into()), kind, session_title: None, question: None, approval: None, bot_question: None }
     }
 
     fn filter(value: Value) -> NotificationFilter {
@@ -4401,5 +4573,87 @@ mod tests {
     #[test]
     fn a_phone_is_told_this_mac_filters_notices() {
         assert_eq!(capabilities(&current_runtime())["notificationFilters"], 1);
+    }
+
+    /// PRO-479: the bots are offered only through a runtime that serves them and
+    /// only while Bots is on; their params are closed, and only reads are open
+    /// to a phone that cannot drive.
+    #[test]
+    fn bots_are_offered_only_while_on_and_their_params_are_closed() {
+        assert_eq!(capabilities_for(&current_runtime(), true)["bots"], 1);
+        assert!(capabilities_for(&current_runtime(), false).get("bots").is_none(), "with Bots off a phone shows nothing of them");
+        assert!(capabilities_for(&runtime_of(Some("0.2.22"), None), true).get("bots").is_none(), "an older runtime has no such operation");
+        let answer: BotAnswerParams = serde_json::from_value(json!({"id": "b1", "number": 4, "answer": 0, "question": "q1"})).unwrap();
+        assert_eq!(answer.into_call(), json!({"operation": "answer", "id": "b1", "number": 4, "answer": 0, "question": "q1"}));
+        let typed: BotAnswerParams = serde_json::from_value(json!({"id": "b1", "number": 4, "text": "File it"})).unwrap();
+        assert_eq!(typed.into_call(), json!({"operation": "answer", "id": "b1", "number": 4, "text": "File it"}));
+        for refused in [json!({"number": 4, "answer": 0}), json!({"id": "b1", "answer": 0}), json!({"id": "b1", "number": 4, "answer": 0, "by": "bot"})] {
+            assert!(serde_json::from_value::<BotAnswerParams>(refused.clone()).is_err(), "{refused}");
+        }
+        assert!(serde_json::from_value::<BotParams>(json!({"id": "b1", "operation": "delete"})).is_err());
+    }
+
+    /// PRO-479: a bot's question is sent whatever the session scope says, under the questions a phone chose.
+    #[test]
+    fn a_bots_question_is_sent_by_kind_and_needs_the_person() {
+        let asked = of(NoticeKind::BotQuestion, "home-chat");
+        assert!(filter(json!({ "kinds": ["bot_question"], "sessions": { "scope": "only", "ids": ["other"] } })).admits(&asked), "not one session's");
+        assert!(!filter(json!({ "kinds": ["question"] })).admits(&asked), "a phone that does not name the kind is not sent it");
+        assert!(filter(json!({ "overrides": { "home-chat": "needsMe" } })).admits(&asked));
+        assert!(!filter(json!({ "overrides": { "home-chat": "mute" } })).admits(&asked), "the home chat muted mutes its bot's questions");
+        assert_eq!(NoticeKind::BotQuestion.name(), "bot_question");
+    }
+
+    /// PRO-479: one notice per question asked since the app started, with what the phone answers it by.
+    #[test]
+    fn each_new_bot_question_is_noticed_once() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let sink = crate::sink::BroadcastSink::new(64);
+        let runtime = MobileRuntime::new();
+        let bot = crate::bots::chat::hire(&sink, "cto", "Atlas").unwrap();
+        let new = crate::bots::items::NewItem { title: "Move macOS CI".into(), summary: String::new(), done_means: Vec::new(), start: true, asked_by: None, added_by: None };
+        crate::bots::items::add(&sink, &bot, &crate::bots::items::By::Bot { session: None }, new).unwrap();
+        assert!(runtime.bot_notifications(&bot.id).is_empty(), "nothing asked");
+        let item = crate::bots::items::ask(&sink, &bot, 1, "Approve the plan and start the run?", &["Approve and start".into(), "Not now".into()], Some(0)).unwrap();
+        let notices = runtime.bot_notifications(&bot.id);
+        assert_eq!(notices.len(), 1);
+        let notice = &notices[0];
+        assert_eq!((notice.kind, notice.title.as_str(), notice.body.as_str()), (NoticeKind::BotQuestion, "Atlas asks", "Approve the plan and start the run?"));
+        let (home, tab) = crate::bots::phone::home_chat_of(&bot.id).unwrap();
+        assert_eq!((notice.session_id.as_deref(), notice.tab_id.as_deref()), (Some(home.as_str()), Some(tab.as_str())), "an older phone opens the chat it came from");
+        assert_eq!(notice.bot_question, Some(BotQuestionNotice {
+            bot_id: bot.id.clone(), number: 1, question: item.question.unwrap().id,
+            answers: vec!["Approve and start".into(), "Not now".into()], recommended: Some(0),
+        }));
+        let wire = serde_json::to_value(notice).unwrap();
+        assert_eq!((wire["kind"].as_str(), wire["botQuestion"]["botId"].as_str()), (Some("bot_question"), Some(bot.id.as_str())));
+        assert!(runtime.bot_notifications(&bot.id).is_empty(), "noticed once");
+        // A question asked again is news again.
+        crate::bots::items::ask(&sink, &bot, 1, "Start, but ask before merging?", &["Yes".into(), "No".into()], None).unwrap();
+        assert_eq!(runtime.bot_notifications(&bot.id).len(), 1);
+        // With Bots off, nothing.
+        crate::bots::items::ask(&sink, &bot, 1, "Third time?", &["Yes".into(), "No".into()], None).unwrap();
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert!(runtime.bot_notifications(&bot.id).is_empty());
+    }
+
+    /// PRO-479: phones read their capabilities again when Bots is switched, and only then.
+    #[test]
+    fn switching_bots_tells_phones_to_ask_again() {
+        let runtime = MobileRuntime::new();
+        let (sender, _receiver) = mpsc::channel(4);
+        let invalidations = Arc::new(super::super::Invalidations::default());
+        runtime.register_client("c", sender, Arc::default(), Arc::default(), invalidations.clone());
+        let was = runtime.bots_on.load(std::sync::atomic::Ordering::SeqCst);
+        runtime.watch_bots_switch(was);
+        assert!(invalidations.take().is_empty(), "no change, nothing to ask");
+        runtime.watch_bots_switch(!was);
+        assert_eq!(invalidations.take(), vec![json!({ "method": "sync.capabilitiesChanged" })]);
+        runtime.invalidate(super::super::Invalidation::Bots);
+        assert_eq!(invalidations.take(), vec![json!({ "method": "bots.changed" })]);
     }
 }

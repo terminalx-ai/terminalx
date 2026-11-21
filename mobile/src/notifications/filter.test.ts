@@ -151,3 +151,33 @@ describe("lock-screen levels", () => {
     }
   });
 });
+
+// PRO-479: a bot's question, under the "questions" choice and never held to a session's scope.
+describe("a bot's question", () => {
+  const asked = event({ kind: "bot_question", title: "Sentry asks", body: "Fix now or file it?", sessionId: "home", tabId: "t", botQuestion: { botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"], recommended: 0 } });
+
+  it("is asked for with questions, only from a Mac that offers its bots", () => {
+    expect(subscribeFilter(on(), "mac", true).kinds).toEqual(["question", "approval", "finished", "failed", "pr_checks_failed", "bot_question"]);
+    expect(subscribeFilter(on(), "mac").kinds).not.toContain("bot_question");
+    expect(subscribeFilter(on({ kinds: { ...defaultSettings().kinds, question: false } }), "mac", true).kinds).not.toContain("bot_question");
+  });
+
+  it("shows under the questions switch, whatever the session scope, and through quiet hours when needs-me still notifies", () => {
+    expect(shouldShow(on(), "mac", asked, noon)).toBe(true);
+    expect(shouldShow(on({ kinds: { ...defaultSettings().kinds, question: false } }), "mac", asked, noon)).toBe(false);
+    expect(shouldShow(on({ sessions: "mine" }), "mac", asked, noon)).toBe(true);
+    expect(shouldShow(withOverride(on(), "mac", "home", "mute"), "mac", asked, noon)).toBe(false);
+    const quiet = { on: true, start: 11 * 60, end: 13 * 60, stillNotifyNeedsMe: true };
+    expect(shouldShow(on({ quietHours: quiet }), "mac", asked, noon)).toBe(true);
+    expect(shouldShow(on({ quietHours: { ...quiet, stillNotifyNeedsMe: false } }), "mac", asked, noon)).toBe(false);
+  });
+
+  it("carries which bot and item, and its answers only when the lock screen shows the question", () => {
+    const everything = present(on(), "mac", "Studio", asked);
+    expect(everything.data).toEqual({ hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: false, botId: "b1", number: 4, question: "q1", answers: ["Fix it now", "File an issue"], recommended: 0 });
+    expect(everything.thread).toBe("mac:bot:b1");
+    const nothing = present(on({ lockScreen: { show: "nothing", sound: true } }), "mac", "Studio", asked);
+    expect(nothing.title).toBe("A bot needs your answer");
+    expect(nothing.data).toEqual({ hostId: "mac", sessionId: "home", tabId: "t", kind: "bot_question", detailsHidden: true, botId: "b1", number: 4 });
+  });
+});

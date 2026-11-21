@@ -146,7 +146,8 @@ async function reconcileNow(hostId: string, catchUp: boolean): Promise<boolean> 
     if (current()) stop(hostId);
     return false;
   }
-  const filter = (await takesFilters(delivery.connection)) ? subscribeFilter(await loadNotificationSettings(), hostId) : null;
+  const offered = await offeredFeatures(delivery.connection);
+  const filter = offered.notificationFilters === 1 ? subscribeFilter(await loadNotificationSettings(), hostId, offered.bots === 1) : null;
   if (!current()) return false;
   const filterKey = filter ? JSON.stringify(filter) : null;
   if (delivery.unsubscribe && delivery.filterKey === filterKey && !catchUp) return true;
@@ -189,17 +190,20 @@ async function catchUpMissed(hostId: string, connection: HostConnection, filter:
   });
 }
 
-/** Whether the Mac reads a subscribe filter (`sync.capabilities.notificationFilters`). */
-async function takesFilters(connection: HostConnection): Promise<boolean> {
+/**
+ * What the Mac offers that the subscription depends on: whether it reads a subscribe filter
+ * (`notificationFilters`) and whether it sends its bots' questions (`bots`, PRO-479).
+ */
+async function offeredFeatures(connection: HostConnection): Promise<{ notificationFilters?: unknown; bots?: unknown }> {
   try {
     const result = await connection.request<Record<string, unknown>>("sync.capabilities");
-    return result.ok && !!result.value && result.value.notificationFilters === 1;
+    return result.ok && result.value && typeof result.value === "object" ? result.value : {};
   } catch {
-    return false;
+    return {};
   }
 }
 
-/** When the Mac's runtime changes (#730), what it offers may too: subscribe again with or without a filter. */
+/** When the Mac's runtime changes (#730), or its Bots setting (PRO-479), what it offers may too: subscribe again with or without a filter. */
 function watchCapabilities(connection: HostConnection): void {
   if (watchedConnections.has(connection)) return;
   watchedConnections.add(connection);
@@ -254,6 +258,7 @@ export function parseNotification(value: unknown): HostNotification | null {
   if (!Number.isSafeInteger(record.seq) || typeof record.epoch !== "string" || typeof record.title !== "string" || typeof record.body !== "string") return null;
   const question = parseQuestion(record.question);
   const approval = record.approval && typeof record.approval === "object" && typeof (record.approval as { requestId?: unknown }).requestId === "string" ? { requestId: (record.approval as { requestId: string }).requestId } : null;
+  const botQuestion = parseBotQuestion(record.botQuestion);
   return {
     seq: record.seq as number,
     epoch: record.epoch,
@@ -265,7 +270,17 @@ export function parseNotification(value: unknown): HostNotification | null {
     ...(typeof record.sessionTitle === "string" ? { sessionTitle: record.sessionTitle } : {}),
     ...(question ? { question } : {}),
     ...(approval ? { approval } : {}),
+    ...(botQuestion ? { botQuestion } : {}),
   };
+}
+
+function parseBotQuestion(value: unknown): HostNotification["botQuestion"] | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.botId !== "string" || !record.botId || !Number.isSafeInteger(record.number) || typeof record.question !== "string") return null;
+  const answers = Array.isArray(record.answers) ? record.answers.filter((answer): answer is string => typeof answer === "string") : [];
+  const recommended = Number.isSafeInteger(record.recommended) && (record.recommended as number) >= 0 && (record.recommended as number) < answers.length ? record.recommended as number : undefined;
+  return { botId: record.botId, number: record.number as number, question: record.question, answers, ...(recommended !== undefined ? { recommended } : {}) };
 }
 
 function parseQuestion(value: unknown): HostNotification["question"] | null {
