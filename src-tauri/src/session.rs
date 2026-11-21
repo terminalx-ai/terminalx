@@ -3132,6 +3132,28 @@ impl SessionManager {
         self.set_display_status(&mut rt, status);
     }
 
+    /// An agent's question card open on a tab, as its agent's `tool` would raise one.
+    #[cfg(test)]
+    pub(crate) fn put_question_for_tests(&self, session_id: &str, tab_id: &str, tool: &str, input: serde_json::Value) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        runtime.lock().unwrap().pending.insert(format!("question-{tab_id}"), PendingAsk { tool_use_id: "tool".into(), tool_name: tool.into(), input, suggestions: Vec::new() });
+    }
+
+    /// Hold tab `tab_id`'s lock on a thread of its own, as a slow launch does, until the sender is dropped or sent to.
+    #[cfg(test)]
+    pub(crate) fn hold_tab_for_tests(&self, session_id: &str, tab_id: &str) -> std::sync::mpsc::Sender<()> {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _rt = runtime.lock().unwrap();
+            held.send(()).ok();
+            released.recv().ok();
+        });
+        is_held.recv().unwrap();
+        release
+    }
+
     fn running_agents(&self) -> std::collections::HashSet<String> {
         self.tabs
             .lock()
@@ -3464,10 +3486,29 @@ impl SessionManager {
     }
 
     pub fn pending_permissions(&self) -> Vec<PendingPermission> {
+        self.pending_permissions_as(true)
+    }
+
+    /// [`Self::pending_permissions`] without waiting: a tab whose lock is held (a launch in progress, which can take
+    /// seconds) is left out, so a read of what waits on the owner never waits behind it. Its question is read on
+    /// the next look.
+    pub fn pending_permissions_now(&self) -> Vec<PendingPermission> {
+        self.pending_permissions_as(false)
+    }
+
+    fn pending_permissions_as(&self, wait: bool) -> Vec<PendingPermission> {
         let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
         let mut out = Vec::new();
         for runtime in runtimes {
-            let runtime = runtime.lock().unwrap();
+            let runtime = if wait {
+                runtime.lock().unwrap()
+            } else {
+                match runtime.try_lock() {
+                    Ok(runtime) => runtime,
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => continue,
+                }
+            };
             for (request_id, pending) in &runtime.pending {
                 let mut options = vec!["allow".to_string(), "deny".to_string()];
                 options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
@@ -6502,7 +6543,7 @@ impl SessionManager {
         let started = if refused { Err(anyhow!("the agent's CLI could not start (a test refused it)")) } else { self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI").map(|_| ()) };
         // The agent is running, or never will: in a bot's home chat that started, the owner's waiting messages are
         // sent now as messages (`bots::chat::launched`); after a failed launch they keep waiting.
-        crate::bots::chat::launched(self, entry, started.is_ok());
+        crate::bots::chat::launched(self, entry, &tab.id, started.is_ok());
         started?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {

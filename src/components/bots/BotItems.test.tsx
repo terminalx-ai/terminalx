@@ -437,6 +437,52 @@ describe("Needs you across the bots", () => {
     }
   });
 
+  it("keeps a reply or comment typed and not sent across pages, and forgets it once sent (PRO-493)", async () => {
+    const first = render(<BotHome bot={atlas} onOpenItem={() => {}} />);
+    await screen.findByRole("button", { name: /Approve and start/ });
+    fireEvent.click(screen.getByText("or reply…"));
+    fireEvent.change(screen.getByLabelText("Your answer to Atlas"), { target: { value: "Only the Mac" } });
+    first.unmount();
+    const page = render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Phase 2: merge main" });
+    fireEvent.change(screen.getByLabelText("Comment, or tell Atlas what to change on this item"), { target: { value: "Keep it short" } });
+    page.unmount();
+    // Back on Home: the reply box is open again with what was typed.
+    const home = render(<BotHome bot={atlas} onOpenItem={() => {}} />);
+    expect(((await screen.findByLabelText("Your answer to Atlas")) as HTMLInputElement).value).toBe("Only the Mac");
+    fireEvent.click(screen.getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_item_answer", expect.objectContaining({ text: "Only the Mac" })));
+    home.unmount();
+    // A new question on the item starts with an empty box.
+    render(<ItemQuestionCard bot={atlas} item={{ ...asking, question: { ...asking.question!, id: "q-new" } }} />);
+    expect(screen.queryByLabelText("Your answer to Atlas")).toBeNull();
+    cleanup();
+    // The comment is back on the item's page, and gone once sent.
+    const again = render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Phase 2: merge main" });
+    const box = screen.getByLabelText("Comment, or tell Atlas what to change on this item") as HTMLInputElement;
+    expect(box.value).toBe("Keep it short");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(box.value).toBe(""));
+    again.unmount();
+    render(<BotItemPage bot={atlas} number={12} onBack={() => {}} />);
+    await screen.findByRole("heading", { name: "Phase 2: merge main" });
+    expect((screen.getByLabelText("Comment, or tell Atlas what to change on this item") as HTMLInputElement).value).toBe("");
+  });
+
+  it("puts Read and answer in the same grid cell as the answer it stands in for (PRO-493)", () => {
+    laidOut((element) => (element.textContent ?? "").length > 40);
+    const cut = { ...asking, question: { ...asking.question!, text: "Ship?\n".repeat(5) + "Say which one, and why, before I start.", answers: ["N", "Y"], recommended: 1 } };
+    render(<NeedsYouQueue bots={[atlas]} needs={{ entries: [{ kind: "item", botId: "b1", at: now, item: cut }], counts: [] }} />);
+    const cell = screen.getByTestId("needs-you-answer-cell");
+    expect(cell.className).toContain("inline-grid");
+    for (const button of [within(cell).getByTestId("needs-you-read"), within(cell).getByTestId("needs-you-answer-measured")]) {
+      expect(button.className).toContain("col-start-1");
+      expect(button.className).toContain("row-start-1");
+      expect(button.className).not.toContain("absolute");
+    }
+  });
+
   it("says nothing and reads nothing once the switch is off", async () => {
     items.shutBotItems();
     mocks.invoke.mockClear();
