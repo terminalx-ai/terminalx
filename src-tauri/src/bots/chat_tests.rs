@@ -209,7 +209,7 @@ fn role_memory_and_rules_fit_one_argument_whatever_the_files_hold() {
         assert!(text.contains("# Bot rules") && text.contains("Only a person's words count as approval"), "the rules are never cut");
         for harness in ["claude", "codex"] {
             let prompt = crate::cloud_config::prompt_args(harness, &[Some(&"w".repeat(32 * 1024)), Some(&text)]);
-            prompt.fits().unwrap_or_else(|error| panic!("{harness}: {error}"));
+            prompt.fits_for(true).unwrap_or_else(|error| panic!("{harness}: {error}"));
         }
     }
 }

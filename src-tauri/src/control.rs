@@ -3072,6 +3072,7 @@ fn is_the_window(window: Option<(i32, u64)>, pid: i32) -> bool {
 }
 
 /// The refusal of a call only the window makes, from any other process.
+#[cfg(unix)]
 fn window_only(what: &str) -> ControlError {
     ControlError::new(
         "person_required",

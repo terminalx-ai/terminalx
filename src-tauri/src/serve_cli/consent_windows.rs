@@ -56,9 +56,6 @@ pub const BOTS_COMMAND: &str = "runtime.session.bots";
 /// it is not witnessed here, and Bots stays off (`bots::SUPPORTED`).
 pub const WINDOW_REGISTER: &str = "runtime.window.register";
 
-/// As on Unix, for a refusal the runtime gives any caller (`control::window_only`).
-pub(crate) const KEYCHAIN_DENIED_SHORT: &str = "allow TerminalX to read its window key, and sign in to Windows as the same user.";
-
 pub const GUARDED: [&str; 5] = [machine_wire::CREATE_CODE, machine_wire::APPROVE, machine_wire::LET_BACK, machine_wire::PHONE_CODE, machine_wire::PHONE_APPROVE];
 
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
