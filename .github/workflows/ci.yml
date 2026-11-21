@@ -168,7 +168,8 @@ jobs:
           if-no-files-found: error
 
   linux-rust:
-    runs-on: instabox-medium
+    # The larger machine: these jobs compile the desktop crate (docs/CI-RUNNERS.md).
+    runs-on: instabox-large
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -234,7 +235,8 @@ jobs:
             tests: "session:: remote:: --skip session::watch_tests::prompts"
           - part: rest
             tests: "--skip session:: --skip remote::"
-    runs-on: instabox-medium
+    # The larger machine: these jobs compile the desktop crate (docs/CI-RUNNERS.md).
+    runs-on: instabox-large
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

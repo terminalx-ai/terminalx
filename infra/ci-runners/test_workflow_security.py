@@ -19,6 +19,9 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
 # Every Linux job's runner: Instabox, a fresh machine for each job. macOS stays GitHub-hosted.
 LINUX = "instabox-medium"
+# The jobs that compile the desktop crate and run its suite get the larger machine.
+LINUX_LARGE = "instabox-large"
+LARGE = {"linux-rust", "linux-rust-tests"}
 MACOS = "macos-latest"
 # A matrix may also name the Windows leg desktop-platforms keeps its steps for.
 MATRIX = {LINUX, "windows-latest"}
@@ -101,7 +104,7 @@ def validate(workflow):
         elif name in SELECTED or name == "webkit-layout":
             assert runner == MACOS, "the macOS jobs run on GitHub's macOS runner"
         else:
-            assert runner == LINUX, "a Linux job off Instabox, or macOS runner time outside the selected jobs and the WebKit checks"
+            assert runner == (LINUX_LARGE if name in LARGE else LINUX), "a Linux job off Instabox or on another size, or macOS runner time outside the selected jobs and the WebKit checks"
         restored = None
         for step in job["steps"]:
             action = step.get("uses", "")
@@ -172,9 +175,11 @@ class WorkflowSecurity(unittest.TestCase):
 
     def test_linux_job_off_instabox_is_rejected(self):
         # GitHub's Ubuntu runner, another label of the same provider, a bare self-hosted one.
-        for runner in ["ubuntu-latest", "instabox-large", "self-hosted"]:
+        for runner in ["ubuntu-latest", "instabox-2xlarge", "self-hosted"]:
             with self.subTest(runner=runner):
                 self.rejects(lambda w: w["jobs"]["linux-rust-tests"].update({"runs-on": runner}))
+        # The larger machine is for the jobs named in LARGE alone.
+        self.rejects(lambda w: w["jobs"]["vitest"].update({"runs-on": "instabox-large"}))
         self.rejects(lambda w: w["jobs"]["desktop-platforms"]["strategy"]["matrix"].update(os=["ubuntu-latest"]))
 
     def test_macos_job_off_githubs_runner_is_rejected(self):
