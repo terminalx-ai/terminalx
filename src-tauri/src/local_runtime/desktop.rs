@@ -168,9 +168,13 @@ impl Desktop {
                 let why = local.unwrap_or_else(|| answer["message"].as_str().unwrap_or("no proof").to_owned());
                 log::warn!("the runtime attached this window without taking it for the window: {why}");
                 // Proved with another key than the runtime pinned: only a
-                // restart pins this window's (PRO-507).
+                // restart pins this window's (PRO-507). Only the desktop
+                // window offers one (`window_consent`).
+                #[cfg(all(unix, feature = "desktop"))]
                 let restart = answer["message"].as_str().is_some_and(|message| message.contains(crate::serve_cli::consent::Refusal::OtherKey.says()))
                     .then(|| super::window_consent::offer_restart(self));
+                #[cfg(not(all(unix, feature = "desktop")))]
+                let restart = None;
                 *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: true, restart }, endpoint));
                 Ok(())
             }
