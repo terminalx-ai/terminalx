@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Issue pipeline: an approved review carries across a merge of main again in a
+  worktree with its dependencies installed. The check for a stray
+  `.gitattributes` took each ignored folder `git status` names (`node_modules/`)
+  for one, so every merge after the final review stopped at "Needs you". Now
+  only real `.gitattributes` files count, and one inside a folder no merged
+  tree has files in (a package's, in `node_modules`) is skipped (PRO-500).
 - Bots (experimental): a lead bot plans and starts orchestration runs. It leads
   a run from a session it starts in the project, then `terminalx bots items
   plan` asks "Approve the plan and start the run?" with a run plan card in its
