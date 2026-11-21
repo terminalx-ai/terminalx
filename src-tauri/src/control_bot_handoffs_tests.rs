@@ -18,6 +18,7 @@ impl Drop for Switches {
     fn drop(&mut self) {
         handoffs::SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
         handoffs::FAIL_SENDS_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
+        handoffs::RELEASED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
         handoffs::REAL_SENDS_FOR_TESTS.store(false, std::sync::atomic::Ordering::SeqCst);
         crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
     }
@@ -708,4 +709,122 @@ fn a_hand_off_left_waiting_for_a_bot_that_is_not_paused_starts_at_its_next_launc
     let started = team.handoff(number);
     assert_eq!(started.state, HandoffState::Working);
     assert!(sent().iter().any(|(session, text, _)| Some(session) == started.to_session.as_ref() && text.contains("Check the runner")));
+}
+
+/// Lead review 2 (M1): the rule is judged again when a hand-off that waited starts. Work handed to a paused bot,
+/// whose line (or Who can ask entry) the owner then removes, does not start on resume: no chat, no item, nothing
+/// sent to it; it fails naming the rule, and its sender is told.
+#[test]
+fn a_waiting_hand_off_does_not_start_on_a_line_the_owner_removed() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let sink = team.service.sink.clone();
+    let work_chats = |bot: &str| index::load().unwrap().into_iter().filter(|entry| crate::bots::chat::session_bot(entry).is_some_and(|reference| reference.id == bot && !reference.home)).count();
+    let atlas_home = home_chat(&team.atlas);
+    let iris_home = home_chat(&team.iris);
+
+    // The line: Atlas hands to its paused report; the owner moves Sentry to report to them; then resumes it.
+    crate::bots::pause(sink.as_ref(), &team.sentry, crate::bots::OWNER).unwrap();
+    let number = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Rotate the token"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    crate::bots::update(sink.as_ref(), &team.sentry, crate::bots::BotPatch { reports_to: Some(crate::bots::OWNER.into()), ..Default::default() }).unwrap();
+    sent();
+    team.window("resume", json!({"id": team.sentry})).unwrap();
+    let refused = team.handoff(number);
+    assert_eq!((refused.state.clone(), refused.to_session.clone(), refused.item), (HandoffState::Failed, None, None));
+    assert!(refused.answer.as_ref().unwrap().text.contains("Sentry does not report to Atlas"), "{refused:?}");
+    assert_eq!(work_chats(&team.sentry), 0, "no chat is made");
+    assert!(crate::bots::items::read(&team.sentry).unwrap().items.is_empty(), "no item is made");
+    let told = sent();
+    assert!(told.iter().all(|(session, _, _)| *session == atlas_home.id), "nothing reaches Sentry: {told:?}");
+    assert!(told.iter().any(|(_, text, author)| author.as_deref() == Some("TerminalX") && text.contains(&format!("Hand-off {number}")) && text.contains("did not start")), "{told:?}");
+    assert!(handoffs::read().unwrap().messages.iter().all(|message| !(message.pending && message.handoff == Some(number))));
+
+    // Who can ask: Iris may hand Atlas work through its entry; Atlas is paused, the entry is removed, Atlas resumes.
+    who_can_ask(&team, &team.atlas, json!([{"kind": "bot", "id": team.iris, "may": "handOff"}]));
+    crate::bots::pause(sink.as_ref(), &team.atlas, crate::bots::OWNER).unwrap();
+    let number = team.as_home(&team.iris, "bots.handoff", json!({"to": "atlas", "title": "Review the copy"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    who_can_ask(&team, &team.atlas, json!([]));
+    sent();
+    team.window("resume", json!({"id": team.atlas})).unwrap();
+    let refused = team.handoff(number);
+    assert_eq!((refused.state.clone(), refused.to_session.clone(), refused.item), (HandoffState::Failed, None, None));
+    assert!(refused.answer.as_ref().unwrap().text.contains("its Who can ask does not list Iris"), "{refused:?}");
+    assert_eq!(work_chats(&team.atlas), 0);
+    assert!(crate::bots::items::read(&team.atlas).unwrap().items.is_empty());
+    let told = sent();
+    assert!(told.iter().all(|(session, _, _)| *session == iris_home.id), "nothing reaches Atlas: {told:?}");
+
+    // A queued tell whose line is gone by delivery is dropped (lead review 2, low).
+    crate::bots::pause(sink.as_ref(), &team.argus, crate::bots::OWNER).unwrap();
+    team.as_home(&team.atlas, "bots.tell", json!({"to": "argus", "text": "Watch the queue."})).unwrap();
+    crate::bots::update(sink.as_ref(), &team.argus, crate::bots::BotPatch { reports_to: Some(crate::bots::OWNER.into()), ..Default::default() }).unwrap();
+    team.window("resume", json!({"id": team.argus})).unwrap();
+    assert!(sent().iter().all(|(_, text, _)| !text.contains("Watch the queue.")));
+    assert!(handoffs::read().unwrap().messages.iter().all(|message| !(message.pending && message.to == team.argus)));
+}
+
+/// Lead review 2 (M2): a bot works on at most MAX_RUNNING_WORK hand-offs at once, counted under the lock from its
+/// open working ones. An answer makes room at once, and the chat made for it (never the home chat) is let go once
+/// its turn ends. A resume starts no more than the cap; the rest start as room is made.
+#[test]
+fn a_bot_works_on_a_bounded_number_of_hand_offs_and_an_answer_makes_room() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let cap = handoffs::MAX_RUNNING_WORK;
+    let mut numbers = Vec::new();
+    for n in 0..cap {
+        let handed = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": format!("Check {n}")})).unwrap();
+        assert_eq!(handed["handoff"]["state"], "working");
+        numbers.push(handed["handoff"]["number"].as_u64().unwrap());
+    }
+    let full = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "One more"})).unwrap_err();
+    assert!(full.message.contains(&format!("already working on {cap} hand-offs")), "{full:?}");
+    // Sentry answers one: room is made, and the chat made for that one is let go, not its home chat.
+    let answered = team.handoff(numbers[0]);
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "about": numbers[0], "text": "Done."})).unwrap();
+    let released = handoffs::RELEASED_FOR_TESTS.lock().unwrap().clone();
+    assert_eq!(released, vec![answered.to_session.clone().unwrap()]);
+    assert!(!released.contains(&home_chat(&team.sentry).id));
+    assert_eq!(team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "One more"})).unwrap()["handoff"]["state"], "working");
+
+    // Resume: of more than the cap waiting, only the cap start; an answer starts the next.
+    crate::bots::pause(team.service.sink.as_ref(), &team.argus, crate::bots::OWNER).unwrap();
+    let waiting: Vec<u64> = (0..cap + 1).map(|n| team.as_home(&team.atlas, "bots.handoff", json!({"to": "argus", "title": format!("Watch {n}")})).unwrap()["handoff"]["number"].as_u64().unwrap()).collect();
+    team.window("resume", json!({"id": team.argus})).unwrap();
+    let states: Vec<HandoffState> = waiting.iter().map(|number| team.handoff(*number).state).collect();
+    assert_eq!(states.iter().filter(|state| **state == HandoffState::Working).count(), cap, "{states:?}");
+    let last = *waiting.last().unwrap();
+    assert_eq!(team.handoff(last).state, HandoffState::Waiting);
+    team.as_home(&team.argus, "bots.tell", json!({"to": "lead", "about": waiting[0], "text": "Done."})).unwrap();
+    let next = team.handoff(last);
+    assert!(next.state == HandoffState::Working && next.to_session.is_some(), "{next:?}");
+}
+
+/// Lead review 2 (M2): two hand-offs sent at once to a bot with room for one: exactly one goes in.
+#[test]
+fn two_hand_offs_sent_at_once_into_the_last_room_one_goes_in() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    for n in 0..handoffs::MAX_RUNNING_WORK - 1 {
+        team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": format!("Check {n}")})).unwrap();
+    }
+    let gate = std::sync::Barrier::new(2);
+    let results: Vec<anyhow::Result<Value, String>> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..2)
+            .map(|n| {
+                let (team, gate) = (&team, &gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": format!("At once {n}")})).map_err(|error| error.message)
+                })
+            })
+            .collect();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1, "{results:?}");
+    assert!(results.iter().any(|result| result.as_ref().is_err_and(|message| message.contains("already working on"))), "{results:?}");
+    assert_eq!(handoffs::read().unwrap().handoffs.iter().filter(|handoff| handoff.to == team.sentry && handoff.state == HandoffState::Working).count(), handoffs::MAX_RUNNING_WORK);
 }

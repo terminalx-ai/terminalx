@@ -269,7 +269,9 @@ fn terminalx_read(program: &str, args: &[&str]) -> bool {
 /// and while paused, with no card. Exactly those, and nothing else under
 /// `bots`: the runtime takes the bot from the caller (`control::Caller`),
 /// refuses a `--bot` or `--place` that is not its own, holds a hand-off to
-/// the reporting line, and refuses a paused bot's changes and messages.
+/// the bots that report to it and those whose Who can ask lets it hand them
+/// work (`handoffs::may_hand_off`), holds a message to the reporting line,
+/// and refuses a paused bot's changes and messages.
 fn own_notes(program: &str, args: &[&str]) -> bool {
     terminalx_words(program, args).is_some_and(|(group, rest)| {
         group == "bots"

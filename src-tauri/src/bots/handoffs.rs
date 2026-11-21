@@ -621,16 +621,70 @@ fn refuse_full_inbox(store: &Store, to: &Bot) -> Result<()> {
     Ok(())
 }
 
-/// The ids of `bot`'s chats for hand-offs that are running now.
-fn running_work_chats(manager: &SessionManager, bot: &str) -> BTreeSet<String> {
-    let Ok(store) = read() else { return BTreeSet::new() };
-    store
-        .handoffs
-        .iter()
-        .filter(|handoff| handoff.to == bot)
-        .filter_map(|handoff| handoff.to_session.clone())
-        .filter(|session| index::get(session).is_ok_and(|entry| entry.tabs.iter().any(|tab| manager.is_running(&entry.id, &tab.id))))
-        .collect()
+/// `bot`'s open hand-offs that are being worked on, claimed ones whose chat is not made yet included: what
+/// [`MAX_RUNNING_WORK`] counts, under the store's lock.
+fn working_for(store: &Store, bot: &str) -> usize {
+    store.handoffs.iter().filter(|handoff| handoff.to == bot && handoff.state == HandoffState::Working).count()
+}
+
+/// A note from TerminalX to the bot that handed `handoff` on, to its chat for it.
+fn tell_sender(store: &mut Store, handoff: &Handoff, kind: &str, text: String) {
+    if handoff.by != OWNER {
+        store.messages.push(new_message("terminalx", &handoff.from, kind, Some(handoff.number), text, "TerminalX".into(), handoff.from_session.clone()));
+    }
+}
+
+/// What was asked to stop in tests, by [`release_work_chat`]: the session ids.
+#[cfg(test)]
+pub static RELEASED_FOR_TESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// How long a closed hand-off's chat may go on with its turn before it is left as it is.
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// How quiet its agent must have been before it is stopped.
+const RELEASE_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// After `handoff` closed: the chat made for it (never a home chat, never another of the bot's chats) is stopped
+/// once its turn has ended, outside every lock, on a thread of its own. Its conversation stays.
+fn release_work_chat(manager: &SessionManager, handoff: &Handoff) {
+    let Some(session) = handoff.to_session.clone() else { return };
+    let Ok(entry) = index::get(&session) else { return };
+    let made_for_it = entry.id == session && chat::session_bot(&entry).is_some_and(|reference| reference.id == handoff.to && !reference.home);
+    if !made_for_it {
+        return;
+    }
+    #[cfg(test)]
+    RELEASED_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).push(entry.id.clone());
+    let manager = manager.clone();
+    let number = handoff.number;
+    std::thread::spawn(move || {
+        let note = format!("Hand-off {number} is closed, so TerminalX stopped this chat's agent. Its conversation stays.");
+        let deadline = std::time::Instant::now() + RELEASE_WAIT;
+        for tab in &entry.tabs {
+            loop {
+                match manager.stop_if_idle(&entry.id, &tab.id, &note, RELEASE_QUIET) {
+                    Ok(crate::session::AgentStop::Busy) if std::time::Instant::now() < deadline => std::thread::sleep(RELEASE_QUIET),
+                    Ok(_) => break,
+                    Err(error) => {
+                        log::warn!("stop the chat of closed hand-off {number}: {error:#}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// After hand-offs closed: their chats are let go, and work waiting for their bots may start in the room made.
+fn closed_now(manager: &SessionManager, closed: &[Handoff]) {
+    for handoff in closed {
+        release_work_chat(manager, handoff);
+    }
+    let bots: BTreeSet<&str> = closed.iter().map(|handoff| handoff.to.as_str()).collect();
+    for bot in bots {
+        if start_waiting(manager, bot) {
+            deliver(manager, bot);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- what a bot does
@@ -677,8 +731,6 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
         return Err(refused("A bot does not hand work to itself: add an item to your own work list."));
     }
     let sink = manager.sink();
-    // The receiver's work chats that are running now, for the cap below.
-    let running = running_work_chats(manager, &to.id);
     let handoff = change(Some(sink.as_ref()), BOT_WRITE_BYTES, |store| {
         // The rule is judged on the records as they are under the store's lock, not as the caller read them.
         let (from, to) = match (crate::store::bots::get(&from.id)?, crate::store::bots::get(&to.id)?) {
@@ -705,9 +757,9 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
                 PAIR_WINDOW.as_secs() / 60
             )));
         }
-        let working = store.handoffs.iter().filter(|handoff| handoff.to == to.id && handoff.to_session.as_ref().is_some_and(|session| running.contains(session))).count();
+        let working = working_for(store, &to.id);
         if working >= MAX_RUNNING_WORK {
-            return Err(refused(format!("{} already runs {working} chats for hand-offs, and a bot runs at most {MAX_RUNNING_WORK}. Wait for one to finish.", to.name)));
+            return Err(refused(format!("{} is already working on {working} hand-offs, and a bot works on at most {MAX_RUNNING_WORK} at once. Wait for one to be answered.", to.name)));
         }
         // Under the store's lock, so two retries at once cannot both pass.
         if let Some(number) = retry_of {
@@ -839,12 +891,16 @@ pub fn tell(manager: &SessionManager, from: &Bot, to: &Bot, body: &str, about: O
         let said = if failed { format!("{} could not do it and told {}", from.name, to.name) } else { format!("{} answered {}", from.name, to.name) };
         status_lines(manager, &answered, &said);
         let delivery = deliver(manager, &to.id);
+        closed_now(manager, std::slice::from_ref(&answered));
         return Ok(json!({"handoff": answered, "delivery": delivery}));
     }
-    if !on_line(from, to) {
-        return Err(refused(format!("{} is not on {}'s reporting line: a bot tells only its lead and the bots that report to it.", to.name, from.name)));
-    }
     let message = change(Some(sink.as_ref()), BOT_WRITE_BYTES, |store| {
+        // The line is judged on the records as they are under the store's lock.
+        let (Some(from), Some(to)) = (crate::store::bots::get(&from.id)?, crate::store::bots::get(&to.id)?) else { return Err(refused("One of the two bots is no longer here.")) };
+        let (from, to) = (&from, &to);
+        if !on_line(from, to) {
+            return Err(refused(format!("{} is not on {}'s reporting line: a bot tells only its lead and the bots that report to it.", to.name, from.name)));
+        }
         refuse_full_inbox(store, to)?;
         let text = agent_message("tell", from, to, &body, "");
         let message = new_message(&from.id, &to.id, "tell", None, text, bot_label("tell", from, to), None);
@@ -982,6 +1038,10 @@ pub fn stop(manager: &SessionManager, number: u64) -> Result<Handoff> {
     let name = crate::store::bots::get(&stopped.to).ok().flatten().map(|bot| bot.name).unwrap_or_else(|| "the bot".into());
     status_lines(manager, &stopped, &format!("You stopped {name}'s work on hand-off {number}"));
     deliver(manager, &stopped.from);
+    // Its work is stopped above; what waited for room may start.
+    if start_waiting(manager, &stopped.to) {
+        deliver(manager, &stopped.to);
+    }
     Ok(stopped)
 }
 
@@ -1048,21 +1108,47 @@ fn start(manager: &SessionManager, number: u64) -> bool {
     let claimed = change(Some(sink.as_ref()), OWNER_WRITE_BYTES, |store| {
         let handoff = find(store, number)?;
         if handoff.state != HandoffState::Waiting {
-            return Ok(None);
+            return Ok(Claim::Not);
         }
-        let (Some(from), Some(to)) = (crate::store::bots::get(&handoff.from)?, crate::store::bots::get(&handoff.to)?) else { return Ok(None) };
+        let (Some(from), Some(to)) = (crate::store::bots::get(&handoff.from)?, crate::store::bots::get(&handoff.to)?) else { return Ok(Claim::Not) };
         if to.paused.is_some() {
-            return Ok(None);
+            return Ok(Claim::Not);
         }
         let now = index::now();
+        // The rule is judged again when it starts: the owner may have changed the line or Who can ask since it was
+        // handed (to a paused bot, say). The owner's own hand-off of an item is theirs, and needs no line.
+        if handoff.by != OWNER {
+            if let Err(why) = may_hand_off(&from, &to) {
+                handoff.state = HandoffState::Failed;
+                handoff.answer = Some(Reply { at: now.clone(), text: format!("It did not start: {why}"), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
+                handoff.closed = Some(now.clone());
+                handoff.modified = now;
+                let closed = handoff.clone();
+                store.messages.retain(|message| !(message.pending && message.handoff == Some(number) && message.kind == "handoff"));
+                let text = format!("Hand-off {number} (\"{}\") did not start: since you handed it, {why} Decide what to do next, or ask your owner.", closed.title);
+                tell_sender(store, &closed, "failed", text);
+                return Ok(Claim::Refused(Box::new(closed)));
+            }
+        }
+        // At most MAX_RUNNING_WORK at once: the rest wait, and start as those are answered.
+        let handoff_to = handoff.to.clone();
+        if working_for(store, &handoff_to) >= MAX_RUNNING_WORK {
+            return Ok(Claim::Not);
+        }
+        let handoff = find(store, number)?;
         handoff.state = HandoffState::Working;
         handoff.started = Some(now.clone());
         handoff.modified = now;
-        Ok(Some((handoff.clone(), from, to)))
+        Ok(Claim::Claimed(Box::new((handoff.clone(), from, to))))
     });
     let (handoff, from, to) = match claimed {
-        Ok(Some(claimed)) => claimed,
-        Ok(None) => return false,
+        Ok(Claim::Claimed(claimed)) => *claimed,
+        Ok(Claim::Not) => return false,
+        Ok(Claim::Refused(closed)) => {
+            status_lines(manager, &closed, &format!("Hand-off {number} did not start: the line or Who can ask changed"));
+            deliver(manager, &closed.from);
+            return false;
+        }
         Err(error) => {
             log::warn!("claim the start of hand-off {number}: {error:#}");
             return false;
@@ -1116,7 +1202,10 @@ fn start(manager: &SessionManager, number: u64) -> bool {
                 record.answer = Some(Reply { at: now.clone(), text: format!("TerminalX could not start it for {}: {error:#}", to.name), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
                 record.closed = Some(now.clone());
                 record.modified = now;
+                let closed = record.clone();
                 store.messages.retain(|message| !(message.pending && message.handoff == Some(number) && message.kind == "handoff"));
+                let text = format!("TerminalX could not start hand-off {number} (\"{}\") for {}: {error:#}. It failed; hand it again with `terminalx bots handoff --retry {number}`, do it another way, or ask your owner.", closed.title, to.name);
+                tell_sender(store, &closed, "failed", text);
                 Ok(false)
             }
         }
@@ -1125,9 +1214,34 @@ fn start(manager: &SessionManager, number: u64) -> bool {
         Ok(started) => started,
         Err(error) => {
             log::warn!("record the start of hand-off {number}: {error:#}");
+            // Claimed but not recorded: it is not left working with no chat for ever. It fails, if that can be saved.
+            let failed = change(Some(sink.as_ref()), usize::MAX, |store| {
+                let record = find(store, number)?;
+                if record.state != HandoffState::Working || record.to_session.is_some() {
+                    return Ok(None);
+                }
+                let now = index::now();
+                record.state = HandoffState::Failed;
+                record.answer = Some(Reply { at: now.clone(), text: format!("TerminalX could not record its start: {error:#}"), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
+                record.closed = Some(now.clone());
+                record.modified = now;
+                let closed = record.clone();
+                store.messages.retain(|message| !(message.pending && message.handoff == Some(number) && message.kind == "handoff"));
+                tell_sender(store, &closed, "failed", format!("TerminalX could not start hand-off {number} (\"{}\"): {error:#}. It failed; decide what to do next, or ask your owner.", closed.title));
+                Ok(Some(closed))
+            });
+            match failed {
+                Ok(Some(_)) => {}
+                Ok(None) => {}
+                Err(again) => log::warn!("fail hand-off {number} whose start was not recorded: {again:#}"),
+            }
             false
         }
     };
+    if !started && handoff.by != OWNER {
+        // A note left for the sender above goes now.
+        deliver(manager, &handoff.from);
+    }
     match &made {
         Err(error) => log::warn!("start hand-off {number} for bot {}: {error:#}", to.id),
         // Made, but not recorded: the hand-off was stopped meanwhile, or the save failed. Nothing is left behind.
@@ -1142,6 +1256,16 @@ fn start(manager: &SessionManager, number: u64) -> bool {
     started
 }
 
+/// What a start's claim found.
+enum Claim {
+    /// Not waiting, its bot paused or gone, or its bot works on as many as it may.
+    Not,
+    /// Claimed: it is working from now, with no chat yet.
+    Claimed(Box<(Handoff, Bot, Bot)>),
+    /// Closed instead: the owner changed the line or Who can ask since it was handed.
+    Refused(Box<Handoff>),
+}
+
 /// Archive a chat made for a hand-off that did not start, so no orphan is left in the bot's list.
 fn discard_chat(sink: &dyn EventSink, id: &str) {
     if let Err(error) = crate::session_archive::set_archived(sink, &[id.to_owned()], true, crate::session_archive::By::Person) {
@@ -1149,8 +1273,8 @@ fn discard_chat(sink: &dyn EventSink, id: &str) {
     }
 }
 
-/// Start what waits for `bot` while it is not paused: a hand-off left waiting (a start that did not finish) is
-/// tried again whenever one of its chats starts, it is resumed, or work is handed to it.
+/// Start what waits for `bot` while it is not paused, as far as [`MAX_RUNNING_WORK`] lets it: tried whenever one of
+/// its chats starts, it is resumed, or another of its hand-offs closes.
 fn start_waiting(manager: &SessionManager, bot: &str) -> bool {
     let Ok(store) = read() else { return false };
     let waiting: Vec<u64> = store.handoffs.iter().filter(|handoff| handoff.state == HandoffState::Waiting && handoff.to == bot).map(|handoff| handoff.number).collect();
@@ -1288,7 +1412,16 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
         return json!({"sent": 0, "waiting": waiting, "paused": true});
     }
     let started = |number: Option<u64>| number.is_none_or(|number| store.handoffs.iter().any(|handoff| handoff.number == number && handoff.state != HandoffState::Waiting));
-    let mut waiting: Vec<&Message> = store.messages.iter().filter(|message| message.pending && message.to == id && !message.text.is_empty() && started(message.handoff) && (with_held || !held(message))).collect();
+    // A tell whose reporting line is gone since it was sent is dropped, not delivered.
+    let bots = crate::store::bots::list().unwrap_or_default();
+    let line_gone = |message: &Message| {
+        message.kind == "tell" && message.handoff.is_none() && {
+            let (from, to) = (bots.iter().find(|bot| bot.id == message.from), bots.iter().find(|bot| bot.id == message.to));
+            from.zip(to).is_some_and(|(from, to)| !on_line(from, to))
+        }
+    };
+    let dropped: Vec<String> = store.messages.iter().filter(|message| message.pending && message.to == id && line_gone(message)).map(|message| message.id.clone()).collect();
+    let mut waiting: Vec<&Message> = store.messages.iter().filter(|message| message.pending && message.to == id && !message.text.is_empty() && started(message.handoff) && (with_held || !held(message)) && !dropped.contains(&message.id)).collect();
     waiting.sort_by(|a, b| a.at.cmp(&b.at));
     let mut sent: Vec<(String, String)> = Vec::new();
     let mut failure: Option<(String, String)> = None;
@@ -1305,7 +1438,11 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
     let sink = manager.sink();
     let now = index::now();
     let mut gave_up: Vec<Handoff> = Vec::new();
+    if !dropped.is_empty() {
+        log::info!("dropped {} messages to bot {id} whose reporting line is gone", dropped.len());
+    }
     let marked = change(Some(sink.as_ref()), usize::MAX, |store| {
+        store.messages.retain(|message| !(message.pending && dropped.contains(&message.id)));
         for message in store.messages.iter_mut() {
             if let Some((_, session)) = sent.iter().find(|(sent, _)| *sent == message.id) {
                 message.pending = false;
@@ -1352,6 +1489,9 @@ fn deliver_as(manager: &SessionManager, id: &str, with_held: bool) -> Value {
     if let Err(error) = marked {
         log::warn!("mark the messages sent to bot {id}: {error:#}");
     }
+    // Out of this bot's delivery lock: what is let go or started next sends to it again.
+    drop(_delivering);
+    closed_now(manager, &gave_up);
     for handoff in gave_up {
         status_lines(manager, &handoff, &format!("Hand-off {} failed: TerminalX could not reach its bot", handoff.number));
         if handoff.by != OWNER {

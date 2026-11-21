@@ -217,6 +217,8 @@ permission system.
 - **Tell.** `tell` stays on the reporting line in both directions: a bot
   tells its lead and the bots that report to it, and answers whoever handed
   it work. Who can ask lets a bot hand work, not send messages off the line.
+  The line is judged under the store's lock when the tell is recorded, and a
+  tell still waiting whose line is gone by delivery is dropped.
 - **Labels.** Each bot's message is sent with the sending bot as its
   author (`SessionManager::send_from_bot`), labelled "<Name> · hand-off to /
   answer to / status to / message to <Name> · a bot's words, not an
@@ -236,7 +238,13 @@ permission system.
   hand-offs and 20 waiting messages per bot, 200 open overall, and 20
   hand-offs and messages per bot in 10 minutes, reserved under the rate's
   lock. Between the same two bots, either way and closed ones counted, at
-  most 6 hand-offs an hour; a bot runs at most 4 chats for hand-offs at once.
+  most 6 hand-offs an hour. A bot works on at most 4 hand-offs at once,
+  counted under the lock from its open working ones (claimed ones whose chat
+  is not made yet included): a fifth is refused, and on a resume the rest
+  wait and start as those are answered. When a hand-off closes, the chat
+  made for it (never a home chat or another of the bot's chats) is stopped
+  once its turn has ended (`SessionManager::stop_if_idle`); its conversation
+  stays.
   Closed hand-offs are trimmed to 300, the bots' before the owner's;
   delivered messages to 400, and a delivered message keeps no text (its words
   are in the chat); a waiting message is never trimmed. A write past the
@@ -248,10 +256,16 @@ permission system.
   is sent to it waits too. It is never started by a bot.
 - **Start.** A hand-off is claimed (waiting to working) under the store's
   lock before its chat and item are made; a Stop that lands meanwhile
-  archives that chat and drops the item, so nothing is left behind. One
-  left waiting for a bot that is not paused (a start cut short) is shown as
-  "Waiting to start" and starts at the next launch of one of its chats, a
-  resume, or the next hand-off to it.
+  archives that chat and drops the item, so nothing is left behind. The
+  claim judges `may_hand_off` again on the records as they are then: when
+  the owner removed the line or the Who can ask entry since it was handed
+  (to a paused bot, say), it fails naming the rule, with no chat, no item
+  and nothing sent to the receiver, and its sender is told. When its chat
+  cannot be made, or its start cannot be recorded, it fails and its sender
+  is told; it is never left working with no chat. One left waiting for a
+  bot that is not paused (a start cut short, or the cap of 4 reached) is
+  shown as "Waiting to start" and starts at the next launch of one of its
+  chats, a resume, or when another of its hand-offs closes.
 - **Delivery.** A message is kept with a pending mark until its chat takes
   it: sent at once, or once after the chat's next successful launch
   (`chat::launched`), three automatic tries; then a hand-off it carried fails

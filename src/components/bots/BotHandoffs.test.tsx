@@ -143,11 +143,23 @@ describe("hand-off cards in a bot's chat (23.04)", () => {
     mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_unavailable")) : route(command, args));
     render(<HandoffCards bot={atlas} chatId="atlas-home" />);
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't read Atlas's hand-offs: runtime_unavailable");
+    expect(screen.queryByText("Restart runtime")).toBeNull();
+    list.handoffs = [handoff(3)];
+    mocks.invoke.mockImplementation(route);
+    fireEvent.click(screen.getByTestId("bot-handoffs-retry"));
+    expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("offer Restart runtime, not Retry, for a read only a restart helps (lead review 2)", async () => {
+    mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_restart_required:e1: Restarting stops 2 agents.")) : route(command, args));
+    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    expect((await screen.findByRole("alert")).textContent).toContain("runtime_restart_required:e1");
+    expect(screen.queryByTestId("bot-handoffs-retry")).toBeNull();
     list.handoffs = [handoff(3)];
     mocks.invoke.mockImplementation(route);
     fireEvent.click(screen.getByText("Restart runtime"));
     expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
-    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("show an answer or a message that did not reach its chat, with a Resend (lead review 1)", async () => {

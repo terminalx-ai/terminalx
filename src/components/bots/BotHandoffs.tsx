@@ -7,6 +7,7 @@ import { errorMessage } from "@/lib/api";
 import { botHandoffsApi, handoffOpen, handoffStateLabel, useBotHandoffs, useTeamBrief } from "@/lib/botHandoffs";
 import { useBotStore } from "@/lib/bots";
 import { cn } from "@/lib/cn";
+import { restartRequired } from "@/lib/machines";
 import { openBot } from "@/lib/sessions";
 import { relativeTime } from "@/lib/time";
 import type { Bot } from "@/types/bots";
@@ -55,7 +56,7 @@ export function HandoffCards({ bot, chatId }: { bot: Bot; chatId: string }) {
   if (error) {
     return (
       <div className="shrink-0 border-b border-hairline px-4 py-2" data-testid="bot-handoff-cards-error">
-        <MachineHostError error={`Couldn't read ${bot.name}'s hand-offs: ${error}`} onRestarted={reload} />
+        <ReadError what={`${bot.name}'s hand-offs`} error={error} onRetry={reload} />
       </div>
     );
   }
@@ -64,6 +65,17 @@ export function HandoffCards({ bot, chatId }: { bot: Bot; chatId: string }) {
     <div className="flex max-h-[40%] shrink-0 flex-col gap-2 overflow-y-auto border-b border-hairline px-4 py-2 scrollbar-thin" aria-label="Hand-offs" data-testid="bot-handoff-cards">
       {shown.map((handoff) => <HandoffCard key={handoff.number} handoff={handoff} now={now} undelivered={undelivered.filter((message) => message.handoff === handoff.number)} onResent={reload} />)}
       {loose.length > 0 && <Undelivered messages={loose} onResent={reload} />}
+    </div>
+  );
+}
+
+/** A read that failed: Restart runtime when only that helps, otherwise a Retry. */
+function ReadError({ what, error, onRetry }: { what: string; error: string; onRetry: () => void }) {
+  if (restartRequired(error)) return <MachineHostError error={error} onRestarted={onRetry} />;
+  return (
+    <div role="alert" className="flex min-w-0 flex-wrap items-center gap-2 text-[12.5px]">
+      <p className="min-w-0 flex-1 text-destructive">Couldn't read {what}: {error}</p>
+      <Button size="sm" variant="outline" className="shrink-0" onClick={onRetry} data-testid="bot-handoffs-retry">Retry</Button>
     </div>
   );
 }
@@ -295,7 +307,7 @@ export function BotReportsTo({ bot }: { bot: Bot }) {
       {reports.length > 0 && (
         <>
           <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">Reports to {bot.name} <span className="ml-1">{reports.length}</span></h2>
-          {error && <MachineHostError error={`Couldn't read ${bot.name}'s hand-offs: ${error}`} onRestarted={reload} />}
+          {error && <ReadError what={`${bot.name}'s hand-offs`} error={error} onRetry={reload} />}
           <ul className="divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-card">
             {reports.map((report) => {
               const given = open.filter((handoff) => handoff.to === report.id);

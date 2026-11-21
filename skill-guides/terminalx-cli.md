@@ -2053,10 +2053,12 @@ terminalx bots handoffs [--all] [--bot <bot>] --json
   at 3; a failed hand-off is handed again with `--retry` at most twice, then the sender
   decides or asks the owner; 20 hand-offs and messages per bot in 10 minutes; 6 hand-offs an
   hour between the same two bots, either way, closed ones counted; a bot holds at most 20 open
-  hand-offs and 20 waiting messages, and runs at most 4 chats for hand-offs at once.
-- Work handed to a paused bot waits, visibly, until the owner resumes it; a paused bot sends
-  nothing (`bot_paused`). A message whose chat cannot take it now is sent once the chat's agent
-  next starts, three tries at most. The owner can stop one hand-off in the window: only the
+  hand-offs and 20 waiting messages, and works on at most 4 hand-offs at once (the rest are
+  refused, or wait after a resume).
+- Work handed to a paused bot waits, visibly, until the owner resumes it, and does not start if
+  the owner removed your line to it meanwhile (you are told why); a paused bot sends nothing
+  (`bot_paused`). A message whose chat cannot take it now is tried three times, then waits and
+  is sent once the chat's agent next starts or the owner resends it. The owner can stop one hand-off in the window: only the
   receiving bot's work on it stops.
 - Kept in `$TERMINALX_HOME/bot-handoffs.json`. The team brief every bot reads is
   `$TERMINALX_HOME/bot-team/BRIEF.md`, written by the owner in the window.
