@@ -36,6 +36,12 @@ pub struct SeenState {
     pub last_polled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    /// When its runs started over the last day, for its runs a day (PRO-490 review).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub started: Vec<String>,
+    /// Until when it holds what it found, its runs a day met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_until: Option<String>,
 }
 
 pub fn list() -> Result<Vec<Automation>> {

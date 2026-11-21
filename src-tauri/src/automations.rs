@@ -177,6 +177,11 @@ pub struct AutomationIssueTrigger {
     pub run_on_existing: bool,
     #[serde(default)]
     pub report: AutomationIssueReport,
+    /// The most runs the search starts in any day (PRO-490 review), as an event trigger's: an issue a run files that
+    /// matches the search wakes another, so a chain is bounded across issues. Absent reads as 48 and, on a save
+    /// from a window that does not send it, keeps the stored value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs_per_day: Option<u32>,
 }
 
 fn default_poll_interval() -> u32 {
@@ -351,6 +356,7 @@ pub fn definition_from_input(
         if trigger.max_runs_per_tick < 1 {
             bail!("Runs per tick must be at least one.");
         }
+        sources::validate_runs_per_day(trigger.max_runs_per_day)?;
         if input.workspace != AutomationWorkspace::NewWorktree {
             bail!("Issue automations need a new worktree per run.");
         }
@@ -401,6 +407,9 @@ pub fn definition_from_input(
         // At most what the editor offers; an older, larger value is clamped.
         issue_trigger: input.issue_trigger.map(|mut trigger| {
             trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            if trigger.max_runs_per_day.is_none() {
+                trigger.max_runs_per_day = existing.and_then(|value| value.issue_trigger.as_ref()).and_then(|stored| stored.max_runs_per_day);
+            }
             trigger
         }),
         event_trigger: event_trigger.map(|mut trigger| {
@@ -1249,6 +1258,8 @@ fn dispatch_issue(
             last_run_at: Some(index::now()),
         },
     );
+    // Counted for its runs a day, with the stamp that keeps it from starting twice.
+    seen.started.push(index::now());
     automation_store::save_seen(&automation.id, seen)?;
 
     start_run(
@@ -1834,11 +1845,20 @@ fn public_issue_state(
     }
 }
 
-fn emit_issue_state(app: &impl AutomationHost, automation_id: &str, state: &automation_store::SeenState) {
-    app.sink().emit(
-        "automation_issue_state",
-        &public_issue_state(automation_id, state),
-    );
+/// An issue search's status, with its day's hold while it lasts (PRO-490 review).
+fn issue_state_of(automation: &Automation, state: &automation_store::SeenState, now: DateTime<Utc>) -> AutomationIssueState {
+    let mut public = public_issue_state(&automation.id, state);
+    let cap = sources::runs_per_day(automation.issue_trigger.as_ref().and_then(|trigger| trigger.max_runs_per_day));
+    public.notice = state
+        .held_until
+        .as_deref()
+        .filter(|resume| DateTime::parse_from_rfc3339(resume).is_ok_and(|resume| resume > now))
+        .map(|resume| sources::day_hold_notice(resume, cap));
+    public
+}
+
+fn emit_issue_state(app: &impl AutomationHost, automation: &Automation, state: &automation_store::SeenState) {
+    app.sink().emit("automation_issue_state", &issue_state_of(automation, state, Utc::now()));
 }
 
 pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
@@ -1851,7 +1871,7 @@ pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
             }
             // One automation's unreadable record does not take the others' states with it.
             Ok(match automation_store::load_seen(&automation.id) {
-                Ok(state) => public_issue_state(&automation.id, &state.unwrap_or_default()),
+                Ok(state) => issue_state_of(&automation, &state.unwrap_or_default(), Utc::now()),
                 Err(error) => AutomationIssueState { automation_id: automation.id.clone(), last_polled_at: None, last_poll_error: Some(format!("{error:#}")), notice: None },
             })
         })
@@ -1940,7 +1960,7 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             let message = format!("{error:#}");
             state.last_poll_error = Some(message.clone());
             automation_store::save_seen(&automation.id, &state)?;
-            emit_issue_state(app, &automation.id, &state);
+            emit_issue_state(app, automation, &state);
             record_poll_error(app, automation, &message)?;
             return Ok(());
         }
@@ -1971,7 +1991,15 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
         }
-        IssueSelection::Dispatch(candidates) => {
+        IssueSelection::Dispatch(mut candidates) => {
+            let cap = sources::runs_per_day(trigger.max_runs_per_day) as usize;
+            let held = within_day(&mut state, &mut candidates, cap, now);
+            if held && candidates.is_empty() {
+                state.held_until = day_resumes(&state.started, cap);
+                automation_store::save_seen(&automation.id, &state)?;
+                emit_issue_state(app, automation, &state);
+                return Ok(());
+            }
             // An automation's first check gates the whole poll (PRO-484).
             let Some(candidates) = precheck::gate_poll(app, automation, candidates)? else {
                 return Ok(());
@@ -1988,10 +2016,33 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
                     spawn_issue_report(app, entry, automation.id.clone(), run.run_id.clone(), true);
                 }
             }
+            if held {
+                state.held_until = day_resumes(&state.started, cap);
+                automation_store::save_seen(&automation.id, &state)?;
+            }
         }
     }
-    emit_issue_state(app, &automation.id, &state);
+    emit_issue_state(app, automation, &state);
     Ok(())
+}
+
+/// An issue search's runs a day (PRO-490 review): `candidates` cut to the room the last day's runs leave, so what
+/// is past it stays unseen for a later poll; true when some were held.
+fn within_day<T>(state: &mut automation_store::SeenState, candidates: &mut Vec<T>, cap: usize, now: DateTime<Utc>) -> bool {
+    state.started.retain(|at| DateTime::parse_from_rfc3339(at).is_ok_and(|at| now - at.with_timezone(&Utc) < chrono::TimeDelta::days(1)));
+    let room = cap.saturating_sub(state.started.len());
+    let held = candidates.len() > room;
+    candidates.truncate(room);
+    state.held_until = None;
+    held
+}
+
+/// When an issue search that met its runs a day has room again: when the oldest run that fills it leaves the day.
+fn day_resumes(started: &[String], cap: usize) -> Option<String> {
+    let mut times: Vec<DateTime<Utc>> = started.iter().filter_map(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)).collect();
+    times.sort();
+    let oldest = times.len().checked_sub(cap).map(|index| times[index])?;
+    Some((oldest + chrono::TimeDelta::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 static EVALUATING: AtomicBool = AtomicBool::new(false);
@@ -2222,6 +2273,7 @@ mod tests {
             max_runs_per_tick,
             run_on_existing,
             report: AutomationIssueReport::default(),
+            max_runs_per_day: None,
         }
     }
 
@@ -2428,6 +2480,76 @@ mod tests {
             });
         }
         serde_json::from_value(value).unwrap()
+    }
+
+    /// PRO-490 review M1: an issue search starts at most its runs a day, across issues; what is past them stays
+    /// unseen and its status says until when, in the event triggers' words.
+    #[test]
+    fn an_issue_search_starts_at_most_its_runs_a_day() {
+        let now = at("2026-11-22T12:00:00Z");
+        let mut state = automation_store::SeenState::default();
+        let ago = |minutes: i64| (now - chrono::TimeDelta::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // Two runs today, one yesterday (out of the day).
+        state.started = vec![ago(25 * 60), ago(120), ago(30)];
+        let mut candidates = vec![1, 2, 3];
+        assert!(within_day(&mut state, &mut candidates, 3, now), "room for one of three");
+        assert_eq!((candidates, state.started.len()), (vec![1], 2));
+        // That one starts: the day is full, and it resumes when the oldest of the three leaves it.
+        state.started.push(ago(0));
+        state.held_until = day_resumes(&state.started, 3);
+        assert_eq!(state.held_until.as_deref(), Some("2026-11-23T10:00:00.000Z"));
+        let mut automation = definition_from_input(automation_input(None, true), None, now).unwrap();
+        automation.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(3);
+        let notice = issue_state_of(&automation, &state, now).notice.unwrap();
+        assert!(notice.contains("it started 3 runs in a day") && notice.contains("2026-11-23 10:00 UTC"), "{notice}");
+        assert!(issue_state_of(&automation, &state, at("2026-11-23T10:00:01Z")).notice.is_none(), "not once it has passed");
+        let mut more = vec![4];
+        assert!(within_day(&mut state, &mut more, 3, now));
+        assert!(more.is_empty());
+        // Under the cap: nothing is held, and an old hold goes.
+        let mut fewer = vec![5];
+        assert!(!within_day(&mut state, &mut fewer, 48, now));
+        assert_eq!((fewer, state.held_until), (vec![5], None));
+        // Saved before it: 48. A value outside 1 to 1000 is refused.
+        assert_eq!(automation_store::SeenState::default().started.len(), 0);
+        let saved = definition_from_input(automation_input(None, true), None, now).unwrap();
+        assert_eq!(sources::runs_per_day(saved.issue_trigger.unwrap().max_runs_per_day), 48);
+        for cap in [0, 1001] {
+            let mut input = automation_input(None, true);
+            input.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(cap);
+            assert!(definition_from_input(input, None, now).unwrap_err().to_string().contains("Runs a day must be from 1 to 1000"), "{cap}");
+        }
+    }
+
+    /// PRO-490 review: a save from a window that does not send runs a day keeps the stored value, for an issue
+    /// search and an event trigger alike; one that sends it changes it.
+    #[test]
+    fn a_save_without_runs_a_day_keeps_the_stored_value() {
+        let now = at("2026-11-22T12:00:00Z");
+        let mut input = automation_input(None, true);
+        input.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(7);
+        let stored = definition_from_input(input, None, now).unwrap();
+        let resaved = definition_from_input(automation_input(None, true), Some(&stored), now).unwrap();
+        assert_eq!(resaved.issue_trigger.unwrap().max_runs_per_day, Some(7));
+        let mut changed = automation_input(None, true);
+        changed.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(9);
+        assert_eq!(definition_from_input(changed, Some(&stored), now).unwrap().issue_trigger.unwrap().max_runs_per_day, Some(9));
+
+        let event = |cap: Option<u32>| {
+            let mut value = serde_json::to_value(automation_input(None, false)).unwrap();
+            value["eventTrigger"] = serde_json::json!({"source": {"kind": "githubPullRequest", "repo": "acme/widgets", "events": ["opened"]}, "pollIntervalMinutes": 5, "maxRunsPerTick": 3});
+            if let Some(cap) = cap {
+                value["eventTrigger"]["maxRunsPerDay"] = cap.into();
+            }
+            serde_json::from_value::<AutomationInput>(value).unwrap()
+        };
+        let stored = definition_from_input(event(Some(5)), None, now).unwrap();
+        assert_eq!(definition_from_input(event(None), Some(&stored), now).unwrap().event_trigger.unwrap().max_runs_per_day, Some(5));
+        assert_eq!(definition_from_input(event(Some(6)), Some(&stored), now).unwrap().event_trigger.unwrap().max_runs_per_day, Some(6));
+        // As stored: absent is written as absent, and read as 48.
+        let fresh = definition_from_input(event(None), None, now).unwrap();
+        assert!(serde_json::to_value(&fresh).unwrap()["eventTrigger"].get("maxRunsPerDay").is_none());
+        assert_eq!(fresh.event_trigger.unwrap().runs_per_day(), 48);
     }
 
     #[test]

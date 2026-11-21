@@ -1130,9 +1130,9 @@ fn an_event_automation_starts_at_most_its_runs_a_day_across_subjects() {
     let _home = crate::store::temp_home();
     // Saved before the cap: read as the default, the same as a duty's.
     let automation = stored(linear_source());
-    assert_eq!(automation.event_trigger.as_ref().unwrap().max_runs_per_day, RUNS_PER_DAY);
+    assert_eq!(automation.event_trigger.as_ref().unwrap().runs_per_day(), RUNS_PER_DAY);
     assert_eq!(RUNS_PER_DAY as usize, crate::bots::wakes::WAKES_PER_DAY);
-    let automation = with_trigger(&automation, |trigger| trigger.max_runs_per_day = 3);
+    let automation = with_trigger(&automation, |trigger| trigger.max_runs_per_day = Some(3));
     tick(&automation, 0, Snapshot::Linear(Vec::new()));
     // Each run files the next issue: a chain across subjects that the per-subject limits never stop.
     assert_eq!(tick(&automation, 5, Snapshot::Linear(vec![issue("1")])).len(), 1);
@@ -1156,10 +1156,10 @@ fn an_event_automation_starts_at_most_its_runs_a_day_across_subjects() {
 fn a_days_cap_is_saved_with_the_automation_and_held_to_its_range() {
     let source = || pr_source(&[PullRequestEvent::Opened]);
     for (cap, ok) in [(0, false), (1, true), (MAX_RUNS_PER_DAY, true), (MAX_RUNS_PER_DAY + 1, false)] {
-        let trigger = AutomationEventTrigger { source: source(), poll_interval_minutes: 5, max_runs_per_tick: 3, max_runs_per_day: cap };
+        let trigger = AutomationEventTrigger { source: source(), poll_interval_minutes: 5, max_runs_per_tick: 3, max_runs_per_day: Some(cap) };
         assert_eq!(validate(&trigger, false, AutomationWorkspace::NewWorktree).is_ok(), ok, "{cap}");
     }
     let trigger: AutomationEventTrigger = serde_json::from_value(json!({"source": source(), "pollIntervalMinutes": 5, "maxRunsPerTick": 3, "maxRunsPerDay": 7})).unwrap();
-    assert_eq!(trigger.max_runs_per_day, 7);
+    assert_eq!(trigger.max_runs_per_day, Some(7));
     assert_eq!(serde_json::to_value(&trigger).unwrap()["maxRunsPerDay"], 7);
 }

@@ -260,7 +260,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
                   {(selected.issueTrigger || selected.eventTrigger) && automationStore.issueStates[selected.id]?.lastPollError && (
                     <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{automationStore.issueStates[selected.id].lastPollError}</div>
                   )}
-                  {selected.eventTrigger && automationStore.issueStates[selected.id]?.notice && (
+                  {(selected.issueTrigger || selected.eventTrigger) && automationStore.issueStates[selected.id]?.notice && (
                     <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{automationStore.issueStates[selected.id].notice}</div>
                   )}
                   {!selected.issueTrigger && !selected.eventTrigger && selected.schedule.kind === "cron" && (

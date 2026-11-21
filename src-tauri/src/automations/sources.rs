@@ -58,19 +58,36 @@ pub struct AutomationEventTrigger {
     pub max_runs_per_tick: u32,
     /// The most runs the trigger starts in any day, from all it reads (PRO-490): a run that makes what wakes the
     /// next (a pull request that opens another, an issue that files another) is bounded across subjects too.
-    /// An automation saved before it reads as [`RUNS_PER_DAY`].
-    #[serde(default = "default_runs_per_day")]
-    pub max_runs_per_day: u32,
+    /// Absent: an automation saved before it, read as [`RUNS_PER_DAY`] ([`AutomationEventTrigger::runs_per_day`]), and
+    /// a save from a window that does not send it, which keeps the stored value (`trigger_after_save`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs_per_day: Option<u32>,
+}
+
+impl AutomationEventTrigger {
+    /// The most runs it starts in a day: as saved, else [`RUNS_PER_DAY`].
+    pub fn runs_per_day(&self) -> u32 {
+        runs_per_day(self.max_runs_per_day)
+    }
+}
+
+/// A trigger's runs a day as saved, else [`RUNS_PER_DAY`]: the event triggers' and the issue search's alike.
+pub(crate) fn runs_per_day(saved: Option<u32>) -> u32 {
+    saved.unwrap_or(RUNS_PER_DAY).max(1)
+}
+
+/// What a save refuses of a runs-a-day value (PRO-490).
+pub(crate) fn validate_runs_per_day(saved: Option<u32>) -> Result<()> {
+    if saved.is_some_and(|cap| !(1..=MAX_RUNS_PER_DAY).contains(&cap)) {
+        bail!("Runs a day must be from 1 to {MAX_RUNS_PER_DAY}.");
+    }
+    Ok(())
 }
 
 /// Runs an event trigger starts in a day unless its automation says otherwise: as many as a bot's duty (`bots::wakes::WAKES_PER_DAY`).
 pub const RUNS_PER_DAY: u32 = 48;
 /// The most an automation may be set to.
 pub const MAX_RUNS_PER_DAY: u32 = 1000;
-
-fn default_runs_per_day() -> u32 {
-    RUNS_PER_DAY
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutomationEventSource {
@@ -263,9 +280,17 @@ pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializ
 /// the input leaves the field out (a client that does not know it), the one
 /// stored, unless that client chose a GitHub issue trigger instead.
 pub(super) fn trigger_after_save(given: Option<Option<AutomationEventTrigger>>, existing: Option<&Automation>, issue_trigger: bool) -> Option<AutomationEventTrigger> {
+    let stored = existing.and_then(|existing| existing.event_trigger.clone());
     match given {
-        Some(given) => given,
-        None => existing.and_then(|existing| existing.event_trigger.clone()).filter(|_| !issue_trigger),
+        // A window that does not send the day's cap (an older one) keeps the stored one (PRO-490 review).
+        Some(Some(mut given)) => {
+            if given.max_runs_per_day.is_none() {
+                given.max_runs_per_day = stored.and_then(|stored| stored.max_runs_per_day);
+            }
+            Some(given)
+        }
+        Some(None) => None,
+        None => stored.filter(|_| !issue_trigger),
     }
 }
 
@@ -312,9 +337,7 @@ pub(super) fn validate(trigger: &AutomationEventTrigger, has_issue_trigger: bool
     if trigger.max_runs_per_tick < 1 {
         bail!("Runs per tick must be at least one.");
     }
-    if !(1..=MAX_RUNS_PER_DAY).contains(&trigger.max_runs_per_day) {
-        bail!("Runs a day must be from 1 to {MAX_RUNS_PER_DAY}.");
-    }
+    validate_runs_per_day(trigger.max_runs_per_day)?;
     if workspace != AutomationWorkspace::NewWorktree {
         bail!("Event automations need a new worktree per run.");
     }
@@ -1116,9 +1139,12 @@ fn prune_seen(state: &mut SourceSeen, unseen: Option<DateTime<Utc>>) {
 }
 
 fn day_notice(held: &BTreeMap<String, String>, cap: u32) -> Option<String> {
-    held.get(DAY_SUBJECT).map(|resume| {
-        format!("Holding what it read until {}: it started {cap} runs in a day, the most this automation starts. They are kept and start then.", when(resume))
-    })
+    held.get(DAY_SUBJECT).map(|resume| day_hold_notice(resume, cap))
+}
+
+/// The status of an automation that met its runs a day, until `resume`: an event trigger's and an issue search's.
+pub(crate) fn day_hold_notice(resume: &str, cap: u32) -> String {
+    format!("Holding what it read until {}: it started {cap} runs in a day, the most this automation starts. They are kept and start then.", when(resume))
 }
 
 fn held_notice(held: &BTreeMap<String, String>) -> Option<String> {
@@ -1261,7 +1287,7 @@ fn poll<G: Into<Gated>>(
     let mut day_held = false;
     if !duty {
         state.held.retain(|subject, resume| subject != DAY_SUBJECT || parse(Some(resume)).is_some_and(|resume| resume > now));
-        let cap = trigger.max_runs_per_day.max(1) as usize;
+        let cap = trigger.runs_per_day() as usize;
         let mut started: Vec<String> = state.pr_wakes.get(DAY_SUBJECT).cloned().unwrap_or_default();
         started.retain(|at| parse(Some(at)).is_some_and(|at| now - at < chrono::TimeDelta::days(1)));
         let room = cap.saturating_sub(started.len());
@@ -1303,7 +1329,7 @@ fn poll<G: Into<Gated>>(
         )),
         held_notice(&state.held),
         duty_notice(&state.held),
-        day_notice(&state.held, trigger.max_runs_per_day.max(1)),
+        day_notice(&state.held, trigger.runs_per_day()),
         (plan.looped > 0).then(|| format!(
             "{} message{} had passed between bots {} times and woke nobody, so two bots cannot keep waking each other.",
             plan.looped,

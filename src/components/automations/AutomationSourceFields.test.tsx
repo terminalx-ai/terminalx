@@ -20,7 +20,7 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("@/lib/issueOps", () => ({ issueOps: { options } }));
 
-const { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerReady, eventTriggerSentence } = await import("./AutomationSourceFields");
+const { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerKnown, eventTriggerReady, eventTriggerSentence, runsPerDayValid } = await import("./AutomationSourceFields");
 
 let latest: AutomationEventTrigger | null = null;
 
@@ -127,25 +127,69 @@ describe("GitHub pull request trigger", () => {
 });
 
 describe("runs a day (PRO-490)", () => {
-  it("starts at 48, reads an automation saved before it as 48, and keeps what is typed within 1 to 1000", async () => {
+  const field = () => screen.getByRole("textbox", { name: "Runs a day, at most" }) as HTMLInputElement;
+
+  it("starts at 48, reads one saved before it as the default, and keeps a whole number from 1 to 1000", async () => {
     sourcePreview.mockResolvedValue([]);
     expect(defaultPullRequestTrigger().maxRunsPerDay).toBe(48);
     expect(defaultLinearTrigger().maxRunsPerDay).toBe(48);
     const { maxRunsPerDay: _, ...saved } = defaultPullRequestTrigger("acme/widgets");
     render(<Harness initial={saved} />);
-    const field = screen.getByRole("spinbutton", { name: "Runs a day, at most" }) as HTMLInputElement;
-    expect(field.value).toBe("48");
-    fireEvent.change(field, { target: { value: "10" } });
+    // Saved before it: empty, which is the default, and ready to save.
+    expect([field().value, field().placeholder]).toEqual(["", "48"]);
+    expect(eventTriggerReady(latest!)).toBe(true);
+    fireEvent.change(field(), { target: { value: "10" } });
     expect(latest?.maxRunsPerDay).toBe(10);
-    fireEvent.change(field, { target: { value: "5000" } });
-    expect(latest?.maxRunsPerDay).toBe(1000);
-    fireEvent.change(field, { target: { value: "0" } });
-    expect(latest?.maxRunsPerDay).toBe(1);
+    expect(eventTriggerReady(latest!)).toBe(true);
+  });
+
+  it("takes empty as the default and says what a decimal or an out-of-range number needs, holding the save (PRO-490 review)", () => {
+    sourcePreview.mockResolvedValue([]);
+    render(<Harness initial={defaultPullRequestTrigger("acme/widgets")} />);
+    expect(field().value).toBe("48");
+    fireEvent.change(field(), { target: { value: "" } });
+    expect(latest?.maxRunsPerDay).toBeUndefined();
+    expect(eventTriggerReady(latest!)).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+    for (const typed of ["2.5", "0", "5000", "ten"]) {
+      fireEvent.change(field(), { target: { value: typed } });
+      expect(eventTriggerReady(latest!), typed).toBe(false);
+      expect(screen.getByRole("alert").textContent).toBe("Runs a day is a whole number from 1 to 1000, or empty for 48.");
+    }
+    fireEvent.change(field(), { target: { value: "12" } });
+    expect([latest?.maxRunsPerDay, eventTriggerReady(latest!)]).toEqual([12, true]);
+    expect(runsPerDayValid(undefined) && runsPerDayValid(1) && runsPerDayValid(1000) && !runsPerDayValid(1.5)).toBe(true);
   });
 
   it("is not a duty's to set", () => {
     sourcePreview.mockResolvedValue([]);
     render(<div className="grid grid-cols-2"><AutomationSourceFields projectPath="/repo" trigger={defaultPullRequestTrigger("acme/widgets")} onChange={() => {}} forDuty /></div>);
-    expect(screen.queryByRole("spinbutton", { name: "Runs a day, at most" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Runs a day, at most" })).toBeNull();
+  });
+});
+
+describe("a known kind this version cannot read (PRO-490 review)", () => {
+  it("is shown read-only, as an unknown kind is, and saves as it was", () => {
+    sourcePreview.mockResolvedValue([]);
+    const unreadable = [
+      { ...defaultPullRequestTrigger("acme/widgets").source, draft: "sometimes" },
+      { ...defaultPullRequestTrigger("acme/widgets").source, events: "opened" },
+      { ...defaultLinearTrigger().source, teamId: 7 },
+      { ...defaultLinearTrigger().source, report: { comment: "yes" } },
+    ];
+    for (const source of unreadable) {
+      const trigger = { ...defaultPullRequestTrigger(), source } as unknown as AutomationEventTrigger;
+      expect(eventTriggerKnown(trigger), JSON.stringify(source)).toBe(false);
+      expect(eventTriggerReady(trigger)).toBe(true);
+      const { unmount } = render(<Harness initial={trigger} />);
+      expect(screen.getByRole("note").textContent).toContain("needs a newer TerminalX");
+      expect(screen.queryByRole("textbox", { name: "Repository" })).toBeNull();
+      unmount();
+    }
+    expect(eventTriggerKnown(defaultPullRequestTrigger("acme/widgets"))).toBe(true);
+    // An event it does not know is kept as written, the source still read.
+    const newer = { ...defaultPullRequestTrigger("acme/widgets").source, events: ["opened", "someNewEvent"] } as unknown as AutomationEventTrigger["source"];
+    expect(eventTriggerKnown({ ...defaultPullRequestTrigger("acme/widgets"), source: newer })).toBe(true);
+    expect(eventTriggerKnown(defaultLinearTrigger())).toBe(true);
   });
 });

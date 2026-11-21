@@ -2210,7 +2210,9 @@ terminalx bots duty-off <duty> [--bot <bot>] --json
   Duties tab. `<duty>` is the duty's id or its name (any letter case); a name two duties share
   is refused.
 - From a bot's own chat, duty run or a session it started, it reaches that bot's duties only
-  (another bot's is `forbidden`). From anywhere else, `--bot` names the bot.
+  (another bot's is `forbidden`), and its home chat says the bot switched it off. From anywhere
+  else, `--bot` names the bot; a process outside every pane with no terminal of its own gets
+  `person_required`.
 - Switching off gives a bot nothing, so it needs no person; switching a duty on, or changing
   one, is the owner's, in the window.
 

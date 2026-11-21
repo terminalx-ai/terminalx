@@ -302,7 +302,10 @@ permission system.
   `consent::guards_request`); switching one off is open. A bot switches off
   one of its own duties from its own session with `terminalx bots duty-off
   "<duty name or id>"` (PRO-492), never another bot's; anyone else names the
-  bot with `--bot`. Switching one on stays the window's. The Automations
+  bot with `--bot`, which a process outside every pane with no terminal of
+  its own may not do (`person_required`). A bot's own switch leaves a line in
+  its home chat, in TerminalX's words, saying the bot switched it off.
+  Switching one on stays the window's. The Automations
   page's own routes refuse a duty. A process in a bot's session reads its own
   bot's duties and no other's, and changes none.
 - **At hire** the role template's duties that wake on a schedule or on
