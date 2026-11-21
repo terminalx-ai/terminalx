@@ -383,8 +383,6 @@ fn read_home_file(id: &str, name: &str) -> Read {
     }
 }
 
-/// `text` inside `<tag>…</tag>`, with any closing tag in it broken, so nothing
-/// in the text ends the block early.
 /// Whether `c` breaks a line or makes one read other than it is: control
 /// characters, Unicode's own line and paragraph separators (they break a line
 /// as a newline does), bidirectional overrides and isolates, and zero-width
@@ -393,6 +391,8 @@ pub(crate) fn breaks_line(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}')
 }
 
+/// `text` inside `<tag>…</tag>`, with any closing tag in it broken, so nothing
+/// in the text ends the block early.
 pub(crate) fn fenced(tag: &str, text: &str) -> String {
     // Any letter case: `</MEMORY>` must not end the block either.
     let close = format!("</{tag}");

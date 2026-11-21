@@ -219,7 +219,9 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   `dutySave`, with a warning beside it; a value this build does not know is
   kept and read as members. A comment by the signed-in `gh` user, or by the
   Linear key's own user, never wakes it, so a bot quoting its own handle does
-  not wake itself. Linear mentions come from the workspace's own people.
+  not wake itself. Linear mentions come from the workspace's own people,
+  never an integration's comment (one with no user). A `gh` that does not
+  say who it is signed in as stops the read, with the status saying so.
   Whatever any of them writes can be untrusted, and the editor says so.
 - **What it is given.** The first check gets the events a read would wake on
   as a JSON file named in `TERMINALX_EVENTS`, in its own folder. The agent
@@ -232,7 +234,8 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   it was given, that event is seen, so the next read checks the one behind
   it. A check that fails leaves it unseen, to be tried again.
 - **Paused.** A paused bot's duties are not read, so what arrives waits and
-  wakes them on resume. A schedule's due runs are still skipped, not run late.
+  wakes them on resume. A bot paused while a read was under way records
+  nothing from it, so what it found wakes the duty on resume too. A schedule's due runs are still skipped, not run late.
 - **Bounded.** One run at a time (a read wakes one); a duty wakes at most
   6 times an hour and 48 a day from all its events, past which they wait and
   its status says until when; one pull request wakes at most 4 runs an hour

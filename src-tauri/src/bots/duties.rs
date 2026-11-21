@@ -328,6 +328,12 @@ pub fn bind(automation: &Automation) -> Bound {
     }
 }
 
+/// Whether the duty's bot is paused now: a read that took a while records
+/// nothing then, so what it found wakes the duty on resume (PRO-472).
+pub(crate) fn bot_paused(automation: &Automation) -> bool {
+    owner(automation).is_some_and(|owner| matches!(bot_store::get(&owner.id), Ok(Some(bot)) if bot.paused.is_some()))
+}
+
 /// The duty's owner and its bot, when that bot may work now.
 fn working_bot(automation: &Automation) -> std::result::Result<(DutyOwner, Bot), String> {
     if !super::enabled() {

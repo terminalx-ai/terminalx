@@ -457,6 +457,12 @@ static CHECKING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 struct Claim(String);
 
+/// Whether an automation's evaluation is still going on its own thread: tests wait for it to end.
+#[cfg(test)]
+pub(crate) fn evaluating(automation_id: &str) -> bool {
+    CHECKING.lock().unwrap_or_else(|error| error.into_inner()).contains(automation_id)
+}
+
 impl Claim {
     fn take(automation_id: &str) -> Option<Self> {
         CHECKING

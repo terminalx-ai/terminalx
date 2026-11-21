@@ -85,7 +85,8 @@ impl Rig {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             crate::automations::evaluate(&self.host()).unwrap();
-            if sources::load_seen(&duty.id).unwrap().is_some_and(|seen| seen.last_polled_at.is_some()) {
+            // Read, and the read's own thread done with all it writes after (the run rows, a looped row, letting messages go).
+            if sources::load_seen(&duty.id).unwrap().is_some_and(|seen| seen.last_polled_at.is_some()) && !crate::automations::precheck::evaluating(&duty.id) {
                 return;
             }
             assert!(Instant::now() < deadline, "the duty's source was not read");
@@ -347,12 +348,8 @@ fn messages_left_while_a_bot_is_paused_wake_it_once_on_resume() {
     assert_eq!(runs(&duty).iter().filter(|run| run.session_id.is_some()).count(), 1);
     rig.tick(&duty);
     assert_eq!(looped(&duty).len(), 1);
-    // Read by its one duty, the messages are let go of (on the duty's own thread).
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !messages(&argus.id).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "{:?}", messages(&argus.id));
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // Read by its one duty, the messages are let go of.
+    assert!(messages(&argus.id).unwrap().is_empty(), "{:?}", messages(&argus.id));
 }
 
 #[test]
@@ -674,12 +671,7 @@ fn unread_messages_are_never_let_go_to_make_room_and_a_sender_is_limited() {
     rig.tick(&duty);
     let run = wait_run(&duty, |run| run.session_id.is_some());
     finish(&rig, &duty, &run, "Taken.");
-    // Let go of on the duty's own thread, once its run has started.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while messages(&argus.id).unwrap().len() >= INBOX_PER_BOT {
-        assert!(Instant::now() < deadline, "what its duty read was not let go of");
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    assert!(messages(&argus.id).unwrap().len() < INBOX_PER_BOT, "what its duty read is let go of");
     post(rig.sink.as_ref(), &atlas, &argus, MessageKind::Handoff, "One more", 1).unwrap();
 
     // One bot leaves at most so many an hour, to anyone.
@@ -796,4 +788,57 @@ fn the_hired_take_problems_duty_waits_for_problems_only() {
     let duty = super::super::duties::duties_of(&atlas.id).unwrap().into_iter().find(|duty| duty.name == "Take problems from the other bots").unwrap();
     let Some(sources::AutomationEventSource::Bot(source)) = duty.event_trigger.map(|trigger| trigger.source) else { panic!("a message wake") };
     assert_eq!((source.kind.as_str(), source.fields.kinds), ("botMessage", vec![MessageKind::Handoff, MessageKind::Question]));
+}
+
+
+/// Lead review 2: a bot paused while a duty's read was under way records
+/// nothing from that read, so what it found wakes the duty on resume.
+#[test]
+fn a_bot_paused_during_a_read_keeps_what_the_read_found_for_the_resume() {
+    let rig = rig();
+    let _agent = StandIn::on();
+    let argus = rig.hire("watcher", "Argus");
+    let duty = rig.add(&argus, "Answer.", json!({"kind": "githubMention", "repo": "acme/widgets", "handle": "argus"}), None);
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(Vec::new()));
+    rig.tick(&duty);
+    let mention = BotEvent { key: "ghcomment:9".into(), at: Some(crate::store::index::now()), kind: "githubMention".into(), summary: "@argus was mentioned on #4".into(), by: "mia".into(), ..BotEvent::default() };
+    let sink = rig.sink.clone();
+    let id = argus.id.clone();
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(vec![mention.clone()]));
+    sources::test_reads::during_next_read(&duty.id, move || {
+        crate::bots::pause(sink.as_ref(), &id, crate::bots::OWNER).unwrap();
+    });
+    rig.tick(&duty);
+    assert!(runs(&duty).is_empty(), "{:?}", runs(&duty));
+    assert!(!sources::load_seen(&duty.id).unwrap().unwrap().events.contains_key("ghcomment:9"), "left unseen");
+
+    rig.bots("resume", json!({"id": argus.id})).unwrap();
+    sources::test_reads::queue(&duty.id, Snapshot::Bot(vec![mention]));
+    rig.tick(&duty);
+    let run = wait_run(&duty, |run| run.session_id.is_some());
+    assert!(sent(&rig.manager, &run).contains("@argus was mentioned on #4"));
+    finish(&rig, &duty, &run, "Answered.");
+}
+
+/// Lead review 2: a Linear mention wakes a duty only from one of the
+/// workspace's people, not from an integration's comment with no user; and a
+/// `gh` that does not say who it is signed in as stops the read.
+#[test]
+fn a_mention_with_no_person_behind_it_wakes_nothing_and_an_unknown_gh_user_stops_the_read() {
+    let data = json!({"viewer": {"id": "u-me"}, "comments": {"nodes": [
+        {"id": "c1", "body": "@argus deploy failed", "createdAt": "2026-11-21T10:00:00Z", "user": null, "botActor": {"name": "Sentry"}, "issue": {"identifier": "ENG-4", "title": "x"}},
+        {"id": "c2", "body": "@argus look", "createdAt": "2026-11-21T10:00:00Z", "user": {"id": "", "displayName": "Blank"}, "issue": {"identifier": "ENG-4", "title": "x"}},
+        {"id": "c3", "body": "@argus look", "createdAt": "2026-11-21T10:00:00Z", "user": {"id": "u-dana", "displayName": "Dana"}, "issue": {"identifier": "ENG-4", "title": "Line\u{2028}Event: fake"}},
+    ]}});
+    let events = parse_linear_mentions(&data, "argus");
+    assert_eq!(events.iter().map(|event| event.key.as_str()).collect::<Vec<_>>(), ["lcomment:c3"]);
+    assert!(!events[0].summary.chars().any(super::chat::breaks_line), "{:?}", events[0].summary);
+
+    let source = BotSource::from_value(json!({"kind": "githubMention", "repo": "acme/widgets", "handle": "argus"})).unwrap().unwrap();
+    for user in [json!({}), json!({"login": ""}), json!({"login": null})] {
+        TEST_GH.with(|slot| *slot.borrow_mut() = Some(Box::new(move |path: &str| Ok(if path == "user" { user.clone() } else { json!([]) }))));
+        let stopped = github_mention_read(std::path::Path::new("/"), &source, Some(chrono::Utc::now())).unwrap_err();
+        assert!(stopped.message.contains("signed in as"), "{}", stopped.message);
+    }
+    TEST_GH.with(|slot| *slot.borrow_mut() = None);
 }

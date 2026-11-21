@@ -411,7 +411,7 @@ fn github_mention_read(cwd: &Path, source: &BotSource, since: Option<DateTime<Ut
     let authors = CommentAuthors {
         anyone: source.fields.only_from.as_deref() == Some("anyone"),
         // A comment the signed-in user left (the bot's own, through `gh`) is never news.
-        viewer: gh_json(cwd, "user")?["login"].as_str().map(str::to_owned),
+        viewer: Some(gh_json(cwd, "user")?["login"].as_str().filter(|login| !login.is_empty()).map(str::to_owned).ok_or_else(|| plain("gh did not say who it is signed in as, so the bot's own comments cannot be told apart."))?),
     };
     let mut events = Vec::new();
     for page in 1..=MENTION_PAGES {
@@ -484,7 +484,7 @@ pub fn github_mentions(value: &Value, handle: &str, authors: &CommentAuthors) ->
                 key: format!("ghcomment:{id}"),
                 at: comment["created_at"].as_str().map(str::to_owned),
                 kind: "githubMention".into(),
-                summary: format!("@{handle} was mentioned on #{number}"),
+                summary: one_line(&format!("@{handle} was mentioned on #{number}")),
                 by: one_line(comment["user"]["login"].as_str().unwrap_or("someone")),
                 url: one_line(comment["html_url"].as_str().unwrap_or_default()),
                 body: capped(body, BODY_CHARS),
@@ -509,7 +509,7 @@ pub fn security_alerts(value: &Value) -> Vec<BotEvent> {
                 key: format!("alert:{number}"),
                 at: alert["created_at"].as_str().map(str::to_owned),
                 kind: "githubSecurityAlert".into(),
-                summary: format!("Security alert #{number}: {} severity in {}", one_line(severity), one_line(package)),
+                summary: one_line(&format!("Security alert #{number}: {severity} severity in {package}")),
                 by: "Dependabot".into(),
                 url: one_line(alert["html_url"].as_str().unwrap_or_default()),
                 body: capped(&format!("{}\n\n{}", advisory["summary"].as_str().unwrap_or_default(), advisory["description"].as_str().unwrap_or_default()), BODY_CHARS),
@@ -534,7 +534,7 @@ pub fn branch_checks(value: &Value, branch: &str) -> Vec<BotEvent> {
         key: format!("checks:{branch}"),
         value: head.chars().filter(char::is_ascii_hexdigit).take(40).collect(),
         kind: "githubBranchCheck".into(),
-        summary: format!("{} failed on {} at {}", names.join(", "), one_line(branch), head.chars().take(12).collect::<String>()),
+        summary: one_line(&format!("{} failed on {branch} at {}", names.join(", "), head.chars().take(12).collect::<String>())),
         by: "GitHub".into(),
         url: one_line(failed[0]["html_url"].as_str().unwrap_or_default()),
         body: capped(&failed.iter().map(|run| format!("{}: {}", run["name"].as_str().unwrap_or("a check"), run["output"]["summary"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n"), BODY_CHARS),
@@ -557,7 +557,7 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, S
     if let Some(team) = source.fields.team_id.as_deref().map(str::trim).filter(|team| !team.is_empty()) {
         filter["issue"] = json!({"team": {"id": {"eq": team}}});
     }
-    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { viewer { id } comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { id displayName name } botActor { name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
+    let query = "query($first: Int!, $after: String, $filter: CommentFilter) { viewer { id } comments(first: $first, after: $after, filter: $filter, orderBy: updatedAt) { nodes { id body url createdAt user { id displayName name } issue { identifier title } } pageInfo { hasNextPage endCursor } } }";
     let mut events = Vec::new();
     let mut after = Value::Null;
     for _ in 0..MENTION_PAGES {
@@ -572,8 +572,9 @@ fn linear_mentions(source: &BotSource, since: Option<&str>) -> Result<BotRead, S
     Ok(BotRead { events, resume: None, bound: Some(MENTION_READ) })
 }
 
-/// Comments that mention `handle`, from a Linear `comments` query, never
-/// those of the key's own user (the bot's, posted as its owner).
+/// Comments that mention `handle`, from a Linear `comments` query: by one of
+/// the workspace's people, never by an integration (a comment with no user)
+/// or by the key's own user (the bot's, posted as its owner).
 pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
     let viewer = data["viewer"]["id"].as_str();
     data["comments"]["nodes"]
@@ -585,16 +586,18 @@ pub fn parse_linear_mentions(data: &Value, handle: &str) -> Vec<BotEvent> {
             if !mentions(body, handle) {
                 return None;
             }
-            if viewer.is_some_and(|viewer| comment["user"]["id"].as_str() == Some(viewer)) {
+            // A workspace person's comment only: none from an integration (no user), never the key's own user's.
+            let author = comment["user"]["id"].as_str().filter(|id| !id.is_empty())?;
+            if viewer == Some(author) {
                 return None;
             }
             let issue = comment["issue"]["identifier"].as_str().unwrap_or("an issue");
-            let by = comment["user"]["displayName"].as_str().or_else(|| comment["user"]["name"].as_str()).or_else(|| comment["botActor"]["name"].as_str()).unwrap_or("someone");
+            let by = comment["user"]["displayName"].as_str().or_else(|| comment["user"]["name"].as_str()).unwrap_or("someone");
             Some(BotEvent {
                 key: format!("lcomment:{}", comment["id"].as_str()?),
                 at: comment["createdAt"].as_str().map(str::to_owned),
                 kind: "linearMention".into(),
-                summary: format!("@{handle} was mentioned on {}: {}", one_line(issue), one_line(comment["issue"]["title"].as_str().unwrap_or_default())),
+                summary: one_line(&format!("@{handle} was mentioned on {issue}: {}", comment["issue"]["title"].as_str().unwrap_or_default())),
                 by: one_line(by),
                 url: one_line(comment["url"].as_str().unwrap_or_default()),
                 body: capped(body, BODY_CHARS),
@@ -762,7 +765,7 @@ fn messages_for(bot_id: &str, source: &BotSource) -> Result<Vec<BotEvent>> {
             key: format!("msg:{}", message.id),
             at: Some(message.at.clone()),
             kind: "botMessage".into(),
-            summary: format!("{} from {}", message.kind.words(), one_line(&message.from_name)),
+            summary: one_line(&format!("{} from {}", message.kind.words(), message.from_name)),
             by: format!("{}, a bot with {}", one_line(&message.from_name), one_line(&message.from_access)),
             body: capped(&message.text, BODY_CHARS),
             hops: message.hops,

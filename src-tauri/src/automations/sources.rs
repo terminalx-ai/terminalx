@@ -1101,7 +1101,6 @@ fn held_notice(held: &BTreeMap<String, String>) -> Option<String> {
 /// Pages back this far before the last read, for clocks that disagree.
 const READ_OVERLAP: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
-/// One tick of an event trigger, with the read, the run row and the start passed in.
 /// What a first check made of a read's wakes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gated {
@@ -1119,6 +1118,7 @@ impl From<bool> for Gated {
     }
 }
 
+/// One tick of an event trigger, with the read, the run row and the start passed in.
 fn poll<G: Into<Gated>>(
     app: &impl AutomationHost,
     automation: &Automation,
@@ -1268,6 +1268,15 @@ fn poll<G: Into<Gated>>(
         emit_state(app, &automation.id, &state);
         return Ok(());
     }
+    // Its bot was paused while the read (or the check) ran: as for a check that failed, the poll is noted and
+    // everything read stays unseen, with the read not moved on, so all of it is read again on resume.
+    if duty && crate::bots::duties::bot_paused(automation) {
+        if still_current(automation) {
+            save_seen(&automation.id, &state)?;
+            emit_state(app, &automation.id, &state);
+        }
+        return Ok(());
+    }
     for key in &plan.forget {
         state.events.remove(key);
     }
@@ -1303,8 +1312,23 @@ fn poll<G: Into<Gated>>(
         !wakes.is_empty()
     });
     save_seen(&automation.id, &state)?;
-    for wake in &plan.wakes {
+    for (index, wake) in plan.wakes.iter().enumerate() {
         if !still_current(automation) {
+            break;
+        }
+        // Its bot paused since: this wake and the rest stay unseen, and the next read pages back to them, for the resume.
+        if duty && crate::bots::duties::bot_paused(automation) {
+            if let Snapshot::Bot(events) = &snapshot {
+                let left: BTreeSet<&str> = plan.wakes[index..].iter().flat_map(|wake| wake.record.iter().map(|(key, _)| key.as_str())).collect();
+                let oldest = events.iter().filter(|event| left.contains(event.key.as_str())).filter_map(|event| parse(event.at.as_deref())).min();
+                if let Some(oldest) = oldest {
+                    let back = oldest - chrono::TimeDelta::seconds(1) + READ_OVERLAP;
+                    if parse(state.last_read_at.as_deref()).is_none_or(|last| back < last) {
+                        state.last_read_at = Some(stamp(back));
+                        save_seen(&automation.id, &state)?;
+                    }
+                }
+            }
             break;
         }
         // The run row first, then the record: a crash between them leaves a
@@ -1687,8 +1711,21 @@ pub(crate) mod test_reads {
         QUEUED.lock().unwrap_or_else(|error| error.into_inner()).entry(automation_id.to_owned()).or_default().push_back((snapshot, resume));
     }
 
+    type During = Box<dyn FnOnce() + Send>;
+    static DURING: Mutex<BTreeMap<String, During>> = Mutex::new(BTreeMap::new());
+
+    /// Something that happens while the next read of the automation is under way (the owner pausing its bot, say).
+    pub(crate) fn during_next_read(automation_id: &str, happen: impl FnOnce() + Send + 'static) {
+        DURING.lock().unwrap_or_else(|error| error.into_inner()).insert(automation_id.to_owned(), Box::new(happen));
+    }
+
     pub(super) fn take(automation_id: &str) -> Option<Queued> {
-        QUEUED.lock().unwrap_or_else(|error| error.into_inner()).get_mut(automation_id)?.pop_front()
+        let queued = QUEUED.lock().unwrap_or_else(|error| error.into_inner()).get_mut(automation_id)?.pop_front();
+        let during = DURING.lock().unwrap_or_else(|error| error.into_inner()).remove(automation_id);
+        if let Some(happen) = during {
+            happen();
+        }
+        queued
     }
 }
 
