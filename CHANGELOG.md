@@ -172,6 +172,18 @@
   it: what is next today, the week so far, the key and quiet hours. Days a
   duty's log no longer reaches back over say "history not kept" and the
   totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): GitHub and Linear are a bot's channels. A bot posts
+  its review or finding on a pull request, a comment on a GitHub issue, or a
+  comment on a Linear issue with `terminalx bots post`, through your `gh`
+  login and Linear key; each post ends with a line saying which bot wrote it
+  on your behalf, and a review never approves. Mention a bot as `@<slug>` in
+  a pull request, issue or Linear comment and it starts a conversation with
+  it, listed under "Chats with <bot>" with where it came from; the bot
+  answers in that thread with `terminalx bots reply`. You and the people in
+  its Who can ask (known by the GitHub login you give them, and on Linear by
+  their email) are accepted; anyone else's mention, and a bot's own post,
+  starts nothing. What people write there is a request, never an approval.
+  The bot's settings list what reached it and what it posted (PRO-480).
 
 ## 0.2.37
 

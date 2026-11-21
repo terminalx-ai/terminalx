@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
-import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
+import { Bot as BotIcon, Brain, CircleDot, Github, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles, SquareKanban } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
-import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
+import { botChats, botSpentToday, chatSource, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { showBotsTeam } from "@/lib/botsPage";
 import { needsYouCount, needsYouTrouble, tookOpening, useNeedsYou, useNeedsYouError, useOpeningItem } from "@/lib/botItems";
@@ -377,7 +377,8 @@ function ChatGroup({ label, action, children }: { label: string; action?: ReactN
 
 function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void; sub?: string }) {
   const working = chat.tabs.some((tab) => tab.status === "in_progress");
-  const Icon = home ? Home : MessageSquare;
+  const source = home ? null : chatSource(chat);
+  const Icon = home ? Home : chat.botChannel?.kind === "github" ? Github : chat.botChannel?.kind === "linear" ? SquareKanban : MessageSquare;
   return (
     <li>
       <button
@@ -389,7 +390,9 @@ function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; se
         <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] text-foreground">{home ? "Home chat" : conversationTitle(chat)}</span>
-          <span className="block truncate text-[11.5px] text-faint">{sub ?? relativeTime(chat.modified || chat.created)}</span>
+          <span className="block truncate text-[11.5px] text-faint" data-testid={!sub && source ? "bot-chat-source" : undefined}>
+            {sub ?? (source ? `${source} · ${relativeTime(chat.modified || chat.created)}` : relativeTime(chat.modified || chat.created))}
+          </span>
         </span>
         {working && <Loader2 aria-label="Working" className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" />}
       </button>

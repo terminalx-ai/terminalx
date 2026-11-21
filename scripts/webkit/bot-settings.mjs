@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 // WebKit layout check for a bot's settings (PRO-478, design 23.07), with
-// Settings → Experimental → Bots on: Runs on, Access, Works in, Channels and
-// Who can ask, reached from the team table. Measured with no organisation and
+// Settings → Experimental → Bots on: Runs on, Access, Works in, Channels (with
+// what reached the bot from GitHub and Linear and what it posted there,
+// PRO-480) and Who can ask, reached from the team table. Measured with no organisation and
 // with one, at the designed 1440×900, the scaled 1280×800 and narrower
 // windows, dark and light: nothing spills past the main slot or sideways off
 // the page, the choice cards and list rows stay inside their sections, no two
 // controls overlap, and a long bot name truncates. The header's menu, its
-// three dialogs and the Add a person or a bot list are opened at the largest
+// three dialogs, a person's GitHub login dialog and the Add a person or a bot list are opened at the largest
 // and the smallest window and measured the same way. Picking an access level
 // saves it through the stubbed `bot_update`.
 //
@@ -31,6 +32,16 @@ const extra = (orgs) => `(() => {
       whoCanAsk: [{ kind: "bot", id: "b2", may: "handOff" }, { kind: "person", id: "u1", name: "Someone with a rather long display name", may: "ask" }, { kind: "team", id: "t1", may: "triage" }] }),
     bot("b2", "Atlas", { roleTitle: "CTO", roleTemplateId: "cto" }),
   ] };
+  // PRO-480: what reached the bot from GitHub and Linear and what it posted there, with long titles and names.
+  const title = "Move macOS CI to our own runner and keep the secrets out of every log line it writes";
+  answers.bot_channels = () => ({
+    handle: "@kestrel",
+    mentions: [
+      { id: "github:acme/app:12", thread: { kind: "github", repo: "an-organisation-with-a-long-name/a-repository-with-a-long-name", number: 14050, title, url: "https://github.com/acme/app/pull/7" }, by: "@someone-with-a-long-github-login", from: "", at, state: "notAccepted", why: "@someone-with-a-long-github-login is not in its Who can ask", session: null },
+      { id: "linear:c2", thread: { kind: "linear", issue: "PRO-480", title, url: "https://linear.app/x/issue/PRO-480" }, by: "Someone with a rather long display name", from: "person", at, state: "delivered", why: "", session: "s1" },
+    ],
+    posts: [{ bot: "b1", kind: "changesRequested", thread: { kind: "github", repo: "acme/app", number: 7, title, url: "https://github.com/acme/app/pull/7" }, at, url: "https://github.com/acme/app/pull/7" }],
+  });
   const list = () => ({ revision: state.revision, bots: structuredClone(state.bots), unreadable: 0 });
   answers.bot_list = list;
   answers.bot_update = ({ id, patch }) => {
@@ -141,6 +152,14 @@ async function popups(page, main) {
     await close("[role=dialog], [role=alertdialog]");
     if (item !== "bot-menu-delete") await menu();
   }
+  // PRO-480: a person's GitHub login, from their row's menu.
+  const person = main.getByTestId("bot-asker").nth(1);
+  await person.scrollIntoViewIfNeeded();
+  await person.getByTestId("bot-asker-may").click();
+  await page.getByTestId("bot-asker-github").click();
+  await page.locator("[role=dialog]").first().waitFor();
+  results["the GitHub login dialog"] = await measurePopup(page, "[role=dialog]");
+  await close("[role=dialog]");
   await main.getByTestId("bot-asker-add").scrollIntoViewIfNeeded();
   await main.getByTestId("bot-asker-add").click();
   await page.locator("[role=menu]").waitFor();
@@ -164,11 +183,13 @@ try {
     await main.getByRole("button", { name: `${LONG_NAME}'s settings` }).click();
     await main.getByTestId("bot-settings").waitFor();
     await main.getByTestId("bot-channel-linear-state").getByText("Connected").waitFor();
+    await main.getByTestId("bot-channel-activity").waitFor();
     failed += report(name, {
       "five sections": (await main.getByTestId("bot-settings-section").count()) === 5,
       "organisation rows": (await main.getByTestId("bot-works-in-org").count()) === orgs,
       "places it does not know are shown": (await main.getByTestId("bot-works-in-unknown").count()) === (orgs ? 1 : 2),
       "the owner and three askers": (await main.getByTestId("bot-asker").count()) === 3 && (await main.getByTestId("bot-asker-owner").count()) === 1,
+      "what reached it and what it posted": (await main.getByTestId("bot-channel-activity").getByRole("listitem").count()) === 3,
     });
     for (const viewport of viewports) {
       await page.setViewportSize(viewport);

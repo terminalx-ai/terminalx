@@ -147,6 +147,15 @@ fn wait_run(duty: &Automation, ready: impl Fn(&AutomationRun) -> bool) -> Automa
     }
 }
 
+/// Once the prompt of the run in `session` is sent: the send marks its tab in progress.
+fn wait_sent(session: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !index::get(session).unwrap().tabs.iter().any(|tab| tab.status == index::TabStatus::InProgress) {
+        assert!(Instant::now() < deadline, "the run's prompt was never sent: {:?}", index::get(session).unwrap().tabs);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn due_now(duty: &Automation) {
     automation_store::update(&duty.id, |value| {
         value.next_run_at = (Utc::now() - chrono::TimeDelta::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -288,6 +297,8 @@ fn a_check_that_prints_starts_the_bots_session_with_its_output_and_reports_where
     for (reply, notified) in [("Still failing on main.", Some(false)), ("URGENT: main has been red for an hour.", Some(true)), ("Nothing new.", None)] {
         run_now(&rig, &bot, &duty);
         let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
+        // The run names its session before its prompt is sent; the send marks the tab in progress, and would undo the settle below if it came after it (PRO-497).
+        wait_sent(started.session_id.as_deref().unwrap());
         crate::automations::complete_from_turn(&host, started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), Some(reply.into()), 1);
         let ended = wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
         match notified {
@@ -635,6 +646,7 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     assert_eq!(duty.run_timeout_minutes, Some(RUN_TIMEOUT_MINUTES));
     run_now(&rig, &bot, &duty);
     let first = wait_run(&duty, |run| run.session_id.is_some());
+    wait_sent(first.session_id.as_deref().unwrap());
     let sessions = index::load().unwrap().len();
     // Run now while it runs: refused, no second session.
     let refused = rig.bots("dutyRun", json!({"id": bot.id, "dutyId": duty.id})).unwrap_err().to_string();
@@ -673,6 +685,8 @@ fn a_duty_never_overlaps_itself_times_out_and_archives_its_older_runs() {
     for _ in 0..5 {
         run_now(&rig, &bot, &duty);
         let started = wait_run(&duty, |run| run.session_id.is_some() && !run.status.is_terminal());
+        // The run names its session before its prompt is sent; the send marks the tab in progress, and would undo the settle below if it came after it (PRO-497).
+        wait_sent(started.session_id.as_deref().unwrap());
         crate::automations::complete_from_turn(&host, started.session_id.as_deref().unwrap(), started.tab_id.as_deref().unwrap(), Some("Nothing new.".into()), 1);
         wait_run(&duty, |run| run.run_id == started.run_id && run.status.is_terminal());
         settle(started.session_id.as_deref().unwrap(), if finished.len() == 2 { index::TabStatus::Waiting } else { index::TabStatus::Completed });

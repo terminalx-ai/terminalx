@@ -204,6 +204,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
     if let Err(error) = super::handoffs::forget_bot(sink, id) {
         log::warn!("move the hand-offs of deleted bot {id} to the trash: {error:#}");
     }
+    // Its mentions and posts on GitHub and Linear (PRO-480).
+    if let Err(error) = super::channels::forget_bot(id) {
+        log::warn!("forget the channel mentions of deleted bot {id}: {error:#}");
+    }
     let ids: Vec<String> = chats(id).into_iter().filter(|entry| !entry.archived).map(|entry| entry.id).collect();
     if ids.is_empty() {
         return;
@@ -227,6 +231,10 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
     }
     // Hand-offs, and the team brief (PRO-475).
     if let Some(answer) = super::handoffs::runtime_call(manager, operation, params) {
+        return answer;
+    }
+    // What reached it from GitHub and Linear, and what it posted there (PRO-480).
+    if let Some(answer) = super::channels::runtime_call(operation, params) {
         return answer;
     }
     if operation == "reconcile" {

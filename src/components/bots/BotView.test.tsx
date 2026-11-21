@@ -108,6 +108,17 @@ describe("a bot's view (PRO-468)", () => {
     expect(mocks.homeChat).not.toHaveBeenCalled();
   });
 
+  it("lists a chat a mention started under Chats with the bot, with where it came from (PRO-480)", () => {
+    const mentioned = session("mentioned", { bot: { id: "b1" }, title: "acme/app#7: Move CI", botChannel: { kind: "github", label: "acme/app#7", url: "https://github.com/acme/app/pull/7#c1" } });
+    mocks.sessions = { ...mocks.sessions, sessions: [home, other, mentioned] };
+    view();
+    const chats = within(screen.getByRole("region", { name: "Chats with Atlas" }));
+    const source = chats.getByTestId("bot-chat-source");
+    expect(source.textContent).toMatch(/^GitHub · acme\/app#7 · /);
+    expect(chats.getByText("acme/app#7: Move CI")).toBeTruthy();
+    expect(chats.getAllByTestId("bot-chat-source")).toHaveLength(1);
+  });
+
   it("selects a chat of the bot, and opens a session one started here", () => {
     const { rerender } = view();
     fireEvent.click(screen.getByText("Chat with Atlas"));
