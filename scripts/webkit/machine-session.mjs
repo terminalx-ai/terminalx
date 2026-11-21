@@ -102,7 +102,7 @@ const fixture = (paired) => `(() => {
         capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", "composer/2", "machine/1", "machine/2", "agent-commands/1",
           // Every feature in machineFeatures.ts, so the machine reads as up to date and nothing is hidden.
           "ports/1", "session/3", "session-status/1", "agent-pty/1", "composer/1", "composer/3", "composer/4", "workspace/1", "workspace/2",
-          "cleanup/1", "pipeline/1", "pipeline/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8"] };
+          "cleanup/1", "pipeline/1", "pipeline/2", "machine/3", "machine/4", "machine/6", "machine/7", "machine/8", "machine/9"] };
     }
     return view.state === "reconnecting" ? { state: "reconnecting", attempt: 1, reason: "network", retryInMs: 2000 } : { state: "connecting", attempt: 1 };
   };

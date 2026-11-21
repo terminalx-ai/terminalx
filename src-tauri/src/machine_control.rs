@@ -264,6 +264,7 @@ pub(crate) fn pairing_refusal(reason: &str, message: &str) -> ControlError {
         "pairing-paused" => "Too many wrong attempts: wait a minute, then try again.",
         "unreachable" => "Check that the machine is on and reachable on this network or Tailscale, or sign both in to use the relay.",
         "invalid-code" => "Copy the whole code from the machine (it starts with txm2.).",
+        "sign-in-required" => "Sign in to TerminalX on this Mac (the machine is reached through the relay), then pair again with a new code.",
         _ => "Try again with a new code.",
     };
     let mut error = ControlError::new(&format!("pairing_{}", reason.replace('-', "_")), message.to_string(), Some(recovery.into()));

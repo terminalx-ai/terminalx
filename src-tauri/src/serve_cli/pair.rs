@@ -3,6 +3,8 @@
 //! by code"; the design's screen 21.06, "On the server").
 //!
 //! It turns hosting on (`machines.allowOperating`) if the person agrees,
+//! asking the first time where the server should listen (PRO-487: "Relay
+//! only" unless they choose otherwise; `hosting` changes it later),
 //! makes a one-time code that works for five minutes, and waits. When a
 //! computer asks with the code, it names it, shows the pairing fingerprint the
 //! computer shows too, and asks "Allow? [y/N]". Only "y" approves; anything
@@ -115,7 +117,20 @@ fn pair(args: &[String]) -> Result<i32> {
                 return Ok(1);
             }
         }
-        turn_on(&canonical)?;
+        // The first time: where it listens. A server that hosted before
+        // the setting existed keeps what it had until `hosting` changes it.
+        let chosen = match crate::store::settings::load().machines.listen {
+            Some(_) => None,
+            None => match ask_where_to_listen(&canonical)? {
+                Asked::Chose(listen, allow_public) => Some((listen, allow_public)),
+                Asked::Interrupted => return Ok(130),
+                Asked::Nothing => {
+                    println!("Nothing changed.");
+                    return Ok(1);
+                }
+            },
+        };
+        turn_on(&canonical, chosen)?;
     }
     status = wait_until_listening(&runtime, status, phone)?;
     let machine_id = status.machine_id.clone().context("the runtime has no machine id")?;
@@ -205,12 +220,62 @@ fn user_label() -> String {
 
 /// `machines.allowOperating` on, through the settings store so every other
 /// key in the file, known or not, stays. `TERMINALX_HOME` names `data`.
-fn turn_on(data: &Path) -> Result<()> {
+/// `listen`: where it listens and whether public callers are answered, when
+/// the person was just asked.
+fn turn_on(data: &Path, listen: Option<(crate::listen::Listen, bool)>) -> Result<()> {
     debug_assert_eq!(crate::store::state_home_env().map(std::path::PathBuf::from).as_deref(), Some(data));
     let mut settings = crate::store::settings::load();
     settings.machines.allow_operating = true;
+    if let Some((listen, allow_public)) = listen {
+        settings.machines.listen = Some(listen);
+        settings.machines.allow_public = Some(allow_public);
+    }
     crate::store::settings::save(&settings).context("turn on \"Let other computers operate this server\" in settings.json")?;
     Ok(())
+}
+
+enum Asked {
+    Chose(crate::listen::Listen, bool),
+    Nothing,
+    Interrupted,
+}
+
+/// Ask where the server listens, saying what each choice exposes here.
+/// Enter is "Relay only"; "All interfaces" and public callers are each
+/// chosen in so many words.
+fn ask_where_to_listen(data: &Path) -> Result<Asked> {
+    use crate::listen::Listen;
+    println!();
+    print!("{}", super::hosting::question(&crate::listen::interfaces()));
+    let listen = loop {
+        match terminal::ask("Choice [1]: ", None)? {
+            terminal::Answer::Line(line) => match super::hosting::answer(&line) {
+                Some(listen) => break listen,
+                None => println!("Answer 1, 2, 3 or 4."),
+            },
+            terminal::Answer::Interrupted => return Ok(Asked::Interrupted),
+            _ => return Ok(Asked::Nothing),
+        }
+    };
+    if listen == Listen::Relay && !super::hosting::signed_in(data) {
+        println!("Relay only needs this server signed in to TerminalX, and it is not.");
+        println!("Run `terminalx-serve login`, then `terminalx-serve pair` again.");
+        return Ok(Asked::Nothing);
+    }
+    // Only a listener on every address is reachable from the internet by
+    // itself; for the others `hosting --allow-public` says it later.
+    let allow_public = if listen != Listen::All {
+        false
+    } else {
+        match terminal::ask("Also answer callers whose own address is public? [y/N] ", None)? {
+            terminal::Answer::Line(line) => allows(&line),
+            terminal::Answer::Interrupted => return Ok(Asked::Interrupted),
+            _ => return Ok(Asked::Nothing),
+        }
+    };
+    println!("Listening: {}. `terminalx-serve hosting --listen …` changes it.", listen.label());
+    println!();
+    Ok(Asked::Chose(listen, allow_public))
 }
 
 fn wait_until_listening(runtime: &Runtime, status: Status, phone: bool) -> Result<Status> {
@@ -223,12 +288,11 @@ fn wait_for_listener(mut status: Status, phone: bool, deadline: Instant, mut rea
     let relay_wait = Instant::now() + HOST_START_WAIT;
     loop {
         let direct = status.listening.is_some();
-        let ready = if phone {
-            status.hosting() && (status.relay.is_some()
-                || (direct && (status.relay_state != machine_wire::RelayState::Connecting || Instant::now() >= relay_wait)))
-        } else {
-            status.enabled && direct
-        };
+        // Reachable through the relay, or directly once the relay had its
+        // chance to register: a code made then carries its invite, so a
+        // computer on another network can use it too (PRO-487).
+        let reachable = status.relay.is_some() || (direct && (status.relay_state != machine_wire::RelayState::Connecting || Instant::now() >= relay_wait));
+        let ready = reachable && if phone { status.hosting() } else { status.enabled };
         if ready && status.machine_id.is_some() {
             return Ok(status);
         }
@@ -238,6 +302,13 @@ fn wait_for_listener(mut status: Status, phone: bool, deadline: Instant, mut rea
             }
             if status.enabled && status.host_key == machine_wire::HostKeyState::Needed {
                 bail!("the runtime's host key is not ready; if TerminalX opened this runtime, pair it from Settings → Machines in the window");
+            }
+            if status.listen.as_ref().is_some_and(|listen| listen.addresses.is_empty()) {
+                let relay = match status.relay_state {
+                    machine_wire::RelayState::SignedOut => "it is not signed in to TerminalX: run `terminalx-serve login`".to_string(),
+                    state => format!("its relay registration is {state:?}; see the runtime's log"),
+                };
+                bail!("this server opens no port (`terminalx-serve hosting` says where it listens), and it is not on the TerminalX relay: {relay}");
             }
             bail!("the runtime did not start listening for computers within {} seconds", LISTEN_WAIT.as_secs());
         }

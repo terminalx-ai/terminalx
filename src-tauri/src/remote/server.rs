@@ -1020,6 +1020,11 @@ impl WorkspaceRpc {
     fn describe_machine(&self, identity: &machine::Identity) -> Value {
         let mut described = machine::describe(identity);
         described["directEndpoints"] = json!(self.direct_endpoints());
+        // Where it listens and who it runs as (PRO-487), for its page.
+        if let Some((listen, runs_as)) = self.machine_access.get().and_then(|access| access.hosting_facts()) {
+            described["listen"] = listen;
+            described["runsAs"] = runs_as;
+        }
         described
     }
 
@@ -1668,6 +1673,17 @@ impl WorkspaceRpc {
             }
             return match self.machine_access.get() {
                 Some(access) => access.rotate_credential(&peer.device_id).await,
+                None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
+            };
+        }
+        // Where the machine listens (`machine/9`, PRO-487): written to its
+        // settings, which its host follows.
+        if method == "machine.setListen" {
+            if !self.is_machine() {
+                return Err(RpcError::new("method_not_found", "this runtime serves one workspace"));
+            }
+            return match self.machine_access.get() {
+                Some(access) => access.set_listen(params).await,
                 None => Err(RpcError::new("method_not_found", "this runtime does not host paired computers")),
             };
         }

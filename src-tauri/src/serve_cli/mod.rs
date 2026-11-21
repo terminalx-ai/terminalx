@@ -1,5 +1,5 @@
 //! `terminalx-serve` commands a person runs on a headless server (PRO-353):
-//! `service`, `pair`, `devices`, `projects`, `login`, `logout` and `update`. Each lives in
+//! `service`, `pair`, `hosting`, `devices`, `projects`, `login`, `logout` and `update`. Each lives in
 //! its own module; this one only dispatches, and holds what they share: the
 //! install layout, the default data directory and the key runtime releases
 //! are signed with.
@@ -32,6 +32,7 @@ pub mod control_client;
 pub mod devices;
 #[cfg(unix)]
 pub mod handover;
+pub mod hosting;
 pub mod login;
 pub mod pair;
 pub mod projects;
@@ -105,6 +106,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let code = match args.first().map(String::as_str)? {
         "service" => service::run(rest),
         "pair" => pair::run(rest),
+        "hosting" => hosting::run(rest),
         "devices" => devices::run(rest),
         #[cfg(unix)]
         "projects" => projects::run(rest),
@@ -124,6 +126,9 @@ Commands on a headless server:
                                      LaunchAgent on macOS)
   pair                               Let another computer operate this one:
                                      shows a one-time code and asks Allow? [y/N]
+  hosting [--listen relay|tailscale|lan|all]
+                                     Show or choose where it listens for them
+                                     (default: relay only, no port open)
   devices [revoke <id>]              List or remove the computers that may
                                      operate this one
   projects [add <folder>]            List the projects paired computers see, or

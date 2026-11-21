@@ -486,9 +486,29 @@ impl std::error::Error for ComputerRefused {}
 
 /// Each method may read the registry file, so the relay host calls them off
 /// its async tasks.
+/// What a connection through the relay proved and said of itself, for
+/// [`MachineRoutes::pair_computer`].
+pub struct RelayAsking {
+    pub relay_device_id: String,
+    pub token: String,
+    pub client_key_b64: String,
+    pub label: Option<String>,
+    pub platform: Option<String>,
+}
+
 pub trait MachineRoutes: Send + Sync + 'static {
-    /// Whether the relay device id is a paired computer's.
+    /// Whether the relay device id is a paired computer's, or the one a live
+    /// pairing code's invite was made for.
     fn is_computer(&self, relay_device_id: &str) -> bool;
+    /// A connection whose relay device is a live pairing code's (PRO-487):
+    /// ask the person, and wait for their answer. `Ok(None)`: not a pairing,
+    /// admit it as any connection. `Ok(Some(Ok(())))`: allowed, its record is
+    /// written, admit it. `Ok(Some(Err(reason)))`: refused, with the
+    /// `pairing_refused` reason. Dropped when the computer gives up.
+    fn pair_computer(self: Arc<Self>, asking: RelayAsking) -> futures_util::future::BoxFuture<'static, Result<Option<Result<(), &'static str>>>> {
+        let _ = asking;
+        Box::pin(async { Ok(None) })
+    }
     /// The paired computer with this relay device id, if `token` is its: its
     /// id and its tracked connection, which `cancel` closes on revocation.
     /// `client_key_b64` is the connection's E2EE client key: a computer is
@@ -1334,6 +1354,35 @@ impl RelayHost {
             bail!("E2EE authentication was not bound to the handshake");
         }
         let token = auth["deviceToken"].as_str().ok_or_else(|| anyhow!("E2EE authentication lacks a device token"))?;
+        // A computer with a pairing code's invite (PRO-487): nothing is
+        // granted before the person allows it, as on the direct route.
+        if let Some(routes) = self.routes() {
+            let pairing = routes.pair_computer(RelayAsking {
+                relay_device_id: connection.relay_device_id.clone(),
+                token: token.to_string(),
+                client_key_b64: session.client_public_key_b64.clone(),
+                label: auth["label"].as_str().map(str::to_string),
+                platform: auth["platform"].as_str().map(str::to_string),
+            });
+            let answer = tokio::select! {
+                answer = pairing => Some(answer),
+                // Anything it sends before the answer, or its connection
+                // ending, is it giving up.
+                _ = async { while let Some(Ok(Message::Ping(_) | Message::Pong(_))) = socket.next().await {} } => None,
+            };
+            match answer {
+                None => bail!("the asking computer closed before an answer"),
+                Some(Err(error)) => return Err(error),
+                Some(Ok(Some(Err(reason)))) => {
+                    let refused = json!({ "type": "pairing_refused", "v": 1, "reason": reason });
+                    let _ = send_sealed(&mut socket, &mut session, &refused).await;
+                    let frame = (reason == crate::machine_wire::REFUSED_CODE_INACTIVE).then(|| tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 4401.into(), reason: "credential refused".into() });
+                    let _ = socket.close(frame).await;
+                    bail!("pairing refused ({reason})");
+                }
+                Some(Ok(Some(Ok(())) | None)) => {}
+            }
+        }
         // Checked and registered under one lock, so a revocation either
         // refuses this connection or finds it and closes it.
         let (cancel_tx, mut cancel) = mpsc::unbounded_channel();

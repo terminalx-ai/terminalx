@@ -35,8 +35,9 @@ extend automations or orchestration runs instead.
 | Role ("soul"): standing instructions | `bots/<id>/ROLE.md`, started from a role template |
 | Memory | `bots/<id>/MEMORY.md` and `bots/<id>/memory/` (the bot's own notes), `personal/` and `orgs/<org>/` beside them (each place's), `src-tauri/src/bots/memory.rs` |
 | History of role and memory | `bot-changes/<id>/` outside the home folder: `changes.jsonl`, `known.json`, `texts/` (`src-tauri/src/bots/changes.rs`) |
+| Work items and "Needs you" questions | `bot-items/<id>/items.json`, beside the home folder rather than in it (`src-tauri/src/bots/items.rs`; TypeScript `src/types/botItems.ts`, `src/lib/botItems.ts`). That is no wall: a Full access bot can write the file with its own file tools, the direct-edit class PRO-489 deals with |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list` |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`, and `terminalx bots memory add / forget / list`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done` |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
@@ -189,9 +190,9 @@ issue.
 | PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | In review |
 | PRO-478 | Settings: runs on, access, works in, channels, who can ask | 23.07 | In review |
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
-| PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
+| PRO-469 | Work items and "Needs you" questions | 23.01, 23.02, 23.09 | In review |
 | PRO-470 | Role and memory, with history and undo | 23.06 | Merged |
-| PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | In review |
+| PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Merged |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |
 | PRO-473 | Week calendar of duties | 23.13 | Backlog |
 | PRO-474 | Pause and Pause all that say what they stopped | 23.12 | Backlog |

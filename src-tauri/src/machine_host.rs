@@ -7,6 +7,10 @@
 //! Nothing listens and nothing is registered until `machines.allowOperating`
 //! is on. While it is on the runtime is a standing service, so a computer can
 //! connect with the window closed. Data privacy mode turns it off.
+//!
+//! Where it listens is `machines.listen` (PRO-487, `crate::listen`): one
+//! listener per address the choice binds, none for "Relay only". A caller
+//! from a public address is refused unless `machines.allowPublic` says so.
 
 pub(crate) mod activity;
 pub(crate) mod direct;
@@ -60,6 +64,14 @@ const SETTINGS_EVERY: u32 = 15;
 /// window's call allows a little more (`Desktop::relay_control`).
 const RELAY_CONTROL_WAIT: Duration = Duration::from_secs(15);
 
+/// How long a pairing code waits for listeners the supervisor is opening.
+const LISTENER_WAIT: Duration = Duration::from_secs(3);
+/// How long a pairing code's relay invite may take to come back.
+const CODE_INVITE_WAIT: Duration = Duration::from_secs(8);
+
+/// Where the host keeps when it last refused a public caller, in [`DIR`].
+const PUBLIC_CALLERS_FILE: &str = "public-callers.json";
+
 /// Held while a computer is connected and `pairing.keepAwake` is on.
 pub const COMPUTER_CONNECTED: crate::power::Reason = crate::power::Reason::new("A computer is operating this Mac through TerminalX");
 
@@ -77,6 +89,12 @@ fn now_ms() -> i64 {
 }
 
 /// Make `path` a directory only this user can enter, or check that it is one.
+/// When a public caller was last refused, as an earlier run kept it.
+fn read_refused_public(data_dir: &Path) -> Option<i64> {
+    let bytes = std::fs::read(data_dir.join(DIR).join(PUBLIC_CALLERS_FILE)).ok()?;
+    serde_json::from_slice::<Value>(&bytes).ok()?["refusedAt"].as_i64()
+}
+
 pub(crate) fn private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     #[cfg(unix)]
@@ -137,6 +155,17 @@ struct Tracked {
     id: u64,
     cancel: mpsc::UnboundedSender<()>,
     route: ComputerRoute,
+    /// How it came in on a direct route: it closes with its listener, and
+    /// when the listen setting no longer answers its address.
+    via: Option<Via>,
+}
+
+/// A direct connection: the listener it came in on, and the address it
+/// came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Via {
+    pub listener: std::net::SocketAddr,
+    pub peer: std::net::SocketAddr,
 }
 
 #[derive(Default)]
@@ -149,7 +178,15 @@ struct State {
     keep_awake: bool,
     keypair: Option<HostKeypair>,
     key_error: Option<String>,
-    listening: Option<direct::Listening>,
+    /// One listener per address the listen setting binds (PRO-487).
+    listeners: Vec<direct::Listening>,
+    /// `machines.listen` and `machines.allowPublic`, as last read. `None`
+    /// until the first read: every interface, public callers refused.
+    plan: Option<crate::listen::Plan>,
+    /// This computer's addresses, as last read, for the one-time question.
+    interfaces: Vec<std::net::Ipv4Addr>,
+    /// When a public caller was last refused.
+    refused_public_at: Option<i64>,
     bind_error: Option<String>,
     /// The bind error is only the port being in use, which frees up.
     port_busy: bool,
@@ -164,8 +201,8 @@ struct State {
     /// name), so the activity log notes one added or removed meanwhile.
     projects_seen: Option<HashMap<String, String>>,
     /// Phones passed to the window from the direct listener. Each holds the
-    /// port, so they close with the listener.
-    phones: HashMap<u64, mpsc::UnboundedSender<()>>,
+    /// port, so they close with the listener it came in on.
+    phones: HashMap<u64, (Option<Via>, mpsc::UnboundedSender<()>)>,
     awake: Option<crate::power::Assertion>,
     last: Option<Status>,
     /// The live code, the computer waiting for Allow, the attempt limit.
@@ -185,6 +222,56 @@ struct State {
 impl State {
     fn hosting(&self) -> bool {
         self.enabled || self.desktop_phones
+    }
+
+    /// The addresses bound now.
+    fn bound(&self) -> Vec<std::net::SocketAddr> {
+        self.listeners.iter().map(|listening| listening.address).collect()
+    }
+
+    /// The direct port, while something listens.
+    fn port(&self) -> Option<u16> {
+        self.listeners.first().map(|listening| listening.address.port())
+    }
+
+    fn plan(&self) -> crate::listen::Plan {
+        self.plan.unwrap_or(crate::listen::Plan { choice: crate::listen::Listen::All, chosen: false, allow_public: false, public_unanswered: true })
+    }
+
+    /// Close the listener on `address` and every connection that came in on it.
+    fn close_listener(&mut self, address: std::net::SocketAddr) {
+        let Some(at) = self.listeners.iter().position(|listening| listening.address == address) else { return };
+        self.listeners.remove(at).stop();
+        for tracked in self.connections.values().flatten().filter(|tracked| tracked.via.is_some_and(|via| via.listener == address)) {
+            let _ = tracked.cancel.send(());
+        }
+        for (via, cancel) in self.phones.values() {
+            if via.is_some_and(|via| via.listener == address) {
+                let _ = cancel.send(());
+            }
+        }
+    }
+
+    /// Whether a direct connection may be let in, or stay: its listener is
+    /// still open, and the plan answers its address.
+    fn keeps(&self, via: Option<Via>) -> bool {
+        via.is_none_or(|via| self.listeners.iter().any(|listening| listening.address == via.listener) && crate::listen::caller_allowed(via.peer.ip(), self.plan().allow_public))
+    }
+
+    /// Close every direct connection the plan no longer answers: public
+    /// callers once they are not allowed. Run whenever the plan changes, so
+    /// a connection let in under the old plan does not outlive it.
+    fn close_refused_callers(&mut self) {
+        let allow_public = self.plan().allow_public;
+        let refused = |via: &Option<Via>| via.is_some_and(|via| !crate::listen::caller_allowed(via.peer.ip(), allow_public));
+        for tracked in self.connections.values().flatten().filter(|tracked| refused(&tracked.via)) {
+            let _ = tracked.cancel.send(());
+        }
+        for (via, cancel) in self.phones.values() {
+            if refused(via) {
+                let _ = cancel.send(());
+            }
+        }
     }
 }
 
@@ -291,6 +378,14 @@ pub struct MachineHost {
     /// when a `--relay-link` registers it.
     account_relay_allowed: bool,
     account_relay: Mutex<Option<AccountRelay>>,
+    /// Refused public callers, for one log line an hour (PRO-487).
+    refusals: crate::listen::Refusals,
+    /// Relay devices of pairing-code invites that ended unused and that the
+    /// relay has not yet confirmed revoking, each with whether a
+    /// `device-revoke` is in flight. Kept until the relay answers
+    /// `device-revoked`, so an invite is not left usable because the relay
+    /// was down when its code ended.
+    unrevoked: Arc<Mutex<HashMap<String, bool>>>,
     /// Phones it serves itself while no window takes them (PRO-359). Only a
     /// runtime with an owner lifetime serves them.
     #[cfg(unix)]
@@ -336,6 +431,10 @@ impl MachineHost {
         let sink = parts.sink.clone();
         #[cfg(unix)]
         let sessions = parts.sessions.clone();
+        let (user, root) = crate::listen::current_user();
+        if root {
+            log::warn!("the runtime runs as root ({user}): every paired computer and every agent on this machine acts as root");
+        }
         let host = Self::new(
             data_dir.to_path_buf(),
             key::KeyStore::for_runtime(data_dir),
@@ -410,10 +509,10 @@ impl MachineHost {
             keys,
             registry: registry::Registry::in_data_dir(&data_dir),
             activity: activity::Log::in_dir(&data_dir.join(DIR)),
-            data_dir,
             sink,
             rpc: Mutex::new(rpc),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State { refused_public_at: read_refused_public(&data_dir), ..State::default() }),
+            data_dir,
             lifetime,
             port,
             wake: Notify::new(),
@@ -424,6 +523,8 @@ impl MachineHost {
             phones: OnceLock::new(),
             account_relay_allowed,
             account_relay: Mutex::new(None),
+            refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         })
     }
 
@@ -450,9 +551,78 @@ impl MachineHost {
     }
 
     /// The direct listener's addresses (`machine/2` `directEndpoints`).
+    /// Only addresses a listener is bound to (PRO-487).
     fn direct_endpoints(&self) -> Vec<String> {
-        let port = self.state.lock().unwrap().listening.as_ref().map(|listening| listening.address.port());
-        port.map(|port| crate::direct_endpoints::machine_endpoints(port, wire::MACHINE_PATH)).unwrap_or_default()
+        let bound = self.state.lock().unwrap().bound();
+        crate::direct_endpoints::bound_endpoints(&bound, wire::MACHINE_PATH)
+    }
+
+    /// Whether a connection from `peer` is answered: not one from a public
+    /// address, unless the person allowed public callers. A refusal is
+    /// remembered for the status, and the first each hour is logged and kept.
+    pub(crate) fn answers(&self, peer: std::net::SocketAddr) -> bool {
+        let allow_public = self.state.lock().unwrap().plan().allow_public;
+        if crate::listen::caller_allowed(peer.ip(), allow_public) {
+            return true;
+        }
+        let now = now_ms();
+        self.state.lock().unwrap().refused_public_at = Some(now);
+        if let Some(earlier) = self.refusals.note(Instant::now()) {
+            let more = if earlier > 0 { format!(" ({earlier} more since this was last logged)") } else { String::new() };
+            log::warn!(
+                "machine host: refused a connection from the public address {}{more}. Public callers are refused; `terminalx-serve hosting --listen all --allow-public` answers them.",
+                peer.ip()
+            );
+            let path = self.data_dir.join(DIR).join(PUBLIC_CALLERS_FILE);
+            Self::off_task(move || {
+                if let Err(error) = private_dir(path.parent().expect("in the host's directory")).and_then(|()| Ok(std::fs::write(&path, json!({ "refusedAt": now }).to_string())?)) {
+                    log::debug!("machine host: keep when a public caller was refused: {error:#}");
+                }
+            });
+            self.wake.notify_one();
+        }
+        false
+    }
+
+    /// Choose where it listens and whether public callers are answered
+    /// (`machine.setListen`, the desktop's Settings → Machines). "Relay
+    /// only" is refused while this machine is not on the relay: nothing
+    /// could reach it again. Blocking: writes `settings.json`.
+    pub fn set_listen(&self, listen: crate::listen::Listen, allow_public: bool) -> Result<wire::ListenStatus, ControlError> {
+        if listen == crate::listen::Listen::Relay && !self.relay().is_some_and(|relay| relay.is_registered()) {
+            return Err(ControlError::new(
+                "not_reachable",
+                "This machine is not connected to the TerminalX relay, so with no port open nothing could reach it.",
+                Some("Sign in to TerminalX on it first (`terminalx-serve login` on a server).".into()),
+            ));
+        }
+        crate::listen::choose(listen, allow_public).map_err(ControlError::internal)?;
+        log::info!("machine host: listens on \"{}\" now; public callers are {}", listen.word(), if allow_public { "answered" } else { "refused" });
+        let status = {
+            let mut state = self.state.lock().unwrap();
+            state.plan = Some(crate::listen::Plan { choice: listen, chosen: true, allow_public, public_unanswered: false });
+            crate::listen::remember(state.plan());
+            state.close_refused_callers();
+            let mut status = self.listen_status(&state);
+            // As it will be once the listeners follow, a moment from now.
+            status.addresses = state.plan().binds(&state.interfaces).into_iter().map(|ip| std::net::SocketAddr::from((ip, self.port)).to_string()).collect();
+            status
+        };
+        self.settings_changed.notify_one();
+        Ok(status)
+    }
+
+    /// Where it listens and who it answers, as the status says it.
+    fn listen_status(&self, state: &State) -> wire::ListenStatus {
+        let plan = state.plan();
+        wire::ListenStatus {
+            choice: plan.choice,
+            chosen: plan.chosen,
+            addresses: state.bound().iter().map(ToString::to_string).collect(),
+            allow_public: plan.allow_public,
+            ask_public: state.hosting() && plan.asks_public(&state.interfaces, state.refused_public_at.is_some()),
+            refused_public_at: state.refused_public_at,
+        }
     }
 
     pub fn registry(&self) -> &registry::Registry {
@@ -581,7 +751,7 @@ impl MachineHost {
             enabled: state.enabled,
             host_key,
             machine_id: state.keypair.as_ref().map(HostKeypair::host_id),
-            listening: state.listening.as_ref().map(|listening| listening.address.to_string()),
+            listening: state.listeners.first().map(|listening| listening.address.to_string()),
             takes_port,
             phone_route,
             computers,
@@ -592,6 +762,9 @@ impl MachineHost {
             phones: wire::PhoneStatus { hosting: state.desktop_phones, window_open: phone_route || self.window_available(), ..self.phone_status() },
             relay_state,
             relay,
+            listen: Some(self.listen_status(state)),
+            // `sudo` is asked once, and only by a runtime that hosts.
+            runs_as: Some(crate::listen::runs_as_now(state.hosting())),
         }
     }
 
@@ -644,7 +817,7 @@ impl MachineHost {
         let phones = self.phones.get()?.clone();
         let stopped = phones.stopped();
         let epoch = *stopped.borrow();
-        Some((phones, state.keypair.clone()?, state.listening.as_ref()?.address.port(), stopped, epoch))
+        Some((phones, state.keypair.clone()?, state.port()?, stopped, epoch))
     }
 
     /// Tell the window and stdout when the status changed.
@@ -699,7 +872,13 @@ impl MachineHost {
             if let Some(settings) = &settings {
                 state.allowed = settings.machines.allow_operating;
                 state.keep_awake = settings.pairing.keep_awake;
+                state.plan = Some(crate::listen::Plan::of(&settings.machines));
+                crate::listen::remember(state.plan());
+                state.close_refused_callers();
             }
+            // Addresses come and go (Tailscale up, a new network): the
+            // listeners follow them on every pass.
+            state.interfaces = crate::listen::interfaces();
             let was = (state.hosting(), state.enabled);
             let network = !crate::data_privacy::enabled();
             state.enabled = state.allowed && network;
@@ -714,6 +893,7 @@ impl MachineHost {
             state.pairing.tick(now_ms());
             (was.0, was.1, state.hosting(), state.enabled)
         };
+        self.retire_code_invites();
         if was_hosting && !hosting {
             self.stop_serving();
         } else if was_enabled && !enabled {
@@ -957,20 +1137,23 @@ impl MachineHost {
     /// Off: close the listener and every computer's connection, keep the records.
     fn stop_serving(&self) {
         let mut state = self.state.lock().unwrap();
-        if let Some(listening) = state.listening.take() {
+        for listening in state.listeners.drain(..) {
             listening.stop();
         }
         state.bind_error = None;
         Self::stop_computers(&mut state, self.activity.clone());
         // A connection on the port keeps the window from binding it again.
-        for (_, cancel) in state.phones.drain() {
+        for (_, (_, cancel)) in state.phones.drain() {
             let _ = cancel.send(());
         }
-        #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.invalidate(); }
         drop(state);
+        // After the host's lock, never under it: the phones take their own
+        // lock and then this host's (`phone_route`), so holding both here
+        // in the other order deadlocks with a revocation under way. Nothing
+        // is admitted meanwhile: `track_phone` needs hosting, now off.
         #[cfg(unix)]
         if let Some(phones) = self.phones.get().cloned() {
+            phones.invalidate();
             Self::off_task(move || phones.stop());
         }
         log::info!("machine host: off; listener and connections closed");
@@ -1007,19 +1190,131 @@ impl MachineHost {
                 }
             }
         }
-        if self.state.lock().unwrap().listening.is_some() {
-            return Ok(());
-        }
         let Some(rpc) = self.rpc()? else { return Ok(()) };
         if built {
             rpc.set_machine_access(Arc::new(HostAccess::new(&self)));
         }
-        let listening = direct::listen(self.clone(), rpc, self.port)?;
-        log::info!("machine host: listening on {}", listening.address);
-        let mut state = self.state.lock().unwrap();
-        state.bind_error = None;
-        state.listening = Some(listening);
-        Ok(())
+        self.listen_where_chosen(rpc)
+    }
+
+    /// Bring the listeners in line with the listen setting and this
+    /// computer's addresses now: close the ones no longer wanted, with the
+    /// connections that came in on them, and open the missing ones. "Relay
+    /// only" wants none.
+    fn listen_where_chosen(self: &Arc<Self>, rpc: Arc<WorkspaceRpc>) -> Result<()> {
+        let missing: Vec<std::net::Ipv4Addr> = {
+            let mut state = self.state.lock().unwrap();
+            let wanted = state.plan().binds(&state.interfaces);
+            let unwanted: Vec<_> = state.bound().into_iter().filter(|address| !matches!(address.ip(), std::net::IpAddr::V4(ip) if wanted.contains(&ip))).collect();
+            for address in unwanted {
+                state.close_listener(address);
+                log::info!("machine host: no longer listening on {address}");
+            }
+            let bound = state.bound();
+            if wanted.is_empty() {
+                state.bind_error = None;
+            }
+            wanted.into_iter().filter(|ip| !bound.iter().any(|address| address.ip() == std::net::IpAddr::V4(*ip))).collect()
+        };
+        let mut failed = None;
+        for ip in missing {
+            match direct::listen(self.clone(), rpc.clone(), std::net::SocketAddr::from((ip, self.port))) {
+                Ok(listening) => {
+                    log::info!("machine host: listening on {}", listening.address);
+                    self.state.lock().unwrap().listeners.push(listening);
+                }
+                // The address left between reading the interfaces and
+                // binding it: the next pass no longer wants it.
+                Err(error) if error.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::AddrNotAvailable)) => {
+                    log::debug!("machine host: {ip} is not this computer's address any more");
+                }
+                Err(error) => failed = Some(error),
+            }
+        }
+        match failed {
+            Some(error) => Err(error),
+            None => {
+                self.state.lock().unwrap().bind_error = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// The addresses the listeners answer on, waiting a moment for the
+    /// supervisor to open them when the setting asks for some and none is up
+    /// yet: a code asked for right after the switch, the key or the listen
+    /// choice arrived names the addresses about to listen, instead of being
+    /// refused as unreachable. Whether anything listens, and its addresses
+    /// (none on a computer with no network address but loopback). Blocking,
+    /// for at most [`LISTENER_WAIT`].
+    fn endpoints_once_listening(&self) -> (bool, Vec<String>) {
+        let deadline = std::time::Instant::now() + LISTENER_WAIT;
+        loop {
+            {
+                let state = self.state.lock().unwrap();
+                let bound = state.bound();
+                // Nothing will listen: "Relay only", no address of the chosen kind, or the port could not be bound.
+                let expected = state.plan.is_none() || !state.plan().binds(&state.interfaces).is_empty();
+                if !bound.is_empty() || !state.enabled || !expected || state.bind_error.is_some() || std::time::Instant::now() >= deadline {
+                    return (!bound.is_empty(), crate::direct_endpoints::bound_endpoints(&bound, wire::MACHINE_PATH));
+                }
+            }
+            self.wake.notify_one();
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// End the relay invites of pairing codes that ended unused there, so a
+    /// leaked code cannot be used through the relay later.
+    ///
+    /// A device stays queued until the relay confirms with `device-revoked`:
+    /// while the relay is not registered, or a request fails or times out,
+    /// the next pass sends it again (revoking is idempotent). Its open relay
+    /// connections are closed at once either way.
+    fn retire_code_invites(&self) {
+        let retired = self.state.lock().unwrap().pairing.take_retired();
+        let relay = self.relay();
+        {
+            let mut unrevoked = self.unrevoked.lock().unwrap();
+            for device in retired {
+                if let Some(relay) = &relay {
+                    relay.close_device_connections(&device);
+                }
+                unrevoked.entry(device).or_insert(false);
+            }
+            if unrevoked.is_empty() {
+                return;
+            }
+        }
+        let Some(relay) = relay.filter(|relay| relay.is_registered()) else { return };
+        let sending: Vec<String> = {
+            let mut unrevoked = self.unrevoked.lock().unwrap();
+            unrevoked.iter_mut().filter(|(_, in_flight)| !**in_flight).map(|(device, in_flight)| {
+                *in_flight = true;
+                device.clone()
+            }).collect()
+        };
+        for device in sending {
+            let (relay, unrevoked) = (relay.clone(), self.unrevoked.clone());
+            Self::off_task(move || {
+                let req_id = uuid::Uuid::new_v4().simple().to_string();
+                let confirmed = relay
+                    .forward_control(json!({ "type": "device-revoke", "v": 1, "reqId": req_id, "relayDeviceId": device }))
+                    .ok()
+                    .and_then(|reply| reply.recv_timeout(RELAY_CONTROL_WAIT).ok())
+                    .and_then(Result::ok)
+                    .is_some_and(|reply| reply["type"] == "device-revoked");
+                let mut unrevoked = unrevoked.lock().unwrap();
+                if confirmed {
+                    unrevoked.remove(&device);
+                } else {
+                    log::debug!("machine host: the relay has not confirmed ending an unused pairing invite; trying again");
+                    if let Some(in_flight) = unrevoked.get_mut(&device) {
+                        *in_flight = false;
+                    }
+                }
+            });
+        }
     }
 
     /// The one workspace RPC, built here when the relay host does not.
@@ -1077,16 +1372,21 @@ impl MachineHost {
 
     /// Note a computer's connection by `route`, unless the switch is off;
     /// the returned id forgets it again. Whether it is its first.
-    fn track(&self, computer: &registry::PairedComputer, route: ComputerRoute, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
+    fn track(&self, computer: &registry::PairedComputer, route: ComputerRoute, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Result<(u64, bool)> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let first = {
             let mut state = self.state.lock().unwrap();
             if !state.enabled {
                 bail!("other computers may not operate this machine now");
             }
+            // Accepted under an earlier plan, or on a listener closed while
+            // it was handshaking: not let in under this one.
+            if !state.keeps(via) {
+                bail!("the machine no longer listens where this computer connected, or no longer answers its address");
+            }
             let connections = state.connections.entry(computer.id.clone()).or_default();
             let first = connections.is_empty();
-            connections.push(Tracked { id, cancel, route });
+            connections.push(Tracked { id, cancel, route, via });
             state.labels.insert(computer.id.clone(), computer.label.clone());
             first
         };
@@ -1095,7 +1395,8 @@ impl MachineHost {
         Ok((id, first))
     }
 
-    /// Let a computer in with `token` by `route`:
+    /// Let a computer in with `token` by `route` (`via` the listener it
+    /// came in on, on a direct route):
     /// `Ok(Err(reason))` refuses it with that `pairing_refused` reason.
     ///
     /// A credential unused for 90 days expires here unless it is connected
@@ -1106,7 +1407,7 @@ impl MachineHost {
     /// racing this admission is either seen here or finds the connection and
     /// closes it. Admission settles a rotated token (`Registry::admitted`).
     /// Blocking: reads and writes the registry.
-    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
+    pub(crate) fn admit(&self, computer: &registry::PairedComputer, token: &str, route: ComputerRoute, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Result<Result<u64, &'static str>> {
         let now = now_ms();
         // One connected now is in use, however long ago it was let in: a
         // second connection (the direct probe beside the relay, a reconnect
@@ -1121,7 +1422,7 @@ impl MachineHost {
             log::info!("machine host: computer {} is disconnected until the person lets it back; refused", computer.id);
             return Ok(Err(wire::REFUSED_DISCONNECTED));
         }
-        let (tracked, first) = self.track(computer, route, cancel)?;
+        let (tracked, first) = self.track(computer, route, via, cancel)?;
         let current = match self.registry.list() {
             Ok(computers) => computers.into_iter().find(|known| known.id == computer.id),
             Err(error) => {
@@ -1187,11 +1488,11 @@ impl MachineHost {
 
     /// Note a phone passed to the window, unless the host is off.
     #[cfg(unix)]
-    pub(crate) fn track_phone(&self, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
+    pub(crate) fn track_phone(&self, via: Option<Via>, cancel: mpsc::UnboundedSender<()>) -> Option<u64> {
         let id = self.next_connection.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
-        state.hosting().then(|| {
-            state.phones.insert(id, cancel);
+        (state.hosting() && state.keeps(via)).then(|| {
+            state.phones.insert(id, (via, cancel));
             id
         })
     }
@@ -1207,11 +1508,14 @@ impl MachineHost {
             return Err(ControlError::new("busy", "Another window takes this machine's phones.", None::<String>));
         }
         state.phone_route = Some(route);
-        #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.invalidate(); }
         drop(state);
+        // Not under the host's lock: see `stop_serving`. What began on the
+        // old route is fenced by the new epoch either way.
         #[cfg(unix)]
-        if let Some(phones) = self.phones.get() { phones.stop(); }
+        if let Some(phones) = self.phones.get() {
+            phones.invalidate();
+            phones.stop();
+        }
         Ok(())
     }
 
@@ -1383,10 +1687,12 @@ impl MachineHost {
             phones: OnceLock::new(),
             account_relay_allowed: false,
             account_relay: Mutex::new(None),
+            refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
-        let listening = direct::listen(host.clone(), rpc, 0)?;
-        host.state.lock().unwrap().listening = Some(listening);
+        let listening = direct::listen_everywhere(host.clone(), rpc, 0)?;
+        host.state.lock().unwrap().listeners.push(listening);
         Ok(host)
     }
 
@@ -1412,6 +1718,8 @@ impl MachineHost {
             phones: OnceLock::new(),
             account_relay_allowed: false,
             account_relay: Mutex::new(None),
+            refusals: crate::listen::Refusals::default(),
+            unrevoked: Arc::default(),
         });
         rpc.set_machine_access(Arc::new(HostAccess::new(&host)));
         host
@@ -1419,7 +1727,7 @@ impl MachineHost {
 
     #[cfg(test)]
     pub(crate) fn port_for_test(&self) -> u16 {
-        self.state.lock().unwrap().listening.as_ref().expect("listening").address.port()
+        self.state.lock().unwrap().port().expect("listening")
     }
 
     #[cfg(test)]
@@ -1432,38 +1740,118 @@ impl MachineHost {
         self.stop_serving();
     }
 
+    /// Listen as `plan` asks on a computer with `interfaces`, as a
+    /// reconcile pass does after reading the settings.
+    #[cfg(test)]
+    pub(crate) fn listen_for_test(self: &Arc<Self>, plan: crate::listen::Plan, interfaces: Vec<std::net::Ipv4Addr>) -> Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.plan = Some(plan);
+            state.interfaces = interfaces;
+            state.close_refused_callers();
+        }
+        let rpc = self.rpc()?.context("the test host has its rpc")?;
+        self.listen_where_chosen(rpc)
+    }
+
+    /// A live code whose relay invite is for `relay_device_id`, as
+    /// `create_code` makes on a machine registered with the relay: its token.
+    #[cfg(test)]
+    pub(crate) fn code_with_relay_for_test(&self, relay_device_id: &str) -> String {
+        self.state.lock().unwrap().pairing.create(now_ms(), None, Some((relay_device_id.to_string(), i64::MAX))).expect("pairing is not paused").0
+    }
+
     /// A new pairing code (docs/MACHINES.md, "As built (PRO-342)"). The
     /// code is answered to the caller only: never logged, never in the status.
     /// `grant_request_id`: the account grant it answers (PRO-349); the
     /// computer still waits for Allow with the fingerprint, as for any code.
     pub fn create_code(&self, grant_request_id: Option<String>) -> Result<wire::CreatedCode, ControlError> {
-        let (public_key_b64, machine_id, port) = {
+        let (public_key_b64, machine_id) = {
             let state = self.state.lock().unwrap();
             let not_enabled = |message: &str| ControlError::new("not_enabled", message, Some("Turn on \"Let other computers operate this Mac\".".into()));
             if !state.enabled {
                 return Err(not_enabled("Other computers may not operate this machine now."));
             }
             let keypair = state.keypair.as_ref().ok_or_else(|| not_enabled("The machine's host key is not ready yet."))?;
-            let listening = state.listening.as_ref().ok_or_else(|| not_enabled("The machine is not listening for computers yet."))?;
-            (keypair.public_key_b64(), keypair.host_id(), listening.address.port())
+            (keypair.public_key_b64(), keypair.host_id())
         };
         // Read before the code exists, so it is not shortened by slow commands.
         let machine = self.identity(&machine_id);
-        let endpoints = crate::direct_endpoints::machine_endpoints(port, wire::MACHINE_PATH);
+        // Only addresses a listener answers on: none under "Relay only".
+        let (listening, endpoints) = self.endpoints_once_listening();
+        // The way in with no listener open, or none the computer can reach
+        // (PRO-487): an invite for a fresh relay device.
+        let relay = self.code_invite(&machine_id);
+        if !listening && relay.is_none() {
+            return Err(ControlError::new(
+                "not_reachable",
+                "This machine opens no port and is not connected to the TerminalX relay, so no computer could use a code.",
+                Some("Sign in to TerminalX on it (`terminalx-serve login` on a server), or choose where it listens (`terminalx-serve hosting --listen lan`).".into()),
+            ));
+        }
+        let invite = relay.as_ref().map(|relay| (relay.relay_device_id.clone(), relay.invite_expires_at));
         let (token, expires_at) = {
             let mut state = self.state.lock().unwrap();
-            match state.pairing.create(now_ms(), grant_request_id) {
+            match state.pairing.create(now_ms(), grant_request_id, invite) {
                 Ok(created) => created,
                 Err(until) => {
+                    drop(state);
+                    if let (Some(invite), Some(host)) = (&relay, self.relay()) {
+                        host.revoke_device(&invite.relay_device_id);
+                    }
                     let mut paused = ControlError::new("pairing_paused", "Too many wrong pairing attempts. Try again in a minute.", None::<String>);
                     paused.details = Some(json!({ "pausedUntil": until }));
                     return Err(paused);
                 }
             }
         };
-        let code = wire::MachineCode::new(token, public_key_b64, machine, endpoints, expires_at).encode().map_err(ControlError::internal)?;
+        // The code it replaced: its invite ends now, not on the next pass.
+        self.retire_code_invites();
+        let mut code = wire::MachineCode::new(token, public_key_b64, machine, endpoints, expires_at);
+        code.relay = relay;
+        let code = code.encode().map_err(ControlError::internal)?;
         self.wake.notify_one();
         Ok(wire::CreatedCode { code, expires_at })
+    }
+
+    /// The relay half of a new pairing code: a single-use invite for a fresh
+    /// relay device, from the live registration. `None` while this machine
+    /// is not registered with the relay, or the relay does not answer: the
+    /// code then names its direct endpoints only. Blocking, for up to
+    /// [`CODE_INVITE_WAIT`].
+    fn code_invite(&self, host_id: &str) -> Option<wire::MachineRelay> {
+        let relay = self.relay()?;
+        let registration = relay.registration().filter(|registration| registration.relay_host_id == host_id)?;
+        let relay_device_id = format!("computer-{}", uuid::Uuid::new_v4().simple());
+        let req_id = uuid::Uuid::new_v4().to_string();
+        let invited = (|| -> Result<(String, i64)> {
+            let reply = relay
+                .forward_control(json!({ "type": "invite-create", "reqId": req_id, "relayDeviceId": relay_device_id }))?
+                .recv_timeout(CODE_INVITE_WAIT)
+                .context("the relay did not answer")??;
+            anyhow::ensure!(relay.registration().as_ref() == Some(&registration), "the relay registration changed meanwhile");
+            anyhow::ensure!(reply["type"] == "invite-created" && reply["reqId"] == req_id, "the relay refused");
+            let token = reply["inviteToken"].as_str().filter(|token| crate::remote::host::valid_base64url_32(token)).context("the relay sent an invalid invite")?;
+            let expires_at = reply["expiresAt"].as_i64().filter(|expiry| *expiry > now_ms()).context("the relay sent an expired invite")?;
+            Ok((token.to_string(), expires_at))
+        })();
+        match invited {
+            Ok((invite_token, invite_expires_at)) => Some(wire::MachineRelay {
+                director_url: registration.director_url,
+                cell_url: registration.cell_url,
+                assignment_epoch: registration.assignment_epoch,
+                relay_host_id: registration.relay_host_id,
+                relay_device_id,
+                invite_token,
+                invite_expires_at,
+            }),
+            Err(error) => {
+                log::warn!("machine host: no relay invite for the pairing code: {error:#}");
+                // It may have been made after all: end it.
+                relay.revoke_device(&relay_device_id);
+                None
+            }
+        }
     }
 
     /// What `machine.describe` says of this machine.
@@ -1491,6 +1879,8 @@ impl MachineHost {
         let existing = self.registry.list().map_err(ControlError::internal)?.into_iter().find(|computer| computer.client_public_key_b64.as_deref() == Some(approving.client_key_b64.as_str()));
         let id = existing.as_ref().map(|computer| computer.id.clone()).unwrap_or_else(|| format!("computer-{}", &uuid::Uuid::new_v4().simple().to_string()[..16]));
         let computer_label = approving.label.clone();
+        // Paired again through the relay: the relay device it had is retired.
+        let replaced_relay_device = existing.as_ref().and_then(|computer| computer.relay_device_id.clone()).filter(|had| approving.relay_device_id.as_ref().is_some_and(|new| new != had));
         let mut computer = registry::PairedComputer {
             id: id.clone(),
             token_hash: approving.token_hash,
@@ -1500,7 +1890,9 @@ impl MachineHost {
             fingerprint: Some(approving.fingerprint),
             approved_at: now,
             last_seen_at: None,
-            relay_device_id: existing.as_ref().and_then(|computer| computer.relay_device_id.clone()),
+            // Paired through the relay: the relay device of the code's invite
+            // is its own from now on (PRO-487).
+            relay_device_id: approving.relay_device_id.clone().or_else(|| existing.as_ref().and_then(|computer| computer.relay_device_id.clone())),
             // Paired again: a fresh token, and whatever held it off is over.
             next_token_hash: None,
             disconnected_at: None,
@@ -1515,6 +1907,9 @@ impl MachineHost {
                 log::warn!("machine host: remove a pairing that ended before Allow: {error:#}");
             }
             return Err(not_found());
+        }
+        if let (Some(replaced), Some(relay)) = (replaced_relay_device, self.relay()) {
+            relay.revoke_device(&replaced);
         }
         log::info!("machine host: computer {id} was allowed to operate this machine");
         self.activity.record(activity::Entry::new(activity::Kind::Paired, Some((&id, &computer_label)), None));
@@ -1591,7 +1986,7 @@ impl MachineHost {
             if !state.hosting() {
                 return Err(ControlError::new("not_enabled", "Phone hosting is off.", None::<String>));
             }
-            (state.keypair.clone(), state.listening.as_ref().map(|listener| listener.address.port()), *phones.stopped().borrow())
+            (state.keypair.clone(), state.port(), *phones.stopped().borrow())
         };
         let Some(keypair) = keypair else {
             return Err(ControlError::new("not_enabled", "The machine's host key is not ready yet.", None::<String>));
@@ -1746,7 +2141,55 @@ fn private_socket(data_dir: &Path, socket: &Path) -> Result<()> {
 }
 
 impl crate::remote::host::MachineRoutes for MachineHost {
+    fn pair_computer(self: Arc<Self>, asking: crate::remote::host::RelayAsking) -> futures_util::future::BoxFuture<'static, Result<Option<Result<(), &'static str>>>> {
+        Box::pin(async move {
+            // Only the relay device the live code's invite was made for asks;
+            // any other is a paired computer's, admitted or refused as one.
+            if !self.state.lock().unwrap().pairing.is_relay_device(&asking.relay_device_id) {
+                return Ok(None);
+            }
+            let keypair = self.keypair().context("the machine host key is not loaded")?;
+            let decision = self.ask(Asking {
+                token_hash: registry::token_hash(&asking.token),
+                client_key_b64: &asking.client_key_b64,
+                label: direct::computer_label(asking.label.as_deref()),
+                platform: direct::computer_platform(asking.platform.as_deref()),
+                fingerprint: direct::computer_fingerprint(keypair.public(), &asking.client_key_b64, &asking.token)?,
+                transport: "relay",
+                relay_device_id: Some(&asking.relay_device_id),
+            });
+            let (request_id, outcome) = match decision {
+                Decision::Wait { request_id, outcome } => (request_id, outcome),
+                Decision::Refuse(reason) => return Ok(Some(Err(reason))),
+            };
+            // The relay host drops this future when the computer gives up:
+            // the request is left then, as a closed direct connection leaves it.
+            struct Leave<'a>(&'a MachineHost, &'a str, bool);
+            impl Drop for Leave<'_> {
+                fn drop(&mut self) {
+                    if self.2 {
+                        self.0.leave(self.1);
+                    }
+                }
+            }
+            let mut leave = Leave(&self, &request_id, true);
+            let answered = direct::await_allow(&self, std::future::pending(), &request_id, outcome).await;
+            leave.2 = false;
+            match answered {
+                Some(pairing::Outcome::Approved) => Ok(Some(Ok(()))),
+                Some(pairing::Outcome::Refused(reason)) => Ok(Some(Err(reason))),
+                Some(pairing::Outcome::Waiting) | None => anyhow::bail!("the pairing request ended without an answer"),
+            }
+        })
+    }
+
     fn is_computer(&self, relay_device_id: &str) -> bool {
+        // A computer pairing with the live code's invite is one too (PRO-487),
+        // and so is an ended invite's device the relay has not confirmed
+        // revoking: never handed to the window as a phone.
+        if self.state.lock().unwrap().pairing.is_relay_device(relay_device_id) || self.unrevoked.lock().unwrap().contains_key(relay_device_id) {
+            return true;
+        }
         self.registry.knows_relay_device(relay_device_id).unwrap_or_else(|error| {
             log::warn!("machine host: read paired computers: {error:#}");
             // Unreadable: never hand an unknown connection to the window as a phone's.
@@ -1757,7 +2200,7 @@ impl crate::remote::host::MachineRoutes for MachineHost {
     fn admit_computer(&self, relay_device_id: &str, token: &str, client_key_b64: &str, cancel: mpsc::UnboundedSender<()>) -> Result<Result<(String, u64), &'static str>> {
         let Some(computer) = self.registry.find_by_relay_device(relay_device_id, token)? else { return Ok(Err(wire::REFUSED_CODE_INACTIVE)) };
         let Some(computer) = self.paired_with_key(computer, client_key_b64) else { return Ok(Err(wire::REFUSED_CODE_INACTIVE)) };
-        let tracked = match self.admit(&computer, token, ComputerRoute::Relay, cancel)? {
+        let tracked = match self.admit(&computer, token, ComputerRoute::Relay, None, cancel)? {
             Ok(tracked) => tracked,
             Err(reason) => return Ok(Err(reason)),
         };
@@ -1782,7 +2225,7 @@ impl crate::remote::host::MachineRoutes for MachineHost {
             {
                 let Some(phones) = self.phones.get().cloned() else { return false };
                 let Some(keypair) = state.keypair.clone() else { return false };
-                let port = state.listening.as_ref().map(|listener| listener.address.port());
+                let port = state.port();
                 let mut stopped = phones.stopped();
                 let epoch = *stopped.borrow();
                 drop(state);
@@ -1861,6 +2304,33 @@ impl crate::remote::machine::MachineAccess for HostAccess {
 
     fn other_computers(&self, caller: Option<&str>) -> Vec<crate::remote::machine_update::OtherComputer> {
         self.host.upgrade().map(|host| host.connected_others(caller)).unwrap_or_default()
+    }
+
+    fn hosting_facts(&self) -> Option<(Value, Value)> {
+        let host = self.host.upgrade()?;
+        let state = host.state.lock().unwrap();
+        let listen = serde_json::to_value(host.listen_status(&state)).ok()?;
+        let runs_as = serde_json::to_value(crate::listen::runs_as_now(state.hosting())).ok()?;
+        Some((listen, runs_as))
+    }
+
+    fn set_listen(&self, params: Value) -> futures_util::future::BoxFuture<'static, Result<Value, crate::remote::protocol::RpcError>> {
+        use crate::remote::protocol::RpcError;
+        let host = self.host.upgrade();
+        Box::pin(async move {
+            let host = host.ok_or_else(|| RpcError::new("unavailable", "the machine host stopped"))?;
+            let listen = params["listen"].as_str().and_then(crate::listen::Listen::from_word).ok_or_else(|| RpcError::invalid("listen is one of relay, tailscale, lan, all"))?;
+            let allow_public = match &params["allowPublic"] {
+                Value::Null => false,
+                Value::Bool(allow) => *allow,
+                _ => return Err(RpcError::invalid("allowPublic is true or false")),
+            };
+            let status = tokio::task::spawn_blocking(move || host.set_listen(listen, allow_public))
+                .await
+                .map_err(RpcError::internal)?
+                .map_err(|error| if error.code == "not_reachable" { RpcError::new("unavailable", error.message) } else { RpcError::internal(error.message) })?;
+            Ok(json!({ "listen": status }))
+        })
     }
 
     fn window_available(&self) -> bool {

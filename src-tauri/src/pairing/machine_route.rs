@@ -90,6 +90,29 @@ impl MachineSide {
         self.status.as_ref().is_some_and(Status::runtime_owns_direct)
     }
 
+    /// As a runtime that hosts and takes the port (`true`) says it.
+    #[cfg(test)]
+    pub(super) fn set_status_for_test(&mut self, owns_port: bool) {
+        self.status = Some(Status {
+            enabled: owns_port,
+            host_key: wire::HostKeyState::Ready,
+            machine_id: None,
+            listening: None,
+            takes_port: owns_port,
+            phone_route: false,
+            computers: vec![],
+            error: None,
+            pending: None,
+            code: None,
+            paused_until: None,
+            phones: Default::default(),
+            listen: None,
+            runs_as: None,
+            relay_state: wire::RelayState::Off,
+            relay: None,
+        });
+    }
+
     fn runtime_relay(&self) -> RuntimeRelay {
         runtime_relay(self.status.as_ref())
     }
@@ -253,24 +276,34 @@ impl PairingManager {
 
     /// Close the window's own listener on the port and the phones on it.
     pub(super) fn release_direct_port(&self) {
+        if self.close_direct_listener() {
+            log::info!("the runtime takes this Mac's direct connections now");
+        }
+    }
+
+    /// Close the window's own listeners and the phones connected to them.
+    /// Whether there were any.
+    pub(super) fn close_direct_listener(&self) -> bool {
         let accept = {
             let mut inner = self.inner.lock().unwrap();
             if inner.direct_via_runtime {
-                return;
+                return false;
             }
             inner.direct_listener_started = false;
+            inner.direct_bound.clear();
             inner.direct_accept.take()
         };
-        let Some(accept) = accept else { return };
+        let Some(accept) = accept else { return false };
         accept.abort();
-        // Each open connection holds the port; the phones reconnect through
-        // the runtime, which passes them back here.
+        // Each open connection holds the port; the phones reconnect to
+        // whoever listens next: the runtime, which passes them back here, or
+        // this window on the addresses the listen setting names now.
         for connections in self.connections.lock().unwrap().values() {
             for connection in connections.iter().filter(|connection| connection.transport == PairingTransport::Direct) {
                 let _ = connection.signal.send(ConnectionSignal::Cancel);
             }
         }
-        log::info!("the runtime takes this Mac's direct connections now");
+        true
     }
 
     /// Listen on a private socket in the runtime's directory and register it,
@@ -423,6 +456,8 @@ mod tests {
             code: None,
             paused_until: None,
             phones: Default::default(),
+            listen: None,
+            runs_as: None,
             relay_state: wire::RelayState::Off,
             relay: None,
         };
@@ -459,6 +494,8 @@ mod tests {
             code: None,
             paused_until: None,
             phones: Default::default(),
+            listen: None,
+            runs_as: None,
             relay_state,
             relay,
         };

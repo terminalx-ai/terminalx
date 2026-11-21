@@ -18,7 +18,7 @@ describe("sections behind an Experimental switch", () => {
 describe("Settings → Machines for everyone (PRO-342, PRO-360)", () => {
   it("is offered, with every row findable, whatever the Experimental switches say", () => {
     const rows = settingsInSection("machines");
-    expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.thisMac", "machines.pairingCode", "machines.yours", "machines.computers"]);
+    expect(rows.map((row) => row.id)).toEqual(["machines.allowOperating", "machines.listen", "machines.thisMac", "machines.pairingCode", "machines.yours", "machines.computers"]);
     noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
     expect(settingsSectionOffered("machines")).toBe(true);
     for (const row of rows) expect(settingOffered(row)).toBe(true);

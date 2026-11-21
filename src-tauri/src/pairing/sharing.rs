@@ -153,9 +153,7 @@ impl PairingManager {
                     .context("Relay is offline. Choose local network only, or retry.")?,
             )
         };
-        self.ensure_direct_listener().context(
-            "Local network access is unavailable. Allow TerminalX in the firewall and retry.",
-        )?;
+        share_listener(self.ensure_direct_listener(), direct_only)?;
         let keypair = self.host_key(true)?;
         let id = Uuid::new_v4().simple().to_string();
         let token = random_token();
@@ -176,7 +174,7 @@ impl PairingManager {
             expires_at: credential_expires_at,
             pairing: PairingOffer {
                 v: 2,
-                endpoint: endpoints[0].clone(),
+                endpoint: super::first_endpoint(&endpoints),
                 direct_endpoints: endpoints,
                 device_token: token.clone(),
                 public_key_b64: keypair.public_key_b64(),
@@ -647,9 +645,40 @@ async fn verify_identity(
 }
 
 
+/// What a share does with the window's direct listener (PRO-487). The
+/// listen setting may open no port here ("Relay only", or no address of the
+/// chosen kind): a relay share does not need one, a local-network-only share
+/// does. Any other failure is the firewall's or the port's.
+fn share_listener(listener: std::io::Result<()>, direct_only: bool) -> Result<()> {
+    match listener {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            if direct_only {
+                bail!("This Mac listens on no local network address (Settings → Machines → Where this Mac listens). Choose Local network there, or share through the relay.");
+            }
+            Ok(())
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("Local network access is unavailable. Allow TerminalX in the firewall and retry.")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRO-487 review: under "Relay only" (nothing bound) a relay share goes
+    /// on; only a local-network-only share is refused, naming the setting.
+    #[test]
+    fn a_relay_share_needs_no_direct_listener() {
+        let nothing_bound = || Err(std::io::Error::from(std::io::ErrorKind::AddrNotAvailable));
+        share_listener(nothing_bound(), false).expect("a relay share goes on with no port open");
+        let refused = share_listener(nothing_bound(), true).unwrap_err().to_string();
+        assert!(refused.contains("Where this Mac listens") && !refused.contains("firewall"), "{refused}");
+        share_listener(Ok(()), true).unwrap();
+        let blocked = share_listener(Err(std::io::ErrorKind::PermissionDenied.into()), false).unwrap_err().to_string();
+        assert!(blocked.contains("firewall"), "another failure is still the firewall's: {blocked}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn delayed_sensitive_reply_is_not_sent_after_guest_removal() {

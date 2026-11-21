@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { ListSection } from "@/components/layout/SessionSidebar";
 import { reloadBots, useBotStore } from "@/lib/bots";
+import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { showHireBot } from "@/lib/botsPage";
 import { openBot, useSessionStore } from "@/lib/sessions";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
@@ -78,6 +79,10 @@ function BotsList() {
 /** A bot's row opens its own view, on its home chat (PRO-468). */
 function BotRow({ bot }: { bot: Bot }) {
   const store = useSessionStore();
+  // What waits on you from this bot (PRO-469): the same count as the Bots page's.
+  const needs = useNeedsYou();
+  const asking = needsYouCount(needs, bot.id);
+  const trouble = needsYouTrouble(needs, useNeedsYouError(), bot.id);
   const open = store.view === "bot" ? store.selectedBotId === bot.id : !!store.selectedSessionId && store.sessions.find((session) => session.id === store.selectedSessionId)?.bot?.id === bot.id;
   const place = runsOnLabel(bot.runsOn);
   const status = statusLine(bot);
@@ -87,7 +92,7 @@ function BotRow({ bot }: { bot: Bot }) {
         type="button"
         onClick={() => openBot(bot.id)}
         aria-current={open ? "page" : undefined}
-        aria-label={`${bot.name}, ${bot.roleTitle}, ${status}, runs on ${place}`}
+        aria-label={`${bot.name}, ${bot.roleTitle}, ${status}${asking ? `, ${asking} need${asking === 1 ? "s" : ""} you` : ""}, runs on ${place}`}
         className={cn("flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left outline-none hover:bg-selected/50 focus-visible:ring-2 focus-visible:ring-ring/40", open && "bg-selected")}
         data-testid="bot-row"
         data-bot={bot.id}
@@ -100,9 +105,15 @@ function BotRow({ bot }: { bot: Bot }) {
           </span>
           <span className={cn("truncate text-[11.5px]", bot.paused ? "text-warning" : "text-faint")}>{status}</span>
         </span>
-        <span title={place} className="shrink-0 text-faint [&_svg]:size-3">
-          <RunsOnIcon runsOn={bot.runsOn} />
-        </span>
+        {trouble ? (
+          <span className="shrink-0 text-[11.5px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-row-needs-you-error">!</span>
+        ) : asking > 0 ? (
+          <span className="shrink-0 text-[11.5px] font-medium text-accent" title={`${asking} need${asking === 1 ? "s" : ""} you`} data-testid="bot-row-needs-you">{asking}</span>
+        ) : (
+          <span title={place} className="shrink-0 text-faint [&_svg]:size-3">
+            <RunsOnIcon runsOn={bot.runsOn} />
+          </span>
+        )}
       </button>
     </li>
   );

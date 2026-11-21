@@ -767,10 +767,10 @@ fn the_older_side_updates_by_version_else_by_what_the_machine_offers() {
     assert_eq!(update_side(Some("0.2.35"), &none, "0.2.33"), MachineUpdateSide::ThisMac);
     assert_eq!(update_side(Some("v0.3.0"), &none, "0.2.33"), MachineUpdateSide::ThisMac);
     // No version, but it offers namespaces this desktop does not know: it is the newer one.
-    assert_eq!(update_side(None, &["machine/9".to_string()], "0.2.33"), MachineUpdateSide::ThisMac);
+    assert_eq!(update_side(None, &["machine/99".to_string()], "0.2.33"), MachineUpdateSide::ThisMac);
     assert_eq!(update_side(None, &["session/1".to_string()], "0.2.33"), MachineUpdateSide::Machine);
     // A version, when there is one, decides over the namespaces.
-    assert_eq!(update_side(Some("0.2.20"), &["machine/9".to_string()], "0.2.33"), MachineUpdateSide::Machine);
+    assert_eq!(update_side(Some("0.2.20"), &["machine/99".to_string()], "0.2.33"), MachineUpdateSide::Machine);
 }
 
 #[test]
@@ -794,7 +794,7 @@ fn update_changed_says_when_the_machine_hands_over() {
 
 #[tokio::test]
 async fn update_required_from_a_newer_machine_says_this_mac_updates() {
-    let newer = DialFailure::NeedsUpdate { version: Some("99.0.0".into()), offered: vec!["machine/9".into()] };
+    let newer = DialFailure::NeedsUpdate { version: Some("99.0.0".into()), offered: vec!["machine/99".into()] };
     let script = Script::new(Duration::from_millis(1), &[(LAN, Answer::Fail(newer))]);
     let env = Env::new(target(&[LAN], MachineRoute::ThisNetwork, None, None), None);
     let (supervisor, mut watch) = start(env, script);

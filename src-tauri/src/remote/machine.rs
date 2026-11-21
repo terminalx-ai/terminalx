@@ -61,6 +61,12 @@ pub const MACHINE_7: &str = "machine/7";
 /// "Session feature parity"; `machine_session.rs`).
 pub const MACHINE_8: &str = "machine/8";
 
+/// `machine/9` (PRO-487): `machine.setListen`, choosing where the machine
+/// listens and whether it answers public callers, from its page on another
+/// computer. `machine.describe` says where it listens and who it runs as to
+/// any connection (docs/MACHINES.md "As built (PRO-487)").
+pub const MACHINE_9: &str = "machine/9";
+
 /// Namespaces a machine connection is never granted: the content key opens
 /// checkpoints the cloud API keeps, the mirror is a cloud workspace's, and
 /// sharing with other people is out of scope (docs/MACHINES.md, Method table).
@@ -147,6 +153,19 @@ pub trait MachineAccess: Send + Sync + 'static {
     /// `{ deviceToken }`, a fresh token the computer keeps in place of its own.
     fn rotate_credential(&self, _device_id: &str) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
         Box::pin(async { Err(RpcError::new("method_not_found", "this runtime does not rotate credentials")) })
+    }
+    /// `listen` and `runsAs` of `machine.describe` (PRO-487): where the
+    /// machine listens and who it answers
+    /// (`crate::machine_wire::ListenStatus`), and the user its runtime runs
+    /// as (`crate::listen::RunsAs`). `None`: it does not say.
+    fn hosting_facts(&self) -> Option<(Value, Value)> {
+        None
+    }
+    /// `machine.setListen` (`machine/9`): `{ listen, allowPublic? }` is
+    /// written to the machine's settings; answers `{ listen }`, the status
+    /// as it will be.
+    fn set_listen(&self, _params: Value) -> futures_util::future::BoxFuture<'static, Result<Value, RpcError>> {
+        Box::pin(async { Err(RpcError::new("method_not_found", "this runtime does not choose where it listens")) })
     }
 }
 

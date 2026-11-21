@@ -88,6 +88,33 @@ export interface PendingComputer {
 }
 
 /** The runtime's machine host (`machine_wire::Status`). */
+/** `machines.listen` (PRO-487): where a machine listens for computers and phones on TCP 6768. */
+export type MachineListen = "relay" | "tailscale" | "lan" | "all";
+
+/** Where a machine listens now and who it answers: `listen` of its host status and of `machine.describe`. */
+export interface MachineListenStatus {
+  /** The choice, or every interface while nobody has chosen. */
+  choice: MachineListen;
+  /** False on an install that listened before the setting existed and keeps every interface until someone chooses. */
+  chosen: boolean;
+  /** The addresses bound now, as `192.168.1.20:6768`; `0.0.0.0:6768` is every interface. */
+  addresses: string[];
+  /** Callers from public addresses are answered. */
+  allowPublic: boolean;
+  /** The one-time question is open: keep the public address, or close it. Public callers are refused meanwhile. */
+  askPublic: boolean;
+  refusedPublicAt: number | null;
+}
+
+/** Who a machine's runtime runs as: `runsAs` of its host status and of `machine.describe`. */
+export interface MachineRunsAs {
+  user: string;
+  /** Every paired computer and every agent there acts as root. */
+  root: boolean;
+  /** Null: not known (not checked yet, or root, who needs none). */
+  passwordlessSudo: boolean | null;
+}
+
 export interface MachineHostStatus {
   enabled: boolean;
   hostKey: "ready" | "needed" | "error";
@@ -112,6 +139,10 @@ export interface MachineHostStatus {
     generation: number;
     runtimeGeneration: number;
   } | null;
+  /** Where the runtime listens and who it answers (PRO-487); absent from older runtimes. */
+  listen?: MachineListenStatus | null;
+  /** Who the runtime runs as (PRO-487); absent from older runtimes. */
+  runsAs?: MachineRunsAs | null;
 }
 
 /**
@@ -123,6 +154,12 @@ export interface MachineHostView {
   allowOperating: boolean;
   /** `pairing.keepAwake`, shared with phones. */
   keepAwake: boolean;
+  /** `machines.listen` in settings (PRO-487); null while never chosen: every interface, as before the setting. */
+  listen?: MachineListen | null;
+  /** `machines.allowPublic`: callers from public addresses are answered. */
+  allowPublic?: boolean;
+  /** The addresses the window's own phone listener holds, while the runtime does not hold the port. */
+  phoneListening?: string[];
   /** Null while the runtime cannot be reached. */
   status: MachineHostStatus | null;
   /**
@@ -278,6 +315,8 @@ export type MachinePairingFailure =
   | "pairing-paused"
   | "unreachable"
   | "invalid-code"
+  /** The machine is reached through the relay only, and nobody is signed in on this Mac (PRO-487). */
+  | "sign-in-required"
   | "cancelled";
 
 /**
