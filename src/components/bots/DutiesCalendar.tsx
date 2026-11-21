@@ -4,7 +4,8 @@ import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
-import { BLOCK_PX, HOUR_PX, WEEKDAYS, addDays, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown } from "@/lib/botCalendar";
+import { HOUR_PX, WEEKDAYS, addDays, blockBox, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
+import { useLocalRuntime } from "@/lib/localRuntime";
 import { dutiesApi, dutyInputOf, reportsToLabel } from "@/lib/botDuties";
 import { useAutomationStore } from "@/lib/automations";
 import { cn } from "@/lib/cn";
@@ -53,9 +54,21 @@ function blockLook(state: BlockState, bot: Bot | undefined): string {
       return cn(roleTone(bot), "ring-1 ring-inset ring-current");
     case "failed":
       return "bg-destructive/15 text-destructive shadow-[inset_2px_0_0_var(--destructive)]";
+    case "stopped":
+      return "border border-hairline bg-muted text-muted-foreground shadow-[inset_2px_0_0_var(--hairline-strong)]";
     case "skipped":
       return "border border-hairline bg-transparent text-faint line-through";
+    default:
+      // A state a newer runtime knows and this window does not: drawn plainly, never left without a look.
+      return "border border-hairline bg-transparent text-muted-foreground";
   }
+}
+
+/** How long a run went on, in a few words. */
+function lengthWords(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
 }
 
 const STATE_WORDS: Record<BlockState, string> = {
@@ -65,17 +78,19 @@ const STATE_WORDS: Record<BlockState, string> = {
   next: "Still to come",
   running: "Running now",
   failed: "Failed",
+  stopped: "Stopped before it finished",
   skipped: "Did not run",
 };
 
 /** The four states the key always explains; the others only when the week has them. */
 const KEY_ALWAYS: BlockState[] = ["done", "reported", "quiet", "next"];
-const KEY_SOMETIMES: BlockState[] = ["running", "failed", "skipped"];
+const KEY_SOMETIMES: BlockState[] = ["running", "failed", "stopped", "skipped"];
 
 /** Where a new duty is to go: a clicked hour, or (from Add a duty) none. */
 export type Slot = { day: number; minute: number; timezone: string } | null;
 
-type Drag = { index: number; pointer: number; startY: number; to: { day: number; minute: number } | null };
+/** A block being dragged. `moved` once it has left its place: let go back there, it is put back, not opened. */
+type Drag = { index: number; pointer: number; startY: number; to: { day: number; minute: number } | null; moved: boolean };
 /** A move being saved: `before` is the schedule it replaces; `undoing` when it puts one back. */
 type PendingMove = { block: CalendarBlock; duty: Automation; schedule: AutomationSchedule; before: AutomationSchedule; undoing?: boolean };
 
@@ -124,10 +139,23 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     calendarApi.week(botId, week).then((value) => { if (live) { setData(value); setError(null); } }, (cause) => { if (live) { setData(null); setError(errorMessage(cause)); } });
     return () => { live = false; };
   }, [botId, week, changeKey, tick]);
+  // Only while the window is shown: hidden, nothing ticks, and on coming back the week is read again at once.
   useEffect(() => {
-    const minute = window.setInterval(() => setNow(new Date()), 60_000);
-    const reread = window.setInterval(() => setTick((value) => value + 1), 5 * 60_000);
-    return () => { window.clearInterval(minute); window.clearInterval(reread); };
+    let timers: number[] = [];
+    const stop = () => { timers.forEach((timer) => window.clearInterval(timer)); timers = []; };
+    const start = () => {
+      stop();
+      timers = [window.setInterval(() => setNow(new Date()), 60_000), window.setInterval(() => setTick((value) => value + 1), 5 * 60_000)];
+    };
+    const shown = () => {
+      if (document.hidden) { stop(); return; }
+      setNow(new Date());
+      setTick((value) => value + 1);
+      start();
+    };
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", shown);
+    return () => { stop(); document.removeEventListener("visibilitychange", shown); };
   }, []);
 
   const byId = useMemo(() => new Map(bots.map((bot) => [bot.id, bot])), [bots]);
@@ -170,7 +198,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const onBlockDown = (event: ReactPointerEvent, index: number) => {
     if (event.button !== 0 || blocks[index]?.state !== "next") return;
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setDrag({ index, pointer: event.pointerId, startY: event.clientY, to: null });
+    setDrag({ index, pointer: event.pointerId, startY: event.clientY, to: null, moved: false });
   };
   const onBlockMove = (event: ReactPointerEvent) => {
     if (!drag || drag.pointer !== event.pointerId) return;
@@ -179,7 +207,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     if (!block || day === null) return;
     // From the block's own time by whole steps of the pointer's travel: a wobble is not a move.
     const to = dragTarget(block, day, event.clientY - drag.startY);
-    setDrag({ ...drag, to: to.day === block.day && to.minute === block.minute ? null : to });
+    const home = to.day === block.day && to.minute === block.minute;
+    setDrag({ ...drag, to: home ? null : to, moved: drag.moved || !home });
   };
   const onBlockUp = (event: ReactPointerEvent, index: number) => {
     const current = drag;
@@ -191,6 +220,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
     if (!block || !bot) return;
     const to = current?.index === index ? current.to : null;
     if (!to) {
+      // Dragged away and brought back: put back where it was, and nothing opens.
+      if (current?.index === index && current.moved) return;
       onOpenDuty(bot, block.dutyId);
       return;
     }
@@ -226,6 +257,8 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
   const dragged = drag?.to ? blocks[drag.index] : null;
   const notKept = data?.notKept ?? [];
   const logs = data?.logs ?? [];
+  // The duties drawn this week: a day's "history not kept" covers its column only when it is true of all of them.
+  const drawn = new Set([...blocks.map((block) => block.dutyId), ...notKept.flat().map((gap) => gap.dutyId)]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="duties-calendar">
@@ -233,7 +266,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
         {lead}
         <span className="flex items-center gap-1 text-[12.5px] text-muted-foreground" data-testid="calendar-week">
           <Button variant="ghost" size="icon-xs" aria-label="The week before" disabled={!data || !weekShown(addDays(data.days[0], -7))} onClick={() => data && setWeek(addDays(data.days[0], -7))}><ChevronLeft /></Button>
-          <span className="min-w-[88px] text-center tabular-nums">{data ? weekLabel(data.days) : "This week"}</span>
+          <span className="min-w-[88px] text-center tabular-nums">{data ? weekLabel(data.days, wall?.ymd) : "This week"}</span>
           <Button variant="ghost" size="icon-xs" aria-label="The week after" disabled={!data || !weekShown(addDays(data.days[0], 7))} onClick={() => data && setWeek(addDays(data.days[0], 7))}><ChevronRight /></Button>
           {week !== null && <Button variant="ghost" size="xs" onClick={() => setWeek(null)}>This week</Button>}
         </span>
@@ -261,7 +294,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col px-6 pt-3 pb-3" data-testid="calendar-main">
-          {error && <MachineHostError error={error} onRestarted={() => { setError(null); setTick((value) => value + 1); }} className="mb-2" />}
+          {error && <WeekError error={error} onRestarted={() => { setError(null); setTick((value) => value + 1); }} />}
           {moveError && pending && (
             <MachineHostError error={moveError} onRestarted={() => { setMoveError(null); move(pending); }} className="mb-2" />
           )}
@@ -307,7 +340,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                       <div key={hour} className="pt-1.5 font-mono text-[10.5px] leading-none text-faint" style={{ height: HOUR_PX }}>{clock(hour * 60)}</div>
                     ))}
                   </div>
-                  <div ref={grid} className="relative grid grid-cols-7" data-testid="calendar-grid">
+                  <div ref={grid} role="group" aria-label={`The week of ${weekLabel(data.days, wall?.ymd)}, by day`} className="relative grid grid-cols-7" data-testid="calendar-grid">
                     {Array.from({ length: 23 }, (_, line) => (
                       <div key={line} aria-hidden className="pointer-events-none absolute right-0 left-0 border-t border-hairline" style={{ top: (line + 1) * HOUR_PX }} />
                     ))}
@@ -316,6 +349,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                         key={name}
                         className={cn("relative h-full cursor-cell border-l border-hairline", day === today && "bg-primary/[.04]")}
                         onClick={(event) => onColumnClick(event, day)}
+                        role="group"
                         aria-label={`${name} ${dayNumber(data.days[day])}`}
                         data-testid="calendar-day"
                       >
@@ -324,23 +358,32 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                             <span className="absolute -top-[3px] -left-[3px] size-[7px] rounded-full bg-primary" />
                           </div>
                         )}
-                        {(notKept[day] ?? []).length > 0 && (
-                          <div
-                            aria-hidden
-                            className="pointer-events-none absolute right-0 left-0 top-0 border-b border-dashed border-hairline bg-[repeating-linear-gradient(135deg,transparent_0_6px,var(--hairline)_6px_7px)]"
-                            style={{ height: (Math.max(...notKept[day].map((gap) => gap.untilMinute)) / 60) * HOUR_PX }}
-                            title={`History not kept: ${notKept[day].map((gap) => dutyName(gap.dutyId)).join(", ")}`}
-                            data-testid="calendar-not-kept"
-                          >
-                            <span className="sticky top-1 ml-1 inline-block rounded bg-background/90 px-1 text-[10.5px] text-faint">history not kept</span>
-                          </div>
-                        )}
+                        {(notKept[day] ?? []).length > 0 && (() => {
+                          const gaps = notKept[day];
+                          // Of every duty drawn: the whole column. Of some: a strip at its edge, so the others' blocks
+                          // are not read as covered too (the notice above names each).
+                          const whole = [...drawn].every((id) => gaps.some((gap) => gap.dutyId === id));
+                          return (
+                            <div
+                              aria-hidden
+                              className={cn("pointer-events-none absolute top-0 left-0 bg-[repeating-linear-gradient(135deg,transparent_0_6px,var(--hairline)_6px_7px)]", whole ? "right-0 border-b border-dashed border-hairline" : "w-[5px] border-r border-dashed border-hairline-strong")}
+                              style={{ height: (Math.max(...gaps.map((gap) => gap.untilMinute)) / 60) * HOUR_PX }}
+                              title={`History not kept: ${gaps.map((gap) => dutyName(gap.dutyId)).join(", ")}`}
+                              data-testid="calendar-not-kept"
+                              data-whole={whole}
+                            >
+                              {whole && <span className="sticky top-1 ml-1 inline-block rounded bg-background/90 px-1 text-[10.5px] text-faint">history not kept</span>}
+                            </div>
+                          );
+                        })()}
                         {blocks.map((block, index) => {
                           if (block.day !== day) return null;
                           const lane = placed.get(index) ?? { lane: 0, of: 1 };
                           const bot = byId.get(block.botId);
                           const name = dutyName(block.dutyId);
-                          const title = `${name} · ${bot?.name ?? "A bot"} · ${clock(block.minute)} · ${STATE_WORDS[block.state]}${block.count > 1 ? ` ×${block.count}` : ""}${block.note ? ` · ${block.note}` : ""}`;
+                          const length = block.minutes && block.minutes >= 1 ? ` · ${block.state === "running" ? "for" : "ran"} ${lengthWords(block.minutes)}` : "";
+                          const title = `${name} · ${bot?.name ?? "A bot"} · ${clock(block.minute)} · ${STATE_WORDS[block.state] ?? "Ran"}${block.count > 1 ? ` ×${block.count}` : ""}${length}${block.note ? ` · ${block.note}` : ""}`;
+                          const box = blockBox(block);
                           return (
                             <button
                               key={`${block.dutyId}-${block.at}-${index}`}
@@ -358,7 +401,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                                 blockLook(block.state, bot),
                                 drag?.index === index && drag.to && "opacity-40",
                               )}
-                              style={{ top: (block.minute / 60) * HOUR_PX + 1, height: BLOCK_PX, left: `calc(${(lane.lane / lane.of) * 100}% + 3px)`, width: `calc(${100 / lane.of}% - 6px)` }}
+                              style={{ top: box.top, height: box.height, left: `calc(${(lane.lane / lane.of) * 100}% + 3px)`, width: `calc(${100 / lane.of}% - 6px)` }}
                               data-testid="calendar-block"
                               data-state={block.state}
                               data-duty={block.dutyId}
@@ -368,7 +411,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
                           );
                         })}
                         {dragged && drag?.to?.day === day && (
-                          <div aria-hidden className={cn("pointer-events-none absolute right-[3px] left-[3px] truncate rounded-[5px] px-1.5 text-[11px] leading-[20px]", blockLook("next", byId.get(dragged.botId)))} style={{ top: (drag.to.minute / 60) * HOUR_PX + 1, height: BLOCK_PX }} data-testid="calendar-drop">
+                          <div aria-hidden className={cn("pointer-events-none absolute right-[3px] left-[3px] truncate rounded-[5px] px-1.5 text-[11px] leading-[20px]", blockLook("next", byId.get(dragged.botId)))} style={blockBox({ minute: drag.to.minute })} data-testid="calendar-drop">
                             {clock(drag.to.minute)} {dutyName(dragged.dutyId)}
                           </div>
                         )}
@@ -431,6 +474,19 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
       </div>
     </div>
   );
+}
+
+/**
+ * The week could not be read. An older runtime, one that does not know the week of duties, is offered a restart: the
+ * app's own runtime knows it.
+ */
+function WeekError({ error, onRestarted }: { error: string; onRestarted: () => void }) {
+  const { state } = useLocalRuntime();
+  if (weekUnknown(error) && state?.state === "connected") {
+    const offer = `runtime_restart_required:${state.epoch}: The TerminalX runtime running is older than this app and cannot read a week of duties. Restart runtime starts the app's own.`;
+    return <MachineHostError error={offer} onRestarted={onRestarted} className="mb-2" />;
+  }
+  return <MachineHostError error={error} onRestarted={onRestarted} className="mb-2" />;
 }
 
 function CountedRow({ label, cells, testId }: { label: string; cells: { day: number; words: string; warn: boolean }[]; testId: string }) {

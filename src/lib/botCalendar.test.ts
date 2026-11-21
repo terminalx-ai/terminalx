@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CRON_WEEKDAYS, cronWeekdayCode } from "@/lib/automationSchedule";
-import { FIRST_WEEK, LAST_WEEK, addDays, dragTarget, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel, weekShown } from "@/lib/botCalendar";
+import { FIRST_WEEK, LAST_WEEK, addDays, blockBox, dragTarget, dutyAt, eventsText, lanes, movedSchedule, oftenText, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
 import type { AutomationSchedule } from "@/types/automations";
 import type { CalendarBlock } from "@/types/botCalendar";
 
@@ -46,6 +46,29 @@ describe("the week's grid and rows", () => {
       // 10:00, 10:10 and 10:20 need three lanes; 10:40 takes the first one back, once 10:00 has ended.
       { lane: 0, of: 3 }, { lane: 1, of: 3 }, { lane: 0, of: 1 }, { lane: 0, of: 1 }, { lane: 0, of: 3 }, { lane: 2, of: 3 },
     ]);
+  });
+
+  it("draws a long run at its length, beside what starts during it, and one near midnight inside its day (PRO-497)", () => {
+    const block = (minute: number, minutes?: number): CalendarBlock => ({ dutyId: `${minute}`, botId: "b", day: 0, minute, at: "", state: "done", count: 1, minutes });
+    // 10:00 for two hours: 11:30 starts during it; 12:30 after it.
+    const placed = lanes([block(600, 120), block(690), block(750)]);
+    expect([0, 1, 2].map((index) => placed.get(index))).toEqual([{ lane: 0, of: 2 }, { lane: 1, of: 2 }, { lane: 0, of: 1 }]);
+    expect(blockBox(block(600, 120))).toEqual({ top: 10 * 46 + 1, height: 2 * 46 - 2 });
+    expect(blockBox(block(600))).toEqual({ top: 10 * 46 + 1, height: 22 });
+    // Ends inside the day: 23:50 moved up; a run past midnight cut at it.
+    const late = blockBox(block(23 * 60 + 50));
+    expect(late.top + late.height).toBeLessThanOrEqual(24 * 46);
+    const across = blockBox(block(23 * 60, 180));
+    expect([across.top, across.top + across.height]).toEqual([23 * 46 + 1, 24 * 46 - 1]);
+    // Two near midnight still go side by side where they are drawn.
+    const ends = lanes([block(23 * 60 + 40), block(23 * 60 + 55)]);
+    expect([0, 1].map((index) => ends.get(index)?.of)).toEqual([2, 2]);
+  });
+
+  it("knows an older runtime's answer to the week it does not know", () => {
+    expect(weekUnknown("Unknown bots operation dutyWeek")).toBe(true);
+    expect(weekUnknown("Unknown bots operation dutyWeeks")).toBe(false);
+    expect(weekUnknown("The runtime could not read the week.") || weekUnknown(null)).toBe(false);
   });
 
   it("words a counted row for the days before today, today and the days to come", () => {
@@ -102,6 +125,11 @@ describe("the week's grid and rows", () => {
   it("labels and steps weeks, and reads the clock in the owner's time zone", () => {
     expect(weekLabel(["2026-11-16", "", "", "", "", "", "2026-11-22"])).toBe("16–22 Nov");
     expect(weekLabel(["2026-11-30", "", "", "", "", "", "2026-12-06"])).toBe("30 Nov – 6 Dec");
+    // PRO-497: another year's week says its year, and one across a new year both.
+    expect(weekLabel(["2026-11-16", "", "", "", "", "", "2026-11-22"], "2026-11-20")).toBe("16–22 Nov");
+    expect(weekLabel(["2025-11-17", "", "", "", "", "", "2025-11-23"], "2026-11-20")).toBe("17–23 Nov 2025");
+    expect(weekLabel(["2027-03-29", "", "", "", "", "", "2027-04-04"], "2026-11-20")).toBe("29 Mar – 4 Apr 2027");
+    expect(weekLabel(["2026-12-28", "", "", "", "", "", "2027-01-03"], "2026-11-20")).toBe("28 Dec 2026 – 3 Jan 2027");
     expect(addDays("2026-11-30", 7)).toBe("2026-12-07");
     expect(addDays("2026-01-05", -7)).toBe("2025-12-29");
     expect(wallClock("Asia/Tokyo", new Date("2026-11-16T15:30:00Z"))).toEqual({ ymd: "2026-11-17", minute: 30 });
