@@ -1045,6 +1045,47 @@ retires only those handles under the still-current claim. No runtime lock is
 held across a process-exit wait; startup refuses unresolved prior ownership and
 leaves its handles for explicit Stop instead.
 
+## Windows
+
+The runtime and the desktop are the same two processes on Windows, with
+Windows' own means where Unix uses sockets, file modes and signals. The
+platform layer is `src-tauri/src/win/`.
+
+- **Endpoints are named pipes.** A home's published endpoint is
+  `\\.\pipe\terminalx-<sha256 of the home>`, and each process's own
+  endpoints are that name with a suffix (`ipc.rs`). Every pipe has an
+  owner-only DACL (this user and SYSTEM), refuses remote clients and is
+  bounded in instances; its first instance claims the name, so a name
+  another process serves is never shared. A client connects at the
+  identification impersonation level and checks that the pipe is owned and
+  served by this user before it sends a credential; a server refuses a
+  client of another account. A status answer may only point at endpoints of
+  the same home.
+- **Private files are owner-only DACLs** in place of `0o600` and `0o700`.
+  A new home is created with an inheritable owner-only DACL, so what is
+  made inside it is private too; an existing home is checked, never
+  changed. Files are judged through an open handle, never through a link,
+  and a file with more than one name is refused.
+- **Ownership and launch** take `File::try_lock` on the same lock files.
+  The runtime is installed as `terminalx-serve.exe`, read-only, under
+  `runtime/<sha256>/`, and started detached, in a process group of its own
+  and outside the desktop's job where that job allows it, so it outlives
+  the window. Stopping one that does not answer terminates it only while it
+  still runs that image as this user, then what it started, each checked by
+  image and start time first.
+- **Terminals** are ConPTY panes. Each pane's processes are in a Job Object
+  of their own, which ends them together, orphans included, and ends with
+  the runtime. Which program is in front of a pane is read from the
+  processes its shell started (`foreground::windows`), since a
+  pseudo-console does not say.
+- **Secrets** the Keychain holds on macOS are sealed with DPAPI for this
+  account and kept in an owner-only folder of the local application data
+  (`keychain.rs`).
+
+Not on Windows yet: handing a runtime over to a new version without
+stopping what it runs (an update stops and restarts it), Local VM tasks,
+and the runtime's self-update, which has no Windows release to install.
+
 ## Linux PTY ownership (#467)
 
 On Linux every terminal pane, an agent's included, runs under a supervisor

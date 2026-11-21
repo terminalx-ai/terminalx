@@ -2657,6 +2657,8 @@ export const files = {
   readImage: (path: string) => invoke<{ mediaType: string; data: string; name: string } | null>("read_image_file", { path }),
   /** The plain text of the drag that just ended on the window: the drop event itself carries only file paths. */
   droppedText: () => invoke<string | null>("dropped_text"),
+  /** How a path dropped on a terminal is quoted: as the shell its terminals run reads it. */
+  terminalQuoteStyle: () => invoke<"posix" | "powershell" | "cmd">("terminal_quote_style"),
   slashCommands: (cwd: string, harness: string) => invoke<SlashCommand[]>("list_slash_commands", { cwd, harness }),
 };
 

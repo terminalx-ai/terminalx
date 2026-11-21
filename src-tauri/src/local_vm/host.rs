@@ -859,12 +859,12 @@ pub fn export_files(source: &Path, manifest: &[journal::InputFile]) -> Result<Va
     if manifest.len() > 64 {
         bail!("Select at most 64 context files");
     }
-    let source = fs::canonicalize(source)?;
+    let source = crate::paths::canonicalize(source)?;
     let mut total = 0_u64;
     let mut files = Vec::new();
     for item in manifest {
         validate_context_path(&item.path)?;
-        let path = fs::canonicalize(source.join(&item.path))?;
+        let path = crate::paths::canonicalize(source.join(&item.path))?;
         if !path.starts_with(&source) || !path.is_file() {
             bail!("Selected input leaves project scope");
         }
@@ -1567,7 +1567,7 @@ fn apply_patch(journal: &Journal, params: &Value) -> Result<Value> {
     if !destination.is_absolute() {
         bail!("Select an absolute host checkout");
     }
-    let destination = fs::canonicalize(destination)?;
+    let destination = crate::paths::canonicalize(destination)?;
     let top = process::run(
         std::process::Command::new("git")
             .arg("-C")
@@ -1576,7 +1576,7 @@ fn apply_patch(journal: &Journal, params: &Value) -> Result<Value> {
         b"",
         BUDGET,
     )?;
-    if fs::canonicalize(String::from_utf8(top)?.trim())? != destination {
+    if crate::paths::canonicalize(String::from_utf8(top)?.trim())? != destination {
         bail!("Select the repository root");
     }
     let bytes = field(&result, "content")?.as_bytes();

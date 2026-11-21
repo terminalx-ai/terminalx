@@ -178,7 +178,7 @@ fn ignored_files(project: &Path, root: &safe_open::Directory) -> Result<IgnoredF
 }
 
 pub fn preview(project: &Path, draft: Option<&[String]>, snapshot: Option<&str>) -> Result<Preview> {
-    let project = fs::canonicalize(project)?;
+    let project = crate::paths::canonicalize(project)?;
     let root = safe_open::Directory::open_resolved(&project)?;
     validate_repository_root(&root)?;
     let mut preview = Preview {
@@ -272,7 +272,7 @@ struct CopyPlan {
 
 impl CopyPlan {
     fn prepare(project: &Path, destination: &Path, max_files: usize, max_bytes: u64) -> Result<Self> {
-        let project = fs::canonicalize(project)?;
+        let project = crate::paths::canonicalize(project)?;
         let root = safe_open::Directory::open_resolved(&project)?;
         let destination = CopyDestination::open(destination)?;
         validate_repository_root(&root)?;
@@ -365,7 +365,7 @@ struct CopyDestination {
 
 impl CopyDestination {
     fn open(path: &Path) -> Result<Self> {
-        let staging = safe_open::Directory::open_resolved(&fs::canonicalize(path.parent().context("Missing workspace parent")?)?)?;
+        let staging = safe_open::Directory::open_resolved(&crate::paths::canonicalize(path.parent().context("Missing workspace parent")?)?)?;
         let root = staging.child(path.file_name().context("Missing workspace name")?)?;
         Ok(Self { root, staging })
     }
@@ -601,7 +601,7 @@ mod safe_open {
     }
     fn checked(root: &Path, relative: &Path, create: bool) -> Result<std::path::PathBuf> {
         anyhow::ensure!(safe_relative(relative), "Unsafe relative path");
-        let mut path = fs::canonicalize(root)?;
+        let mut path = crate::paths::canonicalize(root)?;
         let count = relative.components().count();
         for (index, component) in relative.components().enumerate() {
             path.push(component);
@@ -635,7 +635,8 @@ mod safe_open {
         #[cfg(windows)]
         let (mode, identity) = {
             use std::os::windows::fs::MetadataExt;
-            target.metadata().map(|metadata| (metadata.file_attributes(), (metadata.creation_time(), 0))).unwrap_or((0, (0, 0)))
+            let attributes = target.metadata().map(|metadata| metadata.file_attributes()).unwrap_or(0);
+            (attributes, crate::win::fs::file_id(&target).unwrap_or((0, 0)))
         };
         #[cfg(not(windows))]
         let (mode, identity) = (0, (0, 0));

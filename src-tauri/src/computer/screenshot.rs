@@ -84,9 +84,9 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+    crate::win::fs::create_private_dir_all(dir)
 }
 
 #[cfg(unix)]
@@ -102,9 +102,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
+    use std::io::Write;
+    crate::win::fs::create_private(path, true)?.write_all(bytes)
 }
 
 /// Agents call computer-use in loops; a marker file keeps cleanup from

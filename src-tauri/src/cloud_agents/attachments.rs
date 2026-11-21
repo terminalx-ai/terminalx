@@ -432,6 +432,7 @@ fn named_in(plaintext: &serde_json::Value, field: &str, max: usize) -> Option<Ve
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
 
     const ID: &str = "attach-0001";
@@ -542,7 +543,7 @@ mod tests {
 
         let files = store.take_files("alice", "session-1", &[ID.into()]).unwrap();
         assert_eq!((files[0].name.as_str(), files[0].media_type.as_deref(), files[0].size), ("plan.md", Some("text/markdown"), Some(14)));
-        let folder = crate::store::attachments_dir("session-1").unwrap().canonicalize().unwrap();
+        let folder = crate::store::attachments_dir("session-1").unwrap().canonical().unwrap();
         let path = Path::new(&files[0].path);
         assert!(path.starts_with(&folder), "{path:?} is in {folder:?}");
         assert!(!files[0].path.contains("/Users/alice"), "{:?}", files[0].path);

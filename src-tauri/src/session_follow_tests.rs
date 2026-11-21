@@ -67,6 +67,22 @@ impl Locator for Told {
     }
 }
 
+/// The program a shell tab runs here: `cat`. On Windows a bare `cat` goes to
+/// the reader's shell, where PowerShell takes it as `Get-Content`, so it is
+/// Git for Windows' own, by path, which the pane runs as its program.
+fn stand_in_shell() -> String {
+    #[cfg(windows)]
+    {
+        let sh = crate::binpath::posix_sh().expect("Git for Windows");
+        let cat = sh.parent().and_then(Path::parent).expect("Git's root").join("usr").join("bin").join("cat.exe");
+        format!("'{}'", cat.display())
+    }
+    #[cfg(not(windows))]
+    {
+        "cat".to_string()
+    }
+}
+
 fn agent(harness: &'static str, pid: u32) -> Agent {
     Agent { harness, pid, pids: vec![pid], job: pid }
 }
@@ -171,7 +187,7 @@ impl Rig {
     /// echoes what is typed at it.
     fn shell(&self, n: u32) -> String {
         let id = format!("{SESSION}:{n}");
-        self.pane(&id, "cat");
+        self.pane(&id, &stand_in_shell());
         self.manager.terminals.set_title(&id, &format!("Terminal {n}"));
         id
     }
@@ -232,11 +248,13 @@ impl Rig {
 
     /// The tab's own CLI as the app launches one, less the CLI: a pane whose
     /// program exits when it is given a line, and a runtime that holds it.
+    #[cfg(unix)]
     fn launched(&self, tab: &str, kind: CliKind, transcript: &Path) -> String {
         self.launched_running(tab, kind, transcript, "sh -c 'read line'")
     }
 
     /// [`Self::launched`], the pane running `command` for the CLI.
+    #[cfg(unix)]
     fn launched_running(&self, tab: &str, kind: CliKind, transcript: &Path, command: &str) -> String {
         let pane = SessionManager::pane_id(tab);
         self.pane(&pane, command);
@@ -289,6 +307,7 @@ impl Rig {
     }
 
     /// The reader exits the CLI in `pane`.
+    #[cfg(unix)]
     fn exit(&self, pane: &str) {
         self.manager.terminals.write(pane, b"bye\n").unwrap();
     }
@@ -434,6 +453,7 @@ fn a_shell_an_agent_is_started_in_keeps_its_place_in_the_row_of_tabs() {
     assert_eq!(index::tab_state().unwrap().workspaces[&workspace].order, [other_key, tab_key]);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_agent_tab_becomes_a_terminal_when_its_cli_exits_and_follows_what_is_started_there_next() {
     let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
@@ -493,6 +513,7 @@ fn an_agent_tab_becomes_a_terminal_when_its_cli_exits_and_follows_what_is_starte
     rig.wait("the resumed conversation's next turn", || rig.said("t1").ends_with(&["user: and again".to_string(), "claude: again".to_string()]));
 }
 
+#[cfg(unix)]
 #[test]
 fn an_exit_in_the_middle_of_a_turn_ends_the_turn_as_interrupted_and_says_so_once() {
     let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
@@ -515,6 +536,7 @@ fn an_exit_in_the_middle_of_a_turn_ends_the_turn_as_interrupted_and_says_so_once
     assert!(rig.settled_as_terminal("t1"));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_runtime_that_does_not_follow_terminals_treats_an_exit_as_it_always_did() {
     let rig = Rig::not_following(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
@@ -535,11 +557,13 @@ fn a_runtime_that_does_not_follow_terminals_treats_an_exit_as_it_always_did() {
 }
 
 /// #667, seen 2026-10-29 with codex 0.159.1.
+#[cfg(unix)]
 const CODEX_REVOKED: &str = "account/read failed during TUI bootstrap: account/read failed: workspace routing discovery unauthorized (401) (code -32603)";
 
 impl Rig {
     /// A Codex launched for a prompt, which prints `last` and exits 1 as
     /// soon as the reader gives it a line: before any hook or record.
+    #[cfg(unix)]
     fn failing_at_startup(&self, last: &str) -> String {
         let transcript = self.dir.path().join("codex.jsonl");
         let pane = self.launched_running("t1", CliKind::Codex, &transcript, &format!("sh -c 'read line; printf \"%s\\n\" \"{last}\"; exit 1'"));
@@ -553,6 +577,7 @@ impl Rig {
     }
 
     /// The failed turn's end, as the chat gets it.
+    #[cfg(unix)]
     fn ended(&self) -> (TurnStatus, bool, Option<String>, Option<String>) {
         self.events("t1").into_iter().find_map(|event| match event.payload {
             Payload::TurnCompleted { status, auth_failed, detail, final_text, .. } => Some((status, auth_failed, detail, final_text)),
@@ -561,6 +586,7 @@ impl Rig {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_codex_refused_at_startup_fails_its_turn_as_a_sign_in_on_a_cloud_runtime() {
     let rig = Rig::not_following(json!([agent_tab("t1", "codex", CODEX_ID)]));
@@ -572,6 +598,7 @@ fn a_codex_refused_at_startup_fails_its_turn_as_a_sign_in_on_a_cloud_runtime() {
     assert!(!rig.manager.terminals.is_running(&pane));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_codex_refused_at_startup_stays_the_agents_tab_with_a_sign_in_on_a_desktop() {
     let rig = Rig::new(json!([agent_tab("t1", "codex", CODEX_ID)]));
@@ -586,6 +613,7 @@ fn a_codex_refused_at_startup_stays_the_agents_tab_with_a_sign_in_on_a_desktop()
     assert_eq!(rig.said("t1"), ["user: fix the build", "recovery: SignedOut", "turn Error", "recovery: SignedOut"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_crash_at_startup_says_what_the_cli_said_and_is_no_sign_in() {
     let rig = Rig::new(json!([agent_tab("t1", "codex", CODEX_ID)]));
@@ -630,6 +658,7 @@ fn a_conversation_the_app_has_never_seen_is_brought_in_from_its_first_turn() {
     assert_eq!(rig.said(&tab.id).len(), 9);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_agent_that_has_yet_to_name_its_conversation_is_waited_for() {
     let rig = Rig::new(json!([agent_tab("t1", "claude", CLAUDE_ID)]));
@@ -709,6 +738,7 @@ fn a_prompt_sent_from_the_chat_is_typed_into_the_hand_started_cli_and_drawn_once
     assert!(rig.runtime(&tab.id).lock().unwrap().recovery.is_none());
 }
 
+#[cfg(unix)]
 /// A CLI started by hand shares its pane with the shell it was started from.
 /// When it exits, the watcher says so within a quarter of a second, and
 /// until then the tab still holds it. A prompt that arrives in between is
@@ -840,6 +870,7 @@ fn a_fork_arrives_holding_its_parents_turns_and_they_are_history() {
     assert!(!statuses.lock().unwrap().iter().any(|status| status.contains("completed")), "{:?}", statuses.lock().unwrap());
 }
 
+#[cfg(unix)]
 /// An agent exited while it was asking for permission. What it asked went
 /// with it, and reading the log again raises nothing for a tab that has
 /// nothing wrong with it.
@@ -931,6 +962,7 @@ fn what_needs_the_cli_restarted_is_refused_for_one_started_by_hand_and_says_why(
     assert_eq!(rig.tabs().iter().find(|entry| entry.harness == "claude").unwrap().follow.front, Front::Terminal);
 }
 
+#[cfg(unix)]
 #[test]
 fn stop_ends_a_hand_started_cli_and_leaves_the_shell_it_was_started_from() {
     let rig = Rig::new(json!([]));

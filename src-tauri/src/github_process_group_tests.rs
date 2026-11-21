@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::paths::Canonical;
 use super::*;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -15,7 +17,7 @@ fn successful_process_groups_keep_ownership_until_cleanup_and_acknowledgement() 
             .args(["--exact", CHILD_TEST, "--nocapture"])
             .env("TERMINALX_TEST_GROUP_OWNERSHIP", if managed { "managed" } else { "personal" })
             .env_remove("TERMINALX_TEST_MANAGED_PRIVACY")
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "managed={managed}\n{}\n{}",
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }

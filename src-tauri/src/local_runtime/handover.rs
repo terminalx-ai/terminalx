@@ -593,7 +593,7 @@ pub(crate) struct Verified {
 /// record format; and of this version or a newer one.
 pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     use std::os::unix::fs::MetadataExt;
-    let runtimes = std::fs::canonicalize(home.join("runtime")).context("find this home's installed runtimes")?;
+    let runtimes = crate::paths::canonicalize(home.join("runtime")).context("find this home's installed runtimes")?;
     if binary.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
@@ -606,7 +606,7 @@ pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     }
     let digest = directory.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
     let path = runtimes.join(&digest).join("terminalx-serve");
-    if std::fs::canonicalize(binary).ok().as_ref() != Some(&path) {
+    if crate::paths::canonicalize(binary).ok().as_ref() != Some(&path) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
     let identity = checked(&path, &digest)?;

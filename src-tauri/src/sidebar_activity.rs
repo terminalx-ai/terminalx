@@ -1,12 +1,12 @@
 //! Listening servers for sidebar rows. One bounded, cached probe for the whole
 //! window, including servers an agent detached from its terminal.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn listener_pids(output: &str) -> Vec<u32> {
     output
         .lines()
@@ -17,7 +17,7 @@ fn listener_pids(output: &str) -> Vec<u32> {
         .collect()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn working_directories(output: &str) -> Vec<PathBuf> {
     output
         .lines()
@@ -113,7 +113,7 @@ impl DirectoryCache {
             .filter_map(|session| {
                 paths
                     .entry(&session.cwd)
-                    .or_insert_with(|| std::fs::canonicalize(&session.cwd).ok())
+                    .or_insert_with(|| crate::paths::canonicalize(&session.cwd).ok())
                     .as_ref()
                     .map(|cwd| (session.id.clone(), cwd.clone()))
             })
@@ -136,7 +136,7 @@ pub fn listening_sessions(sessions: Vec<SessionDirectory>) -> Vec<String> {
             at: Instant::now(),
             directories: read_directories()
                 .into_iter()
-                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .filter_map(|path| crate::paths::canonicalize(path).ok())
                 .collect(),
             roots: None,
         });
@@ -162,6 +162,7 @@ pub fn listening_sessions(sessions: Vec<SessionDirectory>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn parses_only_process_ids_and_absolute_working_directories() {
         assert_eq!(

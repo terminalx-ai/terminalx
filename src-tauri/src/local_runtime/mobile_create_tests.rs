@@ -1,8 +1,11 @@
 //! A paired phone starting sessions and changing this Mac's settings. Each
 //! case runs in a child of its own: stand-in agent CLIs go first on the
 //! lookup path, which a process fixes once.
+#[cfg(unix)]
 use super::*;
+#[cfg(unix)]
 use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
+#[cfg(unix)]
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -31,6 +34,7 @@ fn a_phone_starts_sessions_and_changes_settings_as_the_desktop_does() {
     }
 }
 
+#[cfg(unix)]
 fn git(dir: &std::path::Path, args: &[&str]) {
     let status = std::process::Command::new("git").args(args).current_dir(dir)
         .env("GIT_AUTHOR_NAME", "Fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
@@ -39,6 +43,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn phone_create_child() {
     use std::os::unix::fs::PermissionsExt;

@@ -169,7 +169,7 @@ impl SessionManager {
 }
 
 fn project_key(path: &str) -> String {
-    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
+    crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
 }
 
 struct Running(Arc<PrCache>);

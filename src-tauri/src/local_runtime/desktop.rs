@@ -291,7 +291,7 @@ impl Desktop {
     /// may send, refused because this runtime cannot verify the window, is
     /// sent again to a fresh runtime the window launches (PRO-486,
     /// `window_consent`).
-    #[cfg(feature = "desktop")]
+    #[cfg(all(unix, feature = "desktop"))]
     pub(crate) fn machine_host(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let relaunch = super::window_consent::installed().map(|relaunch| relaunch.as_ref() as super::window_consent::Relaunching<'_, Self>);
         super::window_consent::guarded(self, command, params, |runtime, params| runtime.machine_host_once(command, params), relaunch)
@@ -302,7 +302,7 @@ impl Desktop {
     /// repaired as for pairing: a fresh runtime when nothing would stop, else
     /// Restart runtime offered (`window_consent::guarded`). An update that
     /// gives nothing more asks for no proof: the runtime judges it again itself.
-    #[cfg(feature = "desktop")]
+    #[cfg(all(unix, feature = "desktop"))]
     pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         use crate::serve_cli::consent;
         let mut request = serde_json::json!({"operation": operation, "params": params});
@@ -320,14 +320,36 @@ impl Desktop {
         super::window_consent::guarded(self, consent::BOTS_COMMAND, request, |runtime, request| runtime.sessions()?.bots_request(request), relaunch)
     }
 
+    /// [`Self::bots`] on Windows: no window signs for a Bots action there, so
+    /// nothing is proved or repaired; the runtime refuses what needs a
+    /// person and judges an `update` itself (`control::bots_without_a_window`).
+    #[cfg(all(not(unix), feature = "desktop"))]
+    pub(crate) fn bots(&self, operation: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        self.sessions()?.bots_request(serde_json::json!({"operation": operation, "params": params}))
+    }
+
     /// [`Self::machine_host`] with no one at the window to ask, as for an
     /// account pairing grant: a runtime that cannot verify the window is not
     /// restarted for it, and Settings → Machines offers the restart instead
     /// (PRO-486, `window_consent::unattended`).
-    #[cfg(feature = "desktop")]
+    #[cfg(all(unix, feature = "desktop"))]
     pub(crate) fn machine_host_unattended(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let repairable = super::window_consent::installed().is_some();
         super::window_consent::unattended(self, command, params, |runtime, params| runtime.machine_host_once(command, params), repairable, super::window_consent::in_use)
+    }
+
+    /// Windows has no `window_consent` (PRO-486): its consent
+    /// (`consent_windows.rs`) has no missing-Keychain-key refusal to repair by
+    /// relaunching the runtime, so a refusal reaches the caller as it is.
+    #[cfg(all(not(unix), feature = "desktop"))]
+    pub(crate) fn machine_host(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        self.machine_host_once(command, params)
+    }
+
+    /// [`Self::machine_host`] with no one at the window to ask; the same on Windows.
+    #[cfg(all(not(unix), feature = "desktop"))]
+    pub(crate) fn machine_host_unattended(&self, command: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        self.machine_host_once(command, params)
     }
 
     #[cfg(feature = "desktop")]

@@ -16,6 +16,7 @@
 //!   a computer pairs through the relay only with the live code's invite and
 //!   the person's Allow (PRO-487).
 
+use crate::paths::Canonical;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -616,7 +617,7 @@ fn data_privacy_mode_opens_no_listener_and_makes_no_machine_connection() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "machine_host::security_tests::privacy_child", "--nocapture", "--test-threads=1"])
         .env("TERMINALX_TEST_MACHINE_PRIVACY", "1")
-        .env("TERMINALX_HOME", root.path().canonicalize().unwrap())
+        .env("TERMINALX_HOME", root.path().canonical().unwrap())
         .env_remove("TERMINALX_TEST_MANAGED_PRIVACY")
         .env_remove(wire::PORT_ENV)
         .stdin(std::process::Stdio::null())

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::paths::Canonical;
 // Physical gh observations and the production desktop blocking dispatcher.
 use super::*;
 use std::path::Path;
@@ -20,7 +22,7 @@ fn privacy_cloud_merge_keeps_dispatch_and_reconciliation_authority() {
         let out = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "issue_pipeline::cloud_merge::tests::privacy::privacy_cloud_child", "--nocapture"])
             .env("TERMINALX_TEST_CLOUD_MERGE", if managed { "managed" } else { "personal" })
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(out.status.success(), "managed={managed}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     }
 }

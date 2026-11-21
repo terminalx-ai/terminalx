@@ -315,6 +315,8 @@ pub fn run_helper(program: &Path, cwd: &Path, timeout: Duration) -> Result<Zeroi
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use crate::paths::Canonical;
     use std::io::Write as _;
     use std::net::TcpListener;
     use std::thread;
@@ -491,7 +493,7 @@ mod tests {
         assert_eq!(run_helper(&slow, dir.path(), Duration::from_millis(200)).unwrap_err(), "helper-timeout");
         assert!(started.elapsed() < Duration::from_secs(3));
         let here = script(dir.path(), "here", "pwd", 0o755);
-        let cwd = dir.path().canonicalize().unwrap();
+        let cwd = dir.path().canonical().unwrap();
         assert_eq!(run_helper(&here, &cwd, HELPER_TIMEOUT).unwrap().as_str(), cwd.to_str().unwrap());
     }
 }

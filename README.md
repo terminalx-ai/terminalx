@@ -232,6 +232,9 @@ All of them, in full:
   file without printing it.
 - **`~/.local/bin/terminalx` and `~/.local/bin/tnx`** — symlinks to the
   app executable, only when you press Install under Settings → General.
+- **On Windows** the sockets above are named pipes that only your account can
+  open, and Install writes `terminalx.cmd` and `tnx.cmd` to `~/.local/bin`
+  instead of links; see "Windows" in [docs/LOCAL-RUNTIME.md](docs/LOCAL-RUNTIME.md).
 - **`~/.claude/skills/terminalx-cli` and
   `~/.agents/skills/terminalx-cli`** — the first-party discovery stub,
   only when you install it under Settings → Agents. Its full version-matched

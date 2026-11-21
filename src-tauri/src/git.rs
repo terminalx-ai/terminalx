@@ -31,6 +31,11 @@ pub(crate) fn git() -> Command {
     // scoped to our Git child, never the application or an agent's process.
     c.env("GIT_NO_LAZY_FETCH", "1");
     c.env("LC_ALL", "C");
+    // Paths past Windows' 260-character limit: a checkpoint's ref under
+    // `.git/refs` alone is about 130 of them, so a repository a little deep
+    // in the disk could not be checkpointed or reset without this.
+    #[cfg(windows)]
+    c.env("GIT_CONFIG_COUNT", "1").env("GIT_CONFIG_KEY_0", "core.longpaths").env("GIT_CONFIG_VALUE_0", "true");
     c
 }
 
@@ -808,7 +813,13 @@ pub fn work_status(cwd: &Path) -> WorkStatus {
 // ---------------------------------------------------------------- worktrees
 
 pub fn worktree_root(project: &Path) -> PathBuf {
-    project.join(crate::store::settings::load().worktree_dir)
+    let dir = crate::store::settings::load().worktree_dir;
+    // Written with `/` on every system: joined part by part, so the path is
+    // spelled the way git and a resolved path spell it here.
+    if Path::new(&dir).is_absolute() {
+        return project.join(dir);
+    }
+    dir.split(['/', '\\']).filter(|part| !part.is_empty()).fold(project.to_path_buf(), |path, part| path.join(part))
 }
 
 pub fn worktree_path(project: &Path, name: &str) -> PathBuf {
@@ -1050,7 +1061,8 @@ pub(crate) fn fork_worktree_snapshot(path: &Path, copied: &[crate::worktree_file
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if (metadata.creation_time(), 0) != file.identity || metadata.file_attributes() != file.mode {
+            let identity = std::fs::File::open(&current).and_then(|opened| crate::win::fs::file_id(&opened))?;
+            if identity != file.identity || metadata.file_attributes() != file.mode {
                 bail!("copied file {} metadata changed; worktree was kept", file.path);
             }
         }
@@ -1208,12 +1220,12 @@ pub fn rename_worktree(project: &Path, path: &Path, name: &str) -> Result<Create
     if name.is_empty() || name.contains('/') || name == "." || name == ".." {
         bail!("bad worktree name");
     }
-    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let project = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let path = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if path == project {
         bail!("the project's own checkout cannot be renamed here");
     }
-    let managed_root = std::fs::canonicalize(worktree_root(&project)).unwrap_or_else(|_| worktree_root(&project));
+    let managed_root = crate::paths::canonicalize(worktree_root(&project)).unwrap_or_else(|_| worktree_root(&project));
     if path.parent() != Some(managed_root.as_path()) {
         bail!("only TerminalX-managed workspaces can be renamed");
     }
@@ -1296,7 +1308,7 @@ pub struct WorktreeDisposition {
 /// git command run there silently answers for the enclosing repository.
 pub fn is_own_worktree(path: &Path) -> bool {
     let Ok(top) = run(path, &["rev-parse", "--show-toplevel"]) else { return false };
-    match (std::fs::canonicalize(top.trim()), std::fs::canonicalize(path)) {
+    match (crate::paths::canonicalize(top.trim()), crate::paths::canonicalize(path)) {
         (Ok(top), Ok(path)) => top == path,
         _ => false,
     }
@@ -1307,7 +1319,7 @@ pub(crate) fn common_dir(cwd: &Path) -> Option<PathBuf> {
     let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
     let dir = out.trim();
     let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };
-    std::fs::canonicalize(dir).ok()
+    crate::paths::canonicalize(dir).ok()
 }
 
 /// Whether `path` is the top of a working tree of `project`'s repository.
@@ -1429,12 +1441,12 @@ pub fn remove_managed_worktree_dir(project: &Path, path: &Path) -> Result<()> {
     if !meta.is_dir() {
         bail!("refusing to remove: {} is not a directory", path.display());
     }
-    let root = std::fs::canonicalize(worktree_root(project)).context("the worktree directory cannot be resolved")?;
-    let resolved = std::fs::canonicalize(path).with_context(|| format!("{} cannot be resolved", path.display()))?;
+    let root = crate::paths::canonicalize(worktree_root(project)).context("the worktree directory cannot be resolved")?;
+    let resolved = crate::paths::canonicalize(path).with_context(|| format!("{} cannot be resolved", path.display()))?;
     if resolved.parent() != Some(root.as_path()) {
         bail!("refusing to remove: {} is not directly under the worktree directory", path.display());
     }
-    let project_dir = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let project_dir = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     if resolved == project_dir || project_dir.starts_with(&resolved) {
         bail!("refusing to remove: {} holds the project itself", path.display());
     }
@@ -1468,9 +1480,9 @@ fn belongs_to_project(project: &Path, dir: &Path) -> Result<()> {
     let ours = common.join("worktrees");
     // The record may already be gone (git drops it before it fails on the
     // directory), so fall back to comparing the paths as written.
-    let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let resolve = |p: &Path| crate::paths::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let owner = link.parent().map(resolve);
-    let matches = owner.as_deref().is_some_and(|owner| owner == resolve(&ours) || owner == std::fs::canonicalize(&common).unwrap_or(common.clone()).join("worktrees"));
+    let matches = owner.as_deref().is_some_and(|owner| owner == resolve(&ours) || owner == crate::paths::canonicalize(&common).unwrap_or(common.clone()).join("worktrees"));
     if !matches {
         bail!("refusing to remove: {} is a worktree of another repository", dir.display());
     }
@@ -1496,7 +1508,7 @@ pub fn detached_head(project: &Path, path: &Path) -> Option<String> {
         .map(|link| if Path::new(&link).is_absolute() { PathBuf::from(link) } else { path.join(link) })
         .or_else(|| Some(common_dir(project)?.join("worktrees").join(path.file_name()?)))?;
     // Only a record in this project's own git directory is read.
-    if std::fs::canonicalize(admin.parent()?).ok()? != common_dir(project)?.join("worktrees") {
+    if crate::paths::canonicalize(admin.parent()?).ok()? != common_dir(project)?.join("worktrees") {
         return None;
     }
     let head = std::fs::read_to_string(admin.join("HEAD")).ok()?;
@@ -2443,6 +2455,7 @@ mod tests {
         assert_eq!(ws.branch.as_deref(), Some("main"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn review_blob_identities_cover_renames_deletions_binary_and_live_changes() {
         let _home = crate::store::temp_home();
@@ -2998,7 +3011,7 @@ mod tests {
         let _home = crate::store::temp_home();
         // A worktree folder outside any project, as an absolute setting allows.
         let shared = tempfile::tempdir().unwrap();
-        let shared_root = std::fs::canonicalize(shared.path()).unwrap();
+        let shared_root = crate::paths::canonicalize(shared.path()).unwrap();
         let settings = crate::store::settings::Settings { worktree_dir: shared_root.to_string_lossy().into_owned(), ..Default::default() };
         crate::store::settings::save(&settings).unwrap();
         let ours = repo();

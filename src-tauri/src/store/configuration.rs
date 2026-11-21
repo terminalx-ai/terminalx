@@ -2,6 +2,7 @@
 //! deliberately opt-in: adding a field to Settings never gives a repository
 //! permission to set it. No scripts are executed by this module: [`scripts`]
 //! only says which setup and archive commands a repository's hooks may run.
+use crate::paths::Canonical;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -131,15 +132,15 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().into())
 }
 pub fn repository(path: &Path) -> Result<Repository> {
-    let checkout = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
-    let common = PathBuf::from(git(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize()?;
+    let checkout = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonical()?;
+    let common = PathBuf::from(git(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonical()?;
     // Configuration belongs to the primary checkout, including local overrides.
     // A linked workspace must not silently lose ignored local values or adopt
     // executable settings from an arbitrary branch it checks out.
     let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
     let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
-    let root = PathBuf::from(primary).canonicalize()?;
-    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) })
+    let root = PathBuf::from(primary).canonical()?;
+    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonical().unwrap_or_else(|_| path.to_path_buf()) })
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 /// What trust is bound to. A file that sets scripts gets a hash no earlier
@@ -234,7 +235,7 @@ pub struct Store {
     saved_scripts: Option<super::projects::RepositoryScripts>,
 }
 impl Store {
-    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()?, #[cfg(test)] managed_fixture: None, #[cfg(test)] saved_scripts: None }) }
+    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonical()?, #[cfg(test)] managed_fixture: None, #[cfg(test)] saved_scripts: None }) }
     /// The Scripts page's own values for this repository: its user layer.
     fn saved_scripts(&self, repository: &Repository) -> Result<super::projects::RepositoryScripts> {
         #[cfg(test)]

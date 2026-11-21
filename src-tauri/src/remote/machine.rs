@@ -169,7 +169,7 @@ pub trait MachineAccess: Send + Sync + 'static {
     }
 }
 
-/// `macos` or `linux`, as Rust names them.
+/// `macos`, `linux` or `windows`, as Rust names them.
 fn os_family() -> &'static str {
     std::env::consts::OS
 }
@@ -182,7 +182,18 @@ fn os_version() -> Option<String> {
         let version = String::from_utf8(output.stdout).ok()?.trim().to_string();
         (output.status.success() && !version.is_empty()).then_some(version)
     }
-    #[cfg(not(target_os = "macos"))]
+    // `10.0.26100`: the build says which Windows (22000 and later are 11).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let output = std::process::Command::new("cmd.exe").args(["/d", "/c", "ver"]).creation_flags(CREATE_NO_WINDOW).output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let version = text.split("Version ").nth(1)?.split(']').next()?.trim();
+        let parts: Vec<&str> = version.split('.').take(3).collect();
+        (output.status.success() && parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok())).then(|| parts.join("."))
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let release = std::fs::read_to_string("/etc/os-release").ok()?;
         release.lines().find_map(|line| line.strip_prefix("VERSION_ID=")).map(|value| value.trim_matches('"').to_string()).filter(|value| !value.is_empty())
@@ -251,7 +262,7 @@ impl WorktreeRegistration {
     fn project_uses_registry(&self, registry: &Path, common: &Path) -> bool {
         let marker = self.project_marker.as_ref();
         let git_dir = if marker.is_dir() {
-            std::fs::canonicalize(marker).ok()
+            crate::paths::canonicalize(marker).ok()
         } else {
             git_link(marker, "gitdir: ")
         };
@@ -266,7 +277,7 @@ impl WorktreeRegistration {
 /// Git writes these pointers in both directions, relative to the pointer
 /// file's directory or as absolute paths.
 fn git_link(file: &Path, prefix: &str) -> Option<PathBuf> {
-    std::fs::canonicalize(git_link_path(file, prefix)?).ok()
+    crate::paths::canonicalize(git_link_path(file, prefix)?).ok()
 }
 
 fn git_link_path(file: &Path, prefix: &str) -> Option<PathBuf> {
@@ -304,14 +315,14 @@ fn worktree_registrations(project: &Path) -> Vec<WorktreeRegistration> {
     let project_marker: Arc<Path> = Arc::from(project.join(".git"));
     let mut found: Vec<_> = entries.filter_map(Result::ok).filter_map(|entry| {
         let admin = entry.path();
-        if !entry.file_type().ok()?.is_dir() || std::fs::canonicalize(&admin).ok()? != admin {
+        if !entry.file_type().ok()?.is_dir() || crate::paths::canonicalize(&admin).ok()? != admin {
             return None;
         }
         let marker = git_link_path(&admin.join("gitdir"), "")?;
         if marker.file_name()? != ".git" {
             return None;
         }
-        let path = std::fs::canonicalize(marker.parent()?).ok()?;
+        let path = crate::paths::canonicalize(marker.parent()?).ok()?;
         let registration = WorktreeRegistration { path, admin, project_marker: project_marker.clone() };
         (registration.path != project).then_some(registration)
     }).collect();
@@ -375,14 +386,14 @@ pub(super) fn session_checkout(
     if session.worktree_removed {
         return None;
     }
-    let cwd = match std::fs::canonicalize(&session.cwd) {
+    let cwd = match crate::paths::canonicalize(&session.cwd) {
         Ok(cwd) => cwd.is_dir().then_some(cwd),
         Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => None,
         Err(_) => return None,
     };
     let (path, exact) = match cwd {
         Some(cwd) => (cwd, false),
-        None => (std::fs::canonicalize(session.checkout_root()?).ok()?, true),
+        None => (crate::paths::canonicalize(session.checkout_root()?).ok()?, true),
     };
     if !path.is_dir() {
         return None;
@@ -428,7 +439,7 @@ impl Projects {
 
     /// Use a path from the registered-project snapshot used to list sessions.
     pub fn get_at(&self, id: &str, path: &str) -> Result<Arc<ServedProject>, RpcError> {
-        let root = std::fs::canonicalize(path).map_err(|_| RpcError::not_found(format!("the folder of project {id} is gone")))?;
+        let root = crate::paths::canonicalize(path).map_err(|_| RpcError::not_found(format!("the folder of project {id} is gone")))?;
         let mut served = self.served.lock().unwrap();
         if let Some(existing) = served.get(id).filter(|existing| existing.root == root) {
             let existing = existing.clone();

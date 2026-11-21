@@ -11,7 +11,7 @@ fn fixture() -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
 /// With `sparse`, the workspace checks out only those folders of keep/ and drop/.
 fn fixture_with(sparse: Option<&[&str]>) -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
     let repo = tempfile::tempdir().unwrap();
-    let project = std::fs::canonicalize(repo.path()).unwrap();
+    let project = crate::paths::canonicalize(repo.path()).unwrap();
     for args in [vec!["init", "-q", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] {
         git::run(&project, &args).unwrap();
     }
@@ -258,6 +258,7 @@ fn index_failure_after_checkout_rolls_back_the_checkout_and_branch() {
     assert_eq!(index::get("retained").unwrap(), session);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sparse_workspace_comes_back_with_its_folders_and_no_checkout_hook_runs() {
     let _home = crate::store::temp_home();

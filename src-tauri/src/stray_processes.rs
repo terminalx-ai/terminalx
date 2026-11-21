@@ -18,7 +18,9 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -50,7 +52,16 @@ struct Process {
 
 fn program(process: &Process) -> &str {
     let first = process.args.first().map(String::as_str).unwrap_or_default();
-    first.rsplit('/').next().unwrap_or(first)
+    #[cfg(unix)]
+    {
+        first.rsplit('/').next().unwrap_or(first)
+    }
+    // `C:\...\cargo.exe` is `cargo`, as `/.../cargo` is.
+    #[cfg(windows)]
+    {
+        let name = first.rsplit(['/', '\\']).next().unwrap_or(first);
+        name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name)
+    }
 }
 
 /// A Rust build or check, as a build tool or an editor starts one: never a
@@ -70,7 +81,7 @@ fn build_tool(process: &Process) -> bool {
 /// apart from the listing itself, so the choice can be tested on its own.
 /// Which to stop, and which to list only.
 fn choose(dir: &Path, table: &[Process], me: u32, uid: u32) -> (Vec<u32>, Vec<u32>) {
-    let canonical = std::fs::canonicalize(dir).ok();
+    let canonical = crate::paths::canonicalize(dir).ok();
     let under = |path: &Path| path.starts_with(dir) || canonical.as_deref().is_some_and(|canonical| path.starts_with(canonical));
     let inside = |process: &Process| {
         process.cwd.as_deref().is_some_and(under)
@@ -95,11 +106,13 @@ fn choose(dir: &Path, table: &[Process], me: u32, uid: u32) -> (Vec<u32>, Vec<u3
     (stop.into_iter().collect(), left)
 }
 
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
     // SAFETY: signal 0 only asks whether the process exists and may be signalled.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+#[cfg(unix)]
 fn signal(pid: u32, signal: libc::c_int) {
     // SAFETY: a plain kill(2) of one process id, never a group or 0/-1.
     unsafe {
@@ -107,9 +120,40 @@ fn signal(pid: u32, signal: libc::c_int) {
     }
 }
 
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    crate::win::process::is_running(pid)
+}
+
+/// The account a process runs as, as `choose` compares it: 0 for this user,
+/// anything else for another.
+#[cfg(windows)]
+const OURS: u32 = 0;
+
+/// Windows asks no process to stop; the ones chosen are terminated, each
+/// only while it is still the process that was listed: the same image,
+/// started at the same time, of this user.
+#[cfg(windows)]
+pub fn stop_in(dir: &Path) -> Vec<Stray> {
+    let (table, seen) = listing();
+    let (stop, left) = choose(dir, &table, std::process::id(), OURS);
+    let described = |pid: &u32, stopped: bool| Stray { pid: *pid, program: table.iter().find(|process| process.pid == *pid).map(program).unwrap_or_default().to_string(), stopped };
+    let mut found: Vec<Stray> = stop.iter().map(|pid| described(pid, true)).chain(left.iter().map(|pid| described(pid, false))).collect();
+    for pid in &stop {
+        if let Some((image, started)) = seen.get(pid) {
+            let _ = crate::win::process::terminate_if(*pid, image, *started, GRACE);
+        }
+    }
+    for stray in found.iter_mut().filter(|stray| stray.stopped) {
+        stray.stopped = !alive(stray.pid);
+    }
+    found
+}
+
 /// Stop the leftover builds and checks working in `dir`, and say what was
 /// found: the ones stopped, then the ones left running. Called once the
 /// workspace's sessions are stopped and before it is deleted.
+#[cfg(unix)]
 pub fn stop_in(dir: &Path) -> Vec<Stray> {
     let table = processes();
     // SAFETY: getuid cannot fail.
@@ -234,7 +278,52 @@ pub(crate) fn arguments(pid: libc::pid_t) -> Vec<String> {
     buffer[4..].split(|byte| *byte == 0).skip(1).filter(|part| !part.is_empty()).take(count).map(|part| String::from_utf8_lossy(part).into_owned()).collect()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// This machine's processes. A process whose recorded parent has exited, or
+/// was started after it (Windows reuses pids), was let go of: it is listed
+/// with parent 1, as an orphan adopted by init is on Unix. Windows has no
+/// session leaders; what a person detached on purpose is not a build tool,
+/// which is all that is ever stopped.
+/// This user's processes as [`processes`] lists them, with the image and
+/// start time each had then, which a kill checks again.
+#[cfg(windows)]
+fn listing() -> (Vec<Process>, std::collections::HashMap<u32, (PathBuf, u64)>) {
+    let table = processes();
+    let seen = table.iter()
+        .filter(|process| process.uid == OURS)
+        .filter_map(|process| Some((process.pid, (crate::win::process::image_path(process.pid).ok()?, crate::win::process::started(process.pid)?))))
+        .collect();
+    (table, seen)
+}
+
+#[cfg(windows)]
+fn processes() -> Vec<Process> {
+    use crate::win::process as win;
+    let Ok(table) = win::processes() else { return Vec::new() };
+    let me = crate::win::security::current_user().ok();
+    table.iter()
+        .filter(|entry| entry.pid > 4)
+        .map(|entry| {
+            let ours = me.is_some() && crate::win::security::process_user(entry.pid).ok().as_deref() == me;
+            let started = win::started(entry.pid);
+            let parent_alive = table.iter().any(|other| other.pid == entry.parent)
+                && match (started, win::started(entry.parent)) {
+                    (Some(child), Some(parent)) => parent <= child,
+                    _ => false,
+                };
+            let (cwd, args) = if ours { (win::working_directory(entry.pid), arguments(entry.pid)) } else { (None, Vec::new()) };
+            Process { pid: entry.pid, ppid: if parent_alive { entry.parent } else { 1 }, uid: if ours { OURS } else { u32::MAX }, leader: false, cwd, args }
+        })
+        .collect()
+}
+
+/// A process's arguments, from the command line the kernel keeps. Empty when
+/// they cannot be read.
+#[cfg(windows)]
+pub(crate) fn arguments(pid: u32) -> Vec<String> {
+    crate::win::process::command_line(pid).map(|line| crate::win::process::split_command_line(&line)).unwrap_or_default()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn processes() -> Vec<Process> {
     Vec::new()
 }
@@ -311,7 +400,7 @@ mod tests {
         let child = found.iter().find(|process| process.pid == ours.id()).expect("the listing sees the child");
         assert_eq!(child.ppid, std::process::id());
         assert!(!child.leader);
-        assert!(child.cwd.as_deref().is_some_and(|cwd| std::fs::canonicalize(cwd).unwrap() == std::fs::canonicalize(dir.path()).unwrap()), "{:?}", child.cwd);
+        assert!(child.cwd.as_deref().is_some_and(|cwd| crate::paths::canonicalize(cwd).unwrap() == crate::paths::canonicalize(dir.path()).unwrap()), "{:?}", child.cwd);
         assert_eq!(child.args, ["sleep", "300"]);
         // Ours, it has a parent: listed and left running, named without its arguments.
         let listed = stop_in(dir.path());

@@ -121,6 +121,14 @@
   the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
   files on this Mac by other means. Agent and model, rename and delete are
   under the page's menu.
+- TerminalX runs on Windows 10 and 11: the desktop app, its background
+  runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
+  machines, phone pairing and the headless `terminalx-serve` tools. Named
+  pipes with owner-only access stand in for Unix sockets, DPAPI for the
+  Keychain, Job Objects and ConPTY for process groups and terminals, and Git
+  for Windows' `sh` runs setup, archive and action scripts. Not yet on
+  Windows: keeping agents running through a runtime update (an update
+  restarts the runtime), Local VM tasks, and the runtime's self-update.
 
 ## 0.2.37
 

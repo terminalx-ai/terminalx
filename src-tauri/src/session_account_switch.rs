@@ -720,6 +720,7 @@ impl SessionManager {
     }
 }
 
-#[cfg(test)]
+// Its Claude Code is a stand-in `#!/bin/sh` CLI.
+#[cfg(all(test, unix))]
 #[path = "session_account_switch_tests.rs"]
 mod tests;

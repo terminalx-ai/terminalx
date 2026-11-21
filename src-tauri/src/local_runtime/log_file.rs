@@ -5,9 +5,10 @@
 //! The desktop keeps one too, beside it ([`Tee`]): opened from the Dock its
 //! stderr goes nowhere, and with it every line about a lost connection (#716).
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -17,7 +18,21 @@ pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Open the log for appending, private to this user.
 pub fn open(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new().create(true).append(true).mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
+    }
+    // Created owner-only (or taken down to it) and never through a link, in
+    // one open: the runtime is the log's one writer, so writing from its end
+    // is appending.
+    #[cfg(windows)]
+    {
+        use std::io::Seek;
+        let mut file = crate::private_fs::create_file(path, false)?;
+        file.seek(std::io::SeekFrom::End(0))?;
+        Ok(file)
+    }
 }
 
 /// The file the previous log is kept in: `runtime.log.1` beside `runtime.log`.
@@ -72,6 +87,7 @@ fn start_afresh(path: &Path) -> io::Result<File> {
 }
 
 /// Point stdout and stderr at `file`.
+#[cfg(unix)]
 fn redirect(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     for target in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
@@ -80,6 +96,33 @@ fn redirect(file: &File) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
+    Ok(())
+}
+
+/// Point this process's standard output and error handles at `file`: what
+/// `dup2` onto them is on Unix. The standard library looks the handles up
+/// on every write, so a panic message lands in the log too. Each handle is a
+/// duplicate of its own, closed when the next file takes over.
+#[cfg(windows)]
+fn redirect(file: &File) -> io::Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    static HELD: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let mut held = HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut fresh = Vec::new();
+    for target in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let handle = file.try_clone()?.into_raw_handle();
+        // SAFETY: `handle` is a live duplicate this process now owns.
+        if unsafe { SetStdHandle(target, handle) } == 0 {
+            crate::win::process::close(handle);
+            return Err(io::Error::last_os_error());
+        }
+        fresh.push(handle as usize);
+    }
+    // The previous handles stay open: another thread may be writing through
+    // one this moment, and a closed value could be given to something else.
+    // One pair per rotation, so a handful over the process's life.
+    held.extend(fresh);
     Ok(())
 }
 
@@ -173,6 +216,7 @@ pub fn size(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// PRO-287: "Copy logs" copies the latest whole lines, and says when
@@ -188,6 +232,7 @@ mod tests {
         assert!(tail(&fixture.path().join("missing.log"), 1024).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tee_writes_each_line_to_its_file_once_one_is_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -214,6 +259,7 @@ mod tests {
         assert_eq!(size(2 * 1024 * 1024), "2.0 MiB");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_full_log_is_moved_aside_with_one_older_file_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,6 +299,7 @@ mod tests {
         assert_eq!(std::fs::metadata(previous(&path)).unwrap().len(), MAX_BYTES);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_log_is_never_opened_through_a_link() {
         let dir = tempfile::tempdir().unwrap();
