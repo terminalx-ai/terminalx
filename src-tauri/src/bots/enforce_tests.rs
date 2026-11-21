@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::bots::{self, chat, BotAccess, BotPatch};
 use crate::sink::BroadcastSink;
+use crate::store::index::TabStatus;
 
 fn bots_on() -> crate::store::TempHome {
     let home = crate::store::temp_home();
