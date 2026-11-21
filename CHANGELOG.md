@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Bots (experimental): the week calendar of duties starts on the first day of
+  the week of the system's region. Too many duties at one time to read side
+  by side show "+N more", which lists the rest. The grid is keyboard-driven:
+  the arrow keys move between hours and days, Enter adds a duty at the hour,
+  and Alt (Option) with the arrows moves a block still to come, Enter saving
+  it. A deleted duty's past runs stay on the weeks they ran, dimmed and named,
+  and open its kept run log. A run that goes on past midnight carries on as a
+  second block on the next day (PRO-499).
 - Bots (experimental): a bot's Claude Code sessions run no inline `!` command
   of a skill or custom slash command, which runs as it loads with no tool call
   the access gate could see; the command is replaced by a placeholder and the

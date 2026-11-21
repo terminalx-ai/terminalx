@@ -55,7 +55,7 @@ fn run(duty: &str, n: u64, status: &str, scheduled: &str, extra: Value) -> Autom
 }
 
 fn read(tz: Tz, now: &str, duties: &[(&Automation, &Bot, Vec<AutomationRun>)]) -> Week {
-    let inputs: Vec<DutyWeek<'_>> = duties.iter().map(|(duty, bot, runs)| DutyWeek { duty, bot, runs, unreadable: None }).collect();
+    let inputs: Vec<DutyWeek<'_>> = duties.iter().map(|(duty, bot, runs)| DutyWeek { duty, bot, runs, unreadable: None, deleted_at: None }).collect();
     week(tz, monday(), utc(now), &inputs, BTreeMap::new()).unwrap()
 }
 
@@ -170,7 +170,7 @@ fn a_fold_that_began_last_week_counts_only_this_weeks_repeats() {
     assert_eq!(week.totals.checks, 2);
     assert_eq!(states(&week, "drift")[..2], [(0, 540, BlockState::Quiet), (1, 540, BlockState::Quiet)]);
     // Seen from the week before, the same row holds the three before Monday.
-    let inputs = [DutyWeek { duty: &drift, bot: &argus, runs: &runs, unreadable: None }];
+    let inputs = [DutyWeek { duty: &drift, bot: &argus, runs: &runs, unreadable: None, deleted_at: None }];
     let before = week_at(monday() - Duration::days(7), "2026-11-17T12:00:00Z", &inputs);
     assert_eq!(before.totals.checks, 3, "Friday, Saturday and Sunday");
 }
@@ -294,7 +294,7 @@ fn days_the_log_no_longer_covers_are_not_kept_never_empty() {
 fn an_unreadable_log_is_said_on_its_duty_and_its_days_are_not_kept() {
     let atlas = bot("atlas", false);
     let status = duty("status", "atlas", daily(18, "UTC"), json!({}));
-    let inputs = [DutyWeek { duty: &status, bot: &atlas, runs: &[], unreadable: Some("runs.jsonl: line 3 is not JSON") }];
+    let inputs = [DutyWeek { duty: &status, bot: &atlas, runs: &[], unreadable: Some("runs.jsonl: line 3 is not JSON"), deleted_at: None }];
     let week = week(Tz::UTC, monday(), utc("2026-11-18T09:30:00Z"), &inputs, BTreeMap::new()).unwrap();
     let days: Vec<Vec<(String, u32)>> = week.not_kept.iter().map(|day| day.iter().map(|gap| (gap.duty_id.clone(), gap.until_minute)).collect()).collect();
     // Monday and Tuesday whole, Wednesday up to now; nothing after now.
@@ -313,7 +313,7 @@ fn a_schedule_past_the_cap_says_its_count_is_a_floor() {
     let argus = bot("argus", false);
     let every = duty("every", "argus", json!({"kind": "cron", "cron": "* * * * *", "timezone": "Europe/London", "dtstart": "2026-01-01T00:00:00Z"}), json!({}));
     let london: Tz = "Europe/London".parse().unwrap();
-    let inputs = [DutyWeek { duty: &every, bot: &argus, runs: &[], unreadable: None }];
+    let inputs = [DutyWeek { duty: &every, bot: &argus, runs: &[], unreadable: None, deleted_at: None }];
     let back = week(london, NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(), utc("2026-10-01T00:00:00Z"), &inputs, BTreeMap::new()).unwrap();
     assert_eq!(back.often.iter().map(|day| day.planned).sum::<u32>(), MAX_OCCURRENCES as u32);
     assert!(back.often.iter().all(|day| !day.capped) && back.logs.is_empty(), "{:?}", back.logs);
@@ -376,7 +376,10 @@ fn a_week_outside_the_range_is_refused() {
         assert!(week(Tz::UTC, monday, utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_err(), "{day}");
     }
     assert!(week(Tz::UTC, NaiveDate::from_ymd_opt(2199, 12, 30).unwrap(), utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_ok());
-    assert_eq!(monday_of(NaiveDate::MIN), None);
+    assert_eq!(start_of(NaiveDate::MIN, Weekday::Mon), None);
+    // A week starting on Saturday 1 January 2000 is the first; the one before it is not.
+    assert!(week(Tz::UTC, NaiveDate::from_ymd_opt(2000, 1, 1).unwrap(), utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_ok());
+    assert!(week(Tz::UTC, NaiveDate::from_ymd_opt(1999, 12, 31).unwrap(), utc("2026-11-20T00:00:00Z"), &[], BTreeMap::new()).is_err());
 }
 
 /// L5: when midnight does not exist (Chile moves its clocks from 24:00 to 01:00), the day starts at the first
@@ -401,6 +404,100 @@ fn a_blocks_note_is_capped() {
     let note = week.blocks[0].note.as_deref().unwrap();
     assert_eq!(note.chars().count(), NOTE_CHARS);
     assert!(note.ends_with('…'));
+}
+
+/// PRO-499: the week starts on the day the window asks for, and a block's day counts from it; a duty's stored
+/// weekday means the same day whatever the week starts on.
+#[test]
+fn the_week_starts_on_the_day_asked_for_and_a_stored_weekday_keeps_its_meaning() {
+    let thursday = NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+    assert_eq!(start_of(thursday, Weekday::Mon), Some(monday()));
+    assert_eq!(start_of(thursday, Weekday::Sun), NaiveDate::from_ymd_opt(2026, 11, 15));
+    assert_eq!(start_of(thursday, Weekday::Sat), NaiveDate::from_ymd_opt(2026, 11, 14));
+    assert_eq!(start_of(thursday, Weekday::Thu), Some(thursday));
+    assert_eq!(first_weekday(&Value::Null).unwrap(), Weekday::Mon, "an older window says nothing: Monday");
+    assert_eq!(first_weekday(&json!(6)).unwrap(), Weekday::Sun);
+    assert_eq!(first_weekday(&json!(5)).unwrap(), Weekday::Sat);
+    for wrong in [json!(7), json!(-1), json!("SU"), json!(1.5)] {
+        assert!(first_weekday(&wrong).is_err(), "{wrong}");
+    }
+
+    let atlas = bot("atlas", false);
+    // Weekly on Mondays at 09:00, as the editor stores it.
+    let weekly = duty("weekly", "atlas", json!({"kind": "preset", "preset": "weekly", "weekdays": ["MO"], "hour": 9, "minute": 0, "timezone": "UTC", "dtstart": "2026-01-01T00:00:00Z"}), json!({}));
+    let runs = vec![run("weekly", 1, "completed", "2026-11-16T09:00:00Z", json!({}))];
+    let inputs = [DutyWeek { duty: &weekly, bot: &atlas, runs: &runs, unreadable: None, deleted_at: None }];
+    let sunday = NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+    let week = week(Tz::UTC, sunday, utc("2026-11-19T12:00:00Z"), &inputs, BTreeMap::new()).unwrap();
+    assert_eq!(week.days, ["2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20", "2026-11-21"]);
+    assert_eq!((week.today, week.now_minute), (Some(4), Some(12 * 60)));
+    assert_eq!(states(&week, "weekly"), vec![(1, 540, BlockState::Done)], "Monday is the second day of a week that starts on Sunday");
+}
+
+/// PRO-499: a deleted duty's kept runs are drawn where they ran, marked deleted and named; nothing of it is to come,
+/// and it is not counted among the duties that wake often.
+#[test]
+fn a_deleted_duty_keeps_its_past_runs_and_nothing_is_to_come() {
+    let atlas = bot("atlas", false);
+    let mut status = duty("status", "atlas", daily(9, "UTC"), json!({}));
+    status.name = "Daily status".into();
+    let runs = vec![
+        run("status", 2, "completed", "2026-11-17T09:00:00Z", json!({"duty": {"reportedTo": "owner"}})),
+        run("status", 1, "skippedPrecheck", "2026-11-16T09:00:00Z", json!({"precheck": {"stdoutTail": "", "stderrTail": "", "truncated": false, "timedOut": false, "durationMs": 3}})),
+    ];
+    let every = duty("every", "atlas", cron("*/30 * * * *"), json!({}));
+    let often = vec![run("every", 1, "completed", "2026-11-16T10:00:00Z", json!({}))];
+    let gone = Some("2026-11-17T12:00:00Z");
+    let inputs = [
+        DutyWeek { duty: &status, bot: &atlas, runs: &runs, unreadable: None, deleted_at: gone },
+        DutyWeek { duty: &every, bot: &atlas, runs: &often, unreadable: None, deleted_at: gone },
+    ];
+    let week = week_at(monday(), "2026-11-19T08:00:00Z", &inputs);
+    let drawn: Vec<_> = week.blocks.iter().map(|block| (block.duty_id.as_str(), block.day, block.state, block.deleted)).collect();
+    assert_eq!(drawn, vec![("status", 0, BlockState::Quiet, true), ("status", 1, BlockState::Reported, true)], "no block still to come");
+    assert!(week.next_today.is_empty());
+    assert_eq!(week.totals.checks, 3, "what ran is counted");
+    assert!(week.often_duties.is_empty(), "a deleted duty wakes on nothing");
+    assert_eq!((week.often[0].ran, week.often[3].scheduled), (1, 0));
+    assert_eq!(week.deleted.iter().map(|gone| (gone.duty_id.as_str(), gone.name.as_str(), gone.deleted_at.as_str())).collect::<Vec<_>>(), vec![("every", "every", "2026-11-17T12:00:00Z"), ("status", "Daily status", "2026-11-17T12:00:00Z")]);
+    assert_eq!(serde_json::to_value(&week.blocks[0]).unwrap()["deleted"], true);
+    // A week it ran nothing in does not name it.
+    let later = week_at(NaiveDate::from_ymd_opt(2026, 11, 23).unwrap(), "2026-11-24T08:00:00Z", &inputs);
+    assert!(later.blocks.is_empty() && later.deleted.is_empty());
+}
+
+/// PRO-499: a run that goes on past midnight goes on, as a second block, on the next day; one that began in the
+/// week before is drawn from this week's first midnight and counted in the week it began.
+#[test]
+fn a_run_past_midnight_goes_on_the_next_day() {
+    let atlas = bot("atlas", false);
+    let late = duty("late", "atlas", daily(22, "UTC"), json!({}));
+    let runs = vec![
+        run("late", 3, "completed", "2026-11-17T22:00:00Z", json!({"endedAt": "2026-11-17T23:30:00Z"})),
+        run("late", 2, "completed", "2026-11-16T22:00:00Z", json!({"endedAt": "2026-11-17T01:30:00Z"})),
+        run("late", 1, "completed", "2026-11-15T23:00:00Z", json!({"endedAt": "2026-11-16T01:00:00Z"})),
+    ];
+    let week = read(Tz::UTC, "2026-11-18T08:00:00Z", &[(&late, &atlas, runs)]);
+    let ran: Vec<_> = week.blocks.iter().filter(|block| block.state != BlockState::Next).map(|block| (block.day, block.minute, block.minutes, block.continued, block.run_id.as_deref())).collect();
+    assert_eq!(
+        ran,
+        vec![
+            (0, 0, Some(60), true, Some("late-1")),
+            (0, 22 * 60, Some(210), false, Some("late-2")),
+            (1, 0, Some(90), true, Some("late-2")),
+            (1, 22 * 60, Some(90), false, Some("late-3")),
+        ]
+    );
+    assert_eq!(week.totals.checks, 2, "the run that began last Sunday is last week's");
+    let continued = serde_json::to_value(&week.blocks[0]).unwrap();
+    assert_eq!((continued["continued"].clone(), continued["at"].clone()), (json!(true), json!("2026-11-16T00:00:00Z")));
+    assert!(serde_json::to_value(&week.blocks[1]).unwrap().get("continued").is_none(), "said only when true");
+
+    // One still running, across two midnights, to now.
+    let long = vec![run("late", 1, "running", "2026-11-16T22:00:00Z", json!({"endedAt": null}))];
+    let week = read(Tz::UTC, "2026-11-18T03:00:00Z", &[(&late, &atlas, long)]);
+    let ran: Vec<_> = week.blocks.iter().filter(|block| block.state == BlockState::Running).map(|block| (block.day, block.minute, block.minutes, block.continued)).collect();
+    assert_eq!(ran, vec![(0, 22 * 60, Some(29 * 60), false), (1, 0, Some(27 * 60), true), (2, 0, Some(3 * 60), true)]);
 }
 
 // Through the runtime's own dispatch.
@@ -497,6 +594,51 @@ fn the_week_is_read_through_the_dispatch_for_every_bot_or_one_and_never_with_bot
         assert!(refused.to_string().contains("Bots"), "{refused:#}");
     }
     assert!(rig.bots("dutyWeek", json!({})).is_ok());
+}
+
+/// PRO-499: deleting a duty keeps its run log and its name; the week draws its past runs and its log still opens.
+/// Its bot's deletion takes the kept log with it. The week starts on the day the window asks for.
+#[test]
+fn a_deleted_duty_is_read_through_the_dispatch_and_goes_with_its_bot() {
+    let rig = rig();
+    let atlas = rig.hire("Atlas");
+    let iris = rig.hire("Iris");
+    let status = rig.duty(&atlas, "Daily status", daily(18, "UTC"));
+    automation_store::insert_run(run(&status.id, 1, "completed", "2026-11-16T18:00:00Z", json!({"duty": {"reportedTo": "owner"}}))).unwrap();
+    // One that never ran leaves nothing behind.
+    let never = rig.duty(&atlas, "Never ran", daily(7, "UTC"));
+    rig.bots("dutyDelete", json!({"id": atlas.id, "dutyId": status.id})).unwrap();
+    rig.bots("dutyDelete", json!({"id": atlas.id, "dutyId": never.id})).unwrap();
+    assert!(automation_store::get(&status.id).is_err(), "no longer a duty");
+    let folder = crate::store::root().unwrap().join("automations").join(&status.id);
+    assert!(folder.join("runs.jsonl").is_file() && folder.join("deleted.json").is_file());
+    assert!(!crate::store::root().unwrap().join("automations").join(&never.id).exists());
+
+    let week = rig.bots("dutyWeek", json!({"week": "2026-11-19", "timezone": "UTC"})).unwrap();
+    let blocks: Vec<&Value> = week["blocks"].as_array().unwrap().iter().filter(|block| block["dutyId"] == status.id.as_str()).collect();
+    assert_eq!(blocks.len(), 1, "its past run, and nothing to come: {week}");
+    assert_eq!((blocks[0]["state"].as_str(), blocks[0]["deleted"].as_bool()), (Some("reported"), Some(true)));
+    assert_eq!(week["deleted"][0]["name"], "Daily status");
+    assert_eq!(week["deleted"][0]["botId"], atlas.id.as_str());
+
+    let log = rig.bots("dutyKeptLog", json!({"id": atlas.id, "dutyId": status.id})).unwrap();
+    assert_eq!((log["name"].as_str(), log["runs"].as_array().map(Vec::len)), (Some("Daily status"), Some(1)));
+    assert!(log["deletedAt"].is_string());
+    assert!(rig.bots("dutyKeptLog", json!({"id": iris.id, "dutyId": status.id})).is_err(), "another bot's");
+    assert!(rig.bots("dutyKeptLog", json!({"id": atlas.id, "dutyId": "../automations.json"})).is_err());
+    assert!(!crate::bots::enforce::needs_person("dutyKeptLog", &json!({})));
+    assert!(!crate::serve_cli::consent::guards_request("runtime.session.bots", &json!({"operation": "dutyKeptLog", "params": {}})));
+
+    // A week from Sunday: the run on Monday is its second day.
+    let sunday = rig.bots("dutyWeek", json!({"week": "2026-11-19", "timezone": "UTC", "firstDay": 6})).unwrap();
+    assert_eq!(sunday["days"][0], "2026-11-15");
+    assert!(sunday["blocks"].as_array().unwrap().iter().any(|block| block["dutyId"] == status.id.as_str() && block["day"] == 1), "{sunday}");
+    assert!(rig.bots("dutyWeek", json!({"firstDay": 7})).unwrap_err().to_string().contains("firstDay"));
+
+    rig.bots("delete", json!({"id": atlas.id})).unwrap();
+    assert!(!folder.exists(), "the kept log goes with its bot");
+    let trashed = crate::store::root().unwrap().join("trash").join("bots").join(&atlas.id);
+    assert!(trashed.join("duty-runs").join(&status.id).join("runs.jsonl").is_file(), "into its home, in the trash");
 }
 
 /// The Bots switch is off while this lives, and on again after, whatever the test does.
