@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot's run the owner approves or starts from its Run
+  view, rather than from the item's question, no longer refuses the lead's
+  later `runs start` with `awaits_owner`; the item records the start and
+  closes its question, as "Approve and start" there would (PRO-501).
 - Bots (experimental): a lead bot plans and starts orchestration runs. It leads
   a run from a session it starts in the project, then `terminalx bots items
   plan` asks "Approve the plan and start the run?" with a run plan card in its
