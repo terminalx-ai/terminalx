@@ -579,8 +579,10 @@ export function Chat({
       )}
       </div>
       {/* Over the transcript's foot: what scrolls down passes behind the see-through composer, fading into the chat as it goes.
-          It stops short of the scrollbar's gutter, so its fade never paints over the thumb at the end (#1287). */}
-      <div ref={footerRef} className="pointer-events-none absolute bottom-0 left-0 right-(--scrollbar-size) z-10 [&>*]:pointer-events-auto">
+          It stops short of the scrollbar's gutter, so its fade never paints over the thumb at the end (#1287).
+          Never taller than the chat: a short window (760×600 at 150% zoom) shrinks what stands above the composer, which
+          scrolls, rather than running it up under the tab strip. Where it fits, the column changes nothing. */}
+      <div ref={footerRef} className="pointer-events-none absolute bottom-0 left-0 right-(--scrollbar-size) z-10 flex max-h-full flex-col justify-end [&>*]:pointer-events-auto">
         <div aria-hidden className="pointer-events-none! absolute inset-x-0 -top-6 bottom-0 -z-10 bg-[linear-gradient(to_bottom,transparent,var(--color-chat)_70%)]" />
         {/* Above the composer, never behind it: the composer is see-through. */}
         <div

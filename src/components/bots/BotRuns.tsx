@@ -22,8 +22,11 @@ export function RunPlanCards({ bot, chatId, chats }: { bot: Bot; chatId: string;
   const home = chats.find((chat) => chat.id === chatId)?.bot?.home ?? false;
   const asking = runQuestionsIn(list?.items ?? [], chatId, home, chats);
   if (asking.length === 0) return null;
+  // At most 55% of the chat, and never so much that the chat below has no room for its header, a composer whose controls
+  // wrap to two rows and the Latest button above it (15rem, in a 760×520 window): the cards scroll first, so neither the
+  // composer nor Latest covers the chat's header.
   return (
-    <div className="flex max-h-[55%] shrink-0 flex-col gap-2 overflow-y-auto border-b border-hairline px-4 py-2 scrollbar-thin" aria-label="Run plans" data-testid="bot-run-plans">
+    <div className="flex max-h-[min(55%,calc(100%-15rem))] shrink-0 flex-col gap-2 overflow-y-auto border-b border-hairline px-4 py-2 scrollbar-thin" aria-label="Run plans" data-testid="bot-run-plans">
       {asking.map((item) => <RunPlanCard key={item.number} bot={bot} item={item} />)}
     </div>
   );
