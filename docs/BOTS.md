@@ -103,13 +103,20 @@ the first sub-issues.
   with `disableSkillShellExecution`: a skill's inline `!` command runs as the
   skill loads, with no tool call for the gate to see, so it is replaced by a
   placeholder. The bot's own memory and work-list
-  commands pass at every level (see above). It is not a sandbox. **Web and MCP resource reads
-  count as reads**: `WebFetch`, `WebSearch`, a connected server's resource
-  reads and a vetted read-only command that fetches a URL run unasked at
-  Read and report (and at Ask before outward actions). A web request can
-  carry data out of this Mac in its address, and a resource read can carry
-  it out to the server it is read from. Keep secrets away from a bot that
-  should not send them anywhere.
+  commands pass at every level (see above). It is not a sandbox. **Fetching
+  a web page is outward (PRO-496)**: below Full access `WebFetch` asks, at
+  Read and report as a report does, and the card names the address, since
+  the address can carry what the bot read to the host it names. A paused bot
+  and a built-in's unattended run fetch none. Claude Code's own mode does not
+  ask for it: plan mode fetches any host, and its default mode some hosts it
+  trusts, unasked (checked on 2.1.330). No shell command vetted read-only
+  fetches a URL; `curl` and the like meet the gate as any command does.
+  **Web searches and MCP resource reads still count as reads**: `WebSearch`,
+  Codex's `web_search` and a connected server's resource reads run unasked.
+  A search's query goes to the model provider's search, not to a host a page
+  names, and a resource read can carry data out to the server it is read
+  from. The access picker says so. Keep secrets away from a bot that should
+  not send them anywhere.
 - **Pause says what it stopped.** Pause and Pause all are recorded with who
   paused the bot. A paused bot still answers its owner in chat (screen 23.12).
 - **Templates carry no credentials or permissions.** Every duty in a template

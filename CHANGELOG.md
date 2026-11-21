@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bots (experimental): below Full access a bot asks before it fetches a web
+  page (`WebFetch`), at Read and report as it asks before a report: the
+  address can carry what it read off this computer, and the card shows it. A
+  paused bot, and its look around or memory tidy, fetch none. Web searches
+  and a connected server's resources still count as reads, and the access
+  picker now says what each level lets through, the web included (PRO-496).
 - Bots (experimental): a bot's Claude Code sessions run no inline `!` command
   of a skill or custom slash command, which runs as it loads with no tool call
   the access gate could see; the command is replaced by a placeholder and the
