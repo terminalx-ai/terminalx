@@ -1057,7 +1057,8 @@ impl ControlService {
                 let patch = bots::BotPatch { name: Some(required_string(&params, "name")?), ..Default::default() };
                 json!({"bot": bots::update(sink, &named()?.id, patch).map_err(failed)?})
             }
-            "bots.pause" => json!({"bot": bots::pause(sink, &named()?.id, &by).map_err(failed)?}),
+            // What it stopped is said on the pause (PRO-474), as the window's Pause says it.
+            "bots.pause" => json!({"bot": bots::enforce::pause(&self.manager, Some(&named()?.id), &by, bots::pause::FROM_CLI).map_err(failed)?}),
             // Never applied from here: the owner answers in the app.
             "bots.resume" => {
                 caller.person_only("resume bots")?;
@@ -1077,7 +1078,7 @@ impl ControlService {
                 bots::handoffs::deliver_waiting_all(&self.manager);
                 json!({"deleted": bot.id, "name": bot.name})
             }
-            "bots.pauseAll" => json!(bots::pause_all(sink, &by).map_err(failed)?),
+            "bots.pauseAll" => bots::enforce::pause(&self.manager, None, &by, bots::pause::FROM_CLI).map_err(failed)?,
             _ => {
                 caller.person_only("resume bots")?;
                 if !confirmable {
@@ -1093,11 +1094,9 @@ impl ControlService {
                 listing
             }
         };
-        // A pause or a delete reaches that bot's running sessions now.
-        match command {
-            "bots.pause" | "bots.delete" => bots::enforce::reconcile(&self.manager, answer["bot"]["id"].as_str().or(answer["deleted"].as_str())),
-            "bots.pauseAll" => bots::enforce::reconcile(&self.manager, None),
-            _ => {}
+        // A delete reaches that bot's running sessions now (a pause did, in `enforce::pause`).
+        if command == "bots.delete" {
+            bots::enforce::reconcile(&self.manager, answer["deleted"].as_str());
         }
         Ok(answer)
     }

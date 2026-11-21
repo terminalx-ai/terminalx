@@ -6237,9 +6237,10 @@ pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()>
     bots_call(state, "delete", serde_json::json!({"id": id})).await
 }
 
+/// `from`: where in the window it was paused (`app`, or `shortcut` for Pause all's keys), said on the pause (PRO-474).
 #[tauri::command]
-pub async fn bot_pause(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
-    bots_call(state, "pause", serde_json::json!({"id": id})).await
+pub async fn bot_pause(state: State<'_, AppState>, id: String, from: Option<String>) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "pause", serde_json::json!({"id": id, "from": from})).await
 }
 
 #[tauri::command]
@@ -6248,8 +6249,15 @@ pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<cra
 }
 
 #[tauri::command]
-pub async fn bots_pause_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
-    bots_call(state, "pauseAll", serde_json::json!({})).await
+pub async fn bots_pause_all(state: State<'_, AppState>, from: Option<String>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "pauseAll", serde_json::json!({"from": from})).await
+}
+
+/// What the paused bots hold (PRO-474, 23.12): what each is still finishing, every entry of "Held while paused",
+/// and what was spent today and since the pause.
+#[tauri::command]
+pub async fn bots_pause_held(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "pauseHeld", serde_json::json!({})).await
 }
 
 #[tauri::command]

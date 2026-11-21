@@ -107,11 +107,13 @@ struct Fake {
     repository: bool,
     /// The lead was started with Orchestrate.
     ask_first: bool,
+    /// The paused bot the lead works for (PRO-474), by name.
+    paused_bot: Mutex<Option<String>>,
 }
 
 impl Fake {
     fn new() -> Self {
-        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true, ask_first: false }
+        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true, ask_first: false, paused_bot: Mutex::new(None) }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -151,6 +153,10 @@ impl Fake {
 impl Host for Fake {
     fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
         self.stop_worker(worker)
+    }
+
+    fn held_by_pause(&self, _run: &Run) -> Option<String> {
+        self.paused_bot.lock().unwrap().clone()
     }
 
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
@@ -651,6 +657,32 @@ fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
     let approved = engine::approve(&host, &run.id).unwrap();
     assert_eq!(approved.run.state, RunState::Running);
     assert_eq!(host.made(), vec!["map"]);
+}
+
+#[test]
+fn a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each_once() {
+    let _home = crate::store::temp_home();
+    let (host, run) = started_free();
+    let id = run.id.as_str();
+    assert_eq!(engine::start(&host, id).unwrap().started, vec!["map"]);
+
+    // Paused while `map` works: it finishes its step, and nothing starts after it.
+    *host.paused_bot.lock().unwrap() = Some("Atlas".into());
+    host.reports("map", Status::Done, "41 call sites in 9 files.");
+    engine::fill_slots(&host);
+    assert_eq!(host.made(), vec!["map"], "the engine's own start waits for the resume");
+    let refused = engine::start(&host, id).unwrap_err();
+    assert_eq!(refused.code, "bot_paused");
+    assert!(refused.message.contains("led by Atlas, who is paused"), "{}", refused.message);
+    let current = store::get(id).unwrap();
+    assert_eq!((current.state, current.piece("map").unwrap().state, current.piece("store").unwrap().state), (RunState::Running, PieceState::Done, PieceState::Queued));
+
+    // Resumed: what became ready starts, once; a second resume starts nothing more.
+    *host.paused_bot.lock().unwrap() = None;
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map", "store"]);
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map", "store"], "each held piece starts once");
 }
 
 #[test]

@@ -289,6 +289,9 @@ impl Host for ManagerHost {
         Ok(())
     }
 
+    fn held_by_pause(&self, run: &Run) -> Option<String> {
+        crate::bots::pause::holds_run(&run.lead.session_id)
+    }
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();

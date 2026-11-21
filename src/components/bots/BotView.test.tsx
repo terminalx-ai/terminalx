@@ -149,7 +149,7 @@ describe("a bot's view (PRO-468)", () => {
     mocks.bots = { ...mocks.bots, bots: [{ ...atlas, paused: { at: new Date().toISOString(), by: "owner" } }] };
     view();
     const banner = screen.getByRole("status");
-    expect(banner.textContent).toContain("Paused. Atlas still answers you here, in plan mode: it changes nothing and starts no sessions or runs");
+    expect(banner.textContent).toContain("Atlas still answers you here, in plan mode, and says it is paused: it changes nothing and starts no sessions or runs");
     expect(screen.getByTestId("session-view").textContent).toContain("home");
     fireEvent.click(within(banner).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(mocks.resumeBot).toHaveBeenCalledWith("b1"));

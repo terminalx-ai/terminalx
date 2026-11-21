@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     resume: vi.fn(),
     pauseAll: vi.fn(),
     resumeAll: vi.fn(),
+    pauseHeld: vi.fn(),
+    spentToday: vi.fn(),
   },
   switches: { bots: true } as { bots: boolean } | null,
 }));
@@ -64,6 +66,8 @@ const main = () => within(screen.getByRole("main"));
 beforeEach(() => {
   for (const mock of Object.values(mocks.api)) mock.mockReset();
   mocks.api.templates.mockResolvedValue(TEMPLATES);
+  mocks.api.pauseHeld.mockResolvedValue({ bots: [], entries: [], errors: [] });
+  mocks.api.spentToday.mockResolvedValue({ usd: 0, day: "2026-11-20" });
   mocks.switches = { bots: true };
   resetBotsPageForTests();
   localStorage.clear();
@@ -237,6 +241,16 @@ describe("Bots: the switch and the shortcut", () => {
     expect(keymap["app.home"]).toEqual(["mod+shift+j"]);
     expect(keymap["app.bots"]).toEqual([]);
   });
+
+  it("Pause all has ⌥⇧⌘P, which nothing else holds (⇧⌘P is the markdown preview's), and drops it with the switch off", () => {
+    const keymap = resolveKeymap({});
+    expect(keymap["app.pauseAllBots"]).toEqual(["mod+alt+shift+p"]);
+    expect(keymap["files.togglePreview"]).toContain("mod+shift+p");
+    expect(conflictOf("mod+alt+shift+p", "app.home")?.id).toBe("app.pauseAllBots");
+    mocks.switches = { bots: false };
+    expect(conflictOf("mod+alt+shift+p", "app.home")).toBeNull();
+    expect(resolveKeymap({})["app.pauseAllBots"]).toEqual([]);
+  });
 });
 
 describe("Bots: hiring (23.03)", () => {
@@ -388,8 +402,10 @@ describe("Bots: the team table (23.02)", () => {
     render(<Screen />);
     fireEvent.click(main().getByTestId("bots-pause-all"));
     await waitFor(() => expect(main().getByTestId("bots-all-paused")).toBeTruthy());
-    expect(mocks.api.pauseAll).toHaveBeenCalledTimes(1);
-    expect(main().getAllByTestId("bot-doing-now").map((cell) => cell.textContent?.trim())).toEqual(["Paused", "Paused"]);
+    expect(mocks.api.pauseAll).toHaveBeenCalledWith("app");
+    // Every bot paused: the paused page (23.12), a row per bot with its Resume.
+    expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent?.trim())).toEqual(["Paused", "Paused"]);
+    expect(main().getAllByTestId("bots-paused-resume")).toHaveLength(2);
     fireEvent.click(main().getByTestId("bots-resume-all"));
     await waitFor(() => expect(main().queryByTestId("bots-all-paused")).toBeNull());
     expect(main().getByTestId("bots-pause-all")).toBeTruthy();
@@ -399,10 +415,55 @@ describe("Bots: the team table (23.02)", () => {
     const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
     await boot(listOf(4, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }]));
     render(<Screen />);
-    await waitFor(() => expect(main().getAllByTestId("bot-doing-now")).toHaveLength(2));
-    expect(main().getAllByTestId("bot-doing-now").map((cell) => cell.textContent?.trim())).toEqual(["Paused · asks to resume", "Paused"]);
+    await waitFor(() => expect(main().getAllByTestId("bots-paused-was")).toHaveLength(2));
+    expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent?.trim())).toEqual(["Paused · asks to resume", "Paused"]);
     expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · asks to resume, runs on/ })).toBeTruthy();
     expect(sidebar().getByRole("button", { name: /Iris, .*, Paused, runs on/ })).toBeTruthy();
+  });
+
+  it("all paused: the paused page says who paused them and when, what each holds, and resumes one or all (23.12)", async () => {
+    const at = new Date(Date.now() - 18 * 60_000).toISOString();
+    const paused = (was: string, extra = {}) => ({ at, by: "owner", from: "phone", stopped: { was, spent: { day: "2026-11-20", usd: 1 }, ...extra } });
+    await boot(listOf(4, [{ ...atlas, paused: paused("was running 2 workers", { workers: 2 }) }, { ...iris, paused: paused("was quiet") }]));
+    mocks.api.pauseHeld.mockResolvedValue({
+      bots: [{ id: "a", inTurn: 0, needsYou: 0 }, { id: "i", inTurn: 0, needsYou: 0 }],
+      entries: [
+        { kind: "skipped", source: "duty", botId: "a", dutyId: "d1", name: "Stalled sessions and runs", at, count: 3 },
+        { kind: "kept", source: "answer", botId: "i", number: 4, messageKind: "answer", at },
+      ],
+      errors: [],
+    });
+    mocks.api.spentToday.mockImplementation(async (id: string) => ({ usd: id === "a" ? 3.5 : 1, day: "2026-11-20" }));
+    const { bootBotPause, noteBotsForPause, resetBotPauseForTests } = await import("@/lib/botPause");
+    await bootBotPause();
+    render(<Screen />);
+    await act(async () => noteBotsForPause([{ ...atlas, paused: paused("") }]));
+    try {
+      await waitFor(() => expect(main().getAllByTestId("bots-held-entry")).toHaveLength(2));
+      expect(main().getByText("Both bots are paused")).toBeTruthy();
+      expect(main().getByTestId("bots-paused-by").textContent).toMatch(/^You paused them from your phone at \d\d:\d\d, 18 minutes ago\. Nothing runs on its own/);
+      expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent)).toEqual(["Paused · was running 2 workers", "Paused · was quiet"]);
+      expect(main().getAllByTestId("bots-paused-held").map((cell) => cell.textContent)).toEqual(["2 workers stopped after their current step · 3 checks skipped so far", "Your answer is kept and used on resume"]);
+      expect(main().getAllByTestId("bots-held-entry").map((row) => row.dataset.kind)).toEqual(["skipped", "kept"]);
+      await waitFor(() => expect(main().getAllByTestId("bots-stat").map((card) => card.textContent)).toEqual([
+        "Working now02 workers stopped at a safe point",
+        "Needs you0you can still answer; used on resume",
+        "Held while paused43 checks skipped · 1 kept for resume",
+        "Spent today$4.50$2.50 since the pause",
+      ]));
+      expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · 2 workers stopped, runs on/ })).toBeTruthy();
+      expect(sidebar().getByRole("button", { name: /Iris, .*, Paused · your answer is kept, runs on/ })).toBeTruthy();
+
+      mocks.api.resume.mockResolvedValue(iris);
+      fireEvent.click(main().getByRole("button", { name: "Resume Iris" }));
+      await waitFor(() => expect(mocks.api.resume).toHaveBeenCalledWith("i"));
+      await waitFor(() => expect(main().queryByTestId("bots-paused")).toBeNull());
+      // Some paused: the team again, with what the paused one holds under it.
+      expect(main().getByTestId("bot-paused-held").textContent).toBe("2 workers stopped after their current step · 3 checks skipped so far");
+      expect(main().getByText("Held while paused")).toBeTruthy();
+    } finally {
+      resetBotPauseForTests();
+    }
   });
 
   it("pauses and resumes one bot from its row", async () => {
@@ -411,7 +472,7 @@ describe("Bots: the team table (23.02)", () => {
     render(<Screen />);
     fireEvent.click(main().getByRole("button", { name: "Pause Atlas" }));
     await waitFor(() => expect(main().getByTestId("bots-table-row").dataset.paused).toBe("true"));
-    expect(mocks.api.pause).toHaveBeenCalledWith("a");
+    expect(mocks.api.pause).toHaveBeenCalledWith("a", "app");
     expect(main().getByRole("button", { name: "Resume Atlas" })).toBeTruthy();
   });
 });

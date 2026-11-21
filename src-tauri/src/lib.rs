@@ -873,6 +873,7 @@ pub fn run() {
             commands::bot_items,
             commands::bot_item,
             commands::bots_needs_you,
+            commands::bots_pause_held,
             commands::bot_item_answer,
             commands::bot_item_comment,
             commands::bot_item_give,
