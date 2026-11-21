@@ -34,8 +34,9 @@ extend automations or orchestration runs instead.
 | Record: name, slug, role title, template, agent, model, effort, access, runs on, reports to, works in, paused | `bots.json` (`src-tauri/src/store/bots.rs`, `src-tauri/src/bots/mod.rs`; TypeScript `src/types/bots.ts`) |
 | Role ("soul"): standing instructions | `bots/<id>/ROLE.md`, started from a role template |
 | Memory | `bots/<id>/MEMORY.md` and `bots/<id>/memory/` |
+| Work items and "Needs you" questions | `bot-items/<id>/items.json`, outside the home folder so the bot's agent cannot write its owner's answers (`src-tauri/src/bots/items.rs`; TypeScript `src/types/botItems.ts`, `src/lib/botItems.ts`) |
 | Role templates | `src-tauri/src/bots/roles/*.md` and `src-tauri/src/bots/templates.rs`: CTO, Chief of staff, UX designer, QA engineer, Release manager, Docs writer, Security auditor, Watcher |
-| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all` |
+| CLI | `terminalx bots list / create / show / rename / pause / resume / delete / pause-all / resume-all`; a bot's own `terminalx bots items list / show / add / set / ask / check / comment / done` |
 | Desktop UI | `src/components/bots/` (sidebar section, Bots page, first-bot page, hiring) |
 
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
@@ -98,7 +99,7 @@ issue.
 | PRO-468 | Home chat, with the role and memory given to the agent | 23.01, 23.04 | In review |
 | PRO-478 | Settings: runs on, access, works in, channels, who can ask | 23.07 | In review |
 | PRO-485 | Automations wake on Linear issues and GitHub pull request events | n/a | In review |
-| PRO-469 | Work items and "Needs you" questions | 23.09 | Backlog |
+| PRO-469 | Work items and "Needs you" questions | 23.01, 23.02, 23.09 | In review |
 | PRO-470 | Role and memory, with history and undo | 23.06 | Backlog |
 | PRO-471 | Duties on top of automations, with a free check first | 23.05, 23.10 | Backlog |
 | PRO-472 | Wake a duty on GitHub and Linear events, another bot, or a change | 23.05 | Backlog |

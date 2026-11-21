@@ -9,6 +9,7 @@
 
 pub mod chat;
 pub mod enforce;
+pub mod items;
 pub mod templates;
 
 use std::collections::BTreeMap;

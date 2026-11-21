@@ -1,0 +1,327 @@
+import { useState, type FormEvent, type ReactNode } from "react";
+import { ArrowLeft, ArrowLeftRight, ArrowUp, Check, Circle, GitPullRequest, Hash, Link, Loader2, MessageSquare, Square, SquareTerminal } from "@/icons";
+import { Button } from "@/components/ui/button";
+import { Chip } from "@/components/ui/chip";
+import { WithTooltip } from "@/components/ui/tooltip";
+import { errorMessage } from "@/lib/api";
+import { commentOnBotItem, stopBotItem, useBotItem } from "@/lib/botItems";
+import { cn } from "@/lib/cn";
+import { confirmInApp } from "@/lib/confirm";
+import { conversationTitle, selectSession, useSessionStore } from "@/lib/sessions";
+import { relativeTime } from "@/lib/time";
+import { effectiveAccess, type Bot } from "@/types/bots";
+import type { BotItem, BotItemActivity, BotItemLink } from "@/types/botItems";
+import type { SessionEntry } from "@/types/session";
+import { StateIcon } from "./BotHome";
+import { deliveryNote, ItemQuestionCard } from "./NeedsYou";
+
+const STATE_LABEL: Record<string, string> = { planned: "Planned", inProgress: "In progress", needsYou: "Needs you", waiting: "Waiting", done: "Done", dropped: "Dropped" };
+
+/** An item's state in words; one a newer app wrote is shown as itself. */
+export function itemStateLabel(state: string): string {
+  return STATE_LABEL[state] ?? state;
+}
+
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function clock(iso: string): string {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? "" : at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Who did something: you, or the bot. */
+function who(by: string, bot: Bot): string {
+  return by === "owner" ? "You" : by === bot.id ? bot.name : by;
+}
+
+/** What the bot may do on this item, from its access. */
+export function mayDoHere(bot: Bot): string {
+  switch (effectiveAccess(bot.access)) {
+    case "full":
+      return `Full access: ${bot.name} works here the way your own sessions do, without asking. Pause it to stop work you have not seen.`;
+    case "askOutward":
+      return `${bot.name} may change files and run commands here, and asks you before anything that leaves this computer: a push, a message, a post, a deploy or a purchase.`;
+    default:
+      return `${bot.name} reads and reports only: it changes nothing here.`;
+  }
+}
+
+/**
+ * A work item's page (PRO-469, design 23.09): its title, state and links, its summary, what done means, its activity
+ * and a comment box; on the right, about the item, its sessions and links, and what the bot may do here. "Take it
+ * over" opens the item's session; "Stop this item" stops its sessions and drops it. Handing it to another bot comes in a
+ * later build.
+ */
+export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
+  const item = useBotItem(bot.id, number);
+  const store = useSessionStore();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  if (!item) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col px-6 py-4" data-testid="bot-item-page">
+        <Back bot={bot} number={number} onBack={onBack} />
+        <p className="mt-6 flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Reading item #{number}…</p>
+      </div>
+    );
+  }
+
+  const sessions = (item.links ?? []).filter((link) => link.kind === "session").map((link) => store.sessions.find((session) => session.id === link.target)).filter((session): session is SessionEntry => !!session);
+  // The item's own work first (a session the bot started for it), then the chat it was added from; newest first.
+  const takeOver = [...sessions].sort((a, b) => Number(!!a.bot) - Number(!!b.bot) || (b.modified || b.created).localeCompare(a.modified || a.created))[0] ?? null;
+  const closed = item.state === "done" || item.state === "dropped";
+  const lines = item.doneMeans ?? [];
+  const met = lines.filter((line) => line.met).length;
+
+  const stop = async () => {
+    const yes = await confirmInApp({
+      title: `Stop item #${item.number}?`,
+      body: `Its sessions stop and the item is dropped. ${bot.name}'s chats go on.`,
+      action: "Stop this item",
+      destructive: true,
+    });
+    if (!yes) return;
+    setBusy(true);
+    stopBotItem(bot.id, item.number).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-testid="bot-item-page">
+      <div className="flex min-w-0 flex-wrap items-start gap-x-8 gap-y-6 px-5 py-4 sm:px-6">
+        <main className="flex min-w-[min(100%,420px)] flex-1 basis-[560px] flex-col gap-5" aria-label={`Item #${item.number}`}>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Back bot={bot} number={item.number} onBack={onBack} />
+            <div className="ml-auto flex flex-wrap items-center gap-1.5">
+              <Button size="sm" variant="outline" disabled={!takeOver} onClick={() => takeOver && selectSession(takeOver.id)} title={takeOver ? `Open ${conversationTitle(takeOver)}` : "No session works on this item"} data-testid="bot-item-take-over">
+                <SquareTerminal /> Take it over
+              </Button>
+              <WithTooltip label="Handing an item to another bot comes in a later build">
+                <span>
+                  <Button size="sm" variant="outline" disabled aria-label="Hand to another bot (coming later)"><ArrowLeftRight /> Hand to another bot</Button>
+                </span>
+              </WithTooltip>
+              <Button size="sm" variant="outline" disabled={busy || closed} onClick={() => void stop()} data-testid="bot-item-stop">
+                <Square /> Stop this item
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2">
+            <h1 className="text-[19px] font-semibold break-words text-foreground">{item.title}</h1>
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[12.5px] text-faint">
+              <Chip className={cn(item.state === "needsYou" && "text-accent", item.state === "inProgress" && "text-warning")}>
+                <StateIcon item={item} className="size-3" /> {itemStateLabel(item.state)}
+              </Chip>
+              {sessions.length > 0 && <Chip><SquareTerminal className="size-3" /> {sessions.length === 1 ? "1 session" : `${sessions.length} sessions`}</Chip>}
+              {(item.links ?? []).filter((link) => link.kind === "pullRequest" || link.kind === "ticket").slice(0, 3).map((link) => (
+                <Chip key={`${link.kind}:${link.target}`} title={link.title || link.target}>{link.kind === "pullRequest" ? <GitPullRequest className="size-3" /> : <Hash className="size-3" />} {link.target}</Chip>
+              ))}
+              <span className="ml-1">started {relativeTime(item.created)} · asked by {askedBy(item, bot)}</span>
+            </div>
+          </div>
+
+          {item.summary && <p className="text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground" data-testid="bot-item-summary">{item.summary}</p>}
+          {error && <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">{error}</p>}
+          {note && <p role="status" className="rounded-md bg-warning/10 px-3 py-2 text-[12.5px] text-warning">{note}</p>}
+
+          {item.question && (
+            <section aria-label="Needs you" className="overflow-hidden rounded-lg border border-accent/40 bg-card">
+              <ItemQuestionCard bot={bot} item={item} />
+            </section>
+          )}
+
+          <section aria-label="Done means" className="flex min-w-0 flex-col gap-2" data-testid="bot-item-done-means">
+            <div className="flex items-baseline gap-2">
+              <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">Done means</h2>
+              <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{bot.name} cannot close this item until each line is true</span>
+              {lines.length > 0 && <span className="shrink-0 text-[12px] text-muted-foreground">{met} of {lines.length}</span>}
+            </div>
+            {lines.length > 0 ? (
+              <ul className="divide-y divide-hairline overflow-hidden rounded-lg border border-hairline bg-card">
+                {lines.map((line, index) => (
+                  <li key={index} className="flex min-w-0 items-center gap-3 px-3 py-2" data-testid="bot-item-done-line" data-met={line.met ? "true" : "false"}>
+                    {line.met ? <Check aria-label="Met" className="size-4 shrink-0 text-add" /> : <Circle aria-label="Not met" className="size-4 shrink-0 text-faint" />}
+                    <span className="min-w-0 flex-1 text-[13px] break-words text-foreground">{line.text}</span>
+                    <span className="shrink-0 text-[11.5px] text-faint">{[line.how, line.met && line.metAt ? clock(line.metAt) : ""].filter(Boolean).join(" · ")}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="rounded-lg border border-dashed border-hairline-strong px-4 py-3 text-[12.5px] text-faint">{bot.name} has not written what done means for this item yet.</p>
+            )}
+          </section>
+
+          <section aria-label="Activity" className="flex min-w-0 flex-col gap-2" data-testid="bot-item-activity">
+            <div className="flex items-baseline justify-between gap-2">
+              <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">Activity</h2>
+              <span className="text-[12px] text-faint">{usd.format(item.spentUsd || 0)} spent on this item</span>
+            </div>
+            <ol className="flex flex-col">
+              {(item.activity ?? []).map((entry, index) => <ActivityRow key={index} entry={entry} bot={bot} />)}
+            </ol>
+          </section>
+
+          <CommentBox bot={bot} item={item} onNote={setNote} />
+        </main>
+
+        <aside className="flex w-full min-w-0 flex-col gap-6 sm:w-[280px] sm:shrink-0" aria-label="About this item" data-testid="bot-item-aside">
+          <Panel label="About this item">
+            <Fact label="Owner">{bot.name}</Fact>
+            <Fact label="Asked by">{askedBy(item, bot)}</Fact>
+            <Fact label="Spend"><span className="font-mono">{usd.format(item.spentUsd || 0)}</span> so far</Fact>
+            <Fact label="Started">{relativeTime(item.created)}</Fact>
+            <Fact label="Updated">{relativeTime(item.modified)}</Fact>
+            {item.closed && <Fact label={item.state === "done" ? "Done" : "Closed"}>{relativeTime(item.closed)}</Fact>}
+            {item.snoozedUntil && <Fact label="Snoozed until">{new Date(item.snoozedUntil).toLocaleString()}</Fact>}
+          </Panel>
+          <Panel label="Sessions and links">
+            {(item.links ?? []).length === 0 ? (
+              <p className="text-[12.5px] text-faint">None yet.</p>
+            ) : (
+              <ul className="flex flex-col divide-y divide-hairline">
+                {(item.links ?? []).map((link) => <LinkRow key={`${link.kind}:${link.target}`} link={link} session={store.sessions.find((session) => session.id === link.target) ?? null} />)}
+              </ul>
+            )}
+          </Panel>
+          <Panel label={`What ${bot.name} may do here`}>
+            <p className="text-[12.5px] leading-relaxed text-muted-foreground">{mayDoHere(bot)}</p>
+          </Panel>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+/** Who asked for it: you when you gave the work; otherwise who the bot says asked, as the bot's word. */
+function askedBy(item: BotItem, bot: Bot): string {
+  if (item.addedBy === "owner") return "you";
+  const said = item.askedBy === "owner" ? "you" : item.askedBy;
+  return `${said}, as ${bot.name} noted`;
+}
+
+function Back({ bot, number, onBack }: { bot: Bot; number: number; onBack: () => void }) {
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">
+      <Button size="xs" variant="ghost" onClick={onBack} data-testid="bot-item-back"><ArrowLeft /> Home</Button>
+      <span className="truncate text-faint">· item {number} of {bot.name}'s work</span>
+    </div>
+  );
+}
+
+function Panel({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <section aria-label={label} className="flex min-w-0 flex-col gap-2">
+      <h2 className="text-[11px] font-medium uppercase tracking-[.08em] text-faint">{label}</h2>
+      {children}
+    </section>
+  );
+}
+
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-3 border-b border-hairline pb-1.5 text-[12.5px]">
+      <span className="w-[92px] shrink-0 text-faint">{label}</span>
+      <span className="min-w-0 flex-1 truncate text-foreground">{children}</span>
+    </div>
+  );
+}
+
+function linkIcon(kind: string) {
+  switch (kind) {
+    case "session":
+      return SquareTerminal;
+    case "pullRequest":
+      return GitPullRequest;
+    case "ticket":
+      return Hash;
+    default:
+      return Link;
+  }
+}
+
+const LINK_KIND_LABEL: Record<string, string> = { pullRequest: "Pull request", ticket: "Ticket", run: "Run", url: "Link" };
+
+function LinkRow({ link, session }: { link: BotItemLink; session: SessionEntry | null }) {
+  const Icon = linkIcon(link.kind);
+  const title = link.kind === "session" ? (session ? conversationTitle(session) : "A session that is gone") : link.title || link.target;
+  const sub = link.kind === "session" ? (session?.bot ? "Chat" : "Session") : link.title ? link.target : (LINK_KIND_LABEL[link.kind] ?? link.kind);
+  const content = (
+    <>
+      <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12.5px] text-foreground" title={title}>{title}</span>
+        <span className="block truncate text-[11.5px] text-faint" title={sub}>{sub}</span>
+      </span>
+    </>
+  );
+  return (
+    <li className="py-1.5">
+      {session ? (
+        <button type="button" onClick={() => selectSession(session.id)} className="flex w-full min-w-0 items-start gap-2 rounded-md text-left hover:bg-veil">{content}</button>
+      ) : (
+        <div className="flex min-w-0 items-start gap-2">{content}</div>
+      )}
+    </li>
+  );
+}
+
+function ActivityRow({ entry, bot }: { entry: BotItemActivity; bot: Bot }) {
+  const owners = entry.by === "owner";
+  // A bot's notes are its own words: shown as such, never as an instruction or an approval.
+  const words = entry.kind === "comment" || entry.kind === "answered" || entry.kind === "asked" || entry.kind === "done" || entry.kind === "added";
+  return (
+    <li className="flex min-w-0 gap-3 border-b border-hairline py-2 last:border-b-0" data-testid="bot-item-activity-row" data-by={owners ? "owner" : "bot"}>
+      <span className="w-12 shrink-0 pt-0.5 font-mono text-[11.5px] text-faint" title={entry.at}>{clock(entry.at)}</span>
+      <MessageSquare className={cn("mt-0.5 size-3.5 shrink-0", owners ? "text-accent" : "text-muted-foreground")} />
+      <div className="min-w-0 flex-1">
+        <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-foreground">
+          <span className="break-words">{entry.text || `${who(entry.by, bot)}: ${entry.kind}`}</span>
+          {words && entry.detail && (
+            <span className="rounded border border-hairline px-1.5 text-[10.5px] text-faint">{owners ? "your words" : `${bot.name}'s words · not an approval`}</span>
+          )}
+        </p>
+        {entry.detail && <p className="mt-0.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground">{entry.detail}</p>}
+      </div>
+    </li>
+  );
+}
+
+function CommentBox({ bot, item, onNote }: { bot: Bot; item: BotItem; onNote: (note: string | null) => void }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true);
+    setError(null);
+    commentOnBotItem(bot.id, item.number, text.trim()).then(
+      (act) => {
+        setText("");
+        onNote(deliveryNote(bot, act.delivery));
+      },
+      (cause) => setError(errorMessage(cause)),
+    ).finally(() => setBusy(false));
+  };
+  return (
+    <form onSubmit={submit} className="flex min-w-0 flex-col gap-1" data-testid="bot-item-comment">
+      <div className="flex min-w-0 items-center gap-2 rounded-xl border border-hairline-strong bg-card px-3 py-2">
+        <input
+          spellCheck={false}
+          value={text}
+          maxLength={4000}
+          onChange={(event) => setText(event.target.value)}
+          placeholder={`Comment, or tell ${bot.name} what to change on this item`}
+          aria-label={`Comment, or tell ${bot.name} what to change on this item`}
+          className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-faint"
+        />
+        <Button size="icon-xs" variant="secondary" type="submit" disabled={busy || !text.trim()} aria-label="Send">
+          {busy ? <Loader2 className="animate-spin" /> : <ArrowUp />}
+        </Button>
+      </div>
+      {error && <p role="alert" className="text-[12px] text-destructive">{error}</p>}
+    </form>
+  );
+}

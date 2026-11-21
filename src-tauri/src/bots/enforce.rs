@@ -194,6 +194,10 @@ pub fn before_delete(manager: &SessionManager, id: &str) {
 /// After bot `id` is deleted: its chats go to the archive, where they can
 /// still be read. A session it started stays where it is, held to plan mode.
 pub fn after_delete(sink: &dyn EventSink, id: &str) {
+    // Its work list goes to the trash with its home (PRO-469).
+    if let Err(error) = super::items::trash(id) {
+        log::warn!("move the work items of deleted bot {id} to the trash: {error:#}");
+    }
     let ids: Vec<String> = chats(id).into_iter().filter(|entry| !entry.archived).map(|entry| entry.id).collect();
     if ids.is_empty() {
         return;
@@ -207,6 +211,10 @@ pub fn after_delete(sink: &dyn EventSink, id: &str) {
 /// `reconcile` alone holds them again (Settings switching Bots off).
 pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     let sink = manager.sink();
+    // A bot's work items and what needs the owner (PRO-469).
+    if let Some(answer) = super::items::runtime_call(manager, operation, params) {
+        return answer;
+    }
     if operation == "reconcile" {
         reconcile(manager, None);
         return Ok(serde_json::Value::Null);

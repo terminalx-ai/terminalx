@@ -1,0 +1,166 @@
+//! PRO-469: a bot's work items through the real dispatch. A bot edits only
+//! its own list, placed by where the command runs; the owner's answer comes
+//! back through the runtime and reaches the bot's home chat.
+
+use serde_json::{json, Value};
+
+use super::tests::headless_service;
+use super::*;
+
+fn bots_on() {
+    let mut settings = crate::store::settings::load();
+    settings.experimental.bots = true;
+    crate::store::settings::save(&settings).unwrap();
+}
+
+fn home_chat(id: &str) -> SessionEntry {
+    index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id && bot.home)).expect("a hire makes the home chat")
+}
+
+/// From a bot's chat whose tab proves it, the list is that bot's, and no other's.
+/// A chat that cannot prove it is refused, never taken for the owner; the
+/// owner's terminal reads a list by naming the bot and changes nothing.
+#[test]
+fn a_bot_changes_only_its_own_work_list() {
+    let _home = crate::store::temp_home();
+    bots_on();
+    let (service, _sink) = headless_service();
+    let ask = |command: &str, params: Value| service.execute(command, params, "r");
+    let atlas = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let chat = home_chat(&atlas);
+    service.manager.install_review_test_cli(&chat.id, &chat.tabs[0].id, "atlas-launch-secret");
+    let from_chat = |command: &str, mut params: Value, token: &str| {
+        params["caller"] = json!({"session": chat.id, "tab": chat.tabs[0].id});
+        params["hookToken"] = json!(token);
+        ask(command, params)
+    };
+
+    let added = from_chat("bots.items.add", json!({"title": "Merge main into phase-2", "done": ["main is merged | checked by code"], "start": true}), "atlas-launch-secret").unwrap();
+    assert_eq!((added["botId"].as_str(), added["item"]["number"].as_u64(), added["item"]["state"].as_str()), (Some(atlas.as_str()), Some(1), Some("inProgress")));
+    assert_eq!(added["item"]["addedBy"], atlas.as_str());
+    assert_eq!(added["item"]["links"][0], json!({"kind": "session", "target": chat.id}), "the session it was added from is the item's");
+
+    // Another bot's list, by any name, is not its to read or change.
+    for (command, params) in [
+        ("bots.items.add", json!({"bot": "iris", "title": "Planted"})),
+        ("bots.items.list", json!({"bot": iris})),
+        ("bots.items.comment", json!({"bot": "Iris", "item": 1, "text": "x"})),
+    ] {
+        assert_eq!(from_chat(command, params, "atlas-launch-secret").unwrap_err().code, "forbidden", "{command}");
+    }
+    // Naming itself is fine.
+    assert_eq!(from_chat("bots.items.list", json!({"bot": "atlas"}), "atlas-launch-secret").unwrap()["items"].as_array().unwrap().len(), 1);
+    // A claim its tab does not prove is neither the bot nor the owner.
+    for token in ["", "forged", service.endpoint.token.as_str()] {
+        let refused = from_chat("bots.items.add", json!({"title": "Spoofed"}), token).unwrap_err();
+        assert_eq!(refused.code, "unauthorized", "{token:?}: {}", refused.message);
+        assert_eq!(from_chat("bots.items.add", json!({"bot": "iris", "title": "Spoofed"}), token).unwrap_err().code, "unauthorized");
+    }
+    assert!(crate::bots::items::read(&iris).unwrap().items.is_empty());
+    assert_eq!(crate::bots::items::read(&atlas).unwrap().items.len(), 1);
+
+    // The owner's terminal reads by naming the bot, and changes nothing: the owner acts in the app.
+    let listed = ask("bots.items.list", json!({"bot": "atlas"})).unwrap();
+    assert_eq!(listed["items"][0]["title"], "Merge main into phase-2");
+    assert_eq!(ask("bots.items.show", json!({"bot": atlas, "item": 1})).unwrap()["item"]["activity"][0]["kind"], "added");
+    assert_eq!(ask("bots.items.add", json!({"bot": "atlas", "title": "From outside"})).unwrap_err().code, "forbidden");
+    assert_eq!(ask("bots.items.done", json!({"bot": "atlas", "item": 1})).unwrap_err().code, "forbidden");
+    assert_eq!(ask("bots.items.list", json!({})).unwrap_err().code, "invalid_arguments");
+
+    // The rules hold through the dispatch, said as the caller's mistake.
+    let refused = from_chat("bots.items.done", json!({"item": 1}), "atlas-launch-secret").unwrap_err();
+    assert!(refused.code == "invalid_arguments" && refused.message.contains("main is merged"), "{refused:?}");
+    let refused = from_chat("bots.items.set", json!({"item": 1, "link": ["session:owners-elsewhere"]}), "atlas-launch-secret").unwrap_err();
+    assert_eq!(refused.code, "invalid_arguments");
+
+    // Paused, it changes nothing, and still reads.
+    crate::bots::pause(service.sink.as_ref(), &atlas, crate::bots::OWNER).unwrap();
+    assert_eq!(from_chat("bots.items.comment", json!({"item": 1, "text": "x"}), "atlas-launch-secret").unwrap_err().code, "bot_paused");
+    from_chat("bots.items.list", json!({}), "atlas-launch-secret").unwrap();
+
+    // With Bots off every one of them says so.
+    let mut settings = crate::store::settings::load();
+    settings.experimental.bots = false;
+    crate::store::settings::save(&settings).unwrap();
+    assert_eq!(ask("bots.items.list", json!({"bot": "atlas"})).unwrap_err().code, "bots_off");
+}
+
+/// The round trip: a bot asks from its session, the owner answers through the
+/// runtime (the window's route), the answer is recorded as the owner's and
+/// sent to the bot's home chat, the counts clear, and the bot carries on. A
+/// process in the bot's session cannot answer for the owner.
+#[cfg(unix)]
+#[test]
+fn a_bot_asks_the_owner_answers_and_the_bot_carries_on() {
+    let marker = format!("71.{}", std::process::id());
+    let (_home, service, _sink, atlas, chat, _owners, pid) = super::tests::bot_with_a_process(&format!("/bin/sh -c 'sleep {marker}; true'"), &marker);
+    let service = service.with_local_lifetime(crate::local_runtime::Lifetime::new(std::time::Duration::ZERO));
+    let ask = |command: &str, params: Value| service.execute(command, params, "r");
+    let iris = ask("bots.create", json!({"role": "ux-designer", "name": "Iris"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let runtime = |operation: &str, params: Value| ask("runtime.session.bots", json!({"operation": operation, "params": params}));
+
+    // From the bot's own terminal: placed there by its process, whatever it claims.
+    crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+    let claim = json!({"session": "owners-session", "tab": "owners-tab"});
+    let added = ask("bots.items.add", json!({"title": "Move macOS CI to our own runner", "done": ["CI runs on the Mac mini"], "caller": claim})).unwrap();
+    assert_eq!(added["botId"], atlas.as_str());
+    assert_eq!(ask("bots.items.add", json!({"bot": iris, "title": "Planted"})).unwrap_err().code, "forbidden");
+    let asked = ask("bots.items.ask", json!({"item": 1, "question": "Approve the plan?", "answers": ["Approve and start", "Start, but ask before merging", "Not now"], "recommend": 1})).unwrap();
+    assert_eq!((asked["item"]["state"].as_str(), asked["item"]["question"]["recommended"].as_u64()), (Some("needsYou"), Some(0)));
+    // It cannot answer for the owner through the runtime, nor give itself work there.
+    for operation in ["itemAnswer", "itemGive", "itemComment", "itemStop"] {
+        let refused = runtime(operation, json!({"id": atlas, "number": 1, "answer": 0, "title": "x", "text": "x"})).unwrap_err();
+        assert_eq!(refused.code, "forbidden", "{operation}: {}", refused.message);
+    }
+    // It reads there, as the window does.
+    assert_eq!(runtime("needsYou", json!({})).unwrap()["entries"].as_array().unwrap().len(), 1);
+    crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+
+    // The window: Needs you counts it, for that bot only.
+    let needs = runtime("needsYou", json!({})).unwrap();
+    let count = |needs: &Value, id: &str| needs["counts"].as_array().unwrap().iter().find(|count| count["botId"] == id).map(|count| count["needsYou"].as_u64().unwrap()).unwrap();
+    assert_eq!((count(&needs, &atlas), count(&needs, &iris)), (1, 0));
+    let entry = &needs["entries"][0];
+    assert_eq!((entry["kind"].as_str(), entry["botId"].as_str(), entry["item"]["question"]["text"].as_str()), (Some("item"), Some(atlas.as_str()), Some("Approve the plan?")));
+    let asked_at = entry["item"]["question"]["asked"].as_str().unwrap().to_owned();
+    let items = runtime("items", json!({"id": atlas})).unwrap();
+    assert_eq!(items["items"][0]["state"], "needsYou");
+    assert!(items["items"][0].get("activity").is_none(), "a list leaves the activity to the item's page");
+
+    crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+    let answered = runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 1, "asked": asked_at})).unwrap();
+    assert_eq!(answered["item"]["state"], "inProgress");
+    let last = answered["item"]["activity"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["by"].as_str(), last["text"].as_str()), (Some(crate::bots::OWNER), Some("You answered “Start, but ask before merging”")));
+    assert_eq!(answered["delivery"]["sent"], true);
+    let sent = crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().clone());
+    assert_eq!(sent.len(), 1);
+    assert_eq!((sent[0].0.as_str(), sent[0].1.as_str()), (chat.id.as_str(), chat.tabs[0].id.as_str()), "to the bot's home chat");
+    assert!(sent[0].2.contains("item #1") && sent[0].2.contains("“Approve the plan?”") && sent[0].2.contains("My answer: “Start, but ask before merging”"), "{}", sent[0].2);
+    // Answered once; the counts clear everywhere they are read.
+    assert!(runtime("itemAnswer", json!({"id": atlas, "number": 1, "answer": 0, "asked": asked_at})).is_err());
+    let needs = runtime("needsYou", json!({})).unwrap();
+    assert_eq!((count(&needs, &atlas), needs["entries"].as_array().unwrap().len()), (0, 0));
+
+    // The bot carries on from its session and finishes.
+    crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
+    assert!(ask("bots.items.done", json!({"item": 1})).unwrap_err().message.contains("CI runs on the Mac mini"));
+    ask("bots.items.check", json!({"item": 1, "line": 1, "met": true})).unwrap();
+    let done = ask("bots.items.done", json!({"item": 1, "text": "Runner registered"})).unwrap();
+    assert_eq!(done["item"]["state"], "done");
+    crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(None));
+
+    // The owner gives work, comments and stops: told to the bot as the owner, recorded as the owner's.
+    crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+    let given = runtime("itemGive", json!({"id": atlas, "title": "Weekly status for the owner", "summary": "Fridays at 18:00"})).unwrap();
+    assert_eq!((given["item"]["number"].as_u64(), given["item"]["addedBy"].as_str()), (Some(2), Some(crate::bots::OWNER)));
+    runtime("itemComment", json!({"id": atlas, "number": 2, "text": "Keep it to one table"})).unwrap();
+    let stopped = runtime("itemStop", json!({"id": atlas, "number": 2})).unwrap();
+    assert_eq!(stopped["item"]["state"], "dropped");
+    assert!(stopped["stopped"].as_array().unwrap().is_empty(), "the bot's chats are not an item's to stop");
+    let sent = crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().clone());
+    assert_eq!(sent.len(), 2);
+    assert!(sent[0].2.contains("New work for you, item #2") && sent[1].2.contains("Keep it to one table"));
+    service.manager.terminals().kill(&chat.tabs[0].pane_id());
+}

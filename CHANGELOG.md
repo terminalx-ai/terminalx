@@ -38,6 +38,19 @@
   otherwise. Not held (PRO-489): a bot's process that has left its tab and
   runs code of its own choosing, such as one with a terminal of its own. A bot's work on an agent that cannot
   be given its rules (ACP, OpenCode) is refused at launch.
+- Bots (experimental): a bot keeps a list of work items, each with a summary,
+  what "done" means, links to its sessions, pull requests, tickets and runs,
+  what it cost and an activity log. A bot changes only its own list, with
+  `terminalx bots items add|set|ask|check|comment|done`, and cannot mark an
+  item done while a line of done means is unmet. A bot that needs a decision
+  asks once, with two to four answers and the one it recommends; the owner
+  answers from the bot's Home tab, the item's page or the Bots page's Needs
+  you queue, by choice or in their own words, and the answer is recorded as
+  the owner's and sent to the bot's home chat. A question card open in a bot's
+  session waits there too. The Home tab lists what needs you, what is in
+  progress and planned, with Give work; an item's page has Take it over and
+  Stop this item. Needs you counts show on the Bots page, each sidebar row and
+  the Bots destination (PRO-469).
   Hiring, resuming, deleting and raising access are confirmed by the
   TerminalX window on a Mac, which restarts its runtime to do so when needed,
   as pairing does. A resume or more access gives each tab back its own mode,
