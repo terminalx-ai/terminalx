@@ -22,6 +22,7 @@ vi.mock("@/lib/runFamily", () => ({ sessionSpend: () => 0 }));
 vi.mock("@/lib/botsPage", () => ({ showBotsTeam: mocks.showTeam }));
 vi.mock("@/lib/machines", () => ({
   machinesApi: { restartRuntimeForWindow: mocks.restart },
+  restartOffer: (epoch: string, message: string) => `runtime_restart_required:${epoch}: ${message}`,
   restartRequired: (error: string | null) => {
     const match = /^runtime_restart_required:([^:\s]+): ([\s\S]*)$/.exec(error ?? "");
     return match ? { epoch: match[1], message: match[2] } : null;
@@ -407,6 +408,22 @@ describe("the week of duties (PRO-473, design 23.13)", () => {
     fireEvent.pointerDown(block, { button: 0, pointerId: 8, clientX: 450, clientY: 18 * 46 + 5 });
     fireEvent.pointerUp(block, { button: 0, pointerId: 8, clientX: 450, clientY: 18 * 46 + 5 });
     expect(onOpenDuty).toHaveBeenCalledWith(atlas, "d1");
+  });
+
+  it("shows the minute a block will be saved at when dragged to the end of the day, drawn inside it (PRO-497)", async () => {
+    calendar();
+    await screen.findAllByTestId("calendar-block");
+    const block = blocks().find((value) => value.dataset.duty === "d1" && value.dataset.state === "next")!;
+    // From 18:00 six hours down: the last step of the day, 23:45.
+    fireEvent.pointerDown(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 });
+    fireEvent.pointerMove(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 + 6 * 46 });
+    const drop = screen.getByTestId("calendar-drop");
+    expect(drop.textContent).toBe("23:45 Daily status");
+    expect(Number.parseFloat(drop.style.top) + Number.parseFloat(drop.style.height)).toBeLessThanOrEqual(24 * 46);
+    fireEvent.pointerUp(block, { button: 0, pointerId: 9, clientX: 450, clientY: 18 * 46 + 5 + 6 * 46 });
+    await waitFor(() => expect(mocks.invoke.mock.calls.some(([command]) => command === "bot_duty_save")).toBe(true));
+    const [, save] = mocks.invoke.mock.calls.find(([command]) => command === "bot_duty_save")!;
+    expect((save as { input: { schedule: { hour: number; minute: number } } }).input.schedule).toMatchObject({ hour: 23, minute: 45 });
   });
 
   it("offers an older runtime that does not know the week a restart, then reads it again (PRO-497)", async () => {

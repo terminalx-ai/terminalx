@@ -6,6 +6,7 @@ import { Segmented } from "@/components/ui/controls";
 import { errorMessage } from "@/lib/api";
 import { HOUR_PX, WEEKDAYS, addDays, blockBox, calendarApi, clock, countWarns, dayNumber, dayPhase, dragTarget, eventsText, lanes, logWords, movedSchedule, oftenText, scheduleWords, wallClock, weekLabel, weekShown, weekUnknown } from "@/lib/botCalendar";
 import { useLocalRuntime } from "@/lib/localRuntime";
+import { restartOffer } from "@/lib/machines";
 import { dutiesApi, dutyInputOf, reportsToLabel } from "@/lib/botDuties";
 import { useAutomationStore } from "@/lib/automations";
 import { cn } from "@/lib/cn";
@@ -483,7 +484,7 @@ export function DutiesCalendar({ bots, single, lead, onAdd, onOpenDuty }: {
 function WeekError({ error, onRestarted }: { error: string; onRestarted: () => void }) {
   const { state } = useLocalRuntime();
   if (weekUnknown(error) && state?.state === "connected") {
-    const offer = `runtime_restart_required:${state.epoch}: The TerminalX runtime running is older than this app and cannot read a week of duties. Restart runtime starts the app's own.`;
+    const offer = restartOffer(state.epoch, "The TerminalX runtime running is older than this app and cannot read a week of duties. Restart runtime starts the app's own.");
     return <MachineHostError error={offer} onRestarted={onRestarted} className="mb-2" />;
   }
   return <MachineHostError error={error} onRestarted={onRestarted} className="mb-2" />;
