@@ -2300,9 +2300,12 @@ impl WorkspaceGit {
     /// Submodules are never pushed from here, whatever `push.recurseSubmodules`
     /// or `submodule.recurse` say: each would go out through the submodule's
     /// own live configuration, which nothing checked. Where the configuration
-    /// asks for submodule pushes, Git only checks (locally) that the commits
-    /// the branch points at are on a submodule remote, and the push is refused
-    /// otherwise.
+    /// asks for submodule pushes, Git instead checks locally, as `git push
+    /// --recurse-submodules=check` does, the commits origin does not have
+    /// yet: the push is refused when one points at a submodule commit Git
+    /// finds on no submodule remote. A submodule that is not initialised, or a
+    /// submodule commit Git cannot find, is not checked; nothing is pushed
+    /// for it either way.
     ///
     /// What this deliberately does not bind: only the destination URL is
     /// checked. Settings people set on purpose for keys and proxies, which
@@ -2339,6 +2342,16 @@ impl WorkspaceGit {
         let private = scratch.path().join("repo");
         std::fs::create_dir_all(private.join("refs")).map_err(RpcError::internal)?;
         std::fs::write(private.join("HEAD"), format!("ref: refs/heads/{branch}\n")).map_err(RpcError::internal)?;
+        // Origin's remote-tracking refs, so the submodule check below looks
+        // only at the commits origin does not have yet (`--not
+        // --remotes=origin`), as an ordinary `git push` does, not the whole
+        // history. The copy shares the checkout's objects.
+        let tracking = self.git(repo, &["for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/origin/"])?;
+        let packed: String = tracking.lines()
+            .filter(|line| line.split_once(' ').is_some_and(|(id, name)| !id.is_empty() && name.starts_with("refs/remotes/origin/")))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(private.join("packed-refs"), packed).map_err(RpcError::internal)?;
         if shallow.is_file() {
             std::fs::copy(&shallow, private.join("shallow")).map_err(RpcError::internal)?;
         }
@@ -2424,15 +2437,15 @@ impl WorkspaceGit {
 
         // Submodules are never pushed from here: each would go out through
         // its own live, unchecked configuration. Where the configuration asks
-        // for submodule pushes, Git only checks that the commits the branch
-        // points at are already on a submodule remote.
+        // for submodule pushes, Git only checks that the commits sent point at
+        // submodule commits already on a submodule remote.
         let recurse = if self.recurses_into_submodules(command)? { "--recurse-submodules=check" } else { "--recurse-submodules=no" };
         let refspec = format!("{head}:{reference}");
         let pushed = run_network(command(&["push", "--porcelain", "--no-verify", recurse, "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)?;
         if !pushed.ok && recurse.ends_with("check") && pushed.stderr.contains("not be found on any remote") {
             return Err(RpcError::new(
                 "conflict",
-                "This branch points at submodule commits that are not on a submodule remote, and a verified push does not push submodules. Push them from the submodule first; nothing was pushed.",
+                "The commits this push would send point at submodule commits that are not on a submodule remote, and a verified push does not push submodules. Push them from the submodule first; nothing was pushed.",
             ));
         }
         Ok(pushed)

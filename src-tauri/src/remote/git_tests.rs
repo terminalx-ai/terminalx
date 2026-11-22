@@ -2453,7 +2453,12 @@ fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_di
 fn a_verified_pr_push_never_pushes_submodules_through_their_own_config() {
     use std::os::unix::fs::PermissionsExt;
     // Each configuration that makes `git push` push submodules, with the
-    // submodule's commit already on its remote or not.
+    // submodule's commit already on its remote or not. Only the last case
+    // fails without the fix: there Git starts `git push` in the submodule,
+    // with the submodule's own configuration (it then stops on the
+    // superproject's refspec). In the first two Git finds nothing to push
+    // there either way; they show that a submodule commit already on its
+    // remote does not stop the verified push.
     for (key, value, on_remote) in [
         ("push.recurseSubmodules", "on-demand", true),
         ("submodule.recurse", "true", true),
@@ -2575,5 +2580,41 @@ fn shared_git_helpers_read_the_checkout_that_was_verified() {
                 assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
             }
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_submodule_check_of_a_verified_pr_push_looks_only_at_commits_origin_lacks() {
+    // An old commit, long on origin, points at a submodule commit that is
+    // now only on a local submodule branch. An ordinary push does not look
+    // at it again, and neither may the verified one.
+    for value in ["check", "on-demand"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let submodule = f.root.join("lib");
+        git(&submodule, &["checkout", "-qb", "local-only"]);
+        std::fs::write(submodule.join("lib.txt"), "local\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Local library change"]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Old bump"]);
+        git(&f.root, &["push", "-q", "--recurse-submodules=no", "origin", "HEAD:refs/heads/main"]);
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        git(&f.root, &["config", "push.recurseSubmodules", value]);
+        // What an ordinary push would do, without sending anything.
+        git(&f.root, &["push", "-q", "--dry-run", "origin", &format!("{head}:refs/heads/feature/pr")]);
+
+        let created = f.call("git.prCreateForSession", request)
+            .unwrap_or_else(|error| panic!("{value}: {} {}", error.code, error.message));
+        assert_eq!(created["created"], true, "{value}");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{value}");
     }
 }
