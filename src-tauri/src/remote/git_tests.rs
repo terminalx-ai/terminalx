@@ -1476,6 +1476,56 @@ fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_ch
 
 #[cfg(unix)]
 #[test]
+fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
+    // After the checkout is verified and before Git runs: core.worktree is
+    // pointed at another folder, or another repository replaces the checkout.
+    for replace in [false, true] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if replace { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("note.txt"), "outside\n").unwrap();
+        let moved = f.base.join("topic-original");
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "git" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            if replace {
+                std::fs::rename(&target, &away).unwrap();
+                std::fs::rename(&other, &target).unwrap();
+            } else {
+                git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]);
+            }
+        }));
+        if !replace {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+
+        let staged = f.call("git.stage", json!({ "repo": checkout.to_str().unwrap(), "paths": ["note.txt"] }));
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "replace={replace}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if replace { &moved } else { &checkout };
+        if !replace {
+            git(verified, &["config", "--worktree", "--unset", "core.worktree"]);
+        }
+        staged.unwrap_or_else(|error| panic!("replace={replace}: {} {}", error.code, error.message));
+        // The verified checkout staged its own file; the other folder's never entered an index.
+        assert_eq!(git(verified, &["show", ":note.txt"]), "verified", "replace={replace}");
+        if replace {
+            assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     for replace_checkout in [false, true] {
         let _home = crate::store::temp_home();
