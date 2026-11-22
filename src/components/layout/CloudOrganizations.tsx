@@ -41,7 +41,7 @@ import {
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs, type CloudSidebarSection } from "@/lib/prefs";
-import { useCloudPins } from "@/lib/cloudPins";
+import { bootCloudPins, useCloudPins, useCloudPinsError } from "@/lib/cloudPins";
 import { workspaceUsage } from "@/lib/runningLimit";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -175,6 +175,7 @@ function OrganizationSection({
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
   const cloudPins = useCloudPins();
+  const pinsError = useCloudPinsError();
   const store = useSessionStore();
   const { status } = useAccount();
   const filter = useSidebarFilter();
@@ -334,6 +335,15 @@ function OrganizationSection({
   const notes = (
     <>
       {switchError && <p className="px-2 text-[11px] text-destructive">{switchError}</p>}
+      {/* Unread, the pins are not shown, and every project reads as unpinned: say so, rather than drop them silently. */}
+      {live && pinsError && (
+        <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[11px] text-destructive" title={pinsError} data-testid="cloud-pins-error">
+          <span className="min-w-0 flex-1 truncate">Pinned projects could not be read.</span>
+          <button type="button" onClick={() => void bootCloudPins()} className="shrink-0 rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40" data-testid="cloud-pins-retry">
+            Try again
+          </button>
+        </div>
+      )}
       {!live && (
         <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[12px] text-faint" title={HINT} data-testid="cloud-org-not-live">
           <span className="min-w-0 flex-1 truncate">Its cloud sessions show when it is the default organization.</span>

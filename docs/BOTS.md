@@ -1021,6 +1021,15 @@ phone's own calls, never a second set of bot rules.
   `answer` is `itemAnswer`, as the app's Needs you answers, so the answer is
   the owner's and reaches the bot's home chat the same way. A bot's session
   holds no device connection, so it cannot reach these.
+- **The gate before them.** Every paired phone's call passes
+  `allowed_method` (`src-tauri/src/phone/mod.rs`) first, on the direct and
+  the relay connection alike: `list`, `home` and `items` are on its list for
+  any paired phone, the four that act on the drivers' list only. Until
+  PRO-510 none of the seven was on either list, so a phone's every `bots.*`
+  call was refused as `forbidden` before it reached the calls above, and the
+  Bots tab never loaded on a phone. A test now reads the method names from
+  the phone dispatch itself and fails for one the gate does not admit as its
+  handler asks.
 - **A question** is answered by its index or in words, with the question's
   id it was shown, so an answer to a question that has since changed is
   refused ("no longer asks this") rather than given to the new one.
