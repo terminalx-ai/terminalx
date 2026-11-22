@@ -931,13 +931,40 @@ mod tests {
     /// A gateway on this Mac that answers one request and says what was asked.
     fn gateway() -> (String, std::thread::JoinHandle<String>) { gateway_during(|| {}) }
 
+    /// How long a test gateway waits for its request before failing the test.
+    const GATEWAY_WAIT: Duration = Duration::from_secs(10);
+
+    /// The next connection to `listener` at `url`, or a panic naming `url` once
+    /// [`GATEWAY_WAIT`] passes with none: a key sent elsewhere fails the test
+    /// instead of leaving it waiting forever.
+    fn accept_within(listener: &std::net::TcpListener, url: &str) -> std::net::TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + GATEWAY_WAIT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // Some systems hand the accepted socket the listener's non-blocking mode.
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(GATEWAY_WAIT)).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "no request reached the gateway at {url} within {GATEWAY_WAIT:?}: the key was sent somewhere else, or not at all");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("the gateway at {url} couldn’t take a connection: {error}"),
+            }
+        }
+    }
+
     /// [`gateway`], running `during` after the request arrived and before it is answered.
     fn gateway_during(during: impl FnOnce() + Send + 'static) -> (String, std::thread::JoinHandle<String>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let at = url.clone();
         let served = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_within(&listener, &at);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
             loop {
@@ -980,8 +1007,9 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let at = url.clone();
         let served = std::thread::spawn(move || (0..count).map(|_| {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_within(&listener, &at);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
             loop {
@@ -1076,7 +1104,8 @@ mod tests {
 
         // A new base URL: it alone is asked, and it is what is saved.
         let (new, served) = gateway();
-        connect_in(&paths, "acme", "acme-key-9876543210", Some(&format!("  {new}  "))).unwrap();
+        let replaced = connect_in(&paths, "acme", "acme-key-9876543210", Some(&format!("  {new}  "))).unwrap();
+        assert!(matches!(replaced.check, KeyCheck::Accepted), "the new gateway didn’t accept the key, so it was checked elsewhere: {:?}", replaced.check);
         assert!(served.join().unwrap().contains("Bearer acme-key-9876543210"));
         never_asked(&catalogue_listener, "the catalogue address");
         assert_eq!(saved_base(&paths).as_deref(), Some(new.as_str()));
