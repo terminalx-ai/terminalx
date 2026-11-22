@@ -5473,6 +5473,8 @@ impl SessionManager {
             .map_err(anyhow::Error::msg)?;
         self.tabs.lock().unwrap().retain(|_, tab| tab.lock().unwrap().session_id != session_id);
         self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{session_id}/")));
+        // A bot's chat is deleted like any other session (PRO-521): a hand-off it was working on fails, and its sender is told.
+        crate::bots::handoffs::chat_deleted(self, &entry);
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
-import { Bot as BotIcon, Brain, CircleDot, Github, Hash, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, Send, ShieldOff, Settings2, Sparkles, SquareKanban } from "@/icons";
+import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { botsApi, errorMessage } from "@/lib/api";
-import { botChats, botSpentToday, chatSource, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
+import { botChats, botSpentToday, openHomeChat, spentTodayLabel, startBotChat, usageKey } from "@/lib/botChats";
 import { pauseBot, resumeBot, useBotStore } from "@/lib/bots";
 import { heldLine, pausedBySentence, pausedStatus, usePauseHeld } from "@/lib/botPause";
 import { showBotsTeam } from "@/lib/botsPage";
@@ -19,6 +19,7 @@ import { conversationTitle, selectSession, upsertSession, useSessionStore } from
 import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot, type PauseHeld } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
+import { ChatRow } from "./BotChatRow";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
 import { HandoffCards, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
@@ -388,31 +389,5 @@ function ChatGroup({ label, action, children }: { label: string; action?: ReactN
       </div>
       <ul className="mt-1 flex flex-col gap-0.5">{children}</ul>
     </section>
-  );
-}
-
-function ChatRow({ chat, selected, home, onOpen, sub }: { chat: SessionEntry; selected: boolean; home: boolean; onOpen: (chat: SessionEntry) => void; sub?: string }) {
-  const working = chat.tabs.some((tab) => tab.status === "in_progress");
-  const source = home ? null : chatSource(chat);
-  const kind = chat.botChannel?.kind;
-  const Icon = home ? Home : kind === "github" ? Github : kind === "linear" ? SquareKanban : kind === "slack" ? Hash : kind === "telegram" ? Send : MessageSquare;
-  return (
-    <li>
-      <button
-        type="button"
-        aria-current={selected ? "page" : undefined}
-        onClick={() => onOpen(chat)}
-        className={cn("flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-1.5 text-left", selected ? "bg-veil-strong" : "hover:bg-veil")}
-      >
-        <Icon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] text-foreground">{home ? "Home chat" : conversationTitle(chat)}</span>
-          <span className="block truncate text-[11.5px] text-faint" data-testid={!sub && source ? "bot-chat-source" : undefined}>
-            {sub ?? (source ? `${source} · ${relativeTime(chat.modified || chat.created)}` : relativeTime(chat.modified || chat.created))}
-          </span>
-        </span>
-        {working && <Loader2 aria-label="Working" className="mt-0.5 size-3.5 shrink-0 animate-spin text-warning" />}
-      </button>
-    </li>
   );
 }

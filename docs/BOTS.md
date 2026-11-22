@@ -566,6 +566,21 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   size limit first drops the oldest sent messages and closed hand-offs to
   make room; one that still grows the file past 4 MB (a bot's) is refused
   (the owner's go to 6 MB; reads stop at 8 MB).
+- **Closing a chat (PRO-521).** A bot's chat is a session, so its row in
+  the bot's Chat tab has the sidebar's own session menu (right-click, the
+  row's ⋯, the same keys): Rename… and a double-click open the app's one
+  rename dialog, and Archive and Delete session… close it as they close any
+  session. Nothing is lost by it. An archived chat goes on working and
+  answers as before. A message or an answer for a chat that was archived or
+  deleted goes to its bot's home chat instead (`handoffs::target`), and a
+  home chat that was archived is brought back, or made again when it was
+  deleted (`chat::home_chat`). Deleting the chat a hand-off is worked on in
+  fails that hand-off (`handoffs::chat_deleted`): its sender is told so by
+  TerminalX in the chat it handed it from, and the receiving bot keeps its
+  item. The home chat's row offers Rename… but not Archive or Delete: whether
+  the standing chat may be closed is the owner's open decision. The open
+  chat archived or deleted leaves the reader on the bot's page, on its home
+  chat, not on Welcome.
 - **Pause.** A paused bot sends nothing. Work handed to it is recorded as
   waiting, with no chat or item, and starts when the owner resumes it; what
   is sent to it waits too. It is never started by a bot. The resume answers

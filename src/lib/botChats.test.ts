@@ -3,7 +3,7 @@ import type { SessionEntry } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
 
-const { actingBotOf, botChats, botOf, botViewFor, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
+const { actingBotOf, botAfterChatClosed, botChats, botOf, botViewFor, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
 
 const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
   id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
@@ -43,6 +43,21 @@ describe("a bot's chats (PRO-468)", () => {
     expect(botViewFor(true, [{ id: "b1" }], session("plain"), { view: "bot", selectedBotId: "b1" })).toBeNull();
     expect(botViewFor(true, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toEqual({ botId: "b1", chatId: null });
     expect(botViewFor(false, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toBeNull();
+  });
+
+  it("leave the reader on their bot when the open chat is archived or deleted, and nowhere else (PRO-521)", () => {
+    const shown = { botId: "b1", chatId: "chat" };
+    const home = { id: "home", archived: false };
+    const gone = { view: "welcome", selectedSessionId: null, sessions: [home] };
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], gone)).toBe("b1");
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, sessions: [home, { id: "chat", archived: true }] })).toBe("b1");
+    // The chat is still open: the reader went to Welcome themselves.
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, sessions: [home, { id: "chat", archived: false }] })).toBeNull();
+    // Another session or view was chosen since, no bot chat was open, or its bot is gone.
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, selectedSessionId: "home" })).toBeNull();
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, view: "agents" })).toBeNull();
+    expect(botAfterChatClosed(null, [{ id: "b1" }], gone)).toBeNull();
+    expect(botAfterChatClosed(shown, [{ id: "b2" }], gone)).toBeNull();
   });
 
   it("show what the bot spent today, read again whenever its sessions record usage", () => {
