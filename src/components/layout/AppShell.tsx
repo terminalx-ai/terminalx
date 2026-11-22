@@ -86,6 +86,7 @@ import { bootBots, pauseAllBots, shutBots, useBotStore } from "@/lib/bots";
 import { bootBotPause, noteBotsForPause, noteSessionsForPause, shutBotPause } from "@/lib/botPause";
 import { bootBotItems, noteBotSessions, shutBotItems } from "@/lib/botItems";
 import { botViewFor } from "@/lib/botChats";
+import { useStayOnBot } from "@/components/bots/useStayOnBot";
 import { BotView } from "@/components/bots/BotView";
 import { showBotsTeam, useLeaveBotsWhenOff } from "@/lib/botsPage";
 import { BotsView } from "@/components/bots/BotsView";
@@ -340,6 +341,7 @@ export function AppShell() {
   // Bots (PRO-466) are read and listened for only while Settings → Experimental → Bots is on.
   const botsOn = experimentalSwitches?.bots === true;
   const botView = botViewFor(botsOn, bots, selected, store);
+  useStayOnBot(botsOn, bots, botView);
   useEffect(() => {
     if (botsOn) {
       void bootBots();

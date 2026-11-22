@@ -131,6 +131,24 @@ reproduced its intermittent Linux failure. The fixture now explicitly advances
 the rewritten file's mtime; the production cache and all cost/retention
 assertions are unchanged.
 
+## Tests that failed now and then
+
+`.github/workflows/repeat-flaky-tests.yml` (PRO-334, PRO-488) runs five tests
+that used to fail by timing or shared state, many times in a row on the kind
+of runner CI runs each on: the large-tab send cost and the cloud sections'
+search 20 times, the far-behind terminal view and the checkpoint undo 20
+times, and the Codex capability tests 300 times with every core busy. It runs
+only when one of those tests or the workflow changes, and by hand
+(`gh workflow run repeat-flaky-tests.yml -f runs=50`). It is not a required
+status, and it takes one macOS runner for the search.
+
+The send test no longer holds a time in milliseconds. It measures a send in
+units of a reference workload timed beside it in the same run, so the figure
+is the same on a laptop and a hosted runner, and a second test fails if a send
+made twice the work would still pass. The job prints what each run measured;
+set `SEND_COST_LOG` to a file to get the same locally before changing the
+budgets in `src/components/session/TabView.send.test.tsx`.
+
 ## macOS runner time
 
 GitHub runs only a few macOS jobs at once for the whole account, and a job

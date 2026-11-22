@@ -505,13 +505,46 @@ mod tests {
         }
     }
 
+    /// A stand-in `codex` in `directory` that answers `--help` with `body`,
+    /// returned once it can be run.
     #[cfg(unix)]
     fn help_program(directory: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let program = directory.join("codex");
-        std::fs::write(&program, format!("#!/bin/sh\n[ \"$*\" = '--help' ] || exit 91\n{body}\n")).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\n[ \"$*\" = '--help' ] || exit {NOT_HELP}\n{body}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run_once_not_busy(&program);
         program
+    }
+
+    /// What a stand-in exits with when it is run with anything but `--help`.
+    #[cfg(unix)]
+    const NOT_HELP: i32 = 91;
+
+    /// Run the stand-in just written, without `--help`, until Linux no longer
+    /// refuses it with ETXTBSY ("Text file busy"). A test on another thread
+    /// that forks while the write above has the file open hands its child a
+    /// copy of the descriptor, which close-on-exec closes only at that child's
+    /// exec; until then the kernel will not run the file, and the probe under
+    /// test reports that Codex "could not start" (PRO-488). No lock can close
+    /// that window, since every other test in this binary forks too. One run
+    /// that starts proves every copy is closed, and nothing opens the file for
+    /// writing again, so the probes that follow start whatever else is forking.
+    #[cfg(unix)]
+    fn run_once_not_busy(program: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match std::process::Command::new(program).stdin(std::process::Stdio::null()).status() {
+                Ok(status) => {
+                    assert_eq!(status.code(), Some(NOT_HELP), "the stand-in runs its body only for --help");
+                    return;
+                }
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("run the stand-in Codex: {error}"),
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -550,19 +583,40 @@ mod tests {
     #[test]
     fn failed_or_ambiguous_capability_checks_never_enable_a_launch() {
         let directory = tempfile::tempdir().unwrap();
-        for (body, timeout, reason) in [
+        for (case, (body, timeout, reason)) in [
             ("printf '  --no-daemon\n'; exit 2", Duration::from_secs(5), "exited unsuccessfully"),
             ("printf '  --no-daemon-other\n'", Duration::from_secs(5), "Update Codex"),
             ("exec sleep 30", Duration::from_millis(50), "timed out"),
             ("sleep 2 2>/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
             ("sleep 2 >/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
-        ] {
-            let program = help_program(directory.path(), body);
+        ].into_iter().enumerate() {
+            // Its own folder: no case runs a file an earlier one wrote or left running.
+            let folder = directory.path().join(case.to_string());
+            std::fs::create_dir(&folder).unwrap();
+            let program = help_program(&folder, body);
             let error = Launcher::inspect(program, timeout).err().expect("an unsuccessful probe must reject launch");
             assert!(error.to_string().contains(reason), "{body}: {error}");
         }
         let error = Launcher::inspect(directory.path().join("missing"), Duration::from_secs(5)).err().unwrap();
         assert!(error.to_string().contains("could not start"));
+    }
+
+    /// PRO-488 as it happened on Linux CI, made to happen every time: a
+    /// `codex` some process still has open for writing cannot be run. The
+    /// probe says it could not start and admits nothing, and the same file is
+    /// admitted once the writer is done.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_codex_still_open_for_writing_cannot_start_and_never_enables_a_launch() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = help_program(directory.path(), "printf '  --no-daemon\n'");
+        let writer = std::fs::File::options().write(true).open(&program).unwrap();
+        let error = Launcher::inspect(program.clone(), Duration::from_secs(5)).err().expect("a CLI that cannot be run must reject launch");
+        assert!(error.to_string().contains("could not start"), "{error}");
+        drop(writer);
+        // A fork on another thread may have copied `writer` as well.
+        run_once_not_busy(&program);
+        assert!(Launcher::inspect(program, Duration::from_secs(5)).is_ok());
     }
 
     #[cfg(unix)]

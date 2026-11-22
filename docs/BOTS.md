@@ -55,11 +55,17 @@ with its record next to it as `bot.json`.
   works across several (PRO-483). An organisation's folder is its id when
   that is a plain lower-case name, else `x-<hash>`, so ids that differ only
   in case never share a folder on a Mac; a folder an earlier build kept by an
-  id with capitals is moved on the next look.
+  id with capitals is moved on the next look, and undoing a change logged
+  before the move is made in the folder as it is now (PRO-512). Where two
+  such ids already shared one folder (a disk that does not tell case apart),
+  the notes cannot be told apart and stay there: the place left with none
+  says so on the screen and in `memory list` (`notice`), with both paths,
+  until it has notes of its own.
 - **Line numbers.** A memory past 64 KB is listed from its end (its newest
   notes). `forget --line N`, a tidy's line numbers and the screen's Forget
   count from the first line listed, as `terminalx bots memory list` shows
-  them, not from the top of the file.
+  them, not from the top of the file. Where the list starts is counted in
+  the file's own bytes, so it holds in a file that is not UTF-8 (PRO-512).
 - **The two memory commands.** A bot writes memory only with
   `terminalx bots memory add "<note>"` and `terminalx bots memory forget
   "<words>"` (`list` reads), never by editing the files. From a bot's chat, or
@@ -84,15 +90,24 @@ with its record next to it as `bot.json`.
   direction (those that gain lines first, those that lose lines last), so a
   crash between two writes of a move or of its undo leaves a line in both,
   never in neither. A look (every chat launch) reads again only the files
-  whose size, times or inode changed, and follows topic files of any name
+  whose size, times or inode changed, and any file whose times are newer
+  than 3 s: a disk with coarse times does not show a same-size edit made in
+  the same tick as the read (PRO-512). It follows topic files of any name
   without control characters, line breaks, `\` or `:`. An unreadable
   `known.json` is set aside and rebuilt from the log.
 - **The window's key in memory.** The window reads its consent key from
-  Keychain once and holds it in memory only (`consent::witness_for`), so a
-  guarded write does not read Keychain each time; the key a launch pins
-  replaces it, and it is forgotten wherever the launch key is
-  (`consent::forget_launch_key`), so the next write reads Keychain again. A
-  failed read is not held.
+  Keychain and holds it in memory only, for 60 s at most
+  (`consent::witness_for`, `KEY_HELD_FOR`), so a burst of guarded writes
+  does not read Keychain each time, and a Keychain item deleted, replaced or
+  locked while the app runs stops the old key signing within a minute
+  (PRO-512). The key a launch pins replaces it, and it is forgotten wherever
+  the launch key is (`consent::forget_launch_key`). A failed read is not
+  held. The held key is wiped from memory when its last holder drops it
+  (`consent::HeldKey`).
+- **An unsaved role.** Quitting asks first while a role has unsaved changes.
+  The draft of a bot that a whole list no longer has (deleted here or
+  elsewhere) is dropped, and while Bots is off the question is not asked;
+  the drafts are kept and asked about again once it is back on (PRO-512).
 
 ## Rules every sub-issue keeps
 
@@ -311,7 +326,12 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   TerminalX allowed (`local_runtime_prove_window`); nothing is restarted.
   An unproven registrant never takes the window's services while Bots is
   on, so a process with only the control token cannot stand in for the
-  window. The window still reads its key at every registration with Bots
+  window, nor unseat it: a registration without the proof ends only its own
+  sender's standing as the window, and only once it is a registration this
+  runtime would consider (a current lease and a private endpoint of its
+  own). One whose proof goes unanswered twice fails as a runtime that does
+  not answer; it is not sent a third time without the proof. The window
+  still reads its key at every registration with Bots
   off: that proof is what keeps it the window when Bots is turned on.
 
 ## Duties (PRO-471)
@@ -546,6 +566,21 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   size limit first drops the oldest sent messages and closed hand-offs to
   make room; one that still grows the file past 4 MB (a bot's) is refused
   (the owner's go to 6 MB; reads stop at 8 MB).
+- **Closing a chat (PRO-521).** A bot's chat is a session, so its row in
+  the bot's Chat tab has the sidebar's own session menu (right-click, the
+  row's ⋯, the same keys): Rename… and a double-click open the app's one
+  rename dialog, and Archive and Delete session… close it as they close any
+  session. Nothing is lost by it. An archived chat goes on working and
+  answers as before. A message or an answer for a chat that was archived or
+  deleted goes to its bot's home chat instead (`handoffs::target`), and a
+  home chat that was archived is brought back, or made again when it was
+  deleted (`chat::home_chat`). Deleting the chat a hand-off is worked on in
+  fails that hand-off (`handoffs::chat_deleted`): its sender is told so by
+  TerminalX in the chat it handed it from, and the receiving bot keeps its
+  item. The home chat's row offers Rename… but not Archive or Delete: whether
+  the standing chat may be closed is the owner's open decision. The open
+  chat archived or deleted leaves the reader on the bot's page, on its home
+  chat, not on Welcome.
 - **Pause.** A paused bot sends nothing. Work handed to it is recorded as
   waiting, with no chat or item, and starts when the owner resumes it; what
   is sent to it waits too. It is never started by a bot. The resume answers

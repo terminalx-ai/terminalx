@@ -36,16 +36,21 @@ export interface RoleDraft {
   baseHash: string;
 }
 
-// Kept for the app's life, by bot: leaving the screen, or the bot missing from the list for a moment, loses no edit.
+// Kept for the app's life, by bot: leaving the screen, or a list of the bots that could not be read, loses no edit.
+// A bot that a whole list no longer has is deleted, and its draft goes with it (`keepRoleDraftsOf`).
 const drafts = new Map<string, RoleDraft>();
 // While any draft is unsaved, quitting the app or closing its window asks first (`quitWarning`).
 let releaseQuit: (() => void) | null = null;
 
 const UNSAVED_ROLE = "A bot's standing instructions have unsaved changes. If you quit now, they are lost.";
 
+// Whether a draft can be reached: not while Bots is off, when no page shows one.
+let reachable = true;
+
 function holdQuitWhileDrafts() {
-  if (drafts.size > 0 && !releaseQuit) releaseQuit = holdQuit(UNSAVED_ROLE);
-  if (drafts.size === 0 && releaseQuit) {
+  const ask = reachable && drafts.size > 0;
+  if (ask && !releaseQuit) releaseQuit = holdQuit(UNSAVED_ROLE);
+  if (!ask && releaseQuit) {
     releaseQuit();
     releaseQuit = null;
   }
@@ -67,8 +72,28 @@ export function hasRoleDraft(id: string): boolean {
   return drafts.has(id);
 }
 
+/**
+ * The bots there are, as a whole list of them says (PRO-512): the draft of a bot that is not one of them is dropped,
+ * and the quit question with it. A deleted bot's role has nowhere to be saved, and no page shows its draft.
+ */
+export function keepRoleDraftsOf(ids: Iterable<string>) {
+  const there = new Set(ids);
+  for (const id of [...drafts.keys()]) if (!there.has(id)) drafts.delete(id);
+  holdQuitWhileDrafts();
+}
+
+/**
+ * Bots was turned off or on (PRO-512). Off, no page shows a draft, so quitting does not ask about one; the drafts
+ * are kept, and asked about again once Bots is back on in this run of the app.
+ */
+export function roleDraftsReachable(on: boolean) {
+  reachable = on;
+  holdQuitWhileDrafts();
+}
+
 export function resetRoleDraftsForTests() {
   drafts.clear();
+  reachable = true;
   holdQuitWhileDrafts();
 }
 

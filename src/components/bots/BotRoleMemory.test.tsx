@@ -370,6 +370,19 @@ describe("Role and memory (PRO-470)", () => {
     expect(screen.getByTestId("bot-memory-secrets").textContent).toContain("/home/bots/atlas-id/memory/deploy.md");
   });
 
+  it("says where an organisation's earlier notes were left when they could not be moved to it (PRO-512)", async () => {
+    const atWork = bot("atlas-id", "Atlas", { worksIn: ["Acme", "acme"] });
+    const notice = "Notes kept here before are still in /home/bots/atlas-id/orgs/Acme, a folder this place shared with acme.";
+    const shown = view();
+    shown.memory = { ...shown.memory, workingPlace: "Acme", places: [place("bot", []), place("Acme", [], { notice }), place("acme", ["- 2026-11-01 Either's"], { read: false, readLines: 0 }), place("personal", [], { read: false, readLines: 0 })] };
+    serve(shown);
+    show([atWork], atWork);
+    expect((await screen.findByTestId("bot-memory-place-notice")).textContent).toBe(notice);
+    // Only the place it is about says it.
+    fireEvent.click(screen.getByRole("radio", { name: /Stays in acme/ }));
+    await waitFor(() => expect(screen.queryByTestId("bot-memory-place-notice")).toBeNull());
+  });
+
   it("names an organisation's place by its name when the account knows it, else by its id", () => {
     const names = new Map([["org_1", "Kestrel Studio"]]);
     expect(placeLabel("org_1", "Atlas", names)).toBe("Stays in Kestrel Studio");

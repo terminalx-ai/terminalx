@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpSocket};
+use tokio::sync::mpsc;
 
 use super::model::PairingConnectionMode;
 
@@ -34,6 +37,86 @@ pub(super) fn bind_each(addresses: &[Ipv4Addr], port: u16) -> io::Result<Vec<Tcp
         return Err(io::Error::new(io::ErrorKind::AddrNotAvailable, "the listen setting opens no address on this Mac"));
     }
     addresses.iter().map(|address| bind_address(SocketAddr::from((*address, port)))).collect()
+}
+
+/// The sockets open on the window's own listeners, each with the address it
+/// came from, from the moment it is accepted: handshaking, waiting for
+/// approval, a logged-in phone or a shared session alike. The runtime's
+/// machine host tracks its own the same way (`machine_host::Via`), so that a
+/// caller let in under one listen plan does not outlive it (PRO-495).
+///
+/// Whether public callers are answered is kept under the same lock as the
+/// sockets: a socket accepted while the setting changes is either refused
+/// when it is noted or closed by the change, never missed by both.
+#[derive(Default)]
+pub(super) struct Callers {
+    state: Mutex<CallersState>,
+}
+
+#[derive(Default)]
+struct CallersState {
+    /// `machines.allowPublic` as the window last read it; refused until then.
+    allow_public: bool,
+    next: u64,
+    open: HashMap<u64, (IpAddr, mpsc::UnboundedSender<()>)>,
+}
+
+/// Forgets its socket when the socket's handler returns or is dropped.
+pub(super) struct OpenCaller<'a> {
+    callers: &'a Callers,
+    id: u64,
+}
+
+impl Drop for OpenCaller<'_> {
+    fn drop(&mut self) {
+        self.callers.state.lock().unwrap().open.remove(&self.id);
+    }
+}
+
+impl Callers {
+    /// Note a socket from `source`, unless the plan does not answer it now.
+    /// The receiver hears once when the socket is to be closed.
+    pub(super) fn open(&self, source: IpAddr) -> Option<(OpenCaller<'_>, mpsc::UnboundedReceiver<()>)> {
+        let mut state = self.state.lock().unwrap();
+        if !crate::listen::caller_allowed(source, state.allow_public) {
+            return None;
+        }
+        let (close, closed) = mpsc::unbounded_channel();
+        let id = state.next;
+        state.next += 1;
+        state.open.insert(id, (source, close));
+        Some((OpenCaller { callers: self, id }, closed))
+    }
+
+    /// Follow `machines.allowPublic`: from now on, and for the sockets
+    /// already open, which are closed when the plan no longer answers their
+    /// address. How many were closed.
+    pub(super) fn answer_public(&self, allow_public: bool) -> usize {
+        let mut state = self.state.lock().unwrap();
+        state.allow_public = allow_public;
+        state.close(|source| !crate::listen::caller_allowed(source, allow_public))
+    }
+
+    /// Close every socket: the listeners they came in on are closing.
+    pub(super) fn close_all(&self) -> usize {
+        self.state.lock().unwrap().close(|_| true)
+    }
+
+    /// The addresses of the sockets open now, sorted.
+    #[cfg(test)]
+    pub(super) fn sources(&self) -> Vec<IpAddr> {
+        let mut sources: Vec<_> = self.state.lock().unwrap().open.values().map(|(source, _)| *source).collect();
+        sources.sort_unstable();
+        sources
+    }
+}
+
+impl CallersState {
+    /// Tell each socket `refused` names to close. They leave `open` as
+    /// their handlers end; a second pass tells them again, harmlessly.
+    fn close(&self, refused: impl Fn(IpAddr) -> bool) -> usize {
+        self.open.values().filter(|(source, close)| refused(*source) && close.send(()).is_ok()).count()
+    }
 }
 
 /// Relay must not wait for or depend on its optional nearby listener. LAN

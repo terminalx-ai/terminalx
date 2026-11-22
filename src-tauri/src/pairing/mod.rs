@@ -149,6 +149,8 @@ pub struct PairingManager {
     /// manager is taken, as `keep_awake` is.
     connections: Mutex<HashMap<String, Vec<LiveConnection>>>,
     connection_serial: AtomicU64,
+    /// Every socket open on the window's own phone listeners (PRO-495).
+    direct_callers: direct::Callers,
     /// The phone protocol this window serves (`crate::phone`).
     phone: Arc<PhoneHost>,
     /// `APPROVAL_TTL_MS` in the app; fixtures wait less.
@@ -244,6 +246,7 @@ impl PairingManager {
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
             connection_serial: AtomicU64::new(1),
+            direct_callers: direct::Callers::default(),
             phone,
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
@@ -1112,6 +1115,7 @@ impl PairingManager {
         }
         let plan = crate::listen::Plan::current();
         crate::listen::remember(plan);
+        self.direct_callers.answer_public(plan.allow_public);
         if self.runtime_owns_direct() {
             // The runtime holds the port and passes phones here (PRO-341).
             drop(inner);
@@ -1138,10 +1142,19 @@ impl PairingManager {
     /// Check the window's own listeners against the listen setting and this
     /// Mac's addresses, and bind again when they differ: the setting
     /// changed, Tailscale came up, the Mac joined another network.
+    ///
+    /// Callers already in are held to the setting too (PRO-495): turning
+    /// public callers off closes the sockets from public addresses on the
+    /// window's own listeners here, even when the listeners stay where they
+    /// are, as the runtime's `close_refused_callers` does for its own.
     /// Blocking: reads `settings.json`.
     pub fn listen_setting_changed(self: &Arc<Self>) {
         let plan = crate::listen::Plan::current();
         crate::listen::remember(plan);
+        let closed = self.direct_callers.answer_public(plan.allow_public);
+        if closed > 0 {
+            log::info!("phone listener: public callers are not answered now; closed {closed} open connection(s) from public addresses");
+        }
         let wanted = plan.binds(&crate::listen::interfaces());
         let (own, bound, wants) = {
             let inner = self.inner.lock().unwrap();
@@ -1164,6 +1177,18 @@ impl PairingManager {
             }
         }
         self.emit();
+    }
+
+    /// Which of `sources` the window's own listener closes when public
+    /// callers are withdrawn: each is noted as an accepted socket while they
+    /// are answered, then the setting turns off.
+    #[cfg(test)]
+    pub(crate) fn callers_closed_when_public_callers_are_withdrawn_for_test(&self, sources: &[std::net::IpAddr]) -> Vec<std::net::IpAddr> {
+        self.direct_callers.answer_public(true);
+        let mut open: Vec<_> = sources.iter().map(|source| (*source, self.direct_callers.open(*source).expect("answered while public callers are"))).collect();
+        assert_eq!(self.direct_callers.answer_public(true), 0, "nobody is closed while they are answered");
+        self.direct_callers.answer_public(false);
+        open.iter_mut().filter_map(|(source, (_, closed))| closed.try_recv().is_ok().then_some(*source)).collect()
     }
 
     /// The addresses the window's own phone listener is bound to, as
@@ -1220,35 +1245,52 @@ impl PairingManager {
                 }
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
-                    let result = async {
-                        let socket = tokio_tungstenite::accept_async_with_config(
-                            crate::data_privacy::NetworkIo::new(&mut stream),
-                            Some(pairing_websocket_config()),
-                        )
-                        .await?;
-                        manager
-                            .handle_e2ee_socket(
-                                socket,
-                                PairingConnectionContext::Direct {
-                                    direct_auth_id: Uuid::new_v4().simple().to_string(),
-                                    forwarded_id: None,
-                                },
-                                None,
-                                None,
-                            )
-                            .await
-                    }
-                    .await;
+                    manager.serve_direct_caller(&mut stream, peer).await;
                     if manager.is_stopped() || manager.runtime_owns_direct() {
                         // Let the runtime bind this same port when the window
                         // closes. A normal server-side FIN leaves TIME_WAIT.
                         let _ = stream.set_zero_linger();
                     }
-                    if let Err(error) = result {
-                        log::debug!("direct paired-device connection ended: {error:#}");
-                    }
                 });
             }
+        }
+    }
+
+    /// One caller on the window's own listener, from `peer`: served until it
+    /// ends, its listener closes, or the listen setting stops answering its
+    /// address (PRO-495). The caller closes `stream` after.
+    async fn serve_direct_caller<S>(self: &Arc<Self>, stream: &mut S, peer: std::net::SocketAddr)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Judged again as it is noted: the setting may have changed since
+        // the listener admitted it.
+        let Some((_open, mut closed)) = self.direct_callers.open(peer.ip()) else { return };
+        let served = async {
+            let socket = tokio_tungstenite::accept_async_with_config(
+                crate::data_privacy::NetworkIo::new(&mut *stream),
+                Some(pairing_websocket_config()),
+            )
+            .await?;
+            self.handle_e2ee_socket(
+                socket,
+                PairingConnectionContext::Direct {
+                    direct_auth_id: Uuid::new_v4().simple().to_string(),
+                    forwarded_id: None,
+                },
+                None,
+                None,
+            )
+            .await
+        };
+        let result = tokio::select! {
+            result = served => result.map(drop),
+            // Dropping the handler ends the phone's session as a closed
+            // socket does; the phone reconnects and is judged at the door.
+            _ = closed.recv() => Ok(()),
+        };
+        if let Err(error) = result {
+            log::debug!("direct paired-device connection ended: {error:#}");
         }
     }
 

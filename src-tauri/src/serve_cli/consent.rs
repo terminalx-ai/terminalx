@@ -48,7 +48,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -309,7 +309,7 @@ fn read_launch_key() -> Result<Option<String>> {
     let key = load(true)?;
     let public = STANDARD.encode(key.public_key());
     // The key a launch pins is the one the window's writes prove with from now on, created now or not.
-    *CACHED_KEY.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(key));
+    *CACHED_KEY.lock().unwrap_or_else(|error| error.into_inner()) = Some(Held { key: Arc::new(HeldKey::new(key)), read: Instant::now() });
     Ok(Some(public))
 }
 
@@ -337,23 +337,81 @@ pub(crate) fn forget_launch_key() {
     CACHED_KEY.lock().unwrap_or_else(|error| error.into_inner()).take();
 }
 
-/// The window's key as this process last read it from Keychain, kept in
-/// memory only, so each guarded write does not read Keychain again. Never
-/// written anywhere; forgotten wherever the launch key is ([`forget_launch_key`]).
-static CACHED_KEY: std::sync::Mutex<Option<Arc<Ed25519KeyPair>>> = std::sync::Mutex::new(None);
+/// How long the window's key is held in memory after it was read from
+/// Keychain (PRO-512). A burst of guarded writes reads Keychain once; a
+/// Keychain item deleted, replaced or locked while the app runs stops
+/// proving the window within this long, not at the next launch.
+const KEY_HELD_FOR: Duration = Duration::from_secs(60);
 
-/// The window's key: the one held in `cache`, or read through `provider`
-/// (never created) and then held. A read that fails is not held: the next
-/// write reads again. `None` without a provider.
-fn window_key_in(provider: Option<&WindowKey>, cache: &std::sync::Mutex<Option<Arc<Ed25519KeyPair>>>) -> Result<Option<Arc<Ed25519KeyPair>>> {
+/// The window's key in memory, wiped when the last holder lets go of it
+/// (PRO-512): `ring` keeps a key pair as plain bytes and does not clear them.
+pub struct HeldKey(std::mem::ManuallyDrop<Ed25519KeyPair>);
+
+// `wipe` is sound only while the key pair is plain bytes with nothing on the
+// heap: the scalar, the prefix and the public key, 32 bytes each (ring 0.17).
+// A `ring` that keeps it another way stops the build here.
+const _: () = assert!(std::mem::size_of::<Ed25519KeyPair>() == 96 && !std::mem::needs_drop::<Ed25519KeyPair>());
+
+impl HeldKey {
+    fn new(key: Ed25519KeyPair) -> Self {
+        Self(std::mem::ManuallyDrop::new(key))
+    }
+
+    /// Overwrite the key with zeros. It must not be used after.
+    fn wipe(&mut self) {
+        // SAFETY: the key pair is plain bytes (asserted above), the pointer
+        // is to this value, and nothing reads it again: `wipe` is called
+        // from `drop` only, and `ManuallyDrop` runs no destructor on what is left.
+        unsafe { zeroize::zeroize_flat_type(&mut *self.0 as *mut Ed25519KeyPair) }
+    }
+}
+
+impl std::ops::Deref for HeldKey {
+    type Target = Ed25519KeyPair;
+
+    fn deref(&self) -> &Ed25519KeyPair {
+        &self.0
+    }
+}
+
+impl Drop for HeldKey {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+/// The window's key and when it was read from Keychain.
+struct Held {
+    key: Arc<HeldKey>,
+    read: Instant,
+}
+
+/// The window's key as this process last read it from Keychain, kept in
+/// memory only and for [`KEY_HELD_FOR`] at most, so a burst of guarded
+/// writes does not read Keychain each time. Never written anywhere;
+/// forgotten wherever the launch key is ([`forget_launch_key`]), and wiped
+/// once no request signs with it.
+static CACHED_KEY: std::sync::Mutex<Option<Held>> = std::sync::Mutex::new(None);
+
+/// The window's key at `now`: the one held in `cache` if it was read within
+/// [`KEY_HELD_FOR`], or read through `provider` (never created) and then
+/// held. One held longer is forgotten first, so Keychain as it is now
+/// decides: an item deleted, replaced or locked since stops the old key
+/// signing. A read that fails is not held: the next write reads again.
+/// `None` without a provider.
+fn window_key_in(provider: Option<&WindowKey>, cache: &std::sync::Mutex<Option<Held>>, now: Instant) -> Result<Option<Arc<HeldKey>>> {
     let Some(provider) = provider else { return Ok(None) };
     // Held across the read, so two writes at once ask Keychain once.
     let mut held = cache.lock().unwrap_or_else(|error| error.into_inner());
-    if let Some(key) = held.as_ref() {
-        return Ok(Some(key.clone()));
+    if let Some(known) = held.as_ref() {
+        if now.saturating_duration_since(known.read) < KEY_HELD_FOR {
+            return Ok(Some(known.key.clone()));
+        }
     }
-    let key = Arc::new(provider(false)?);
-    *held = Some(key.clone());
+    // Forgotten before the read: one that fails leaves no key behind.
+    held.take();
+    let key = Arc::new(HeldKey::new(provider(false)?));
+    *held = Some(Held { key: key.clone(), read: now });
     Ok(Some(key))
 }
 
@@ -484,8 +542,8 @@ pub fn witness_for(command: &str, run: &Path, params: &mut Value) -> Result<Opti
         return Ok(None);
     }
     // Fail locally if this window cannot read its key; read once, then held in memory.
-    let key = window_key_in(WINDOW_KEY.get(), &CACHED_KEY)?;
-    witness_proving(command, run, params, key.as_deref())
+    let key = window_key_in(WINDOW_KEY.get(), &CACHED_KEY, Instant::now())?;
+    witness_proving(command, run, params, key.as_deref().map(|key| &**key))
 }
 
 #[cfg(test)]
@@ -1025,26 +1083,99 @@ pub(crate) mod tests {
             })
         };
         let cache = std::sync::Mutex::new(None);
-        assert!(window_key_in(None, &cache).unwrap().is_none());
-        assert!(window_key_in(Some(&provider), &cache).is_err());
+        let now = Instant::now();
+        assert!(window_key_in(None, &cache, now).unwrap().is_none());
+        assert!(window_key_in(Some(&provider), &cache, now).is_err());
         assert!(cache.lock().unwrap().is_none(), "a failed read is not held");
         fail.store(false, Ordering::SeqCst);
-        let first = window_key_in(Some(&provider), &cache).unwrap().unwrap();
+        let first = window_key_in(Some(&provider), &cache, now).unwrap().unwrap();
         // Keychain locked again: the held key still proves the window, with no read.
         fail.store(true, Ordering::SeqCst);
-        let second = window_key_in(Some(&provider), &cache).unwrap().unwrap();
+        let second = window_key_in(Some(&provider), &cache, now).unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(reads.load(Ordering::SeqCst), 2);
         cache.lock().unwrap().take();
-        assert!(window_key_in(Some(&provider), &cache).is_err(), "forgotten, the next write reads Keychain");
+        assert!(window_key_in(Some(&provider), &cache, now).is_err(), "forgotten, the next write reads Keychain");
         assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+
+    /// PRO-512: the held key is good for a short time only. A Keychain item
+    /// locked or deleted while the app runs stops the window signing with the
+    /// key it read before, and one replaced is the key it signs with from then on.
+    #[test]
+    fn a_held_window_key_is_read_again_from_keychain_after_a_short_time() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // 0: the first key; 1: Keychain locked, or its item deleted; 2: the item replaced.
+        let keychain = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider: WindowKey = {
+            let (reads, keychain) = (reads.clone(), keychain.clone());
+            Box::new(move |_| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                match keychain.load(Ordering::SeqCst) {
+                    0 => Ok(signing_key(&[9; 32])),
+                    1 => Err(anyhow::Error::new(WindowKeyMissing)),
+                    _ => Ok(signing_key(&[4; 32])),
+                }
+            })
+        };
+        let cache = std::sync::Mutex::new(None);
+        let start = Instant::now();
+        let first = window_key_in(Some(&provider), &cache, start).unwrap().unwrap();
+        let just_within = start + KEY_HELD_FOR - Duration::from_millis(1);
+        assert!(Arc::ptr_eq(&first, &window_key_in(Some(&provider), &cache, just_within).unwrap().unwrap()));
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "a burst of writes reads Keychain once");
+
+        // Deleted or locked meanwhile: once the time is up the old key signs nothing more.
+        keychain.store(1, Ordering::SeqCst);
+        let error = window_key_in(Some(&provider), &cache, start + KEY_HELD_FOR).err().expect("Keychain as it is now decides");
+        assert!(error.downcast_ref::<WindowKeyMissing>().is_some());
+        assert!(cache.lock().unwrap().is_none(), "the key read before is not kept behind a failed read");
+        assert!(window_key_in(Some(&provider), &cache, start + KEY_HELD_FOR).is_err(), "and each later write asks Keychain again");
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+
+        // Replaced: the new key is the one held, from when it was read.
+        keychain.store(2, Ordering::SeqCst);
+        let later = start + KEY_HELD_FOR * 2;
+        let replaced = window_key_in(Some(&provider), &cache, later).unwrap().unwrap();
+        assert_eq!(replaced.public_key().as_ref(), signing_key(&[4; 32]).public_key().as_ref());
+        assert_ne!(replaced.public_key().as_ref(), first.public_key().as_ref());
+        assert!(Arc::ptr_eq(&replaced, &window_key_in(Some(&provider), &cache, later + KEY_HELD_FOR / 2).unwrap().unwrap()));
+        assert_eq!(reads.load(Ordering::SeqCst), 4);
+    }
+
+    /// PRO-512: the key held in memory is wiped when it is dropped, and a
+    /// request still signing with it keeps it whole until it is done.
+    #[test]
+    fn the_held_window_key_is_wiped_when_dropped() {
+        fn bytes(key: &HeldKey) -> Vec<u8> {
+            let at = (&*key.0 as *const Ed25519KeyPair).cast::<u8>();
+            // SAFETY: the key pair is 96 plain bytes with no padding (asserted beside `HeldKey`), read while it is owned.
+            unsafe { std::slice::from_raw_parts(at, std::mem::size_of::<Ed25519KeyPair>()) }.to_vec()
+        }
+        // What `drop` does, on a value that is then never dropped or used: its bytes are read where they still are.
+        let mut held = std::mem::ManuallyDrop::new(HeldKey::new(signing_key(&[9; 32])));
+        let public = signing_key(&[9; 32]).public_key().as_ref().to_vec();
+        let before = bytes(&held);
+        assert!(before.windows(32).any(|part| part == public) && before.iter().filter(|byte| **byte != 0).count() > 64, "the key is in memory");
+        held.wipe();
+        assert_eq!(bytes(&held), vec![0; 96], "nothing of the key is left");
+
+        // The cache forgets the key while a request holds it: it signs on, and is wiped with that last holder.
+        let cache = std::sync::Mutex::new(None);
+        let provider: WindowKey = Box::new(|_| Ok(signing_key(&[9; 32])));
+        let signing = window_key_in(Some(&provider), &cache, Instant::now()).unwrap().unwrap();
+        cache.lock().unwrap().take();
+        let socket = Path::new("/tmp/cw-x.sock");
+        let proof = sign_witness(&signing, socket, "nonce");
+        assert!(keyed(&signing_key(&[9; 32])).proven(Some(&proof), socket, "nonce"), "a request in flight still proves the window");
+        assert_eq!(Arc::strong_count(&signing), 1, "the request is the last holder: its drop drops, and so wipes, the key");
     }
 
     /// The window's launch key and its in-memory copy are forgotten together (macOS only: elsewhere no key is pinned).
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     #[test]
     fn forgetting_the_launch_key_forgets_the_window_key_held_in_memory() {
-        *CACHED_KEY.lock().unwrap() = Some(Arc::new(signing_key(&[5; 32])));
+        *CACHED_KEY.lock().unwrap() = Some(Held { key: Arc::new(HeldKey::new(signing_key(&[5; 32]))), read: Instant::now() });
         forget_launch_key();
         assert!(CACHED_KEY.lock().unwrap().is_none());
     }

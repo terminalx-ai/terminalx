@@ -303,6 +303,8 @@ impl PairingManager {
                 let _ = connection.signal.send(ConnectionSignal::Cancel);
             }
         }
+        // And the sockets that are not a logged-in phone yet (PRO-495).
+        self.direct_callers.close_all();
         true
     }
 

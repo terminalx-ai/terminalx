@@ -17,9 +17,18 @@ const mocks = vi.hoisted(() => ({
     roleWrite: vi.fn(),
   },
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
+  // The quit questions held now, as `quitWarning` would hold them.
+  quit: new Set<symbol>(),
 }));
 
 vi.mock("@/lib/api", () => ({ botsApi: mocks.api }));
+vi.mock("@/lib/quitWarning", () => ({
+  holdQuit: () => {
+    const key = Symbol();
+    mocks.quit.add(key);
+    return () => mocks.quit.delete(key);
+  },
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
     mocks.listeners.set(event, handler);
@@ -27,6 +36,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
+const { hasRoleDraft, keepRoleDraft, resetRoleDraftsForTests } = await import("./botMemory");
 const { bootBots, shutBots, getBotStore, createBot, updateBot, deleteBot, pauseBot, resumeBot, pauseAllBots, resumeAllBots, loadBotTemplates, resetBotsForTests } = await import("./bots");
 
 const bot = (id: string, name: string, extra: Partial<Bot> = {}): Bot => ({
@@ -44,7 +54,11 @@ beforeEach(() => {
   mocks.listeners.clear();
   mocks.api.list.mockResolvedValue(listOf(0, []));
 });
-afterEach(() => resetBotsForTests());
+afterEach(() => {
+  resetBotsForTests();
+  resetRoleDraftsForTests();
+  mocks.quit.clear();
+});
 
 describe("the bots' store (PRO-466)", () => {
   it("reads and listens for nothing until it is booted", () => {
@@ -201,5 +215,66 @@ describe("the bots' store (PRO-466)", () => {
     expect(effectiveAccess("full")).toBe("full");
     expect(effectiveAccess("askOutward")).toBe("askOutward");
     expect(effectiveAccess("approveEverything")).toBe("readReport");
+  });
+});
+
+describe("an unsaved role and the bots there are (PRO-512)", () => {
+  const draft = { text: "Half written", base: "Before", baseHash: "h1" };
+  const asking = () => mocks.quit.size > 0;
+
+  it("stops asking before quitting once the bot is deleted here", async () => {
+    mocks.api.list.mockResolvedValue(listOf(1, [bot("1", "Atlas"), bot("2", "Iris")]));
+    await bootBots();
+    keepRoleDraft("1", draft);
+    expect(asking()).toBe(true);
+    // A delete that is refused deletes nothing: the draft stays, and is still asked about.
+    mocks.api.remove.mockRejectedValue("No bot has the id 1.");
+    await expect(deleteBot("1")).rejects.toBe("No bot has the id 1.");
+    expect([hasRoleDraft("1"), asking()]).toEqual([true, true]);
+    mocks.api.remove.mockResolvedValue(undefined);
+    await deleteBot("1");
+    expect([hasRoleDraft("1"), asking()]).toEqual([false, false]);
+  });
+
+  it("stops asking once a list no longer has the bot, deleted elsewhere", async () => {
+    mocks.api.list.mockResolvedValue(listOf(1, [bot("1", "Atlas"), bot("2", "Iris")]));
+    await bootBots();
+    keepRoleDraft("1", draft);
+    keepRoleDraft("2", draft);
+    // A list with a record this app cannot read may be missing a bot that is there: nothing is dropped.
+    changed(listOf(2, [bot("2", "Iris")], 1));
+    expect([hasRoleDraft("1"), hasRoleDraft("2"), asking()]).toEqual([true, true, true]);
+    // Nor by an older list, which is not taken.
+    changed(listOf(1, []));
+    expect([hasRoleDraft("1"), hasRoleDraft("2")]).toEqual([true, true]);
+    changed(listOf(3, [bot("2", "Iris")]));
+    expect([hasRoleDraft("1"), hasRoleDraft("2"), asking()]).toEqual([false, true, true]);
+    changed(listOf(4, []));
+    expect([hasRoleDraft("2"), asking()]).toEqual([false, false]);
+  });
+
+  it("keeps a draft when the bots cannot be read", async () => {
+    mocks.api.list.mockResolvedValue(listOf(1, [bot("1", "Atlas")]));
+    await bootBots();
+    keepRoleDraft("1", draft);
+    mocks.api.list.mockRejectedValue("The runtime is not running.");
+    mocks.listeners.get("local_runtime_reattached")!({ payload: null });
+    await vi.waitFor(() => expect(getBotStore().error).toBe("The runtime is not running."));
+    expect([hasRoleDraft("1"), asking()]).toEqual([true, true]);
+  });
+
+  it("does not ask while Bots is off, and asks again about the draft it kept once Bots is back on", async () => {
+    mocks.api.list.mockResolvedValue(listOf(1, [bot("1", "Atlas")]));
+    await bootBots();
+    keepRoleDraft("1", draft);
+    shutBots();
+    expect([hasRoleDraft("1"), asking()]).toEqual([true, false]);
+    await bootBots();
+    expect([hasRoleDraft("1"), asking()]).toEqual([true, true]);
+    // Deleted while Bots was off: the list read when it comes back on drops the draft.
+    shutBots();
+    mocks.api.list.mockResolvedValue(listOf(2, []));
+    await bootBots();
+    expect([hasRoleDraft("1"), asking()]).toEqual([false, false]);
   });
 });

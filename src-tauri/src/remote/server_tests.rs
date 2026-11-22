@@ -4081,6 +4081,85 @@ async fn a_manager_forks_a_turn_into_a_tab_or_a_session_and_a_viewer_only_reads_
     assert_eq!(code(call(&f.rpc, &admin, "session.reset", reset).await), "unavailable");
 }
 
+/// #1399: a manager resets a chat to its first turn through `checkpoints/1`,
+/// and the same call with `endSeq: null` undoes it. A stand-in `claude` that
+/// exits at once is all the restart runs, so no provider is ever called.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_resets_a_chat_over_rpc_and_undoes_it() {
+    let _home = crate::store::temp_home();
+    let program = crate::store::root().unwrap().join("claude");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _program = crate::harness::claude::pty::claude_program_for_tests(program);
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    listed(&f.rpc);
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: Some(f.root.to_string_lossy().into_owned()) };
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap();
+    f.rpc.set_agents(agents);
+    // Two finished turns; the second is the one a reset to the first takes away.
+    let (session, tab) = seed_chat(&f.root);
+    let log = crate::store::log_path(&session.id, &tab).unwrap();
+    for (seq, payload) in [
+        (4, json!({"type":"user_message","text":"LATER_RESET_SECRET","images":[],"queued":false})),
+        (5, json!({"type":"turn_completed","status":"ok"})),
+    ] {
+        crate::store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":session.id,"tabId":tab,"harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+    }
+    let original_provider = session.tabs[0].provider_session_id.clone();
+    let want = json!({ "protocol": PROTOCOL, "want": ["session/1", protocol::CHECKPOINTS] });
+    let (admin, _admin_events) = Peer::for_user("d-admin".into(), Authority::Manage, Some("admin".into()));
+    call(&f.rpc, &admin, "rpc.hello", want.clone()).await.unwrap();
+    let (viewer, _viewer_events) = Peer::for_user("d-viewer".into(), Authority::Participate, Some("viewer".into()));
+    call(&f.rpc, &viewer, "rpc.hello", want).await.unwrap();
+    let history = |tab_id: &str| std::fs::read_to_string(crate::store::log_path(&session.id, tab_id).unwrap()).unwrap();
+
+    // A viewer may not reset; nothing changes.
+    let reset = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "resetFiles": false, "clientRequestId": "request-reset-1" });
+    assert_eq!(code(call(&f.rpc, &viewer, "session.reset", reset.clone()).await), "forbidden");
+    assert_eq!(crate::store::log_path(&session.id, &tab).unwrap(), log);
+
+    // The manager's reset: a new history with the first turn only, under a new conversation id.
+    let done = call(&f.rpc, &admin, "session.reset", reset).await.unwrap();
+    let stored = crate::store::index::get(&session.id).unwrap();
+    let generation = stored.tabs[0].unknown["resetLogId"].as_str().unwrap().to_string();
+    assert_eq!(done["tab"]["tabId"], tab.as_str(), "{done}");
+    assert_eq!(done["tab"]["history"], generation.as_str(), "the returned tab names its new history: {done}");
+    assert_eq!(done["tab"]["reset"], json!({ "turn": 1, "undoable": true }), "{done}");
+    assert_ne!(stored.tabs[0].provider_session_id, original_provider);
+    let new_log = crate::store::log_path(&session.id, &tab).unwrap();
+    assert_ne!(new_log, log);
+    let kept = history(&tab);
+    assert!(kept.contains("FIRST_RESET_MARKER"), "the first turn is retained");
+    assert!(!kept.contains("LATER_RESET_SECRET"), "the later turn is removed");
+    assert!(std::fs::read_to_string(&log).unwrap().contains("LATER_RESET_SECRET"), "the old history is kept for Undo");
+
+    // Undo: `endSeq: null` brings back the history before the reset, once.
+    let undo = json!({ "sessionId": session.id, "tabId": tab, "endSeq": null, "clientRequestId": "request-reset-2" });
+    let undone = call(&f.rpc, &admin, "session.reset", undo).await.unwrap();
+    let restored = crate::store::index::get(&session.id).unwrap();
+    let undo_generation = restored.tabs[0].unknown["resetLogId"].as_str().unwrap();
+    assert_ne!(undo_generation, generation, "Undo is another history again");
+    assert_eq!(undone["tab"]["history"], undo_generation, "{undone}");
+    assert_eq!(undone["tab"]["reset"], json!({ "undoable": false }), "{undone}");
+    assert!(!restored.tabs[0].unknown.contains_key("resetBackupId"));
+    let back = history(&tab);
+    assert!(back.contains("FIRST_RESET_MARKER") && back.contains("LATER_RESET_SECRET"), "both turns are back");
+    // Nothing more to undo.
+    let again = json!({ "sessionId": session.id, "tabId": tab, "endSeq": null, "clientRequestId": "request-reset-3" });
+    assert_eq!(code(call(&f.rpc, &admin, "session.reset", again).await), "refused");
+    manager.closing();
+    f.terminals.kill_all();
+}
+
 #[test]
 fn a_reset_tab_names_its_history_and_what_its_reset_did() {
     let mut tab: crate::store::index::TabEntry = serde_json::from_value(json!({ "id": "t", "harness": "claude", "created": "now" })).unwrap();
