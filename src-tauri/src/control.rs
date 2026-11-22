@@ -549,10 +549,14 @@ impl ControlService {
                 if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
                 let unproven = match &proof { Some(Err(error)) => Some(error.message.clone()), _ => None };
                 if let Some(message) = &unproven {
+                    // One that is no registration of this runtime's (no
+                    // current lease, no private endpoint) is refused as it
+                    // is with a proof, before it changes anything (PRO-508).
+                    lifetime.window.validate(lifetime, &params)?;
                     log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
-                    // Whoever was taken for the window before is not, when it
-                    // is the process that now cannot prove it, or one this
-                    // runtime never saw prove it, as a handover carries (PRO-507).
+                    // The process that now cannot prove it is no longer taken
+                    // for the window (PRO-507). Another process's registration
+                    // unseats no one, a handover's window included (PRO-508).
                     #[cfg(unix)]
                     lifetime.window.unproven_from(crate::hooks::caller_pid());
                     // Unproven (a window that cannot read its Keychain key, or
@@ -5504,7 +5508,20 @@ mod tests {
         // stays (a window that cannot read its Keychain key still shows what
         // runs), but it provides no window services and is not the window.
         let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
-        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": "/nowhere.sock", "token": "ab".repeat(16)});
+        // Its endpoint is a private socket in this runtime's `run`, named
+        // through a short link in /tmp (a long TMPDIR passes a socket path's limit).
+        use std::os::unix::fs::PermissionsExt;
+        let short = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(crate::store::root().unwrap().join("run"), short.path().join("r")).unwrap();
+        let endpoint = short.path().join("r").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        // PRO-508: one that names no private endpoint of this runtime is no
+        // registration at all, with a proof or without.
+        let mut elsewhere = registration.clone();
+        elsewhere["socket"] = json!("/nowhere.sock");
+        assert_eq!(ask(crate::serve_cli::consent::WINDOW_REGISTER, elsewhere).unwrap_err().message, "The desktop endpoint is not a private endpoint of this runtime.");
         let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone()).unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
         let mut witnessed = registration.clone();
@@ -5635,7 +5652,10 @@ mod tests {
     /// own, Bots off or on, instead of "Another desktop currently provides…",
     /// while the unproven one still holds the slot (review of #1468, item 3);
     /// and a registration without the proof unseats a window this runtime
-    /// never saw prove it (one a handover carried over), Bots on or off. A
+    /// never saw prove it (one a handover carried over), Bots on or off, when
+    /// that window's own process sent it. PRO-508: another process's does
+    /// not, and one that is not a valid registration (no current lease, or
+    /// no private endpoint) is refused and unseats no one, whoever sent it. A
     /// registration without the proof never reaches the slot while Bots is on
     /// (it is refused first), so the other half of giving way, any
     /// registration while Bots is on, is the registry's test's
@@ -5658,14 +5678,25 @@ mod tests {
         let endpoint = short.path().join("r").join("w.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
         std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let register = |key: Option<&[u8; 32]>| {
+        // A registrant: a process of its own, with its registration on a
+        // fresh lease (`valid`), or with one that names no lease of this
+        // runtime, as a holder of the control token alone sends.
+        let registrant = |key: Option<&[u8; 32]>, valid: bool| {
             let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
             let (pid, _, mut params) = crate::serve_cli::consent::tests::detached_request_with(&run, crate::serve_cli::consent::WINDOW_REGISTER, key, true);
-            for (field, value) in [("epoch", attached["epoch"].clone()), ("lease", attached["lease"].clone()), ("socket", json!(endpoint)), ("token", json!("ab".repeat(16)))] {
+            let lease = if valid { attached["lease"].clone() } else { json!("no-lease-of-this-runtime") };
+            for (field, value) in [("epoch", attached["epoch"].clone()), ("lease", lease), ("socket", json!(endpoint)), ("token", json!("ab".repeat(16)))] {
                 params[field] = value;
             }
+            (pid, attached, params)
+        };
+        let send = |pid: i32, params: Value| {
             crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
-            (pid, attached, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r"))
+            service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r")
+        };
+        let register = |key: Option<&[u8; 32]>| {
+            let (pid, attached, params) = registrant(key, true);
+            (pid, attached, send(pid, params))
         };
         let bots = |on: bool| {
             let mut settings = crate::store::settings::load();
@@ -5673,19 +5704,41 @@ mod tests {
             crate::store::settings::save(&settings).unwrap();
         };
 
-        // A handover's window is unseated by a registration that cannot prove
-        // it: Bots on, one refused at once; Bots off, one that is registered.
-        bots(true);
-        lifetime.window.handed_over(Some((1, 1)));
-        let (_, _, refused) = register(None);
-        assert_eq!(refused.unwrap()["registered"], false);
-        assert!(lifetime.window.window_process().is_none(), "Bots on: the handed-over window is no longer taken for it");
-        bots(false);
-        lifetime.window.handed_over(Some((1, 1)));
+        // PRO-508, Bots on and off: a handover's window is unseated only by
+        // its own process's valid registration that cannot prove it. One
+        // that is no registration of this runtime's is refused first, even
+        // from that process; another process's valid one leaves it.
+        for on in [true, false] {
+            bots(on);
+            let (window, _, invalid) = registrant(None, false);
+            lifetime.window.handed_over(Some((window, 1)));
+            let refused = send(window, invalid).unwrap_err();
+            assert_eq!((refused.code.as_str(), refused.message.as_str()), ("desktop_unavailable", "The desktop attachment is no longer current."), "Bots {on}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: a registration that is not valid unseats no one");
+            let mut bare = json!({});
+            crate::serve_cli::consent::witness_for_test(crate::serve_cli::consent::WINDOW_REGISTER, &run, &mut bare, None).unwrap();
+            assert_eq!(send(window, bare).unwrap_err().message, "Invalid desktop registration.", "Bots {on}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: nor a bare one");
+
+            let (stranger, attached, answer) = register(None);
+            assert_ne!(stranger, window);
+            let answer = answer.unwrap();
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: another process's registration does not unseat a handover's window");
+            lifetime.command("runtime.detach", attached).unwrap();
+
+            let (_, attached, own) = registrant(None, true);
+            let answer = send(window, own).unwrap();
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert!(lifetime.window.window_process().is_none(), "Bots {on}: the handed-over window that cannot prove it is no longer taken for it");
+            lifetime.command("runtime.detach", attached).unwrap();
+        }
+
+        // Bots off: an unproven window is registered and serves.
         let (_, _, unproven) = register(None);
         let unproven = unproven.unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
-        assert!(lifetime.window.window_process().is_none(), "the handed-over window is no longer taken for it");
+        assert!(lifetime.window.window_process().is_none());
         assert!(lifetime.window.available(), "Bots off: the unproven window serves");
         let (_, _, another) = register(None);
         assert!(another.unwrap_err().message.contains("Another desktop"), "it holds the slot against another unproven one");

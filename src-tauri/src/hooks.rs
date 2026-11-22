@@ -222,7 +222,7 @@ pub struct ControlEndpoint {
 impl ControlEndpoint {
     /// The endpoint the runtime this process was served on, handed over with
     /// it (#765): the same socket path and token its agents were given.
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub fn adopted(socket: PathBuf, token: String) -> Self {
         Self { socket, token, published: Default::default() }
     }

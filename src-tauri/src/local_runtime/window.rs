@@ -140,7 +140,10 @@ impl Registry {
         self.register_as(lifetime, params, true)
     }
 
-    fn register_as(&self, lifetime: &Lifetime, params: Value, unproven: bool) -> Result<Value, ControlError> {
+    /// A registration as it must be before it is taken, or changes anything
+    /// here: on a current attachment of this runtime, naming a private
+    /// endpoint of it and a credential of the right shape.
+    fn checked(lifetime: &Lifetime, params: Value) -> Result<(Registration, Arc<Attachment>), ControlError> {
         let registration: Registration = serde_json::from_value(params).map_err(|_| unavailable("Invalid desktop registration."))?;
         let attachment = lifetime.attachment(&registration.epoch,&registration.lease).map_err(|_| unavailable("The desktop attachment is no longer current."))?;
         let checked = (|| -> anyhow::Result<()> {
@@ -151,6 +154,20 @@ impl Registry {
             Ok(())
         })();
         if checked.is_err() { return Err(unavailable("The desktop endpoint is not a private endpoint of this runtime.")); }
+        Ok((registration, attachment))
+    }
+
+    /// Whether `params` is a registration this runtime would consider, as
+    /// [`Self::register`] refuses one that is not. A registration that did
+    /// not prove it is the window is checked so before it unseats anyone or
+    /// is noted as refused (PRO-508): the control token alone, which every
+    /// agent tab holds, sends none that passes.
+    pub(crate) fn validate(&self, lifetime: &Lifetime, params: &Value) -> Result<(), ControlError> {
+        Self::checked(lifetime, params.clone()).map(drop)
+    }
+
+    fn register_as(&self, lifetime: &Lifetime, params: Value, unproven: bool) -> Result<Value, ControlError> {
+        let (registration, attachment) = Self::checked(lifetime, params)?;
         let mut current = self.0.lock().unwrap();
         if let Some(previous) = current.as_ref().filter(|service| service.attachment.valid()) {
             let same = previous.lease == registration.lease && previous.socket == registration.socket
@@ -231,14 +248,16 @@ impl Registry {
         *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
     }
 
-    /// A registration as the window from process `caller` did not prove it
-    /// is (PRO-507): the window as recognised before is no longer, when it is
-    /// that process, or one this runtime never saw prove it (one a handover
-    /// carried over). One that proved it here and is another process stays:
-    /// a registration it did not send does not unseat it.
+    /// A valid registration as the window from process `caller` did not
+    /// prove it is (PRO-507): the window as recognised before is no longer,
+    /// when it is that process. A registration another process sent unseats
+    /// no one (PRO-508): not a window that proved it here, nor one a handover
+    /// carried over, which registers here itself and is judged then. Where
+    /// the sender cannot be told, only one this runtime never saw prove it is
+    /// unseated.
     pub(crate) fn unproven_from(&self, caller: Option<i32>) {
         let mut recognised = self.1.lock().unwrap_or_else(|e| e.into_inner());
-        if recognised.is_some_and(|window| !window.proven || Some(window.process.0) == caller) {
+        if recognised.is_some_and(|window| caller.map_or(!window.proven, |caller| caller == window.process.0)) {
             *recognised = None;
             *KNOWN_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
@@ -546,15 +565,21 @@ mod tests {
     }
 
     /// PRO-507: a registration that does not prove it is the window unseats
-    /// the window recognised before when it is the same process, or one this
-    /// runtime never saw prove it (a handover's); another process that
-    /// proved it here stays.
+    /// the window recognised before when it is the same process. PRO-508:
+    /// another process's unseats neither a window that proved it here nor
+    /// one a handover carried over; a sender that cannot be told unseats only
+    /// one never proved here.
     #[test]
     fn an_unproven_registration_unseats_only_a_window_it_may_be() {
         let registry = Registry::default();
         registry.handed_over(Some((10, 1)));
         registry.unproven_from(Some(99));
-        assert_eq!(registry.window_process(), None, "a handover's window was never proved here");
+        assert_eq!(registry.window_process(), Some((10, 1)), "another process does not unseat a handover's window");
+        registry.unproven_from(Some(10));
+        assert_eq!(registry.window_process(), None, "a handover's window that cannot prove it here is no longer taken for it");
+        registry.handed_over(Some((10, 1)));
+        registry.unproven_from(None);
+        assert_eq!(registry.window_process(), None, "a sender that cannot be told: one never proved here is unseated");
         registry.recognise((10, 1), true);
         registry.unproven_from(Some(99));
         assert_eq!(registry.window_process(), Some((10, 1)), "another process does not unseat a proven window");
@@ -565,6 +590,39 @@ mod tests {
         registry.recognise((11, 2), false);
         registry.unproven_from(None);
         assert_eq!(registry.window_process(), None, "one taken by where it runs is unseated");
+    }
+
+    /// PRO-508: what a registration must be before it is considered: on a
+    /// current attachment, a private socket of this runtime, a credential of
+    /// the right shape. `validate` refuses what `register` refuses for it.
+    #[test]
+    fn a_registration_is_valid_only_on_a_current_attachment_and_a_private_endpoint() {
+        let _home = crate::store::temp_home();
+        let lifetime = Lifetime::new(Duration::from_secs(60));
+        let endpoint = prepare_control().unwrap();
+        serve_private(endpoint.clone(), |_| HookReply::default(), move |request| ControlResponse::success(request.id, json!({}))).unwrap();
+        let attachment = attach(&lifetime);
+        let valid = registration(&attachment, &endpoint);
+        lifetime.window.validate(&lifetime, &valid).unwrap();
+        assert!(!lifetime.window.available(), "validating registers nothing");
+        let with = |field: &str, value: Value| { let mut registration = valid.clone(); registration[field] = value; registration };
+        let mut bare = valid.clone();
+        bare.as_object_mut().unwrap().remove("lease");
+        for (invalid, says) in [
+            (json!({}), "Invalid desktop registration."),
+            (bare, "Invalid desktop registration."),
+            (with("extra", json!(1)), "Invalid desktop registration."),
+            (with("lease", json!("not-a-lease")), "The desktop attachment is no longer current."),
+            (with("epoch", json!("another-owner")), "The desktop attachment is no longer current."),
+            (with("socket", json!(std::env::temp_dir().join("elsewhere.sock"))), "The desktop endpoint is not a private endpoint of this runtime."),
+            (with("token", json!("short")), "The desktop endpoint is not a private endpoint of this runtime."),
+        ] {
+            let refused = lifetime.window.validate(&lifetime, &invalid).unwrap_err();
+            assert_eq!((refused.code.as_str(), refused.message.as_str()), ("desktop_unavailable", says), "{invalid}");
+            assert_eq!(lifetime.window.register_unproven(&lifetime, invalid).unwrap_err().message, says);
+        }
+        lifetime.command("runtime.detach", attachment).unwrap();
+        assert_eq!(lifetime.window.validate(&lifetime, &valid).unwrap_err().message, "The desktop attachment is no longer current.", "detached");
     }
 
     #[test]
