@@ -66,7 +66,14 @@ pub struct WorkspaceGit {
     project: bool,
     #[cfg(test)]
     github_origin_fixture: Option<String>,
+    /// Runs at named points between a check and the step it guards, so tests
+    /// can change the repository deterministically in that window.
+    #[cfg(test)]
+    barrier: Option<Barrier>,
 }
+
+#[cfg(test)]
+type Barrier = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// At most this many of a machine project's checkout and worktrees are listed.
 pub const MAX_PROJECT_REPOSITORIES: usize = 100;
@@ -433,6 +440,17 @@ fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, ob
     Ok(())
 }
 
+/// Add one value to a private configuration file, quoted as Git writes it.
+fn add_private_config(dir: &Path, file: &Path, key: &str, value: &Path, what: &str) -> Result<(), RpcError> {
+    let mut command = git_command(dir);
+    command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
+    let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+    if !result.ok {
+        return Err(failure_error(what, &result.text(), Failure::Other));
+    }
+    Ok(())
+}
+
 fn bounded_branch_output(mut command: Command, args: &[&str], deadline: Instant) -> Result<Ran, RpcError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -669,7 +687,7 @@ impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
         Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false,
-            #[cfg(test)] github_origin_fixture: None }
+            #[cfg(test)] github_origin_fixture: None, #[cfg(test)] barrier: None }
     }
 
     /// The Git of one of a machine's projects (`machine/1`). `repo` names its
@@ -677,6 +695,13 @@ impl WorkspaceGit {
     /// folder, or absolute for one outside it (docs/MACHINES.md, Project scoping).
     pub fn for_project(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
         Self { project: true, ..Self::new(root, files) }
+    }
+
+    fn barrier(&self, _point: &str) {
+        #[cfg(test)]
+        if let Some(barrier) = &self.barrier {
+            barrier(_point);
+        }
     }
 
     #[cfg(test)]
@@ -1354,15 +1379,7 @@ impl WorkspaceGit {
             .is_ok_and(|value| value.trim() == "true");
         snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format, include_worktree)?;
 
-        let add_config = |file: &Path, key: &str, value: &Path| {
-            let mut command = git_command(&repo.dir);
-            command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
-            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
-            if !result.ok {
-                return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
-            }
-            Ok(())
-        };
+        let add_config = |file: &Path, key: &str, value: &Path| add_private_config(&repo.dir, file, key, value, "prepare branch commit config");
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
             std::fs::create_dir_all(private.join("info")).map_err(RpcError::internal)?;
@@ -2001,10 +2018,10 @@ impl WorkspaceGit {
         } else { None };
         if let Some(head) = pinned_head {
             let push = |repo: &Repo, branch: &str, head: &str| {
-                // Resolved right before transmission, so a push URL or rewrite
-                // that leaves the verified origin receives nothing at all.
-                self.verify_push_destination(repo, origin.as_deref())?;
-                self.push_ref(repo, branch, head)
+                // Checked against the configuration the push itself reads, so a
+                // push URL or rewrite that leaves the verified origin, before or
+                // after the check, receives nothing at all.
+                self.push_to_verified_origin(repo, origin.as_deref(), branch, head)
             };
             self.push_branch(&repo, &branch, head, push, verify_publish)?;
             // Confirm the source GitHub reads through origin before relying
@@ -2070,9 +2087,83 @@ impl WorkspaceGit {
 
     /// Every URL `git push origin` would write to, after `pushurl`,
     /// `pushInsteadOf` and `insteadOf`, must be the one verified fetch origin.
-    fn verify_push_destination(&self, repo: &Repo, origin: Option<&str>) -> Result<(), RpcError> {
+    ///
+    /// Git rereads its configuration in every process, so a check in one
+    /// process does not bind a later `git push`. Copy the configuration once
+    /// (system, global, checkout and command scopes, as a guarded commit does)
+    /// into a private Git directory that shares the checkout's objects, resolve
+    /// the push destination from that copy, and push from it. A push URL or URL
+    /// rewrite written to any live configuration file after the copy cannot
+    /// redirect the push; a change before the copy fails the destination check.
+    ///
+    /// What this does not cover: the private copy lives in an owner-only
+    /// temporary directory, so another process of the same user could still
+    /// rewrite it, and Git hooks and credential helpers (arbitrary programs the
+    /// configuration names) run as before.
+    fn push_to_verified_origin(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<Ran, RpcError> {
         let origin = origin.ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))?;
-        let urls = self.git(repo, &["remote", "get-url", "--push", "--all", "origin"])?;
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+        let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+        let shallow = path(&["rev-parse", "--path-format=absolute", "--git-path", "shallow"])?;
+        let hooks_args = ["rev-parse", "--path-format=absolute", "--git-path", "hooks"];
+        let hooks = path(&hooks_args)?;
+        let object_format = match self.git(repo, &["rev-parse", "--show-object-format"])?.trim() {
+            "sha1" => "sha1",
+            "sha256" => "sha256",
+            _ => return Err(RpcError::internal("Unsupported Git object format")),
+        };
+        let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true");
+
+        let mut scratch = tempfile::Builder::new();
+        scratch.prefix("terminalx-pr-push-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            scratch.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+        let private = scratch.path().join("repo");
+        std::fs::create_dir_all(private.join("refs")).map_err(RpcError::internal)?;
+        // Hooks that inspect refs see the checkout's, as they would in place.
+        let refs = self.git(repo, &["for-each-ref", "--sort=refname", "--format=%(objectname) %(refname)"])?;
+        std::fs::write(private.join("packed-refs"), refs).map_err(RpcError::internal)?;
+        std::fs::write(private.join("HEAD"), format!("ref: refs/heads/{branch}\n")).map_err(RpcError::internal)?;
+        if shallow.is_file() {
+            std::fs::copy(&shallow, private.join("shallow")).map_err(RpcError::internal)?;
+        }
+        snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format, include_worktree)?;
+
+        let mut command_config = std::ffi::OsString::from("include.path=");
+        command_config.push(scratch.path().join("config.command"));
+        let command = |args: &[&str]| {
+            let mut command = git_command(&repo.dir);
+            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR")
+                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &index)
+                .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
+                .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
+                .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")
+                .arg("-c").arg(&command_config).args(["-c", "core.bare=false"]).args(args);
+            command
+        };
+        let run = |args: &[&str]| {
+            let result = run_bounded(command(args), LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            if !result.ok {
+                return Err(failure_error("prepare push", &result.text(), Failure::Other));
+            }
+            Ok(result.stdout)
+        };
+        // Keep the checkout's hooks (pre-push), as the guarded commit does.
+        let private_hooks = run(&hooks_args)?;
+        if Path::new(private_hooks.strip_suffix('\n').unwrap_or(&private_hooks)) != hooks {
+            let hooks_config = scratch.path().join("hooks.config");
+            add_private_config(&repo.dir, &hooks_config, "core.hooksPath", &hooks, "prepare push config")?;
+            let scoped_config = private.join(if include_worktree { "config.worktree" } else { "config" });
+            add_private_config(&repo.dir, &scoped_config, "include.path", &hooks_config, "prepare push config")?;
+        }
+
+        let urls = run(&["remote", "get-url", "--push", "--all", "origin"])?;
         let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
         if urls != [origin] {
             return Err(RpcError::new(
@@ -2080,7 +2171,9 @@ impl WorkspaceGit {
                 "Git would push this branch somewhere other than the verified origin. Check the repository's push URL and URL rewrites.",
             ));
         }
-        Ok(())
+        self.barrier("transmit");
+        let refspec = format!("{head}:refs/heads/{branch}");
+        run_network(command(&["push", "--porcelain", "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)
     }
 
     fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {

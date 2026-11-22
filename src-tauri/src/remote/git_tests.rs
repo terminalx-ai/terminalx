@@ -1431,6 +1431,51 @@ fn machine_pr_creation_accepts_a_push_alias_that_rewrites_back_to_the_verified_o
 
 #[cfg(unix)]
 #[test]
+fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_changes_before_transmission() {
+    // A push URL, and a push-only rewrite of origin, written after the
+    // destination check and before transmission.
+    for redirect in ["pushurl", "pushInsteadOf"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let separate = f.remote("push");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let (origin_url, separate_url) = (origin.to_str().unwrap().to_owned(), separate.to_str().unwrap().to_owned());
+        // The checkout's pre-push hook still runs, told the verified origin.
+        let hook = f.root.join(".git/hooks/pre-push");
+        std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let (checkout, reached) = (f.root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let seen = reached.clone();
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "transmit" { return; }
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            match redirect {
+                "pushurl" => git(&checkout, &["config", "remote.origin.pushurl", &separate_url]),
+                _ => git(&checkout, &["config", &format!("url.{separate_url}.pushInsteadOf"), &origin_url]),
+            };
+            assert_eq!(git(&checkout, &["remote", "get-url", "--push", "--all", "origin"]), separate_url);
+        }));
+
+        let outcome = f.call("git.prCreateForSession", request);
+        assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "{redirect}: the barrier ran");
+        // The unverified destination received neither the ref nor the commit.
+        assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty(), "{redirect}");
+        let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+        assert!(!object.success(), "{redirect}: the redirected destination received the confirmed commit");
+        // The push went to the origin that was verified, exactly at the confirmed head.
+        let created = outcome.unwrap_or_else(|error| panic!("{redirect}: {} {}", error.code, error.message));
+        assert_eq!(created["pr"]["headSha"], head.as_str());
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        assert_eq!(std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(), format!("origin {}\n", origin.display()));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     for replace_checkout in [false, true] {
         let _home = crate::store::temp_home();
