@@ -2446,3 +2446,60 @@ fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_di
         assert!(!checkout.join(".git/index.lock").exists());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_verified_pr_push_never_pushes_submodules_through_their_own_config() {
+    use std::os::unix::fs::PermissionsExt;
+    // Each configuration that makes `git push` push submodules, with the
+    // submodule's commit already on its remote or not.
+    for (key, value, on_remote) in [
+        ("push.recurseSubmodules", "on-demand", true),
+        ("submodule.recurse", "true", true),
+        ("push.recurseSubmodules", "on-demand", false),
+    ] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let mut request = machine_pr_request(&f, &f.root);
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+
+        let submodule = f.root.join("lib");
+        std::fs::write(submodule.join("lib.txt"), "new\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Library change"]);
+        if on_remote {
+            git(&submodule, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        }
+        // Any connection the submodule's own configuration makes is recorded.
+        let spy = f.base.join("receive-pack-spy");
+        let contacted = f.base.join("submodule-contacted");
+        std::fs::write(&spy, format!("#!/bin/sh\ntouch '{}'\nexec git-receive-pack \"$@\"\n", contacted.display())).unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&submodule, &["config", "remote.origin.receivepack", spy.to_str().unwrap()]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Bump lib"]);
+        let head = git(&f.root, &["rev-parse", "HEAD"]);
+        request["pushHead"] = json!(head);
+        git(&f.root, &["config", key, value]);
+
+        let result = f.call("git.prCreateForSession", request);
+        assert!(!contacted.exists(), "{key}={value}: the submodule's remote was contacted");
+        if on_remote {
+            let created = result.unwrap_or_else(|error| panic!("{key}={value}: {} {}", error.code, error.message));
+            assert_eq!(created["created"], true);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        } else {
+            let refused = result.expect_err("a submodule commit on no remote is refused");
+            assert_eq!(refused.code, "conflict", "{}", refused.message);
+            assert!(refused.message.contains("submodule"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        }
+    }
+}

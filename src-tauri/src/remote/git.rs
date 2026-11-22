@@ -2264,15 +2264,24 @@ impl WorkspaceGit {
     /// long as the checkout has no executable pre-push hook file, and is
     /// refused before anything is sent when it has one.
     ///
-    /// What this does not bind: only the destination URL is checked. Settings
-    /// the copy carries over unchecked can still carry the bytes elsewhere
+    /// Submodules are never pushed from here, whatever `push.recurseSubmodules`
+    /// or `submodule.recurse` say: each would go out through the submodule's
+    /// own live configuration, which nothing checked. Where the configuration
+    /// asks for submodule pushes, Git only checks (locally) that the commits
+    /// the branch points at are on a submodule remote, and the push is refused
+    /// otherwise.
+    ///
+    /// What this deliberately does not bind: only the destination URL is
+    /// checked. Settings people set on purpose for keys and proxies, which
+    /// the copy carries over unchecked, still decide how the bytes travel
     /// while that URL is origin: `core.sshCommand`, `core.gitProxy`,
-    /// `http.proxy`, `remote.origin.receivepack`, SSH host aliases, inherited
-    /// `GIT_SSH*` variables and `push.recurseSubmodules`. The copy lives in an
-    /// owner-only temporary directory that another process of the same user
-    /// could still rewrite, and hooks and credential helpers (programs the
-    /// configuration names) run as before. A hook runs before the push, so it
-    /// sees the repository as it was then.
+    /// `http.proxy`, `remote.origin.receivepack`, SSH host aliases and
+    /// inherited `GIT_SSH*` variables. The copy lives in an owner-only
+    /// temporary directory that another process of the same user could still
+    /// rewrite (such a process can already do anything this runtime can), and
+    /// hooks and credential helpers (programs the configuration names) run as
+    /// before. A hook runs before the push, so it sees the repository as it
+    /// was then.
     fn push_to_verified_origin(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<Ran, RpcError> {
         let origin = origin.ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))?;
         let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(crate::git::path_line(&out)));
@@ -2380,8 +2389,39 @@ impl WorkspaceGit {
             }
         }
 
+        // Submodules are never pushed from here: each would go out through
+        // its own live, unchecked configuration. Where the configuration asks
+        // for submodule pushes, Git only checks that the commits the branch
+        // points at are already on a submodule remote.
+        let recurse = if self.recurses_into_submodules(command)? { "--recurse-submodules=check" } else { "--recurse-submodules=no" };
         let refspec = format!("{head}:{reference}");
-        run_network(command(&["push", "--porcelain", "--no-verify", "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)
+        let pushed = run_network(command(&["push", "--porcelain", "--no-verify", recurse, "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)?;
+        if !pushed.ok && recurse.ends_with("check") && pushed.stderr.contains("not be found on any remote") {
+            return Err(RpcError::new(
+                "conflict",
+                "This branch points at submodule commits that are not on a submodule remote, and a verified push does not push submodules. Push them from the submodule first; nothing was pushed.",
+            ));
+        }
+        Ok(pushed)
+    }
+
+    /// Whether `git push` would recurse into submodules with this
+    /// configuration: `push.recurseSubmodules` set to anything but off, or
+    /// unset with `submodule.recurse` on.
+    fn recurses_into_submodules(&self, command: impl Fn(&[&str]) -> Command) -> Result<bool, RpcError> {
+        let read = |args: &[&str]| -> Result<Option<String>, RpcError> {
+            let ran = run_bounded(command(args), LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+            match (ran.ok, ran.stdout.trim()) {
+                (true, value) => Ok(Some(value.to_ascii_lowercase())),
+                // Exit 1: not set.
+                (false, _) if !ran.timed_out && ran.stderr.trim().is_empty() => Ok(None),
+                (false, _) => Err(failure_error("prepare push", &ran.text(), Failure::Other)),
+            }
+        };
+        if let Some(value) = read(&["config", "--get", "push.recurseSubmodules"])? {
+            return Ok(!matches!(value.as_str(), "no" | "false" | "off" | "0" | ""));
+        }
+        Ok(read(&["config", "--bool", "--get", "submodule.recurse"])?.as_deref() == Some("true"))
     }
 
     /// Whether the checkout has a pre-push hook file Git would run: in
