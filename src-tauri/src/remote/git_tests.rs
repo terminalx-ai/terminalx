@@ -2414,3 +2414,35 @@ fn a_linked_checkout_whose_name_ends_in_a_space_is_verified_listed_and_served() 
     assert_eq!(git(&checkout, &["show", ":note.txt"]), "verified");
     assert!(git(&f.base.join("topic"), &["ls-files", "--", "note.txt"]).is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    for condition in ["gitdir", "gitdir/i"] {
+        let f = fixture();
+        let origin = f.remote("origin");
+        let checkout = f.clone(&origin, "app");
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        let git_dir = git(&checkout, &["rev-parse", "--absolute-git-dir"]);
+        let pattern = if condition == "gitdir" { git_dir.clone() } else { git_dir.to_uppercase() };
+        git(&checkout, &["config", &format!("includeIf.{condition}:{pattern}.path"), "signing.conf"]);
+        let signer = f.base.join("fail-signing");
+        std::fs::write(&signer, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n", f.base.join("signing-attempt").display())).unwrap();
+        std::fs::set_permissions(&signer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(checkout.join(".git/signing.conf"), format!(
+            "[commit]\n\tgpgSign = true\n[user]\n\tsigningKey = checkout-key\n[gpg]\n\tformat = openpgp\n\tprogram = {}\n", signer.display(),
+        )).unwrap();
+        // Outside this Git directory the condition does not hold.
+        assert_eq!(git(&checkout, &["config", "--get", "user.signingKey"]), "checkout-key", "{condition}");
+
+        std::fs::write(checkout.join("draft"), "work\n").unwrap();
+        let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+        let error = f.call("git.commitForPush", params).expect_err("the failing signer stops the commit");
+        assert_eq!(error.code, "git_failed", "{condition}: {error:?}");
+        let signing = std::fs::read_to_string(f.base.join("signing-attempt")).expect("Git asked the checkout's signer");
+        assert!(signing.lines().any(|arg| arg == "checkout-key"), "{condition}: {signing}");
+        assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head, "{condition}");
+        assert!(!checkout.join(".git/index.lock").exists());
+    }
+}
