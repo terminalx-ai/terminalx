@@ -42,7 +42,7 @@ env:
 
 jobs:
   # The large-tab send timing (PRO-334), on the runner the vitest job uses.
-  send-timing:
+  repeat-send-timing:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -70,7 +70,7 @@ jobs:
 
   # The far-behind view and the checkpoint undo (PRO-334), and the Codex
   # capability check (PRO-488), on the runner linux-rust-tests uses.
-  linux-rust:
+  repeat-linux-rust:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -139,7 +139,7 @@ jobs:
           echo "passed $PROBE_RUNS runs in a row"
 
   # The cloud sections' search (PRO-334), on the runner webkit-layout uses.
-  webkit-search:
+  repeat-webkit-search:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
