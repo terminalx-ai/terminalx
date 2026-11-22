@@ -39,6 +39,15 @@ pub(crate) fn git() -> Command {
     c
 }
 
+/// A path Git printed on a line of its own, without its line ending. Only the
+/// ending is removed: a file name may itself end in whitespace.
+pub(crate) fn path_line(out: &str) -> &str {
+    let line = out.strip_suffix('\n').unwrap_or(out);
+    #[cfg(windows)]
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line
+}
+
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     if transfer_args(args) { return transfer(cwd, args); }
     run_command(git().current_dir(cwd), args)
@@ -337,7 +346,7 @@ pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)
 /// rebase, a cherry-pick, a revert or a bisect left part way.
 pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    let dir = Path::new(dir.trim());
+    let dir = Path::new(path_line(&dir));
     let marks = [
         ("MERGE_HEAD", "merge"),
         ("rebase-merge", "rebase"),
@@ -467,7 +476,7 @@ pub fn working_change_sets(
 
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
 fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
-    let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
+    let index = path_line(&run(cwd, &["rev-parse", "--git-path", "index"])?).to_string();
     let index_path = if Path::new(&index).is_absolute() { PathBuf::from(&index) } else { cwd.join(&index) };
     let tmp = std::env::temp_dir().join(format!("raccoon-index-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
     let result = (|| {
@@ -1269,7 +1278,7 @@ pub(crate) fn ensure_worktree_dir_ignored(project: &Path) {
     let dir = crate::store::settings::load().worktree_dir;
     let top = dir.split('/').next().unwrap_or(".raccoon").to_string();
     if let Ok(git_dir) = run(project, &["rev-parse", "--git-common-dir"]) {
-        let git_dir = git_dir.trim();
+        let git_dir = path_line(&git_dir);
         let git_dir = if Path::new(git_dir).is_absolute() { PathBuf::from(git_dir) } else { project.join(git_dir) };
         let info = git_dir.join("info");
         let exclude = info.join("exclude");
@@ -1308,7 +1317,7 @@ pub struct WorktreeDisposition {
 /// git command run there silently answers for the enclosing repository.
 pub fn is_own_worktree(path: &Path) -> bool {
     let Ok(top) = run(path, &["rev-parse", "--show-toplevel"]) else { return false };
-    match (crate::paths::canonicalize(top.trim()), crate::paths::canonicalize(path)) {
+    match (crate::paths::canonicalize(path_line(&top)), crate::paths::canonicalize(path)) {
         (Ok(top), Ok(path)) => top == path,
         _ => false,
     }
@@ -1317,7 +1326,7 @@ pub fn is_own_worktree(path: &Path) -> bool {
 /// A repository's shared git directory, resolved.
 pub(crate) fn common_dir(cwd: &Path) -> Option<PathBuf> {
     let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
-    let dir = out.trim();
+    let dir = path_line(&out);
     let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };
     crate::paths::canonicalize(dir).ok()
 }
@@ -1475,7 +1484,7 @@ fn belongs_to_project(project: &Path, dir: &Path) -> Result<()> {
     };
     let link = if Path::new(link).is_absolute() { PathBuf::from(link) } else { dir.join(link) };
     let common = run(project, &["rev-parse", "--git-common-dir"]).context("the project's git directory cannot be found")?;
-    let common = common.trim();
+    let common = path_line(&common);
     let common = if Path::new(common).is_absolute() { PathBuf::from(common) } else { project.join(common) };
     let ours = common.join("worktrees");
     // The record may already be gone (git drops it before it fails on the

@@ -2380,3 +2380,37 @@ fn mention_lookups_read_the_workspaces_pull_requests_with_its_gh() {
     assert_eq!(f.git.mention_prs(&f.root, "fix").unwrap_err().code, "auth_failed");
     assert_eq!(f.git.mention_pr_context(&f.root, 7).unwrap_err().code, "auth_failed");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_linked_checkout_whose_name_ends_in_a_space_is_verified_listed_and_served() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("topic ");
+    git(&f.root, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    // The same name without the space is another repository; it must not
+    // stand in for the checkout.
+    f.clone(&remote, "../topic");
+    std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+    assert!(crate::git::is_own_worktree(&checkout));
+    // A folder inside it is not its own top level, space or not.
+    std::fs::create_dir(checkout.join("inner ")).unwrap();
+    assert!(!crate::git::is_own_worktree(&checkout.join("inner ")));
+    assert_eq!(crate::git::common_dir(&checkout), crate::git::common_dir(&f.root));
+
+    let name = checkout.to_str().unwrap();
+    let listed = f.call("git.repositories", json!({})).unwrap();
+    let names: Vec<_> = listed["repositories"].as_array().unwrap().iter().map(|repo| repo["repo"].as_str().unwrap().to_owned()).collect();
+    assert!(names.iter().any(|listed| listed == name), "listed: {names:?}");
+    let status = f.call("git.status", json!({ "repo": name })).unwrap();
+    assert_eq!(status["branch"], "topic");
+    assert_eq!(status["operation"], Value::Null);
+    let changes = f.call("git.workingChanges", json!({ "repo": name })).unwrap();
+    assert!(changes["files"].as_array().unwrap().iter().any(|file| file["path"] == "note.txt"), "{changes}");
+    f.call("git.stage", json!({ "repo": name, "paths": ["note.txt"] })).unwrap();
+    assert_eq!(git(&checkout, &["show", ":note.txt"]), "verified");
+    assert!(git(&f.base.join("topic"), &["ls-files", "--", "note.txt"]).is_empty());
+}

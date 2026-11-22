@@ -589,7 +589,7 @@ fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, 
     let scratch = scratch.tempdir().map_err(RpcError::internal)?;
     let index = scratch.path().join("index");
     let current_index = read(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
-    let current_index = Path::new(current_index.strip_suffix('\n').unwrap_or(&current_index));
+    let current_index = Path::new(crate::git::path_line(&current_index));
     if current_index.exists() {
         std::fs::copy(current_index, &index).map_err(RpcError::internal)?;
     }
@@ -1189,7 +1189,7 @@ impl WorkspaceGit {
     /// A merge, rebase or cherry-pick left in progress.
     fn operation(&self, repo: &Repo) -> Option<&'static str> {
         let git_dir = self.git(repo, &["rev-parse", "--absolute-git-dir"]).ok()?;
-        let git_dir = PathBuf::from(git_dir.trim());
+        let git_dir = PathBuf::from(crate::git::path_line(&git_dir));
         if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
             Some("rebase")
         } else if git_dir.join("MERGE_HEAD").exists() {
@@ -1478,7 +1478,7 @@ impl WorkspaceGit {
             }
             Ok(())
         };
-        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(crate::git::path_line(&out)));
         let git_dir = path(&["rev-parse", "--absolute-git-dir"])?;
         let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
@@ -1783,7 +1783,7 @@ impl WorkspaceGit {
             return Err(refused());
         }
         let git_dir = self.git(repo, &["rev-parse", "--absolute-git-dir"]).map_err(|_| refused())?;
-        let git_dir = Path::new(git_dir.trim()).canonical().map_err(|_| refused())?;
+        let git_dir = Path::new(crate::git::path_line(&git_dir)).canonical().map_err(|_| refused())?;
         let directory = directory_identity(&path).map_err(|_| refused())?;
         let admin = directory_identity(&git_dir).map_err(|_| refused())?;
         Ok(CheckoutIdentity { path, git_dir, directory, admin })
@@ -1810,7 +1810,7 @@ impl WorkspaceGit {
     fn checkout_contains(root: &Path, cwd: &Path) -> bool {
         cwd == root || (cwd.starts_with(root)
             && crate::git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
-                .and_then(|top| Path::new(top.trim()).canonical().ok()).as_deref() == Some(root))
+                .and_then(|top| Path::new(crate::git::path_line(&top)).canonical().ok()).as_deref() == Some(root))
     }
 
     /// A prior branch may have contained the directory the link saved.
@@ -2275,7 +2275,7 @@ impl WorkspaceGit {
     /// sees the repository as it was then.
     fn push_to_verified_origin(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<Ran, RpcError> {
         let origin = origin.ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))?;
-        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(crate::git::path_line(&out)));
         let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
         let shallow = path(&["rev-parse", "--path-format=absolute", "--git-path", "shallow"])?;
         let object_format = match self.git(repo, &["rev-parse", "--show-object-format"])?.trim() {
@@ -2388,7 +2388,7 @@ impl WorkspaceGit {
     /// `core.hooksPath` or the default hooks directory, and executable.
     fn has_pre_push_hook(&self, repo: &Repo) -> Result<bool, RpcError> {
         let hook = self.git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"])?;
-        let hook = Path::new(hook.strip_suffix('\n').unwrap_or(&hook));
+        let hook = Path::new(crate::git::path_line(&hook));
         let Ok(metadata) = std::fs::metadata(hook) else { return Ok(false) };
         #[cfg(unix)]
         {
@@ -2461,7 +2461,7 @@ impl WorkspaceGit {
             .map_err(|_| RpcError::invalid("Give the pull request's URL."))?;
         let repo = Repo { name: ".".into(), dir: self.root.clone(), bound: None };
         let common = self.git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let common = Path::new(common.trim()).canonical().map_err(RpcError::internal)?;
+        let common = Path::new(crate::git::path_line(&common)).canonical().map_err(RpcError::internal)?;
         let owned = |entry: &PendingPrCreation| entry.url == url && entry.checkout.git_dir.starts_with(&common);
         let evidence = pending_pr_creations(|entries| (entries.iter().filter(|entry| owned(entry)).cloned().collect::<Vec<_>>(), false))?;
         if evidence.is_empty() {
@@ -2504,7 +2504,7 @@ impl WorkspaceGit {
     fn same_checkout(checkout: &CheckoutIdentity) -> bool {
         let Ok(path) = checkout.path.canonical() else { return false };
         let git_dir = crate::git::run(&path, &["rev-parse", "--absolute-git-dir"]).ok()
-            .and_then(|dir| Path::new(dir.trim()).canonical().ok());
+            .and_then(|dir| Path::new(crate::git::path_line(&dir)).canonical().ok());
         path == checkout.path && git_dir.as_deref() == Some(checkout.git_dir.as_path())
             && directory_identity(&path).ok() == Some(checkout.directory)
             && directory_identity(&checkout.git_dir).ok() == Some(checkout.admin)
