@@ -1665,8 +1665,10 @@ struct PrefetchParams {
     known: Vec<KnownTranscript>,
     /// The conversations open on the phone's screen (#1337): they read for
     /// themselves, and the phone drops a page sent for one, so none is sent.
+    /// A phone that names them, even as none, names all of them (#1381); one
+    /// that leaves them out is judged by what it read a moment ago.
     #[serde(default)]
-    open: Vec<OpenTranscript>,
+    open: Option<Vec<OpenTranscript>>,
 }
 
 #[derive(Deserialize)]
@@ -1695,11 +1697,12 @@ fn prefetch(connection: &Arc<MobileConnection>, params: PrefetchParams) -> Resul
         connection.prefetch.stop();
         return Ok(json!({ "enabled": false }));
     }
-    if params.known.len() > PREFETCH_KNOWN || params.open.len() > PREFETCH_KNOWN {
+    if params.known.len() > PREFETCH_KNOWN || params.open.as_ref().is_some_and(|open| open.len() > PREFETCH_KNOWN) {
         connection.prefetch.stop();
         bail!("a prefetch names at most {PREFETCH_KNOWN} conversations");
     }
-    let open: HashSet<(String, String)> = params.open.into_iter().map(|open| (open.session_id, open.tab_id)).collect();
+    let open: Option<HashSet<(String, String)>> = params.open
+        .map(|open| open.into_iter().map(|open| (open.session_id, open.tab_id)).collect());
     let known: HashMap<(String, String), SyncCursor> = params.known.into_iter()
         .map(|known| ((known.session_id, known.tab_id), known.cursor)).collect();
     // Replaces the one under way, if any: never more than one thread at work for a connection.
@@ -1721,7 +1724,8 @@ fn prefetch_targets_reply() -> Result<Value> {
 struct PrefetchJob {
     connection: std::sync::Weak<MobileConnection>,
     known: HashMap<(String, String), SyncCursor>,
-    open: HashSet<(String, String)>,
+    /// None from a phone that does not name them.
+    open: Option<HashSet<(String, String)>>,
 }
 
 /// Sends one `sync.prefetch`'s conversations, until it is done, no longer
@@ -1739,7 +1743,7 @@ fn run_prefetch(job: PrefetchJob, wanted: &dyn Fn() -> bool) {
     for (session, tab) in targets {
         let Some(connection) = job.connection.upgrade() else { return };
         if PREFETCH_BYTES - sent < 16 * 1024 || !current(&connection) || !connection.room_for_prefetch(&current) { return; }
-        if reading_for_itself(&connection.sync_cache, &job.open, &session, &tab) { continue; }
+        if reading_for_itself(&connection.sync_cache, job.open.as_ref(), &session, &tab) { continue; }
         let after = job.known.get(&(session.clone(), tab.clone()));
         let still = || current(&connection);
         match prefetch_message(&connection, &session, &tab, after, PREFETCH_BYTES - sent, Wanted(&still)) {
@@ -1760,11 +1764,16 @@ fn run_prefetch(job: PrefetchJob, wanted: &dyn Fn() -> bool) {
 }
 
 /// Whether the phone reads this conversation for itself, so a prefetch leaves
-/// it (#1337): it named it open, or read it on this connection a moment ago,
-/// as one open on screen does. The phone drops a page sent for one, and the
-/// data it spent on that page is wasted.
-fn reading_for_itself(cache: &SyncCache, open: &HashSet<(String, String)>, session: &str, tab: &str) -> bool {
-    open.contains(&(session.to_string(), tab.to_string())) || cache.read_within(session, tab, PREFETCH_READING)
+/// it (#1337): it named it open; or, from a phone that names none, it read
+/// it on this connection a moment ago, as one open on screen does. A phone's
+/// own list is the whole of it (#1381): one it just closed is sent its new
+/// events. The phone drops a page sent for an open one, and the data it
+/// spent on that page is wasted.
+fn reading_for_itself(cache: &SyncCache, open: Option<&HashSet<(String, String)>>, session: &str, tab: &str) -> bool {
+    match open {
+        Some(open) => open.contains(&(session.to_string(), tab.to_string())),
+        None => cache.read_within(session, tab, PREFETCH_READING),
+    }
 }
 
 /// The conversations a prefetch sends, most recently active first: the
@@ -3398,6 +3407,33 @@ mod tests {
         assert!(cache.continuing("session", "tab", &cursor(&page)), "and the phone's own read stays under way");
     }
 
+    /// #1381: a phone that names its open conversations, even as none, is
+    /// taken at its word: one it read a moment ago and has since closed is
+    /// sent its new events. One that names none is judged as before.
+    #[test]
+    fn a_named_open_list_replaces_the_recently_read_guess() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let cache = SyncCache::default();
+        write_log(&path, &(1..=20).map(prompt).collect::<Vec<_>>());
+        // The phone read the conversation a moment ago, then closed it; new events follow.
+        drain_cached(&cache, &path, None, direct());
+        append_log(&path, &(21..=25).map(prompt).collect::<Vec<_>>());
+        let open = |params: Value| -> Option<HashSet<(String, String)>> {
+            let params: PrefetchParams = serde_json::from_value(params).unwrap();
+            params.open.map(|open| open.into_iter().map(|open| (open.session_id, open.tab_id)).collect())
+        };
+        let none = open(json!({ "enabled": true, "open": [] }));
+        assert_eq!(none, Some(HashSet::new()), "an empty list is a list");
+        assert!(!reading_for_itself(&cache, none.as_ref(), "session", "tab"), "a just-closed conversation is prefetched");
+        let other = open(json!({ "enabled": true, "open": [{ "sessionId": "session", "tabId": "other" }] }));
+        assert!(!reading_for_itself(&cache, other.as_ref(), "session", "tab"));
+        assert!(reading_for_itself(&cache, other.as_ref(), "session", "other"), "one named open is left");
+        let legacy = open(json!({ "enabled": true }));
+        assert_eq!(legacy, None);
+        assert!(reading_for_itself(&cache, legacy.as_ref(), "session", "tab"), "a phone that names none keeps the recent-read guess");
+    }
+
     /// #1337: a prefetch for a conversation open on the phone, whose page the
     /// phone drops, leaves the phone reader's checkpoint as it was, so its
     /// next `session.sync` still reads only what was appended; and a prefetch
@@ -3412,14 +3448,14 @@ mod tests {
         write_log(&path, &events);
         // What the phone saved of this conversation earlier: up to record 200.
         let saved = cursor(&sync_page(&events[..200], None, "session", "tab", "test", direct()).unwrap());
-        assert!(!reading_for_itself(&cache, &HashSet::new(), "session", "tab"));
+        assert!(!reading_for_itself(&cache, None, "session", "tab"));
 
         // The transcript opens and reads for itself.
         let (_, open, _) = drain_cached(&cache, &path, None, direct());
-        assert!(reading_for_itself(&cache, &HashSet::new(), "session", "tab"), "a conversation read a moment ago is open");
-        assert!(!reading_for_itself(&cache, &HashSet::new(), "session", "other"));
+        assert!(reading_for_itself(&cache, None, "session", "tab"), "a conversation read a moment ago is open");
+        assert!(!reading_for_itself(&cache, None, "session", "other"));
         let named: HashSet<_> = [("session".to_string(), "other".to_string())].into();
-        assert!(reading_for_itself(&cache, &named, "session", "other"), "one the phone names open is too");
+        assert!(reading_for_itself(&cache, Some(&named), "session", "other"), "one the phone names open is too");
 
         // Records are appended; a prefetch from the saved checkpoint runs, and the open screen drops its page.
         append_log(&path, &(301..=310).map(prompt).collect::<Vec<_>>());

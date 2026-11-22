@@ -368,7 +368,8 @@ describe("a prefetch while a conversation is open (#1337)", () => {
     expect(request).toHaveBeenLastCalledWith("sync.prefetch", expect.objectContaining({ open: [{ sessionId: "session", tabId: "tab" }] }));
     stop();
     expect(openTranscriptsOf("host")).toEqual([]);
+    // Once closed it is named as none open, so the Mac sends its new events (#1381).
     await startPrefetch(api, "host");
-    expect(request.mock.lastCall?.[1]).not.toHaveProperty("open");
+    expect(request.mock.lastCall?.[1]).toHaveProperty("open", []);
   });
 });
