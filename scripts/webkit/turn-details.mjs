@@ -9,6 +9,16 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 
+// The page's clock is pinned (#1407): Friday 2026-11-20 13:29 local, the day and time the weekly
+// check once failed on, with the weekly windows resetting Saturday 2026-11-28 11:00, eight days out.
+const NOW = new Date(2026, 10, 20, 13, 29);
+const WEEKLY_RESET = new Date(2026, 10, 28, 11, 0);
+const LOCALE = "en-US";
+const clock = (date) => date.toLocaleTimeString(LOCALE, { hour: "numeric", minute: "2-digit" });
+const SOON = new Date(NOW.getTime() + 88 * 60_000);
+const fiveHourReset = `Resets at ${clock(SOON)} · in 1h 28m`;
+const weeklyReset = `Resets ${WEEKLY_RESET.toLocaleDateString(LOCALE, { weekday: "short" })} ${clock(WEEKLY_RESET)}`;
+
 const fixture = `
   const backend = window.__PW_STUB__;
   const now = Date.now();
@@ -38,9 +48,7 @@ const fixture = `
   ];
   backend.answers.check_agent_readiness = () => ({ state: "ready", checkedAt: at(0), version: "1", loginMethod: "Claude account", plan: "max", account: "alex@example.com" });
   const soon = now + 88 * 60_000;
-  const saturday = new Date(); saturday.setDate(saturday.getDate() + ((6 - saturday.getDay()) % 7 || 7)); saturday.setHours(11, 0, 0, 0);
-  // The weekly windows must reset more than a day out, or the popover shows "Resets at …" for them too (on Fridays).
-  if (saturday.getTime() - now < 24 * 3600_000) saturday.setDate(saturday.getDate() + 7);
+  const saturday = new Date(${WEEKLY_RESET.getTime()});
   backend.answers.status_resource_overview = { agentCount: 0, orphanCount: 0, rssBytes: 0, pressure: 0 };
   backend.answers.status_resource_sample = { totalRssBytes: 0, processes: [] };
   backend.answers.status_usage_refresh = () => backend.answers.status_usage_snapshot;
@@ -64,7 +72,7 @@ async function layout(root) {
 
 try {
   for (const colorScheme of ["dark", "light"]) {
-    const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: fixture, colorScheme });
+    const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra: fixture, colorScheme, locale: LOCALE, now: NOW });
     await openConversation(page, "Fix duplicate permission cards");
     const footers = page.getByTestId("turn-footer");
     await footers.first().waitFor();
@@ -141,7 +149,7 @@ try {
       "Compact now under the bar with its hint": contextText.indexOf("Compact now") < contextText.indexOf("Claude usage") && contextText.includes("Types /compact into Claude Code"),
       "usage header with plan and refresh": /Claude usageMax plan · refreshed /.test(contextText),
       "a bar per window": (await context.getByRole("meter").count()) === 4,
-      "absolute reset times": /Resets at .+ · in 1h 2[78]m/.test(contextText) && /Resets [A-Z][a-z]{2} /.test(contextText),
+      "absolute reset times": contextText.includes(fiveHourReset) && contextText.split(weeklyReset).length === 3,
       "amber when high": (await context.getByText("86%", { exact: true }).evaluate((el) => getComputedStyle(el).color)) !== (await context.getByText("41%", { exact: true }).evaluate((el) => getComputedStyle(el).color)),
       "close-to-limit warning": contextText.includes("You're close to your 5-hour limit."),
       "account rows by name": ["Signed inalex@example.com · Claude Max", "ProviderAnthropic", "ModelOpus 5.5claude-opus-5-5", "Effort · FastHigh · Off", "This session so far$0.59 estimated"].every((row) => contextText.includes(row)),
@@ -149,7 +157,7 @@ try {
       "inside the window": contextGeometry.inside,
       "nothing under 12px": contextGeometry.small.length === 0,
       "nothing spills": contextGeometry.spill.length === 0,
-    }, { contextText, contextGeometry });
+    }, { contextText, contextGeometry, fiveHourReset, weeklyReset });
     await page.waitForTimeout(400);
     if (shots) await page.screenshot({ path: `${shots}/context-${colorScheme}.png` });
     await page.close();
