@@ -3885,6 +3885,22 @@ fn a_shell_command_from_the_composer_settles_at_its_output() {
     }
 }
 
+/// #1383: while a composer `!command` awaits its echo, a prompt typed in the
+/// terminal that opens with the same input tags and goes on in the reader's
+/// words is theirs, drawn as a message. The real shell record that follows
+/// is still the composer prompt's echo.
+#[test]
+fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
+    let rig = Rig::new();
+    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+    let prose = format!("{SHELL_INPUT} please explain");
+    rig.append(&shell_record("prose", &prose));
+    assert_eq!(user_texts(&rig), ["!git status", prose.as_str()], "the reader's prompt is drawn");
+    rig.append(&shell_record("shell-both", &format!("{SHELL_INPUT}\n{SHELL_OUTPUT}")));
+    assert_eq!(user_texts(&rig), ["!git status", prose.as_str(), SHELL_OUTPUT], "the shell record is the echo, its output drawn");
+}
+
 /// #1294: should the agent take up a `!` command's output (Claude Code
 /// 2.1.295 did), the turn is the agent's and is not cut short at the output.
 #[test]

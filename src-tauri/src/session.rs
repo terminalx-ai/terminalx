@@ -705,7 +705,9 @@ impl ComposerEcho {
         // A `!` command (#1294): Claude Code runs it in its shell and records
         // the command without the `!`, as `<bash-input>`. The chat turns the
         // `!command` the composer published into the command's block.
-        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), bash_input(rest)) {
+        // Only a whole shell record with its input part is one (#1383): the
+        // input tags followed by the reader's words are their prompt.
+        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), shell_command(rest)) {
             return ran.split_whitespace().eq(sent.split_whitespace());
         }
         // The CLI may reflow a paste or enclose it (or its chunks) in these
@@ -739,8 +741,16 @@ fn shell_output_of_echo(rt: &TabRuntime, payload: &Payload) -> Option<Payload> {
     Some(Payload::UserMessage { author: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
 }
 
-/// The command in a record of Claude Code's `!` shell passthrough (#1294):
-/// `<bash-input> git status</bash-input>`, maybe with the output after it.
+/// The command in a record of Claude Code's `!` shell passthrough (#1294),
+/// when `recorded` is one by the shared strict grammar and has an input part
+/// (#1383): `<bash-input> git status</bash-input>`, maybe with its output.
+fn shell_command(recorded: &str) -> Option<&str> {
+    claude::transcript::shell_record(recorded).filter(|shell| shell.input)?;
+    bash_input(recorded)
+}
+
+/// The text between the first input tags of a shell-shaped record. Only
+/// `shell_command` may read it, once the record is known to be one.
 fn bash_input(recorded: &str) -> Option<&str> {
     let after = recorded.trim_start().strip_prefix("<bash-input>")?;
     Some(&after[..after.find("</bash-input>")?])
@@ -9759,6 +9769,32 @@ mod tests {
         assert!(!ComposerEcho::new("git status".into(), 0).matches("<bash-input> git status</bash-input>"));
         assert_eq!(bash_input("<bash-input>ls</bash-input>"), Some("ls"));
         assert_eq!(bash_input("<bash-input>ls"), None);
+    }
+
+    /// #1383. Input tags around the command, then anything that is not the
+    /// rest of a shell record, are a prompt of the reader's: no `!command`
+    /// echo, though the tags hold its words.
+    #[test]
+    fn composer_echo_matches_only_a_whole_shell_record() {
+        let echo = ComposerEcho::new("!pwd".into(), 0);
+        for prompt in [
+            "<bash-input>pwd</bash-input> please explain",
+            "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+            "<bash-input>pwd</bash-input><bash-input>ls</bash-input>",
+            "<bash-input>pwd</bash-input><bash-stdout>a</bash-stdout><bash-stdout>b</bash-stdout><bash-stderr></bash-stderr><bash-stdout>c</bash-stdout>",
+            "<bash-input>pwd</bash-input><bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+            "<bash-input>pwd</bash-stdout>",
+        ] {
+            assert!(!echo.matches(prompt), "{prompt}");
+            assert_eq!(shell_command(prompt), None, "{prompt}");
+        }
+        for record in [
+            "<bash-input>pwd</bash-input>",
+            "<bash-input> pwd</bash-input>\n<bash-stdout>/tmp</bash-stdout><bash-stderr></bash-stderr>",
+            "<bash-input>pwd</bash-input><bash-stderr>denied</bash-stderr>",
+        ] {
+            assert!(echo.matches(record), "{record}");
+        }
     }
 
     /// Claude Code writes the pasted-image labels straight into the prompt
