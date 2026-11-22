@@ -66,7 +66,16 @@ pub struct WorkspaceGit {
     project: bool,
     #[cfg(test)]
     github_origin_fixture: Option<String>,
+    /// Runs at named points between a check and the step it guards, so tests
+    /// can change the repository deterministically in that window.
+    #[cfg(test)]
+    barrier: Option<Barrier>,
+    #[cfg(test)]
+    git_without_hook_run: bool,
 }
+
+#[cfg(test)]
+type Barrier = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// At most this many of a machine project's checkout and worktrees are listed.
 pub const MAX_PROJECT_REPOSITORIES: usize = 100;
@@ -76,6 +85,76 @@ struct Repo {
     /// Workspace-relative, `.` for the root.
     name: String,
     dir: PathBuf,
+    /// A machine checkout, as `machine_repo` verified it. Git commands for
+    /// this call run in that checkout, not in whatever `dir` names later.
+    bound: Option<BoundCheckout>,
+}
+
+/// The verified checkout: its top-level directory, held open, and the Git
+/// directory discovered from it.
+///
+/// On Unix a command made by `repo_command` starts in the opened directory
+/// itself, without a chdir to the path first, so Git discovers from that
+/// checkout and replacing the checkout at its path does not move the command.
+/// A checkout moved away mid-call keeps receiving that call's commands at its
+/// new place; one deleted mid-call makes them fail. The next call verifies
+/// whatever the path names then.
+///
+/// Commands that run no ordinary hooks (`HOOKLESS`) also name the Git directory and
+/// work tree in the environment, so a `core.worktree` written after
+/// verification is not read. Commands that can run hooks (checkout, pull,
+/// fetch, push, update-ref, branch) do not: Git exports GIT_DIR and
+/// GIT_WORK_TREE to hooks, and a hook that runs Git from a subdirectory then
+/// fails or sees the wrong top level. For those a `core.worktree` change
+/// between verification and the command is still read. The guarded commit
+/// runs in a private Git directory and names the work tree by its verified
+/// path in its private configuration; the PR push's private copy has no
+/// work tree.
+///
+/// Not bound:
+/// - the `.git` entry inside a main checkout: it is named relative to the
+///   opened directory, not held open, so replacing it with a link or gitfile
+///   after verification still redirects configuration, refs and objects;
+/// - a Git directory outside the checkout (a linked worktree's admin
+///   directory), which is named by its verified absolute path;
+/// - reads through `crate::git`, `crate::git_media`, `crate::landed`,
+///   `crate::pr_associations` and the branch comparison helpers, which take
+///   `repo.dir` and rediscover the repository, so one call can mix bound
+///   commands with an unbound check such as `operation_in_progress`;
+/// - Repos built without verification: `list`, `repository_facts`,
+///   `pr_reconcile_creation`, `mention_prs` and the PR-context helper; `gh`,
+///   which runs in `repo.dir`; and `add_private_config`, which only writes a
+///   private file;
+/// - everything off Unix, where the checkout is named by path only.
+struct BoundCheckout {
+    #[cfg(unix)]
+    top: std::fs::File,
+    #[cfg(not(unix))]
+    top: PathBuf,
+    /// Relative to the top-level directory when inside it (Unix).
+    git_dir: PathBuf,
+}
+
+/// Git subcommands that run no ordinary hooks, so they may name their Git
+/// directory and work tree in the environment (see BoundCheckout). Index
+/// writers among them can still run `post-index-change` and the
+/// `core.fsmonitor` program, which then see those variables too.
+const HOOKLESS: &[&str] = &[
+    "add", "cat-file", "config", "diff", "for-each-ref", "log", "ls-files", "ls-remote", "remote", "restore",
+    "rev-list", "rev-parse", "rm", "show", "status", "symbolic-ref", "update-index",
+];
+
+/// Start `command` in the opened `directory`, whatever its path names now.
+#[cfg(unix)]
+fn run_in_directory(command: &mut Command, directory: &std::fs::File) {
+    use std::os::unix::{io::AsRawFd, process::CommandExt};
+    let fd = directory.as_raw_fd();
+    // SAFETY: the closure runs in the forked child before exec and only calls
+    // fchdir, which is async-signal-safe. The descriptor outlives the spawn:
+    // the caller's Repo owns it for the whole call.
+    unsafe {
+        command.pre_exec(move || if libc::fchdir(fd) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) });
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -433,6 +512,17 @@ fn snapshot_commit_config(checkout_git: impl Fn() -> Command, scratch: &Path, ob
     Ok(())
 }
 
+/// Add one value to a private configuration file, quoted as Git writes it.
+fn add_private_config(dir: &Path, file: &Path, key: &str, value: &Path, what: &str) -> Result<(), RpcError> {
+    let mut command = git_command(dir);
+    command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
+    let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+    if !result.ok {
+        return Err(failure_error(what, &result.text(), Failure::Other));
+    }
+    Ok(())
+}
+
 fn bounded_branch_output(mut command: Command, args: &[&str], deadline: Instant) -> Result<Ran, RpcError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
@@ -570,9 +660,15 @@ fn run_network(command: Command, timeout: Duration, kind: Network) -> Result<Ran
 }
 
 pub(super) fn git_command(dir: &Path) -> Command {
+    let mut command = git_command_anywhere();
+    command.current_dir(dir);
+    command
+}
+
+/// `git_command` without a start directory, for a caller that sets its own.
+fn git_command_anywhere() -> Command {
     let mut command = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     command
-        .current_dir(dir)
         .env("PATH", crate::binpath::login_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         // A read-only diff/status call must not demand-fetch promised objects.
@@ -669,7 +765,8 @@ impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
         Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false,
-            #[cfg(test)] github_origin_fixture: None }
+            #[cfg(test)] github_origin_fixture: None, #[cfg(test)] barrier: None,
+            #[cfg(test)] git_without_hook_run: false }
     }
 
     /// The Git of one of a machine's projects (`machine/1`). `repo` names its
@@ -677,6 +774,13 @@ impl WorkspaceGit {
     /// folder, or absolute for one outside it (docs/MACHINES.md, Project scoping).
     pub fn for_project(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
         Self { project: true, ..Self::new(root, files) }
+    }
+
+    fn barrier(&self, _point: &str) {
+        #[cfg(test)]
+        if let Some(barrier) = &self.barrier {
+            barrier(_point);
+        }
     }
 
     #[cfg(test)]
@@ -841,6 +945,78 @@ impl WorkspaceGit {
         !self.project || crate::git::is_own_worktree(&self.dir(name))
     }
 
+    /// `name` as a Repo. A machine checkout must be its own top level, and is
+    /// bound to what was verified (see BoundCheckout).
+    fn machine_repo(&self, name: &str) -> Option<Repo> {
+        let dir = self.dir(name);
+        if !self.project {
+            return Some(Repo { name: name.to_owned(), dir, bound: None });
+        }
+        let path = dir.canonical().ok()?;
+        #[cfg(unix)]
+        let top = std::fs::File::open(&path).ok()?;
+        #[cfg(not(unix))]
+        let top = path.clone();
+        let mut command = git_command(&path);
+        #[cfg(unix)]
+        run_in_directory(&mut command, &top);
+        command.args(["rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir"]);
+        let ran = run_bounded(command, LOCAL_TIMEOUT).ok().filter(|ran| ran.ok)?;
+        let [shown, git_dir] = ran.stdout.lines().collect::<Vec<_>>()[..] else { return None };
+        // The opened directory is its own top level, and the path still names it.
+        if Path::new(shown).canonical().ok()? != path {
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let opened = top.metadata().ok()?;
+            if directory_identity(&path).ok()? != (opened.dev(), opened.ino()) {
+                return None;
+            }
+        }
+        let git_dir = Path::new(git_dir).canonical().ok()?;
+        #[cfg(unix)]
+        let git_dir = git_dir.strip_prefix(&path).map(Path::to_path_buf).unwrap_or(git_dir);
+        Some(Repo { name: name.to_owned(), dir, bound: Some(BoundCheckout { top, git_dir }) })
+    }
+
+    /// A Git command for `repo`, bound to its verified checkout if it has one
+    /// (see BoundCheckout). `pin` names the Git directory and work tree too:
+    /// only for commands that run no hooks.
+    fn repo_command(repo: &Repo, pin: bool) -> Command {
+        let Some(bound) = &repo.bound else { return git_command(&repo.dir) };
+        #[cfg(unix)]
+        let mut command = git_command_anywhere();
+        #[cfg(unix)]
+        run_in_directory(&mut command, &bound.top);
+        #[cfg(not(unix))]
+        let mut command = git_command(&bound.top);
+        if pin {
+            command.env("GIT_DIR", &bound.git_dir).env("GIT_WORK_TREE", Self::work_tree(repo)).env_remove("GIT_COMMON_DIR");
+        }
+        command
+    }
+
+    /// The work tree a `repo_command` names: its start directory when bound.
+    fn work_tree(repo: &Repo) -> &std::ffi::OsStr {
+        match &repo.bound {
+            #[cfg(unix)]
+            Some(_) => std::ffi::OsStr::new("."),
+            #[cfg(not(unix))]
+            Some(bound) => bound.top.as_os_str(),
+            None => repo.dir.as_os_str(),
+        }
+    }
+
+    fn current_branch(&self, repo: &Repo) -> Option<String> {
+        self.git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    fn head_commit(&self, repo: &Repo) -> Option<String> {
+        self.git(repo, &["rev-parse", "HEAD"]).ok().map(|s| s.trim().to_string())
+    }
+
     fn listed_project_repositories(&self, preferred: Option<&str>) -> (Vec<String>, bool) {
         let (mut names, truncated) = Self::limit_project_repositories(self.project_repositories(), preferred);
         names.retain(|name| self.verified_machine_repo(name));
@@ -891,7 +1067,7 @@ impl WorkspaceGit {
         match params.get("repo") {
             None | Some(Value::Null) => match names.len() {
                 0 => Err(RpcError::not_found("this workspace has no Git repository")),
-                1 => Ok(Repo { dir: self.dir(&names[0]), name: names[0].clone() }),
+                1 => self.machine_repo(&names[0]).ok_or_else(|| RpcError::not_found(format!("{} is not a repository in this workspace", names[0]))),
                 count => Err(RpcError::new(
                     "ambiguous_repository",
                     format!("this workspace has {count} repositories ({}); name one with repo", names.join(", ")),
@@ -901,8 +1077,8 @@ impl WorkspaceGit {
                 let name = if name.is_empty() { "." } else { name.trim_end_matches('/') };
                 names
                     .iter()
-                    .find(|known| known.as_str() == name && self.verified_machine_repo(known))
-                    .map(|known| Repo { dir: self.dir(known), name: known.clone() })
+                    .find(|known| known.as_str() == name)
+                    .and_then(|known| self.machine_repo(known))
                     .ok_or_else(|| RpcError::not_found(format!("{name} is not a repository in this workspace")))
             }
             Some(_) => Err(RpcError::invalid("repo must be a string")),
@@ -914,7 +1090,7 @@ impl WorkspaceGit {
     }
 
     fn git_timed(&self, repo: &Repo, args: &[&str], timeout: Duration, env: &[(&str, &str)]) -> Result<String, RpcError> {
-        let ran = self.run_git(&repo.dir, args, timeout, env)?;
+        let ran = self.run_git(repo, args, timeout, env)?;
         if ran.ok {
             return Ok(ran.stdout);
         }
@@ -922,9 +1098,10 @@ impl WorkspaceGit {
         Err(failure_error(&format!("git {}", args.first().copied().unwrap_or("")), &text, classify(&text, ran.timed_out)))
     }
 
-    fn run_git(&self, dir: &Path, args: &[&str], timeout: Duration, env: &[(&str, &str)]) -> Result<Ran, RpcError> {
-        let mut command = git_command(dir);
+    fn run_git(&self, repo: &Repo, args: &[&str], timeout: Duration, env: &[(&str, &str)]) -> Result<Ran, RpcError> {
+        let mut command = Self::repo_command(repo, args.first().is_some_and(|first| HOOKLESS.contains(first)));
         command.args(args);
+        self.barrier("git");
         for (key, value) in env {
             command.env(key, value);
         }
@@ -1063,7 +1240,7 @@ impl WorkspaceGit {
             return Ok(json!({ "head": null, "aheadOfBase": 0 }));
         };
         let range = format!("{target}..{head}");
-        let count = bounded_branch_git(git_command(&repo.dir), &["rev-list", "--count", &range], deadline)?;
+        let count = bounded_branch_git(Self::repo_command(&repo, true), &["rev-list", "--count", &range], deadline)?;
         let ahead = count.trim().parse::<u64>().map_err(RpcError::internal)?;
         Ok(json!({ "head": head, "aheadOfBase": ahead }))
     }
@@ -1160,7 +1337,7 @@ impl WorkspaceGit {
         if from.is_some_and(|from| !valid_object_id(from) && !from.strip_suffix("..HEAD").is_some_and(valid_ref_name)) {
             return Err(RpcError::invalid("from is a commit id or a base branch followed by ..HEAD"));
         }
-        if crate::git::head_commit(&repo.dir).is_none() && from.is_none() {
+        if self.head_commit(&repo).is_none() && from.is_none() {
             return Ok(json!({ "repo": repo.name, "commits": [] }));
         }
         let mut commits = crate::git::log_commits(&repo.dir, from, limit).map_err(git_error)?;
@@ -1176,7 +1353,7 @@ impl WorkspaceGit {
         Ok(json!({
             "repo": repo.name,
             "branches": branches,
-            "current": crate::git::current_branch(&repo.dir),
+            "current": self.current_branch(&repo),
             "defaultBranch": crate::git::default_branch(&repo.dir),
         }))
     }
@@ -1212,7 +1389,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let paths = Self::path_list(params)?;
         // Before the first commit there is no HEAD to restore from.
-        let mut args = if crate::git::head_commit(&repo.dir).is_some() { vec!["restore", "--staged", "--"] } else { vec!["rm", "--cached", "-r", "-q", "--"] };
+        let mut args = if self.head_commit(&repo).is_some() { vec!["restore", "--staged", "--"] } else { vec!["rm", "--cached", "-r", "-q", "--"] };
         args.extend(paths.iter().map(String::as_str));
         self.git(&repo, &args)?;
         Ok(json!({ "repo": repo.name, "paths": paths }))
@@ -1276,8 +1453,8 @@ impl WorkspaceGit {
             args.extend(paths.iter().map(String::as_str));
         }
         self.git_timed(&repo, &args, LOCAL_TIMEOUT, &env)?;
-        let commit = crate::git::head_commit(&repo.dir);
-        let branch = crate::git::current_branch(&repo.dir);
+        let commit = self.head_commit(&repo);
+        let branch = self.current_branch(&repo);
         Ok(json!({
             "repo": repo.name,
             "commit": commit,
@@ -1331,7 +1508,7 @@ impl WorkspaceGit {
         if index.exists() {
             std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
             // Expand the split index while Git can still find its shared part.
-            let mut command = git_command(&repo.dir);
+            let mut command = Self::repo_command(repo, true);
             command.env("GIT_INDEX_FILE", &staged).args(["update-index", "--no-split-index"]);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
@@ -1352,17 +1529,15 @@ impl WorkspaceGit {
         std::fs::write(private.join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
         let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
             .is_ok_and(|value| value.trim() == "true");
-        snapshot_commit_config(|| git_command(&repo.dir), scratch.path(), object_format, include_worktree)?;
+        snapshot_commit_config(|| Self::repo_command(repo, true), scratch.path(), object_format, include_worktree)?;
+        // Name the work tree in the private repository's own config file (Git
+        // reads core.worktree there without includes), not in GIT_WORK_TREE:
+        // Git exports that to hooks as `.`, and a hook that runs Git from a
+        // subdirectory would take the subdirectory for the work tree.
+        let top = path(&["rev-parse", "--show-toplevel"])?;
+        add_private_config(&repo.dir, &private.join("config"), "core.worktree", &top, "prepare branch commit config")?;
 
-        let add_config = |file: &Path, key: &str, value: &Path| {
-            let mut command = git_command(&repo.dir);
-            command.args(["config", "--file"]).arg(file).args(["--add", key]).arg(value);
-            let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
-            if !result.ok {
-                return Err(failure_error("prepare branch commit config", &result.text(), Failure::Other));
-            }
-            Ok(())
-        };
+        let add_config = |file: &Path, key: &str, value: &Path| add_private_config(&repo.dir, file, key, value, "prepare branch commit config");
         let sparse_config = git_dir.join("info/sparse-checkout");
         if sparse_config.is_file() {
             std::fs::create_dir_all(private.join("info")).map_err(RpcError::internal)?;
@@ -1373,9 +1548,9 @@ impl WorkspaceGit {
         command_config.push(scratch.path().join("config.command"));
 
         let run = |args: &[&str]| {
-            let mut command = git_command(&repo.dir);
-            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR")
-                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", &repo.dir).env("GIT_INDEX_FILE", &staged)
+            let mut command = Self::repo_command(repo, false);
+            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
+                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_INDEX_FILE", &staged)
                 .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
                 .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
                 .env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")
@@ -1433,7 +1608,7 @@ impl WorkspaceGit {
     fn pull(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let output = self.git_timed(&repo, &["pull", "--ff-only", "--no-rebase"], NETWORK_TIMEOUT, &[])?;
-        Ok(json!({ "repo": repo.name, "output": output, "head": crate::git::head_commit(&repo.dir) }))
+        Ok(json!({ "repo": repo.name, "output": output, "head": self.head_commit(&repo) }))
     }
 
     /// The commit `origin` has for `branch`: `Some(None)` when it has no
@@ -1475,14 +1650,14 @@ impl WorkspaceGit {
 
     fn push_ref(&self, repo: &Repo, branch: &str, source: &str) -> Result<Ran, RpcError> {
         let refspec = format!("{source}:refs/heads/{branch}");
-        self.run_git(&repo.dir, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
+        self.run_git(repo, &["push", "--porcelain", "origin", &refspec], NETWORK_TIMEOUT, &[])
     }
 
     fn push_with(&self, params: &Value, push: impl FnOnce(&Repo, &str, &str) -> Result<Ran, RpcError>) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let branch = match optional_ref(params, "branch")? {
             Some(branch) => branch.to_string(),
-            None => crate::git::current_branch(&repo.dir).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch to push"))?,
+            None => self.current_branch(&repo).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch to push"))?,
         };
         let local = self.local_head(&repo, &branch)?;
         if let Some(head) = params.get("head") {
@@ -1582,7 +1757,7 @@ impl WorkspaceGit {
     fn branch_param(&self, repo: &Repo, params: &Value) -> Result<String, RpcError> {
         match optional_ref(params, "branch")? {
             Some(branch) => Ok(branch.to_string()),
-            None => crate::git::current_branch(&repo.dir).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch")),
+            None => self.current_branch(repo).ok_or_else(|| RpcError::invalid("HEAD is detached; name a branch")),
         }
     }
 
@@ -1672,7 +1847,7 @@ impl WorkspaceGit {
         let requested = crate::pr_associations::identity(required_str(params, "url")?)
             .map_err(|_| RpcError::invalid("Expected a pull request URL."))?;
         let branch = required_str(params, "branch")?;
-        let checkout_matches = || crate::git::current_branch(&repo.dir).as_deref() == Some(branch);
+        let checkout_matches = || self.current_branch(&repo).as_deref() == Some(branch);
         if !checkout_matches() {
             return Err(RpcError::invalid("The session's checkout is no longer on the pull request branch."));
         }
@@ -1785,10 +1960,10 @@ impl WorkspaceGit {
     }
 
     fn pr_locator_identity(&self, name: &str, deadline: Instant) -> Option<String> {
-        if Instant::now() >= deadline || !self.verified_machine_repo(name) {
+        if Instant::now() >= deadline {
             return None;
         }
-        let repo = Repo { name: name.to_owned(), dir: self.dir(name) };
+        let repo = self.machine_repo(name)?;
         self.default_pr_repository(&repo, deadline.saturating_duration_since(Instant::now())).ok()
     }
 
@@ -1845,7 +2020,7 @@ impl WorkspaceGit {
     /// match, read with this workspace's `gh`, as a local tab's list is read
     /// with this computer's (`github::search_prs`).
     pub(super) fn mention_prs(&self, dir: &Path, query: &str) -> Result<Vec<crate::github::PullRequest>, RpcError> {
-        let repo = Repo { name: ".".into(), dir: dir.to_path_buf() };
+        let repo = Repo { name: ".".into(), dir: dir.to_path_buf(), bound: None };
         let refused = std::cell::RefCell::new(None);
         let found = crate::github::search_prs_with(dir, query, |_, args| self.gh_for_mention(&repo, args, &refused));
         found.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
@@ -1857,7 +2032,7 @@ impl WorkspaceGit {
         if number == 0 {
             return Err(RpcError::invalid("number is a pull request number"));
         }
-        let repo = Repo { name: ".".into(), dir: dir.to_path_buf() };
+        let repo = Repo { name: ".".into(), dir: dir.to_path_buf(), bound: None };
         let refused = std::cell::RefCell::new(None);
         let text = crate::github::pr_context_with(dir, number, |_, args| self.gh_for_mention(&repo, args, &refused));
         text.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
@@ -1914,7 +2089,7 @@ impl WorkspaceGit {
         };
         let verify_checkout = || {
             verify_identity()?;
-            if session.is_some() && crate::git::current_branch(&repo.dir).as_deref() != Some(&branch) {
+            if session.is_some() && self.current_branch(&repo).as_deref() != Some(&branch) {
                 return Err(RpcError::new("conflict", "The selected branch is no longer checked out in this session. Refresh and try again."));
             }
             Ok(())
@@ -1922,7 +2097,7 @@ impl WorkspaceGit {
         let verify_publish = || {
             verify_checkout()?;
             if let Some(head) = pinned_head {
-                if crate::git::head_commit(&repo.dir).as_deref() != Some(head) {
+                if self.head_commit(&repo).as_deref() != Some(head) {
                     return Err(RpcError::new("conflict", "The branch no longer matches the commit shown in the pull request form. Refresh and try again."));
                 }
             }
@@ -2001,10 +2176,11 @@ impl WorkspaceGit {
         } else { None };
         if let Some(head) = pinned_head {
             let push = |repo: &Repo, branch: &str, head: &str| {
-                // Resolved right before transmission, so a push URL or rewrite
-                // that leaves the verified origin receives nothing at all.
-                self.verify_push_destination(repo, origin.as_deref())?;
-                self.push_ref(repo, branch, head)
+                // Checked against the configuration copy the push itself reads,
+                // so a push URL or rewrite pointing away from the verified origin,
+                // written before or after the check, does not get the push. Other
+                // transport settings are not checked (see push_to_verified_origin).
+                self.push_to_verified_origin(repo, origin.as_deref(), branch, head)
             };
             self.push_branch(&repo, &branch, head, push, verify_publish)?;
             // Confirm the source GitHub reads through origin before relying
@@ -2070,17 +2246,168 @@ impl WorkspaceGit {
 
     /// Every URL `git push origin` would write to, after `pushurl`,
     /// `pushInsteadOf` and `insteadOf`, must be the one verified fetch origin.
-    fn verify_push_destination(&self, repo: &Repo, origin: Option<&str>) -> Result<(), RpcError> {
+    ///
+    /// Git rereads its configuration in every process, so a check in one
+    /// process does not bind a later `git push`. Copy the configuration once
+    /// (system, global, checkout and command scopes, as a guarded commit does)
+    /// into a private Git directory that shares the checkout's objects, resolve
+    /// the push destination from that copy, and push from it. A push URL or URL
+    /// rewrite written to any live configuration file after the copy cannot
+    /// redirect the push; a change before the copy fails the destination check.
+    ///
+    /// The checkout's pre-push hook runs in the checkout itself (`git hook
+    /// run`, fed what `git push` would feed it), not against the private copy,
+    /// so hooks such as Git LFS see the real repository; the private push then
+    /// runs no hook files (an empty `core.hooksPath`, `--no-verify`); hooks
+    /// defined in configuration (`hook.<name>.*`, newer Git) are not turned
+    /// off. A Git without `git hook run --to-stdin` (before 2.40) pushes as
+    /// long as the checkout has no executable pre-push hook file, and is
+    /// refused before anything is sent when it has one.
+    ///
+    /// What this does not bind: only the destination URL is checked. Settings
+    /// the copy carries over unchecked can still carry the bytes elsewhere
+    /// while that URL is origin: `core.sshCommand`, `core.gitProxy`,
+    /// `http.proxy`, `remote.origin.receivepack`, SSH host aliases, inherited
+    /// `GIT_SSH*` variables and `push.recurseSubmodules`. The copy lives in an
+    /// owner-only temporary directory that another process of the same user
+    /// could still rewrite, and hooks and credential helpers (programs the
+    /// configuration names) run as before. A hook runs before the push, so it
+    /// sees the repository as it was then.
+    fn push_to_verified_origin(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<Ran, RpcError> {
         let origin = origin.ok_or_else(|| RpcError::invalid("Choose a GitHub origin repository before creating a pull request."))?;
-        let urls = self.git(repo, &["remote", "get-url", "--push", "--all", "origin"])?;
-        let urls: Vec<_> = urls.lines().filter(|url| !url.is_empty()).collect();
+        let path = |args: &[&str]| self.git(repo, args).map(|out| PathBuf::from(out.strip_suffix('\n').unwrap_or(&out)));
+        let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
+        let shallow = path(&["rev-parse", "--path-format=absolute", "--git-path", "shallow"])?;
+        let object_format = match self.git(repo, &["rev-parse", "--show-object-format"])?.trim() {
+            "sha1" => "sha1",
+            "sha256" => "sha256",
+            _ => return Err(RpcError::internal("Unsupported Git object format")),
+        };
+        let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
+            .is_ok_and(|value| value.trim() == "true");
+
+        let mut scratch = tempfile::Builder::new();
+        scratch.prefix("terminalx-pr-push-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            scratch.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let scratch = scratch.tempdir().map_err(RpcError::internal)?;
+        let private = scratch.path().join("repo");
+        std::fs::create_dir_all(private.join("refs")).map_err(RpcError::internal)?;
+        std::fs::write(private.join("HEAD"), format!("ref: refs/heads/{branch}\n")).map_err(RpcError::internal)?;
+        if shallow.is_file() {
+            std::fs::copy(&shallow, private.join("shallow")).map_err(RpcError::internal)?;
+        }
+        let no_hooks = scratch.path().join("no-hooks");
+        std::fs::create_dir(&no_hooks).map_err(RpcError::internal)?;
+        snapshot_commit_config(|| Self::repo_command(repo, true), scratch.path(), object_format, include_worktree)?;
+
+        let mut command_config = std::ffi::OsString::from("include.path=");
+        command_config.push(scratch.path().join("config.command"));
+        let mut hooks_config = std::ffi::OsString::from("core.hooksPath=");
+        hooks_config.push(&no_hooks);
+        let command = |args: &[&str]| {
+            let mut command = Self::repo_command(repo, false);
+            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
+                .env("GIT_OBJECT_DIRECTORY", &objects)
+                .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
+                .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
+                .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")
+                // No hook file runs against the private copy (reference-transaction
+                // included); pre-push runs in the checkout below.
+                .arg("-c").arg(&command_config).arg("-c").arg(&hooks_config).args(args);
+            command
+        };
+        let urls = run_bounded(command(&["remote", "get-url", "--push", "--all", "origin"]), LOCAL_TIMEOUT).map_err(RpcError::internal)?;
+        if !urls.ok {
+            return Err(failure_error("prepare push", &urls.text(), Failure::Other));
+        }
+        let urls: Vec<_> = urls.stdout.lines().filter(|url| !url.is_empty()).collect();
         if urls != [origin] {
             return Err(RpcError::new(
                 "conflict",
                 "Git would push this branch somewhere other than the verified origin. Check the repository's push URL and URL rewrites.",
             ));
         }
-        Ok(())
+        self.barrier("transmit");
+
+        // What `git push` feeds pre-push: local ref, local object, remote ref,
+        // remote object (zeros for a new branch).
+        let reference = format!("refs/heads/{branch}");
+        let advertised = run_network(command(&["ls-remote", "--", "origin", &reference]), NETWORK_TIMEOUT, Network::Git)?;
+        if !advertised.ok {
+            return Ok(advertised);
+        }
+        let remote = advertised.stdout.lines()
+            .find_map(|line| line.split_once('\t').filter(|(_, name)| *name == reference).map(|(sha, _)| sha.to_owned()))
+            .unwrap_or_else(|| "0".repeat(head.len()));
+        let updates = scratch.path().join("pre-push-updates");
+        std::fs::write(&updates, format!("{head} {head} {reference} {remote}\n")).map_err(RpcError::internal)?;
+        let mut to_stdin = std::ffi::OsString::from("--to-stdin=");
+        to_stdin.push(&updates);
+        let hook = |name: &str| {
+            let mut command = Self::repo_command(repo, false);
+            command.args(["hook", "run", "--ignore-missing"]).arg(&to_stdin).args([name, "--", "origin", origin]);
+            command
+        };
+        // Run pre-push itself; no probe with an invented hook name, which
+        // newer Git refuses as an unknown hook event.
+        let ran = if self.git_without_hook_run() {
+            Ran { ok: false, stdout: String::new(), stderr: "git: 'hook' is not a git command. See 'git --help'.".into(), timed_out: false }
+        } else {
+            run_network(hook("pre-push"), NETWORK_TIMEOUT, Network::Git)?
+        };
+        if ran.timed_out {
+            return Ok(ran);
+        }
+        if !ran.ok {
+            // Git before 2.36 has no `git hook`, and before 2.40 no
+            // `--to-stdin`. Such a Git knows only hook files, so with none
+            // there is nothing to run and the push goes ahead as on main.
+            let unsupported = ran.stderr.contains("'hook' is not a git command") || ran.stderr.contains("unknown option `to-stdin");
+            if !unsupported {
+                let mut declined = ran;
+                declined.stderr.push_str("\nerror: the pre-push hook declined the push");
+                return Ok(declined);
+            }
+            if self.has_pre_push_hook(repo)? {
+                return Err(RpcError::new(
+                    "git_failed",
+                    "This Git cannot run the repository's pre-push hook for a verified push (it needs `git hook run --to-stdin`, Git 2.40 or later). Update Git and try again; nothing was pushed.",
+                ));
+            }
+        }
+
+        let refspec = format!("{head}:{reference}");
+        run_network(command(&["push", "--porcelain", "--no-verify", "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)
+    }
+
+    /// Whether the checkout has a pre-push hook file Git would run: in
+    /// `core.hooksPath` or the default hooks directory, and executable.
+    fn has_pre_push_hook(&self, repo: &Repo) -> Result<bool, RpcError> {
+        let hook = self.git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"])?;
+        let hook = Path::new(hook.strip_suffix('\n').unwrap_or(&hook));
+        let Ok(metadata) = std::fs::metadata(hook) else { return Ok(false) };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        }
+        #[cfg(not(unix))]
+        Ok(metadata.is_file())
+    }
+
+    /// Tests stand in for a Git that predates `git hook run --to-stdin`.
+    #[cfg(test)]
+    fn git_without_hook_run(&self) -> bool {
+        self.git_without_hook_run
+    }
+
+    #[cfg(not(test))]
+    fn git_without_hook_run(&self) -> bool {
+        false
     }
 
     fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {
@@ -2132,7 +2459,7 @@ impl WorkspaceGit {
         }
         let url = crate::pr_associations::identity(required_str(params, "url")?)
             .map_err(|_| RpcError::invalid("Give the pull request's URL."))?;
-        let repo = Repo { name: ".".into(), dir: self.root.clone() };
+        let repo = Repo { name: ".".into(), dir: self.root.clone(), bound: None };
         let common = self.git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let common = Path::new(common.trim()).canonical().map_err(RpcError::internal)?;
         let owned = |entry: &PendingPrCreation| entry.url == url && entry.checkout.git_dir.starts_with(&common);
@@ -2415,10 +2742,10 @@ impl WorkspaceGit {
     }
 
     fn repository_facts(&self, name: &str) -> Value {
-        let repo = Repo { name: name.to_string(), dir: self.dir(name) };
+        let repo = Repo { name: name.to_string(), dir: self.dir(name), bound: None };
         let deadline = Instant::now() + FACTS_TIMEOUT;
         let left = || deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
-        let git = |args: &[&str]| self.run_git(&repo.dir, args, left(), &[]).ok().filter(|ran| ran.ok).map(|ran| ran.stdout);
+        let git = |args: &[&str]| self.run_git(&repo, args, left(), &[]).ok().filter(|ran| ran.ok).map(|ran| ran.stdout);
         let branch = git(&["symbolic-ref", "--short", "-q", "HEAD"]).map(|out| out.trim().to_string()).filter(|out| !out.is_empty());
         let porcelain = git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
         let (dirty, untracked) = match &porcelain {
