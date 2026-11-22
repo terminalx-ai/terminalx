@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, BotList, BotRoleTemplate } from "@/types/bots";
+import type { SessionEntry, TabStatus } from "@/types/session";
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -23,7 +24,7 @@ vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mo
 
 const { bootBots, resetBotsForTests } = await import("@/lib/bots");
 const { resetBotsPageForTests, showHireBot, showBotsTeam } = await import("@/lib/botsPage");
-const { getSessionStore, openAgents } = await import("@/lib/sessions");
+const { getSessionStore, openAgents, upsertSession, patchTab, removeSessions } = await import("@/lib/sessions");
 const { useLeaveBotsWhenOff } = await import("@/lib/botsPage");
 const { conflictOf, resolveKeymap } = await import("@/lib/shortcuts");
 const { BotsView } = await import("./BotsView");
@@ -481,6 +482,110 @@ describe("Bots: the team table (23.02)", () => {
     expect(main().queryByTestId("bots-paused")).toBeNull();
     expect(mocks.api.pause).toHaveBeenCalledWith("a", "app");
     expect(main().getByRole("button", { name: "Resume Atlas" })).toBeTruthy();
+  });
+});
+
+describe("Bots: what a bot is doing, from its sessions (PRO-515)", () => {
+  const atlas = bot("a", "Atlas");
+  const iris = bot("i", "Iris", { roleTemplateId: "ux-designer", roleTitle: "UX designer" });
+  const session = (id: string, title: string, status: TabStatus, extra: Partial<SessionEntry> = {}): SessionEntry => ({
+    id, title, kind: "quick", projectPath: "/bots/a", cwd: "/bots/a", worktreeRemoved: false, archived: false, created: "2026-11-22T10:00:00Z", modified: "2026-11-22T10:00:00Z",
+    tabs: [{ id: `${id}-t`, title: "Claude", harness: "claude", permissionMode: "bypassPermissions", status, created: "2026-11-22T10:00:00Z", modified: "2026-11-22T10:00:00Z" }],
+    ...extra,
+  } as SessionEntry);
+  const seeded: string[] = [];
+  const seed = (...sessions: SessionEntry[]) => act(() => {
+    for (const entry of sessions) {
+      seeded.push(entry.id);
+      upsertSession(entry);
+    }
+  });
+  afterEach(() => {
+    removeSessions(seeded.splice(0));
+  });
+  const row = (id: string) => sidebar().getAllByTestId("bot-row").find((el) => el.dataset.bot === id)!;
+  const sidebarStatus = (id: string) => within(row(id)).getByTestId("bot-row-status");
+  const doingNow = (id: string) => within(main().getAllByTestId("bots-table-row").find((el) => el.dataset.bot === id)!).getByTestId("bot-doing-now");
+
+  it("a bot with a running session says it is working, and on what, in the sidebar and in Doing now; one without stays Quiet", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("home-a", "Home chat", "in_progress", { bot: { id: "a", home: true } }), session("home-i", "Home chat", "idle", { bot: { id: "i", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Working · Home chat");
+    expect(sidebarStatus("a").dataset.doing).toBe("working");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Home chat");
+    expect(doingNow("a").dataset.doing).toBe("working");
+    expect(sidebar().getByRole("button", { name: /Atlas, CTO, Working · Home chat, runs on This Mac/ })).toBeTruthy();
+    // Iris has a chat, and nothing of hers is in a turn.
+    expect(sidebarStatus("i").textContent).toBe("Quiet");
+    expect(doingNow("i").textContent?.trim()).toBe("Quiet");
+    expect(doingNow("i").dataset.doing).toBe("quiet");
+  });
+
+  it("follows the session as its turn starts and ends, with no reload", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("home-a", "Home chat", "idle", { bot: { id: "a", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Quiet");
+    expect(doingNow("a").textContent?.trim()).toBe("Quiet");
+    act(() => patchTab("home-a", "home-a-t", { status: "in_progress" }));
+    expect(sidebarStatus("a").textContent).toBe("Working · Home chat");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Home chat");
+    act(() => patchTab("home-a", "home-a-t", { status: "completed" }));
+    expect(sidebarStatus("a").textContent).toBe("Quiet");
+    expect(doingNow("a").textContent?.trim()).toBe("Quiet");
+    expect(mocks.api.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a duty's run, a hand-off's chat, a run's lead and its workers as the bot's, and nobody else's sessions", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(
+      // A duty's run of Atlas's, and a run he leads with two workers: sessions his chats started.
+      session("duty", "Stalled sessions and runs", "in_progress", { bot: { id: "a" }, botDuty: { id: "auto-1" } }),
+      session("lead", "Phase 2: restarting blocked runs", "in_progress", { bot: { id: "a" } }),
+      session("w1", "Piece 1", "in_progress", { botStarted: { id: "a" }, runWorker: true }),
+      session("w2", "Piece 2", "in_progress", { botStarted: { id: "a" }, runWorker: true }),
+      // Not a bot's: an ordinary session at work changes no bot's line.
+      session("plain", "Fix the login page", "in_progress"),
+      // Iris's hand-off chat, archived while in a turn as the index last said: not counted.
+      session("gone", "Hand-off #3", "in_progress", { bot: { id: "i" }, archived: true }),
+    );
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Working · Stalled sessions and runs · 2 workers");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Stalled sessions and runs · 2 workers");
+    expect(doingNow("i").textContent?.trim()).toBe("Quiet");
+    // The duty's run ends: the run he leads is what he is on.
+    act(() => patchTab("duty", "duty-t", { status: "completed" }));
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Phase 2: restarting blocked runs · 2 workers");
+    // Only workers left at work.
+    act(() => patchTab("lead", "lead-t", { status: "completed" }));
+    act(() => patchTab("w1", "w1-t", { status: "completed" }));
+    expect(sidebarStatus("a").textContent).toBe("Working · 1 worker");
+    // Iris's hand-off chat, in a turn: hers.
+    seed(session("handoff", "Hand-off #4 from Atlas", "in_progress", { bot: { id: "i" } }));
+    expect(doingNow("i").textContent?.trim()).toBe("Working · Hand-off #4 from Atlas");
+  });
+
+  it("a session stopped on the person says it waits for them, and working wins over waiting", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("ask", "Review #12", "waiting", { bot: { id: "a" } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Waiting for you · Review #12");
+    expect(doingNow("a").dataset.doing).toBe("waiting");
+    seed(session("busy", "Chat with Atlas", "in_progress", { bot: { id: "a" } }));
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Chat with Atlas");
+  });
+
+  it("a paused bot keeps its paused lines whatever its sessions say", async () => {
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    await boot(listOf(2, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }, bot("s", "Sentry")]));
+    seed(session("home-a", "Home chat", "in_progress", { bot: { id: "a", home: true } }), session("home-i", "Home chat", "in_progress", { bot: { id: "i", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Paused · asks to resume");
+    expect(sidebarStatus("i").textContent).toBe("Paused");
+    expect(doingNow("a").textContent?.trim()).toBe("Paused · asks to resume");
+    expect(doingNow("i").textContent?.trim()).toBe("Paused");
+    expect(doingNow("s").textContent?.trim()).toBe("Quiet");
   });
 });
 

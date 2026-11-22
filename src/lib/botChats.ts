@@ -88,6 +88,44 @@ export function botChats(sessions: readonly SessionEntry[], botId: string): BotC
   return { chats: [...home, ...others], startedBy, dutyRuns };
 }
 
+/** What a bot is doing now, read from its sessions (PRO-515). */
+export interface BotDoing {
+  /** `working`: a session of its is in a turn. `waiting`: none is, and one waits on the person. */
+  state: "working" | "waiting";
+  /** The session it is on, by its title: a duty's run first, then a chat. Absent when only its runs' workers are at work. */
+  what: string | null;
+  /** Its runs' workers in that state. */
+  workers: number;
+}
+
+type DoingSession = Pick<SessionEntry, "bot" | "botStarted" | "botDuty" | "runWorker" | "archived" | "title" | "tabs">;
+
+/**
+ * What bot `botId` is doing, from the sessions as the app already keeps them: its chats (the home chat, a hand-off's,
+ * a run's lead), its duties' runs and the sessions those started, a run's workers among them. A tab `in_progress` is
+ * a turn; one `waiting` is a turn stopped on the person. Nothing here is kept: it is read again whenever the sessions
+ * change, so the line follows a turn as it starts and ends. `null` when nothing of the bot's is in a turn.
+ */
+export function botDoing(sessions: readonly DoingSession[], botId: string): BotDoing | null {
+  const own = sessions.filter((session) => !session.archived && actingBotOf(session) === botId);
+  for (const state of ["working", "waiting"] as const) {
+    const status = state === "working" ? "in_progress" : "waiting";
+    const busy = own.filter((session) => session.tabs.some((tab) => tab.status === status));
+    if (!busy.length) continue;
+    const workers = busy.filter((session) => session.runWorker === true);
+    const others = busy.filter((session) => session.runWorker !== true);
+    const on = others.find(isDutyRun) ?? others[0] ?? null;
+    return { state, what: on ? on.title.trim() || null : null, workers: workers.length };
+  }
+  return null;
+}
+
+/** A bot's doing in a line: "Working · Home chat · 2 workers", "Working · 1 worker", "Waiting for you · Review #12". */
+export function doingLine(doing: BotDoing): string {
+  const workers = doing.workers === 0 ? null : doing.workers === 1 ? "1 worker" : `${doing.workers} workers`;
+  return [doing.state === "working" ? "Working" : "Waiting for you", doing.what, workers].filter(Boolean).join(" · ");
+}
+
 /** The bot's home chat, made again by the app when it is missing. */
 export function openHomeChat(botId: string): Promise<SessionEntry> {
   return botsApi.homeChat(botId);

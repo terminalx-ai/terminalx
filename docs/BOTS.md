@@ -43,6 +43,21 @@ extend automations or orchestration runs instead.
 A deleted bot is not removed. Its home folder moves to `trash/bots/<id>/`,
 with its record next to it as `bot.json`.
 
+## What a bot is doing (PRO-515)
+
+A bot's status line (its sidebar row, and **Doing now** on the Bots page) is
+read from its sessions, as the app already keeps them, and from nothing else:
+`botDoing` in `src/lib/botChats.ts`. The bot's sessions are its chats (the
+home chat, a hand-off's, a run's lead), its duties' runs, and the sessions
+those started, a run's workers among them (`actingBotOf`). A tab
+`in_progress` is a turn: "Working · <the duty's run, else the chat> · N
+workers". With none, a tab `waiting` says "Waiting for you · …". "Quiet" is
+only a bot with no session in a turn. A paused bot keeps its paused lines.
+There is no field on the bot's record for this and no second tracker: the
+line changes when `session_updated` changes the session. The phone's
+`bots.list` says the same from the runtime's side (`pause::running_now`, the
+turns a pause would stop).
+
 ## Role and memory (PRO-470)
 
 - **Places.** A note is kept with the bot (`bot`, it goes everywhere the bot
@@ -1038,7 +1053,8 @@ phone's own calls, never a second set of bot rules.
   only then, so with Bots off nothing on the phone changes.
 - **The calls** (`src-tauri/src/phone/rpc.rs`, wire names `bots.*`): `list`
   (every bot, Needs you across them, and each bot's current work and next
-  duty run), `home` and `items` (one bot's record, list, chats, duties and
+  duty run; the current work is its newest item in progress, and with none,
+  what its sessions in a turn are on, PRO-515), `home` and `items` (one bot's record, list, chats, duties and
   role, read only: reading never makes a chat), and `answer`, `pause`,
   `resume`, `pauseAll`. The window passes them to the runtime's paired-phone
   call (`local_runtime/mobile.rs`, operation `bots`), which admits the phone

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot whose session is running no longer reads
+  "Quiet". Its sidebar row and the Bots page's **Doing now** say
+  "Working · <the chat or duty it is on>", with its runs' workers counted
+  ("· 2 workers"), or "Waiting for you · …" when a session of its is stopped
+  on you, and go back to "Quiet" when the turn ends, with no reload. Both
+  were a fixed "Quiet" for every bot that was not paused. On the phone's Bots
+  tab a bot with a running session and no work item in progress was shown as
+  quiet too; it now says what the session is on (PRO-515).
+
 ## 0.2.38
 
 - Bots (experimental): a chat-app link code is shown only to the window that

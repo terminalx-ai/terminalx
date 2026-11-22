@@ -61,21 +61,31 @@ pub fn call(manager: &SessionManager, operation: &str, params: &Value) -> Result
 }
 
 /// The Bots tab: every bot, what needs the owner across them, and a line on what each is doing.
+///
+/// `working` is its most recently changed item in progress; with none, what its
+/// sessions in a turn are on (PRO-515: a bot whose chat, duty or worker runs
+/// is never sent as doing nothing). Sessions that cannot be read leave the item's line alone.
 fn list(manager: &SessionManager) -> Result<Value> {
     let listing = super::listing()?;
     let needs_you = items::needs_you(manager)?;
     let duties = next_checks();
+    let sessions = index::load().unwrap_or_else(|error| {
+        log::warn!("read the sessions to say what each bot is doing: {error:#}");
+        Vec::new()
+    });
     let team: Vec<Value> = listing
         .bots
         .iter()
         .map(|bot| {
-            let working = items::read(&bot.id).ok().and_then(|list| {
-                list.items.into_iter().filter(|item| item.state == ItemState::InProgress).max_by(|a, b| a.modified.cmp(&b.modified))
-            });
+            let working = items::read(&bot.id)
+                .ok()
+                .and_then(|list| list.items.into_iter().filter(|item| item.state == ItemState::InProgress).max_by(|a, b| a.modified.cmp(&b.modified)))
+                .map(|item| (item.title, item.modified))
+                .or_else(|| super::pause::running_now(manager, bot, &sessions));
             json!({
                 "botId": bot.id,
-                "working": working.as_ref().map(|item| item.title.clone()),
-                "workingSince": working.as_ref().map(|item| item.modified.clone()),
+                "working": working.as_ref().map(|(what, _)| what.clone()),
+                "workingSince": working.as_ref().map(|(_, since)| since.clone()),
                 "nextCheck": duties.get(&bot.id),
             })
         })
