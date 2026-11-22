@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { appendFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HeldQueue, AgentEvent } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
@@ -123,60 +124,151 @@ describe("sending a message (#727)", () => {
   });
 
   // The report's tab held about 490 events; this one holds several thousand.
-  it("draws a sent message within 100 ms in a tab of several thousand events", async () => {
-    const turns = 320;
-    saved = syntheticLog(turns, false).map((event) => ({ ...event, sessionId: session.id, tabId: session.tabs[0].id }));
-    nextSeq = saved.length;
-    expect(saved.length).toBeGreaterThan(4000);
-    runtime(true);
-    render(<Tab />);
-    await waitFor(() => expect(screen.getAllByTestId("reader-message").length).toBeGreaterThan(0));
-    // Only the turns in and near the view are drawn, however long the conversation.
-    expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
+  it("draws a sent message in a tab of several thousand events within its budget of reference work", async () => {
+    const cost = await sendCost();
+    expect(cost.sending, `drawn as sending: ${cost.said}`).toBeLessThan(SENDING_BUDGET);
+    expect(cost.sent, `drawn as sent: ${cost.said}`).toBeLessThan(SENT_BUDGET);
+  }, CPU_WAIT_MS);
 
-    // The work the window does is timed by its CPU time: on a machine with
-    // other work queued (a load of 50 is usual where this was written) a wall
-    // clock times the scheduler as much as the chat. The wall clock is held to
-    // a looser bound, which still catches a frame or a timer waited for.
-    const cpuMs = (since: NodeJS.CpuUsage) => {
-      const used = process.cpuUsage(since);
-      return (used.user + used.system) / 1000;
-    };
-    const atOnce = { cpu: [] as number[], wall: [] as number[] };
-    const asSent = { cpu: [] as number[], wall: [] as number[] };
-    for (let send = 1; send <= 5; send++) {
-      const text = `Follow-up ${send}`;
-      fireEvent.change(field(), { target: { value: text } });
-      let started = performance.now();
-      let cpu = process.cpuUsage();
+  // PRO-334: the budgets are worth keeping only while they still catch a send
+  // that has become twice the work. This one is made so on purpose.
+  it("is over that budget once a send is twice the work", async () => {
+    const cost = await sendCost({ times: 2 });
+    expect(cost.sending, `drawn as sending, twice the work: ${cost.said}`).toBeGreaterThan(SENDING_BUDGET);
+    expect(cost.sent, `drawn as sent, twice the work: ${cost.said}`).toBeGreaterThan(SENT_BUDGET);
+  }, CPU_WAIT_MS);
+});
+
+// What a send may cost in a tab of several thousand events (#727), in units
+// of `ReferenceWork` timed beside it. A time in milliseconds held on one
+// machine and not on the next: about 30 ms where the test was written was 100
+// to 119 ms on hosted runners, over a 100 ms limit with nothing changed
+// (PRO-334). A send against a reference timed beside it is a figure that
+// goes with neither the machine nor its load (see `sendCost`).
+//
+// A send costs about 1.2 units to draw as sending and 2.3 to draw as sent
+// (1.12 to 1.33 and 1.98 to 2.53 over twelve runs at a load of 130 to 200).
+// Each budget is that times the square root of two, so the figure can stray
+// by 40% either way before either test above is wrong about it: a send that
+// has become twice the work is over, and today's is under. When a change is
+// meant to make sending dearer or cheaper, measure again (SEND_COST_LOG) and
+// set these from what it costs then.
+const SENDING_BUDGET = 1.7;
+const SENT_BUDGET = 3.25;
+
+// The first sends are not timed: V8 is still compiling the code a send runs,
+// and a send costs three times as much until it has (7 units, then 2).
+const SENDS_TO_WARM_UP = 10;
+const SENDS_TIMED = 15;
+// How long a run may wait for the processor before it is given up on. The
+// cost is CPU time, so this is not part of what is checked: at a load of 200
+// the twenty-five sends took more than five seconds of the clock.
+const CPU_WAIT_MS = 120_000;
+
+/**
+ * The work a send's cost is measured in: what a send is made of (React
+ * drawing rows again, jsdom changing the page, a query over it) at a fixed
+ * size that nothing in the app changes.
+ */
+function ReferenceWork({ pass }: { pass: number }) {
+  return (
+    <ul>
+      {Array.from({ length: 400 }, (_, row) => (
+        <li key={row} data-testid="reference-row" className={(row + pass) % 2 ? "odd" : "even"}><span>{row}</span><b>{row + pass}</b></li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The CPU time this thread has used, in milliseconds. A wall clock times the
+ * scheduler as much as the chat on a machine with other work queued, and the
+ * process's CPU time adds what V8 compiles and collects on its other threads
+ * whenever it chooses to.
+ */
+function threadMs() {
+  const used = process.threadCpuUsage();
+  return (used.user + used.system) / 1000;
+}
+
+/**
+ * What a send costs the window in a tab of several thousand events: the work
+ * to draw it as sending once Enter is pressed, and the work to draw it as sent
+ * once the runtime has answered. Each is given in units of the reference work
+ * timed just before and just after it, as the median over `SENDS_TIMED` sends,
+ * so the speed of the machine, and of the moment, is in both halves of the
+ * figure and not in the figure.
+ *
+ * Nothing here waits: a send that needed a frame or a timer before it was
+ * drawn would not be on the page when it is looked for.
+ *
+ * `times` makes a send that many times the work, by keeping the thread busy
+ * for as long again as each step took before the step is called done.
+ */
+async function sendCost({ times = 1 }: { times?: number } = {}) {
+  saved = syntheticLog(320, false).map((event) => ({ ...event, sessionId: session.id, tabId: session.tabs[0].id }));
+  nextSeq = saved.length;
+  expect(saved.length).toBeGreaterThan(4000);
+  runtime(true);
+  render(<Tab />);
+  await waitFor(() => expect(screen.getAllByTestId("reader-message").length).toBeGreaterThan(0));
+  // Only the turns in and near the view are drawn, however long the conversation.
+  expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
+
+  // On a page of its own, so nothing a send looks for has to pass over it.
+  const page = document.createElement("div");
+  const reference = render(<ReferenceWork pass={0} />, { container: page });
+  let pass = 0;
+  const referenceMs = () => {
+    const from = threadMs();
+    reference.rerender(<ReferenceWork pass={++pass} />);
+    expect(page.querySelectorAll('[data-testid="reference-row"]')).toHaveLength(400);
+    return threadMs() - from;
+  };
+  const stepMs = async (step: () => unknown) => {
+    const from = threadMs();
+    await step();
+    const until = threadMs() + (threadMs() - from) * (times - 1);
+    while (threadMs() < until);
+    return threadMs() - from;
+  };
+
+  const sending: number[] = [];
+  const sent: number[] = [];
+  const ms = { reference: [] as number[], sending: [] as number[], sent: [] as number[] };
+  let before = referenceMs();
+  for (let send = 1; send <= SENDS_TO_WARM_UP + SENDS_TIMED; send++) {
+    const text = `Follow-up ${send}`;
+    fireEvent.change(field(), { target: { value: text } });
+    const sendingMs = await stepMs(() => {
       fireEvent.keyDown(field(), { key: "Enter" });
       expect(sendingText()).toContain(text);
-      atOnce.cpu.push(cpuMs(cpu));
-      atOnce.wall.push(performance.now() - started);
-      started = performance.now();
-      cpu = process.cpuUsage();
+    });
+    const sentMs = await stepMs(async () => {
       await act(async () => reply!.resolve());
-      await waitFor(() => {
-        expect(sendingText()).toBeNull();
-        expect(sentText(text)).toBe(true);
-      }, { interval: 1 });
-      asSent.cpu.push(cpuMs(cpu));
-      asSent.wall.push(performance.now() - started);
-    }
-    // The median of five: the first send also pays for compiling the code it runs.
-    const median = (times: number[]) => [...times].sort((a, b) => a - b)[Math.floor(times.length / 2)];
-    const said = (times: { cpu: number[]; wall: number[] }) => `cpu ${times.cpu.map(Math.round).join(", ")} ms; wall ${times.wall.map(Math.round).join(", ")} ms`;
-    // Hosted CI runners are slower per core: medians of 108-114 ms CPU were
-    // measured there for the same work. The regression this guards (#727) cost
-    // 3-4 s, so three times the bound on CI still catches it many times over.
-    const slack = process.env.CI ? 3 : 1;
-    expect(median(atOnce.cpu), `drawn as sending: ${said(atOnce)}`).toBeLessThan(100 * slack);
-    expect(median(asSent.cpu), `drawn as sent: ${said(asSent)}`).toBeLessThan(100 * slack);
-    expect(median(atOnce.wall), `drawn as sending: ${said(atOnce)}`).toBeLessThan(400 * slack);
-    expect(median(asSent.wall), `drawn as sent: ${said(asSent)}`).toBeLessThan(400 * slack);
-    expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
-  });
-});
+      expect(sendingText()).toBeNull();
+      expect(sentText(text)).toBe(true);
+    });
+    const after = referenceMs();
+    const unit = (before + after) / 2;
+    before = after;
+    if (send <= SENDS_TO_WARM_UP) continue;
+    sending.push(sendingMs / unit);
+    sent.push(sentMs / unit);
+    ms.reference.push(unit);
+    ms.sending.push(sendingMs);
+    ms.sent.push(sentMs);
+  }
+  expect(document.querySelectorAll("[data-turn]").length).toBeLessThan(20);
+
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  const cost = { sending: median(sending), sent: median(sent) };
+  const said = `${cost.sending.toFixed(2)} units as sending, ${cost.sent.toFixed(2)} as sent`
+    + ` (medians of ${median(ms.sending).toFixed(1)} and ${median(ms.sent).toFixed(1)} ms against ${median(ms.reference).toFixed(1)} ms of reference work)`;
+  // A passing run prints nothing, so the figures are kept where asked for: this is what the budgets are set from.
+  if (process.env.SEND_COST_LOG) appendFileSync(process.env.SEND_COST_LOG, `${JSON.stringify({ times, ...cost, ms: { reference: median(ms.reference), sending: median(ms.sending), sent: median(ms.sent) } })}\n`);
+  return { ...cost, said };
+}
 
 // PRO-254: exercise the real composer, route, backend command and queue tray.
 describe("held follow-ups", () => {
