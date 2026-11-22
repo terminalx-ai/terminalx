@@ -17,14 +17,23 @@ const mocks = vi.hoisted(() => ({
   spentToday: vi.fn(async () => ({ usd: 3.5, day: "2026-11-20" })),
 }));
 
-vi.mock("@/lib/bots", () => ({ useBotStore: () => mocks.bots, pauseBot: mocks.pauseBot, resumeBot: mocks.resumeBot }));
-vi.mock("@/lib/sessions", () => ({
+// A chat's row has the sidebar's session menu (PRO-521), so the sidebar's modules load here too: each of these keeps
+// the rest of its module and replaces only what this view reads.
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined), convertFileSrc: (path: string) => path, isTauri: () => false }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@/lib/bots", async (original) => ({ ...(await original<typeof import("@/lib/bots")>()), useBotStore: () => mocks.bots, pauseBot: mocks.pauseBot, resumeBot: mocks.resumeBot }));
+vi.mock("@/lib/sessions", async (original) => ({
+  ...(await original<typeof import("@/lib/sessions")>()),
   useSessionStore: () => mocks.sessions,
   selectSession: mocks.selectSession,
   upsertSession: mocks.upsertSession,
   conversationTitle: (session: SessionEntry) => session.title,
 }));
-vi.mock("@/lib/api", () => ({ botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume, spentToday: mocks.spentToday }, errorMessage: (error: unknown) => String(error) }));
+vi.mock("@/lib/api", async (original) => ({
+  ...(await original<typeof import("@/lib/api")>()),
+  botsApi: { homeChat: mocks.homeChat, newChat: mocks.newChat, dismissResume: mocks.dismissResume, spentToday: mocks.spentToday },
+  errorMessage: (error: unknown) => String(error),
+}));
 vi.mock("@/components/session/SessionView", () => ({ SessionView: ({ session }: { session: SessionEntry }) => <div data-testid="session-view">{session.id}</div> }));
 vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: ({ bot }: { bot: Bot }) => <div data-testid="bot-duties">{bot.name}'s duties</div> }));
 vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));

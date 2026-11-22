@@ -1689,6 +1689,59 @@ fn status_lines(manager: &SessionManager, handoff: &Handoff, line: &str) {
     }
 }
 
+// ---------------------------------------------------------------- closing a chat
+
+/// After a session was deleted (PRO-521; a bot's chat is deleted like any other session): an open hand-off whose
+/// work chat it was fails, as its work went with the chat, and the bot that handed it is told, so it never waits on
+/// an answer that cannot come. The receiving bot's item stays on its list as it is. Nothing else needs doing here:
+/// a message or an answer that named the chat goes to its bot's home chat instead ([`target`]), which is brought
+/// back or made again when it is the one that went, and an archived chat only leaves the list.
+pub fn chat_deleted(manager: &SessionManager, entry: &SessionEntry) {
+    let Some(bot) = chat::acting_bot(entry) else { return };
+    let open_here = |handoff: &Handoff| handoff.to == bot && handoff.to_session.as_deref() == Some(entry.id.as_str()) && !handoff.state.closed();
+    if !read().is_ok_and(|store| store.handoffs.iter().any(open_here)) {
+        return;
+    }
+    let sink = manager.sink();
+    let failed = change(Some(sink.as_ref()), usize::MAX, |store| {
+        let now = index::now();
+        let mut failed = Vec::new();
+        for handoff in store.handoffs.iter_mut().filter(|handoff| open_here(handoff)) {
+            handoff.state = HandoffState::Failed;
+            handoff.answer = Some(Reply { at: now.clone(), text: "Its chat was deleted before it answered.".into(), failed: true, by: "terminalx".into(), unknown: BTreeMap::new() });
+            handoff.closed = Some(now.clone());
+            handoff.modified = now.clone();
+            failed.push(handoff.clone());
+        }
+        for handoff in &failed {
+            // What still waited to go into the deleted chat about it goes nowhere now: its sender hears it failed.
+            store.messages.retain(|message| !(message.pending && message.handoff == Some(handoff.number) && message.to == handoff.to));
+            if handoff.by != OWNER {
+                let to = crate::store::bots::get(&handoff.to).ok().flatten().map(|bot| bot.name).unwrap_or_else(|| "the other bot".into());
+                let text = format!(
+                    "{to}'s chat for your hand-off {} (\"{}\") was deleted in the TerminalX window before it answered, so it failed and its work there is gone. Decide what to do next, or ask your owner.",
+                    handoff.number, handoff.title
+                );
+                store.messages.push(new_message("terminalx", &handoff.from, "failed", Some(handoff.number), text, "TerminalX".into(), handoff.from_session.clone()));
+            }
+        }
+        Ok(failed)
+    });
+    let failed = match failed {
+        Ok(failed) => failed,
+        Err(error) => {
+            log::warn!("fail the hand-offs worked on in deleted chat {}: {error:#}", entry.id);
+            return;
+        }
+    };
+    let told: BTreeSet<&str> = failed.iter().filter(|handoff| handoff.by != OWNER).map(|handoff| handoff.from.as_str()).collect();
+    for from in told {
+        deliver(manager, from);
+    }
+    // Room is made for what waited for the bot whose chat went.
+    closed_now(manager, &failed);
+}
+
 // ---------------------------------------------------------------- deleting a bot
 
 /// Before bot `id` is deleted: the work other bots do on hand-offs it gave them stops.
