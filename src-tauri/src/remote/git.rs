@@ -89,21 +89,30 @@ struct Repo {
 }
 
 /// The verified checkout: its top-level directory, held open, and the Git
-/// directory discovered from it. Commands name both explicitly, so neither
-/// `.git` discovery nor `core.worktree` is consulted again, and on Unix they
-/// start in the opened directory itself, so replacing the checkout at its path
-/// does not move them. A checkout moved away mid-call keeps receiving that
-/// call's commands; the next call verifies whatever the path names then.
+/// directory discovered from it.
 ///
-/// Bound: every command through `run_git`/`repo_command` (all of this file's
-/// mutations, fetch/pull/push, the guarded commit and PR push snapshots, and
-/// reads made through `self.git`). Not bound yet: reads made through
-/// `crate::git`, `crate::git_media`, `crate::landed`, `crate::pr_associations`
-/// and the branch comparison helpers, which take `repo.dir` and rediscover
-/// the repository, and `gh`, which runs in `repo.dir`. A Git directory outside
-/// the checkout (a linked worktree's admin directory) is named by its
-/// verified absolute path, not held open, and off Unix the checkout is
-/// named by path only.
+/// On Unix every bound command starts in the opened directory itself (never
+/// chdir to the path first), so Git discovers that checkout's own `.git` and
+/// replacing the checkout at its path does not move the command. A checkout
+/// moved away mid-call keeps receiving that call's commands; one deleted
+/// mid-call makes them fail. The next call verifies whatever the path names.
+///
+/// Commands that run no hooks (`HOOKLESS`) also name the Git directory and
+/// work tree explicitly, so a `core.worktree` written after verification is
+/// not consulted. Commands that can run hooks (checkout, pull, fetch, push,
+/// update-ref, branch, and the guarded commit) do not: Git exports GIT_DIR and
+/// GIT_WORK_TREE to hooks, and a hook that runs Git from a subdirectory then
+/// sees the wrong repository. For those, a `core.worktree` change between
+/// verification and the command is still read (the PR push itself names its
+/// work tree in its private configuration instead, see
+/// `push_to_verified_origin`).
+///
+/// Not bound yet: reads made through `crate::git`, `crate::git_media`,
+/// `crate::landed`, `crate::pr_associations` and the branch comparison
+/// helpers, which take `repo.dir` and rediscover the repository, and `gh`,
+/// which runs in `repo.dir`. A Git directory outside the checkout (a linked
+/// worktree's admin directory) is named by its verified absolute path, not
+/// held open, and off Unix the checkout is named by path only.
 struct BoundCheckout {
     #[cfg(unix)]
     top: std::fs::File,
@@ -112,6 +121,13 @@ struct BoundCheckout {
     /// Relative to the top-level directory when inside it (Unix).
     git_dir: PathBuf,
 }
+
+/// Git subcommands that run no hooks, so they may name their Git directory and
+/// work tree in the environment (see BoundCheckout).
+const HOOKLESS: &[&str] = &[
+    "add", "cat-file", "config", "diff", "for-each-ref", "log", "ls-files", "ls-remote", "remote", "restore",
+    "rev-list", "rev-parse", "rm", "show", "status", "symbolic-ref", "update-index",
+];
 
 /// Start `command` in the opened `directory`, whatever its path names now.
 #[cfg(unix)]
@@ -629,9 +645,15 @@ fn run_network(command: Command, timeout: Duration, kind: Network) -> Result<Ran
 }
 
 pub(super) fn git_command(dir: &Path) -> Command {
+    let mut command = git_command_anywhere();
+    command.current_dir(dir);
+    command
+}
+
+/// `git_command` without a start directory, for a caller that sets its own.
+fn git_command_anywhere() -> Command {
     let mut command = Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")));
     command
-        .current_dir(dir)
         .env("PATH", crate::binpath::login_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         // A read-only diff/status call must not demand-fetch promised objects.
@@ -943,13 +965,19 @@ impl WorkspaceGit {
         Some(Repo { name: name.to_owned(), dir, bound: Some(BoundCheckout { top, git_dir }) })
     }
 
-    /// A Git command for `repo`, bound to its verified checkout if it has one.
-    fn repo_command(repo: &Repo) -> Command {
-        let mut command = git_command(&repo.dir);
-        if let Some(bound) = &repo.bound {
+    /// A Git command for `repo`, bound to its verified checkout if it has one
+    /// (see BoundCheckout). `pin` names the Git directory and work tree too:
+    /// only for commands that run no hooks.
+    fn repo_command(repo: &Repo, pin: bool) -> Command {
+        let Some(bound) = &repo.bound else { return git_command(&repo.dir) };
+        #[cfg(unix)]
+        let mut command = git_command_anywhere();
+        #[cfg(unix)]
+        run_in_directory(&mut command, &bound.top);
+        #[cfg(not(unix))]
+        let mut command = git_command(&bound.top);
+        if pin {
             command.env("GIT_DIR", &bound.git_dir).env("GIT_WORK_TREE", Self::work_tree(repo)).env_remove("GIT_COMMON_DIR");
-            #[cfg(unix)]
-            run_in_directory(&mut command, &bound.top);
         }
         command
     }
@@ -1055,7 +1083,7 @@ impl WorkspaceGit {
     }
 
     fn run_git(&self, repo: &Repo, args: &[&str], timeout: Duration, env: &[(&str, &str)]) -> Result<Ran, RpcError> {
-        let mut command = Self::repo_command(repo);
+        let mut command = Self::repo_command(repo, args.first().is_some_and(|first| HOOKLESS.contains(first)));
         command.args(args);
         self.barrier("git");
         for (key, value) in env {
@@ -1196,7 +1224,7 @@ impl WorkspaceGit {
             return Ok(json!({ "head": null, "aheadOfBase": 0 }));
         };
         let range = format!("{target}..{head}");
-        let count = bounded_branch_git(Self::repo_command(&repo), &["rev-list", "--count", &range], deadline)?;
+        let count = bounded_branch_git(Self::repo_command(&repo, true), &["rev-list", "--count", &range], deadline)?;
         let ahead = count.trim().parse::<u64>().map_err(RpcError::internal)?;
         Ok(json!({ "head": head, "aheadOfBase": ahead }))
     }
@@ -1464,7 +1492,7 @@ impl WorkspaceGit {
         if index.exists() {
             std::fs::copy(&index, &staged).map_err(RpcError::internal)?;
             // Expand the split index while Git can still find its shared part.
-            let mut command = Self::repo_command(repo);
+            let mut command = Self::repo_command(repo, true);
             command.env("GIT_INDEX_FILE", &staged).args(["update-index", "--no-split-index"]);
             let result = run_bounded(command, LOCAL_TIMEOUT).map_err(RpcError::internal)?;
             if !result.ok {
@@ -1485,7 +1513,7 @@ impl WorkspaceGit {
         std::fs::write(private.join("HEAD"), format!("ref: {reference}\n")).map_err(RpcError::internal)?;
         let include_worktree = self.git(repo, &["config", "--local", "--no-includes", "--bool", "--get", "extensions.worktreeConfig"])
             .is_ok_and(|value| value.trim() == "true");
-        snapshot_commit_config(|| Self::repo_command(repo), scratch.path(), object_format, include_worktree)?;
+        snapshot_commit_config(|| Self::repo_command(repo, true), scratch.path(), object_format, include_worktree)?;
 
         let add_config = |file: &Path, key: &str, value: &Path| add_private_config(&repo.dir, file, key, value, "prepare branch commit config");
         let sparse_config = git_dir.join("info/sparse-checkout");
@@ -1498,7 +1526,7 @@ impl WorkspaceGit {
         command_config.push(scratch.path().join("config.command"));
 
         let run = |args: &[&str]| {
-            let mut command = Self::repo_command(repo);
+            let mut command = Self::repo_command(repo, false);
             command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR")
                 .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", Self::work_tree(repo)).env("GIT_INDEX_FILE", &staged)
                 .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
@@ -2214,6 +2242,7 @@ impl WorkspaceGit {
         let objects = path(&["rev-parse", "--path-format=absolute", "--git-path", "objects"])?;
         let index = path(&["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
         let shallow = path(&["rev-parse", "--path-format=absolute", "--git-path", "shallow"])?;
+        let top = path(&["rev-parse", "--show-toplevel"])?;
         let hooks_args = ["rev-parse", "--path-format=absolute", "--git-path", "hooks"];
         let hooks = path(&hooks_args)?;
         let object_format = match self.git(repo, &["rev-parse", "--show-object-format"])?.trim() {
@@ -2241,14 +2270,19 @@ impl WorkspaceGit {
         if shallow.is_file() {
             std::fs::copy(&shallow, private.join("shallow")).map_err(RpcError::internal)?;
         }
-        snapshot_commit_config(|| Self::repo_command(repo), scratch.path(), object_format, include_worktree)?;
+        snapshot_commit_config(|| Self::repo_command(repo, true), scratch.path(), object_format, include_worktree)?;
+        // The work tree is named in the private repository's own config file,
+        // which Git reads without includes, not in GIT_WORK_TREE: Git would
+        // export that to the pre-push hook, and a hook that runs Git from a
+        // subdirectory would then see the wrong top level.
+        add_private_config(&repo.dir, &private.join("config"), "core.worktree", &top, "prepare push config")?;
 
         let mut command_config = std::ffi::OsString::from("include.path=");
         command_config.push(scratch.path().join("config.command"));
         let command = |args: &[&str]| {
-            let mut command = Self::repo_command(repo);
-            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR")
-                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_WORK_TREE", Self::work_tree(repo)).env("GIT_INDEX_FILE", &index)
+            let mut command = Self::repo_command(repo, false);
+            command.env("GIT_DIR", &private).env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
+                .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_INDEX_FILE", &index)
                 .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
                 .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
                 .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")

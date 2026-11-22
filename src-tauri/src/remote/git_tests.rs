@@ -1446,7 +1446,8 @@ fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_ch
         let (origin_url, separate_url) = (origin.to_str().unwrap().to_owned(), separate.to_str().unwrap().to_owned());
         // The checkout's pre-push hook still runs, told the verified origin.
         let hook = f.root.join(".git/hooks/pre-push");
-        std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\n").unwrap();
+        std::fs::create_dir(f.root.join("frontend")).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\n(cd frontend && git rev-parse --show-toplevel) >> ../pre-push-ran 2>&1\n").unwrap();
         std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let (checkout, reached) = (f.root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
         let seen = reached.clone();
@@ -1470,7 +1471,7 @@ fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_ch
         let created = outcome.unwrap_or_else(|error| panic!("{redirect}: {} {}", error.code, error.message));
         assert_eq!(created["pr"]["headSha"], head.as_str());
         assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
-        assert_eq!(std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(), format!("origin {}\n", origin.display()));
+        assert_eq!(std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(), format!("origin {}\n{}\n", origin.display(), f.root.display()));
     }
 }
 
@@ -1478,8 +1479,9 @@ fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_ch
 #[test]
 fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
     // After the checkout is verified and before Git runs: core.worktree is
-    // pointed at another folder, or another repository replaces the checkout.
-    for replace in [false, true] {
+    // pointed at another folder, another repository replaces the checkout, or
+    // the checkout is only moved away.
+    for change in ["redirect", "replace", "move"] {
         let _home = crate::store::temp_home();
         let mut f = fixture();
         let remote = f.remote("origin");
@@ -1488,39 +1490,64 @@ fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
         let checkout = f.base.join("topic");
         git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
         std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
-        let outside = if replace { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("note.txt"), "outside\n").unwrap();
         let moved = f.base.join("topic-original");
+        if change == "redirect" {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
 
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
         f.git.barrier = Some(Arc::new(move |point| {
             if point != "git" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
-            if replace {
-                std::fs::rename(&target, &away).unwrap();
-                std::fs::rename(&other, &target).unwrap();
-            } else {
-                git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]);
+            match change {
+                "redirect" => { git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]); }
+                "replace" => {
+                    std::fs::rename(&target, &away).unwrap();
+                    std::fs::rename(&other, &target).unwrap();
+                }
+                _ => std::fs::rename(&target, &away).unwrap(),
             }
         }));
-        if !replace {
-            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
-        }
 
         let staged = f.call("git.stage", json!({ "repo": checkout.to_str().unwrap(), "paths": ["note.txt"] }));
-        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "replace={replace}: the barrier ran");
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change}: the barrier ran");
         f.git.barrier = None;
-        let verified = if replace { &moved } else { &checkout };
-        if !replace {
+        let verified = if change == "redirect" { &checkout } else { &moved };
+        if change == "redirect" {
             git(verified, &["config", "--worktree", "--unset", "core.worktree"]);
         }
-        staged.unwrap_or_else(|error| panic!("replace={replace}: {} {}", error.code, error.message));
-        // The verified checkout staged its own file; the other folder's never entered an index.
-        assert_eq!(git(verified, &["show", ":note.txt"]), "verified", "replace={replace}");
-        if replace {
+        staged.unwrap_or_else(|error| panic!("{change}: {} {}", error.code, error.message));
+        // The verified checkout staged its own file, wherever it now is; the
+        // other folder's never entered an index.
+        assert_eq!(git(verified, &["show", ":note.txt"]), "verified", "{change}");
+        if change == "replace" {
             assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_git_hooks_can_run_git_from_a_subdirectory() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    std::fs::create_dir(f.root.join("frontend")).unwrap();
+    // What a `cd frontend && npx lint-staged` style hook asks Git.
+    for name in ["post-checkout", "pre-push"] {
+        let hook = f.root.join(".git/hooks").join(name);
+        std::fs::write(&hook, format!("#!/bin/sh\n(cd frontend && git rev-parse --show-toplevel) > ../{name}-top 2>&1\n")).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    f.call("git.checkout", json!({ "repo": ".", "branch": "feature/hooks", "create": true })).unwrap();
+    f.call("git.push", json!({ "repo": "." })).unwrap();
+    for name in ["post-checkout", "pre-push"] {
+        assert_eq!(std::fs::read_to_string(f.base.join(format!("{name}-top"))).unwrap(), format!("{}\n", f.root.display()), "{name}");
     }
 }
 
