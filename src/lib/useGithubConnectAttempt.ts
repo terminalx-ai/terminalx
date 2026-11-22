@@ -10,24 +10,27 @@ import {
 } from "@/lib/organizationGithubApp";
 
 export const CONNECT_POLL_INTERVAL_MS = 2000;
-/** The account service's attempt lifetime (the expiry message promises 15 minutes). */
-export const CONNECT_ATTEMPT_LIFETIME_MS = 15 * 60_000;
-/** How long past that lifetime the desktop waits for the server to settle the attempt before it stops checking. */
-export const CONNECT_EXPIRY_GRACE_MS = 60_000;
 /**
- * The desktop's own cutoff, on its monotonic clock from when it started the
- * attempt. The server-issued `expiresAt` is never compared with the desktop's
- * wall clock: the two clocks need not agree, and the wall clock can jump.
+ * How long the desktop keeps checking one attempt: its own UX budget, not the
+ * account service's attempt lifetime, which it neither knows nor assumes
+ * (#1370). Only the server ends an attempt; while it answers "waiting" the
+ * desktop polls, up to this budget on its monotonic clock from when it started
+ * the attempt. Past it the desktop stops without calling the attempt expired
+ * and re-reads the installations, so one that connected on the server shows
+ * up; one that connects even later shows on the next read of the installations.
+ * The server-issued `expiresAt` is never compared with the desktop's wall
+ * clock: the two clocks need not agree, and the wall clock can jump.
  */
-export const CONNECT_LOCAL_TIMEOUT_MS = CONNECT_ATTEMPT_LIFETIME_MS + CONNECT_EXPIRY_GRACE_MS;
+export const CONNECT_POLL_BUDGET_MS = 30 * 60_000;
 
 const monotonicNow = () => performance.now();
 
 /**
  * One GitHub App connect attempt, shared by the organization settings card
  * and the cloud setup wizard (#1285): polls a waiting attempt until the
- * account service settles it, ends it locally once it is past its expiry, and
- * turns every ending into one outcome the caller shows.
+ * account service settles it or the desktop's polling budget runs out
+ * (`CONNECT_POLL_BUDGET_MS`), and turns every ending into one outcome the
+ * caller shows.
  *
  * Completion is only visible through the poll: GitHub redirects the browser to
  * the account service, never to the desktop.
@@ -64,7 +67,7 @@ export function useGithubConnectAttempt({
   const clockRef = useRef(clock);
   clockRef.current = clock;
 
-  const timedOut = () => clockRef.current() - startedAt.current > CONNECT_LOCAL_TIMEOUT_MS;
+  const timedOut = () => clockRef.current() - startedAt.current > CONNECT_POLL_BUDGET_MS;
 
   useEffect(() => {
     if (!attempt || attempt.state !== "waiting") return;
@@ -109,7 +112,7 @@ export function useGithubConnectAttempt({
         if (githubAppErrorCode(failure) === "github_connect_attempt_expired") {
           endExpired();
         } else if (githubAppErrorCode(failure) === "github_app_request_failed") {
-          // A network blip keeps polling, until the desktop's own cutoff.
+          // A network blip keeps polling, until the desktop's polling budget runs out.
           if (timedOut()) stopUnsettled();
           else setAttempt({ ...attempt });
         } else {
