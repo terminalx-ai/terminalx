@@ -2291,7 +2291,9 @@ fed by the machine's one connection (`src/lib/machineSession.ts`).
   for sessions in a subdirectory and checkouts beyond the repository list
   limit. When a saved starting subdirectory is missing or has become a
   file, the runtime can recover the checkout from the session's verified saved root. The panel
-  reports when the checkout is unavailable.
+  reports when the checkout is unavailable. A machine's project-relative
+  paths use `/` as their only separator, so a backslash in a Unix checkout
+  or file name stays literal (`..` between backslashes is still refused).
 - **Live commands.** The machine's agent scope (no organization) sends
   `session.send/steer/stop/decide` with a `clientRequestId` when
   `agent-commands/1` is granted. A decision keeps one id per request across

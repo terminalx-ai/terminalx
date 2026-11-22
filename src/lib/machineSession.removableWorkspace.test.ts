@@ -180,6 +180,26 @@ it("leaves the default Files and Git sources unavailable for an unresolved legac
   expect(request.mock.calls.some(([method]) => method === "git.status")).toBe(false);
 });
 
+it("roots Files at a linked checkout whose name holds a literal backslash, not its slash-separated sibling (#1263)", async () => {
+  const { mini } = machines();
+  const checkout = ".worktrees/team\\first";
+  mini.sessions[0] = { ...mini.sessions[0], cwd: `${projectRoot}/${checkout}`, fileRoot: checkout, fileRepository: checkout };
+  const call = mini.client.call.bind(mini.client);
+  const request = vi.spyOn(mini.client, "call").mockImplementation((method, params) => {
+    if (method === "git.repositories") return Promise.resolve({ repositories: [{ repo: "." }, { repo: checkout }] });
+    if (method === "fs.list") return Promise.resolve({ path: params?.path, entries: [], truncated: false });
+    if (method === "fs.read") return Promise.resolve({ path: params?.path, size: 1, version: "v1", offset: 0, eof: true, etag: "e", binary: false, text: "x" });
+    return call(method, params);
+  });
+  mini.runtime.connect();
+  const { result } = renderHook(() => useMachineSession(firstKey));
+  await waitFor(() => expect(result.current?.fileSource).toBeDefined());
+  await result.current!.fileSource!.listDir("");
+  await result.current!.fileSource!.readText("src/file\\name.ts");
+  expect(request).toHaveBeenCalledWith("fs.list", { projectId: "project", path: checkout });
+  expect(request).toHaveBeenCalledWith("fs.read", { projectId: "project", path: `${checkout}/src/file\\name.ts` });
+});
+
 describe("useMachineSession removable workspace", () => {
   it("binds the machine host, project key, and remote path across session and machine changes", async () => {
     const { mini, studio } = machines();
