@@ -708,6 +708,29 @@ fn words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt() {
     }
 }
 
+/// #1385 review: the resend said more than the lapsed prompt, and an idle
+/// CLI recorded it as the lapsed prompt's words. The record was the new
+/// message's, so the lapsed one is retired by the record as before: the
+/// same words typed into the terminal after are a message of their own.
+#[test]
+fn a_resend_recorded_as_the_lapsed_prompts_words_retires_it() {
+    let rig = Rig::of(CliKind::Claude, "");
+    let lapsed = rig.queue_and_lapse("check the tests");
+
+    assert!(!rig.compose("check the tests please", 0));
+    rig.enter_written();
+    rig.append(&rig.cli().prompt("check the tests"));
+    rig.cli_replies("they pass");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+
+    assert_eq!(rig.told()[4..], [
+        "user: check the tests please", "reply: they pass", "end",
+        "user: check the tests", "reply: still passing", "end",
+    ], "the prompt typed in the terminal is drawn as its own message");
+    assert!(!rig.turn_prompt_seqs().contains(&lapsed), "no turn is the lapsed card's");
+}
+
 /// #1385 on Codex, which delivers prompts queued together as one record:
 /// the same words sent again go in such a batch, and retire the lapsed
 /// prompt they repeat as surely as a record of their own would.

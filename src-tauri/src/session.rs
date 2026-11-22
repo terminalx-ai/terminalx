@@ -582,21 +582,23 @@ impl LapsedEchoes {
         Some(lapsed.echo.echoed())
     }
 
-    /// A record was matched to `sent`, messages the composer sent since,
+    /// `recorded` was matched to `sent`, messages the composer sent since,
     /// each its words and how many images it had: the lapsed prompts that
-    /// say the same are not owed that record, nor any later prompt with those
-    /// words, and are given up. Judged by what was sent, not by the record,
-    /// which may hold it inside more or changed (#1385). Their `seq`s.
+    /// say the same as one of them, or as the record, are not owed that
+    /// record, nor any later prompt with those words, and are given up. What
+    /// was sent counts as well as the record, which may hold it inside more
+    /// or changed (#1385); the record counts as well as what was sent, which
+    /// an idle CLI may have recorded as a lapsed prompt's words. Their `seq`s.
     ///
     /// Each may have reached the CLI after all, and its record be the next
     /// with those words, or another's: words alone cannot tell (#1386). The
     /// card is owed a word that its delivery was not confirmed, never a
     /// record that may be a later prompt's.
-    fn retire(&mut self, sent: &[(&str, usize)], conversation: &Path, now: Instant) -> Vec<u64> {
+    fn retire(&mut self, sent: &[(&str, usize)], recorded: &str, conversation: &Path, now: Instant) -> Vec<u64> {
         self.prune(conversation, now);
         let mut retired = Vec::new();
         self.0.retain(|lapsed| {
-            let said = sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text));
+            let said = lapsed.echo.matches(recorded) || sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text));
             if said {
                 retired.push(lapsed.echo.seq);
             }
@@ -7339,7 +7341,8 @@ impl SessionManager {
                         p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
                     } else {
                         let sent: Vec<(&str, usize)> = awaited.iter().filter(|(seq, ..)| echoed.iter().any(|echo| echo.seq == *seq)).map(|(_, text, images)| (text.as_str(), *images)).collect();
-                        unconfirmed = p.lapsed.retire(&sent, &conversation, Instant::now());
+                        let recorded = match &payload { Payload::UserMessage { text, .. } => text.as_str(), _ => "" };
+                        unconfirmed = p.lapsed.retire(&sent, recorded, &conversation, Instant::now());
                         echoed
                     };
                     if !echoed.is_empty() {
