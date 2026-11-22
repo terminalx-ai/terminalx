@@ -15,6 +15,7 @@ pub mod chat_apps;
 pub(crate) mod chat_app_test_server;
 pub mod memory;
 pub mod chat;
+pub mod cloud;
 pub mod calendar;
 pub mod duties;
 pub mod brief;

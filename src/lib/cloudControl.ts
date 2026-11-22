@@ -6,7 +6,7 @@ import { getAccount } from "@/lib/account";
 import { resolveCloudAttention } from "@/lib/cloudAttention";
 import { getTabLog, lastSeq } from "@/lib/agentEvents";
 import { WORKSPACE_STOPPED, type AgentTabInfo, type OutboxEntry } from "@/lib/cloudAgentApi";
-import { getCloudAgents, loadCloudAgents, refreshFromCheckpoint, relistCloudCheckpoints, syncLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
+import { configureCloudAgentTab, getCloudAgents, holdCloudAgentTabMode, loadCloudAgents, refreshFromCheckpoint, relistCloudCheckpoints, syncLiveTabs, type CloudAgentTab } from "@/lib/cloudAgents";
 import {
   applyCloudSnapshot,
   cloudOrgArg,
@@ -19,7 +19,7 @@ import {
   relistCloudCatalog,
   resumeCloudWorkspace,
 } from "@/lib/cloudCatalog";
-import { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON, NOT_SHARED_REASON, effectiveYou, getCollab, listedYou, tabGate, workspaceAuthority } from "@/lib/cloudCollab";
+import { LIFECYCLE_ADMIN_REASON, NEW_SESSION_ADMIN_REASON, NOT_SHARED_REASON, effectiveYou, getCollab, listedYou, mayConfigure, tabGate, workspaceAuthority } from "@/lib/cloudCollab";
 import { cloudConnectionInfo, connectedCloudClient, retainCloudConnection, waitCloudConnected, wakeCloudConnection, type CloudLease } from "@/lib/cloudConnections";
 import { failureMessage, PHASES, phaseOf, RUNTIME_NOT_PICKED_UP, runtimeNotPickedUp, settled } from "@/lib/cloudCreate";
 import { getCloudDashboard, type CloudDashboardSession } from "@/lib/cloudDashboard";
@@ -558,6 +558,62 @@ const sent = new Map<string, Promise<unknown>>();
 const SENT_KEYS = 500;
 
 /**
+ * What a command from a session that works for a bot is held to (PRO-514).
+ * The app's native side works it out from the bot's access as it is now
+ * (`bots::cloud`, the rule its local sessions are held by) and writes it into
+ * the command; one a caller wrote is dropped there. Nothing here decides how
+ * wide a mode is: `modes` says what each mode is held to, and `limit` is what
+ * a mode it does not list is held to.
+ */
+interface BotHoldRule {
+  limit: string;
+  why: string;
+  modes: Record<string, string>;
+}
+
+interface BotHold {
+  /** Absent for a bot with full access: nothing is narrowed. */
+  mode: { terminal: BotHoldRule; nativeCodex: BotHoldRule } | null;
+  /** `send`: the target is the bot's only if it is its workspace's first session. */
+  launchOnly: boolean;
+  /** `resume`: the workspace's sessions that work for the bot, by key, and whether its first session does. */
+  sessions: string[];
+  launch: boolean;
+}
+
+const BOT_HOLD_UNREADABLE = "This command comes from a session that works for a bot, and what it is held to could not be read, so it was not run.";
+
+function botHoldRule(value: unknown): BotHoldRule {
+  const rule = value as Partial<BotHoldRule> | null;
+  if (!rule || typeof rule !== "object" || typeof rule.limit !== "string" || !rule.limit || !rule.modes || typeof rule.modes !== "object" || Object.values(rule.modes).some((mode) => typeof mode !== "string" || !mode)) {
+    throw forbidden(BOT_HOLD_UNREADABLE);
+  }
+  return { limit: rule.limit, why: typeof rule.why === "string" ? rule.why : "", modes: rule.modes };
+}
+
+/** The hold a command carries, or null for one that carries none. One that cannot be read refuses the command. */
+function botHoldOf(params: Params): BotHold | null {
+  const hold = params.botHold;
+  if (hold === undefined || hold === null) return null;
+  if (typeof hold !== "object" || Array.isArray(hold)) throw forbidden(BOT_HOLD_UNREADABLE);
+  const { mode, launchOnly, sessions, launch } = hold as Record<string, unknown>;
+  if (sessions !== undefined && (!Array.isArray(sessions) || sessions.some((key) => typeof key !== "string"))) throw forbidden(BOT_HOLD_UNREADABLE);
+  return {
+    mode: mode === undefined || mode === null ? null : { terminal: botHoldRule((mode as Record<string, unknown>).terminal), nativeCodex: botHoldRule((mode as Record<string, unknown>).nativeCodex) },
+    launchOnly: launchOnly === true,
+    sessions: (sessions as string[] | undefined) ?? [],
+    launch: launch === true,
+  };
+}
+
+/** The mode a bot's hold lets this tab run in: the one it would run in next, or the limit when that is wider. */
+function heldMode(mode: NonNullable<BotHold["mode"]>, tab: CloudAgentTab): string {
+  const rule = tab.info.transport === "experimentalCodexStdio" ? mode.nativeCodex : mode.terminal;
+  const next = tab.pendingConfig?.mode ?? tab.info.requestedPermissionMode ?? tab.info.permissionMode;
+  return Object.hasOwn(rule.modes, next) ? rule.modes[next]! : rule.limit;
+}
+
+/**
  * The last message `send` put in for each tab (by workspace key and tab), and
  * how far this desktop knew the tab before it: a status `wait` reads that was
  * reported up to that seq is from before the message (#668).
@@ -637,6 +693,20 @@ async function sendOnce(params: Params) {
   const lease = client && collab.available && you ? (collab.leases[tab.tabId] ?? null) : null;
   const gate = tabGate(you, lease, Date.now(), tab.info.status === "in_progress" || tab.info.status === "waiting", personName);
   if (gate.blocked) throw forbidden(gate.blocked);
+  // A bot's session prompts a session that works for the same bot, held to the bot's access as it is now (PRO-514).
+  const hold = botHoldOf(params);
+  if (hold?.launchOnly && target.item.workspace.launch?.sessionId !== target.sessionId) {
+    throw forbidden("A session that works for a bot does not prompt a cloud session that does not work for the same bot.");
+  }
+  if (hold?.mode) {
+    const rule = tab.info.transport === "experimentalCodexStdio" ? hold.mode.nativeCodex : hold.mode.terminal;
+    // The runtime takes a mode only from a manager or an approver: from anyone else the prompt would arrive and the mode would not.
+    if (!mayConfigure(you)) throw forbidden(`This cloud session cannot be held to its bot's access from here (${rule.why}): you may not set its permission mode in this workspace, so the message was not sent.`);
+    const held = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId);
+    if (!held || !holdCloudAgentTabMode(scope, tab.tabId, heldMode(hold.mode, held))) {
+      throw forbidden(`This cloud session cannot be held to its bot's access from here (${rule.why}): this desktop holds no tab of it to set the mode on, so the message was not sent.`);
+    }
+  }
   const before = new Set(getCloudAgents(scope).outbox.map((entry) => entry.clientCommandId));
   const known = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === tab.tabId) ?? tab;
   const knew = Math.max(known.info.lastSeq, lastSeq(target.sessionId, tab.tabId));
@@ -1018,9 +1088,39 @@ async function stop(params: Params, sleep: Sleep = pause, now: () => number = Da
   return { workspace: target.key, state: lifecycleState(after, "suspend"), operationId: snapshot?.operation.id ?? null, changed: true };
 }
 
+/**
+ * A resume by a bot's session (PRO-514): the bot's sessions in the workspace
+ * come back in a mode no wider than its access allows now. Set at once on a
+ * workspace this desktop is connected to and may configure; otherwise it
+ * waits with the tab and goes with its next message, before the prompt.
+ */
+async function holdBotSessions(target: { orgId: string; workspaceId: string; key: string; item: CloudWorkspaceListItem }, hold: BotHold) {
+  if (!hold.mode) return;
+  const sessionIds = new Set(hold.sessions.map((key) => parseCloudWorkspaceKey(key)).filter((parsed) => parsed && cloudWorkspaceKey(parsed.orgId, parsed.workspaceId) === target.key).map((parsed) => parsed!.sessionId));
+  const launchId = hold.launch ? (target.item.workspace.launch?.sessionId ?? null) : null;
+  if (launchId) sessionIds.add(launchId);
+  if (!sessionIds.size) return;
+  const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
+  await loadCloudAgents(scope).catch(() => undefined);
+  const client = connectedCloudClient(target.key);
+  for (const tab of getCloudAgents(scope).tabs) {
+    if (!tab.info.sessionId || !sessionIds.has(tab.info.sessionId)) continue;
+    const mode = heldMode(hold.mode, tab);
+    if (mode === (tab.pendingConfig?.mode ?? tab.info.requestedPermissionMode ?? tab.info.permissionMode)) continue;
+    try {
+      await configureCloudAgentTab(scope, tab.tabId, { mode }, client);
+    } catch {
+      // Not set live (the runtime refused, or went away): it goes with the tab's next message instead.
+      holdCloudAgentTabMode(scope, tab.tabId, mode);
+    }
+  }
+}
+
 async function resume(params: Params, sleep: Sleep = pause, now: () => number = Date.now) {
   const target = await lifecycleTarget(params, stopping, sleep, now);
   const { item } = target;
+  const hold = botHoldOf(params);
+  if (hold) await holdBotSessions(target, hold);
   // Already running, or on its way: nothing is resumed twice.
   if (resuming(item)) return { workspace: target.key, state: lifecycleState(item, "resume"), operationId: item.latestOperation?.id ?? null, changed: false };
   if (machineRunning(item)) return { workspace: target.key, state: lifecycleState(item, "resume"), changed: false };

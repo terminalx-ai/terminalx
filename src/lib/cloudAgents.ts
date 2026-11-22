@@ -1136,6 +1136,24 @@ export async function configureCloudAgentTab(
 }
 
 /**
+ * Hold a tab to `mode` with its next message (PRO-514): the mode rides in
+ * that message whatever the tab is in now, and the runtime sets it before the
+ * prompt reaches the agent. False for a tab this desktop does not hold, which
+ * no message of its own could carry a mode for.
+ */
+export function holdCloudAgentTabMode(scope: CloudAgentScope, tabId: string, mode: string): boolean {
+  const s = store(scope);
+  const tab = s.tabs.get(tabId);
+  if (!tab) return false;
+  tab.pendingConfig = { ...(tab.pendingConfig ?? {}), mode };
+  tab.info = withPending(tab.info, tab.pendingConfig);
+  tab.settingsIgnored = false;
+  publish(s);
+  scheduleSave(s, tabId);
+  return true;
+}
+
+/**
  * Drop a tab's unsent setting change because this person may no longer make
  * it (they lost approval rights since choosing it), and say so. The next
  * message then goes without settings the runtime would only ignore.

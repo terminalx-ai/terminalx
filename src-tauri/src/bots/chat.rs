@@ -136,6 +136,15 @@ impl ModeLimit {
     pub fn clamp(&self, mode: &str) -> String {
         if self.allows(mode) { mode.to_owned() } else { self.mode.to_owned() }
     }
+
+    /// The limit for an agent on `transport`: native Codex cannot ask before
+    /// each action, so where the limit is to ask, it is held to plan.
+    pub fn on(self, transport: index::AgentTransport) -> Self {
+        if self.mode == "manual" && transport == index::AgentTransport::ExperimentalCodexStdio {
+            return Self { mode: "plan", why: format!("{}, and native Codex cannot ask before each action", self.why) };
+        }
+        self
+    }
 }
 
 /// The limit on a session that acts for a bot: its access, plan mode while it
@@ -143,11 +152,17 @@ impl ModeLimit {
 /// other session, and for one whose bot is gone or while Bots is off: it is
 /// then an ordinary session, the owner's to run as they choose.
 pub fn mode_limit(entry: &SessionEntry) -> Option<ModeLimit> {
-    let id = acting_bot(entry)?;
+    bot_limit(&acting_bot(entry)?, &entry.id)
+}
+
+/// [`mode_limit`] by the bot's id, for work of its that is no session of
+/// this computer's: a session in a cloud workspace (`cloud`, PRO-514).
+/// `what` names it in the log.
+pub fn bot_limit(id: &str, what: &str) -> Option<ModeLimit> {
     if !super::enabled() {
         return None;
     }
-    match bot_store::get(&id) {
+    match bot_store::get(id) {
         Ok(Some(bot)) if bot.paused.is_some() => Some(ModeLimit { mode: "plan", why: format!("{} is paused", bot.name) }),
         Ok(Some(bot)) => {
             let mode = permission_mode(&bot.access);
@@ -155,7 +170,7 @@ pub fn mode_limit(entry: &SessionEntry) -> Option<ModeLimit> {
         }
         Ok(None) => None,
         Err(error) => {
-            log::warn!("read the bots to hold {} to its bot's access: {error:#}", entry.id);
+            log::warn!("read the bots to hold {what} to its bot's access: {error:#}");
             Some(ModeLimit { mode: "plan", why: "its bot cannot be read".into() })
         }
     }
@@ -165,11 +180,7 @@ pub fn mode_limit(entry: &SessionEntry) -> Option<ModeLimit> {
 /// manual mode runs on request with a writable workspace, more than asking
 /// before acting allows, so such a tab is held to plan.
 pub fn tab_limit(entry: &SessionEntry, tab: &TabEntry) -> Option<ModeLimit> {
-    let limit = mode_limit(entry)?;
-    if limit.mode == "manual" && tab.transport == index::AgentTransport::ExperimentalCodexStdio {
-        return Some(ModeLimit { mode: "plan", why: format!("{}, and native Codex cannot ask before each action", limit.why) });
-    }
-    Some(limit)
+    Some(mode_limit(entry)?.on(tab.transport))
 }
 
 fn access_label(access: &BotAccess) -> &'static str {
