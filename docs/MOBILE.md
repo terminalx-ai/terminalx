@@ -148,7 +148,8 @@ The listener is bound where `machines.listen` says (PRO-487; docs/MACHINES.md,
 private or all addresses chosen. A pairing offer carries only addresses that
 are bound, so with "Relay only" a phone pairs and connects through the relay.
 A connection from a public source address is refused unless
-`machines.allowPublic` is on.
+`machines.allowPublic` is on, and one that is already open is closed when it
+is turned off (PRO-495), whether the runtime or the window holds the port.
 
 The iOS build includes `NSLocalNetworkUsageDescription`. The app requests Local
 Network access just in time when the user pairs or connects to a LAN address,
