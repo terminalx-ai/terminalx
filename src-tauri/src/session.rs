@@ -582,13 +582,29 @@ impl LapsedEchoes {
         Some(lapsed.echo.echoed())
     }
 
-    /// `payload` was matched to a message the composer sent since: the
-    /// lapsed prompts with its words are not owed it, nor any later prompt
-    /// with those words, and are given up.
-    fn retire(&mut self, payload: &Payload, conversation: &Path, now: Instant) {
-        let Payload::UserMessage { text, .. } = payload else { return };
+    /// `recorded` was matched to `sent`, messages the composer sent since,
+    /// each its words and how many images it had: the lapsed prompts that
+    /// say the same as one of them, or as the record, are not owed that
+    /// record, nor any later prompt with those words, and are given up. What
+    /// was sent counts as well as the record, which may hold it inside more
+    /// or changed (#1385); the record counts as well as what was sent, which
+    /// an idle CLI may have recorded as a lapsed prompt's words. Their `seq`s.
+    ///
+    /// Each may have reached the CLI after all, and its record be the next
+    /// with those words, or another's: words alone cannot tell (#1386). The
+    /// card is owed a word that its delivery was not confirmed, never a
+    /// record that may be a later prompt's.
+    fn retire(&mut self, sent: &[(&str, usize)], recorded: &str, conversation: &Path, now: Instant) -> Vec<u64> {
         self.prune(conversation, now);
-        self.0.retain(|lapsed| !lapsed.echo.matches(text));
+        let mut retired = Vec::new();
+        self.0.retain(|lapsed| {
+            let said = lapsed.echo.matches(recorded) || sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text));
+            if said {
+                retired.push(lapsed.echo.seq);
+            }
+            !said
+        });
+        retired
     }
 }
 
@@ -705,7 +721,9 @@ impl ComposerEcho {
         // A `!` command (#1294): Claude Code runs it in its shell and records
         // the command without the `!`, as `<bash-input>`. The chat turns the
         // `!command` the composer published into the command's block.
-        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), bash_input(rest)) {
+        // Only a whole shell record with its input part is one (#1383): the
+        // input tags followed by the reader's words are their prompt.
+        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), shell_command(rest)) {
             return ran.split_whitespace().eq(sent.split_whitespace());
         }
         // The CLI may reflow a paste or enclose it (or its chunks) in these
@@ -739,8 +757,16 @@ fn shell_output_of_echo(rt: &TabRuntime, payload: &Payload) -> Option<Payload> {
     Some(Payload::UserMessage { author: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
 }
 
-/// The command in a record of Claude Code's `!` shell passthrough (#1294):
-/// `<bash-input> git status</bash-input>`, maybe with the output after it.
+/// The command in a record of Claude Code's `!` shell passthrough (#1294),
+/// when `recorded` is one by the shared strict grammar and has an input part
+/// (#1383): `<bash-input> git status</bash-input>`, maybe with its output.
+fn shell_command(recorded: &str) -> Option<&str> {
+    claude::transcript::shell_record(recorded).filter(|shell| shell.input)?;
+    bash_input(recorded)
+}
+
+/// The text between the first input tags of a shell-shaped record. Only
+/// `shell_command` may read it, once the record is known to be one.
 fn bash_input(recorded: &str) -> Option<&str> {
     let after = recorded.trim_start().strip_prefix("<bash-input>")?;
     Some(&after[..after.find("</bash-input>")?])
@@ -7288,8 +7314,16 @@ impl SessionManager {
             // others, reached the agent inside the prompt recorded here, which
             // the chat shows for it; so does one an idle CLI recorded changed
             // (#722).
+            let mut unconfirmed: Vec<u64> = Vec::new();
             let echoed = match &mut rt.engine {
                 Engine::Cli(p) => {
+                    // What each awaited prompt said, to know a lapsed one by
+                    // once a record is matched to it (#1385).
+                    let awaited: Vec<(u64, String, usize)> = if matches!(payload, Payload::UserMessage { .. }) && !p.lapsed.0.is_empty() {
+                        p.echoed.iter().map(|echo| (echo.seq, echo.text.clone(), echo.image_count)).collect()
+                    } else {
+                        Vec::new()
+                    };
                     let echoed: Vec<Echoed> = if p.harness == CliKind::Codex {
                         consume_codex_queue_echo(&mut p.echoed, &payload)
                     } else if let Some(echo) = consume_composer_echo(&mut p.echoed, &payload) {
@@ -7306,7 +7340,9 @@ impl SessionManager {
                     let echoed = if echoed.is_empty() {
                         p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
                     } else {
-                        p.lapsed.retire(&payload, &conversation, Instant::now());
+                        let sent: Vec<(&str, usize)> = awaited.iter().filter(|(seq, ..)| echoed.iter().any(|echo| echo.seq == *seq)).map(|(_, text, images)| (text.as_str(), *images)).collect();
+                        let recorded = match &payload { Payload::UserMessage { text, .. } => text.as_str(), _ => "" };
+                        unconfirmed = p.lapsed.retire(&sent, recorded, &conversation, Instant::now());
                         echoed
                     };
                     if !echoed.is_empty() {
@@ -7319,6 +7355,11 @@ impl SessionManager {
                 }
                 _ => Vec::new(),
             };
+            // A lapsed card the same words sent again took the place of
+            // (#1386): whether the CLI took it too is not known.
+            for seq in unconfirmed {
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: true }, None);
+            }
             if let (Some((dropped, said)), Some((lineage, text))) = (&replaced, &prompt) {
                 // The same words as the dropped prompt, and no message sent
                 // from the chat says them: sent again from the input box the
@@ -9759,6 +9800,32 @@ mod tests {
         assert!(!ComposerEcho::new("git status".into(), 0).matches("<bash-input> git status</bash-input>"));
         assert_eq!(bash_input("<bash-input>ls</bash-input>"), Some("ls"));
         assert_eq!(bash_input("<bash-input>ls"), None);
+    }
+
+    /// #1383. Input tags around the command, then anything that is not the
+    /// rest of a shell record, are a prompt of the reader's: no `!command`
+    /// echo, though the tags hold its words.
+    #[test]
+    fn composer_echo_matches_only_a_whole_shell_record() {
+        let echo = ComposerEcho::new("!pwd".into(), 0);
+        for prompt in [
+            "<bash-input>pwd</bash-input> please explain",
+            "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+            "<bash-input>pwd</bash-input><bash-input>ls</bash-input>",
+            "<bash-input>pwd</bash-input><bash-exit-code>0</bash-exit-code><bash-exit-code>1</bash-exit-code>",
+            "<bash-input>pwd</bash-input><bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+            "<bash-input>pwd</bash-stdout>",
+        ] {
+            assert!(!echo.matches(prompt), "{prompt}");
+            assert_eq!(shell_command(prompt), None, "{prompt}");
+        }
+        for record in [
+            "<bash-input>pwd</bash-input>",
+            "<bash-input> pwd</bash-input>\n<bash-stdout>/tmp</bash-stdout><bash-stderr></bash-stderr>",
+            "<bash-input>pwd</bash-input><bash-stderr>denied</bash-stderr>",
+        ] {
+            assert!(echo.matches(record), "{record}");
+        }
     }
 
     /// Claude Code writes the pasted-image labels straight into the prompt
