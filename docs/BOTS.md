@@ -311,7 +311,12 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   TerminalX allowed (`local_runtime_prove_window`); nothing is restarted.
   An unproven registrant never takes the window's services while Bots is
   on, so a process with only the control token cannot stand in for the
-  window. The window still reads its key at every registration with Bots
+  window, nor unseat it: a registration without the proof ends only its own
+  sender's standing as the window, and only once it is a registration this
+  runtime would consider (a current lease and a private endpoint of its
+  own). One whose proof goes unanswered twice fails as a runtime that does
+  not answer; it is not sent a third time without the proof. The window
+  still reads its key at every registration with Bots
   off: that proof is what keeps it the window when Bots is turned on.
 
 ## Duties (PRO-471)

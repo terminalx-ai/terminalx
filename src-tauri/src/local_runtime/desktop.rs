@@ -80,9 +80,80 @@ pub struct UnprovenWindow {
     /// The runtime pinned another key than the one this window's Keychain
     /// holds now (it was replaced since), so registering again cannot repair
     /// it: Restart runtime, offered as `runtime_restart_required:<epoch>: …`
-    /// (PRO-507). None otherwise.
+    /// (PRO-507). None otherwise, and until the window first says it is
+    /// unproven ([`Desktop::unproven_shown`], PRO-508).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
+}
+
+/// A window the runtime did not take for the window, as its attachment
+/// keeps it.
+#[derive(Clone)]
+struct Unproven {
+    window: UnprovenWindow,
+    /// The endpoint it registered, to register again with its proof
+    /// ([`Desktop::prove_again`]).
+    endpoint: crate::hooks::ControlEndpoint,
+    /// The runtime pinned another key than this window's Keychain holds, so
+    /// only a restart repairs it. The restart is offered when the window
+    /// first says so, not when it registers (PRO-508): with Bots off no
+    /// notice shows, and nothing is asked of the runtime or put in
+    /// Settings → Machines for it.
+    other_key: bool,
+}
+
+/// What a registration's answer says of a window not taken for the window:
+/// why, whether the runtime pins a key, and whether it pins another than
+/// this window proved with. None for a window taken for it. `local`: what
+/// kept the proof from being made here.
+fn unproven_answer(answer: &serde_json::Value, local: Option<String>) -> Option<(UnprovenWindow, bool)> {
+    // Attached, but not taken for the window (review 2): a runtime whose
+    // window's key is pinned took no proof from this one, so with Bots on it
+    // changes nothing until it can prove it (the Keychain unlocked, then Try
+    // again, which registers again with the proof). It still shows what
+    // runs, and says so (M2).
+    if answer["proven"] == false {
+        let why = local.unwrap_or_else(|| answer["message"].as_str().unwrap_or("no proof").to_owned());
+        // Proved with another key than the runtime pinned: only a restart
+        // pins this window's (PRO-507).
+        let other_key = answer["message"].as_str().is_some_and(|message| message.contains(crate::serve_cli::consent::Refusal::OtherKey.says()));
+        return Some((UnprovenWindow { why, pinned: true, restart: None }, other_key));
+    }
+    // A runtime started without the window's key (Keychain could not be read
+    // at its launch) holds bots by placement alone; the window says so, for a
+    // restart with the key to repair (PRO-489).
+    if answer["pinned"] == false {
+        let why = answer["message"].as_str().unwrap_or("This runtime was started without the window's key.").to_owned();
+        return Some((UnprovenWindow { why, pinned: false, restart: None }, false));
+    }
+    None
+}
+
+/// What an unproven window says of itself where it is shown, which is only
+/// while Bots is on (`bots`). The first time, one whose runtime pinned
+/// another key offers Restart runtime through `offer`, which asks the runtime
+/// what a restart would stop: once, under `offering`, and outside `state`'s
+/// lock, which a registration takes.
+fn shown(state: &Mutex<Option<Unproven>>, offering: &Mutex<()>, bots: bool, offer: impl FnOnce() -> Option<String>) -> Option<UnprovenWindow> {
+    if !bots {
+        return None;
+    }
+    let owed = |unproven: &Unproven| unproven.other_key && unproven.window.restart.is_none();
+    let _offering = offering.lock().unwrap_or_else(|e| e.into_inner());
+    {
+        let state = state.lock().unwrap();
+        let unproven = state.as_ref()?;
+        if !owed(unproven) {
+            return Some(unproven.window.clone());
+        }
+    }
+    let offered = offer();
+    let mut state = state.lock().unwrap();
+    let unproven = state.as_mut()?;
+    if owed(unproven) {
+        unproven.window.restart = offered;
+    }
+    Some(unproven.window.clone())
 }
 
 pub struct Desktop {
@@ -93,10 +164,10 @@ pub struct Desktop {
     generation: u64,
     windows: Arc<Mutex<Windows>>,
     /// Why the runtime attached this window without taking it for the
-    /// window (PRO-489), and the endpoint it registered, to register again
-    /// with its proof ([`Self::prove_again`]). None once proven, or where
-    /// none is asked.
-    unproven: Mutex<Option<(UnprovenWindow, crate::hooks::ControlEndpoint)>>,
+    /// window (PRO-489). None once proven, or where none is asked.
+    unproven: Mutex<Option<Unproven>>,
+    /// Held while the restart is offered for an unproven window ([`shown`]).
+    offering: Mutex<()>,
 }
 
 impl Desktop {
@@ -113,7 +184,7 @@ impl Desktop {
         let generation = next();
         let lost = watch.clone().map(|watch| -> super::bridge::Lost { Box::new(move |reason| watch(Lost::Events { generation, reason })) });
         let events = Bridge::connect(&client, sink.clone(), lost)?;
-        Ok(Self { client, events, sink, watch, generation, windows: Arc::default(), unproven: Mutex::default() })
+        Ok(Self { client, events, sink, watch, generation, windows: Arc::default(), unproven: Mutex::default(), offering: Mutex::default() })
     }
 
     /// Attach again through `client`, which discovery found: the same owner,
@@ -159,37 +230,16 @@ impl Desktop {
             // the window services belong to a different desktop process.
             Err(error) if format!("{error:#}").contains("Another desktop currently provides") =>
                 Err(Blocked("Another TerminalX window is connected to this background runtime. Close it, then try again.".into()).into()),
-            // Attached, but not taken for the window (review 2): a runtime
-            // whose window's key is pinned, with Bots on, took no proof from
-            // this one, so it changes nothing until it can prove it (the
-            // Keychain unlocked, then Try again, which registers again with
-            // the proof). It still shows what runs, and says so (M2).
-            Ok(answer) if answer["proven"] == false => {
-                let why = local.unwrap_or_else(|| answer["message"].as_str().unwrap_or("no proof").to_owned());
-                log::warn!("the runtime attached this window without taking it for the window: {why}");
-                // Proved with another key than the runtime pinned: only a
-                // restart pins this window's (PRO-507). Only the desktop
-                // window offers one (`window_consent`).
-                #[cfg(all(unix, feature = "desktop"))]
-                let restart = answer["message"].as_str().is_some_and(|message| message.contains(crate::serve_cli::consent::Refusal::OtherKey.says()))
-                    .then(|| super::window_consent::offer_restart(self));
-                #[cfg(not(all(unix, feature = "desktop")))]
-                let restart = None;
-                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: true, restart }, endpoint));
+            // Not answered, or refused: what was known of this window stays,
+            // as when Try again finds the runtime not answering (PRO-508).
+            Err(error) => Err(error),
+            Ok(answer) => {
+                let unproven = unproven_answer(&answer, local);
+                if let Some((window, _)) = &unproven {
+                    log::warn!("the runtime did not take this window for the window (key pinned: {}): {}", window.pinned, window.why);
+                }
+                *self.unproven.lock().unwrap() = unproven.map(|(window, other_key)| Unproven { window, endpoint, other_key });
                 Ok(())
-            }
-            // A runtime started without the window's key (Keychain could not
-            // be read at its launch) holds bots by placement alone; the window
-            // says so, for a restart with the key to repair (PRO-489).
-            Ok(answer) if answer["pinned"] == false => {
-                let why = answer["message"].as_str().unwrap_or("This runtime was started without the window's key.").to_owned();
-                log::warn!("the runtime this window attached to has no window key pinned: {why}");
-                *self.unproven.lock().unwrap() = Some((UnprovenWindow { why, pinned: false, restart: None }, endpoint));
-                Ok(())
-            }
-            other => {
-                *self.unproven.lock().unwrap() = None;
-                other.map(drop)
             }
         }
     }
@@ -198,7 +248,23 @@ impl Desktop {
     /// window, while it has not proved it since (PRO-489): while Bots is on,
     /// its session and terminal changes are refused until it does.
     pub fn unproven(&self) -> Option<UnprovenWindow> {
-        self.unproven.lock().unwrap().as_ref().map(|(unproven, _)| unproven.clone())
+        self.unproven.lock().unwrap().as_ref().map(|unproven| unproven.window.clone())
+    }
+
+    /// [`Self::unproven`], as the window's notice shows it, which it does
+    /// only while Bots is on (`bots`). The first time, a window whose
+    /// runtime pinned another key than its Keychain holds offers Restart
+    /// runtime, here and in Settings → Machines (PRO-507): that asks the
+    /// runtime what a restart would stop, so it is not done at registration
+    /// or while Bots is off, when nothing shows it (PRO-508). Only the
+    /// desktop window offers one (`window_consent`).
+    pub fn unproven_shown(&self, bots: bool) -> Option<UnprovenWindow> {
+        shown(&self.unproven, &self.offering, bots, || {
+            #[cfg(all(unix, feature = "desktop"))]
+            return Some(super::window_consent::offer_restart(self));
+            #[cfg(not(all(unix, feature = "desktop")))]
+            None
+        })
     }
 
     /// Register again, with the window's proof: what Try again does once the
@@ -206,13 +272,13 @@ impl Desktop {
     /// the window; a window it already took, or never asked to prove
     /// itself, has nothing to do.
     pub fn prove_again(&self) -> Result<bool> {
-        let Some((unproven, endpoint)) = self.unproven.lock().unwrap().clone() else { return Ok(true) };
+        let Some(unproven) = self.unproven.lock().unwrap().clone() else { return Ok(true) };
         // Only a restart pins a key a runtime started without (`window_consent`),
         // or another than it pinned.
-        if !unproven.pinned || unproven.restart.is_some() {
+        if !unproven.window.pinned || unproven.other_key {
             return Ok(false);
         }
-        self.register_window(endpoint)?;
+        self.register_window(unproven.endpoint)?;
         Ok(self.unproven().is_none())
     }
 
@@ -533,21 +599,26 @@ impl Desktop {
 /// whose window's key is pinned takes only a registrant that proves it for
 /// the window. One that does not answer in time is sent once more with its
 /// proof (PRO-507): registering again on the same lease is the same
-/// registration. A runtime from before that refuses the witness as an
-/// unknown field, one that still does not answer, and a window that cannot
-/// read its key, which makes none: each registers as before, and the
-/// runtime judges.
+/// registration. One that still does not answer is the answer (PRO-508): the
+/// runtime may yet take either send, and one without the proof after them
+/// would undo what they proved, so none is sent, and the wait ends at two
+/// sends. A runtime from before the proof refuses the witness as an unknown
+/// field, and a window that cannot read its key makes none: each registers
+/// as before, without it, and the runtime judges.
 fn register_proving(mut send: impl FnMut(bool) -> Result<serde_json::Value>) -> (Result<serde_json::Value>, Option<String>) {
     let unanswered = |answer: &Result<serde_json::Value>| answer.as_ref().err().is_some_and(|error| error.downcast_ref::<super::client::Unresponsive>().is_some());
     let mut answer = send(true);
     if unanswered(&answer) {
         log::info!("the window's registration with its proof was not answered in time; sending it once more");
         answer = send(true);
+        if unanswered(&answer) {
+            return (answer, None);
+        }
     }
     match answer {
         Err(error) if error.downcast_ref::<super::client::Refused>().is_none_or(|refused| refused.message.contains("Invalid desktop registration")) => {
             log::info!("register the window without its proof: {error:#}");
-            let local = (error.downcast_ref::<super::client::Refused>().is_none() && error.downcast_ref::<super::client::Unresponsive>().is_none()).then(|| format!("{error:#}"));
+            let local = error.downcast_ref::<super::client::Refused>().is_none().then(|| format!("{error:#}"));
             (send(false), local)
         }
         answered => (answered, None),
@@ -560,26 +631,126 @@ mod tests {
     use serde_json::json;
 
     /// PRO-507: a registration with the window's proof that is not answered
-    /// in time is sent once more with it before one without it; one that is
-    /// refused is not sent again, and a proof that cannot be made here says why.
+    /// in time is sent once more with it; one that is refused is not sent
+    /// again, and a proof that cannot be made here says why. PRO-508: one
+    /// unanswered twice is not sent a third time without the proof, which
+    /// would undo what a late-taken send proved; so no sequence of answers
+    /// waits out more than two sends.
     #[test]
-    fn an_unanswered_registration_is_sent_once_more_with_its_proof() {
+    fn an_unanswered_registration_is_sent_once_more_with_its_proof_and_never_without_it() {
         use super::super::client::{Refused, Unresponsive};
-        let timeout = || -> Result<serde_json::Value> { Err(Unresponsive { command: "register".into(), waited: Duration::from_secs(1) }.into()) };
-        let run = |answers: Vec<Box<dyn Fn() -> Result<serde_json::Value>>>| {
+        type Answer = Box<dyn Fn() -> Result<serde_json::Value>>;
+        let timeout = || -> Answer { Box::new(|| Err(Unresponsive { command: "register".into(), waited: LIFECYCLE_TIMEOUT }.into())) };
+        let old_runtime = || -> Answer { Box::new(|| Err(Refused { code: "desktop_unavailable".into(), message: "Invalid desktop registration.".into() }.into())) };
+        let locked = || -> Answer { Box::new(|| Err(anyhow::anyhow!("Keychain is locked"))) };
+        let registered = || -> Answer { Box::new(|| Ok(json!({"registered": true}))) };
+        // What was sent, the answer, what kept the proof from being made, and
+        // how many sends went unanswered: each of those waits LIFECYCLE_TIMEOUT.
+        let run = |answers: Vec<Answer>| {
             let mut sent = Vec::new();
+            let mut waited = 0;
             let mut answers = answers.into_iter();
-            let (answer, local) = register_proving(|witnessed| { sent.push(witnessed); answers.next().expect("no more sends")() });
-            (sent, answer.map_err(|error| format!("{error:#}")), local)
+            let (answer, local) = register_proving(|witnessed| {
+                sent.push(witnessed);
+                let answer = answers.next().expect("no more sends")();
+                if answer.as_ref().is_err_and(|error| error.downcast_ref::<Unresponsive>().is_some()) { waited += 1; }
+                answer
+            });
+            assert!(answers.next().is_none(), "every scripted answer was asked for");
+            (sent, answer.map_err(|error| format!("{error:#}")), local, waited)
         };
-        let (sent, answer, local) = run(vec![Box::new(timeout), Box::new(|| Ok(json!({"registered": true})))]);
+        let (sent, answer, local, _) = run(vec![timeout(), registered()]);
         assert_eq!((sent, answer, local), (vec![true, true], Ok(json!({"registered": true})), None), "answered the second time, with its proof");
-        let (sent, answer, local) = run(vec![Box::new(timeout), Box::new(timeout), Box::new(|| Ok(json!({"registered": true, "proven": false})))]);
-        assert_eq!((sent, answer.unwrap()["proven"].clone(), local), (vec![true, true, false], json!(false), None), "twice unanswered: without it, as before");
-        let (sent, answer, _) = run(vec![Box::new(|| Err(Refused { code: "unavailable".into(), message: "Another desktop currently provides this runtime's window services.".into() }.into()))]);
+
+        // Twice unanswered: that is the answer. No send without the proof follows.
+        let mut sent = Vec::new();
+        let (answer, local) = register_proving(|witnessed| { sent.push(witnessed); timeout()() });
+        assert_eq!(sent, vec![true, true], "never a third send, and none without the proof");
+        assert!(answer.unwrap_err().downcast_ref::<Unresponsive>().is_some() && local.is_none(), "the runtime is not answering");
+
+        let (sent, answer, ..) = run(vec![Box::new(|| Err(Refused { code: "unavailable".into(), message: "Another desktop currently provides this runtime's window services.".into() }.into()))]);
         assert!(sent == vec![true] && answer.unwrap_err().contains("Another desktop"), "a refusal is the answer");
-        let (sent, _, local) = run(vec![Box::new(|| Err(anyhow::anyhow!("Keychain is locked"))), Box::new(|| Ok(json!({"registered": true})))]);
+        let (sent, _, local, _) = run(vec![locked(), registered()]);
         assert_eq!((sent, local.as_deref()), (vec![true, false], Some("Keychain is locked")), "no proof made here: without it, and why");
+        let (sent, answer, local, _) = run(vec![old_runtime(), registered()]);
+        assert_eq!((sent, answer, local), (vec![true, false], Ok(json!({"registered": true})), None), "a runtime from before the proof: without it");
+
+        // The wait is at most two sends (20 s), whatever is answered between.
+        for (answers, sends) in [
+            (vec![timeout(), timeout()], vec![true, true]),
+            (vec![timeout(), old_runtime(), timeout()], vec![true, true, false]),
+            (vec![timeout(), locked(), timeout()], vec![true, true, false]),
+            (vec![old_runtime(), timeout()], vec![true, false]),
+            (vec![locked(), timeout()], vec![true, false]),
+        ] {
+            let (sent, answer, _, waited) = run(answers);
+            assert!(answer.is_err() && waited <= 2, "{sent:?} waited out {waited} sends");
+            assert_eq!(sent, sends);
+        }
+    }
+
+    fn unproven_state(answer: serde_json::Value) -> Mutex<Option<Unproven>> {
+        let endpoint = crate::hooks::ControlEndpoint::adopted("/run/w.sock".into(), "ab".repeat(16));
+        Mutex::new(unproven_answer(&answer, None).map(|(window, other_key)| Unproven { window, endpoint, other_key }))
+    }
+
+    fn other_key_answer() -> serde_json::Value {
+        json!({"registered": true, "proven": false, "message": format!("This was refused: {}.", crate::serve_cli::consent::Refusal::OtherKey.says())})
+    }
+
+    /// PRO-508: a window whose runtime pinned another key than its Keychain
+    /// holds records no restart offer when it registers, and asks the runtime
+    /// nothing for one; nor while Bots is off, however often its status is
+    /// read. Bots on, the first time it says it is unproven it offers the
+    /// restart, once.
+    #[test]
+    fn a_replaced_key_offers_the_restart_only_when_the_window_says_so_with_bots_on() {
+        let offers = AtomicU64::new(0);
+        let offer = || { offers.fetch_add(1, Ordering::SeqCst); Some("runtime_restart_required:e: Restart runtime starts a new one.".to_owned()) };
+        let (state, offering) = (unproven_state(other_key_answer()), Mutex::new(()));
+        let registered = state.lock().unwrap().clone().unwrap();
+        assert!(registered.other_key && registered.window.pinned && registered.window.restart.is_none(), "registered: nothing offered yet");
+
+        for _ in 0..3 {
+            assert_eq!(shown(&state, &offering, false, offer), None, "Bots off: no notice");
+        }
+        assert_eq!(offers.load(Ordering::SeqCst), 0, "Bots off: nothing asked of the runtime, nothing offered");
+        assert!(state.lock().unwrap().as_ref().unwrap().window.restart.is_none());
+
+        let said = shown(&state, &offering, true, offer).unwrap();
+        assert!(said.restart.as_deref().is_some_and(|restart| restart.starts_with("runtime_restart_required:e:")), "{said:?}");
+        assert_eq!(shown(&state, &offering, true, offer), Some(said.clone()));
+        assert_eq!(offers.load(Ordering::SeqCst), 1, "offered once, not on every status read");
+        // Bots off again: the notice goes, and nothing more is asked.
+        assert_eq!(shown(&state, &offering, false, offer), None);
+        assert_eq!(offers.load(Ordering::SeqCst), 1);
+
+        // Read from several windows at once: still one offer.
+        let (state, offering) = (unproven_state(other_key_answer()), Mutex::new(()));
+        std::thread::scope(|scope| for _ in 0..4 {
+            scope.spawn(|| assert!(shown(&state, &offering, true, offer).unwrap().restart.is_some()));
+        });
+        assert_eq!(offers.load(Ordering::SeqCst), 2);
+
+        // Proven while the restart was being worked out: nothing is said.
+        let (state, offering) = (unproven_state(other_key_answer()), Mutex::new(()));
+        assert_eq!(shown(&state, &offering, true, || { *state.lock().unwrap() = None; Some("offer".into()) }), None);
+    }
+
+    /// Only a replaced key offers a restart: a locked Keychain is repaired
+    /// by Try again, and a runtime with no key pinned by Settings → Machines.
+    #[test]
+    fn a_window_that_can_prove_itself_again_or_has_no_key_pinned_offers_no_restart() {
+        let never = || -> Option<String> { panic!("no restart is offered for this") };
+        let offering = Mutex::new(());
+        let (window, other_key) = unproven_answer(&json!({"registered": false, "proven": false, "message": "refused"}), Some("Keychain is locked".into())).unwrap();
+        assert_eq!((window.clone(), other_key), (UnprovenWindow { why: "Keychain is locked".into(), pinned: true, restart: None }, false));
+        let locked = unproven_state(json!({"registered": false, "proven": false, "message": "refused"}));
+        assert_eq!(shown(&locked, &offering, true, never).unwrap().why, "refused");
+        let unpinned = unproven_state(json!({"registered": true, "pinned": false, "message": "no key"}));
+        assert_eq!(shown(&unpinned, &offering, true, never), Some(UnprovenWindow { why: "no key".into(), pinned: false, restart: None }));
+        assert!(unproven_answer(&json!({"registered": true}), None).is_none(), "taken for the window");
+        assert_eq!(shown(&unproven_state(json!({"registered": true})), &offering, true, never), None);
     }
 
     #[test]
