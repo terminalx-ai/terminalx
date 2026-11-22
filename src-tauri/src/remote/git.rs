@@ -2400,11 +2400,13 @@ impl WorkspaceGit {
     }
 
     /// Tests stand in for a Git that predates `git hook run --to-stdin`.
+    #[cfg(test)]
     fn git_without_hook_run(&self) -> bool {
-        #[cfg(test)]
-        if self.git_without_hook_run {
-            return true;
-        }
+        self.git_without_hook_run
+    }
+
+    #[cfg(not(test))]
+    fn git_without_hook_run(&self) -> bool {
         false
     }
 
