@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudWorkspaceListItem } from "@/lib/api";
+import type { CloudWorkspaceListItem, TabLayout } from "@/lib/api";
 import type { AgentTabInfo } from "@terminalx/portable/workspace";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
@@ -651,6 +651,32 @@ describe("a local session's row of tabs under the title bar", () => {
       const layout = layoutOf(getTabState(), `remote:${KEY}`);
       expect(layout.order).not.toContain("agent:t-gone");
       expect(layout.panes?.map((pane) => [pane.id, pane.tabs, pane.active])).toEqual([["left", ["agent:t-1"], "agent:t-1"], ["right", ["agent:t-2"], "agent:t-2"]]);
+    });
+
+    it("keeps the saved layout while the runtime's agent list has not come, though the cache failed and the shells are listed (#1379)", async () => {
+      twoTabs();
+      // This desktop kept nothing it can read: the cache fails, so the store is loaded with no agent tabs at all.
+      guard.handlers.cloud_agent_cache_load = () => { throw new Error("cache unreadable"); };
+      const arranged: TabLayout = { order: ["agent:t-2", "agent:t-1"], pinned: ["agent:t-2"], muted: [], titles: {}, panes: [{ id: "left", tabs: ["agent:t-1"], active: "agent:t-1" }, { id: "right", tabs: ["agent:t-2"], active: "agent:t-2" }] };
+      saveTabLayout(`remote:${KEY}`, arranged);
+      // Connected, the shells listed, the agent list not answered yet.
+      runtime.withheld = ["session.tabs"];
+      await open(null);
+      await act(async () => runtime.connect());
+      await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+      await waitFor(() => expect(runtime.methods("session.tabs").length).toBeGreaterThan(0));
+      await settle(); await settle();
+      const kept = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(kept.order).toEqual(arranged.order);
+      expect(kept.pinned).toEqual(["agent:t-2"]);
+      expect(kept.panes?.map((pane) => [pane.id, pane.tabs])).toEqual([["left", ["agent:t-1"]], ["right", ["agent:t-2"]]]);
+      // The agent list comes, and t-2 was closed meanwhile: now, and only for it, the layout is pruned.
+      runtime.tabs = runtime.tabs.filter((tab) => tab.tabId !== "t-2");
+      await act(async () => runtime.answerWithheld());
+      await waitFor(() => expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual([]));
+      const pruned = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(pruned.order).toEqual(["agent:t-1"]);
+      expect(pruned.panes?.flatMap((pane) => pane.tabs)).toEqual(["agent:t-1"]);
     });
   });
 

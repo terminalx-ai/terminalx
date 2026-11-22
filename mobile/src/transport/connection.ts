@@ -8,7 +8,7 @@ import { updateStoredHost, writeHostCredential, type HostCredential, type Stored
 import { hostDisplayName } from "../store/host-name";
 import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
 import { closeDetail, ConnectionAttemptError, connectionProblem, decisiveProblem, pathProblem, type ConnectionProblem } from "./connection-errors";
-import { PHONE_CLOSE } from "./phone-close";
+import { PHONE_CLOSE, type PhoneCloseCode } from "./phone-close";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -163,7 +163,7 @@ export class HostConnection {
    * the person can do that: `byPerson` is true for a tap (Reconnect, Retry,
    * choosing the computer again), false for what the app does by itself.
    */
-  restart(reason = "restarted", byPerson = false): void {
+  restart(reason = "restarted", byPerson = false, closeCode: PhoneCloseCode = PHONE_CLOSE.closed): void {
     const active = this.active;
     if (!active) return;
     if (this.heldByMac && !byPerson) return;
@@ -174,7 +174,7 @@ export class HostConnection {
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
-    this.client?.close();
+    this.client?.close(closeCode);
     this.client = null;
     const generation = this.generation;
     void this.connectLoop(generation);
@@ -224,8 +224,11 @@ export class HostConnection {
       },
       () => {
         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
-        client.close(PHONE_CLOSE.probeTimeout);
-        this.reconnectNow("the connection from before the background did not answer");
+        // The generation is retired before the client closes (#1375): its
+        // disconnect listener would otherwise take this for a lost connection.
+        this.reconnectNow("the connection from before the background did not answer", PHONE_CLOSE.probeTimeout);
+        // A Mac that holds this phone disconnected keeps it from restarting; the dead client still goes.
+        if (this.client === client) client.close(PHONE_CLOSE.probeTimeout);
       },
     );
     return true;
@@ -280,9 +283,9 @@ export class HostConnection {
     else if (this.attempting !== this.generation) this.restart();
   }
 
-  private reconnectNow(reason: string): void {
+  private reconnectNow(reason: string, closeCode?: PhoneCloseCode): void {
     this.resumeDeadline = Date.now() + RESUME_REQUEST_WAIT_MS;
-    this.restart(reason);
+    this.restart(reason, false, closeCode);
   }
 
   /** Ends the current generation: its loop and race stop at their next check, and say why. */
