@@ -1,0 +1,165 @@
+name: Repeat flaky tests
+
+# PRO-334 and PRO-488: five tests failed in CI by timing or by state they
+# shared, and each failure cost an hour-long rerun. This runs each of them
+# many times in a row on the kind of runner CI runs it on, so a change to one
+# of them shows here whether it still fails now and then. It runs when one of
+# them (or this file) changes, and by hand; it is not a required status.
+#
+# It follows ci.yml's rules for a public repository: actions pinned by commit,
+# no credentials kept, a read-only token, and a cargo cache that is only read.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/repeat-flaky-tests.yml
+      - src/components/session/TabView.send.test.tsx
+      - scripts/webkit/cloud-sections.mjs
+      - src-tauri/src/local_runtime/stream_tests.rs
+      - src-tauri/src/checkpoints.rs
+      - src-tauri/src/harness/codex/pty.rs
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: How many times in a row each test runs
+        default: "20"
+      probe_runs:
+        description: How many times the Codex capability tests run, with other work on every core
+        default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repeat-flaky-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUNS: ${{ inputs.runs || '20' }}
+  PROBE_RUNS: ${{ inputs.probe_runs || '300' }}
+
+jobs:
+  # The large-tab send timing (PRO-334), on the runner the vitest job uses.
+  send-timing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      - name: The send tests, many times in a row
+        env:
+          # Each run adds a line: what a send cost, in reference units.
+          SEND_COST_LOG: ${{ runner.temp }}/send-cost.jsonl
+        run: |
+          for run in $(seq "$RUNS"); do
+            echo "::group::run $run of $RUNS"
+            pnpm vitest run src/components/session/TabView.send.test.tsx
+            echo "::endgroup::"
+          done
+          echo "What each run measured:"
+          cat "$SEND_COST_LOG"
+
+  # The far-behind view and the checkpoint undo (PRO-334), and the Codex
+  # capability check (PRO-488), on the runner linux-rust-tests uses.
+  linux-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep jq
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies and build the frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+      - name: Show the Rust toolchain
+        id: toolchain
+        run: |
+          rustup show && cargo --version
+          echo "rustc=$(rustc --version | tr -c '[:alnum:].\n' '-')" >> "$GITHUB_OUTPUT"
+      # Main's cache from linux-rust-tests, read and never saved.
+      - name: Restore the cargo cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ci-v4-linux-rust-tests-main-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ steps.toolchain.outputs.rustc }}
+      # Built once; every run below is the test binary itself.
+      - name: Build the library's tests
+        id: build
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/build.jsonl"
+          binary=$(jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "$RUNNER_TEMP/build.jsonl" | tail -n 1)
+          test -x "$binary"
+          echo "binary=$binary" >> "$GITHUB_OUTPUT"
+      - name: The far-behind view and the checkpoint undo, many times in a row
+        working-directory: src-tauri
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          for run in $(seq "$RUNS"); do
+            echo "::group::run $run of $RUNS"
+            "$BINARY" --exact \
+              local_runtime::stream::tests::a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback \
+              checkpoints::tests::latest_undo_is_exact_and_notes_survive_reload_and_are_acknowledged_once \
+              git::tests::a_snapshot_reads_a_racily_clean_edit
+            echo "::endgroup::"
+          done
+      # PRO-488 needed another test to fork while a stand-in was being written.
+      # Every core is kept busy, and the module's tests, which all write and
+      # run stand-ins, run on sixteen threads at once.
+      - name: The Codex capability tests, many times with every core busy
+        working-directory: src-tauri
+        env:
+          BINARY: ${{ steps.build.outputs.binary }}
+        run: |
+          for core in $(seq "$(nproc)"); do (while :; do :; done) & done
+          trap 'kill $(jobs -p)' EXIT
+          for run in $(seq "$PROBE_RUNS"); do
+            "$BINARY" harness::codex::pty::tests --test-threads=16 > "$RUNNER_TEMP/probe.log" 2>&1 || { cat "$RUNNER_TEMP/probe.log"; echo "failed on run $run of $PROBE_RUNS"; exit 1; }
+          done
+          tail -n 3 "$RUNNER_TEMP/probe.log"
+          echo "passed $PROBE_RUNS runs in a row"
+
+  # The cloud sections' search (PRO-334), on the runner webkit-layout uses.
+  webkit-search:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install npm dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the frontend
+        run: pnpm build
+      - name: Install WebKit for the layout checks
+        run: pnpm exec playwright install webkit
+      - name: The cloud sections checks, many times in a row
+        run: |
+          for run in $(seq "$RUNS"); do
+            echo "::group::run $run of $RUNS"
+            node scripts/webkit/cloud-sections.mjs
+            echo "::endgroup::"
+          done
