@@ -1314,6 +1314,8 @@ impl ControlService {
                     "place": place.key(),
                     "file": shown.map(|shown| shown.path.clone()),
                     "lines": shown.map(|shown| shown.lines.clone()).unwrap_or_default(),
+                    // Earlier notes of this place that could not be moved to it (PRO-512); null when there are none.
+                    "notice": shown.and_then(|shown| shown.notice.clone()),
                     "budget": memory::BUDGET,
                     "places": view.memory.places.iter().map(|shown| json!({"place": shown.key, "lines": shown.lines.len(), "read": shown.read})).collect::<Vec<_>>(),
                 }))
