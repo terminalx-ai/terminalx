@@ -193,6 +193,40 @@ The app, not the agent, holds a bot to its access (PRO-468, PRO-489).
   starts no work: it may be a bot's helper that left its tab. That includes
   the owner's own script with no terminal (launchd, cron, a CI runner), which
   runs them from a terminal, or once the bots are resumed.
+- **Cloud workspaces: the same limits as on this Mac (PRO-514).** A session
+  that works for a bot may start a session in a cloud workspace
+  (`cloud.sessions.create`), prompt it (`cloud.send`) and resume its
+  workspace (`cloud.resume`). Each is held to the bot's access as it is at
+  that moment, by the rule its local sessions are held by (`chat::bot_limit`,
+  the limit behind `chat::mode_limit` and `hold_to_bot`):
+  - A new cloud session starts in a mode no wider than the limit, whatever
+    mode was asked for: bypass with full access, Ask every time with ask
+    before outward actions, plan with read and report. The mode is always
+    named, since a launch that names none starts in bypass. It starts on
+    Claude Code or Codex only, as a bot's local sessions do. Below full
+    access it starts no issue pipeline, since what a pipeline pushes and
+    merges from the workspace could not be asked about first.
+  - The session is recorded as the bot's (`cloudSessions` in `bots.json`,
+    which a bot is refused a write to). A bot's session prompts only cloud
+    sessions recorded as the same bot's. The first session of a workspace it
+    created is the bot's by that workspace's launch, which the window names.
+  - A prompt, and a resume, carry the limit to the window (`botHold`), which
+    sets the tab's mode to it: named in the prompt's own message, so the
+    workspace's runtime applies it before the agent reads the prompt, and
+    refuses the prompt if it cannot. A lowered access so reaches a cloud
+    session at its next prompt or resume. A raised one widens nothing by
+    itself: the owner widens the tab in the window.
+  - A paused bot is refused all three, as `forbidden`. Another computer
+    (`machine.*`) and `pipelines.start` stay refused.
+
+  What this does not do: the workspace's runtime knows nothing of bots. It
+  runs the agent in the mode it is given and takes a mode only from a
+  person's connection, which is the window's, so the hold is made on this
+  Mac, where the command arrives. The per-call gate of a local session
+  (`bots::access`) does not reach a cloud VM: there the mode is the whole
+  barrier. And a person who sets a wider mode on a bot's cloud tab, from the
+  window, a phone or another computer, is not refused as they are on a local
+  tab; the bot's next prompt or resume narrows it again.
 - **Only the window writes through the runtime directly.** The control token
   is in every agent tab's environment, and a lease (`runtime.attach`) is
   anyone's for the asking. So a runtime whose window's key is pinned
@@ -1102,6 +1136,7 @@ issue.
 | PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | Backlog |
 | PRO-489 | Hardening left over from reviews | n/a | In review |
+| PRO-514 | A bot works in cloud workspaces with the access it has on this Mac | n/a | In review |
 
 ## Not in this epic
 

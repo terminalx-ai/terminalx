@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Bots (experimental): a bot works in cloud workspaces with the access it has
+  on this Mac. A session that works for a bot may start a cloud session,
+  prompt it and resume its workspace, where before every one was refused. A
+  bot with full access runs there with permissions bypassed; one that asks
+  before outward actions is held to Ask every time, and one that reads and
+  reports to plan, whatever mode it asks for. A change to a bot's access
+  reaches its cloud sessions at their next prompt or resume. A paused bot is
+  still refused, and so are another computer and starting an issue pipeline
+  (PRO-514).
+
 ## 0.2.38
 
 - Bots (experimental): a chat-app link code is shown only to the window that
