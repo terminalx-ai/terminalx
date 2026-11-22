@@ -285,6 +285,12 @@ pub fn delete(project: &Path, path: &Path, options: DeleteOptions<'_>) -> Result
     if p == root {
         anyhow::bail!("the project's own checkout cannot be deleted from here");
     }
+    // A pull request created from it and not yet confirmed (#1382): its
+    // pending record is the only evidence, so the checkout and its branch
+    // stay. A record that cannot be read keeps them too.
+    if let Some(url) = crate::remote::git::pending_pr_creation_in(&p).map_err(|error| anyhow::anyhow!("Pull requests created from it could not be checked: {}", error.message))? {
+        anyhow::bail!("Verify the pull request at {url} before removing this workspace.");
+    }
     let mut removal = git::WorktreeRemoval::default();
     // Asked of a directory that is not a working tree of this project, git
     // would name some other repository's branch.

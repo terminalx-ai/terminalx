@@ -1026,6 +1026,65 @@ pub(crate) fn pending_pr_creation_for(project: &Path, path: &Path) -> Result<Opt
     crate::remote::git::pending_pr_creation_in(&checkout_root(&project, path)).map_err(|error| error.message)
 }
 
+/// Saved checkout evidence for sessions recorded before it was kept (#1228).
+/// A fork of a session whose worktree later disappears is verified against
+/// its `checkoutIdentity`; a session saved before that existed has none, and
+/// once the directory is gone nothing can establish it. So, once per run,
+/// each such session whose checkout is still here, a linked worktree of its
+/// project on its stored branch and at its recorded root when one is
+/// recorded, has it captured now, as a new session's is when it is created.
+/// Any doubt leaves the session as it was; a checkout already missing stays
+/// unrecoverable.
+pub fn backfill_checkout_identities() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // Off the caller's thread: it runs Git for each such session, and nothing waits for it.
+    ONCE.call_once(|| {
+        std::thread::spawn(|| {
+            if let Err(error) = backfill_checkout_identities_now() {
+                log::warn!("record checkout identities of older sessions: {error:#}");
+            }
+        });
+    });
+}
+
+pub(crate) fn backfill_checkout_identities_now() -> anyhow::Result<usize> {
+    let sessions = index::load()?;
+    let found: Vec<(String, String, String, serde_json::Value)> = sessions.iter().filter_map(|session| {
+        if session.worktree_removed || session.worktree_name.is_none() || session.unknown.contains_key("checkoutIdentity") {
+            return None;
+        }
+        let branch = session.branch.as_deref().filter(|branch| !branch.is_empty())?;
+        let cwd = crate::paths::canonicalize(&session.cwd).ok()?;
+        let top = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()?;
+        let root = crate::paths::canonicalize(top.trim()).ok()?;
+        if let Some(recorded) = session.checkout_root() {
+            if crate::paths::canonicalize(recorded).ok()? != root {
+                return None;
+            }
+        }
+        if git::current_branch(&root).as_deref() != Some(branch) {
+            return None;
+        }
+        let identity = git::worktree_identity::WorktreeIdentity::capture(Path::new(&session.project_path), &root)?;
+        Some((session.id.clone(), session.cwd.clone(), root.to_string_lossy().into_owned(), serde_json::to_value(identity).ok()?))
+    }).collect();
+    if found.is_empty() {
+        return Ok(0);
+    }
+    index::update(|sessions| {
+        let mut bound = 0;
+        for (id, cwd, root, identity) in found {
+            // Only a session still as it was read: one moved or bound meanwhile is left alone.
+            let Some(session) = sessions.iter_mut().find(|session| session.id == id && session.cwd == cwd && !session.worktree_removed
+                && session.worktree_name.is_some() && !session.unknown.contains_key("checkoutIdentity")) else { continue };
+            session.set_checkout_root(Some(&root));
+            session.unknown.insert("checkoutIdentity".into(), identity);
+            bound += 1;
+        }
+        Ok(bound)
+    })
+}
+
 fn require_resolved_pr_creation(path: &Path) -> Result<()> {
     if let Some(url) = crate::remote::git::pending_pr_creation_in(path).map_err(|error| error.message)? {
         return Err(format!("Verify the pull request at {url} before removing this workspace."));
