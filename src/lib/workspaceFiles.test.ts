@@ -215,3 +215,83 @@ describe("a machine session's files in a worktree outside its project (PRO-405)"
     files.dispose();
   });
 });
+
+describe("a machine session's files in a checkout whose name holds a backslash (#1263)", () => {
+  // A Unix machine: `/` is the only separator, so these are two different directories.
+  const checkout = "wt/team\\read";
+  const sibling = "wt/team/read";
+  const disk: Record<string, string> = {
+    [`${checkout}/src/file\\name.ts`]: "intended",
+    [`${sibling}/src/file/name.ts`]: "sibling",
+    [`${sibling}/src/file\\name.ts`]: "sibling",
+  };
+  const asked: { method: string; params: Record<string, unknown> }[] = [];
+  const machine = () =>
+    client((method, params) => {
+      asked.push({ method, params });
+      const path = params.path as string;
+      if (method === "fs.list") {
+        const names = new Set(Object.keys(disk).flatMap((file) => (file.startsWith(`${path}/`) ? [file.slice(path.length + 1).split("/")[0]] : [])));
+        if (!names.size) throw { code: "not_found" };
+        return { path, entries: [...names].map((name) => ({ name, path: `${path}/${name}`, kind: disk[`${path}/${name}`] === undefined ? "directory" : "file", size: 0, modifiedMs: null })), truncated: false };
+      }
+      if (method === "fs.read") {
+        if (disk[path] === undefined) throw { code: "not_found" };
+        return { path, size: disk[path].length, version: "v1", offset: 0, eof: true, etag: `etag-${disk[path]}`, binary: false, text: disk[path] };
+      }
+      if (method === "fs.stat") {
+        if (disk[path] === undefined) throw { code: "not_found" };
+        return { name: path.split("/").pop(), kind: "file", size: disk[path].length, modifiedMs: 1, version: "v1", etag: `etag-${disk[path]}` };
+      }
+      if (method === "fs.write") {
+        disk[path] = params.text as string;
+        return { path, etag: "etag-new", size: disk[path].length, version: "v2" };
+      }
+      if (method === "fs.search") {
+        const hits = Object.entries(disk)
+          .filter(([file, text]) => file.startsWith(`${path}/`) && text.includes(params.query as string))
+          .map(([file]) => ({ path: file, line: 1, col: 0, text: params.query, matches: [[0, (params.query as string).length]] }));
+        return { searchId: params.searchId, hits, files: hits.length, capped: false, cancelled: false };
+      }
+      throw { code: "method_not_found" };
+    });
+  const source = (machineFiles = true) =>
+    cloudFileSource(`machine:m:p/${checkout}`, machine(), false, checkout, async () => [{ repo: "." }, { repo: checkout }], machineFiles);
+  const paths = (method: string) => asked.filter((call) => call.method === method).map((call) => call.params.path);
+
+  it("lists, opens, saves and searches the linked checkout itself, never its slash-separated sibling", async () => {
+    asked.length = 0;
+    const files = source();
+    expect((await files.listDir("")).map((entry) => entry.path)).toEqual(["src"]);
+    expect((await files.listDir("src")).map((entry) => [entry.path, entry.isDir])).toEqual([["src/file\\name.ts", false]]);
+    const opened = await files.readText("src/file\\name.ts");
+    expect(opened.content).toBe("intended");
+    expect(await files.stat("src/file\\name.ts")).toEqual({ version: "v1", etag: "etag-intended" });
+    await files.writeText("src/file\\name.ts", "saved", opened.etag);
+    const found = await files.search({ query: "saved", regex: false, caseSensitive: true }, new AbortController().signal);
+    expect(found.hits.map((hit) => hit.path)).toEqual(["src/file\\name.ts"]);
+
+    expect(paths("fs.list")).toEqual([checkout, `${checkout}/src`]);
+    expect(paths("fs.read")).toEqual([`${checkout}/src/file\\name.ts`]);
+    expect(paths("fs.stat")).toEqual([`${checkout}/src/file\\name.ts`]);
+    expect(paths("fs.write")).toEqual([`${checkout}/src/file\\name.ts`]);
+    expect(paths("fs.search")).toEqual([checkout]);
+    expect(disk[`${checkout}/src/file\\name.ts`]).toBe("saved");
+    expect(disk[`${sibling}/src/file/name.ts`]).toBe("sibling");
+    expect(disk[`${sibling}/src/file\\name.ts`]).toBe("sibling");
+    // Nothing reached the sibling, whose name differs only by the separator.
+    expect(asked.some((call) => typeof call.params.path === "string" && call.params.path.startsWith(sibling))).toBe(false);
+
+    // Backslashes stay literal without opening a way out between them.
+    for (const bad of ["..\\x", "src\\..\\..\\x", "../x", "src/../../x"]) await expect(files.readText(bad), bad).rejects.toThrow();
+    expect(paths("fs.read")).toEqual([`${checkout}/src/file\\name.ts`]);
+    files.dispose();
+
+    // A cloud workspace's paths still split on either slash.
+    asked.length = 0;
+    const cloud = source(false);
+    await cloud.readText("src/file\\name.ts");
+    expect(paths("fs.read")).toEqual([`${sibling}/src/file/name.ts`]);
+    cloud.dispose();
+  });
+});

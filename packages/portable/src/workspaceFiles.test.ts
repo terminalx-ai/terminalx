@@ -102,6 +102,20 @@ describe("workspace files", () => {
     for (const bad of ["../x", "a/../../x", "/etc/hosts", "C:\\x", "\\\\server\\share"]) expect(() => remotePath(bad)).toThrow();
   });
 
+  it("keeps a machine project's backslashes literal and still refuses every way out (#1263)", () => {
+    // A cloud workspace's path, as before: either slash separates.
+    expect(remotePath("wt/team\\read/a.ts")).toBe("wt/team/read/a.ts");
+    // A machine's runtime names relative paths with `/`: a backslash is part of a Unix name.
+    expect(remotePath("wt/team\\read/file\\name.ts", true)).toBe("wt/team\\read/file\\name.ts");
+    expect(remotePath("wt//team\\read/./a.ts/", true)).toBe("wt/team\\read/a.ts");
+    expect(remoteFilePath("wt/team\\read", false, true)).toBe("wt/team\\read");
+    expect(remoteFilePath("wt/team\\read", true, true)).toBe("wt/team\\read");
+    for (const bad of ["../x", "a/../../x", "a\\..\\x", "a/..\\x", "a/x\\..", "/etc/hosts", "\\x", "\\\\server\\share", "C:\\x", "c:x", "a\0b"]) {
+      expect(() => remotePath(bad, true), bad).toThrow();
+      expect(() => remoteFilePath(bad, false, true), bad).toThrow();
+    }
+  });
+
   it("names a machine project's worktree outside its folder absolutely, never climbing out of it (PRO-405)", () => {
     expect(remoteFilePath("src/./a.ts", true)).toBe("src/a.ts");
     expect(remoteFilePath("/Users/me/worktrees//read/src/", true)).toBe("/Users/me/worktrees/read/src");

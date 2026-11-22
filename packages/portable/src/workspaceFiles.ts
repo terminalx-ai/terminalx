@@ -96,11 +96,18 @@ export interface RemoteSearchQuery {
   maxResults?: number;
   /** `path` may be a machine project's worktree outside its folder, by absolute path (`remoteFilePath`). */
   absolute?: boolean;
+  /** `path` is a machine project's: `/` is its only separator (`remoteFilePath`). */
+  machine?: boolean;
 }
 
-/** Whether a call may name a machine project's worktree outside its folder by absolute path (`remoteFilePath`). */
+/**
+ * Whether a call may name a machine project's worktree outside its folder by
+ * absolute path, and whether its paths are a machine project's, where `/` is
+ * the only separator (`remoteFilePath`).
+ */
 export interface PathScope {
   absolute?: boolean;
+  machine?: boolean;
 }
 
 export class RemotePathError extends Error {
@@ -111,15 +118,20 @@ export class RemotePathError extends Error {
  * A workspace-relative path as the runtime expects it, or a refusal for one
  * that is absolute or climbs out. The runtime checks again (and resolves
  * symlinks); this only keeps an obviously wrong path from being sent.
+ *
+ * `machine`: a machine project's path. Its runtime names every relative path
+ * with `/`, so `/` is the only separator and a backslash is kept as a literal
+ * character of a Unix checkout or file name. A part a Windows runtime would
+ * read as `..` between backslashes is still refused.
  */
-export function remotePath(path: string): string {
+export function remotePath(path: string, machine = false): string {
   const parts: string[] = [];
   if (path.startsWith("/") || path.startsWith("\\") || /^[a-zA-Z]:/.test(path) || path.includes("\0")) {
     throw new RemotePathError(`${path} is not a workspace-relative path`);
   }
-  for (const part of path.split(/[\\/]+/)) {
+  for (const part of path.split(machine ? /\/+/ : /[\\/]+/)) {
     if (!part || part === ".") continue;
-    if (part === "..") throw new RemotePathError(`${path} leaves the workspace`);
+    if (part.split("\\").includes("..")) throw new RemotePathError(`${path} leaves the workspace`);
     parts.push(part);
   }
   return parts.join("/");
@@ -134,8 +146,8 @@ export function remotePath(path: string): string {
  * worktrees and refuses every other (`path_forbidden`); this only keeps a
  * malformed one, or any absolute one nobody asked for, from being sent.
  */
-export function remoteFilePath(path: string, absolute = false): string {
-  if (!absolute || !path.startsWith("/")) return remotePath(path);
+export function remoteFilePath(path: string, absolute = false, machine = false): string {
+  if (!absolute || !path.startsWith("/")) return remotePath(path, machine);
   // An absolute machine path uses Unix separators. A backslash is a
   // literal character in a checkout or file name.
   if (path.includes("\0")) throw new RemotePathError(`${path} is not a path on the machine`);
@@ -150,12 +162,12 @@ export function isConflict(error: unknown): boolean {
 }
 
 export async function listRemoteDir(client: WorkspaceRpcClient, path: string, scope: PathScope = {}): Promise<RemoteListing> {
-  return client.call<RemoteListing>("fs.list", { path: remoteFilePath(path, scope.absolute) });
+  return client.call<RemoteListing>("fs.list", { path: remoteFilePath(path, scope.absolute, scope.machine) });
 }
 
 /** `etag`: hash files up to the remote limit too, not only small ones. */
 export async function statRemote(client: WorkspaceRpcClient, path: string, options: { etag?: boolean } & PathScope = {}): Promise<RemoteStat> {
-  return client.call<RemoteStat>("fs.stat", { path: remoteFilePath(path, options.absolute), ...(options.etag ? { etag: true } : {}) });
+  return client.call<RemoteStat>("fs.stat", { path: remoteFilePath(path, options.absolute, options.machine), ...(options.etag ? { etag: true } : {}) });
 }
 
 interface ReadPart {
@@ -183,7 +195,7 @@ export interface ReadOptions extends PathScope {
  * `conflict`.
  */
 export async function readRemoteFile(client: WorkspaceRpcClient, path: string, options: ReadOptions = {}): Promise<RemoteFile> {
-  const rel = remoteFilePath(path, options.absolute);
+  const rel = remoteFilePath(path, options.absolute, options.machine);
   for (let attempt = 0; ; attempt++) {
     try {
       return await readOnce(client, rel, options);
@@ -245,7 +257,7 @@ export async function writeRemoteFile(
   expectedEtag: string | null | undefined,
   scope: PathScope = {},
 ): Promise<RemoteWriteResult> {
-  const rel = remoteFilePath(path, scope.absolute);
+  const rel = remoteFilePath(path, scope.absolute, scope.machine);
   const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
   if (bytes.length > FS_MAX_FILE_BYTES) throw new WorkspaceRpcError("too_large", `${rel} is larger than ${FS_MAX_FILE_BYTES} bytes`, "fs.write");
   const condition = expectedEtag === undefined ? {} : { expectedEtag };
@@ -270,7 +282,7 @@ export async function searchRemote(client: WorkspaceRpcClient, query: RemoteSear
   abortIfNeeded(signal);
   const searchId = `search-${crypto.randomUUID().replace(/-/g, "")}`;
   const params: Record<string, unknown> = { searchId, query: query.query, regex: !!query.regex, caseSensitive: !!query.caseSensitive };
-  if (query.path) params.path = remoteFilePath(query.path, query.absolute);
+  if (query.path) params.path = remoteFilePath(query.path, query.absolute, query.machine);
   if (query.maxResults) params.maxResults = query.maxResults;
   const request = client.call<RemoteSearchResult & { searchId: string }>("fs.search", params);
   if (!signal) return request;
