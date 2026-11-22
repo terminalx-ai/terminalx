@@ -652,3 +652,61 @@ fn an_unlisted_target_with_inside_links_and_clashing_paths() {
     let error = preview_in(&rig.homes, &[change(Kind::Skill, "pdf-tools", Direction::ToCodex)]).unwrap_err().to_string();
     assert_eq!(error, "skill `pdf-tools` can't be copied over: scripts is a file on the other side");
 }
+
+/// A skill copy whose first file can't be read once its folders are made
+/// (its source went away): what is on disk and what the receipt says agree.
+fn copy_of_a_vanished_file(rig: &Rig, target: &Path) -> (Result<Written, Box<Stopped>>, PathBuf) {
+    let source = rig.homes.home.join("source");
+    fs::create_dir_all(&source).unwrap();
+    let files = vec![SkillFile { rel: "scripts/deep/run.sh".into(), hash: [0; 32], len: 0, executable: false }];
+    let write = Write::Skill { source: source.clone(), target: target.to_path_buf(), files, exists: target.exists() };
+    (apply_one(&rig.homes, &write, &today()), source)
+}
+
+#[test]
+fn a_skill_copy_that_stops_before_its_first_file_takes_back_the_folders_it_made() {
+    let rig = rig();
+    let skills = rig.homes.codex_dir.join("skills");
+    let before = snapshot(&skills);
+    let target = skills.join("new-skill");
+    let (result, _) = copy_of_a_vanished_file(&rig, &target);
+    let Err(stopped) = result else { panic!("the copy went through") };
+    let error = stopped_message(&rig.homes, &[], &stopped);
+    assert!(error.starts_with("Nothing was written: read "), "{error}");
+    assert!(!error.contains("still there"), "{error}");
+    // Nothing of this attempt is left, and the folder it went into stays.
+    assert!(!target.exists());
+    assert!(skills.is_dir());
+    assert_eq!(snapshot(&skills), before);
+}
+
+#[test]
+fn a_stopped_skill_copy_keeps_folders_that_were_already_there() {
+    let rig = rig();
+    let target = rig.homes.codex_dir.join("skills/new-skill");
+    fs::create_dir_all(target.join("scripts")).unwrap();
+    let (result, _) = copy_of_a_vanished_file(&rig, &target);
+    let Err(stopped) = result else { panic!("the copy went through") };
+    assert!(stopped.made.is_empty());
+    assert!(target.join("scripts").is_dir());
+    assert!(!target.join("scripts/deep").exists());
+}
+
+/// A folder made for a write that could not be taken back is named, so the
+/// receipt never says "nothing" while it is on disk.
+#[test]
+fn a_folder_left_behind_is_named() {
+    let rig = rig();
+    let made = rig.homes.codex_dir.join("skills/new-skill");
+    let stopped = |made: Vec<PathBuf>| Stopped { error: anyhow!("boom"), target: rig.homes.codex_dir.join("skills/new-skill"), backup: None, copied: Vec::new(), mode_unset: None, of: 1, made };
+    assert_eq!(stopped_message(&rig.homes, &[], &stopped(vec![made.clone()])), "No file was written: boom. The folder ~/.codex/skills/new-skill made for it is still there.");
+    assert_eq!(
+        stopped_message(&rig.homes, &[], &stopped(vec![made.clone(), made.join("scripts")])),
+        "No file was written: boom. The folders ~/.codex/skills/new-skill, ~/.codex/skills/new-skill/scripts made for it are still there."
+    );
+    let done = [Written { path: "~/.codex/prompts/review.md".into(), backup: None }];
+    assert_eq!(
+        stopped_message(&rig.homes, &done, &stopped(vec![made])),
+        "Wrote ~/.codex/prompts/review.md, then stopped: boom. Nothing after that was written. The folder ~/.codex/skills/new-skill made for it is still there."
+    );
+}

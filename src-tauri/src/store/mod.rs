@@ -303,6 +303,21 @@ pub(crate) fn temp_home() -> TempHome {
 mod tests {
     use super::*;
 
+    /// A write whose rename fails (a folder holding a file is in the way)
+    /// leaves no temporary file beside it.
+    #[test]
+    fn a_failed_rename_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.json");
+        fs::create_dir(&p).unwrap();
+        fs::write(p.join("keep"), "mine").unwrap();
+        let error = write_atomic(&p, b"{}").unwrap_err();
+        assert!(format!("{error:#}").starts_with("rename into "), "{error:#}");
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names, ["x.json"]);
+        assert_eq!(fs::read(p.join("keep")).unwrap(), b"mine");
+    }
+
     #[test]
     fn atomic_write_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

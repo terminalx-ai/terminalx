@@ -1360,6 +1360,9 @@ struct Stopped {
     mode_unset: Option<PathBuf>,
     /// How many files the skill copy meant to write.
     of: usize,
+    /// Folders this write created, outermost first. On a stop the empty ones
+    /// are removed again; any still there are named.
+    made: Vec<PathBuf>,
 }
 
 /// The error text for a stop: every file written before it, including those
@@ -1379,51 +1382,68 @@ fn stopped_message(homes: &Homes, done: &[Written], stopped: &Stopped) -> String
         wrote.push(format!("{} of {} files into {} ({names}{backup})", stopped.copied.len(), stopped.of, homes.pretty(&stopped.target)));
     }
     let error = &stopped.error;
+    // With files copied the folders made for them hold them; without, a
+    // folder that could not be removed again is all this write left.
+    let left = match stopped.made.as_slice() {
+        [one] if stopped.copied.is_empty() => format!(" The folder {} made for it is still there.", homes.pretty(one)),
+        made if !made.is_empty() && stopped.copied.is_empty() => {
+            format!(" The folders {} made for it are still there.", made.iter().map(|d| homes.pretty(d)).collect::<Vec<_>>().join(", "))
+        }
+        _ => String::new(),
+    };
     if wrote.is_empty() {
-        return match &stopped.backup {
-            Some(b) => format!("Nothing was written: {error:#}. A backup was made at {} first.", homes.pretty(b)),
-            None => format!("Nothing was written: {error:#}"),
+        return match (&stopped.backup, left.is_empty()) {
+            (Some(b), true) => format!("Nothing was written: {error:#}. A backup was made at {} first.", homes.pretty(b)),
+            (Some(b), false) => format!("No file was written: {error:#}. A backup was made at {} first.{left}", homes.pretty(b)),
+            (None, true) => format!("Nothing was written: {error:#}"),
+            (None, false) => format!("No file was written: {error:#}.{left}"),
         };
     }
     let note = match (&stopped.backup, stopped.copied.is_empty()) {
         (Some(b), true) => format!(" A backup was made at {} first.", homes.pretty(b)),
         _ => String::new(),
     };
-    format!("Wrote {}, then stopped: {error:#}. Nothing after that was written.{note}", wrote.join(", "))
+    format!("Wrote {}, then stopped: {error:#}. Nothing after that was written.{note}{left}", wrote.join(", "))
 }
 
-fn apply_one(homes: &Homes, write: &Write, date: &str) -> Result<Written, Stopped> {
+fn apply_one(homes: &Homes, write: &Write, date: &str) -> Result<Written, Box<Stopped>> {
     let backup = backup_of(homes, write, date);
     let of = match write {
         Write::Skill { files, .. } => files.len(),
         Write::File { .. } => 1,
     };
-    let mut stopped = Stopped { error: anyhow!("stopped"), target: write.target().to_path_buf(), backup: None, copied: Vec::new(), mode_unset: None, of };
+    let mut stopped = Stopped { error: anyhow!("stopped"), target: write.target().to_path_buf(), backup: None, copied: Vec::new(), mode_unset: None, of, made: Vec::new() };
     if let Some(backup) = &backup {
         if let Err(e) = make_backup(write.target(), backup).with_context(|| format!("back up {}", homes.pretty(write.target()))) {
             // A backup cut short is not one to point at; nothing of the write has begun.
             stopped.error = e;
-            return Err(stopped);
+            return Err(Box::new(stopped));
         }
         stopped.backup = Some(backup.clone());
     }
     let result = match write {
-        Write::File { path, bytes, .. } => write_file(path, bytes),
+        Write::File { path, bytes, .. } => write_file(path, bytes, &mut stopped.made),
         Write::Skill { source, target, files, .. } => copy_skill(homes, source, target, files, &mut stopped),
     };
     match result {
         Ok(()) => Ok(Written { path: homes.pretty(write.target()), backup: backup.map(|b| homes.pretty(&b)) }),
         Err(error) => {
             stopped.error = error;
-            Err(stopped)
+            // Innermost first; `remove_dir` takes only an empty folder, so
+            // nothing copied in, or put there by anyone else, goes with it.
+            for dir in stopped.made.iter().rev() {
+                let _ = fs::remove_dir(dir);
+            }
+            stopped.made.retain(|dir| fs::symlink_metadata(dir).is_ok());
+            Err(Box::new(stopped))
         }
     }
 }
 
-fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_file(path: &Path, bytes: &[u8], made: &mut Vec<PathBuf>) -> Result<()> {
     let real = through_link(path)?;
     if let Some(parent) = real.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        make_dirs(parent, made).with_context(|| format!("create {}", parent.display()))?;
     }
     crate::store::write_atomic(&real, bytes)
 }
@@ -1462,7 +1482,7 @@ fn copy_skill(homes: &Homes, source: &Path, target: &Path, files: &[SkillFile], 
         // made since cannot carry a write out of the folder.
         let to = landing(target, &file.rel).map_err(|e| anyhow!("{e}"))?;
         if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+            make_dirs(parent, &mut progress.made).with_context(|| format!("create {}", parent.display()))?;
         }
         let from = source.join(&file.rel);
         let bytes = fs::read(&from).with_context(|| format!("read {}", from.display()))?;
@@ -1480,6 +1500,30 @@ fn copy_skill(homes: &Homes, source: &Path, target: &Path, files: &[SkillFile], 
         }
     }
     Ok(())
+}
+
+/// `fs::create_dir_all`, recording in `made` each folder this call created
+/// (outermost first) and none that was already there.
+fn make_dirs(dir: &Path, made: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    match fs::create_dir(dir) {
+        Ok(()) => {
+            made.push(dir.to_path_buf());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            make_dirs(dir.parent().ok_or(e)?, made)?;
+            match fs::create_dir(dir) {
+                Ok(()) => {
+                    made.push(dir.to_path_buf());
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Where a write to `path` should land: the file a link points at, so a
