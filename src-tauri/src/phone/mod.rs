@@ -819,6 +819,17 @@ pub(crate) fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         // What a new session can be started with, and this Mac's phone-visible settings.
         "sessions.options",
         "mac.settings",
+        // The conversations a phone is sent ahead of time (#1283), and the
+        // layered configuration its new-session form shows: reads.
+        "sync.prefetch",
+        "sync.prefetchTargets",
+        "configuration.resolve",
+        // The Bots tab (PRO-479): the bots, a bot's home and its list.
+        "bots.list",
+        "bots.home",
+        "bots.items",
+        // The cloud projects pinned on this Mac (#1469).
+        "cloud.pins",
     ];
     const DRIVER: &[&str] = &[
         // What the phone calls itself (PRO-314).
@@ -852,6 +863,14 @@ pub(crate) fn allowed_method(scope: DeviceScope, method: &str) -> bool {
         "session.continue",
         // Closing a tab as the desktop's tab strip does.
         "session.closeTab",
+        // Pinning a session or a cloud project as the sidebar does (#1469).
+        "sessions.pin",
+        "cloud.pin",
+        // The owner's acts on the bots (PRO-479).
+        "bots.answer",
+        "bots.pause",
+        "bots.resume",
+        "bots.pauseAll",
     ];
     VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
 }

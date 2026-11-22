@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { botsApi, errorMessage, invoke } from "@/lib/api";
+import { holdQuit } from "@/lib/quitWarning";
 import type { Bot } from "@/types/bots";
 import type { BotChange, BotDiffLine, BotRoleMemory } from "@/types/botMemory";
 
@@ -37,6 +38,18 @@ export interface RoleDraft {
 
 // Kept for the app's life, by bot: leaving the screen, or the bot missing from the list for a moment, loses no edit.
 const drafts = new Map<string, RoleDraft>();
+// While any draft is unsaved, quitting the app or closing its window asks first (`quitWarning`).
+let releaseQuit: (() => void) | null = null;
+
+const UNSAVED_ROLE = "A bot's standing instructions have unsaved changes. If you quit now, they are lost.";
+
+function holdQuitWhileDrafts() {
+  if (drafts.size > 0 && !releaseQuit) releaseQuit = holdQuit(UNSAVED_ROLE);
+  if (drafts.size === 0 && releaseQuit) {
+    releaseQuit();
+    releaseQuit = null;
+  }
+}
 
 export function roleDraft(id: string): RoleDraft | undefined {
   return drafts.get(id);
@@ -46,6 +59,7 @@ export function roleDraft(id: string): RoleDraft | undefined {
 export function keepRoleDraft(id: string, draft: RoleDraft | null) {
   if (draft && draft.text !== draft.base) drafts.set(id, draft);
   else drafts.delete(id);
+  holdQuitWhileDrafts();
 }
 
 /** Whether a bot's standing instructions have an unsaved edit. */
@@ -55,6 +69,7 @@ export function hasRoleDraft(id: string): boolean {
 
 export function resetRoleDraftsForTests() {
   drafts.clear();
+  holdQuitWhileDrafts();
 }
 
 export const MEMORY_CHANGED_EVENT = "bot_memory_changed";

@@ -45,6 +45,9 @@ pub const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// the change is kept as the whole text before and after, by hash, so one
 /// large edit never fills the log and rotates the rest of the history out.
 pub const MAX_LINE_EDIT_BYTES: usize = 32 * 1024;
+/// The most the kept texts of past changes may take (the files as they are
+/// now aside): past it the log is rotated too, so the texts it no longer names go.
+pub const MAX_HISTORY_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 /// More lines than this on both sides of a memory file's edit are recorded as a whole text.
 const MAX_DIFF_CELLS: usize = 4_000_000;
 /// What a secret taken out of the history reads as.
@@ -262,20 +265,49 @@ type Known = BTreeMap<String, String>;
 
 fn read_known(id: &str) -> Result<Option<Known>> {
     let path = dir(id)?.join(KNOWN_FILE);
-    let known: Option<Known> = crate::store::read_json(&path).with_context(|| format!("{} cannot be read", path.display()))?;
+    let known: Option<Known> = match crate::store::read_json(&path) {
+        Ok(known) => known,
+        // Unreadable (cut short, or not JSON): set aside, and rebuilt from the states the log ends with, so the
+        // owner's writes go on and edits made since the last recorded change are still found.
+        Err(error) => {
+            log::warn!("bot {id}: {} cannot be read ({error:#}); rebuilt from the change log", path.display());
+            let aside = path.with_file_name(format!("{KNOWN_FILE}.unreadable-{}", uuid::Uuid::now_v7()));
+            if let Err(error) = std::fs::rename(&path, &aside) {
+                log::warn!("bot {id}: set {} aside: {error:#}", path.display());
+            }
+            return rebuilt_known(id);
+        }
+    };
     // A value that is not a hash is the text itself, as an earlier build kept it.
     known
         .map(|known| known.into_iter().map(|(rel, value)| Ok((rel, if is_hash(&value) { value } else { keep_text(id, &value)? }))).collect())
         .transpose()
 }
 
-/// A path inside the home, as an edit names it: plain names only, never out of the home.
+/// What the app knows of the files when `known.json` cannot be read: as
+/// hiring wrote them, then each file as the newest change to it left it.
+fn rebuilt_known(id: &str) -> Result<Option<Known>> {
+    let mut known = as_hired(id)?.unwrap_or_default();
+    for change in read_log(id)?.changes {
+        for (rel, state) in change.states {
+            match state {
+                Some(hash) => known.insert(rel, hash),
+                None => known.remove(&rel),
+            };
+        }
+    }
+    Ok((!known.is_empty()).then_some(known))
+}
+
+/// A path inside the home, as an edit names it: names only (any letters,
+/// spaces inside a name and punctuation; no control characters, line breaks
+/// or direction marks, no `\` or `:`), never out of the home.
 pub fn checked(rel: &str) -> Result<()> {
     let path = Path::new(rel);
     let plain = !rel.is_empty()
-        && rel.len() <= 255
-        && path.components().all(|component| matches!(component, Component::Normal(_)))
-        && rel.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'));
+        && rel.len() <= 1024
+        && path.components().all(|component| matches!(component, Component::Normal(name) if name.len() <= 255 && name.to_str().is_some_and(|name| name.trim() == name)))
+        && rel.chars().all(|c| !c.is_control() && !matches!(c, '\\' | ':') && !super::memory::breaks_a_line(c));
     anyhow::ensure!(plain, "{rel} is not a file of the bot's home");
     Ok(())
 }
@@ -348,7 +380,8 @@ pub fn lines_of(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
-fn text_of(lines: &[String]) -> String {
+/// A file's text from its lines, as the line edits write it.
+pub fn text_of(lines: &[String]) -> String {
     if lines.is_empty() { String::new() } else { format!("{}\n", lines.join("\n")) }
 }
 
@@ -365,6 +398,8 @@ pub struct Files {
     home: PathBuf,
     texts: BTreeMap<String, Option<String>>,
     touched: BTreeSet<String>,
+    /// Each touched file as it was before this change, for [`Files::write`]'s order.
+    original: BTreeMap<String, Option<String>>,
     recorded: Vec<NewChange>,
 }
 
@@ -384,7 +419,7 @@ fn insert_at(lines: &[String], index: Option<usize>, prev: Option<&String>) -> u
 
 impl Files {
     fn new(id: &str, home: PathBuf) -> Self {
-        Self { id: id.into(), home, texts: BTreeMap::new(), touched: BTreeSet::new(), recorded: Vec::new() }
+        Self { id: id.into(), home, texts: BTreeMap::new(), touched: BTreeSet::new(), original: BTreeMap::new(), recorded: Vec::new() }
     }
 
     pub fn get(&mut self, rel: &str) -> Result<Option<String>> {
@@ -403,6 +438,9 @@ impl Files {
     }
 
     fn set(&mut self, rel: &str, text: Option<String>) {
+        if !self.original.contains_key(rel) {
+            self.original.insert(rel.into(), self.texts.get(rel).cloned().flatten());
+        }
         self.texts.insert(rel.into(), text);
         self.touched.insert(rel.into());
     }
@@ -468,12 +506,15 @@ impl Files {
         Ok(())
     }
 
-    /// Write the touched files, each place's `MEMORY.md` last: a note moved to
-    /// an archive is in the archive before it leaves the memory, so a crash
-    /// between the two loses nothing.
+    /// Write the touched files by direction: those that only gain lines first,
+    /// then those that gain and lose some, then those that only lose lines,
+    /// and removed files last. A note moved to an archive is in the archive
+    /// before it leaves the memory, and one an undo moves back is in the
+    /// memory before it leaves the archive, so a crash between two writes
+    /// leaves a line in both, never in neither.
     fn write(&self) -> Result<()> {
         let mut order: Vec<&String> = self.touched.iter().collect();
-        order.sort_by_key(|rel| (rel.rsplit('/').next() == Some(bot_store::MEMORY_FILE), rel.as_str()));
+        order.sort_by_key(|rel| (self.direction(rel), rel.rsplit('/').next() == Some(bot_store::MEMORY_FILE), rel.as_str()));
         for rel in order {
             no_links(&self.home, rel)?;
             let path = self.home.join(rel);
@@ -494,6 +535,29 @@ impl Files {
             }
         }
         Ok(())
+    }
+}
+
+impl Files {
+    /// 0: only gains lines (or is new); 1: gains and loses; 2: only loses; 3: removed.
+    fn direction(&self, rel: &str) -> u8 {
+        let Some(after) = self.texts.get(rel).cloned().flatten() else { return 3 };
+        let before = self.original.get(rel).cloned().flatten().unwrap_or_default();
+        let count = |text: &str| {
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for line in text.lines() {
+                *counts.entry(line.to_owned()).or_default() += 1;
+            }
+            counts
+        };
+        let (was, is) = (count(&before), count(&after));
+        let loses = was.iter().any(|(line, n)| is.get(line).copied().unwrap_or(0) < *n);
+        let gains = is.iter().any(|(line, n)| was.get(line).copied().unwrap_or(0) < *n);
+        match (gains, loses) {
+            (_, false) => 0,
+            (true, true) => 1,
+            (false, true) => 2,
+        }
     }
 }
 
@@ -568,7 +632,7 @@ pub fn diff(before: &[String], after: &[String]) -> Option<Vec<DiffLine>> {
 /// removals from the last up, then additions from the first down. Each
 /// names the line above it, for an undo to find its place. `None` past
 /// [`MAX_LINE_EDIT_BYTES`]: the caller keeps the whole texts instead.
-fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit>> {
+pub(super) fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit>> {
     let steps = diff(before, after)?;
     let (mut removed, mut added) = (Vec::new(), Vec::new());
     let (mut old, mut new): (usize, usize) = (0, 0);
@@ -592,8 +656,13 @@ fn line_edits(rel: &str, before: &[String], after: &[String]) -> Option<Vec<Edit
     }
     removed.reverse();
     removed.extend(added);
-    let size: usize = removed.iter().map(|edit| serde_json::to_string(edit).map_or(usize::MAX, |text| text.len())).fold(0, usize::saturating_add);
-    (size <= MAX_LINE_EDIT_BYTES).then_some(removed)
+    within_cap(&removed).then_some(removed)
+}
+
+/// Whether line edits stay within [`MAX_LINE_EDIT_BYTES`], serialised.
+pub fn within_cap(edits: &[Edit]) -> bool {
+    let size: usize = edits.iter().map(|edit| serde_json::to_string(edit).map_or(usize::MAX, |text| text.len())).fold(0, usize::saturating_add);
+    size <= MAX_LINE_EDIT_BYTES
 }
 
 /// The edits that turn what the app knew of a file into what it is now.
@@ -657,6 +726,34 @@ fn logged_state<'a>(log: &'a Log, rel: &str) -> Option<&'a Option<String>> {
     log.changes.iter().rev().find_map(|change| change.states.get(rel))
 }
 
+/// What identifies a file's contents without reading them: its size, its
+/// modification and change times and (on Unix) its inode. Taken without following a link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp(u64, Option<std::time::SystemTime>, u64, i64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::symlink_metadata(path).ok().filter(|meta| meta.file_type().is_file())?;
+    #[cfg(unix)]
+    let (inode, changed) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.ino(), meta.ctime().saturating_mul(1_000_000_000).saturating_add(meta.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let (inode, changed) = (0, 0);
+    Some(Stamp(meta.len(), meta.modified().ok(), inode, changed))
+}
+
+/// Each followed file's stamp and hash as a look last read it, by bot and
+/// path, in memory only: a look (every chat launch) reads again only the
+/// files whose stamp changed, however many topic files a bot keeps.
+static SEEN: Mutex<BTreeMap<(String, String), (Stamp, String)>> = Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+thread_local! {
+    /// Files a look read on this thread, for tests.
+    pub static LOOK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Look for edits made outside the app since it last saw the files: each
 /// file changed is recorded as one `outside` change, at its modification
 /// time. A state the log already ends with is not recorded again. Answers
@@ -674,10 +771,29 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<Known>) -> Res
     }
     let mut now = Known::new();
     let mut texts = BTreeMap::new();
+    let mut seen = SEEN.lock().unwrap_or_else(|error| error.into_inner());
     for rel in &names {
+        let key = (id.to_owned(), rel.clone());
+        let stamped = no_links(&files.home, rel).ok().and_then(|()| stamp(&files.home.join(rel)));
+        // Unchanged since it was last read, and as the app knows it: not read again.
+        if let (Some(stamped), Some((was, hash))) = (&stamped, seen.get(&key)) {
+            if stamped == was && known.as_ref().and_then(|known| known.get(rel)) == Some(hash) {
+                now.insert(rel.clone(), hash.clone());
+                continue;
+            }
+        }
+        #[cfg(test)]
+        if std::fs::symlink_metadata(files.home.join(rel)).is_ok() {
+            LOOK_READS.with(|reads| reads.set(reads.get() + 1));
+        }
         match files.get(rel) {
             Ok(Some(text)) => {
-                now.insert(rel.clone(), hash_of(&text));
+                let hash = hash_of(&text);
+                match stamped {
+                    Some(stamped) => seen.insert(key, (stamped, hash.clone())),
+                    None => seen.remove(&key),
+                };
+                now.insert(rel.clone(), hash);
                 texts.insert(rel.clone(), text);
             }
             Ok(None) => {}
@@ -737,14 +853,24 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<Known>) -> Res
     Ok(changed)
 }
 
-/// Rotate the log once it passes [`MAX_LOG_BYTES`]: its newest changes are
-/// kept, up to half that, and the texts nothing names any more are removed.
+/// Rotate the log once it passes [`MAX_LOG_BYTES`], or the texts its
+/// changes keep pass [`MAX_HISTORY_TEXT_BYTES`]: its newest changes are kept,
+/// up to half of each, and the texts nothing names any more are removed.
 /// The `fresh` changes just written are always kept, and so is the newest
 /// change to the role, with the text it replaced: the role's history and its
-/// Undo never rotate out behind a large memory edit.
+/// Undo never rotate out behind a large memory edit. The texts of the files
+/// as they are now (`known`) are always kept, and not counted.
 fn rotate(id: &str, folder: &Path, known: &Known, fresh: usize) -> Result<()> {
     let path = folder.join(LOG_FILE);
-    if std::fs::metadata(&path).map_or(0, |meta| meta.len()) <= MAX_LOG_BYTES {
+    let texts = folder.join(TEXTS_DIR);
+    let size_of = |hash: &str| std::fs::metadata(texts.join(format!("{hash}.txt"))).map_or(0, |meta| meta.len());
+    let current: BTreeSet<&String> = known.values().collect();
+    let history_texts: u64 = std::fs::read_dir(&texts)
+        .map(|entries| {
+            entries.flatten().filter(|entry| entry.file_name().to_str().and_then(|name| name.strip_suffix(".txt")).is_none_or(|hash| !current.contains(&hash.to_owned()))).filter_map(|entry| entry.metadata().ok()).map(|meta| meta.len()).sum()
+        })
+        .unwrap_or(0);
+    if std::fs::metadata(&path).map_or(0, |meta| meta.len()) <= MAX_LOG_BYTES && history_texts <= MAX_HISTORY_TEXT_BYTES {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&std::fs::read(&path)?).into_owned();
@@ -752,13 +878,18 @@ fn rotate(id: &str, folder: &Path, known: &Known, fresh: usize) -> Result<()> {
     let touches_role = |line: &str| serde_json::from_str::<Change>(line).is_ok_and(|change| change.states.contains_key(bot_store::ROLE_FILE));
     let newest_role = lines.iter().rposition(|line| touches_role(line));
     let mut keep = vec![false; lines.len()];
-    let mut size = 0;
+    let (mut size, mut text_size) = (0, 0);
+    let mut counted: BTreeSet<String> = known.values().cloned().collect();
     for (at, line) in lines.iter().enumerate().rev() {
         let must = lines.len() - at <= fresh;
-        if !must && size + line.len() as u64 + 1 > MAX_LOG_BYTES / 2 {
+        let named: BTreeSet<String> = serde_json::from_str::<Value>(line).map(|value| named_texts(&value)).unwrap_or_default();
+        let new_texts: u64 = named.iter().filter(|hash| !counted.contains(*hash)).map(|hash| size_of(hash)).sum();
+        if !must && (size + line.len() as u64 + 1 > MAX_LOG_BYTES / 2 || text_size + new_texts > MAX_HISTORY_TEXT_BYTES / 2) {
             break;
         }
         size += line.len() as u64 + 1;
+        text_size += new_texts;
+        counted.extend(named);
         keep[at] = true;
     }
     if let Some(at) = newest_role {
@@ -767,6 +898,25 @@ fn rotate(id: &str, folder: &Path, known: &Known, fresh: usize) -> Result<()> {
     let kept: Vec<&str> = lines.iter().zip(&keep).filter(|(_, keep)| **keep).map(|(line, _)| *line).collect();
     crate::store::write_atomic(&path, format!("{}\n", kept.join("\n")).as_bytes())?;
     prune_texts(id, folder, known)
+}
+
+/// The kept texts a logged change names: its edits' `before` and `after`
+/// (every hash-shaped string, for an edit this build cannot read too) and the states it left.
+fn named_texts(change: &Value) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    for edit in change["edits"].as_array().into_iter().flatten() {
+        for key in ["before", "after"] {
+            if let Some(hash) = edit[key].as_str().filter(|hash| is_hash(hash)) {
+                named.insert(hash.to_owned());
+            }
+        }
+    }
+    for state in change["states"].as_object().into_iter().flat_map(|states| states.values()) {
+        if let Some(hash) = state.as_str().filter(|hash| is_hash(hash)) {
+            named.insert(hash.to_owned());
+        }
+    }
+    named
 }
 
 /// Remove the kept texts that no change in the log and nothing in `known` names.
@@ -802,9 +952,10 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
     let _guard = LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let home = bot_store::home_dir(id)?;
     anyhow::ensure!(std::fs::symlink_metadata(&home).is_ok_and(|meta| meta.is_dir()), "the bot's home folder is missing");
-    let mut files = Files::new(id, home);
     let mut known = read_known(id)?;
-    let mut known_changed = notice_outside(id, &mut files, &mut known)?;
+    let mut known_changed = move_legacy_org_folders(id, &home, &mut known);
+    let mut files = Files::new(id, home);
+    known_changed |= notice_outside(id, &mut files, &mut known)?;
     let out = f(&mut files)?;
     files.write()?;
     let folder = crate::store::ensure_dir(dir(id)?)?;
@@ -858,6 +1009,40 @@ pub fn commit<T>(sink: &dyn EventSink, id: &str, f: impl FnOnce(&mut Files) -> R
         sink.emit(EVENT, &serde_json::json!({"id": id}));
     }
     Ok((out, recorded))
+}
+
+/// Move the organisation folders an earlier build kept by an id with
+/// capitals to where they are kept now (`memory::legacy_org_folders`), with
+/// what the app knows of their files, so the move is not taken for an
+/// outside edit. Answers whether anything moved. A move that fails is left for the next look.
+fn move_legacy_org_folders(id: &str, home: &Path, known: &mut Option<Known>) -> bool {
+    // Only a home with such a folder reads the bot's record.
+    let capitals = std::fs::read_dir(home.join(super::memory::ORGS_DIR))
+        .map(|entries| entries.flatten().any(|entry| entry.file_name().to_str().is_some_and(|name| name.chars().any(|c| c.is_ascii_uppercase()))))
+        .unwrap_or(false);
+    let Some(bot) = capitals.then(|| bot_store::get(id).ok().flatten()).flatten() else { return false };
+    let mut moved = false;
+    for (old, new) in super::memory::legacy_org_folders(&bot, home) {
+        let is_dir = std::fs::symlink_metadata(home.join(&old)).is_ok_and(|meta| meta.is_dir());
+        if !is_dir || std::fs::symlink_metadata(home.join(&new)).is_ok() || no_links(home, &format!("{new}/x")).is_err() {
+            continue;
+        }
+        if let Err(error) = std::fs::rename(home.join(&old), home.join(&new)) {
+            log::warn!("bot {id}: move {old} to {new}: {error:#}");
+            continue;
+        }
+        moved = true;
+        if let Some(known) = known.as_mut() {
+            let prefix = format!("{old}/");
+            let keys: Vec<String> = known.keys().filter(|rel| rel.starts_with(&prefix)).cloned().collect();
+            for rel in keys {
+                if let Some(hash) = known.remove(&rel) {
+                    known.insert(format!("{new}/{}", &rel[prefix.len()..]), hash);
+                }
+            }
+        }
+    }
+    moved
 }
 
 /// Look for outside edits to one bot's files, as its chat launches an agent: what it is told is then on record.

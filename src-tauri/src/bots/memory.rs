@@ -120,14 +120,46 @@ impl Place {
 }
 
 /// An organisation's folder, by its id: a renamed organisation keeps its
-/// notes. An id that is not a plain name is kept by its hash.
+/// notes. An id that is not a plain lower-case name is kept by its hash, so
+/// two ids that differ only in case never share a folder where names do not
+/// tell case apart (macOS).
 fn org_folder(id: &str) -> String {
-    let plain = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) && !id.starts_with("x-");
-    if plain {
+    if plain_org_id(id) && !id.chars().any(|c| c.is_ascii_uppercase()) {
         return id.into();
     }
     let hash = sha2::Sha256::digest(id.as_bytes());
     format!("x-{}", hash.iter().take(8).map(|byte| format!("{byte:02x}")).collect::<String>())
+}
+
+fn plain_org_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) && !id.starts_with("x-")
+}
+
+/// The organisation folders of `bot` that an earlier build kept by an id
+/// with capitals (`orgs/Acme/`), with where they are kept now, by their
+/// paths in the home: `[(old, new)]`. One that another of its organisations'
+/// ids would have shared (`Acme` and `acme` where names do not tell case
+/// apart) is left where it is: its notes cannot be told apart.
+pub(super) fn legacy_org_folders(bot: &Bot, home: &Path) -> Vec<(String, String)> {
+    let same_folder = |a: &str, b: &str| {
+        let (a, b) = (home.join(ORGS_DIR).join(a), home.join(ORGS_DIR).join(b));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(a), Ok(b)) if a.ino() == b.ino() && a.dev() == b.dev())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (a, b);
+            true
+        }
+    };
+    bot.works_in
+        .iter()
+        .filter(|id| plain_org_id(id) && id.chars().any(|c| c.is_ascii_uppercase()))
+        .filter(|id| !bot.works_in.iter().any(|other| other != *id && other.eq_ignore_ascii_case(id) && same_folder(other, id)))
+        .map(|id| (format!("{ORGS_DIR}/{id}"), format!("{ORGS_DIR}/{}", org_folder(id))))
+        .collect()
 }
 
 /// Every place `bot` keeps notes: itself, each organisation it works in, and personal.
@@ -173,7 +205,6 @@ pub fn read_limited(path: &Path) -> Limited {
     read_limited_to(path, READ_LIMIT, false)
 }
 
-/// [`read_limited`] to at most `limit` bytes.
 /// [`read_limited`] to at most `limit` bytes; `tail`: of a file past it, its
 /// end, from the first whole line (a memory's newest notes are last).
 pub fn read_limited_to(path: &Path, limit: u64, tail: bool) -> Limited {
@@ -232,6 +263,20 @@ fn read_role_shown(home: &Path) -> Limited {
     }
 }
 
+/// How many lines at the top of a memory file its list leaves out (the
+/// screen's and `terminalx bots memory list`'s): a file past [`READ_LIMIT`]
+/// is listed from its end, as [`read_in_home`] reads it. A line number a list
+/// gave counts from the first line it shows, so it is that many further down the file.
+pub fn lines_not_listed(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    if bytes.len() as u64 <= READ_LIMIT {
+        return 0;
+    }
+    let from = bytes.len() - READ_LIMIT as usize;
+    let start = bytes[from..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |at| from + at + 1);
+    bytes[..start].iter().filter(|byte| **byte == b'\n').count()
+}
+
 /// The date of a note line (`- 2026-11-20 …`), if it has one.
 pub fn note_date(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("- ")?;
@@ -270,7 +315,7 @@ pub fn secrets_in(text: &str) -> Vec<String> {
 }
 
 /// Characters that would make one line read as two, or reorder what is shown.
-fn breaks_a_line(c: char) -> bool {
+pub(crate) fn breaks_a_line(c: char) -> bool {
     matches!(c, '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -358,7 +403,7 @@ fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, kee
     }
     let moved = notes.len();
     let mut edits = Vec::new();
-    let mut rolled = false;
+    let mut rolled = [false; 2];
     for (which, place) in pair.iter().enumerate() {
         let added: u64 = notes.iter().filter(|note| note.1 == which).map(|note| texts[which][note.2].len() as u64 + 1).sum();
         let archive = place.archive_file();
@@ -373,19 +418,40 @@ fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, kee
             copy += 1;
         }
         edits.push(files.replacing(&name, Some(&now))?);
-        edits.push(files.replacing(&archive, None)?);
-        rolled = true;
+        rolled[which] = true;
     }
     // Removed from the bottom up so each index still holds, then added to the archives oldest first.
     let mut removals = notes.clone();
     removals.sort_by(|a, b| (a.1, b.2).cmp(&(b.1, a.2)));
-    edits.extend(removals.iter().map(|(_, which, at)| Edit::RemoveLine {
-        file: pair[*which].memory_file(),
-        line: texts[*which][*at].clone(),
-        index: Some(*at),
-        prev: at.checked_sub(1).map(|above| texts[*which][above].clone()),
-    }));
-    edits.extend(notes.iter().map(|(_, which, at)| Edit::AddLine { file: pair[*which].archive_file(), line: texts[*which][*at].clone(), index: None, prev: None }));
+    let mut lines: Vec<Edit> = removals
+        .iter()
+        .map(|(_, which, at)| Edit::RemoveLine { file: pair[*which].memory_file(), line: texts[*which][*at].clone(), index: Some(*at), prev: at.checked_sub(1).map(|above| texts[*which][above].clone()) })
+        .collect();
+    lines.extend(notes.iter().map(|(_, which, at)| Edit::AddLine { file: pair[*which].archive_file(), line: texts[*which][*at].clone(), index: None, prev: None }));
+    if changes::within_cap(&lines) {
+        for (which, place) in pair.iter().enumerate() {
+            if rolled[which] {
+                edits.push(files.replacing(&place.archive_file(), None)?);
+            }
+        }
+        edits.extend(lines);
+    } else {
+        // A memory grown large outside the app moves many lines at once: kept as whole texts by hash, so one move
+        // never fills the log and rotates the rest of the history out.
+        for (which, place) in pair.iter().enumerate() {
+            let gone: BTreeSet<usize> = notes.iter().filter(|note| note.1 == which).map(|note| note.2).collect();
+            if gone.is_empty() {
+                continue;
+            }
+            let left: Vec<String> = texts[which].iter().enumerate().filter(|(at, _)| !gone.contains(at)).map(|(_, line)| line.clone()).collect();
+            let archive = place.archive_file();
+            let mut archived = if rolled[which] { Vec::new() } else { files.lines(&archive)? };
+            archived.extend(notes.iter().filter(|note| note.1 == which).map(|note| texts[which][note.2].clone()));
+            edits.push(files.replacing(&place.memory_file(), Some(&changes::text_of(&left)))?);
+            edits.push(files.replacing(&archive, Some(&changes::text_of(&archived)))?);
+        }
+    }
+    let rolled = rolled.contains(&true);
     let text = format!(
         "Moved {moved} older note{} to the archive to stay within {BUDGET} lines{}",
         if moved == 1 { "" } else { "s" },
@@ -415,8 +481,8 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, place: &Place, text: &str, by: &str,
 
 /// Remove the one note in `place` that `which` names: the whole line, the
 /// note's text, or a part of it that only one note has. `index` says which
-/// line is meant (counted from 0), so one of two equal notes can be
-/// forgotten. A note that held a secret is also taken out of the history.
+/// line is meant (counted from 0 in the list, see [`lines_not_listed`]), so
+/// one of two equal notes can be forgotten. A note that held a secret is also taken out of the history.
 pub fn forget(sink: &dyn EventSink, bot: &Bot, place: &Place, which: &str, index: Option<usize>, by: &str, source: Source) -> Result<Vec<Change>> {
     let wanted = which.trim();
     if wanted.is_empty() {
@@ -425,8 +491,9 @@ pub fn forget(sink: &dyn EventSink, bot: &Bot, place: &Place, which: &str, index
     let file = place.memory_file();
     let matches = |line: &str| line.trim() == wanted || note_text(line).eq_ignore_ascii_case(wanted);
     let (line, recorded) = changes::commit(sink, &bot.id, |files| {
+        let skipped = lines_not_listed(&files.get(&file)?.unwrap_or_default());
         let lines = files.lines(&file)?;
-        let at = match index.filter(|at| lines.get(*at).is_some_and(|line| matches(line))) {
+        let at = match index.map(|at| at + skipped).filter(|at| lines.get(*at).is_some_and(|line| matches(line))) {
             Some(at) => at,
             None => {
                 let lower = wanted.to_lowercase();
@@ -898,14 +965,17 @@ pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], 
         }
         // Each named note, checked against the file as it is now, and named once.
         let mut texts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // Lines not listed at the top of each file: a list's numbers start after them.
+        let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
         let mut taken: BTreeSet<(String, usize)> = BTreeSet::new();
         let mut take = |files: &mut changes::Files, texts: &mut BTreeMap<String, Vec<String>>, line: &TidyLine| -> Result<(String, usize)> {
             let file = place_of(line)?.memory_file();
             if !texts.contains_key(&file) {
+                skipped.insert(file.clone(), lines_not_listed(&files.get(&file)?.unwrap_or_default()));
                 texts.insert(file.clone(), files.lines(&file)?);
             }
             let lines = &texts[&file];
-            let at = line.line.checked_sub(1).ok_or_else(|| refused("Lines are counted from 1, as `terminalx bots memory list` shows them."))?;
+            let at = line.line.checked_sub(1).ok_or_else(|| refused("Lines are counted from 1, as `terminalx bots memory list` shows them."))? + skipped[&file];
             let found = lines.get(at).filter(|found| is_note(found) && note_text(found).eq_ignore_ascii_case(line.note.trim()));
             if found.is_none() {
                 return Err(refused(format!("Line {} of {file} does not read “{}”: memory changed since it was read. List it again and tidy what it says now.", line.line, line.note.trim())));

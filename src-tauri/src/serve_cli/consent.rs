@@ -305,7 +305,12 @@ pub(crate) fn launch_public_key() -> Result<Option<String>> {
 
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 fn read_launch_key() -> Result<Option<String>> {
-    WINDOW_KEY.get().map(|load| load(true).map(|key| STANDARD.encode(key.public_key()))).transpose()
+    let Some(load) = WINDOW_KEY.get() else { return Ok(None) };
+    let key = load(true)?;
+    let public = STANDARD.encode(key.public_key());
+    // The key a launch pins is the one the window's writes prove with from now on, created now or not.
+    *CACHED_KEY.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(key));
+    Ok(Some(public))
 }
 
 /// A key read or saved before stopping a runtime so that the launch that
@@ -328,6 +333,28 @@ pub(crate) fn provision_launch_key() -> Result<Option<String>> {
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 pub(crate) fn forget_launch_key() {
     PROVISIONED.lock().unwrap().take();
+    // The window's own copy goes with it: its next write reads Keychain again.
+    CACHED_KEY.lock().unwrap_or_else(|error| error.into_inner()).take();
+}
+
+/// The window's key as this process last read it from Keychain, kept in
+/// memory only, so each guarded write does not read Keychain again. Never
+/// written anywhere; forgotten wherever the launch key is ([`forget_launch_key`]).
+static CACHED_KEY: std::sync::Mutex<Option<Arc<Ed25519KeyPair>>> = std::sync::Mutex::new(None);
+
+/// The window's key: the one held in `cache`, or read through `provider`
+/// (never created) and then held. A read that fails is not held: the next
+/// write reads again. `None` without a provider.
+fn window_key_in(provider: Option<&WindowKey>, cache: &std::sync::Mutex<Option<Arc<Ed25519KeyPair>>>) -> Result<Option<Arc<Ed25519KeyPair>>> {
+    let Some(provider) = provider else { return Ok(None) };
+    // Held across the read, so two writes at once ask Keychain once.
+    let mut held = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(key) = held.as_ref() {
+        return Ok(Some(key.clone()));
+    }
+    let key = Arc::new(provider(false)?);
+    *held = Some(key.clone());
+    Ok(Some(key))
 }
 
 /// What to do when the window cannot prove itself, for a refusal the runtime
@@ -453,9 +480,15 @@ fn challenge(mut stream: UnixStream, expected: &str) -> bool {
 /// needs one; `None` for one that does not. In the window's process the
 /// parameter carries the window's proof too ([`speak_as_window`]).
 pub fn witness_for(command: &str, run: &Path, params: &mut Value) -> Result<Option<Witness>> {
-    witness_with_window_key(command, run, params, WINDOW_KEY.get())
+    if !guards_request(command, params) {
+        return Ok(None);
+    }
+    // Fail locally if this window cannot read its key; read once, then held in memory.
+    let key = window_key_in(WINDOW_KEY.get(), &CACHED_KEY)?;
+    witness_proving(command, run, params, key.as_deref())
 }
 
+#[cfg(test)]
 fn witness_with_window_key(
     command: &str,
     run: &Path,
@@ -974,6 +1007,46 @@ pub(crate) mod tests {
 
         assert!(witness_with_window_key(machine_wire::DECLINE, dir.path(), &mut json!({}), Some(&unavailable))
             .unwrap().is_none());
+    }
+
+    /// The window's key is read from Keychain once and held in memory: later
+    /// writes do not read it again, a failed read is not held, and forgetting
+    /// it makes the next write read Keychain again.
+    #[test]
+    fn the_window_key_is_read_once_and_held_until_forgotten() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fail = Arc::new(AtomicBool::new(true));
+        let provider: WindowKey = {
+            let (reads, fail) = (reads.clone(), fail.clone());
+            Box::new(move |create| {
+                assert!(!create, "a write never creates the key");
+                reads.fetch_add(1, Ordering::SeqCst);
+                if fail.load(Ordering::SeqCst) { anyhow::bail!("Keychain is locked") } else { Ok(signing_key(&[9; 32])) }
+            })
+        };
+        let cache = std::sync::Mutex::new(None);
+        assert!(window_key_in(None, &cache).unwrap().is_none());
+        assert!(window_key_in(Some(&provider), &cache).is_err());
+        assert!(cache.lock().unwrap().is_none(), "a failed read is not held");
+        fail.store(false, Ordering::SeqCst);
+        let first = window_key_in(Some(&provider), &cache).unwrap().unwrap();
+        // Keychain locked again: the held key still proves the window, with no read.
+        fail.store(true, Ordering::SeqCst);
+        let second = window_key_in(Some(&provider), &cache).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        cache.lock().unwrap().take();
+        assert!(window_key_in(Some(&provider), &cache).is_err(), "forgotten, the next write reads Keychain");
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+
+    /// The window's launch key and its in-memory copy are forgotten together (macOS only: elsewhere no key is pinned).
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    #[test]
+    fn forgetting_the_launch_key_forgets_the_window_key_held_in_memory() {
+        *CACHED_KEY.lock().unwrap() = Some(Arc::new(signing_key(&[5; 32])));
+        forget_launch_key();
+        assert!(CACHED_KEY.lock().unwrap().is_none());
     }
 
     #[test]
