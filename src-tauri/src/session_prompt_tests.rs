@@ -673,6 +673,56 @@ fn a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message() {
     }
 }
 
+/// #1385: the same words sent again reach the CLI inside a longer prompt,
+/// or changed by an idle CLI. That record is the new message's, so the
+/// lapsed one with those words is retired all the same: the same words
+/// typed into the terminal after are a message of their own, never the old
+/// card's.
+#[test]
+fn words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt() {
+    for recorded in ["check the tests and then run lint", "check all of the tests"] {
+        let kind = CliKind::Claude;
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}: the CLI is idle: sent again, it starts a turn");
+        rig.enter_written();
+        rig.append(&rig.cli().prompt(recorded));
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], [
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}, {recorded}: the prompt typed in the terminal is drawn as its own message");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}, {recorded}: no turn is the lapsed card's");
+    }
+}
+
+/// #1385 on Codex, which delivers prompts queued together as one record:
+/// the same words sent again go in such a batch, and retire the lapsed
+/// prompt they repeat as surely as a record of their own would.
+#[test]
+fn words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt() {
+    let rig = Rig::of(CliKind::Codex, "");
+    let lapsed = rig.queue_and_lapse("check the tests");
+
+    assert!(!rig.compose("look around", 0));
+    rig.cli_takes("look around");
+    assert!(rig.compose("check the tests", 0));
+    rig.enter_written();
+    assert!(rig.compose("and run lint", 0));
+    rig.enter_written();
+    rig.append(&rig.cli().steer("check the tests\nand run lint"));
+    rig.cli_replies("they pass");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+
+    assert_eq!(rig.told().iter().filter(|line| *line == "user: check the tests").count(), 1, "the prompt typed in the terminal is drawn as its own message");
+    assert!(!rig.turn_prompt_seqs().contains(&lapsed), "no turn is the lapsed card's");
+}
+
 #[test]
 fn a_queued_prompt_the_cli_takes_is_never_flagged() {
     for kind in BOTH {

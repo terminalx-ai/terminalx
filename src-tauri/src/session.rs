@@ -582,13 +582,14 @@ impl LapsedEchoes {
         Some(lapsed.echo.echoed())
     }
 
-    /// `payload` was matched to a message the composer sent since: the
-    /// lapsed prompts with its words are not owed it, nor any later prompt
-    /// with those words, and are given up.
-    fn retire(&mut self, payload: &Payload, conversation: &Path, now: Instant) {
-        let Payload::UserMessage { text, .. } = payload else { return };
+    /// A record was matched to `sent`, messages the composer sent since,
+    /// each its words and how many images it had: the lapsed prompts that
+    /// say the same are not owed that record, nor any later prompt with those
+    /// words, and are given up. Judged by what was sent, not by the record,
+    /// which may hold it inside more or changed (#1385).
+    fn retire(&mut self, sent: &[(&str, usize)], conversation: &Path, now: Instant) {
         self.prune(conversation, now);
-        self.0.retain(|lapsed| !lapsed.echo.matches(text));
+        self.0.retain(|lapsed| !sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text)));
     }
 }
 
@@ -7300,6 +7301,13 @@ impl SessionManager {
             // (#722).
             let echoed = match &mut rt.engine {
                 Engine::Cli(p) => {
+                    // What each awaited prompt said, to know a lapsed one by
+                    // once a record is matched to it (#1385).
+                    let awaited: Vec<(u64, String, usize)> = if matches!(payload, Payload::UserMessage { .. }) && !p.lapsed.0.is_empty() {
+                        p.echoed.iter().map(|echo| (echo.seq, echo.text.clone(), echo.image_count)).collect()
+                    } else {
+                        Vec::new()
+                    };
                     let echoed: Vec<Echoed> = if p.harness == CliKind::Codex {
                         consume_codex_queue_echo(&mut p.echoed, &payload)
                     } else if let Some(echo) = consume_composer_echo(&mut p.echoed, &payload) {
@@ -7316,7 +7324,8 @@ impl SessionManager {
                     let echoed = if echoed.is_empty() {
                         p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
                     } else {
-                        p.lapsed.retire(&payload, &conversation, Instant::now());
+                        let sent: Vec<(&str, usize)> = awaited.iter().filter(|(seq, ..)| echoed.iter().any(|echo| echo.seq == *seq)).map(|(_, text, images)| (text.as_str(), *images)).collect();
+                        p.lapsed.retire(&sent, &conversation, Instant::now());
                         echoed
                     };
                     if !echoed.is_empty() {
@@ -9781,7 +9790,7 @@ mod tests {
             "<bash-input>pwd</bash-input> please explain",
             "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
             "<bash-input>pwd</bash-input><bash-input>ls</bash-input>",
-            "<bash-input>pwd</bash-input><bash-stdout>a</bash-stdout><bash-stdout>b</bash-stdout><bash-stderr></bash-stderr><bash-stdout>c</bash-stdout>",
+            "<bash-input>pwd</bash-input><bash-exit-code>0</bash-exit-code><bash-exit-code>1</bash-exit-code>",
             "<bash-input>pwd</bash-input><bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
             "<bash-input>pwd</bash-stdout>",
         ] {
