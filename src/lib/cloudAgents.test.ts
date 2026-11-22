@@ -453,6 +453,49 @@ describe("cloud agent tabs store", () => {
     expect(getCloudAgents(scope).tabs.map((candidate) => candidate.tabId).sort()).toEqual(["t-1", "t-2"]);
   });
 
+  it("a reset while the first subscription is still answered replays the new history from its first event (#1398)", async () => {
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 })]);
+    const client = fakeClient();
+    // A first attach leaves the old history cached up to its cursor.
+    const detach = await attachCloudAgentTab(scope, "t-1", client);
+    const first = client.subscribeSession.mock.calls[0]!;
+    for (const seq of [1, 2, 3, 4, 5]) first[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    (first[3] as { onCursor: (cursor?: string) => void }).onCursor("8:5");
+    detach();
+    // The next attach's subscription is held open.
+    const stopped: number[] = [];
+    let answer!: () => void;
+    client.subscribeSession.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (answer = resolve));
+      return () => void stopped.push(2);
+    });
+    client.subscribeSession.mockImplementation(async () => () => void stopped.push(3));
+    const attaching = attachCloudAgentTab(scope, "t-1", client);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(2));
+    const held = client.subscribeSession.mock.calls[1]!;
+    expect((held[3] as { sinceCursor?: string }).sinceCursor).toBe("8:5");
+    // Meanwhile a reset to the turn that ended at seq 2 names a new history.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 2, history: "generation-2" })]);
+    expect(getTabLog("s-1", "t-1").events).toEqual([]);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(3));
+    const fresh = client.subscribeSession.mock.calls[2]!;
+    expect((fresh[3] as { sinceCursor?: string }).sinceCursor).toBeUndefined();
+    // What the retired subscription still delivers is not taken.
+    held[2](ev(4, { type: "assistant_text", text: "line 4" }));
+    (held[3] as { onCursor: (cursor?: string) => void }).onCursor("8:9");
+    for (const seq of [1, 2]) fresh[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    answer();
+    const stop = await attaching;
+    // The retired subscription is stopped once it is answered, and the tab is read only from the new replay.
+    expect(stopped).toEqual([2]);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2]);
+    const tab = getCloudAgents(scope).tabs[0]!;
+    expect(tab.cursor).toBeNull();
+    expect(tab.historyRead).toBe(true);
+    stop();
+    expect(stopped).toEqual([2, 3]);
+  });
+
   it("a newer checkpoint of a rewritten history replaces what a stopped workspace's reader kept (#1326)", async () => {
     backend.metas = [{ tabId: "t-1", epoch: 1, version: 1 }];
     const old = [1, 2, 3, 4].map((seq) => ev(seq, { type: "assistant_text", text: `old ${seq}` }));
