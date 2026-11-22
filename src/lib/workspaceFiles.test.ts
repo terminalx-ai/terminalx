@@ -256,7 +256,7 @@ describe("a machine session's files in a checkout whose name holds a backslash (
       throw { code: "method_not_found" };
     });
   const source = (machineFiles = true) =>
-    cloudFileSource(`machine:m:p/${checkout}`, machine(), false, checkout, async () => [{ repo: "." }, { repo: checkout }], machineFiles);
+    cloudFileSource(`machine:m:p/${checkout}`, machine(), false, checkout, undefined, machineFiles);
   const paths = (method: string) => asked.filter((call) => call.method === method).map((call) => call.params.path);
 
   it("lists, opens, saves and searches the linked checkout itself, never its slash-separated sibling", async () => {
@@ -268,7 +268,7 @@ describe("a machine session's files in a checkout whose name holds a backslash (
     expect(opened.content).toBe("intended");
     expect(await files.stat("src/file\\name.ts")).toEqual({ version: "v1", etag: "etag-intended" });
     await files.writeText("src/file\\name.ts", "saved", opened.etag);
-    const found = await files.search({ query: "saved", regex: false, caseSensitive: true }, new AbortController().signal);
+    const found = await files.search!({ query: "saved", regex: false, caseSensitive: true }, new AbortController().signal);
     expect(found.hits.map((hit) => hit.path)).toEqual(["src/file\\name.ts"]);
 
     expect(paths("fs.list")).toEqual([checkout, `${checkout}/src`]);
