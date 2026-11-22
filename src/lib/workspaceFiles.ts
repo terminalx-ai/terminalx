@@ -204,7 +204,9 @@ const PORCELAIN: Record<string, ChangeStatus> = { "?": "added", A: "added", M: "
  * PRO-347), or at a machine project's worktree outside its folder by the
  * absolute path `git.repositories` lists (PRO-405): every path it takes and
  * gives is relative to that folder, as a local session's are to its `cwd`.
- * Empty for the workspace's own root.
+ * Empty for the workspace's own root. `machine`: a machine project's files,
+ * whose paths have `/` as their only separator, so a backslash in a Unix
+ * checkout or file name stays literal (`remotePath`).
  */
 /** The path beneath a file root, in project-relative or absolute coordinates. */
 export function pathInFileRoot(root: string, path: string): string | null {
@@ -220,15 +222,16 @@ export function cloudFileSource(
   readOnly: boolean,
   base = "",
   discoverRepositories: () => Promise<readonly RemoteRepository[]> = () => listRepositories(client),
+  machine = false,
 ): CloudFileSource {
   const absolute = base.startsWith("/");
-  const root = base ? remoteFilePath(base, absolute) : "";
+  const root = base ? remoteFilePath(base, absolute, machine) : "";
   /** Only a source rooted at an outside worktree names absolute paths, and only under its root. */
-  const scope = { absolute };
+  const scope = { absolute, machine };
   /** The runtime's path for one of ours. */
   const inside = (rel: string) => {
     if (!root || !rel) return root || rel;
-    if (!absolute) return `${root}/${remotePath(rel)}`;
+    if (!absolute) return `${root}/${remotePath(rel, machine)}`;
     if (rel.startsWith("/")) throw new RemotePathError(`${rel} is not a checkout-relative path`);
     const suffix = rel.split("/").filter((part) => part !== ".").join("/");
     return remoteFilePath(`${root}/${suffix}`, true);
