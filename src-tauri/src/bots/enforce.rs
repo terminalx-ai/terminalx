@@ -403,7 +403,8 @@ pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
         // PRO-477: Start makes a bot work, as the owner's message.
         "suggestionStart" => true,
         // PRO-481: a link code lets the chat that sends it give the bot work.
-        "chatAppLink" => true,
+        // Unlinking cuts the owner's channel quietly: the owner's act too.
+        "chatAppLink" | "chatAppUnlink" => true,
         // PRO-481: "Also sends to" a chat app sends the home chat's replies out of the app.
         "chatAppAlsoSends" => super::chat_apps::also_sends_adds(params),
         // PRO-476: an answer that approves a run's plan starts its workers, or lets it merge.

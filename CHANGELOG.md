@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Bots (experimental): a chat-app link code is shown only to the window that
+  made it: an agent tab's read of the bot's channels says only that a code
+  waits. Unlinking a chat now asks for you, as linking does. Wrong codes are
+  counted per chat, so a stranger who finds the bot cannot use up your tries,
+  and a word that only looks like a code is not answered. Connecting another
+  Telegram bot in place of the first no longer drops its first messages and
+  button presses (PRO-509).
 - Mobile: the Bots tab, pinning from the phone and the Pinned section's
   cloud projects, and the phone's prefetch of recent conversations now reach
   the Mac. Their calls (`bots.*`, `sessions.pin`, `cloud.pins`, `cloud.pin`,

@@ -3410,6 +3410,9 @@ fn bots_action(operation: &str) -> &'static str {
         "suggestionStart" => "start a bot's suggestion",
         "briefWrite" => "change the team brief",
         "itemAnswer" => "approve a bot's run",
+        "chatAppLink" => "link a chat to a bot",
+        "chatAppUnlink" => "unlink a bot's chat",
+        "chatAppAlsoSends" => "send a bot's replies to a chat app",
         _ => "give a bot more access, change who it reports to or turn its memory back on",
     }
 }
