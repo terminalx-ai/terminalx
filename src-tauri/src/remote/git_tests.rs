@@ -1509,6 +1509,37 @@ fn a_declining_pre_push_hook_stops_the_machine_pr_push() {
 
 #[cfg(unix)]
 #[test]
+fn the_pre_push_hook_is_told_a_new_remote_branch_by_the_zero_id() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "native", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    git(&f.root, &["checkout", "-qb", "feature/new"]);
+    git(&f.root, &["commit", "-qm", "New branch", "--allow-empty"]);
+    let head = git(&f.root, &["rev-parse", "HEAD"]);
+    let hook = f.root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\ncat >> ../pre-push-ran\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let created = f.call("git.prCreateForSession", json!({
+        "repo": ".", "sessionId": "native", "branch": "feature/new", "pushHead": head, "title": "Add new", "base": "main"
+    })).unwrap();
+    assert_eq!(created["pr"]["headSha"], head.as_str());
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/new"]), head);
+    let zero = "0".repeat(head.len());
+    assert_eq!(
+        std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(),
+        format!("origin {}\n{head} {head} refs/heads/feature/new {zero}\n", origin.display()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_git_without_hook_run_pushes_unless_the_checkout_has_a_pre_push_hook() {
     for hook in ["none", "not executable", "executable"] {
         let _home = crate::store::temp_home();

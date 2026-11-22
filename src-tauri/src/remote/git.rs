@@ -100,15 +100,16 @@ struct Repo {
 /// new place; one deleted mid-call makes them fail. The next call verifies
 /// whatever the path names then.
 ///
-/// Commands that run no hooks (`HOOKLESS`) also name the Git directory and
+/// Commands that run no ordinary hooks (`HOOKLESS`) also name the Git directory and
 /// work tree in the environment, so a `core.worktree` written after
 /// verification is not read. Commands that can run hooks (checkout, pull,
 /// fetch, push, update-ref, branch) do not: Git exports GIT_DIR and
 /// GIT_WORK_TREE to hooks, and a hook that runs Git from a subdirectory then
 /// fails or sees the wrong top level. For those a `core.worktree` change
 /// between verification and the command is still read. The guarded commit
-/// and the PR push run in private Git directories and name the work tree by
-/// its verified path in their private configuration.
+/// runs in a private Git directory and names the work tree by its verified
+/// path in its private configuration; the PR push's private copy has no
+/// work tree.
 ///
 /// Not bound:
 /// - the `.git` entry inside a main checkout: it is named relative to the
@@ -134,8 +135,10 @@ struct BoundCheckout {
     git_dir: PathBuf,
 }
 
-/// Git subcommands that run no hooks, so they may name their Git directory and
-/// work tree in the environment (see BoundCheckout).
+/// Git subcommands that run no ordinary hooks, so they may name their Git
+/// directory and work tree in the environment (see BoundCheckout). Index
+/// writers among them can still run `post-index-change` and the
+/// `core.fsmonitor` program, which then see those variables too.
 const HOOKLESS: &[&str] = &[
     "add", "cat-file", "config", "diff", "for-each-ref", "log", "ls-files", "ls-remote", "remote", "restore",
     "rev-list", "rev-parse", "rm", "show", "status", "symbolic-ref", "update-index",
@@ -2255,9 +2258,11 @@ impl WorkspaceGit {
     /// The checkout's pre-push hook runs in the checkout itself (`git hook
     /// run`, fed what `git push` would feed it), not against the private copy,
     /// so hooks such as Git LFS see the real repository; the private push then
-    /// runs no hooks. A Git without `git hook run --to-stdin` pushes as long as
-    /// the checkout has no pre-push hook file, and is refused before anything
-    /// is sent when it has one.
+    /// runs no hook files (an empty `core.hooksPath`, `--no-verify`); hooks
+    /// defined in configuration (`hook.<name>.*`, newer Git) are not turned
+    /// off. A Git without `git hook run --to-stdin` (before 2.40) pushes as
+    /// long as the checkout has no executable pre-push hook file, and is
+    /// refused before anything is sent when it has one.
     ///
     /// What this does not bind: only the destination URL is checked. Settings
     /// the copy carries over unchecked can still carry the bytes elsewhere
@@ -2310,7 +2315,7 @@ impl WorkspaceGit {
                 .env("GIT_CONFIG_SYSTEM", scratch.path().join("config.system"))
                 .env("GIT_CONFIG_GLOBAL", scratch.path().join("config.global"))
                 .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS")
-                // No hook runs against the private copy (reference-transaction
+                // No hook file runs against the private copy (reference-transaction
                 // included); pre-push runs in the checkout below.
                 .arg("-c").arg(&command_config).arg("-c").arg(&hooks_config).args(args);
             command
@@ -2347,22 +2352,32 @@ impl WorkspaceGit {
             command.args(["hook", "run", "--ignore-missing"]).arg(&to_stdin).args([name, "--", "origin", origin]);
             command
         };
-        let supported = !self.git_without_hook_run()
-            && run_bounded(hook("terminalx-no-such-hook"), LOCAL_TIMEOUT).map_err(RpcError::internal)?.ok;
-        if supported {
-            let ran = run_network(hook("pre-push"), NETWORK_TIMEOUT, Network::Git)?;
-            if !ran.ok {
+        // Run pre-push itself; no probe with an invented hook name, which
+        // newer Git refuses as an unknown hook event.
+        let ran = if self.git_without_hook_run() {
+            Ran { ok: false, stdout: String::new(), stderr: "git: 'hook' is not a git command. See 'git --help'.".into(), timed_out: false }
+        } else {
+            run_network(hook("pre-push"), NETWORK_TIMEOUT, Network::Git)?
+        };
+        if ran.timed_out {
+            return Ok(ran);
+        }
+        if !ran.ok {
+            // Git before 2.36 has no `git hook`, and before 2.40 no
+            // `--to-stdin`. Such a Git knows only hook files, so with none
+            // there is nothing to run and the push goes ahead as on main.
+            let unsupported = ran.stderr.contains("'hook' is not a git command") || ran.stderr.contains("unknown option `to-stdin");
+            if !unsupported {
                 let mut declined = ran;
                 declined.stderr.push_str("\nerror: the pre-push hook declined the push");
                 return Ok(declined);
             }
-        } else if self.has_pre_push_hook(repo)? {
-            // A Git before `git hook run --to-stdin` (2.36) knows only hook
-            // files, so without one there is nothing to run.
-            return Err(RpcError::new(
-                "git_failed",
-                "This Git cannot run the repository's pre-push hook for a verified push (it needs `git hook run --to-stdin`). Update Git and try again; nothing was pushed.",
-            ));
+            if self.has_pre_push_hook(repo)? {
+                return Err(RpcError::new(
+                    "git_failed",
+                    "This Git cannot run the repository's pre-push hook for a verified push (it needs `git hook run --to-stdin`, Git 2.40 or later). Update Git and try again; nothing was pushed.",
+                ));
+            }
         }
 
         let refspec = format!("{head}:{reference}");
@@ -2372,9 +2387,9 @@ impl WorkspaceGit {
     /// Whether the checkout has a pre-push hook file Git would run: in
     /// `core.hooksPath` or the default hooks directory, and executable.
     fn has_pre_push_hook(&self, repo: &Repo) -> Result<bool, RpcError> {
-        let hooks = self.git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
-        let hook = Path::new(hooks.strip_suffix('\n').unwrap_or(&hooks)).join("pre-push");
-        let Ok(metadata) = std::fs::metadata(&hook) else { return Ok(false) };
+        let hook = self.git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "hooks/pre-push"])?;
+        let hook = Path::new(hook.strip_suffix('\n').unwrap_or(&hook));
+        let Ok(metadata) = std::fs::metadata(hook) else { return Ok(false) };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
