@@ -581,6 +581,8 @@ function PlaceNotes({ bot, place }: { bot: Bot; place: BotMemoryPlace }) {
         {place.bytes > 0 && <Button variant="ghost" size="xs" onClick={() => fs.openPath(place.path).catch(write.fail)}><ExternalLink /> Open</Button>}
       </div>
       {place.problem && <div className="px-3 pt-2"><Problem>MEMORY.md: {place.problem}</Problem></div>}
+      {/* Notes an earlier version kept in a folder two organisations shared (PRO-512): this place reads none of them. */}
+      {place.notice && <div className="px-3 pt-2"><Problem testId="bot-memory-place-notice">{place.notice}</Problem></div>}
       <ul className="max-h-64 overflow-y-auto py-1 scrollbar-thin">
         {notes.length === 0 && <li className="px-3 py-1.5 text-[12.5px] text-faint">Nothing kept here yet.</li>}
         {notes.map(({ line, index, dated, note }) => (

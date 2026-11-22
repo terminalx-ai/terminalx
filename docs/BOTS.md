@@ -55,11 +55,17 @@ with its record next to it as `bot.json`.
   works across several (PRO-483). An organisation's folder is its id when
   that is a plain lower-case name, else `x-<hash>`, so ids that differ only
   in case never share a folder on a Mac; a folder an earlier build kept by an
-  id with capitals is moved on the next look.
+  id with capitals is moved on the next look, and undoing a change logged
+  before the move is made in the folder as it is now (PRO-512). Where two
+  such ids already shared one folder (a disk that does not tell case apart),
+  the notes cannot be told apart and stay there: the place left with none
+  says so on the screen and in `memory list` (`notice`), with both paths,
+  until it has notes of its own.
 - **Line numbers.** A memory past 64 KB is listed from its end (its newest
   notes). `forget --line N`, a tidy's line numbers and the screen's Forget
   count from the first line listed, as `terminalx bots memory list` shows
-  them, not from the top of the file.
+  them, not from the top of the file. Where the list starts is counted in
+  the file's own bytes, so it holds in a file that is not UTF-8 (PRO-512).
 - **The two memory commands.** A bot writes memory only with
   `terminalx bots memory add "<note>"` and `terminalx bots memory forget
   "<words>"` (`list` reads), never by editing the files. From a bot's chat, or
@@ -84,15 +90,24 @@ with its record next to it as `bot.json`.
   direction (those that gain lines first, those that lose lines last), so a
   crash between two writes of a move or of its undo leaves a line in both,
   never in neither. A look (every chat launch) reads again only the files
-  whose size, times or inode changed, and follows topic files of any name
+  whose size, times or inode changed, and any file whose times are newer
+  than 3 s: a disk with coarse times does not show a same-size edit made in
+  the same tick as the read (PRO-512). It follows topic files of any name
   without control characters, line breaks, `\` or `:`. An unreadable
   `known.json` is set aside and rebuilt from the log.
 - **The window's key in memory.** The window reads its consent key from
-  Keychain once and holds it in memory only (`consent::witness_for`), so a
-  guarded write does not read Keychain each time; the key a launch pins
-  replaces it, and it is forgotten wherever the launch key is
-  (`consent::forget_launch_key`), so the next write reads Keychain again. A
-  failed read is not held.
+  Keychain and holds it in memory only, for 60 s at most
+  (`consent::witness_for`, `KEY_HELD_FOR`), so a burst of guarded writes
+  does not read Keychain each time, and a Keychain item deleted, replaced or
+  locked while the app runs stops the old key signing within a minute
+  (PRO-512). The key a launch pins replaces it, and it is forgotten wherever
+  the launch key is (`consent::forget_launch_key`). A failed read is not
+  held. The held key is wiped from memory when its last holder drops it
+  (`consent::HeldKey`).
+- **An unsaved role.** Quitting asks first while a role has unsaved changes.
+  The draft of a bot that a whole list no longer has (deleted here or
+  elsewhere) is dropped, and while Bots is off the question is not asked;
+  the drafts are kept and asked about again once it is back on (PRO-512).
 
 ## Rules every sub-issue keeps
 

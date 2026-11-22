@@ -141,6 +141,18 @@ fn plain_org_id(id: &str) -> bool {
 /// ids would have shared (`Acme` and `acme` where names do not tell case
 /// apart) is left where it is: its notes cannot be told apart.
 pub(super) fn legacy_org_folders(bot: &Bot, home: &Path) -> Vec<(String, String)> {
+    bot.works_in
+        .iter()
+        .filter(|id| plain_org_id(id) && id.chars().any(|c| c.is_ascii_uppercase()))
+        .filter(|id| shares_legacy_folder(bot, home, id).is_none())
+        .map(|id| (format!("{ORGS_DIR}/{id}"), format!("{ORGS_DIR}/{}", org_folder(id))))
+        .collect()
+}
+
+/// Another organisation `bot` works in whose id differs from `id` only in
+/// case, and whose folder under an earlier build was the same one on disk:
+/// a volume that does not tell case apart kept both in it.
+fn shares_legacy_folder<'a>(bot: &'a Bot, home: &Path, id: &str) -> Option<&'a str> {
     let same_folder = |a: &str, b: &str| {
         let (a, b) = (home.join(ORGS_DIR).join(a), home.join(ORGS_DIR).join(b));
         #[cfg(unix)]
@@ -154,12 +166,42 @@ pub(super) fn legacy_org_folders(bot: &Bot, home: &Path) -> Vec<(String, String)
             true
         }
     };
-    bot.works_in
-        .iter()
-        .filter(|id| plain_org_id(id) && id.chars().any(|c| c.is_ascii_uppercase()))
-        .filter(|id| !bot.works_in.iter().any(|other| other != *id && other.eq_ignore_ascii_case(id) && same_folder(other, id)))
-        .map(|id| (format!("{ORGS_DIR}/{id}"), format!("{ORGS_DIR}/{}", org_folder(id))))
-        .collect()
+    bot.works_in.iter().map(String::as_str).find(|other| *other != id && other.eq_ignore_ascii_case(id) && same_folder(other, id))
+}
+
+/// What the owner is told about an organisation's notes that could not be
+/// moved to where they are kept now (PRO-512): an earlier build kept them by
+/// an id with capitals, in one folder with another organisation's whose id
+/// differs only in case, on a volume that does not tell the two apart. They
+/// stay there, so this place reads none of them. Said while its own memory is
+/// empty: once it has notes, the owner has sorted them or it has moved on.
+pub fn unmoved_notes(bot: &Bot, home: &Path, place: &Place) -> Option<String> {
+    let Place::Org(id) = place else { return None };
+    if !(plain_org_id(id) && id.chars().any(|c| c.is_ascii_uppercase())) {
+        return None;
+    }
+    let other = shares_legacy_folder(bot, home, id)?;
+    if !read_in_home(home, &place.memory_file()).text.trim().is_empty() {
+        return None;
+    }
+    let old = home.join(ORGS_DIR).join(id);
+    // The other's folder now is that same one only when its id is a plain lower-case name.
+    let read_by = if org_folder(other) == other { format!("{other} reads them as its own") } else { "no place reads them now".to_string() };
+    Some(format!(
+        "Notes kept here before are still in {}, a folder this place shared with {other}: their ids differ only in case, and this disk does not tell such names apart. The notes cannot be told apart, so they were left there, and {read_by}. Move the lines that belong here into {}.",
+        old.display(),
+        home.join(place.memory_file()).display()
+    ))
+}
+
+/// Where a file an earlier build's change names is kept now, by its path in
+/// the home: one in an organisation's folder kept by an id with capitals
+/// (`orgs/Acme/…`) is in that organisation's folder as [`org_folder`] names
+/// it. `None` for a path that is kept where it says.
+pub(super) fn kept_now(rel: &str) -> Option<String> {
+    let (id, rest) = rel.strip_prefix(ORGS_DIR)?.strip_prefix('/')?.split_once('/')?;
+    let folder = org_folder(id);
+    (plain_org_id(id) && folder != id).then(|| format!("{ORGS_DIR}/{folder}/{rest}"))
 }
 
 /// Every place `bot` keeps notes: itself, each organisation it works in, and personal.
@@ -267,8 +309,9 @@ fn read_role_shown(home: &Path) -> Limited {
 /// screen's and `terminalx bots memory list`'s): a file past [`READ_LIMIT`]
 /// is listed from its end, as [`read_in_home`] reads it. A line number a list
 /// gave counts from the first line it shows, so it is that many further down the file.
-pub fn lines_not_listed(text: &str) -> usize {
-    let bytes = text.as_bytes();
+/// Counted in the file's own bytes, as the list's read cuts it: text decoded
+/// from a file that is not UTF-8 is longer than the file, and would be cut elsewhere (PRO-512).
+pub fn lines_not_listed(bytes: &[u8]) -> usize {
     if bytes.len() as u64 <= READ_LIMIT {
         return 0;
     }
@@ -491,7 +534,7 @@ pub fn forget(sink: &dyn EventSink, bot: &Bot, place: &Place, which: &str, index
     let file = place.memory_file();
     let matches = |line: &str| line.trim() == wanted || note_text(line).eq_ignore_ascii_case(wanted);
     let (line, recorded) = changes::commit(sink, &bot.id, |files| {
-        let skipped = lines_not_listed(&files.get(&file)?.unwrap_or_default());
+        let skipped = lines_not_listed(files.bytes_read(&file)?.unwrap_or_default());
         let lines = files.lines(&file)?;
         let at = match index.map(|at| at + skipped).filter(|at| lines.get(*at).is_some_and(|line| matches(line))) {
             Some(at) => at,
@@ -725,6 +768,9 @@ pub struct PlaceView {
     pub read_lines: usize,
     pub not_read: usize,
     pub archive_lines: usize,
+    /// What the owner should know about where this place's notes are ([`unmoved_notes`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
     #[serde(flatten)]
     pub file: Limited,
 }
@@ -846,7 +892,7 @@ pub fn view(sink: &dyn EventSink, bot: &Bot) -> Result<View> {
         let read_lines = if place == Place::Bot { own_read } else if place == working { place_read } else { 0 };
         let read = place == Place::Bot || place == working;
         let archive_lines = read_in_home(&home, &place.archive_file()).text.lines().count();
-        place_views.push(PlaceView { key: place.key().into(), path: shown(&place.memory_file()), not_read: if read { lines.len() - read_lines } else { 0 }, read_lines, read, archive_lines, lines, file });
+        place_views.push(PlaceView { key: place.key().into(), path: shown(&place.memory_file()), not_read: if read { lines.len() - read_lines } else { 0 }, read_lines, read, archive_lines, notice: unmoved_notes(bot, &home, &place), lines, file });
         // A topics folder reached through a link is not listed.
         let listed = changes::no_links(&home, &format!("{}/{ARCHIVE_FILE}", place.topics_dir())).is_ok() && std::fs::symlink_metadata(home.join(place.topics_dir())).is_ok_and(|meta| meta.is_dir());
         if let Some(entries) = listed.then(|| std::fs::read_dir(home.join(place.topics_dir())).ok()).flatten() {
@@ -971,7 +1017,7 @@ pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], 
         let mut take = |files: &mut changes::Files, texts: &mut BTreeMap<String, Vec<String>>, line: &TidyLine| -> Result<(String, usize)> {
             let file = place_of(line)?.memory_file();
             if !texts.contains_key(&file) {
-                skipped.insert(file.clone(), lines_not_listed(&files.get(&file)?.unwrap_or_default()));
+                skipped.insert(file.clone(), lines_not_listed(files.bytes_read(&file)?.unwrap_or_default()));
                 texts.insert(file.clone(), files.lines(&file)?);
             }
             let lines = &texts[&file];
