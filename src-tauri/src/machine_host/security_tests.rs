@@ -473,6 +473,59 @@ async fn withdrawing_public_callers_closes_the_ones_already_in_and_late_handshak
     assert!(rig.host.track_phone(None, cancel).map(|id| rig.host.untrack_phone(id)).is_some(), "a relay phone has no listener to judge");
 }
 
+/// PRO-495: the runtime's listener and the window's own phone listener
+/// close the same callers when "answer public callers" is withdrawn: every
+/// one whose source address is public, and none of the rest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_window_and_the_runtime_close_the_same_callers_when_public_ones_are_withdrawn() {
+    use super::{Tracked, Via};
+    use crate::listen::Listen;
+    use crate::machine_wire::ComputerRoute;
+    let rig = rig(TTL);
+    let listener: std::net::SocketAddr = format!("0.0.0.0:{}", rig.port).parse().unwrap();
+    let public = ["203.0.113.7", "8.8.8.8", "100.128.0.1", "172.32.0.1", "198.51.100.9", "2001:db8::1"];
+    let nearby = ["127.0.0.1", "192.168.1.20", "10.1.2.3", "172.16.4.5", "100.93.49.78", "169.254.1.2", "fd7a:115c:a1e0::1"];
+    let sources: Vec<std::net::IpAddr> = public.iter().chain(&nearby).map(|address| address.parse().unwrap()).collect();
+
+    // The runtime: half of them computers, half phones passed to a window.
+    let mut closed = Vec::new();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, true));
+        for (index, source) in sources.iter().enumerate() {
+            let (cancel, cancelled) = tokio::sync::mpsc::unbounded_channel();
+            let via = Some(Via { listener, peer: std::net::SocketAddr::new(*source, 50000) });
+            if index % 2 == 0 {
+                state.connections.entry(format!("computer-{index}")).or_default().push(Tracked { id: 1000 + index as u64, cancel, route: ComputerRoute::Lan, via });
+            } else {
+                state.phones.insert(1000 + index as u64, (via, cancel));
+            }
+            closed.push((*source, cancelled));
+        }
+        state.close_refused_callers();
+    }
+    assert!(closed.iter_mut().all(|(_, cancelled)| cancelled.try_recv().is_err()), "nobody is closed while they are answered");
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.plan = Some(plan(Listen::All, false));
+        state.close_refused_callers();
+    }
+    let by_runtime: Vec<std::net::IpAddr> = closed.iter_mut().filter_map(|(source, cancelled)| cancelled.try_recv().is_ok().then_some(*source)).collect();
+    {
+        let mut state = rig.host.state.lock().unwrap();
+        state.connections.retain(|id, _| !id.starts_with("computer-"));
+        state.phones.retain(|id, _| *id < 1000);
+    }
+
+    // The window, holding the port itself, with the same callers.
+    let window = crate::pairing::PairingManager::new(std::sync::Arc::new(crate::account::AccountManager::default()));
+    let by_window = window.callers_closed_when_public_callers_are_withdrawn_for_test(&sources);
+
+    let expected: Vec<std::net::IpAddr> = public.iter().map(|address| address.parse().unwrap()).collect();
+    assert_eq!(by_runtime, expected, "the runtime closes the public callers and only them");
+    assert_eq!(by_window, by_runtime, "and the window closes the same ones");
+}
+
 /// PRO-487 (security review): an unused pairing code's relay invite is
 /// revoked even if the relay was not there when the code ended. Its device
 /// stays queued, and is never taken for a phone, until the relay confirms.
