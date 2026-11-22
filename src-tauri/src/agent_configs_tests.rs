@@ -593,6 +593,40 @@ fn a_linked_target_folder_without_skill_md_is_refused() {
     refused_with_nothing_written(&rig, &outside, "skill `release-notes` on the other side links to ~/outside; change that folder instead");
 }
 
+/// A relative link is named by where it leads, not as `..` segments.
+#[cfg(unix)]
+#[test]
+fn a_relative_linked_target_folder_is_named_by_where_it_leads() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(rig.homes.home.join("elsewhere")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink("../../elsewhere/../outside/.", rig.homes.codex_dir.join("skills/release-notes")).unwrap();
+    refused_with_nothing_written(&rig, &outside, "skill `release-notes` on the other side links to ~/outside; change that folder instead");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_linked_target_folder_names_where_it_would_lead() {
+    let rig = rig();
+    let outside = rig.homes.home.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink("../../outside/gone", rig.homes.codex_dir.join("skills/release-notes")).unwrap();
+    refused_with_nothing_written(&rig, &outside, "skill `release-notes` on the other side links to ~/outside/gone, which is not there; change that folder instead");
+    assert!(!outside.join("gone").exists());
+}
+
+/// A link that cannot be read (here: not a link at all, which `read_link`
+/// refuses the same way) is still named as something, never as nothing.
+#[test]
+fn an_unreadable_link_is_never_named_empty() {
+    let rig = rig();
+    let gone = rig.homes.codex_dir.join("skills/not-there");
+    let shown = link_shown(&rig.homes, &gone);
+    assert!(shown.starts_with("a place that can't be read ("), "{shown}");
+    assert!(shown.len() > "a place that can't be read ()".len(), "{shown}");
+}
+
 #[cfg(unix)]
 #[test]
 fn an_unlisted_target_with_inside_links_and_clashing_paths() {

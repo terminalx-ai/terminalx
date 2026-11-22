@@ -202,6 +202,15 @@ impl Homes {
         }
     }
 
+    /// [`Homes::pretty`] for a path with every link resolved: a home that is
+    /// itself reached through a link (`/var` on macOS) still shows as `~`.
+    fn pretty_real(&self, real: &Path) -> String {
+        match fs::canonicalize(&self.home).ok().and_then(|home| real.strip_prefix(home).ok().map(|rest| self.home.join(rest))) {
+            Some(path) => self.pretty(&path),
+            None => self.pretty(real),
+        }
+    }
+
     fn commands_dir(&self, side: Direction) -> PathBuf {
         match side {
             Direction::ToClaude => self.claude_dir.join("commands"),
@@ -1034,8 +1043,7 @@ fn plan(homes: &Homes, changes: &[Change]) -> Result<Plan> {
                 let found = fs::symlink_metadata(&target).ok();
                 let exists = found.is_some();
                 if found.is_some_and(|m| m.file_type().is_symlink()) {
-                    let to = fs::read_link(&target).map(|to| homes.pretty(&target.parent().map_or(to.clone(), |p| p.join(&to)))).unwrap_or_default();
-                    bail!("skill `{}` on the other side links to {to}; change that folder instead", change.name);
+                    bail!("skill `{}` on the other side links to {}; change that folder instead", change.name, link_shown(homes, &target));
                 }
                 if exists && !target.is_dir() {
                     bail!("{} is a file, not a skill folder", homes.pretty(&target));
@@ -1418,6 +1426,32 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     crate::store::write_atomic(&real, bytes)
+}
+
+/// Where the link at `link` leads, for a refusal: the folder it resolves to,
+/// or, for a dangling link, where it would be with `.` and `..` taken out,
+/// and never an empty name when the link cannot be read.
+fn link_shown(homes: &Homes, link: &Path) -> String {
+    if let Ok(real) = fs::canonicalize(link) {
+        return homes.pretty_real(&real);
+    }
+    match fs::read_link(link) {
+        Ok(to) => {
+            let joined = link.parent().map_or(to.clone(), |p| p.join(&to));
+            let mut path = PathBuf::new();
+            for part in joined.components() {
+                match part {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        path.pop();
+                    }
+                    part => path.push(part),
+                }
+            }
+            format!("{}, which is not there", homes.pretty(&path))
+        }
+        Err(e) => format!("a place that can't be read ({e})"),
+    }
 }
 
 /// Copies each file in turn, recording each one in `progress` as soon as it
