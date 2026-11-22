@@ -235,6 +235,29 @@ try {
       await stopped.mouse.wheel(0, 400);
       await stopped.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
     }
+    // Then the transcript is wheeled again, as a reader would, until several of the reply's lines lie behind the
+    // permission card itself, not by a line's margin: the reply's lowest line on screen is brought to the card's foot,
+    // so the lines above it fill the card, and each turn is measured again.
+    const BEHIND = 3;
+    const behindCard = () => bannerPermission.evaluate((node) => {
+      const card = node.getBoundingClientRect();
+      const shown = node.closest('section[aria-label="Session recovery"]').getBoundingClientRect();
+      const top = Math.max(card.top, shown.top), bottom = Math.min(card.bottom, shown.bottom);
+      const lines = [...document.querySelectorAll("[data-chat-scroller] p")].filter((p) => p.textContent.startsWith("Readable over panels"))
+        .flatMap((p) => { const range = document.createRange(); range.selectNodeContents(p); return [...range.getClientRects()]; })
+        .filter((line) => line.width > 0);
+      // The lowest line on screen, which need not be the last in the document.
+      const lowest = Math.max(...lines.filter((line) => line.bottom <= bottom + card.height).map((line) => line.bottom));
+      return { lines: lines.filter((line) => line.top >= top && line.bottom <= bottom && line.left < card.right && line.right > card.left).length,
+        offset: Math.round((bottom - 8) - lowest), height: Math.round(bottom - top) };
+    });
+    await stopped.mouse.move(scrollerBox.x + scrollerBox.width / 2, scrollerBox.y + 80);
+    const behind = [await behindCard()];
+    for (let turn = 0; turn < 6 && (behind[behind.length - 1].lines < BEHIND || Math.abs(behind[behind.length - 1].offset) > 24); turn++) {
+      await stopped.mouse.wheel(0, -behind[behind.length - 1].offset);
+      await settled(false);
+      behind.push(await behindCard());
+    }
     // #1377: the permission card itself over the reply's text, probed the same way within what the banner shows of it.
     const permissionPlaced = await bannerPermission.evaluate((node) => {
       const banner = node.closest('section[aria-label="Session recovery"]');
@@ -263,10 +286,10 @@ try {
       "over the reply's text, nothing shows through the banner and its muted text reads at 4.5:1": solid(bannerGround),
       "nothing shows through the banner's wrapper on the chat's colour": solid(wrapperGround),
       "nothing shows through the question card in the banner, and its muted text reads at 4.5:1": solid(bannerCardGround),
-      "the permission card lies whole in the banner, drawn over the reply's text": permissionPlaced.wholeInBanner && permissionPlaced.coveredLines > 0 && permissionPlaced.under && permissionPlaced.onTop,
+      "the permission card lies whole in the banner, drawn over several lines of the reply's text": permissionPlaced.wholeInBanner && permissionPlaced.coveredLines >= BEHIND && permissionPlaced.under && permissionPlaced.onTop,
       "nothing shows through the permission card in the banner, and its muted text reads at 4.5:1": solid(bannerPermissionGround),
       "no browser errors": stoppedErrors.length === 0,
-    }, { where, scrolled, placed, permissionPlaced, bannerGround, wrapperGround, bannerCardGround, bannerPermissionGround, stoppedErrors });
+    }, { where, scrolled, placed, behind, permissionPlaced, bannerGround, wrapperGround, bannerCardGround, bannerPermissionGround, stoppedErrors });
     await stopped.close();
 
     // Reduce transparency: glass is off from the first paint, nothing blurs,
