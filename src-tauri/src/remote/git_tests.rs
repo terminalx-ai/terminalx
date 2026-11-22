@@ -1509,6 +1509,43 @@ fn a_declining_pre_push_hook_stops_the_machine_pr_push() {
 
 #[cfg(unix)]
 #[test]
+fn a_git_without_hook_run_pushes_unless_the_checkout_has_a_pre_push_hook() {
+    for hook in ["none", "not executable", "executable"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        f.git.git_without_hook_run = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+        if hook != "none" {
+            // Where core.hooksPath points, as Git would look.
+            let hooks = f.base.join("shared hooks");
+            std::fs::create_dir(&hooks).unwrap();
+            git(&f.root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+            std::fs::write(hooks.join("pre-push"), "#!/bin/sh\nexit 0\n").unwrap();
+            let mode = if hook == "executable" { 0o755 } else { 0o644 };
+            std::fs::set_permissions(hooks.join("pre-push"), std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        }
+        let outcome = f.call("git.prCreateForSession", request);
+        if hook == "executable" {
+            let refused = outcome.expect_err("a hook this Git cannot run is refused");
+            assert_eq!(refused.code, "git_failed");
+            assert!(refused.message.contains("nothing was pushed"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        } else {
+            let created = outcome.unwrap_or_else(|error| panic!("{hook}: {} {}", error.code, error.message));
+            assert_eq!(created["pr"]["headSha"], head.as_str(), "{hook}");
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{hook}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
     // After the checkout is verified and before Git runs: core.worktree is
     // pointed at another folder, another repository replaces the checkout, or

@@ -70,6 +70,8 @@ pub struct WorkspaceGit {
     /// can change the repository deterministically in that window.
     #[cfg(test)]
     barrier: Option<Barrier>,
+    #[cfg(test)]
+    git_without_hook_run: bool,
 }
 
 #[cfg(test)]
@@ -760,7 +762,8 @@ impl WorkspaceGit {
     /// `files` resolves working-tree paths with the same containment rules as `fs/1`.
     pub fn new(root: PathBuf, files: Arc<WorkspaceFiles>) -> Self {
         Self { root, files, gh: std::env::var_os("TERMINALX_SERVE_GH").map(PathBuf::from), project: false,
-            #[cfg(test)] github_origin_fixture: None, #[cfg(test)] barrier: None }
+            #[cfg(test)] github_origin_fixture: None, #[cfg(test)] barrier: None,
+            #[cfg(test)] git_without_hook_run: false }
     }
 
     /// The Git of one of a machine's projects (`machine/1`). `repo` names its
@@ -2252,8 +2255,9 @@ impl WorkspaceGit {
     /// The checkout's pre-push hook runs in the checkout itself (`git hook
     /// run`, fed what `git push` would feed it), not against the private copy,
     /// so hooks such as Git LFS see the real repository; the private push then
-    /// runs no hooks. A Git without `git hook run --to-stdin` is refused before
-    /// anything is sent.
+    /// runs no hooks. A Git without `git hook run --to-stdin` pushes as long as
+    /// the checkout has no pre-push hook file, and is refused before anything
+    /// is sent when it has one.
     ///
     /// What this does not bind: only the destination URL is checked. Settings
     /// the copy carries over unchecked can still carry the bytes elsewhere
@@ -2343,22 +2347,50 @@ impl WorkspaceGit {
             command.args(["hook", "run", "--ignore-missing"]).arg(&to_stdin).args([name, "--", "origin", origin]);
             command
         };
-        let supported = run_bounded(hook("terminalx-no-such-hook"), LOCAL_TIMEOUT).map_err(RpcError::internal)?;
-        if !supported.ok {
+        let supported = !self.git_without_hook_run()
+            && run_bounded(hook("terminalx-no-such-hook"), LOCAL_TIMEOUT).map_err(RpcError::internal)?.ok;
+        if supported {
+            let ran = run_network(hook("pre-push"), NETWORK_TIMEOUT, Network::Git)?;
+            if !ran.ok {
+                let mut declined = ran;
+                declined.stderr.push_str("\nerror: the pre-push hook declined the push");
+                return Ok(declined);
+            }
+        } else if self.has_pre_push_hook(repo)? {
+            // A Git before `git hook run --to-stdin` (2.36) knows only hook
+            // files, so without one there is nothing to run.
             return Err(RpcError::new(
                 "git_failed",
                 "This Git cannot run the repository's pre-push hook for a verified push (it needs `git hook run --to-stdin`). Update Git and try again; nothing was pushed.",
             ));
         }
-        let ran = run_network(hook("pre-push"), NETWORK_TIMEOUT, Network::Git)?;
-        if !ran.ok {
-            let mut declined = ran;
-            declined.stderr.push_str("\nerror: the pre-push hook declined the push");
-            return Ok(declined);
-        }
 
         let refspec = format!("{head}:{reference}");
         run_network(command(&["push", "--porcelain", "--no-verify", "origin", &refspec]), NETWORK_TIMEOUT, Network::Git)
+    }
+
+    /// Whether the checkout has a pre-push hook file Git would run: in
+    /// `core.hooksPath` or the default hooks directory, and executable.
+    fn has_pre_push_hook(&self, repo: &Repo) -> Result<bool, RpcError> {
+        let hooks = self.git(repo, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+        let hook = Path::new(hooks.strip_suffix('\n').unwrap_or(&hooks)).join("pre-push");
+        let Ok(metadata) = std::fs::metadata(&hook) else { return Ok(false) };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        }
+        #[cfg(not(unix))]
+        Ok(metadata.is_file())
+    }
+
+    /// Tests stand in for a Git that predates `git hook run --to-stdin`.
+    fn git_without_hook_run(&self) -> bool {
+        #[cfg(test)]
+        if self.git_without_hook_run {
+            return true;
+        }
+        false
     }
 
     fn verify_pr_remote_head(&self, repo: &Repo, origin: Option<&str>, branch: &str, head: &str) -> Result<(), RpcError> {
