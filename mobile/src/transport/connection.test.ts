@@ -219,6 +219,34 @@ describe("background and foreground", () => {
     expect(mocks.clients.length).toBeGreaterThan(1);
   });
 
+  it("retires the old generation before closing a probe that failed, so only the quiet reconnect runs (#1375)", async () => {
+    await up();
+    const logs: ConnectionLogEntry[] = [];
+    connection.onLog((entry) => logs.push(entry));
+    const seen = watch();
+    const before = live()[0];
+    const sockets = mocks.clients.length;
+    connection.background();
+    // Back within the flap window: an ordinary loss here would count as a flap and wait before reconnecting.
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Only the connection from before the background is dead; the next one answers.
+    before.request = () => Promise.reject(new Error("Request timed out"));
+    expect(connection.foreground()).toBe(true);
+    await flush();
+    expect(before.closedWith).toBe(4001);
+    // A deliberate close is not a lost connection: no warning, no flap.
+    expect(logs.filter((entry) => entry.message === "Connection lost")).toEqual([]);
+    // One race from the restart, at once, and none from the old generation's disconnect listener.
+    const race = mocks.clients.slice(sockets);
+    expect(race.map((client) => client.options.endpoint ?? "relay")).toEqual(mocks.clients.slice(0, sockets).map((client) => client.options.endpoint ?? "relay"));
+    expect(live()).toHaveLength(1);
+    expect(live()[0]).not.toBe(before);
+    // The reconnect stayed quiet: nothing but the connected stage that was already showing.
+    expect(seen.stages.filter((stage) => stage !== "connected")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[FLAP_DELAYS_MS.length - 1]); await flush();
+    expect(mocks.clients.slice(sockets)).toHaveLength(race.length);
+  });
+
   it("tries nothing from the background, and reconnects once, unseen, on return", async () => {
     await up();
     const seen = watch();
