@@ -2434,7 +2434,7 @@ fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_di
         std::fs::write(checkout.join(".git/signing.conf"), format!(
             "[commit]\n\tgpgSign = true\n[user]\n\tsigningKey = checkout-key\n[gpg]\n\tformat = openpgp\n\tprogram = {}\n", signer.display(),
         )).unwrap();
-        // Outside this Git directory the condition does not hold.
+        // In this Git directory the condition holds.
         assert_eq!(git(&checkout, &["config", "--get", "user.signingKey"]), "checkout-key", "{condition}");
 
         std::fs::write(checkout.join("draft"), "work\n").unwrap();
