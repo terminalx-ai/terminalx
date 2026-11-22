@@ -586,10 +586,23 @@ impl LapsedEchoes {
     /// each its words and how many images it had: the lapsed prompts that
     /// say the same are not owed that record, nor any later prompt with those
     /// words, and are given up. Judged by what was sent, not by the record,
-    /// which may hold it inside more or changed (#1385).
-    fn retire(&mut self, sent: &[(&str, usize)], conversation: &Path, now: Instant) {
+    /// which may hold it inside more or changed (#1385). Their `seq`s.
+    ///
+    /// Each may have reached the CLI after all, and its record be the next
+    /// with those words, or another's: words alone cannot tell (#1386). The
+    /// card is owed a word that its delivery was not confirmed, never a
+    /// record that may be a later prompt's.
+    fn retire(&mut self, sent: &[(&str, usize)], conversation: &Path, now: Instant) -> Vec<u64> {
         self.prune(conversation, now);
-        self.0.retain(|lapsed| !sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text)));
+        let mut retired = Vec::new();
+        self.0.retain(|lapsed| {
+            let said = sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text));
+            if said {
+                retired.push(lapsed.echo.seq);
+            }
+            !said
+        });
+        retired
     }
 }
 
@@ -7299,6 +7312,7 @@ impl SessionManager {
             // others, reached the agent inside the prompt recorded here, which
             // the chat shows for it; so does one an idle CLI recorded changed
             // (#722).
+            let mut unconfirmed: Vec<u64> = Vec::new();
             let echoed = match &mut rt.engine {
                 Engine::Cli(p) => {
                     // What each awaited prompt said, to know a lapsed one by
@@ -7325,7 +7339,7 @@ impl SessionManager {
                         p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
                     } else {
                         let sent: Vec<(&str, usize)> = awaited.iter().filter(|(seq, ..)| echoed.iter().any(|echo| echo.seq == *seq)).map(|(_, text, images)| (text.as_str(), *images)).collect();
-                        p.lapsed.retire(&sent, &conversation, Instant::now());
+                        unconfirmed = p.lapsed.retire(&sent, &conversation, Instant::now());
                         echoed
                     };
                     if !echoed.is_empty() {
@@ -7338,6 +7352,11 @@ impl SessionManager {
                 }
                 _ => Vec::new(),
             };
+            // A lapsed card the same words sent again took the place of
+            // (#1386): whether the CLI took it too is not known.
+            for seq in unconfirmed {
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: true }, None);
+            }
             if let (Some((dropped, said)), Some((lineage, text))) = (&replaced, &prompt) {
                 // The same words as the dropped prompt, and no message sent
                 // from the chat says them: sent again from the input box the

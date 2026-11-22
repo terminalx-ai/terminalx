@@ -673,6 +673,14 @@ fn a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message() {
     }
 }
 
+impl Rig {
+    /// The `seq`s of the messages the chat was told were withdrawn with
+    /// their delivery unconfirmed.
+    fn unconfirmed_seqs(&self) -> Vec<u64> {
+        self.events().iter().filter_map(|e| match e.payload { Payload::PromptWithdrawn { prompt_seq, unconfirmed: true } => Some(prompt_seq), _ => None }).collect()
+    }
+}
+
 /// #1385: the same words sent again reach the CLI inside a longer prompt,
 /// or changed by an idle CLI. That record is the new message's, so the
 /// lapsed one with those words is retired all the same: the same words
@@ -721,6 +729,85 @@ fn words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt() {
 
     assert_eq!(rig.told().iter().filter(|line| *line == "user: check the tests").count(), 1, "the prompt typed in the terminal is drawn as its own message");
     assert!(!rig.turn_prompt_seqs().contains(&lapsed), "no turn is the lapsed card's");
+}
+
+/// #1386: a queued prompt lapses, the reader sends the same words again,
+/// and two records with those words follow: the CLI may have taken the
+/// lapsed one after all, before or after the new one, or the second may be
+/// typed in the terminal. Words cannot tell which. Each record is drawn as
+/// what the agent received; the new message is matched to one; the lapsed
+/// card is told its delivery was not confirmed, neither left Queued nor
+/// handed a record that may be another prompt's.
+#[test]
+fn a_lapsed_prompt_and_the_same_words_sent_again_leave_the_lapsed_delivery_unconfirmed() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.cli_takes("check the tests");
+        assert_eq!(rig.unconfirmed_seqs(), [lapsed], "{kind:?}: the card says its delivery was not confirmed");
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], [
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}: both records are drawn");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: neither is certified as the lapsed card's");
+        assert_eq!(rig.unconfirmed_seqs(), [lapsed], "{kind:?}: said once");
+        assert_eq!(rig.banner(), None, "{kind:?}");
+    }
+}
+
+/// #1386, the other order: the CLI takes the lapsed prompt before the same
+/// words are sent again. Its record is that message, and the words sent
+/// after are a message of their own, with nothing left unconfirmed.
+#[test]
+fn a_lapsed_prompt_taken_before_the_same_words_are_sent_again_is_that_message() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], ["reply: they pass", "end", "user: check the tests", "reply: still passing", "end"], "{kind:?}");
+        assert_eq!(rig.turn_prompt_seqs().iter().filter(|seq| **seq == lapsed).count(), 1, "{kind:?}: the card is cleared into the turn that answers it");
+        assert!(rig.unconfirmed_seqs().is_empty(), "{kind:?}");
+    }
+}
+
+/// #1386 across a reset: the same words sent again in the conversation a
+/// `/clear` opened say nothing of the lapsed card, which belongs to the one
+/// before.
+#[test]
+fn the_same_words_sent_again_after_a_reset_leave_the_lapsed_card_alone() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        let cleared = rig.transcript.with_file_name("after-clear.jsonl");
+        std::fs::write(&cleared, "").unwrap();
+        rig.tail.retarget(&cleared);
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.hook("UserPromptSubmit", json!({ "prompt": "check the tests" }));
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&cleared).unwrap().write_all(rig.cli().prompt("check the tests").as_bytes()).unwrap();
+        }
+        rig.manager.pump(&rig.rt, &rig.tail);
+
+        assert_eq!(rig.told()[4..], ["user: check the tests"], "{kind:?}: one message, of the new conversation");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}");
+        assert!(rig.unconfirmed_seqs().is_empty(), "{kind:?}: the new conversation says nothing of the old card");
+    }
 }
 
 #[test]
