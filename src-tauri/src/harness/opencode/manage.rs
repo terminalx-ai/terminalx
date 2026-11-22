@@ -256,13 +256,26 @@ fn read_config(paths: &Paths) -> Config {
 
 /// Replace `path` with `value`, through a file beside it, owner-only when `private`.
 fn write_json(path: &Path, value: &Value, private: bool) -> Result<(), String> {
+    write_json_unless(path, value, private, || false).map(|_| ())
+}
+
+/// [`write_json`], left undone (`Ok(false)`) when `abandon`, asked right before
+/// the new file replaces `path`, says so.
+fn write_json_unless(path: &Path, value: &Value, private: bool, abandon: impl FnOnce() -> bool) -> Result<bool, String> {
     let parent = path.parent().ok_or("no folder to write in")?;
     std::fs::create_dir_all(parent).map_err(|error| format!("Couldn’t create {}: {error}", shown(parent)))?;
     let text = format!("{}\n", serde_json::to_string_pretty(value).map_err(|error| error.to_string())?);
     // A key file someone left readable by others is narrowed first, as `opencode auth login`
     // keeps it: write_atomic carries an existing file's mode over to the new one.
+    if private { narrow(path)?; }
+    // Created owner-only and fsynced before the rename, so keys are never readable mid-write.
+    crate::store::write_atomic_unless(path, text.as_bytes(), abandon).map_err(|error| format!("Couldn’t write {}: {error:#}", shown(path)))
+}
+
+/// Make an existing key file that others may read owner-only.
+fn narrow(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    if private {
+    {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(path) {
             if meta.permissions().mode() & 0o077 != 0 {
@@ -271,9 +284,8 @@ fn write_json(path: &Path, value: &Value, private: bool) -> Result<(), String> {
         }
     }
     #[cfg(not(unix))]
-    let _ = private;
-    // Created owner-only and fsynced before the rename, so keys are never readable mid-write.
-    crate::store::write_atomic(path, text.as_bytes()).map_err(|error| format!("Couldn’t write {}: {error:#}", shown(path)))
+    let _ = path;
+    Ok(())
 }
 
 /// Change the config file with `edit`, unless it may not be written.
@@ -333,20 +345,40 @@ fn read_auth_bytes(paths: &Paths) -> Result<(Option<String>, Map<String, Value>)
 const AUTH_READS: u32 = 3;
 const AUTH_RETRY: Duration = Duration::from_millis(100);
 
-/// Change the key file with `edit`, leaving every other entry as it is on disk
-/// at the moment of writing. OpenCode rewrites the file without a lock (say to
-/// refresh a sign-in), so the file is read again just before the write and,
-/// if it changed since `edit` saw it, the edit is made again on the new text,
-/// rather than putting back what OpenCode just replaced.
+/// Change the key file with `edit`, keeping every other entry as OpenCode last
+/// wrote it. OpenCode rewrites the file without a lock (say to refresh a
+/// sign-in), so once the new file is written and synced beside it, the key
+/// file is read again right before the rename swaps the new one in; if it
+/// changed since `edit` saw it, the new file is dropped and the edit made again
+/// on the new text, rather than putting back what OpenCode just replaced.
+///
+/// This is an optimistic check, not a compare-and-swap: OpenCode takes no lock
+/// TerminalX could share, and a lock of TerminalX's own can't stop it. A write
+/// of OpenCode's landing in the moment between that last read and the rename
+/// is still replaced. The window is a read and a rename long, not the edit,
+/// serialization and sync before them.
 fn update_auth(paths: &Paths, mut edit: impl FnMut(&mut Map<String, Value>)) -> Result<(), String> {
     let file = paths.auth_file();
     for _ in 0..AUTH_UPDATES {
         let (seen, mut auth) = read_auth_bytes(paths)?;
+        let read = auth.clone();
         edit(&mut auth);
+        // Nothing to change (say the entry went, or the whole file, since the caller looked):
+        // no write, so a deleted file isn't made again as `{}` and the file is left as it is.
+        // One left readable by others is still made owner-only, as a write would have.
+        if auth == read { return if seen.is_some() { narrow(&file) } else { Ok(()) }; }
         #[cfg(test)]
         BEFORE_AUTH_WRITE.with(|hook| if let Some(hook) = hook.borrow_mut().as_mut() { hook() });
-        if auth_text(&file)? != seen { continue; }
-        return write_json(&file, &Value::Object(auth), true);
+        // Asked once the new file is ready, right before it replaces this one.
+        let mut now = Ok(None);
+        let written = write_json_unless(&file, &Value::Object(auth), true, || {
+            #[cfg(test)]
+            BEFORE_AUTH_REPLACE.with(|hook| if let Some(hook) = hook.borrow_mut().as_mut() { hook() });
+            now = auth_text(&file);
+            !matches!(&now, Ok(text) if *text == seen)
+        })?;
+        if written { return Ok(()); }
+        now?;
     }
     Err(format!("{} kept changing while TerminalX was saving, so it was left as OpenCode wrote it. Try again in a moment.", shown(&file)))
 }
@@ -357,6 +389,9 @@ const AUTH_UPDATES: u32 = 5;
 thread_local! {
     /// Run by [`update_auth`] between its edit and its write: where another writer's change lands.
     static BEFORE_AUTH_WRITE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+    /// Run by [`update_auth`] once the new key file is written beside the old one, before
+    /// the last look at the old one: where a refresh after the edit's own read lands.
+    static BEFORE_AUTH_REPLACE: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn mask(key: &str) -> String {
@@ -896,13 +931,40 @@ mod tests {
     /// A gateway on this Mac that answers one request and says what was asked.
     fn gateway() -> (String, std::thread::JoinHandle<String>) { gateway_during(|| {}) }
 
+    /// How long a test gateway waits for its request before failing the test.
+    const GATEWAY_WAIT: Duration = Duration::from_secs(10);
+
+    /// The next connection to `listener` at `url`, or a panic naming `url` once
+    /// [`GATEWAY_WAIT`] passes with none: a key sent elsewhere fails the test
+    /// instead of leaving it waiting forever.
+    fn accept_within(listener: &std::net::TcpListener, url: &str) -> std::net::TcpStream {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + GATEWAY_WAIT;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    // Some systems hand the accepted socket the listener's non-blocking mode.
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(GATEWAY_WAIT)).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "no request reached the gateway at {url} within {GATEWAY_WAIT:?}: the key was sent somewhere else, or not at all");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("the gateway at {url} couldn’t take a connection: {error}"),
+            }
+        }
+    }
+
     /// [`gateway`], running `during` after the request arrived and before it is answered.
     fn gateway_during(during: impl FnOnce() + Send + 'static) -> (String, std::thread::JoinHandle<String>) {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let at = url.clone();
         let served = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
+            let stream = accept_within(&listener, &at);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
             loop {
@@ -945,8 +1007,9 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let at = url.clone();
         let served = std::thread::spawn(move || (0..count).map(|_| {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream = accept_within(&listener, &at);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut request = String::new();
             loop {
@@ -1041,7 +1104,8 @@ mod tests {
 
         // A new base URL: it alone is asked, and it is what is saved.
         let (new, served) = gateway();
-        connect_in(&paths, "acme", "acme-key-9876543210", Some(&format!("  {new}  "))).unwrap();
+        let replaced = connect_in(&paths, "acme", "acme-key-9876543210", Some(&format!("  {new}  "))).unwrap();
+        assert!(matches!(replaced.check, KeyCheck::Accepted), "the new gateway didn’t accept the key, so it was checked elsewhere: {:?}", replaced.check);
         assert!(served.join().unwrap().contains("Bearer acme-key-9876543210"));
         never_asked(&catalogue_listener, "the catalogue address");
         assert_eq!(saved_base(&paths).as_deref(), Some(new.as_str()));
@@ -1142,6 +1206,54 @@ mod tests {
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
         assert_eq!(auth["anthropic"], refreshed, "the rotated token is not put back to the old one");
         assert_eq!(auth["weird"], json!({"type": "api", "key": "weird-key-0123456789"}));
+    }
+
+    /// Issue #1374: Disconnect decided the key was there from an earlier read; if
+    /// OpenCode drops it, or the whole file, before the key file is read again,
+    /// nothing is written and the file stays as OpenCode left it.
+    #[test]
+    fn disconnect_writes_nothing_when_the_key_went_meanwhile() {
+        for gone_file in [false, true] {
+            let (_dir, paths) = paths();
+            std::fs::create_dir_all(&paths.data_dir).unwrap();
+            std::fs::write(paths.auth_file(), json!({"weird": {"type": "api", "key": "weird-key-0123456789"}, "anthropic": {"type": "oauth", "refresh": "r1"}}).to_string()).unwrap();
+            // Compact, as TerminalX never writes it: any rewrite would change these bytes.
+            let left = json!({"anthropic": {"type": "oauth", "refresh": "r2"}}).to_string();
+            let (file, during) = (paths.auth_file(), left.clone());
+            let mut once = Some(move || if gone_file { std::fs::remove_file(&file).unwrap() } else { std::fs::write(&file, &during).unwrap() });
+            BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || if let Some(change) = once.take() { change() })));
+            let disconnected = disconnect_in(&paths, "weird");
+            BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = None);
+            let overview = disconnected.unwrap();
+            assert!(!overview.connected.iter().any(|provider| provider.id == "weird"));
+            if gone_file {
+                assert!(!paths.auth_file().exists(), "a deleted key file is not made again");
+            } else {
+                assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), left, "the file is left as OpenCode wrote it, other sign-ins and all");
+            }
+        }
+    }
+
+    /// Issue #1373: a refresh landing after the new key file was serialized and
+    /// written beside the old one, the point the old check came too early for,
+    /// is seen before the swap, so the rotated sign-in is kept.
+    #[test]
+    fn a_sign_in_refreshed_while_the_new_file_is_written_is_kept() {
+        let (_dir, paths) = paths();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(paths.auth_file(), json!({"anthropic": {"type": "oauth", "refresh": "r1", "access": "a1", "expires": 1}}).to_string()).unwrap();
+        let refreshed = json!({"type": "oauth", "refresh": "r2", "access": "a2", "expires": 2});
+        let (file, during) = (paths.auth_file(), json!({"anthropic": refreshed}).to_string());
+        let mut once = Some(move || std::fs::write(&file, &during).unwrap());
+        BEFORE_AUTH_REPLACE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || if let Some(write) = once.take() { write() })));
+        let connected = connect_in(&paths, "weird", "weird-key-0123456789", None);
+        BEFORE_AUTH_REPLACE.with(|hook| *hook.borrow_mut() = None);
+        connected.unwrap();
+        let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
+        assert_eq!(auth["anthropic"], refreshed, "the rotated token is not put back to the old one");
+        assert_eq!(auth["weird"], json!({"type": "api", "key": "weird-key-0123456789"}));
+        let left: Vec<_> = std::fs::read_dir(&paths.data_dir).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("auth.json")], "the dropped new file is not left beside it");
     }
 
     #[test]
