@@ -1,6 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi, type Mock } from "vitest";
-import { CONNECT_LOCAL_TIMEOUT_MS } from "@/lib/useGithubConnectAttempt";
+import { CONNECT_POLL_BUDGET_MS } from "@/lib/useGithubConnectAttempt";
 
 /**
  * Clock scenarios for useGithubConnectAttempt (#1323), run against each
@@ -77,6 +77,24 @@ export function githubConnectClockScenarios({
     await screen.findByText(/expired before it was confirmed/);
   });
 
+  it("keeps polling an attempt the server still reports waiting past the 15 minutes its expiry message names, then shows the server's connected result", async () => {
+    // The desktop's budget is its own policy, not the server's lifetime plus grace (#1370).
+    const longServerLifetime = 20 * 60_000;
+    expect(CONNECT_POLL_BUDGET_MS).toBeGreaterThan(longServerLifetime);
+    skew();
+    api.connect.mockResolvedValue({ ...waiting(), browserOpened: true });
+    api.attempt.mockResolvedValue(waiting());
+    await begin();
+    await pollsAtLeast(2);
+    clocks.monotonic = longServerLifetime;
+    const before = api.attempt.mock.calls.length;
+    await pollsAtLeast(before + 2);
+    expect(screen.queryByText(/stopped waiting for the account service/)).toBeNull();
+    noExpiry();
+    api.attempt.mockResolvedValue({ attemptId: "att_1", state: "connected", browserOpened: false, installation: connected });
+    await screen.findByText(new RegExp(`Connected ${connected.accountLogin}\\.`));
+  });
+
   it("shows the expiry the server reports by refusing the poll", async () => {
     skew();
     api.connect.mockResolvedValue({ ...waiting(), browserOpened: true });
@@ -97,7 +115,7 @@ export function githubConnectClockScenarios({
     await pollsAtLeast(2);
     noExpiry();
     const loads = api.summary.mock.calls.length;
-    clocks.monotonic = CONNECT_LOCAL_TIMEOUT_MS + 1;
+    clocks.monotonic = CONNECT_POLL_BUDGET_MS + 1;
     await screen.findByText(/stopped waiting for the account service to confirm the connection/);
     noExpiry();
     // Reconciles: an installation that connected on the server shows up.
