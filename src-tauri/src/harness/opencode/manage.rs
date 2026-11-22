@@ -261,8 +261,15 @@ fn write_json(path: &Path, value: &Value, private: bool) -> Result<(), String> {
     let text = format!("{}\n", serde_json::to_string_pretty(value).map_err(|error| error.to_string())?);
     // A key file someone left readable by others is narrowed first, as `opencode auth login`
     // keeps it: write_atomic carries an existing file's mode over to the new one.
+    if private { narrow(path)?; }
+    // Created owner-only and fsynced before the rename, so keys are never readable mid-write.
+    crate::store::write_atomic(path, text.as_bytes()).map_err(|error| format!("Couldn’t write {}: {error:#}", shown(path)))
+}
+
+/// Make an existing key file that others may read owner-only.
+fn narrow(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    if private {
+    {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(path) {
             if meta.permissions().mode() & 0o077 != 0 {
@@ -271,9 +278,8 @@ fn write_json(path: &Path, value: &Value, private: bool) -> Result<(), String> {
         }
     }
     #[cfg(not(unix))]
-    let _ = private;
-    // Created owner-only and fsynced before the rename, so keys are never readable mid-write.
-    crate::store::write_atomic(path, text.as_bytes()).map_err(|error| format!("Couldn’t write {}: {error:#}", shown(path)))
+    let _ = path;
+    Ok(())
 }
 
 /// Change the config file with `edit`, unless it may not be written.
@@ -342,7 +348,12 @@ fn update_auth(paths: &Paths, mut edit: impl FnMut(&mut Map<String, Value>)) -> 
     let file = paths.auth_file();
     for _ in 0..AUTH_UPDATES {
         let (seen, mut auth) = read_auth_bytes(paths)?;
+        let read = auth.clone();
         edit(&mut auth);
+        // Nothing to change (say the entry went, or the whole file, since the caller looked):
+        // no write, so a deleted file isn't made again as `{}` and the file is left as it is.
+        // One left readable by others is still made owner-only, as a write would have.
+        if auth == read { return if seen.is_some() { narrow(&file) } else { Ok(()) }; }
         #[cfg(test)]
         BEFORE_AUTH_WRITE.with(|hook| if let Some(hook) = hook.borrow_mut().as_mut() { hook() });
         if auth_text(&file)? != seen { continue; }
@@ -1142,6 +1153,32 @@ mod tests {
         let auth: Value = serde_json::from_str(&std::fs::read_to_string(paths.auth_file()).unwrap()).unwrap();
         assert_eq!(auth["anthropic"], refreshed, "the rotated token is not put back to the old one");
         assert_eq!(auth["weird"], json!({"type": "api", "key": "weird-key-0123456789"}));
+    }
+
+    /// Issue #1374: Disconnect decided the key was there from an earlier read; if
+    /// OpenCode drops it, or the whole file, before the key file is read again,
+    /// nothing is written and the file stays as OpenCode left it.
+    #[test]
+    fn disconnect_writes_nothing_when_the_key_went_meanwhile() {
+        for gone_file in [false, true] {
+            let (_dir, paths) = paths();
+            std::fs::create_dir_all(&paths.data_dir).unwrap();
+            std::fs::write(paths.auth_file(), json!({"weird": {"type": "api", "key": "weird-key-0123456789"}, "anthropic": {"type": "oauth", "refresh": "r1"}}).to_string()).unwrap();
+            // Compact, as TerminalX never writes it: any rewrite would change these bytes.
+            let left = json!({"anthropic": {"type": "oauth", "refresh": "r2"}}).to_string();
+            let (file, during) = (paths.auth_file(), left.clone());
+            let mut once = Some(move || if gone_file { std::fs::remove_file(&file).unwrap() } else { std::fs::write(&file, &during).unwrap() });
+            BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = Some(Box::new(move || if let Some(change) = once.take() { change() })));
+            let disconnected = disconnect_in(&paths, "weird");
+            BEFORE_AUTH_WRITE.with(|hook| *hook.borrow_mut() = None);
+            let overview = disconnected.unwrap();
+            assert!(!overview.connected.iter().any(|provider| provider.id == "weird"));
+            if gone_file {
+                assert!(!paths.auth_file().exists(), "a deleted key file is not made again");
+            } else {
+                assert_eq!(std::fs::read_to_string(paths.auth_file()).unwrap(), left, "the file is left as OpenCode wrote it, other sign-ins and all");
+            }
+        }
     }
 
     #[test]
