@@ -1401,6 +1401,36 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
 
 #[cfg(unix)]
 #[test]
+fn machine_pr_creation_accepts_a_push_alias_that_rewrites_back_to_the_verified_origin() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    let separate = f.remote("push");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let head = request["pushHead"].as_str().unwrap();
+    let origin_url = origin.to_str().unwrap();
+    // The raw push URL differs from the fetch origin; only its rewrite matches.
+    git(&f.root, &["remote", "set-url", "--push", "origin", "alias:widgets"]);
+    git(&f.root, &["config", &format!("url.{origin_url}.insteadOf"), "alias:widgets"]);
+    assert_eq!(git(&f.root, &["config", "--get", "remote.origin.pushurl"]), "alias:widgets");
+    assert_eq!(git(&f.root, &["remote", "get-url", "--push", "--all", "origin"]), origin_url);
+
+    let created = f.call("git.prCreateForSession", request.clone()).expect("the alias resolves to the verified origin");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["pr"]["head"], "feature/pr");
+    assert_eq!(created["pr"]["headSha"], head);
+    assert_eq!(created["sessionAssociated"], true);
+    // The exact confirmed commit reached the origin, and nothing else did.
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+    assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty());
+    let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+    assert!(!object.success(), "the separate remote received the confirmed commit");
+}
+
+#[cfg(unix)]
+#[test]
 fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     for replace_checkout in [false, true] {
         let _home = crate::store::temp_home();
