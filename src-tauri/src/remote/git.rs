@@ -111,22 +111,42 @@ struct Repo {
 /// path in its private configuration; the PR push's private copy has no
 /// work tree.
 ///
-/// Not bound:
+/// The shared helpers in `crate::git` (and `crate::git_media`,
+/// `crate::landed`, `crate::pr_associations`, which run Git through it) are
+/// bound the same way: while the Repo lives, a local Git command they start
+/// on this thread for `repo.dir` starts in the opened directory, and a
+/// hookless one names the Git directory and work tree (`crate::git::bind`).
+/// So `operation_in_progress`, status, working changes, history and the
+/// branch comparison read the checkout the rest of the call works on. `gh`
+/// starts in the opened directory too, so the Git it runs finds that
+/// checkout's remotes. The listing, the per-repository facts before archive
+/// or delete, `pr_reconcile_creation` and a mention lookup in one of the
+/// project's checkouts verify and bind their checkout like any other call.
+///
+/// Not bound, deliberately:
+/// - commands that can run hooks still read a `core.worktree` changed after
+///   verification (see above);
 /// - the `.git` entry inside a main checkout: it is named relative to the
 ///   opened directory, not held open, so replacing it with a link or gitfile
-///   after verification still redirects configuration, refs and objects;
+///   after verification still redirects configuration, refs and objects.
+///   Holding it open would mean naming the Git directory to every command,
+///   which hooks cannot take;
 /// - a Git directory outside the checkout (a linked worktree's admin
-///   directory), which is named by its verified absolute path;
-/// - reads through `crate::git`, `crate::git_media`, `crate::landed`,
-///   `crate::pr_associations` and the branch comparison helpers, which take
-///   `repo.dir` and rediscover the repository, so one call can mix bound
-///   commands with an unbound check such as `operation_in_progress`;
-/// - Repos built without verification: `list`, `repository_facts`,
-///   `pr_reconcile_creation`, `mention_prs` and the PR-context helper; `gh`,
-///   which runs in `repo.dir`; and `add_private_config`, which only writes a
-///   private file;
-/// - everything off Unix, where the checkout is named by path only.
+///   directory), which is named by its verified absolute path, as Git
+///   itself names it in the checkout's `.git` file;
+/// - transfers through `crate::git` (fetch, pull, push, clone, ls-remote),
+///   which keep their own runners and start by path; helper commands started
+///   on another thread, or for any path other than `repo.dir`; and
+///   `add_private_config`, which only writes a private file;
+/// - a mention lookup for a session in a subfolder of its checkout, or in a
+///   workspace runtime, where nothing was verified to bind: `gh` runs there
+///   by path, as before;
+/// - everything off Unix, where there is no directory to start a process in
+///   but its path.
 struct BoundCheckout {
+    /// Binds the shared `crate::git` helpers called with `repo.dir` on this
+    /// thread. Declared first so it is released before `top` closes.
+    _helpers: crate::git::Bound,
     #[cfg(unix)]
     top: std::fs::File,
     #[cfg(not(unix))]
@@ -135,26 +155,14 @@ struct BoundCheckout {
     git_dir: PathBuf,
 }
 
-/// Git subcommands that run no ordinary hooks, so they may name their Git
-/// directory and work tree in the environment (see BoundCheckout). Index
-/// writers among them can still run `post-index-change` and the
-/// `core.fsmonitor` program, which then see those variables too.
-const HOOKLESS: &[&str] = &[
-    "add", "cat-file", "config", "diff", "for-each-ref", "log", "ls-files", "ls-remote", "remote", "restore",
-    "rev-list", "rev-parse", "rm", "show", "status", "symbolic-ref", "update-index",
-];
+use crate::git::HOOKLESS;
 
 /// Start `command` in the opened `directory`, whatever its path names now.
+/// The caller's Repo owns the descriptor for the whole call.
 #[cfg(unix)]
 fn run_in_directory(command: &mut Command, directory: &std::fs::File) {
-    use std::os::unix::{io::AsRawFd, process::CommandExt};
-    let fd = directory.as_raw_fd();
-    // SAFETY: the closure runs in the forked child before exec and only calls
-    // fchdir, which is async-signal-safe. The descriptor outlives the spawn:
-    // the caller's Repo owns it for the whole call.
-    unsafe {
-        command.pre_exec(move || if libc::fchdir(fd) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) });
-    }
+    use std::os::unix::io::AsRawFd;
+    crate::git::start_in(command, directory.as_raw_fd());
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -544,10 +552,10 @@ fn bounded_branch_git(command: Command, args: &[&str], deadline: Instant) -> Res
     Ok(output.stdout)
 }
 
-fn comparison_refs(cwd: &Path, base: &str, deadline: Instant) -> Result<Option<(String, String)>, RpcError> {
+fn comparison_refs(repo: &Repo, base: &str, deadline: Instant) -> Result<Option<(String, String)>, RpcError> {
     let resolve = |reference: &str| {
         let args = ["rev-parse", "--verify", "--quiet", "--end-of-options", reference];
-        let output = bounded_branch_output(git_command(cwd), &args, deadline)?;
+        let output = bounded_branch_output(WorkspaceGit::repo_command(repo, true), &args, deadline)?;
         if output.ok {
             Ok(Some(output.stdout.trim().to_string()))
         } else if output.stderr.is_empty() {
@@ -568,10 +576,12 @@ fn comparison_refs(cwd: &Path, base: &str, deadline: Instant) -> Result<Option<(
 
 /// Compare the worktree to the merge base using an intent-to-add index so
 /// untracked contents are never written as objects.
-fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, RpcError> {
+fn branch_diff_size(repo: &Repo, base: &str, deadline: Instant) -> Result<Value, RpcError> {
     let run = |command, args: &[&str]| bounded_branch_git(command, args, deadline);
-    let read = |args: &[&str]| run(git_command(cwd), args);
-    let (head, base_commit) = match comparison_refs(cwd, base, deadline)? {
+    // Every command here (rev-parse, merge-base, hash-object, config, add
+    // into a private index, diff) runs no ordinary hooks.
+    let read = |args: &[&str]| run(WorkspaceGit::repo_command(repo, true), args);
+    let (head, base_commit) = match comparison_refs(repo, base, deadline)? {
         Some((head, target)) => {
             let merge_base = read(&["merge-base", &head, &target])?;
             (Some(head), merge_base)
@@ -609,7 +619,7 @@ fn branch_diff_size(cwd: &Path, base: &str, deadline: Instant) -> Result<Value, 
         .collect();
     let hooks = format!("core.hooksPath={}", scratch.path().join("hooks").display());
     let command = || {
-        let mut command = git_command(cwd);
+        let mut command = WorkspaceGit::repo_command(repo, true);
         command.env("GIT_INDEX_FILE", &index).env("GIT_OBJECT_DIRECTORY", &objects)
             .args(["-c", &hooks, "-c", "core.splitIndex=false", "-c", "core.fsmonitor=false"]);
         for filter in &filters {
@@ -939,11 +949,6 @@ impl WorkspaceGit {
         (found, truncated)
     }
 
-    /// Git configuration can redirect a registered worktree's working
-    /// directory. Verify the effective checkout before using it for Git.
-    fn verified_machine_repo(&self, name: &str) -> bool {
-        !self.project || crate::git::is_own_worktree(&self.dir(name))
-    }
 
     /// `name` as a Repo. A machine checkout must be its own top level, and is
     /// bound to what was verified (see BoundCheckout).
@@ -978,7 +983,12 @@ impl WorkspaceGit {
         let git_dir = Path::new(git_dir).canonical().ok()?;
         #[cfg(unix)]
         let git_dir = git_dir.strip_prefix(&path).map(Path::to_path_buf).unwrap_or(git_dir);
-        Some(Repo { name: name.to_owned(), dir, bound: Some(BoundCheckout { top, git_dir }) })
+        self.barrier("verified");
+        #[cfg(unix)]
+        let helpers = crate::git::bind(&dir, &top, &git_dir);
+        #[cfg(not(unix))]
+        let helpers = crate::git::bind(&dir);
+        Some(Repo { name: name.to_owned(), dir, bound: Some(BoundCheckout { _helpers: helpers, top, git_dir }) })
     }
 
     /// A Git command for `repo`, bound to its verified checkout if it has one
@@ -1019,7 +1029,9 @@ impl WorkspaceGit {
 
     fn listed_project_repositories(&self, preferred: Option<&str>) -> (Vec<String>, bool) {
         let (mut names, truncated) = Self::limit_project_repositories(self.project_repositories(), preferred);
-        names.retain(|name| self.verified_machine_repo(name));
+        // Git configuration can redirect a registered worktree's working
+        // directory: only a checkout that verifies as its own top level is listed.
+        names.retain(|name| self.machine_repo(name).is_some());
         (names, truncated)
     }
 
@@ -1031,15 +1043,17 @@ impl WorkspaceGit {
         };
         let repositories: Vec<Value> = names
             .iter()
-            .map(|name| {
-                let dir = self.dir(name);
-                json!({
+            .filter_map(|name| {
+                // Bound while its facts are read (see BoundCheckout).
+                let repo = self.machine_repo(name)?;
+                let dir = &repo.dir;
+                Some(json!({
                     "repo": name,
-                    "branch": crate::git::current_branch(&dir),
-                    "head": crate::git::head_commit(&dir),
-                    "remote": crate::git::remote_url(&dir).map(|url| display_remote(&url)),
-                    "defaultBranch": crate::git::default_branch(&dir),
-                })
+                    "branch": crate::git::current_branch(dir),
+                    "head": crate::git::head_commit(dir),
+                    "remote": crate::git::remote_url(dir).map(|url| display_remote(&url)),
+                    "defaultBranch": crate::git::default_branch(dir),
+                }))
             })
             .collect();
         json!({ "repositories": repositories, "truncated": truncated })
@@ -1236,7 +1250,7 @@ impl WorkspaceGit {
         let repo = self.repo(params)?;
         let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
         let deadline = Instant::now() + HEADER_DIFF_TIMEOUT;
-        let Some((head, target)) = comparison_refs(&repo.dir, base, deadline)? else {
+        let Some((head, target)) = comparison_refs(&repo, base, deadline)? else {
             return Ok(json!({ "head": null, "aheadOfBase": 0 }));
         };
         let range = format!("{target}..{head}");
@@ -1248,7 +1262,7 @@ impl WorkspaceGit {
     fn branch_diff_size(&self, params: &Value) -> Result<Value, RpcError> {
         let repo = self.repo(params)?;
         let base = optional_ref(params, "base")?.ok_or_else(|| RpcError::invalid("base is required"))?;
-        branch_diff_size(&repo.dir, base, Instant::now() + HEADER_DIFF_TIMEOUT)
+        branch_diff_size(&repo, base, Instant::now() + HEADER_DIFF_TIMEOUT)
     }
 
     fn review_range(&self, params: &Value) -> Result<Value, RpcError> {
@@ -1725,8 +1739,14 @@ impl WorkspaceGit {
             .or_else(|| crate::binpath::resolve("gh"))
             .ok_or_else(|| RpcError::new("unavailable", "the GitHub CLI is not installed in this workspace"))?;
         let mut command = Command::new(bin);
+        // In the verified checkout, so the Git that gh runs finds that
+        // checkout's remotes (see BoundCheckout).
+        match &repo.bound {
+            #[cfg(unix)]
+            Some(bound) => run_in_directory(&mut command, &bound.top),
+            _ => { command.current_dir(&repo.dir); }
+        }
         command
-            .current_dir(&repo.dir)
             .args(args)
             .env("PATH", crate::binpath::login_path())
             .env("GH_PROMPT_DISABLED", "1")
@@ -2020,7 +2040,7 @@ impl WorkspaceGit {
     /// match, read with this workspace's `gh`, as a local tab's list is read
     /// with this computer's (`github::search_prs`).
     pub(super) fn mention_prs(&self, dir: &Path, query: &str) -> Result<Vec<crate::github::PullRequest>, RpcError> {
-        let repo = Repo { name: ".".into(), dir: dir.to_path_buf(), bound: None };
+        let repo = self.mention_repo(dir);
         let refused = std::cell::RefCell::new(None);
         let found = crate::github::search_prs_with(dir, query, |_, args| self.gh_for_mention(&repo, args, &refused));
         found.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
@@ -2032,10 +2052,23 @@ impl WorkspaceGit {
         if number == 0 {
             return Err(RpcError::invalid("number is a pull request number"));
         }
-        let repo = Repo { name: ".".into(), dir: dir.to_path_buf(), bound: None };
+        let repo = self.mention_repo(dir);
         let refused = std::cell::RefCell::new(None);
         let text = crate::github::pr_context_with(dir, number, |_, args| self.gh_for_mention(&repo, args, &refused));
         text.map_err(|error| refused.take().unwrap_or_else(|| RpcError::new("git_failed", format!("{error:#}"))))
+    }
+
+    /// The session checkout a mention lookup's `gh` runs in: bound when it is
+    /// one of this machine project's checkouts (see BoundCheckout), by path
+    /// otherwise (a workspace runtime, or a session in a subfolder).
+    fn mention_repo(&self, dir: &Path) -> Repo {
+        let unbound = || Repo { name: ".".into(), dir: dir.to_path_buf(), bound: None };
+        if !self.project {
+            return unbound();
+        }
+        self.project_repositories().into_iter().find(|name| self.dir(name).canonical().ok().as_deref() == Some(dir))
+            .and_then(|name| self.machine_repo(&name))
+            .unwrap_or_else(unbound)
     }
 
     /// One `gh` call of a mention lookup, as the shared `github` code runs
@@ -2499,7 +2532,7 @@ impl WorkspaceGit {
         }
         let url = crate::pr_associations::identity(required_str(params, "url")?)
             .map_err(|_| RpcError::invalid("Give the pull request's URL."))?;
-        let repo = Repo { name: ".".into(), dir: self.root.clone(), bound: None };
+        let repo = self.machine_repo(".").ok_or_else(|| RpcError::not_found("this project's checkout is not a Git repository of its own"))?;
         let common = self.git(&repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let common = Path::new(crate::git::path_line(&common)).canonical().map_err(RpcError::internal)?;
         let owned = |entry: &PendingPrCreation| entry.url == url && entry.checkout.git_dir.starts_with(&common);
@@ -2782,7 +2815,8 @@ impl WorkspaceGit {
     }
 
     fn repository_facts(&self, name: &str) -> Value {
-        let repo = Repo { name: name.to_string(), dir: self.dir(name), bound: None };
+        // Verified and bound on this thread (see BoundCheckout).
+        let Some(repo) = self.machine_repo(name) else { return json!({ "path": name }) };
         let deadline = Instant::now() + FACTS_TIMEOUT;
         let left = || deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
         let git = |args: &[&str]| self.run_git(&repo, args, left(), &[]).ok().filter(|ran| ran.ok).map(|ran| ran.stdout);

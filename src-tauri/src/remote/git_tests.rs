@@ -189,7 +189,8 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
 
 #[test]
 fn branch_diff_size_refuses_to_start_after_its_deadline() {
-    assert_eq!(branch_diff_size(Path::new("."), "main", Instant::now()).unwrap_err().code, "timeout");
+    let repo = Repo { name: ".".into(), dir: PathBuf::from("."), bound: None };
+    assert_eq!(branch_diff_size(&repo, "main", Instant::now()).unwrap_err().code, "timeout");
 }
 
 #[test]
@@ -2500,6 +2501,79 @@ fn a_verified_pr_push_never_pushes_submodules_through_their_own_config() {
             assert!(refused.message.contains("submodule"), "{}", refused.message);
             assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
             assert!(!f.gh_calls().contains("\"create\""));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_git_helpers_read_the_checkout_that_was_verified() {
+    // Right after verification, another clone (with a merge left in
+    // progress) replaces the checkout at its path, or core.worktree is
+    // pointed at another folder. The reads through `crate::git` that follow
+    // must still answer for the verified checkout.
+    for (change, method) in [("replace", "git.workingChanges"), ("replace", "git.status"), ("replace", "git.commitForPush"), ("redirect", "git.workingChanges")] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside-only.txt"), "outside\n").unwrap();
+        if change == "replace" {
+            std::fs::write(outside.join(".git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+        } else {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+        let moved = f.base.join("topic-original");
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "verified" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            if change == "replace" {
+                std::fs::rename(&target, &away).unwrap();
+                std::fs::rename(&other, &target).unwrap();
+            } else {
+                git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]);
+            }
+        }));
+        let params = match method {
+            "git.commitForPush" => json!({
+                "repo": checkout.to_str().unwrap(), "message": "work", "author": me(),
+                "expectedBranch": "feature/topic", "expectedHead": head,
+            }),
+            _ => json!({ "repo": checkout.to_str().unwrap() }),
+        };
+        let result = f.call(method, params);
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change} {method}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if change == "replace" { &moved } else { &checkout };
+        if change == "redirect" {
+            git(verified, &["config", "--worktree", "--unset", "core.worktree"]);
+        }
+        let result = result.unwrap_or_else(|error| panic!("{change} {method}: {} {}", error.code, error.message));
+        match method {
+            "git.workingChanges" => {
+                let files: Vec<_> = result["files"].as_array().unwrap().iter().map(|file| file["path"].as_str().unwrap().to_owned()).collect();
+                assert!(files.iter().any(|file| file == "note.txt"), "{change}: {files:?}");
+                assert!(!files.iter().any(|file| file == "outside-only.txt"), "{change}: {files:?}");
+            }
+            "git.status" => {
+                assert_eq!(result["branch"], "feature/topic", "{change}");
+                assert_eq!(result["head"], head.as_str(), "{change}");
+                assert_eq!(result["operation"], Value::Null, "{change}");
+            }
+            _ => {
+                assert_eq!(git(verified, &["rev-parse", "HEAD^"]), head, "{change}");
+                assert_eq!(git(verified, &["show", "HEAD:note.txt"]), "verified");
+                assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+            }
         }
     }
 }
