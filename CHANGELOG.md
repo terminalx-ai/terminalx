@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.38
+
 - Bots (experimental): a chat-app link code is shown only to the window that
   made it: an agent tab's read of the bot's channels says only that a code
   waits. Unlinking a chat now asks for you, as linking does. Wrong codes are
@@ -381,6 +383,85 @@
   their email) are accepted; anyone else's mention, and a bot's own post,
   starts nothing. What people write there is a request, never an approval.
   The bot's settings list what reached it and what it posted (PRO-480).
+- Stats & usage is a Settings page (Personal, after Machines), with Refresh
+  at the top right. The status bar menu, a session's cost link, the Stats
+  shortcut and ⌘K open it there. The main window's Stats view and General's
+  Usage row are gone, and a window that last showed Stats reopens on Home
+  (PRO-463, #1417).
+- Settings menu: Projects and Organizations are one closed row each, with a
+  count, under "Projects & organizations". An organization opens to its own
+  pages, filtered by your role, with breadcrumbs; links, search and messages
+  open the right group (PRO-464, #1418).
+- Automations: a First check script runs through `/bin/sh` before any session
+  is made. No output gives a "Nothing new" run with no session, output is
+  added to the prompt, and a failure or timeout fails the run. The editor has
+  a First check section with Try it, and the runs list shows nothing-new runs
+  in a neutral colour (PRO-484, #1425).
+- Automations wake on new Linear issues and on GitHub pull request events:
+  opened, new commits pushed, review requested from me, a check failed. Each
+  source keeps its own record of what it has seen, starts from now, backs off
+  on errors and says when it can't be read. The editor has both triggers,
+  with a live preview of what matches (PRO-485, #1426).
+- Codex: a resumed session no longer stops at "Working directory · resume".
+  Codex is resumed in the current directory, so the message that resumed it
+  goes straight in. If Codex does draw a list of choices, the held message
+  says the agent is asking a question in its terminal, and is sent once it is
+  answered (PRO-462, #1414).
+- Terminal prompt cards: the card for a CLI's own in-terminal question is
+  taken down when its CLI stops, exits or leaves the terminal, also after a
+  restart. It shows while the pane keeps redrawing instead of waiting for
+  quiet, and an answer is refused while a hook's request is open (PRO-460,
+  #1422).
+- Pairing: "window consent key is missing from Keychain" after the app adopts
+  an older runtime no longer stops Create pairing code. The app relaunches
+  that runtime with its own key when nothing would be cut short; when work is
+  running it names the work and offers Restart runtime. The offer reaches the
+  window when an account grant makes it, and what would stop is read again
+  before the restart (PRO-486, #1428, #1431).
+- Headless runtime: a setting for where it listens. Relay only is the
+  default, callers from the public internet are refused unless allowed, and
+  an existing install is asked once. Pairing by code goes through the relay,
+  and the runtime shows when it runs as root or with sudo (PRO-487, #1434).
+- Runtime releases carry the version their binary reports, so the install
+  one-liner and `terminalx-serve update` accept the download and offer newer
+  releases (#1424).
+- Machines: the session header's Create PR on a branch the machine never
+  pushed uses the verified push, as the PR panel does, so no commit reaches a
+  `pushurl` or `pushInsteadOf` destination before it is checked (#1421).
+- Mobile: the Sessions header's machine name opens a Switch machine list:
+  paired machines with their state, a check on the one in use, offline ones
+  dimmed, and Add a machine. Machine actions moved to a "…" button, also
+  opened by a long press on the name, and gained Disconnect (PRO-465, #1416).
+  The mobile app is 0.1.2, build 3 (#1420).
+- Composer: in a narrow chat the toolbar wraps instead of running Attach,
+  Dictate and Send off its edge. The footer and the microphone alert stay
+  inside the chat, and a bot's run plan card leaves room for the chat at
+  760×520 (#1473).
+- Bots (experimental): window consent hardening. An unproven window gives way
+  to the proven one and serves nothing while Bots is on, and serves again
+  once Bots is off. Stale recognitions are cleared, a replaced Keychain key
+  offers Restart runtime, a proven registration that timed out is retried,
+  and the errors say more (PRO-507, #1468, #1471).
+- Bots (experimental): hand-offs. Work the owner stopped cannot be handed
+  again as a new hand-off for 24 hours, and the refusal says so; after that,
+  recurring work such as a daily duty's hand-off goes on. A title with no
+  letters or digits is never matched, and a question no longer drops out
+  while its tab is held (PRO-498, PRO-493, #1453, #1456).
+- Bots (experimental): Role and memory fixes left from review, among them
+  the app's own archive move, undoing it, the retry after a runtime restart,
+  line numbers in a memory over the read limit, and topic files with spaces
+  or non-ASCII names (PRO-491, #1474).
+- Bots (experimental): calendar fixes. A run that began and was stopped reads
+  "Stopped before it finished". A block is as tall as its run went on, cut at
+  midnight. The week label says its year outside this year. The timers stop
+  while the window is hidden. "History not kept" covers a day only when it is
+  true of every duty drawn. A block dragged away and brought back opens
+  nothing. An older runtime is offered Restart runtime (PRO-497, #1442).
+- For contributors: `docs/BOTS.md` maps the Bots work and its rules (PRO-459,
+  #1433). The calendar's WebKit check clicks the hour cell and confirms all
+  168 hours take a click (PRO-511, #1475), the machines break check applies
+  again (PRO-504, #1452), and Linux CI is on GitHub's runners after a trial
+  on Instabox (#1448, #1460).
 
 ## 0.2.37
 
