@@ -251,11 +251,13 @@ export class HostApi {
    * it was not asked or did not start. `open` names the conversations on
    * screen, which read for themselves, to a Mac that names `prefetchOpen`
    * (#1337): it sends none of them, so no page is sent only to be dropped.
+   * It is named even when empty: the Mac then takes it as the whole list,
+   * not a guess from what was read a moment ago (#1381).
    */
   async prefetch(enabled: boolean, known: { sessionId: string; tabId: string; cursor: SyncCursor }[] = [], open: { sessionId: string; tabId: string }[] = []): Promise<boolean> {
     const features = await this.features();
     if (features.prefetch !== 1) return false;
-    const named = enabled ? { known, ...(features.prefetchOpen === 1 && open.length > 0 ? { open } : {}) } : {};
+    const named = enabled ? { known, ...(features.prefetchOpen === 1 ? { open } : {}) } : {};
     const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...named });
     return result.ok && result.value?.enabled === true;
   }

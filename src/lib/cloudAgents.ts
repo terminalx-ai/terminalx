@@ -921,62 +921,57 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     scheduleSave(s, tabId);
   };
   let stop: (() => void) | null = null;
-  const subscribe = (sinceCursor: string | undefined) =>
-    client.subscribeSession(sessionId, tabId, onEvent, {
+  // Each subscription is one attempt; a reset retires the current one
+  // (#1326, #1398), and what a retired attempt still delivers is ignored.
+  let attempt = 0;
+  const subscribe = (sinceCursor: string | undefined) => {
+    const mine = attempt;
+    const current = () => mine === attempt && stores.get(cloudAgentsKey(scope)) === s;
+    return client.subscribeSession(sessionId, tabId, (raw) => { if (current()) onEvent(raw); }, {
       sinceCursor,
       onCursor: (cursor) => {
-        if (stores.get(cloudAgentsKey(scope)) !== s) return;
-        const current = s.tabs.get(tabId);
-        if (current) current.cursor = cursor ?? null;
+        if (!current()) return;
+        const tab = s.tabs.get(tabId);
+        if (tab) tab.cursor = cursor ?? null;
       },
       onStatus: (change) => {
-        if (stores.get(cloudAgentsKey(scope)) !== s) return;
-        const current = s.tabs.get(tabId);
-        if (!current) return;
-        const status = settledStatus(current.info, change.status);
-        noteStatus(current, status);
-        if (status === "completed" && isViewed(scope, tabId)) current.unread = false;
+        if (!current()) return;
+        const tab = s.tabs.get(tabId);
+        if (!tab) return;
+        const status = settledStatus(tab.info, change.status);
+        noteStatus(tab, status);
+        if (status === "completed" && isViewed(scope, tabId)) tab.unread = false;
         // The runtime reports the process in `session.tabs`, not with a status.
-        current.info = { ...current.info, status, process: change.process ?? current.info.process };
+        tab.info = { ...tab.info, status, process: change.process ?? tab.info.process };
         publish(s);
         scheduleSave(s, tabId);
       },
-      onReplayed: () => { if (stores.get(cloudAgentsKey(scope)) === s) caught(client.connection.state === "connected"); },
+      onReplayed: () => { if (current()) caught(client.connection.state === "connected"); },
     });
-  try {
-    stop = await subscribe(tab.cursor ?? undefined);
-  } catch (error) {
-    end();
-    const current = s.tabs.get(tabId);
-    if (current) current.live = false;
-    publish(s);
-    throw error;
-  }
-  if (stores.get(cloudAgentsKey(scope)) !== s) { stop?.(); end(); return () => {}; }
+  };
   // The replay has been merged: the conversation is what is shown now.
-  const replayed = s.tabs.get(tabId);
-  if (replayed && !replayed.historyRead) {
-    replayed.historyRead = true;
-    publish(s);
-  }
+  const replayed = () => {
+    const tab = s.tabs.get(tabId);
+    if (tab && !tab.historyRead) {
+      tab.historyRead = true;
+      publish(s);
+    }
+  };
   // A reset rewrote the history (#1326): the feed of the old one ends, and
-  // the new one is replayed from its first event into the emptied log.
-  let restarting = 0;
+  // the new one is replayed from its first event into the emptied log. It
+  // can come while the first subscription is still being answered (#1398):
+  // that one is retired too, and stopped once it is.
   const restart = () => {
     const previous = stop;
     stop = null;
     previous?.();
     caught(false);
-    const attempt = ++restarting;
+    const mine = ++attempt;
     void subscribe(undefined).then(
       (next) => {
-        if (ended || attempt !== restarting || stores.get(cloudAgentsKey(scope)) !== s) return next();
+        if (ended || mine !== attempt || stores.get(cloudAgentsKey(scope)) !== s) return next();
         stop = next;
-        const current = s.tabs.get(tabId);
-        if (current && !current.historyRead) {
-          current.historyRead = true;
-          publish(s);
-        }
+        replayed();
       },
       // The connection went meanwhile: the next attach replays from the emptied cursor.
       () => undefined,
@@ -985,9 +980,29 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   const feeds = restarts.get(feedKey(s, tabId)) ?? new Set<() => void>();
   feeds.add(restart);
   restarts.set(feedKey(s, tabId), feeds);
-  return () => {
+  const unregister = () => {
     feeds.delete(restart);
     if (!feeds.size && restarts.get(feedKey(s, tabId)) === feeds) restarts.delete(feedKey(s, tabId));
+  };
+  try {
+    const first = await subscribe(tab.cursor ?? undefined);
+    if (attempt === 0) stop = first;
+    else first();
+  } catch (error) {
+    // A reset meanwhile started a feed of its own, which this failure does not end.
+    if (attempt === 0) {
+      unregister();
+      end();
+      const current = s.tabs.get(tabId);
+      if (current) current.live = false;
+      publish(s);
+      throw error;
+    }
+  }
+  if (stores.get(cloudAgentsKey(scope)) !== s) { unregister(); stop?.(); end(); return () => {}; }
+  if (attempt === 0) replayed();
+  return () => {
+    unregister();
     stop?.();
     end();
     const current = s.tabs.get(tabId);
