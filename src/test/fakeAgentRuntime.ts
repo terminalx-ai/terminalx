@@ -87,6 +87,23 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   /** How `session.toTerminal` (#644) is refused, in the runtime's own words; null moves the tab. */
   toTerminalRefusal: { code: string; message: string } | null = null;
 
+  /**
+   * Methods whose requests are left unanswered, alone, while the rest are
+   * answered as usual, until `answerWithheld()`: what is answered then is
+   * read from the runtime at that moment.
+   */
+  withheld: string[] = [];
+  private withheldFrames: RpcWireRequest[] = [];
+  answerWithheld() {
+    const frames = this.withheldFrames;
+    this.withheldFrames = [];
+    this.withheld = [];
+    for (const frame of frames) {
+      const answer = this.answer(frame);
+      for (const listener of this.messages) listener(answer);
+    }
+  }
+
   /** The slow answer is ready: it and everything that waited behind it arrive, in order. */
   release() {
     const held = this.held ?? [];
@@ -118,6 +135,10 @@ export class FakeAgentRuntime implements WorkspaceTransport {
   send(frame: RpcWireRequest): boolean {
     if (!this.up) return false;
     this.sent.push(frame);
+    if (this.withheld.includes(frame.method)) {
+      this.withheldFrames.push(frame);
+      return true;
+    }
     const answer = this.answer(frame);
     if (this.held) {
       this.held.push(answer);

@@ -70,6 +70,12 @@ export interface CloudAgentsSnapshot {
   tabs: CloudAgentTab[];
   outbox: OutboxEntry[];
   loaded: boolean;
+  /**
+   * The runtime's own tab list has come over the connection that is up
+   * (#1379): `loaded` is also true from the cache alone, even an empty or
+   * failed one, which says nothing of which tabs the runtime still has.
+   */
+  liveListed: boolean;
   /** What the last interactive command did to the workspace's compute. */
   wake: WakeResult | null;
   error: string | null;
@@ -83,6 +89,7 @@ interface Store {
   tabs: Map<string, CloudAgentTab>;
   outbox: OutboxEntry[];
   loaded: boolean;
+  liveListed: boolean;
   loading: Promise<void> | null;
   wake: WakeResult | null;
   error: string | null;
@@ -160,7 +167,7 @@ export function cloudAgentsKey(scope: CloudAgentScope): string {
   return `${scope.organizationId}:${scope.workspaceId}`;
 }
 
-const EMPTY: CloudAgentsSnapshot = { tabs: [], outbox: [], loaded: false, wake: null, error: null, version: 0 };
+const EMPTY: CloudAgentsSnapshot = { tabs: [], outbox: [], loaded: false, liveListed: false, wake: null, error: null, version: 0 };
 
 function store(scope: CloudAgentScope): Store {
   const k = cloudAgentsKey(scope);
@@ -172,6 +179,7 @@ function store(scope: CloudAgentScope): Store {
       tabs: new Map(),
       outbox: [],
       loaded: false,
+      liveListed: false,
       loading: null,
       wake: null,
       error: null,
@@ -199,7 +207,7 @@ function publish(s: Store) {
     if (cloudActivityRead(s.scope.organizationId, s.scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt)) tab.unread = false;
   }
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
-  s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
+  s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, liveListed: s.liveListed, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
   for (const listener of [...anyListeners]) listener();
 }
@@ -773,6 +781,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
     forgetTab(s, tab);
   }
   s.loaded = true;
+  s.liveListed = true;
   publish(s);
 }
 
@@ -826,6 +835,11 @@ export function markCloudAgentsOffline(scope: CloudAgentScope) {
   const s = stores.get(cloudAgentsKey(scope));
   if (!s) return;
   for (const tab of s.tabs.values()) if (tab.source === "live") tab.source = "cache";
+  // The next connection's list is not known until it comes.
+  if (s.liveListed) {
+    s.liveListed = false;
+    publish(s);
+  }
 }
 
 /** Follow `session.tabs` broadcasts from the runtime. */
