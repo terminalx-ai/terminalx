@@ -213,6 +213,8 @@ describe("connect attempt clocks", () => {
   githubConnectClockScenarios({
     api,
     connected: installation({ id: "ghinst_2", accountLogin: "globex" }),
+    summaryWith: (added) => summary({ installations: [installation(), added] }),
+    shown: (accountLogin) => screen.queryByRole("button", { name: `Choose repositories for ${accountLogin}` }),
     begin: async () => {
       await renderPanel();
       fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));

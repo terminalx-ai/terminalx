@@ -89,6 +89,15 @@ it("shows Connection canceled. after the desktop's own cancel", async () => {
 });
 
 describe("connect attempt clocks", () => {
+  const globex = {
+    id: "ghinst_2",
+    installationId: 43,
+    accountLogin: "globex",
+    accountType: "Organization",
+    repositorySelection: "selected",
+    state: "connected",
+    permissions: { contents: "write", metadata: "read" },
+  };
   githubConnectClockScenarios({
     api,
     connected: {
@@ -100,7 +109,12 @@ describe("connect attempt clocks", () => {
       state: "connected",
       permissions: { contents: "write", metadata: "read" },
     },
+    summaryWith: (added) => ({ ...summary(), installations: [added] }),
+    // Named by the login, then its repository count.
+    shown: (accountLogin) => screen.queryByRole("radio", { name: (name) => name.startsWith(accountLogin) }),
     begin: async () => {
+      // The step lists the repositories of the installation it selects once one is connected.
+      api.repositories.mockResolvedValue({ installation: globex, repositories: [], truncated: false, missing: [] });
       fireEvent.click(await renderStep());
     },
   });

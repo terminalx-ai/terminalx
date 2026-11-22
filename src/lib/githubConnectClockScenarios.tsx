@@ -10,16 +10,22 @@ import { CONNECT_POLL_BUDGET_MS } from "@/lib/useGithubConnectAttempt";
  * monotonic clock (`performance.now`) is advanced separately. Only the server
  * may end an attempt as expired, and only the monotonic clock may bound it.
  */
-export function githubConnectClockScenarios({
+export function githubConnectClockScenarios<Installation extends { id: string; accountLogin: string }>({
   api,
   begin,
   connected,
+  summaryWith,
+  shown,
 }: {
   api: { connect: Mock; attempt: Mock; summary: Mock };
   /** Renders the consumer and starts a connect attempt. */
   begin: () => Promise<void>;
   /** An installation the poll reports once the attempt connects. */
-  connected: { id: string; accountLogin: string } & Record<string, unknown>;
+  connected: Installation;
+  /** The consumer's summary once `installation` has connected on the server. */
+  summaryWith: (installation: Installation) => unknown;
+  /** The consumer's control for choosing `accountLogin`'s installation, or null when it is not shown. */
+  shown: (accountLogin: string) => HTMLElement | null;
 }) {
   const realMonotonic = performance.now.bind(performance);
   const realWall = Date.now.bind(Date);
@@ -114,12 +120,16 @@ export function githubConnectClockScenarios({
     await begin();
     await pollsAtLeast(2);
     noExpiry();
+    expect(shown(connected.accountLogin)).toBeNull();
+    // The installation connects on the server; only a summary read after the cutoff can return it (#1371).
     const loads = api.summary.mock.calls.length;
+    api.summary.mockResolvedValue(summaryWith(connected));
     clocks.monotonic = CONNECT_POLL_BUDGET_MS + 1;
     await screen.findByText(/stopped waiting for the account service to confirm the connection/);
     noExpiry();
-    // Reconciles: an installation that connected on the server shows up.
+    // Reconciles: the summary is read again and the installation that connected on the server shows up.
     await waitFor(() => expect(api.summary.mock.calls.length).toBeGreaterThan(loads));
+    await waitFor(() => expect(shown(connected.accountLogin)).not.toBeNull());
     const polls = api.attempt.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(api.attempt.mock.calls.length).toBe(polls);
