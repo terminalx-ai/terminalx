@@ -1134,10 +1134,19 @@ impl ControlService {
             "bots.delete" => {
                 caller.person_only("delete bots")?;
                 let bot = named()?;
+                let was_a_bot = bots::enforce::is_a_bot(&bot.id);
                 bots::enforce::before_delete(&self.manager, &bot.id);
-                bots::delete(sink, &bot.id).map_err(failed)?;
-                bots::enforce::after_delete(sink, &bot.id);
-                bots::handoffs::deliver_waiting_all(&self.manager);
+                let deleted = bots::delete(sink, &bot.id);
+                // A bot whose record is gone is cleaned up after even when moving its home or history failed, so
+                // that failure is not also its chats left open and its work left running.
+                if bots::enforce::removed(was_a_bot, deleted.is_ok(), &bot.id) {
+                    bots::enforce::after_delete(sink, &bot.id);
+                    bots::handoffs::deliver_waiting_all(&self.manager);
+                    if deleted.is_err() {
+                        bots::enforce::reconcile(&self.manager, Some(&bot.id));
+                    }
+                }
+                deleted.map_err(failed)?;
                 json!({"deleted": bot.id, "name": bot.name})
             }
             "bots.pauseAll" => bots::enforce::pause(&self.manager, None, &by, bots::pause::FROM_CLI).map_err(failed)?,
@@ -4883,6 +4892,88 @@ mod tests {
         assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice"})).unwrap_err().code, "invalid_arguments");
         assert_eq!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 0})).unwrap_err().code, "invalid_arguments");
         assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": 2})).is_ok());
+
+        // PRO-491: past the read limit the list starts from the file's end, and `--line N` counts as the list does.
+        let mut long: Vec<String> = (0..3000).map(|n| format!("- 2026-11-01 Note number {n:04}, written long enough to pass the read limit")).collect();
+        long.insert(2991, "- 2026-11-02 Twice".into());
+        long.push("- 2026-11-02 Twice".into());
+        std::fs::write(&home, format!("{}\n", long.join("\n"))).unwrap();
+        let listed = ask("bots.memory.list", json!({"bot": "iris"})).unwrap();
+        let lines: Vec<&str> = listed["lines"].as_array().unwrap().iter().map(|line| line.as_str().unwrap()).collect();
+        assert!(lines.len() < 3000 && lines[0].contains("Note number"), "read from the end");
+        let number = lines.iter().position(|line| *line == "- 2026-11-02 Twice").unwrap() + 1;
+        assert!(ask("bots.memory.forget", json!({"bot": "iris", "line": "Twice", "number": number})).is_ok());
+        let left = std::fs::read_to_string(&home).unwrap();
+        assert!(left.contains("Note number 2990, written long enough to pass the read limit\n- 2026-11-01 Note number 2991"), "the one the list numbered is the one forgotten");
+        assert!(left.ends_with("- 2026-11-02 Twice\n"));
+    }
+
+    /// PRO-491: a delete whose history cannot be moved to the trash still
+    /// cleans up after the bot, whose record is gone: its chats go to the
+    /// archive, and the failure is said.
+    #[test]
+    fn a_delete_whose_history_cannot_move_still_cleans_up_after_the_bot() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chats = || index::load().unwrap().into_iter().filter(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).collect::<Vec<_>>();
+        assert!(!chats().is_empty() && chats().iter().all(|entry| !entry.archived));
+        assert!(crate::store::root().unwrap().join("bot-changes").join(&id).is_dir());
+        // Where its history would go is taken.
+        let taken = crate::store::root().unwrap().join("trash").join("bots").join(format!("{id}.changes"));
+        std::fs::create_dir_all(taken.join("kept")).unwrap();
+        let error = ask("bots.delete", json!({"bot": "atlas"})).unwrap_err();
+        assert!(error.message.contains("history could not be moved"), "{}", error.message);
+        assert!(crate::bots::get(&id).is_err(), "its record is gone");
+        assert!(chats().iter().all(|entry| entry.archived), "its chats went to the archive all the same");
+    }
+
+    /// PRO-491 review: the clean-up after a delete runs only for a bot that
+    /// call removed: never for an id that was never a bot or was deleted
+    /// before, and never with Bots off.
+    #[test]
+    fn the_delete_clean_up_runs_only_for_a_bot_the_delete_removed() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let (service, _sink) = headless_service();
+        let ask = |command: &str, params: Value| service.execute(command, params, "r");
+        let id = ask("bots.create", json!({"role": "cto", "name": "Atlas"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+        let chat = index::load().unwrap().into_iter().find(|entry| crate::bots::chat::session_bot(entry).is_some_and(|bot| bot.id == id)).unwrap();
+        // A session that says it is the chat of a bot that never was.
+        let mut ghost = chat.clone();
+        ghost.id = "ghost-chat".into();
+        ghost.unknown.insert(crate::bots::chat::SESSION_KEY.into(), json!({"id": "ghost"}));
+        index::update(|entries| { entries.push(ghost.clone()); Ok(()) }).unwrap();
+        let archived = |session: &str| index::get(session).unwrap().archived;
+        let runtime_delete = |id: &str| crate::bots::enforce::call(&service.manager, "delete", &json!({"id": id}));
+
+        assert_eq!(ask("bots.delete", json!({"bot": "ghost"})).unwrap_err().code, "not_found");
+        assert!(runtime_delete("ghost").is_err());
+        assert!(!archived("ghost-chat"), "no clean-up for an id that was never a bot");
+
+        // With Bots off, nothing is cleaned up after, even for a bot there is.
+        settings.experimental.bots = false;
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(ask("bots.delete", json!({"bot": "atlas"})).unwrap_err().code, "bots_off");
+        assert!(runtime_delete(&id).is_err());
+        assert!(!archived(&chat.id) && crate::store::bots::get(&id).unwrap().is_some());
+
+        // On, the delete cleans up after the bot it removed, and a second delete does nothing more.
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        assert!(ask("bots.delete", json!({"bot": "atlas"})).is_ok());
+        assert!(archived(&chat.id));
+        let mut back = index::get(&chat.id).unwrap();
+        back.archived = false;
+        index::update(|entries| { entries.retain(|entry| entry.id != back.id); entries.push(back.clone()); Ok(()) }).unwrap();
+        assert!(runtime_delete(&id).is_err());
+        assert!(!archived(&chat.id), "a second delete cleans up nothing");
     }
 
     /// PRO-470 H1: a process in a bot's pane that names no session (its
@@ -5417,9 +5508,14 @@ mod tests {
 
     /// PRO-507: on a keyed runtime, a window registered without its proof
     /// while Bots was off gives way to the window proving it on a lease of its
-    /// own once Bots is on, instead of "Another desktop currently provides…";
+    /// own, Bots off or on, instead of "Another desktop currently provides…",
+    /// while the unproven one still holds the slot (review of #1468, item 3);
     /// and a registration without the proof unseats a window this runtime
-    /// never saw prove it (one a handover carried over), Bots on or off.
+    /// never saw prove it (one a handover carried over), Bots on or off. A
+    /// registration without the proof never reaches the slot while Bots is on
+    /// (it is refused first), so the other half of giving way, any
+    /// registration while Bots is on, is the registry's test's
+    /// (`window::tests::an_unproven_window_serves_only_with_bots_off_and_gives_way_to_a_proven_one`).
     #[cfg(unix)]
     #[test]
     fn an_unproven_window_gives_way_to_the_proven_one_and_unseats_a_handed_over_one() {
@@ -5430,7 +5526,12 @@ mod tests {
         let service = service.with_local_lifetime(lifetime.clone());
         TEST_WINDOW_KEY.with(|key| key.set(Some([7; 32])));
         let run = service.endpoint.socket.parent().unwrap().to_owned();
-        let endpoint = crate::store::root().unwrap().join("run").join("w.sock");
+        // The window's endpoint lives in this runtime's `run`, named through a
+        // short link in /tmp: under a long TMPDIR its own path would be past
+        // what a Unix socket's may be.
+        let short = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(crate::store::root().unwrap().join("run"), short.path().join("r")).unwrap();
+        let endpoint = short.path().join("r").join("w.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
         std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
         let register = |key: Option<&[u8; 32]>| {
@@ -5440,7 +5541,7 @@ mod tests {
                 params[field] = value;
             }
             crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
-            (pid, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r").unwrap())
+            (pid, attached, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r"))
         };
         let bots = |on: bool| {
             let mut settings = crate::store::settings::load();
@@ -5448,29 +5549,46 @@ mod tests {
             crate::store::settings::save(&settings).unwrap();
         };
 
-        // A handover's window is unseated by a registration that cannot prove it, Bots off.
+        // A handover's window is unseated by a registration that cannot prove
+        // it: Bots on, one refused at once; Bots off, one that is registered.
+        bots(true);
+        lifetime.window.handed_over(Some((1, 1)));
+        let (_, _, refused) = register(None);
+        assert_eq!(refused.unwrap()["registered"], false);
+        assert!(lifetime.window.window_process().is_none(), "Bots on: the handed-over window is no longer taken for it");
         bots(false);
         lifetime.window.handed_over(Some((1, 1)));
-        let (_, unproven) = register(None);
+        let (_, _, unproven) = register(None);
+        let unproven = unproven.unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
         assert!(lifetime.window.window_process().is_none(), "the handed-over window is no longer taken for it");
         assert!(lifetime.window.available(), "Bots off: the unproven window serves");
+        let (_, _, another) = register(None);
+        assert!(another.unwrap_err().message.contains("Another desktop"), "it holds the slot against another unproven one");
+
+        // Bots off: the window, proving it on its own lease, takes the slot from it.
+        let (pid, attached, proven) = register(Some(&[7; 32]));
+        let proven = proven.unwrap();
+        assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
+        assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
+        lifetime.command("runtime.detach", attached).unwrap();
+
+        // Bots on: an unproven window serves nothing but keeps the slot (it
+        // serves again with Bots off); the window proving it takes it.
+        let (_, _, unproven) = register(None);
+        assert_eq!(unproven.unwrap()["registered"], true);
         bots(true);
         assert!(!lifetime.window.available(), "Bots on: it serves no longer");
-        // And Bots on, by one refused at once.
-        lifetime.window.handed_over(Some((1, 1)));
-        let (_, refused) = register(None);
-        assert_eq!(refused["registered"], false, "{refused}");
-        assert!(lifetime.window.window_process().is_none());
-
-        // The window, proving it on its own lease, is registered and recognised.
-        let (pid, proven) = register(Some(&[7; 32]));
-        assert_eq!((proven["registered"].clone(), proven.get("proven")), (json!(true), None), "{proven}");
+        bots(false);
+        assert!(lifetime.window.available(), "still in the slot: Bots off, it serves again");
+        bots(true);
+        let (pid, _, proven) = register(Some(&[7; 32]));
+        assert_eq!(proven.unwrap()["registered"], true, "gives way while Bots is on");
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid));
         assert!(lifetime.window.available());
         // Another process that cannot prove it does not unseat it.
-        let (_, stranger) = register(None);
-        assert_eq!(stranger["registered"], false, "{stranger}");
+        let (_, _, stranger) = register(None);
+        assert_eq!(stranger.unwrap()["registered"], false);
         assert_eq!(lifetime.window.window_process().map(|(window, _)| window), Some(pid), "the proven window stays");
 
         std::fs::write(run.join("done"), b"").unwrap();

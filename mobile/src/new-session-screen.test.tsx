@@ -13,6 +13,10 @@ import { agentDefaults, initialChoices, request, type NewSessionChoices } from "
 // A phone starts sessions and changes this Mac's settings as the desktop does.
 const mocks = vi.hoisted(() => ({ app: {} as any, push: vi.fn(), replace: vi.fn(), navigate: vi.fn(), uuids: 0 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
+// The Sessions screen reads the cloud catalog for pinned cloud projects (#1469);
+// its provider loads native modules. No cloud account here: the screen as it
+// is drawn without the provider.
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false }) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {}, name: "Den", setName: vi.fn() }), THEMES: ["Den"], themePalette: () => ({ page: "#000", accent: "#fff" }) }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { version: "0.1.1", ios: { buildNumber: "2" } } } }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), useRouter: () => ({ push: mocks.push, replace: mocks.replace, navigate: mocks.navigate, dismissTo: vi.fn() }) }));

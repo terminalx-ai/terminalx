@@ -40,7 +40,8 @@ async function placed(page, selector, others) {
     const visible = (s) => find(s).filter((el) => el.getBoundingClientRect().width > 0 && el.checkVisibility({ opacityProperty: true, visibilityProperty: true }));
     const el = visible(selector)[0];
     const r = el.getBoundingClientRect();
-    const points = [0.1, 0.5, 0.9].flatMap((x) => [0.15, 0.5, 0.85].map((y) => [r.left + r.width * x, r.top + r.height * y]));
+    // Its top edge too: a row pushed up under the tab strip used to pass on the points 15% down (#1447).
+    const points = [0.1, 0.5, 0.9].flatMap((x) => [[r.left + r.width * x, r.top + 2], ...[0.15, 0.5, 0.85].map((y) => [r.left + r.width * x, r.top + r.height * y])]);
     const apart = (b) => b.bottom <= r.top + 1 || b.top >= r.bottom - 1 || b.right <= r.left + 1 || b.left >= r.right - 1;
     const overlaps = Object.entries(others).flatMap(([name, s]) => visible(s).filter((other) => other !== el && !el.contains(other) && !other.contains(el) && !apart(other.getBoundingClientRect())).map(() => name));
     const buttons = [...el.querySelectorAll("button")].map((b) => b.getBoundingClientRect());
