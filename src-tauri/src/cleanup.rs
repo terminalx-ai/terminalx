@@ -112,6 +112,13 @@ fn canonical(path: &Path) -> PathBuf {
     crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Why a sessionless worktree stays while a pull request created from it is
+/// unconfirmed (#1382), as bulk cleanup keeps one (#1367). Unknown is never
+/// read as none.
+fn pending_pr_creation(path: &Path) -> Option<String> {
+    crate::worktree_cleanup::pending_pr_creation(&canonical(path))
+}
+
 /// Whether any session runs in `dir` or below it.
 fn used_by_a_session(sessions: &[SessionEntry], dir: &Path) -> bool {
     let dir = canonical(dir);
@@ -153,6 +160,8 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
         let state = landed::check(project_path, &path, if base.fresh { Fetch::JustFetched } else { Fetch::Skip });
         let kept_because = if !state.checked {
             Some("Not a working git checkout of this project, so it cannot be checked for unsaved work. Delete it by hand if it is not needed.".to_string())
+        } else if let Some(why) = pending_pr_creation(&path) {
+            Some(why)
         } else if let Some(reason) = base.not_verified.as_ref().or(state.not_verified.as_ref()) {
             Some(format!("Not verified: {reason}"))
         } else if !state.safe {
@@ -449,10 +458,13 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
                 Ok(())
             };
             unused()?;
+            if let Some(why) = pending_pr_creation(&path) { return Err(why) }
             let before = landed::check(project, &path, Fetch::JustFetched);
             if !before.safe { return Err("It is no longer clean and merged; it was not deleted.".into()) }
             crate::archive_script::before_removal(project, &path, &[], None, None, runner, &|| {}).map_err(|e| e.to_string())?;
             unused()?;
+            // A pull request created while the archive hook ran keeps it too.
+            if let Some(why) = pending_pr_creation(&path) { return Err(why) }
             let state = landed::check(project, &path, Fetch::JustFetched);
             let Some(head) = state.head.as_deref().filter(|_| state.safe && state.head == before.head && state.branch == before.branch) else {
                 return Err("It is no longer clean and merged, or changed during its archive script; it was not deleted.".into());
@@ -781,6 +793,80 @@ mod tests {
         assert!(!wt.exists());
         assert!(!git::worktree_branch_names(f.path()).contains(&"quiet-amber-fox".to_string()));
         assert!(f.scan(&[]).is_empty());
+    }
+
+    /// A pending record for a pull request created from `tree` (#1382), as a
+    /// create whose read-back failed leaves it.
+    fn pending_record(tree: &Path, url: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!([{
+            "session": "gone-session",
+            "checkout": { "path": canonical(tree), "git_dir": tree.join(".git"), "directory": [0, 0], "admin": [0, 0] },
+            "branch": "feature/pr", "base": "main", "head": "0000000", "url": url,
+        }])).unwrap()
+    }
+
+    #[test]
+    fn a_sessionless_worktree_with_an_unconfirmed_pull_request_is_kept() {
+        let f = Fixture::new();
+        let wt = f.worktree("pending-pr");
+        let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+        let url = "https://github.test/octo/repo/pull/3";
+        std::fs::write(&record, pending_record(&wt, url)).unwrap();
+        let why = format!("Verify the pull request at {url} before removing this workspace.");
+        let leftover = find(&f.scan(&[]), LeftoverKind::Worktree, "pending-pr").cloned().expect("listed");
+        assert_eq!(leftover.kept_because.as_deref(), Some(why.as_str()), "the preview says why");
+        let removal = f.remove(&[], &[&leftover.id]);
+        assert!(removal.removed.is_empty());
+        assert_eq!(removal.failed[0].error, why);
+        // Asked directly, as a stale preview would, the removal refuses too.
+        assert_eq!(remove_one(&leftover, &f.sources(std::slice::from_ref(&f.project), &[]), None), Err(why.clone()));
+        let options = crate::workspaces::DeleteOptions { delete_branch: true, direct: git::DirectDelete::Never, verified_head: None };
+        assert_eq!(crate::workspaces::delete(f.path(), &wt, options).unwrap_err().to_string(), why);
+        assert!(wt.join("a.txt").exists());
+        assert!(git::worktree_branch_names(f.path()).contains(&"pending-pr".to_string()));
+        // An unreadable record is not read as none.
+        std::fs::write(&record, b"not json").unwrap();
+        let kept = find(&f.scan(&[]), LeftoverKind::Worktree, "pending-pr").cloned().unwrap();
+        assert!(kept.kept_because.as_deref().unwrap().starts_with("Pull requests created from it could not be checked"), "{kept:?}");
+        assert!(f.remove(&[], &[&kept.id]).removed.is_empty());
+        assert!(wt.exists());
+        // Once reconciliation settles it, ordinary cleanup removes it.
+        std::fs::remove_file(&record).unwrap();
+        assert_eq!(f.remove(&[], &[&kept.id]).removed, vec![kept.id.clone()]);
+        assert!(!wt.exists());
+        assert!(!git::worktree_branch_names(f.path()).contains(&"pending-pr".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pull_request_created_during_a_leftovers_archive_hook_keeps_it() {
+        use std::sync::Arc;
+        let f = Fixture::new();
+        let wt = f.worktree("hook-pr");
+        let url = "https://github.test/octo/repo/pull/4";
+        let staged = f.dir.path().join("pending.json");
+        std::fs::write(&staged, pending_record(&wt, url)).unwrap();
+        let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+        let marker = f.dir.path().join("hook-ran");
+        let project = crate::store::projects::add(f.project.path.as_str()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts {
+                setup: String::new(),
+                archive: format!("cp '{}' '{}' && touch '{}'", staged.display(), record.display(), marker.display()),
+                archive_timeout_minutes: None,
+            }), ..Default::default()
+        }).unwrap();
+        let id = format!("worktree:{}:hook-pr", f.project.path);
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let runner = crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false };
+        let result = remove_from_sources_with_runner(&f.sources(std::slice::from_ref(&f.project), &[]), std::slice::from_ref(&id), &|_| {}, Some(runner));
+        terminals.kill_all();
+        assert!(marker.exists(), "the archive hook ran");
+        assert!(result.removed.is_empty());
+        assert_eq!(result.failed[0].error, format!("Verify the pull request at {url} before removing this workspace."));
+        assert!(wt.join("a.txt").exists());
+        assert!(git::worktree_branch_names(f.path()).contains(&"hook-pr".to_string()));
     }
 
     #[test]

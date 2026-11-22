@@ -856,7 +856,7 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
 /// pending record in it is the only evidence of an open pull request. The
 /// branch it was made on may since have been switched for a clean, merged
 /// one, so nothing else in the review sees it. Unknown is never read as none.
-fn pending_pr_creation(path: &Path) -> Option<String> {
+pub(crate) fn pending_pr_creation(path: &Path) -> Option<String> {
     match crate::remote::git::pending_pr_creation_in(path) {
         Ok(None) => None,
         Ok(Some(url)) => Some(format!("Verify the pull request at {url} before removing this workspace.")),
