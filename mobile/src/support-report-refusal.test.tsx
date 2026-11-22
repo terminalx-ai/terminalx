@@ -93,6 +93,8 @@ async function preparePreview() {
   expect(container.textContent).toContain("Review diagnostic fields");
 }
 const sentEvents = () => support.submit.mock.calls.at(-1)![1].local.events as { kind: string }[];
+/** The kinds sent, in alphabetical order. A report lists the newest event first, and two events in the same millisecond keep the order they were logged in, so the order sent depends on whether the clock ticked between them. */
+const sentKinds = () => sentEvents().map(({ kind }) => kind).sort();
 /** The screen keeps a delivered report until Done; each test that delivers one ends there. */
 const done = async () => { expect(container.textContent).toContain("Report delivered"); await tap("Done"); };
 const changed = "Pairing access changed";
@@ -141,7 +143,7 @@ it("keeps a draft through network failures, and sends the pairing's events", asy
   await tap("Send to TerminalX Support");
   expect(container.textContent).toContain("Report delivered");
   // The draft holds what was reviewed: the events up to the preview, newest first.
-  expect(sentEvents().map(({ kind }) => kind)).toEqual(["attempt-failed", "connecting"]);
+  expect(sentKinds()).toEqual(["attempt-failed", "connecting"]);
   await done();
 });
 
@@ -207,6 +209,6 @@ it("does not bring back the refused pairing's events once the phone is paired ag
   await relayAnswers("network");
   await preparePreview();
   await tap("Send to TerminalX Support");
-  expect(sentEvents().map(({ kind }) => kind)).toEqual(["attempt-failed", "connecting"]);
+  expect(sentKinds()).toEqual(["attempt-failed", "connecting"]);
   await done();
 });

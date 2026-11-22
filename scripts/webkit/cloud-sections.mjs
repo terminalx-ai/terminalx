@@ -92,6 +92,9 @@ for (const width of [200, 268, 420]) {
     const fold = orgA.getByRole("button", { name: "Share Lab", exact: true });
     await fold.focus();
     await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+    // WebKit shows the tooltip for focus() too. Tabbing back before that one has closed can leave it
+    // closed (about 1 run in 25 on a loaded machine); no person tabs away and back within a frame.
+    await page.getByRole("tooltip").waitFor({ state: "hidden" });
     await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
     await page.getByRole("tooltip").waitFor();
     const keyboardFocused = await fold.evaluate((el) => document.activeElement === el);
