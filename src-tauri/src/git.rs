@@ -86,38 +86,47 @@ pub(crate) fn start_in(command: &mut Command, directory: std::os::unix::io::RawF
 
 #[cfg(unix)]
 thread_local! {
-    /// Checkouts bound on this thread: the path callers name, the opened
-    /// top-level directory, and the Git directory (relative to it when inside).
-    static BOUND: std::cell::RefCell<Vec<(PathBuf, std::os::unix::io::RawFd, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Checkouts bound on this thread: each binding's own token, the path
+    /// callers name (canonical when it resolves), the opened top-level
+    /// directory, and the Git directory (relative to it when inside).
+    static BOUND: std::cell::RefCell<Vec<(u64, PathBuf, std::os::unix::io::RawFd, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// Hands each binding a token of its own, so it releases only its entry.
+#[cfg(unix)]
+static NEXT_BINDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A checkout bound for this thread while it lives (see `bind`). Not `Send`:
 /// it is released on the thread that bound it.
 pub(crate) struct Bound {
     #[cfg(unix)]
-    path: PathBuf,
+    token: u64,
     _thread: std::marker::PhantomData<std::sync::MutexGuard<'static, ()>>,
 }
 
 /// Bind `path` to the verified checkout opened as `top` with its Git
 /// directory `git_dir`. While the returned value lives, local Git commands
 /// this module starts on this thread for exactly `path` start in the opened
-/// directory instead of changing to the path, so they reach that checkout
+/// directory instead of changing to the path (spelled as given or
+/// canonically), so they reach that checkout
 /// even if another one is put at the path; a `HOOKLESS` one also names the
 /// Git directory and work tree, so a `core.worktree` written later is not
 /// read. Transfers, other threads and other paths are unaffected. `top` must
 /// outlive the binding. Off Unix nothing is bound.
 pub(crate) fn bind(path: &Path, #[cfg(unix)] top: &std::fs::File, #[cfg(unix)] git_dir: &Path) -> Bound {
     #[cfg(unix)]
-    {
+    let token = {
         use std::os::unix::io::AsRawFd;
-        BOUND.with(|bound| bound.borrow_mut().push((path.to_path_buf(), top.as_raw_fd(), git_dir.to_path_buf())));
-    }
+        let token = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        BOUND.with(|bound| bound.borrow_mut().push((token, path, top.as_raw_fd(), git_dir.to_path_buf())));
+        token
+    };
     #[cfg(not(unix))]
     let _ = path;
     Bound {
         #[cfg(unix)]
-        path: path.to_path_buf(),
+        token,
         _thread: std::marker::PhantomData,
     }
 }
@@ -127,11 +136,23 @@ impl Drop for Bound {
         #[cfg(unix)]
         BOUND.with(|bound| {
             let mut bound = bound.borrow_mut();
-            if let Some(index) = bound.iter().rposition(|(path, _, _)| *path == self.path) {
-                bound.remove(index);
-            }
+            bound.retain(|(token, ..)| *token != self.token);
         });
     }
+}
+
+/// The binding for `cwd`, matched by its spelling or, failing that, its
+/// canonical path.
+#[cfg(unix)]
+fn bound_at(cwd: &Path) -> Option<(std::os::unix::io::RawFd, PathBuf)> {
+    BOUND.with(|bound| {
+        let bound = bound.borrow();
+        if bound.is_empty() {
+            return None;
+        }
+        let find = |cwd: &Path| bound.iter().rev().find(|(_, path, ..)| path == cwd).map(|(_, _, fd, dir)| (*fd, dir.clone()));
+        find(cwd).or_else(|| find(&crate::paths::canonicalize(cwd).ok()?))
+    })
 }
 
 /// A local Git command in `cwd`, for a command whose arguments are `args`:
@@ -139,7 +160,7 @@ impl Drop for Bound {
 pub(crate) fn git_in(cwd: &Path, args: &[&str]) -> Command {
     let mut command = git();
     #[cfg(unix)]
-    if let Some((directory, git_dir)) = BOUND.with(|bound| bound.borrow().iter().rev().find(|(path, _, _)| path == cwd).map(|(_, fd, dir)| (*fd, dir.clone()))) {
+    if let Some((directory, git_dir)) = bound_at(cwd) {
         start_in(&mut command, directory);
         if subcommand(args).is_some_and(|sub| HOOKLESS.contains(&sub)) {
             command.env("GIT_DIR", git_dir).env("GIT_WORK_TREE", ".").env_remove("GIT_COMMON_DIR");
@@ -2221,6 +2242,44 @@ mod tests {
             let result = output_within(command, std::time::Duration::from_millis(50));
             assert!(matches!(result, Err(RunError::TimedOut)), "{redirect}: {result:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binding_matches_the_canonical_path_and_releases_only_its_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
+        let init = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            // Not through `run`, which a binding for this path would redirect.
+            assert!(Command::new("git").current_dir(path).args(["init", "-q"]).status().unwrap().success());
+        };
+        let (checkout, other) = (base.join("checkout"), base.join("other"));
+        init(&checkout);
+        init(&other);
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&checkout, &link).unwrap();
+        let shown = |cwd: &Path| crate::paths::canonicalize(path_line(&run(cwd, &["rev-parse", "--show-toplevel"]).unwrap())).unwrap();
+
+        // Bound by one spelling; the helpers are called with the other. The
+        // checkout then moves away and another repository takes its path.
+        let top = std::fs::File::open(&checkout).unwrap();
+        let first = bind(&link, &top, Path::new(".git"));
+        let moved = base.join("moved");
+        std::fs::rename(&checkout, &moved).unwrap();
+        init(&checkout);
+        assert_eq!(shown(&checkout), moved);
+        assert_eq!(shown(&link), moved);
+
+        // A newer binding of the same path wins while it lives, and releasing
+        // the older one leaves it in place.
+        let other_top = std::fs::File::open(&other).unwrap();
+        let second = bind(&checkout, &other_top, Path::new(".git"));
+        assert_eq!(shown(&checkout), other);
+        drop(first);
+        assert_eq!(shown(&checkout), other);
+        drop(second);
+        assert_eq!(shown(&checkout), checkout);
     }
 
     pub(super) fn repo() -> tempfile::TempDir {

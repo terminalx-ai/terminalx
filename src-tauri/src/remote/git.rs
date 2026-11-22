@@ -111,11 +111,12 @@ struct Repo {
 /// path in its private configuration; the PR push's private copy has no
 /// work tree.
 ///
-/// The shared helpers in `crate::git` (and `crate::git_media`,
-/// `crate::landed`, `crate::pr_associations`, which run Git through it) are
-/// bound the same way: while the Repo lives, a local Git command they start
-/// on this thread for `repo.dir` starts in the opened directory, and a
-/// hookless one names the Git directory and work tree (`crate::git::bind`).
+/// The Git processes of the shared helpers in `crate::git` (and
+/// `crate::git_media`, `crate::landed`, `crate::pr_associations`, which run
+/// Git through it) are bound the same way: while the Repo lives, a local Git
+/// command they start on this thread for `repo.dir` (spelled as given or
+/// canonically) starts in the opened directory, and a hookless one names
+/// the Git directory and work tree (`crate::git::bind`).
 /// So `operation_in_progress`, status, working changes, history and the
 /// branch comparison read the checkout the rest of the call works on. `gh`
 /// starts in the opened directory too, so the Git it runs finds that
@@ -134,6 +135,11 @@ struct Repo {
 /// - a Git directory outside the checkout (a linked worktree's admin
 ///   directory), which is named by its verified absolute path, as Git
 ///   itself names it in the checkout's `.git` file;
+/// - files the helpers read themselves rather than through Git: they take
+///   `repo.dir` or a path Git printed and open it by path (the index copied
+///   for a snapshot, working-tree file contents and media, `common_dir`'s
+///   result, the sparse-checkout and `.git` presence checks in `crate::landed`). Only
+///   their Git processes are bound;
 /// - transfers through `crate::git` (fetch, pull, push, clone, ls-remote),
 ///   which keep their own runners and start by path; helper commands started
 ///   on another thread, or for any path other than `repo.dir`; and
