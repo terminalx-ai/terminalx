@@ -8,6 +8,7 @@
 //
 //   pnpm build && pnpm exec playwright install webkit && pnpm test:webkit-layout
 //   node scripts/webkit/run-all.mjs chat-find run-menu     only these checks
+//   node scripts/webkit/run-all.mjs agent-dashboard:2      one entry of a script that runs as several (its name alone: all of them)
 //   pnpm test:webkit-layout --jobs 1                        one at a time (or WEBKIT_JOBS=1)
 //   node scripts/webkit/run-all.mjs --shard 2/4             the second of four parts (one CI job each)
 //   node scripts/webkit/run-all.mjs --shard 2/4 --list      the names that part runs, one per line; nothing runs
@@ -33,7 +34,7 @@ export const checks = [
   "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "workspace-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
   "dialog-lists",
-  "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
+  "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard:1", "agent-dashboard:2", "agent-dashboard:3", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
   "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
   "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
@@ -58,6 +59,18 @@ export const checks = [
   "team-presence-following",
   "machines-pairing", "machine-connection", "machine-page", "machine-update",
 ];
+
+/**
+ * An entry of `checks` is a script's name, or `<script>:<part>` for a script that runs as several entries: the
+ * arguments each such entry gives its script are here. agent-dashboard's seven layouts are dealt over three entries
+ * by its own --layouts, each layout in exactly one: together they took 470 s on a slow runner, against the 600 s
+ * limit below for one check.
+ */
+const entryArguments = new Map([
+  ["agent-dashboard:1", ["--layouts", "1/3"]],
+  ["agent-dashboard:2", ["--layouts", "2/3"]],
+  ["agent-dashboard:3", ["--layouts", "3/3"]],
+]);
 
 /**
  * The checks that are left out on a Linux host, each with why. They run on macOS as before. These are judgements made
@@ -85,7 +98,7 @@ const environment = (name) => (machineScreens.includes(name) ? { MACHINES_SHOTS:
 // any of them starts, and a free port each, so they run beside the others. They
 // are found by what they import, so a new one needs no entry here; the parts of
 // --shard each take some of them.
-const script = (name) => fileURLToPath(new URL(`./${name}.mjs`, import.meta.url));
+const script = (name) => fileURLToPath(new URL(`./${name.split(":")[0]}.mjs`, import.meta.url));
 const startsVite = (name) => /(from\s+|import\()\s*["'](vite|\.\/vite-page\.mjs)["']/.test(readFileSync(script(name), "utf8"));
 
 // These measure against the clock, so other checks competing for the processor
@@ -105,7 +118,7 @@ function run(name) {
     const started = Date.now();
     // Said at once, so a log that stops short shows which checks never ended.
     console.log(`start ${name}`);
-    const child = spawn(process.execPath, [script(name)], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...environment(name) } });
+    const child = spawn(process.execPath, [script(name), ...(entryArguments.get(name) ?? [])], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...environment(name) } });
     const output = [];
     child.stdout?.on("data", (chunk) => output.push(chunk));
     child.stderr?.on("data", (chunk) => output.push(chunk));
@@ -160,9 +173,12 @@ async function main() {
   const jobsValue = parsed.values.jobs ?? process.env.WEBKIT_JOBS;
   const jobs = jobsValue === undefined ? Math.min(4, availableParallelism()) : Number(jobsValue);
   if (!Number.isInteger(jobs) || jobs < 1) usage(`The number of checks to run at once must be a whole number above 0, not ${JSON.stringify(jobsValue)}.`);
-  const unknown = args.filter((name) => !checks.includes(name));
+  // A script that runs as several entries is named whole (`agent-dashboard`) or by one entry (`agent-dashboard:2`).
+  const names = (arg) => checks.filter((name) => name === arg || name.split(":")[0] === arg);
+  const unknown = args.filter((arg) => !names(arg).length);
   if (unknown.length) usage(`Not a check of this suite: ${unknown.join(", ")}.`);
-  const named = args.length ? checks.filter((name) => args.includes(name)) : checks;
+  const wanted = new Set(args.flatMap(names));
+  const named = args.length ? checks.filter((name) => wanted.has(name)) : checks;
 
   let selected = named;
   if (parsed.values.shard !== undefined) {
