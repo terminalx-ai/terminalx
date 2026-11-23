@@ -965,8 +965,21 @@ pub fn deliver(manager: &SessionManager) -> usize {
         }
         let Ok(current) = read() else { return sent };
         let org = mention.org.as_deref();
-        // A person listed for an organisation the bot no longer works in asks nothing there now (`judge`, read again).
-        if org.is_some() && super::memory::place_of(&bot, org) == super::memory::Place::Bot {
+        // A person listed for an organisation the bot no longer works in asks nothing there now (`judge`, read again):
+        // not accepted, with why, so it is not delivered late and out of context if the place is switched on again.
+        if let Some(org) = org.filter(|org| super::memory::place_of(&bot, Some(org)) == super::memory::Place::Bot) {
+            let why = format!("{} was listed for organisation {org}, which {} no longer works in", mention.by, bot.name);
+            let outcome = change(|store| {
+                if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == mention.id && kept.bot == mention.bot && kept.state == WAITING) {
+                    kept.state = NOT_ACCEPTED.into();
+                    kept.why = why.clone();
+                    kept.text.clear();
+                }
+                Ok(())
+            });
+            if let Err(error) = outcome {
+                log::warn!("bot channels: turn away a mention of {}: {error:#}", bot.id);
+            }
             continue;
         }
         let made = match mention.session.as_deref().and_then(|id| index::get(id).ok()).filter(|entry| !entry.archived).or_else(|| chat_for(&current, &bot, &mention.thread, org)) {

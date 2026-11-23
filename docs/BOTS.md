@@ -1179,6 +1179,15 @@ workspaces and the people who may ask from it stay in that organisation.
   earlier build, a duty's run, a hand-off's chat) works in the bot's first
   place as before; a place the bot no longer works in is no place at all
   (`Place::Bot`), never another place instead.
+- **Work items are pinned to a place when made** (`Item.org`): a
+  conversation's item to its place, one the owner gives in the app to the
+  bot's first place at that moment. Reordering Works in moves none of them.
+  Only an item an earlier build kept has none, and follows the first place.
+- **The owner's word about an item** (an answer, a comment, new work) goes
+  to a chat in that item's place (`chat::place_chat`): the home chat when it
+  works there, else the bot's standing chat of that place (`botPlaceHome`,
+  titled "Home chat", made the first time). One about a place the bot no
+  longer works in waits on its item, saying why, and holds up no other.
 - **Choosing the place.** The home chat works in the bot's first place when
   it is made. In the bot's Chat tab, a bot that works in more than one place
   starts a new chat from "New chat, working in" (Personal, then each
@@ -1201,8 +1210,15 @@ workspaces and the people who may ask from it stay in that organisation.
   (`BotAsker.org`). Their mention on GitHub or Linear starts, or goes on in,
   a chat in that organisation (`Mention.org`, `channels::chat_for`), never
   one of another; while the bot does not work there it starts nothing.
+  A mention from someone listed for an organisation the bot has left is
+  marked not accepted, with why, not kept to be delivered late.
   Slack and Telegram belong to no organisation: their chats work in the
-  bot's first place, as do hand-offs from another bot.
+  bot's first place.
+- **Hand-offs** are worked on in the place they were handed from: the
+  sender's conversation's, or for an item the owner hands on, the item's
+  (`handoffs::work_place`). The receiver's work chat and item are made
+  there. A receiver that does not work in that place is not handed the work:
+  the hand-off fails and the sender is told why.
 - **Cloud time is billed to the organisation the work is for.** A bot's
   `cloud.sessions.create`, `cloud.send` and `cloud.resume` carry its
   conversation's organisation to the window (`botHold.org`,
@@ -1219,8 +1235,9 @@ workspaces and the people who may ask from it stay in that organisation.
 - **Not built here: the organisation admin's view.** An organisation's
   admins seeing which members' bots work in it, and switching one off for
   their organisation, needs the server to know of members' bots, which it
-  does not yet (the Phase 2 team layer, PRO-120). It is a follow-up; until
-  then the owner switches a place off under Works in.
+  does not yet (the Phase 2 team layer, PRO-120). It is a follow-up, and
+  PRO-483 stays open until it is built; until then the owner switches a
+  place off under Works in.
 
 ## Build map
 

@@ -289,9 +289,10 @@ fn create_chat(sink: &dyn EventSink, bot: &Bot, home: bool, org: Option<&str>) -
     create_chat_marked(sink, bot, home, None, org, |_| {})
 }
 
-/// A chat of `bot` for work another bot handed it (PRO-475): one of its chats, under its own access and pause, in its first place.
-pub(crate) fn work_chat(sink: &dyn EventSink, bot: &Bot, title: String) -> Result<SessionEntry> {
-    create_chat_marked(sink, bot, false, Some(title), None, |_| {})
+/// A chat of `bot` for work another bot handed it (PRO-475): one of its chats, under its own access and pause, in
+/// `org`, the place the work is for (PRO-483).
+pub(crate) fn work_chat(sink: &dyn EventSink, bot: &Bot, title: String, org: &str) -> Result<SessionEntry> {
+    create_chat_marked(sink, bot, false, Some(title), Some(org), |_| {})
 }
 
 /// A chat of `bot` that a mention on GitHub or Linear started (PRO-480), marked by `mark` with where it came from,
@@ -345,6 +346,43 @@ pub fn home_chat(sink: &dyn EventSink, id: &str) -> Result<SessionEntry> {
         Some(entry) => Ok(entry),
         None => create_chat(sink, &bot, true, None),
     }
+}
+
+/// The entry key of a bot's standing chat in a place its home chat does not work in (PRO-483): `true`.
+pub const PLACE_HOME_KEY: &str = "botPlaceHome";
+
+/// The chat where the owner's messages about the work of `place` reach `bot` (PRO-483): its home chat when that works
+/// there, else its standing chat in that place (the newest, brought back from the archive), made the first time. So
+/// the owner's answer about one organisation's item never reaches another organisation's conversation.
+pub fn place_chat(sink: &dyn EventSink, bot: &Bot, place: &super::memory::Place) -> Result<SessionEntry> {
+    let home = home_chat(sink, &bot.id)?;
+    if session_place(bot, &home) == *place {
+        return Ok(home);
+    }
+    if *place == super::memory::Place::Bot {
+        return Err(super::refused(format!("{} no longer works in the place this work is for.", bot.name)));
+    }
+    let _once = HOME_CHAT_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let existing = index::load()?
+        .into_iter()
+        .filter(|entry| entry.unknown.get(PLACE_HOME_KEY) == Some(&Value::Bool(true)))
+        .filter(|entry| session_bot(entry).is_some_and(|reference| reference.id == bot.id && reference.org.as_deref() == Some(place.key())))
+        .max_by(|a, b| a.created.cmp(&b.created));
+    match existing {
+        Some(entry) if entry.archived => {
+            let back = crate::session_archive::set_archived(sink, std::slice::from_ref(&entry.id), false, crate::session_archive::By::Person)?;
+            Ok(back.into_iter().next().unwrap_or(entry))
+        }
+        Some(entry) => Ok(entry),
+        None => create_chat_marked(sink, bot, false, Some(HOME_CHAT_TITLE.into()), Some(place.key()), |entry| {
+            entry.unknown.insert(PLACE_HOME_KEY.into(), Value::Bool(true));
+        }),
+    }
+}
+
+/// Whether `entry` is a chat the owner's item messages go to: a home chat, or a standing chat of a place.
+fn takes_owner_messages(entry: &SessionEntry) -> bool {
+    entry.unknown.get(PLACE_HOME_KEY) == Some(&Value::Bool(true))
 }
 
 /// Another conversation with the bot, beside its home chat, in `org`
@@ -670,10 +708,12 @@ pub fn launched(manager: &crate::session::SessionManager, entry: &SessionEntry, 
         return;
     }
     let (manager, id, home, session) = (manager.clone(), reference.id.clone(), reference.home, entry.id.clone());
+    // A place's standing chat takes the owner's messages about that place's work (PRO-483).
+    let place_home = takes_owner_messages(entry);
     std::thread::spawn(move || {
         // The owner's waiting messages go to the bot's current home chat (`items::to_home_chat`): an older home chat
         // that starts sends nothing on (PRO-493).
-        if home && current_home(&id).as_deref() == Some(session.as_str()) {
+        if (home && current_home(&id).as_deref() == Some(session.as_str())) || place_home {
             super::items::deliver_waiting(&manager, &id);
         }
         // What other bots sent this bot (PRO-475), for any of its chats.

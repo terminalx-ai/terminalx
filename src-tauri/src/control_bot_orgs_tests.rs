@@ -118,3 +118,124 @@ fn a_bots_cloud_command_carries_the_organisation_its_conversation_works_in() {
     crate::bots::update(sink, &atlas, crate::bots::BotPatch { works_in: Some(vec!["personal".into()]), ..Default::default() }).unwrap();
     assert_eq!(crate::bots::cloud::hold_org(&atlas, Some(&acme.id)), "", "nor one the bot no longer works in");
 }
+
+/// What the tests below sent to bots' chats is cleared when they end, on failure too.
+struct Sends;
+
+impl Drop for Sends {
+    fn drop(&mut self) {
+        crate::bots::handoffs::SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
+        crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+        crate::bots::channels::SENT_FOR_TESTS.lock().unwrap_or_else(|error| error.into_inner()).clear();
+    }
+}
+
+/// A hand-off is worked on in the place it was handed from: the receiver's chat and item are that place's, never its
+/// first place's; one that does not work there is not handed the work at all.
+#[test]
+fn a_hand_off_is_worked_on_in_the_place_it_was_handed_from() {
+    let _home = crate::store::temp_home();
+    let _sends = Sends;
+    bots_on();
+    let (service, _sink) = headless_service();
+    let sink = service.sink.as_ref();
+    let hire = |role: &str, name: &str| service.execute("bots.create", json!({"role": role, "name": name}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let (atlas, sentry) = (hire("cto", "Atlas"), hire("security-auditor", "Sentry"));
+    crate::bots::update(sink, &atlas, crate::bots::BotPatch { works_in: Some(vec!["acme".into(), "kestrel".into()]), ..Default::default() }).unwrap();
+    // Sentry's first place is Kestrel: a hand-off from Acme must not be worked on there.
+    crate::bots::update(sink, &sentry, crate::bots::BotPatch { reports_to: Some(atlas.clone()), works_in: Some(vec!["kestrel".into(), "acme".into()]), ..Default::default() }).unwrap();
+    let acme = crate::bots::chat::new_chat(sink, &atlas, Some("acme")).unwrap();
+    service.manager.install_review_test_cli(&acme.id, &acme.tabs[0].id, "acme-secret");
+    let hand = |title: &str| {
+        let params = json!({"to": "sentry", "title": title, "caller": {"session": acme.id, "tab": acme.tabs[0].id}, "hookToken": "acme-secret"});
+        let number = service.execute("bots.handoff", params, "r").unwrap()["handoff"]["number"].as_u64().unwrap();
+        crate::bots::handoffs::read().unwrap().handoffs.into_iter().find(|handoff| handoff.number == number).unwrap()
+    };
+
+    let handoff = hand("Check Acme's deploy key");
+    assert_eq!(handoff.state, crate::bots::handoffs::HandoffState::Working);
+    let work = index::get(handoff.to_session.as_deref().unwrap()).unwrap();
+    assert_eq!(crate::bots::chat::session_org(&work).as_deref(), Some("acme"), "worked on in Acme, not in Sentry's first place");
+    let item = crate::bots::items::read(&sentry).unwrap().items.into_iter().find(|item| Some(item.number) == handoff.item).unwrap();
+    assert_eq!(item.org.as_deref(), Some("acme"));
+
+    // Sentry no longer works in Acme: the next one fails, saying why, and no chat of Sentry's gets it.
+    crate::bots::update(sink, &sentry, crate::bots::BotPatch { works_in: Some(vec!["kestrel".into()]), ..Default::default() }).unwrap();
+    let handoff = hand("Check Acme's runner");
+    assert_eq!(handoff.state, crate::bots::handoffs::HandoffState::Failed);
+    assert!(handoff.answer.as_ref().unwrap().text.contains("does not work in organisation acme"), "{:?}", handoff.answer);
+    assert!(handoff.to_session.is_none());
+}
+
+/// The owner's word about an item reaches a chat of that item's place only: the home chat when it works there, else
+/// the bot's standing chat of that place. One about a place the bot left waits, saying why.
+#[test]
+fn the_owners_word_about_an_item_reaches_a_chat_of_that_items_place() {
+    let _home = crate::store::temp_home();
+    let _sends = Sends;
+    bots_on();
+    let (service, _sink) = headless_service();
+    let sink = service.sink.as_ref();
+    let atlas = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    crate::bots::update(sink, &atlas, crate::bots::BotPatch { works_in: Some(vec!["acme".into(), "kestrel".into()]), ..Default::default() }).unwrap();
+    let call = |operation: &str, params: Value| crate::bots::items::runtime_call(&service.manager, operation, &params).unwrap().unwrap();
+    // Given by the owner while Acme comes first: Acme's work, pinned there.
+    let acme_item = call("itemGive", json!({"id": atlas, "title": "Rotate Acme's deploy key"}));
+    assert_eq!(acme_item["item"]["org"], "acme");
+    crate::bots::update(sink, &atlas, crate::bots::BotPatch { works_in: Some(vec!["kestrel".into(), "acme".into()]), ..Default::default() }).unwrap();
+    let kestrel_item = call("itemGive", json!({"id": atlas, "title": "Kestrel's release notes"}));
+    assert_eq!(kestrel_item["item"]["org"], "kestrel");
+    let acme_number = acme_item["item"]["number"].as_u64().unwrap();
+    let in_place = |session: &str| crate::bots::chat::session_org(&index::get(session).unwrap());
+
+    crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+    call("itemComment", json!({"id": atlas, "number": acme_number, "text": "Use the new vault"}));
+    let sent = crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().clone());
+    let to_acme = sent.iter().find(|(_, _, text)| text.contains("Use the new vault")).unwrap();
+    assert_eq!(in_place(&to_acme.0).as_deref(), Some("acme"), "reordering Works in did not move the item, and its word went to Acme");
+    for (session, _, text) in &sent {
+        if text.contains("Kestrel's release notes") {
+            assert_eq!(in_place(session).as_deref(), Some("kestrel"));
+        }
+        if text.contains("Rotate Acme's deploy key") || text.contains("new vault") {
+            assert_eq!(in_place(session).as_deref(), Some("acme"));
+        }
+    }
+
+    // Atlas leaves Acme: a comment on Acme's item waits, with why, and reaches no other place's chat.
+    crate::bots::update(sink, &atlas, crate::bots::BotPatch { works_in: Some(vec!["kestrel".into()]), ..Default::default() }).unwrap();
+    crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow_mut().clear());
+    let held = call("itemComment", json!({"id": atlas, "number": acme_number, "text": "Second thought"}));
+    assert_eq!(held["delivery"]["sent"], false, "{held}");
+    assert!(held["delivery"]["error"].as_str().unwrap().contains("no longer works in"), "{held}");
+    assert!(crate::bots::items::SENT_FOR_TESTS.with(|sent| sent.borrow().iter().all(|(_, _, text)| !text.contains("Second thought"))));
+}
+
+/// A mention from a person listed for an organisation the bot has left is turned away, not kept waiting to be
+/// delivered late if the place is switched on again.
+#[test]
+fn a_mention_from_an_organisation_the_bot_left_is_not_accepted() {
+    let _home = crate::store::temp_home();
+    let _sends = Sends;
+    bots_on();
+    let (service, _sink) = headless_service();
+    let atlas = service.execute("bots.create", json!({"role": "cto", "name": "Atlas"}), "r").unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    let mention: crate::bots::channels::Mention = serde_json::from_value(json!({
+        "id": "github:acme/app:1", "bot": atlas, "thread": {"kind": "github", "repo": "acme/app", "number": 7, "url": "https://github.com/acme/app/pull/7"},
+        "by": "Ann", "from": "person", "at": "2026-11-23T10:00:00Z", "state": "waiting", "text": "@atlas look at this", "org": "acme",
+    }))
+    .unwrap();
+    crate::bots::channels::change(|store| {
+        store.mentions.push(crate::bots::channels::Kept::Known(mention));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(crate::bots::channels::deliver(&service.manager), 0);
+    let kept = crate::bots::channels::read().unwrap().mentions.into_iter().find_map(|kept| match kept {
+        crate::bots::channels::Kept::Known(mention) => Some(mention),
+        crate::bots::channels::Kept::Other(_) => None,
+    })
+    .unwrap();
+    assert_eq!(kept.state, crate::bots::channels::NOT_ACCEPTED);
+    assert!(kept.why.contains("no longer works in") && kept.text.is_empty(), "{kept:?}");
+}
