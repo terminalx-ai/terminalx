@@ -18,6 +18,11 @@ use super::{engine, store};
 pub struct RuntimeObserver {
     host: OnceLock<Arc<LocalHost>>,
     local_automations: OnceLock<crate::automations::RuntimeHost>,
+    /// The steps this observer started, for a test to wait out before its
+    /// store goes: a step goes on after it first announces a change (it may
+    /// release the tabs and write again), and a test's store is the process's.
+    #[cfg(test)]
+    started: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl RuntimeObserver {
@@ -36,7 +41,26 @@ impl RuntimeObserver {
         if !store::takes_part(session_id, tab_id) {
             return;
         }
-        let _ = std::thread::Builder::new().name("issue-pipeline".into()).spawn(crate::github_process::queued(move || work(&host)));
+        let spawned = std::thread::Builder::new().name("issue-pipeline".into()).spawn(crate::github_process::queued(move || work(&host)));
+        self.started(spawned);
+    }
+
+    fn started(&self, spawned: std::io::Result<std::thread::JoinHandle<()>>) {
+        #[cfg(test)]
+        if let Ok(handle) = spawned {
+            self.started.lock().unwrap().push(handle);
+        }
+        #[cfg(not(test))]
+        drop(spawned);
+    }
+
+    /// Wait for every step this observer started to end, those they lead to included.
+    #[cfg(test)]
+    fn finish_started(&self) {
+        loop {
+            let Some(handle) = self.started.lock().unwrap().pop() else { return };
+            handle.join().unwrap();
+        }
     }
 }
 
@@ -55,7 +79,8 @@ impl SessionObserver for RuntimeObserver {
         if !store::takes_part(session_id, tab_id) {
             // Not a pipeline's tab: a worker that owes its lead a report is held to that instead.
             if let Some(host) = self.host.get().cloned().filter(|_| crate::worker_report::expected(session_id, tab_id)) {
-                let _ = std::thread::Builder::new().name("worker-report".into()).spawn(move || host.worker_turn_completed(&session, &tab, final_message.as_deref()));
+                let spawned = std::thread::Builder::new().name("worker-report".into()).spawn(move || host.worker_turn_completed(&session, &tab, final_message.as_deref()));
+                self.started(spawned);
             }
             return;
         }
@@ -211,12 +236,17 @@ mod tests {
         observer.automation_completed("someone", "else", Some(blocked.into()), 1);
         // The author's is: off the hook's thread, and announced to whoever shows it.
         observer.automation_completed("author", "t1", Some(blocked.into()), 1);
+        // The whole step, not only its first write: it goes on to release
+        // the author and may write again, and after this test that write
+        // would land in the next test's store (PRO-513).
+        observer.finish_started();
         let deadline = Instant::now() + Duration::from_secs(10);
-        // Written, then announced: both are waited for.
-        while (store::get("p1").unwrap().state != State::NeedsYou || *announced.lock().unwrap() == 0) && Instant::now() < deadline {
+        // Announced, on the sink's own thread.
+        while *announced.lock().unwrap() == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         let moved = store::get("p1").unwrap();
+        assert_eq!(moved.state, State::NeedsYou);
         assert_eq!(moved.reason, Some(StopReason::AuthorNotDone { detail: "Which database?".into() }));
         assert!(*announced.lock().unwrap() >= 1);
     }
@@ -255,6 +285,7 @@ mod tests {
         while store::get(&p.id).unwrap().resolution.is_some() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
+        observer.finish_started();
         let after = store::get(&p.id).unwrap();
         assert!(after.resolution.is_none());
         assert_eq!(after.state, State::NeedsYou);
