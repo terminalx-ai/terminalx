@@ -75,6 +75,22 @@ function needsBots(client: Pick<WorkspaceRpcClient, "hasCapability">, where: str
   if (!client.hasCapability("bots/1")) throw new Error(`TerminalX on ${where} is too old to keep a bot. Update it, then move the bot again.`);
 }
 
+/** Whether bot `id` lives on the other side now, as its own list there says; `unknown` when that cannot be read. */
+async function landedThere(client: Pick<WorkspaceRpcClient, "call">, id: string): Promise<"yes" | "no" | "unknown"> {
+  try {
+    const list = await client.call<{ bots?: { bots?: { id?: unknown }[] } }>("bots.list");
+    const bots = list.bots?.bots;
+    if (!Array.isArray(bots)) return "unknown";
+    return bots.some((other) => other?.id === id) ? "yes" : "no";
+  } catch {
+    return "unknown";
+  }
+}
+
+function notThere(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "not_found";
+}
+
 /** Move `bot` from this Mac to `place`, a cloud workspace or a paired machine, with its role, memory, duties and items. */
 export async function moveBot(bot: Bot, place: Exclude<BotPlace, { kind: "thisMac" } | { kind: "other" }>, onStep: (step: MoveStep) => void = () => undefined, deps: MoveDeps = liveDeps): Promise<MoveResult> {
   onStep("connecting");
@@ -93,8 +109,16 @@ export async function moveBot(bot: Bot, place: Exclude<BotPlace, { kind: "thisMa
       for (const [index, data] of chunks.entries()) await client.call("bots.importPart", { transfer, index, parts: chunks.length, data });
       imported = await client.call<{ bot: Bot; notes?: string[] }>("bots.import", { transfer });
     } catch (error) {
-      await deps.step("moveBack", { id: bot.id }).catch(() => undefined);
-      throw error;
+      // The import may have landed with only its reply lost: undone here, the bot would run in both places.
+      const landed = await landedThere(client, bot.id);
+      if (landed === "no") {
+        await deps.step("moveBack", { id: bot.id }).catch(() => undefined);
+        throw error;
+      }
+      if (landed === "unknown") {
+        throw new Error(`It is not known whether ${bot.name} reached ${place.kind === "cloud" ? "the workspace" : "the machine"}, so it rests on this Mac for now and runs nowhere twice. Bring it back once ${place.kind === "cloud" ? "the workspace" : "the machine"} can be reached: that finds it either way. (${error instanceof Error ? error.message : String(error)})`);
+      }
+      imported = { bot: { ...bot, runsOn: "thisMac" } };
     }
     onStep("settling");
     const notes = [...(imported.notes ?? [])];
@@ -121,7 +145,18 @@ export async function bringBotBack(bot: Bot, onStep: (step: MoveStep) => void = 
   try {
     needsBots(client, place.kind === "cloud" ? "that workspace" : "that machine");
     onStep("reading");
-    const { transfer, parts: count } = await client.call<{ transfer: string; parts: number }>("bots.export", { id: bot.id });
+    let held: { transfer: string; parts: number };
+    try {
+      held = await client.call<{ transfer: string; parts: number }>("bots.export", { id: bot.id });
+    } catch (error) {
+      // A move whose import never landed there: the bot was only ever here, so it simply works here again.
+      if (notThere(error) && (await landedThere(client, bot.id)) === "no") {
+        const back = (await deps.step("moveBack", { id: bot.id })) as Bot;
+        return { bot: back ?? { ...bot, runsOn: "thisMac" }, notes: [`${bot.name} had not reached it, so nothing came back: it works on this Mac again as it was.`] };
+      }
+      throw error;
+    }
+    const { transfer, parts: count } = held;
     let bundle = "";
     for (let index = 0; index < count; index++) bundle += (await client.call<{ data: string }>("bots.exportPart", { transfer, index })).data;
     onStep("bringing");

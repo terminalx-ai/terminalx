@@ -126,3 +126,63 @@ fn a_bundle_cannot_write_outside_the_bots_folders() {
         assert!(import(&sink(), bundle, None).is_err(), "{tree} {path}");
     }
 }
+
+#[test]
+fn a_bundle_brings_only_its_own_bots_duties_once_each() {
+    let _home = bots_on();
+    let atlas = hire();
+    let exported = export(&atlas.id).unwrap();
+    // Another member's bot already lives there, with its own duties.
+    let _there = other_runtime();
+    let mut settings = crate::store::settings::load();
+    settings.experimental.bots = true;
+    crate::store::settings::save(&settings).unwrap();
+    let theirs = super::super::create(&sink(), "watcher", "Argus").unwrap();
+    super::super::duties::from_template(&sink(), &theirs).unwrap();
+    let their_duties = duties::duties_of(&theirs.id).unwrap();
+    let their_duty = their_duties.first().expect("the watcher role brings duties").clone();
+
+    // A duty that names another bot would run with that bot's access: refused, and nothing changes.
+    let mut forged = exported.clone();
+    let mut duty = forged.duties[0].clone();
+    duty.unknown = their_duty.unknown.clone();
+    forged.duties.push(duty);
+    assert!(import(&sink(), forged, Some("user-2")).unwrap_err().to_string().contains("not one of Atlas's duties"));
+    // Neither twice in one bundle, nor taking an id something else has here.
+    let mut twice = exported.clone();
+    twice.duties.push(twice.duties[0].clone());
+    assert!(import(&sink(), twice, None).unwrap_err().to_string().contains("twice"));
+    let mut taken = exported.clone();
+    taken.duties[0].id = their_duty.id.clone();
+    assert!(import(&sink(), taken, None).unwrap_err().to_string().contains("taken here"));
+
+    assert!(bot_store::get(&atlas.id).unwrap().is_none(), "a refused bundle leaves no bot");
+    assert!(!bot_store::home_dir(&atlas.id).unwrap().exists(), "nor any of its files");
+    assert_eq!(duties::duties_of(&theirs.id).unwrap(), their_duties, "their duties are untouched");
+    import(&sink(), exported, None).unwrap();
+}
+
+#[test]
+fn a_refused_bundle_turns_nothing_on_and_moves_nothing_aside() {
+    let _home = bots_on();
+    let bot = hire();
+    let mut bundle = export(&bot.id).unwrap();
+    move_out(&sink(), &bot.id, "machine:mac-2").unwrap();
+    let memory = bot_store::home_dir(&bot.id).unwrap().join("MEMORY.md");
+    bundle.files.push(BundleFile { tree: "home".into(), path: "../escape".into(), data: String::new() });
+    assert!(import(&sink(), bundle, None).is_err());
+    // The copy it left here is where it was, and nothing went to the trash.
+    assert!(memory.exists());
+    assert!(!crate::store::root().unwrap().join("trash").join("bots-replaced").exists());
+
+    let _there = other_runtime();
+    let mut bundle = export_from_scratch(&bot);
+    bundle.files.push(BundleFile { tree: "nowhere".into(), path: "x".into(), data: String::new() });
+    assert!(import(&sink(), bundle, None).is_err());
+    assert!(!crate::bots::enabled(), "a refused bundle does not turn Bots on");
+}
+
+/// A bundle for `bot` with no files or duties, for a runtime that never had it.
+fn export_from_scratch(bot: &Bot) -> Bundle {
+    Bundle { v: BUNDLE_VERSION, bot: bot.clone(), home: String::new(), files: Vec::new(), duties: Vec::new(), duty_settings: None }
+}

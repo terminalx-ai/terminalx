@@ -558,14 +558,17 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
     let waking = cloud.clone();
     let wake_api = crate::cloud_bootstrap::HttpApi::new(origin);
     crate::cloud_wake::spawn_reporter(move |report| {
+        use crate::cloud_wake::Sent;
         if waking.is_rejected() {
-            return false;
+            return Sent::Failed;
         }
         match waking.report_wake_at(&wake_api, report) {
-            Ok(()) => true,
+            Ok(()) => Sent::Taken,
             Err(error) => {
-                log::debug!("report the next bot wake: {}", crate::cloud_bootstrap::describe(&error));
-                false
+                let described = crate::cloud_bootstrap::describe(&error);
+                log::debug!("report the next bot wake: {described}");
+                // An API from before terminalx-saas PRO-482 has no such endpoint.
+                if described.ends_with("HTTP 404") { Sent::Unserved } else { Sent::Failed }
             }
         }
     });

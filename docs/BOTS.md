@@ -1180,9 +1180,18 @@ and comes back the same way. It lives in exactly one place at a time.
   not inside the bot's home is listed as a note to fix there.
 - **Order of a move.** The bundle is read, then the bot is marked moved here
   (`moveOut`) before the other side has it, so its duties never run in two
-  places. If the other side refuses, the mark is undone (`moveBack`). On a
-  cloud workspace the window then sets the workspace's idle suspend to two
-  minutes; if that fails, it is a note, not a failed move.
+  places. If the import fails, the window first asks the other side's own
+  list whether the bot landed anyway (a reply lost on the way): if it did,
+  the move stands; if it did not, the mark is undone (`moveBack`); if that
+  cannot be learned, the bot stays marked moved and runs nowhere twice, and
+  Bring back finds it either way (a bot that never landed simply works here
+  again). On a cloud workspace the window then sets the workspace's idle
+  suspend to two minutes; if that fails, it is a note, not a failed move.
+- **What a bundle may carry.** Everything is checked before anything on the
+  receiving side changes (Bots is not turned on, no copy is set aside): its
+  files' paths, count and size, and its duties, each of which must name the
+  bundle's own bot, appear once, and not take the id of anything else there.
+  A write that fails partway puts back the copy it replaced.
 - **A bot that has moved, as seen here.** It stays listed, with its place's
   name. Its duties are held ("runs on a cloud workspace now: its duties run
   there"), no chat starts for it, its sessions are held to plan mode, and
@@ -1203,6 +1212,11 @@ and comes back the same way. It lives in exactly one place at a time.
   (`/v1/cloud-workspace-bootstrap/wake-at`, `cloud_wake`). The service wakes
   a sleeping workspace then, and suspends it again after two idle minutes, so
   billing stops between duties.
+  This needs terminalx-saas with PRO-482 (branch
+  `raccoon/pro-482-bot-cloud-wake`). An older API answers 404, and the
+  runtime asks again only hourly; it also refuses the two-minute idle window,
+  so the workspace keeps its own window and sleeps through duty times until
+  that change ships.
 - **The phone.** The phone asks for `bots/1` on its own connection to the
   workspace and shows the person's bots' open questions on the workspace's
   screen. An answer goes straight to the bot there, with the Mac off.

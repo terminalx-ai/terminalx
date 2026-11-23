@@ -202,7 +202,7 @@ pub fn move_back(sink: &dyn EventSink, id: &str) -> Result<Bot> {
 /// Move what is here of bot `id` aside before a bundle replaces it, into the
 /// trash, never deleted: a copy left from before a move may hold notes the
 /// owner wrote since.
-fn set_aside(id: &str) -> Result<()> {
+fn set_aside(id: &str) -> Result<PathBuf> {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let trash = crate::store::ensure_dir(root()?.join("trash").join("bots-replaced").join(format!("{id}-{stamp}")))?;
     for (tree, _) in TREES {
@@ -216,12 +216,18 @@ fn set_aside(id: &str) -> Result<()> {
             std::fs::rename(&file, trash.join("suggestions.json")).with_context(|| format!("move {} aside", file.display()))?;
         }
     }
-    Ok(())
+    Ok(trash)
 }
 
-fn write_files(bundle: &Bundle) -> Result<()> {
+/// Every file of `bundle`, checked and decoded, with where it goes here:
+/// nothing is written until the whole bundle is known to be good.
+fn checked_files(bundle: &Bundle) -> Result<Vec<(PathBuf, Vec<u8>)>> {
     let id = &bundle.bot.id;
+    if bundle.files.len() > MAX_FILES {
+        return Err(refused(format!("The bundle carries more than {MAX_FILES} files.")));
+    }
     let mut bytes = 0u64;
+    let mut out = Vec::with_capacity(bundle.files.len());
     for file in &bundle.files {
         let relative = safe_relative(&file.path).ok_or_else(|| refused(format!("The bundle names a file outside the bot's folders: {}", file.path)))?;
         let dir = tree_dir(&file.tree, id)?.ok_or_else(|| refused(format!("The bundle names an unknown folder {}.", file.tree)))?;
@@ -233,7 +239,13 @@ fn write_files(bundle: &Bundle) -> Result<()> {
         if bytes > MAX_BYTES {
             return Err(refused(format!("The bundle carries more than {} MB.", MAX_BYTES / (1024 * 1024))));
         }
-        let path = dir.join(&relative);
+        out.push((dir.join(&relative), data));
+    }
+    Ok(out)
+}
+
+fn write_files(id: &str, files: Vec<(PathBuf, Vec<u8>)>) -> Result<()> {
+    for (path, data) in files {
         if let Some(parent) = path.parent() {
             crate::store::ensure_dir(parent.to_path_buf())?;
         }
@@ -242,6 +254,50 @@ fn write_files(bundle: &Bundle) -> Result<()> {
     // A home with no role file still reads as a bot's home.
     crate::store::ensure_dir(bot_store::home_dir(id)?)?;
     Ok(())
+}
+
+/// The bundle's duties, each checked to be one of its bot's: a duty that
+/// names another bot (or none) would run a prompt the sender wrote with
+/// another bot's access. An id is taken once, and never one of another
+/// duty or automation here.
+fn checked_duties(bundle: &Bundle) -> Result<()> {
+    let id = &bundle.bot.id;
+    let mut seen = std::collections::BTreeSet::new();
+    let here = automation_store::list()?;
+    for duty in &bundle.duties {
+        if duties::owner(duty).is_none_or(|owner| owner.id != *id) {
+            return Err(refused(format!("The bundle carries “{}”, which is not one of {}'s duties.", duty.name, bundle.bot.name)));
+        }
+        if duty.id.is_empty() || !seen.insert(duty.id.as_str()) {
+            return Err(refused(format!("The bundle carries the duty id {} twice.", duty.id)));
+        }
+        if let Some(other) = here.iter().find(|automation| automation.id == duty.id) {
+            if duties::owner(other).is_none_or(|owner| owner.id != *id) {
+                return Err(refused(format!("The duty id {} is taken here by something else.", duty.id)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Put back what [`set_aside`] moved, after a write that failed partway.
+fn restore_aside(id: &str, aside: &Path) {
+    for (tree, _) in TREES {
+        if let Ok(Some(dir)) = tree_dir(tree, id) {
+            let _ = std::fs::remove_dir_all(&dir);
+            if aside.join(tree).exists() {
+                let _ = std::fs::rename(aside.join(tree), &dir);
+            }
+        }
+    }
+    if let Ok(Some(dir)) = tree_dir("suggestions", id) {
+        let file = dir.join(format!("{id}.json"));
+        let _ = std::fs::remove_file(&file);
+        if aside.join("suggestions.json").exists() {
+            let _ = std::fs::rename(aside.join("suggestions.json"), &file);
+        }
+    }
+    let _ = std::fs::remove_dir(aside);
 }
 
 /// A duty as it runs here: in this runtime's home of the bot when it worked
@@ -269,8 +325,7 @@ pub fn import(sink: &dyn EventSink, bundle: Bundle, owner_user: Option<&str>) ->
     }
     let id = bundle.bot.id.clone();
     bot_store::home_dir(&id).map_err(|_| refused("The bundle's bot has an id that names no folder."))?;
-    // The bot's owner asked for it here, so Bots is on here: its duties run, and its owner can reach it.
-    turn_on()?;
+    // Everything is checked before anything here changes.
     if let Some(existing) = bot_store::get(&id)? {
         if existing.runs_on.here() {
             return Err(refused(format!("{} already lives here.", existing.name)));
@@ -281,8 +336,18 @@ pub fn import(sink: &dyn EventSink, bundle: Bundle, owner_user: Option<&str>) ->
             }
         }
     }
-    set_aside(&id)?;
-    write_files(&bundle)?;
+    checked_duties(&bundle)?;
+    let files = checked_files(&bundle)?;
+    if !super::SUPPORTED {
+        return Err(refused(super::UNSUPPORTED_MESSAGE));
+    }
+    // The bot's owner asked for it here, so Bots is on here: its duties run, and its owner can reach it.
+    turn_on()?;
+    let aside = set_aside(&id)?;
+    if let Err(error) = write_files(&id, files) {
+        restore_aside(&id, &aside);
+        return Err(error);
+    }
     if let Some(settings) = &bundle.duty_settings {
         if let Ok(settings) = serde_json::from_value::<duties::DutySettings>(settings.clone()) {
             duties::put_settings(&id, settings)?;

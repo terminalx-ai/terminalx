@@ -10,7 +10,7 @@ const { bringBotBack, moveBot, parts, PART_CHARS, BOT_IDLE_SUSPEND_MINUTES } = a
 
 const atlas = { id: "b1", name: "Atlas", runsOn: "thisMac" } as Bot;
 
-function deps(options: { capable?: boolean; failImport?: boolean; failRemove?: boolean; exported?: string } = {}) {
+function deps(options: { capable?: boolean; failImport?: boolean; failRemove?: boolean; exported?: string; there?: "yes" | "no" | "unknown"; exportMissing?: boolean } = {}) {
   const steps: [string, Record<string, unknown>][] = [];
   const calls: [string, Record<string, unknown>][] = [];
   const release = vi.fn();
@@ -21,6 +21,11 @@ function deps(options: { capable?: boolean; failImport?: boolean; failRemove?: b
     async call<T>(method: string, params: Record<string, unknown>): Promise<T> {
       calls.push([method, params]);
       if (method === "bots.import" && options.failImport) throw new Error("refused there");
+      if (method === "bots.list") {
+        if (options.there === "unknown") throw new Error("unreachable");
+        return { bots: { bots: options.there === "yes" ? [{ id: "b1" }] : [] } } as T;
+      }
+      if (method === "bots.export" && options.exportMissing) throw Object.assign(new Error("No bot of yours has the id b1 here."), { code: "not_found" });
       if (method === "bots.remove" && options.failRemove) throw new Error("gone away");
       if (method === "bots.import") return { bot: { ...atlas, runsOn: "thisMac" }, notes: ["A duty's project is not there."] } as T;
       if (method === "bots.export") return { transfer: "t1", parts: parts(exported).length } as T;
@@ -82,8 +87,22 @@ describe("moving a bot (PRO-482)", () => {
     expect(d.setIdleSuspend).not.toHaveBeenCalled();
   });
 
+  it("an import whose reply was lost but landed is not undone: the bot never runs in two places", async () => {
+    const d = deps({ failImport: true, there: "yes" });
+    const result = await moveBot(atlas, cloudPlace("org-1", "ws-1"), undefined, d.value);
+    expect(d.steps.map(([op]) => op)).toEqual(["moveExport", "moveOut"]);
+    expect(result.bot.runsOn).toBe("cloud:org-1:ws-1");
+    expect(d.setIdleSuspend).toHaveBeenCalled();
+  });
+
+  it("an import whose outcome cannot be learned leaves the bot resting here, not undone", async () => {
+    const d = deps({ failImport: true, there: "unknown" });
+    await expect(moveBot(atlas, cloudPlace("org-1", "ws-1"), undefined, d.value)).rejects.toThrow("not known whether Atlas reached");
+    expect(d.steps.map(([op]) => op)).toEqual(["moveExport", "moveOut"]);
+  });
+
   it("a move the other side refuses is undone here", async () => {
-    const d = deps({ failImport: true });
+    const d = deps({ failImport: true, there: "no" });
     await expect(moveBot(atlas, cloudPlace("org-1", "ws-1"), undefined, d.value)).rejects.toThrow("refused there");
     expect(d.steps.map(([op]) => op)).toEqual(["moveExport", "moveOut", "moveBack"]);
     expect(d.release).toHaveBeenCalledOnce();
@@ -113,6 +132,13 @@ describe("bringing a bot back (PRO-482)", () => {
     expect(d.calls.map(([method]) => method)).toEqual(["bots.export", "bots.exportPart", "bots.exportPart", "bots.remove"]);
     expect(d.steps).toEqual([["moveImport", { bundle: exported }]]);
     expect(result.bot.runsOn).toBe("thisMac");
+  });
+
+  it("a bot that never reached the other side works here again on Bring back", async () => {
+    const d = deps({ exportMissing: true, there: "no" });
+    const result = await bringBotBack(away, undefined, d.value);
+    expect(d.steps.map(([op]) => op)).toEqual(["moveBack"]);
+    expect(result.notes[0]).toContain("had not reached it");
   });
 
   it("a copy there that cannot be let go keeps running there, and this Mac's rests again", async () => {
