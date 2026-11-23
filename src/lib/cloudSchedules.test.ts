@@ -121,6 +121,10 @@ describe("scheduled tasks: what the dialog says", () => {
     expect(runText({ state: "failed", category: "timed-out" })).toBe("Failed: it ran past its time limit and was stopped");
     expect(runText({ state: "skipped", category: "daily-cap" })).toBe("Skipped: 24 runs had already started in 24 hours");
     expect(runText({ state: "failed", category: "something-new" })).toBe("Failed: something-new");
+    const webhook = { state: "failed", category: "webhook-prompt-too-large" };
+    expect(runText(webhook)).toBe("Failed: webhook-prompt-too-large");
+    expect(runText(webhook, true)).toBe("Failed: the prompt exceeded 32 KiB after inserting the webhook payload");
+    expect(runText({ ...webhook, category: "webhook-payload-forbidden" }, true)).toContain("a command or a forbidden file mention");
     expect(scheduleErrorMessage("cloud_schedule_cleanup_pending")).toContain("Pause the task");
     expect(scheduleErrorMessage("cloud_schedule_needs_approval")).toContain("Delete the task and make it again");
     expect(scheduleErrorMessage("something_new")).toBe("That did not work (something_new).");

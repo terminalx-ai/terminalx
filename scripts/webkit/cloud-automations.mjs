@@ -23,7 +23,13 @@ let schedule = {id:'a1',workspaceId:'w1',name:'PR triage',createdBy:'u1',agent:'
 api.accountStatus = async () => ({state:'signed-in',identity:{email:'fixture@example.test',name:'Fixture',organization:'Automation lab',organizationId:'o1'},context:{account:'fixture',scope:'profile',revision:'r1'},organizations:[{id:'o1',name:'Automation lab',role:'owner',isPersonal:false,cloud:{enabled:true,flags:{'organization.setup-flow.v1':webhookEnabled}}}],expiresAt:null,lastError:null});
 api.phase2DesktopContractsAvailable = async () => !held;
 api.cloudAutomations = async () => ({schedules:[schedule]});
-api.cloudAutomation = async () => {calls.push({kind:'detail'});return ({schedule,runs:[{id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},{id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},{id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:'run-archived',archivedAt:4}]});};
+api.cloudAutomation = async () => {
+  calls.push({kind:'detail'});
+  if (schedule.webhookTrigger) return {schedule,runs:[
+    {id:'webhook-failed',scheduledFor:1,trigger:'webhook',state:'failed',category:'webhook-prompt-too-large'},
+    {id:'manual-completed',scheduledFor:2,trigger:'manual',state:'completed'},
+  ]};
+  return ({schedule,runs:[{id:'pending',scheduledFor:1,trigger:'github',state:'creating-workspace',workspaceId:null},{id:'allocated',scheduledFor:2,trigger:'github',state:'completed',workspaceId:'run-own',archiveAt:3},{id:'archived',scheduledFor:3,trigger:'github',state:'completed',workspaceId:'run-archived',archivedAt:4}]});};
 api.cloudWorkspaceRepositories = async () => ({configured:true,repositories:[{id:'row1',fullName:'acme/repo',state:'accessible'},{fullName:'acme/no-id',state:'accessible'}]});
 api.cloudAutomationEstimate = async (input) => {calls.push({kind:'estimate',input});return {estimate,supported:true,nextRunAt:null};};
 api.cloudAutomationCreate = async (input) => {
@@ -121,7 +127,10 @@ try {
   await webhook.getByText('New secret · just now',{exact:true}).waitFor();
   await page.getByText('Webhook secret rotated',{exact:true}).waitFor();
   assert.equal(await page.getByText(/^rotate-b{72}$/).count(),0,'closing removes the rotated secret immediately');
-  await checkLayout(dialog,'rotated state');
+  await dialog.getByRole('button',{name:'Show runs',exact:true}).click();
+  await dialog.getByTestId('automation-run-webhook-failed').getByText(/prompt exceeded 32 KiB.*· Webhook/).waitFor();
+  await dialog.getByTestId('automation-run-manual-completed').getByText(/Completed · Manual/).waitFor();
+  await checkLayout(dialog,'rotated state and run history');
   assert.deepEqual(errors,[]);await page.close();console.log('ok cloud-automations '+width+'px: real form, single trigger, filters, authoritative IDs, fresh quote, run states and webhook create/rotate');
  }
  const page=await browser.newPage({viewport:{width:390,height:800}});

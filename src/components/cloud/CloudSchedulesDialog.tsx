@@ -312,7 +312,7 @@ function ScheduleRow({
       )}
       <p className="text-muted-foreground">
         {next && !paused ? `Next run ${next}. ` : ""}
-        {last ? `Last run ${whenText(last.scheduledFor)}: ${runText(last)}.` : "It has not run yet."}
+        {last ? `Last run ${whenText(last.scheduledFor)}: ${runText(last, webhookAvailable)}.` : "It has not run yet."}
       </p>
       <ul className="text-faint">
         {automationCostLines(schedule.estimate, schedule.maxRunMinutes, schedule.workspaceMode === "fresh", triggerKind)
@@ -327,7 +327,7 @@ function ScheduleRow({
         {showWebhook && latestWebhook && <WebhookDetails trigger={latestWebhook} orgId={orgId} scheduleId={schedule.id} disabled={busy} onRotated={setRotatedTrigger} />}
       </>}
       <Button size="xs" variant="ghost" onClick={() => setShowRuns((value) => !value)}>{showRuns ? "Hide runs" : "Show runs"}</Button>
-      {showRuns && <CloudAutomationRuns schedule={schedule} orgId={orgId} />}
+      {showRuns && <CloudAutomationRuns schedule={schedule} orgId={orgId} webhookAvailable={webhookAvailable} />}
       {confirming === "resume" && !blocked && (
         <p className="flex flex-wrap items-center gap-2 rounded-md bg-well/40 px-2 py-1.5" data-testid="cloud-schedule-resume-confirm">
           <span>Resuming starts billed compute by itself again on matching triggers, and the task then runs under your account.</span>
@@ -354,7 +354,7 @@ function ScheduleRow({
   );
 }
 
-function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto; orgId: string }) {
+function CloudAutomationRuns({ schedule, orgId, webhookAvailable }: { schedule: CloudAutomationDto; orgId: string; webhookAvailable: boolean }) {
   const capture = useAutomationFence();
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof api.cloudAutomation>> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -370,8 +370,10 @@ function CloudAutomationRuns({ schedule, orgId }: { schedule: CloudAutomationDto
   if (!detail) return <p>Reading runs…</p>;
   return <ul aria-label="Runs">{detail.runs.length === 0 && <li>No runs yet.</li>}{detail.runs.map((run) => {
     const workspaceId = run.workspaceId && !(detail.schedule.workspaceMode === "fresh" && run.workspaceId === detail.schedule.workspaceId) ? run.workspaceId : null;
+    const trigger = webhookAvailable && run.trigger === "webhook" ? "Webhook"
+      : webhookAvailable && run.trigger === "manual" ? "Manual" : run.trigger;
     return <li key={run.id} data-testid={`automation-run-${run.id}`}>
-      <p>{whenText(run.scheduledFor)} · {runText(run)} · {run.trigger}</p>
+      <p>{whenText(run.scheduledFor)} · {runText(run, webhookAvailable)} · {trigger}</p>
       {run.workBranch && <p>Branch: {run.workBranch}</p>}
       {run.archivedAt ? <p>Archived {whenText(run.archivedAt)}</p> : run.archiveAt ? <p>Archive due {whenText(run.archiveAt)}; archival not observed.</p> : null}
       {workspaceId ? <Button size="xs" variant="ghost" onClick={() => openCloudSession(run.sessionId ? cloudSessionKey(orgId, workspaceId, run.sessionId) : cloudWorkspaceKey(orgId, workspaceId), run.tabId)}>Open run workspace</Button> : <p>Run workspace not allocated.</p>}

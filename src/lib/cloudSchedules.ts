@@ -196,11 +196,17 @@ const RUN_CATEGORY: Record<string, string> = {
   "file-mention-forbidden": "its prompt mentions a file outside the project",
 };
 
+const WEBHOOK_RUN_CATEGORY: Record<string, string> = {
+  "webhook-payload-forbidden": "the webhook payload turned the prompt into a command or a forbidden file mention",
+  "webhook-prompt-too-large": "the prompt exceeded 32 KiB after inserting the webhook payload",
+};
+
 /** "Failed: it ran past its time limit and was stopped". */
-export function runText(run: Pick<CloudScheduleRun, "state" | "category">): string {
+export function runText(run: Pick<CloudScheduleRun, "state" | "category">, webhookAvailable = false): string {
   const state = RUN_STATE[run.state] ?? run.state;
   if (!run.category || run.state === "completed") return state;
-  return `${state}: ${RUN_CATEGORY[run.category] ?? run.category}`;
+  const webhookReason = webhookAvailable ? WEBHOOK_RUN_CATEGORY[run.category] : undefined;
+  return `${state}: ${webhookReason ?? RUN_CATEGORY[run.category] ?? run.category}`;
 }
 
 /** A time in the reader's own zone: "Oct 12, 09:00". */
