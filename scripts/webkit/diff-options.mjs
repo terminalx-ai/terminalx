@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // PRO-226: real diff controls, CodeMirror and media decoders in headless WebKit.
 import assert from "node:assert/strict";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 function pdf(color) {
@@ -31,8 +32,7 @@ const source = {
 };
 createRoot(document.getElementById('root')).render(<div style={{width: '100%', height: '100vh'}}><ChangesPanel source={source} events={[]} version={0} active live={false}/></div>);
 `;
-const server = await createServer({ server: { host: "127.0.0.1", port: 0, strictPort: false }, plugins: [{
-  name: "diff-regression",
+const server = await createCheckServer({ server: { host: "127.0.0.1" }, plugins: [{
   resolveId(id) { if (id === "/diff-regression.tsx") return "\0diff-regression.tsx"; },
   async load(id) { if (id === "\0diff-regression.tsx") return (await transformWithEsbuild(entry, "diff-regression.tsx", { loader: "tsx", jsx: "automatic" })).code; },
   configureServer(server) { server.middlewares.use("/diff-test", async (_request, response) => {

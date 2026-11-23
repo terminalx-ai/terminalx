@@ -4,7 +4,8 @@
 // nothing overflows the editor sideways and no two fields overlap.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -27,8 +28,7 @@ a.automation_source_preview = ({source}) => source.kind === 'linearIssue'
   : [{id:'12',identifier:'#12',title:'Cache the repository list between refreshes so the sidebar stops flickering',url:'https://github.com/acme/widgets/pull/12',detail:'feature/cache-repository-list → main · draft'}];
 `;
 const stub = readFileSync(new URL("./tauri-stub.js", import.meta.url), "utf8");
-const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, plugins: [{
-  name: "automation-sources-regression",
+const server = await createCheckServer({ server: { host: "127.0.0.1" }, plugins: [{
   resolveId(id) { if (id === "/automation-sources-regression.tsx") return "\0automation-sources-regression.tsx"; },
   async load(id) { if (id === "\0automation-sources-regression.tsx") return (await transformWithEsbuild(entry, "automation-sources-regression.tsx", { loader: "tsx", jsx: "automatic" })).code; },
   configureServer(server) { server.middlewares.use("/automation-sources-test", async (_req, res) => { res.setHeader("Content-Type", "text/html"); res.end(await server.transformIndexHtml("/automation-sources-test", '<div id="root"></div><script type="module" src="/automation-sources-regression.tsx"></script>')); }); },

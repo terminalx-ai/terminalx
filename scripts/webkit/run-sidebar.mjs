@@ -112,7 +112,6 @@ try {
 
     // Off: every session is its own row, as before.
     const off = await start({ enabled: false, foldSecond: true });
-    await off.list.getByRole("button", { name: /View all/ }).click().catch(() => {});
     await off.list.getByRole("button", { name: /Fix duplicate permission cards/ }).waitFor();
     const soloOff = await off.list.locator("li", { has: off.page.getByRole("button", { name: /Fix duplicate permission cards/ }) }).last().innerHTML();
     const offChecks = {

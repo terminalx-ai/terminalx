@@ -2,10 +2,13 @@
 // PRO-293: the conflict view in a centre tab and the Merge in progress card, wide and narrow.
 // A fake GitSource stands in for the checkout; the components are the app's own, rendered through Vite.
 import assert from "node:assert/strict";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
-const SHOTS = process.env.MERGE_CONFLICTS_SHOTS
-  ?? "/private/tmp/claude-501/-Users-developer-code-ai-raccoon--raccoon-worktrees-pro-293-resolve-merge-conflicts-in-the-a/8a20d9ee-0694-4452-ad96-be237749a02a/scratchpad/shots";
+// Pictures go to MERGE_CONFLICTS_SHOTS, by default scripts/webkit/output/merge-conflicts; that default folder ignores
+// itself. (It was a path under one Mac's /private/tmp, which no other host has.)
+const output = fileURLToPath(new URL("./output/", import.meta.url));
+const SHOTS = process.env.MERGE_CONFLICTS_SHOTS ?? `${output}merge-conflicts`;
 
 const entry = `
 import React from 'react';
@@ -91,9 +94,9 @@ window.__TAURI_INTERNALS__ = {
 };`;
 
 async function serve() {
-  const { createServer, transformWithEsbuild } = await import("vite");
-  const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, plugins: [{
-    name: "merge-conflicts-check",
+  const { transformWithEsbuild } = await import("vite");
+  const { createCheckServer } = await import("./vite-page.mjs");
+  const server = await createCheckServer({ server: { host: "127.0.0.1" }, plugins: [{
     resolveId(id) { if (id === "/merge-conflicts.tsx") return "\0merge-conflicts.tsx"; },
     async load(id) { if (id === "\0merge-conflicts.tsx") return (await transformWithEsbuild(entry, "merge-conflicts.tsx", { loader: "tsx", jsx: "automatic" })).code; },
     configureServer(server) {
@@ -127,8 +130,9 @@ try {
   server = await serve();
   const url = `http://127.0.0.1:${server.httpServer.address().port}/merge-conflicts-test`;
   await mkdir(SHOTS, { recursive: true });
-  const { webkit } = await import("playwright");
-  browser = await webkit.launch();
+  if (!process.env.MERGE_CONFLICTS_SHOTS) await writeFile(`${output}.gitignore`, "*\n");
+  const { launch } = await import("./harness.mjs");
+  browser = await launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));

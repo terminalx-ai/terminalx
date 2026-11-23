@@ -9,7 +9,8 @@ import { launch, open, serve } from "./harness.mjs";
 
 const shots = process.env.WEBKIT_LAYOUT_SCREENSHOTS;
 if (shots) await mkdir(shots, { recursive: true });
-const mod = process.platform === "darwin" ? "Meta" : "Control";
+// ⌘: every page is the Mac app, whatever the host (harness.mjs).
+const mod = "Meta";
 
 const server = await serve();
 const browser = await launch();
