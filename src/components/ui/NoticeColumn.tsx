@@ -11,6 +11,10 @@ const AVOID = "[data-composer-box], [data-toast-avoid], [data-held-tray]";
 /** How tall a stack in the bottom corner is taken to be when deciding where it goes. */
 const BAND = 160;
 
+/** The top column's top edge (`top-22`), and what it keeps above the composer it stops at. */
+const TOP_EDGE = 88;
+const CLEARANCE = 8;
+
 const COLUMN = "pointer-events-none fixed z-(--z-notice) flex max-w-[calc(100vw-2rem)] flex-col gap-2";
 
 type Place = { top: string; bottom: string; width: string; widthPx: number; right: number; bottomInset: number };
@@ -42,7 +46,8 @@ const subscribe = (listener: () => void) => {
 export function NoticeColumn({ waiting, children, window: kind = "main" }: { waiting?: ReactNode; children: ReactNode; window?: "main" | "floating" }) {
   const place = PLACES[kind];
   const [element, setElement] = useState<HTMLDivElement | null>(null);
-  const up = useComposerInCorner(place, element);
+  const floor = useComposerInCorner(place, element);
+  const up = floor !== null;
   const ref = useCallback((node: HTMLDivElement | null) => {
     setStack(node);
     setElement(node);
@@ -50,7 +55,8 @@ export function NoticeColumn({ waiting, children, window: kind = "main" }: { wai
   const toasts = <div ref={ref} data-notice-stack="" className="flex min-h-0 flex-col gap-2">{children}</div>;
   return (
     <>
-      <div data-notice-column="top" className={cn(COLUMN, place.top, place.width)}>
+      {/* With the toasts up here a tall stack stops above the composer and scrolls within itself, never over Send. */}
+      <div data-notice-column="top" className={cn(COLUMN, place.top, place.width, up && "overflow-y-auto overscroll-contain")} style={up ? { maxHeight: Math.max(floor - TOP_EDGE - CLEARANCE, 96) } : undefined}>
         {waiting}
         {up && toasts}
       </div>
@@ -60,12 +66,13 @@ export function NoticeColumn({ waiting, children, window: kind = "main" }: { wai
 }
 
 /**
- * Whether a composer (or a card that answers to it) reaches under the bottom-right corner. Read when
+ * The top of whatever composer (or card that answers to it) reaches under the bottom-right corner, or
+ * null when nothing does. Read when
  * the window opens and resizes, every second as views and panels open and close, and whenever a toast
  * comes or goes, before it is painted: one that comes just after a chat opened goes straight up.
  */
-function useComposerInCorner(place: Place, toasts: HTMLElement | null): boolean {
-  const [up, setUp] = useState(false);
+function useComposerInCorner(place: Place, toasts: HTMLElement | null): number | null {
+  const [floor, setFloor] = useState<number | null>(null);
   const { right, bottomInset, widthPx } = place;
   useLayoutEffect(() => {
     const measure = () => {
@@ -73,8 +80,8 @@ function useComposerInCorner(place: Place, toasts: HTMLElement | null): boolean 
       const corner = { left: window.innerWidth - right - columnWidth, right: window.innerWidth - right, bottom: window.innerHeight - bottomInset, top: window.innerHeight - bottomInset - BAND };
       const under = [...document.querySelectorAll<HTMLElement>(AVOID)]
         .map((box) => box.getBoundingClientRect())
-        .some((box) => box.width > 0 && box.height > 0 && box.right > corner.left && box.left < corner.right && box.bottom > corner.top && box.top < corner.bottom);
-      setUp(under);
+        .filter((box) => box.width > 0 && box.height > 0 && box.right > corner.left && box.left < corner.right && box.bottom > corner.top && box.top < corner.bottom);
+      setFloor(under.length ? Math.round(Math.min(...under.map((box) => box.top))) : null);
     };
     measure();
     const timer = window.setInterval(measure, 1000);
@@ -89,7 +96,7 @@ function useComposerInCorner(place: Place, toasts: HTMLElement | null): boolean 
       observer?.disconnect();
     };
   }, [right, bottomInset, widthPx, toasts]);
-  return up;
+  return floor;
 }
 
 /**

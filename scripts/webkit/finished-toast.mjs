@@ -73,6 +73,8 @@ try {
           composer: composer.toJSON(),
           inside: card.left >= 0 && card.top >= 0 && card.right <= innerWidth && card.bottom <= innerHeight,
           offComposer: apart(card, composer),
+          // The column the toast is in stops above the composer, however many notices it holds.
+          columnAbove: box(document.querySelector('[data-notice-column="top"]')).bottom <= composer.top,
           offFooter: !footers.length || apart(card, footers.at(-1)),
           upTop: card.bottom < composer.top && card.top < innerHeight / 2,
           belowTabs: card.top >= 38,
@@ -82,6 +84,7 @@ try {
       if (shots) await page.screenshot({ path: `${shots}/finished-toast-${width}-${colorScheme}.png` });
       assert.ok(layout.inside, `${label}: notice inside the window ${JSON.stringify(layout)}`);
       assert.ok(layout.offComposer, `${label}: notice clear of the composer ${JSON.stringify(layout)}`);
+      assert.ok(layout.columnAbove, `${label}: the notice column stops above the composer ${JSON.stringify(layout)}`);
       assert.ok(layout.offFooter, `${label}: notice clear of the last turn's footer ${JSON.stringify(layout)}`);
       assert.ok(layout.upTop && layout.belowTabs, `${label}: notice top right, under the title bar ${JSON.stringify(layout)}`);
       console.log(`ok ${label}: finished notice at ${Math.round(layout.card.left)},${Math.round(layout.card.top)}, clear of the composer and the last turn's footer (${layout.footers} footers on screen)`);

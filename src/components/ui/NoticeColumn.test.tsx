@@ -32,6 +32,14 @@ it("puts the toasts top right, with the notices that wait, when a composer reach
   expect(columnOf("Notifications are off")).toBe("top");
 });
 
+it("stops the top column above the composer, so a tall stack scrolls instead of covering Send", () => {
+  composer({ left: 494, right: 1214, top: 775, bottom: 860 });
+  mount();
+  const top = screen.getByText("Claude Code finished").closest<HTMLElement>("[data-notice-column]")!;
+  expect(top.style.maxHeight).toBe(`${775 - 88 - 8}px`);
+  expect(top.className).toContain("overflow-y-auto");
+});
+
 // A settings or issues page: its own controls are up top, so the toasts keep the bottom corner.
 it("keeps the toasts in the bottom corner when no composer is under it", () => {
   mount();
