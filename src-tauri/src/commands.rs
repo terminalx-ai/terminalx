@@ -6425,8 +6425,8 @@ pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<
 
 /// Another conversation with the bot, in its home folder.
 #[tauri::command]
-pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
-    bots_call(state, "newChat", serde_json::json!({"id": id})).await
+pub async fn bot_new_chat(state: State<'_, AppState>, id: String, org: Option<String>) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "newChat", serde_json::json!({"id": id, "org": org})).await
 }
 
 /// The owner said no to a resume asked for from the `terminalx` CLI (PRO-468).

@@ -1029,7 +1029,7 @@ fn deleting_the_chat_a_hand_off_is_worked_on_in_fails_it_and_tells_its_sender() 
     // Failed once: there is nothing left to answer, and deleting a chat with no open hand-off changes nothing.
     assert!(team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "about": number, "text": "Late"})).unwrap_err().message.contains("failed already"));
     let revision = handoffs::read().unwrap().revision;
-    let spare = crate::bots::chat::new_chat(team.service.sink.as_ref(), &team.sentry).unwrap();
+    let spare = crate::bots::chat::new_chat(team.service.sink.as_ref(), &team.sentry, None).unwrap();
     team.service.manager.delete_session(&spare.id).unwrap();
     assert_eq!(handoffs::read().unwrap().revision, revision, "a chat no hand-off is worked on in is only deleted");
     assert!(sent().is_empty());
@@ -1047,7 +1047,7 @@ fn what_is_sent_to_a_closed_chat_reaches_the_bots_home_chat() {
     let atlas_home = home_chat(&team.atlas);
 
     // Handed from a chat of Atlas's beside its home chat, and worked on in a chat of Sentry's that is then archived.
-    let side = crate::bots::chat::new_chat(sink.as_ref(), &team.atlas).unwrap();
+    let side = crate::bots::chat::new_chat(sink.as_ref(), &team.atlas, None).unwrap();
     team.service.manager.install_review_test_cli(&side.id, &side.tabs[0].id, "atlas-side-secret");
     let number = team.as_chat(&side, "atlas-side-secret", "bots.handoff", json!({"to": "sentry", "title": "Check the runner"})).unwrap()["handoff"]["number"].as_u64().unwrap();
     let handoff = team.handoff(number);

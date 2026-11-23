@@ -66,6 +66,13 @@ pub struct BotRef {
     /// The bot's home chat, the one made at hire.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub home: bool,
+    /// The place the conversation works in (PRO-483): `personal` or an
+    /// organisation's id, as the bot's `works_in` has it. Only that place's
+    /// notes, work items and cloud workspaces are its. Absent on a chat an
+    /// earlier build made: it works in the bot's first place
+    /// (`memory::working_place`), as it did then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
 }
 
 /// The bot `entry` belongs to, if it belongs to one. A value this build cannot read is none.
@@ -75,6 +82,22 @@ pub fn session_bot(entry: &SessionEntry) -> Option<BotRef> {
 
 pub fn set_session_bot(entry: &mut SessionEntry, bot: &BotRef) {
     entry.unknown.insert(SESSION_KEY.into(), serde_json::to_value(bot).expect("a bot reference is JSON"));
+}
+
+/// The place `entry` works in for its bot (PRO-483), as it was recorded: its
+/// chat's, or that of the chat whose session started it. `None` for a
+/// session that records none (made by an earlier build, or a duty's run),
+/// which works in the bot's first place.
+pub fn session_org(entry: &SessionEntry) -> Option<String> {
+    match session_bot(entry) {
+        Some(reference) => reference.org,
+        None => Some(entry.unknown.get(STARTED_KEY)?.get("org")?.as_str()?.to_owned()),
+    }
+}
+
+/// The place a conversation of `bot` in `entry` works in (PRO-483): see [`super::memory::place_of`].
+pub fn session_place(bot: &Bot, entry: &SessionEntry) -> super::memory::Place {
+    super::memory::place_of(bot, session_org(entry).as_deref())
 }
 
 /// The bot `entry` acts for: the bot of its chat, or of the session that started it.
@@ -89,8 +112,14 @@ pub fn inherit(entry: &mut SessionEntry) {
     if acting_bot(entry).is_some() {
         return;
     }
-    let Some(id) = entry.parent.as_ref().and_then(|parent| index::get(&parent.session_id).ok()).and_then(|parent| acting_bot(&parent)) else { return };
-    entry.unknown.insert(STARTED_KEY.into(), serde_json::json!({ "id": id }));
+    let Some(parent) = entry.parent.as_ref().and_then(|parent| index::get(&parent.session_id).ok()) else { return };
+    let Some(id) = acting_bot(&parent) else { return };
+    // It works in the place its starter works in (PRO-483): that place's notes and work, never another's.
+    let mut started = serde_json::json!({ "id": id });
+    if let Some(org) = session_org(&parent) {
+        started["org"] = serde_json::json!(org);
+    }
+    entry.unknown.insert(STARTED_KEY.into(), started);
     let limits: Vec<Option<ModeLimit>> = entry.tabs.iter().map(|tab| tab_limit(entry, tab)).collect();
     for (tab, limit) in entry.tabs.iter_mut().zip(limits) {
         if let Some(limit) = limit {
@@ -103,7 +132,7 @@ pub fn inherit(entry: &mut SessionEntry) {
 /// a fork of a session a bot started still acts for the bot.
 pub fn keep_on_fork(source: &SessionEntry, fork: &mut SessionEntry) {
     if let Some(bot) = session_bot(source) {
-        set_session_bot(fork, &BotRef { id: bot.id, home: false });
+        set_session_bot(fork, &BotRef { id: bot.id, home: false, org: bot.org });
     } else if let Some(started) = source.unknown.get(STARTED_KEY) {
         fork.unknown.insert(STARTED_KEY.into(), started.clone());
     }
@@ -253,26 +282,36 @@ fn new_tab(bot: &Bot) -> crate::session_ops::NewTab {
 /// One find-or-make at a time, so two asks for a missing home chat make one.
 static HOME_CHAT_LOCK: Mutex<()> = Mutex::new(());
 
-/// A new chat with `bot` in its home folder; the home chat when `home`.
-fn create_chat(sink: &dyn EventSink, bot: &Bot, home: bool) -> Result<SessionEntry> {
-    create_chat_titled(sink, bot, home, None)
+/// A new chat with `bot` in its home folder; the home chat when `home`. It
+/// works in `org` (`personal` or an organisation the bot works in), or in
+/// the bot's first place when `None`.
+fn create_chat(sink: &dyn EventSink, bot: &Bot, home: bool, org: Option<&str>) -> Result<SessionEntry> {
+    create_chat_marked(sink, bot, home, None, org, |_| {})
 }
 
-/// A chat of `bot` for work another bot handed it (PRO-475): one of its chats, under its own access and pause.
+/// A chat of `bot` for work another bot handed it (PRO-475): one of its chats, under its own access and pause, in its first place.
 pub(crate) fn work_chat(sink: &dyn EventSink, bot: &Bot, title: String) -> Result<SessionEntry> {
-    create_chat_titled(sink, bot, false, Some(title))
+    create_chat_marked(sink, bot, false, Some(title), None, |_| {})
 }
 
-/// A chat of `bot` that a mention on GitHub or Linear started (PRO-480), marked by `mark` with where it came from.
-pub(crate) fn channel_chat(sink: &dyn EventSink, bot: &Bot, title: String, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
-    create_chat_marked(sink, bot, false, Some(title), mark)
+/// A chat of `bot` that a mention on GitHub or Linear started (PRO-480), marked by `mark` with where it came from,
+/// in `org`: the organisation the person who asked was added from (PRO-483), or the bot's first place.
+pub(crate) fn channel_chat(sink: &dyn EventSink, bot: &Bot, title: String, org: Option<&str>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    create_chat_marked(sink, bot, false, Some(title), org, mark)
 }
 
-fn create_chat_titled(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option<String>) -> Result<SessionEntry> {
-    create_chat_marked(sink, bot, home, title, |_| {})
+/// The place a new chat of `bot` works in: `org` when the bot works there, the bot's first place when `None`.
+pub fn chat_org(bot: &Bot, org: Option<&str>) -> Result<String> {
+    use super::memory::{place_of, working_place, Place};
+    let Some(org) = org.map(str::trim).filter(|org| !org.is_empty()) else { return Ok(working_place(bot).key().to_owned()) };
+    match place_of(bot, Some(org)) {
+        Place::Bot => Err(super::refused(format!("{} does not work in {org}. Turn it on under Works in, in the bot's settings, first.", bot.name))),
+        place => Ok(place.key().to_owned()),
+    }
 }
 
-fn create_chat_marked(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option<String>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+fn create_chat_marked(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option<String>, org: Option<&str>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    let org = chat_org(bot, org)?;
     if !takes_bot_instructions(&bot.harness) {
         return Err(super::refused(unheld_agent(&bot.name, &bot.harness)));
     }
@@ -283,7 +322,7 @@ fn create_chat_marked(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option
         tab: Some(new_tab(bot)),
         ..Default::default()
     };
-    let reference = BotRef { id: bot.id.clone(), home };
+    let reference = BotRef { id: bot.id.clone(), home, org: Some(org) };
     crate::session_ops::create_quick_chat_marked(sink, req, |entry| {
         set_session_bot(entry, &reference);
         mark(entry);
@@ -304,13 +343,15 @@ pub fn home_chat(sink: &dyn EventSink, id: &str) -> Result<SessionEntry> {
             Ok(back.into_iter().next().unwrap_or(entry))
         }
         Some(entry) => Ok(entry),
-        None => create_chat(sink, &bot, true),
+        None => create_chat(sink, &bot, true, None),
     }
 }
 
-/// Another conversation with the bot, beside its home chat.
-pub fn new_chat(sink: &dyn EventSink, id: &str) -> Result<SessionEntry> {
-    create_chat(sink, &super::get(id)?, false)
+/// Another conversation with the bot, beside its home chat, in `org`
+/// (`personal` or an organisation it works in; PRO-483), or in its first
+/// place when `None`.
+pub fn new_chat(sink: &dyn EventSink, id: &str, org: Option<&str>) -> Result<SessionEntry> {
+    create_chat(sink, &super::get(id)?, false, org)
 }
 
 /// Hire a bot and make its home chat. A home chat that cannot be made now
@@ -336,7 +377,7 @@ pub fn call(sink: &dyn EventSink, operation: &str, params: &Value) -> Option<Res
     let id = || params["id"].as_str().map(str::to_owned).ok_or_else(|| super::refused("id must be a string"));
     let answer = match operation {
         "homeChat" => id().and_then(|id| home_chat(sink, &id)).and_then(|entry| Ok(serde_json::to_value(entry)?)),
-        "newChat" => id().and_then(|id| new_chat(sink, &id)).and_then(|entry| Ok(serde_json::to_value(entry)?)),
+        "newChat" => id().and_then(|id| new_chat(sink, &id, params["org"].as_str())).and_then(|entry| Ok(serde_json::to_value(entry)?)),
         _ => return None,
     };
     Some(answer)
@@ -570,7 +611,9 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
         }
     };
     let role = read_home_file(&bot.id, bot_store::ROLE_FILE);
-    let memory = super::memory::for_conversation(&bot);
+    // Only the notes of the place this conversation works in (PRO-483).
+    let place = session_place(&bot, entry);
+    let memory = super::memory::for_conversation(&bot, &place);
     let home = super::home(&bot).map(|home| home.to_string_lossy().into_owned()).unwrap_or_else(|| entry.cwd.clone());
     // The home chat's first conversation: a fresh tab, not one carried on from another.
     let first_run = reference.home && tab.provider_session_id.is_none() && tab.fork_from.is_none() && tab.continuation.is_none() && entry.tabs.first().is_some_and(|first| first.id == tab.id);
@@ -581,7 +624,7 @@ pub fn launch_note(entry: &SessionEntry, tab: &TabEntry) -> Option<String> {
         Some(("how you post on GitHub and Linear", super::channels::launch_note(&bot))),
         // PRO-481: where its replies to a chat app go.
         super::chat_apps::launch_note(&bot).map(|apps| ("note on Slack and Telegram", apps)),
-        super::items::launch_note(&bot.id).map(|items| ("work items (`terminalx bots items list` shows them)", items)),
+        super::items::launch_note(&bot, &place).map(|items| ("work items (`terminalx bots items list` shows them)", items)),
         // PRO-475: the reporting line, hand-offs, and the team brief every bot reads.
         super::handoffs::launch_note(&bot, in_plan).map(|team| ("note on working with other bots, with open hand-offs and the team brief (`terminalx bots handoffs` shows the hand-offs)", team)),
     ];
