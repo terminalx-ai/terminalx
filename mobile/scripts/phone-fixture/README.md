@@ -1,0 +1,80 @@
+# Phone fixture (22.01–22.07)
+
+The production app (its root layout, native tab bar and every screen) with
+only `src/state/AppProvider.tsx` swapped for `fixture-app.tsx` and
+`src/cloud/CloudProvider.tsx` for `fixture-cloud.tsx`. The real `HostApi` runs
+over a fake connection that answers the Mac's requests with placeholder data:
+
+- five machines: two paired Macs online, two offline, and one on the account only;
+- nine sessions: two waiting on the person, three working, one merged, one with failing checks, and so on;
+- a conversation with earlier turns, a reply, and two commands.
+
+The Cloud tab runs the real `CloudCatalog` and `CloudApi`; only `fetch` is
+answered in memory. It has two organizations with workspaces (one working, two
+stopped, one waiting on an answer) and five without any. One stopped workspace
+has a saved conversation: its checkpoint is sealed with the app's own crypto
+and opened on the phone by the real reader, with a placeholder key.
+
+There is no pairing, account, network or private data. Each `flow-22.0N.yaml`
+drives the app with Maestro and saves a screenshot for each state that design
+22.0N draws. `flow-22.00-setup.yaml` picks the Ember theme the boards use.
+
+The scenario is passed as a launch argument (`arguments: { fixtureScenario: … }`
+in a flow), and it reaches the app through `Settings.get("fixtureScenario")`.
+
+| Scenario | What the phone sees |
+| --- | --- |
+| `connected` (default) | Connected to Studio MacBook |
+| `connecting` | Still connecting, before the wait counts as long |
+| `waiting` | Connecting for longer than `WAITING_AFTER_MS`: "Waiting for Mac…" |
+| `updating` | Connected, and the conversation's first sync never ends |
+| `offline` | No internet |
+| `held` | The Mac holds the phone off ("Disconnected on your Mac") |
+| `slow-refresh` | Connected, and a pull to refresh takes 6 s |
+
+`fixtureCloud: loading` holds the first read of the cloud list, so the Cloud
+tab shows its placeholder rows. `openRoute: /cloud` with `openWorkspace: <id>`
+opens a workspace at launch, as a tap on its row does.
+
+`fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
+the session screen (working, a question, a table, done).
+
+Notifications (22.07) run the app's own path: the fixture saves 22.07's choices
+through the notification store and its machines into the hosts list, and the
+Mac answers `notifications.missedSince`. `fixtureLockScreen: everything` (or
+`sessionName`, `nothing`) turns that lock-screen level on and has the Mac send
+three notifications from while the phone was away; the app filters, words and
+schedules them, and `flow-22.07.yaml` shoots the lock screen. iOS asks before
+anything reaches the phone, so the flow asks it from the page's switch.
+`flow-22.07-off.yaml` turns notifications off in iOS Settings (Maestro's launch
+`permissions` cannot deny them on a simulator) and back on afterwards. The
+notifications are headed "Phone fixture", the copy's own app name.
+
+1. Build the simulator app once, as `pnpm ios:simulator` does, but without installing it:
+
+   ```sh
+   cd mobile && export APP_VARIANT=production
+   pnpm exec expo prebuild --platform ios --no-clean
+   xcodebuild -workspace ios/TerminalX.xcworkspace -scheme TerminalX -configuration Release \
+     -destination id=$SIMULATOR_UDID -derivedDataPath dist/simulator-build \
+     ARCHS=$(uname -m) ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= build
+   ```
+
+2. Bundle the fixture and put it into a copy of that app under its own bundle
+   id, so an installed TerminalX app and its pairing are left alone. Then capture:
+
+   ```sh
+   scripts/phone-fixture/capture.sh <output directory> [flow …]
+   ```
+
+   With no flows it runs every `flow-*.yaml`. `SKIP_BUNDLE=1` reuses the last
+   bundle when only a flow changed.
+
+   `capture.sh` needs:
+   - Maestro (`MAESTRO=/path/to/maestro/bin/maestro`);
+   - a Java runtime (`JAVA_HOME`);
+   - the simulator to use (`SIMULATOR_UDID`, which defaults to the booted one).
+
+   Each screenshot is saved under `<output directory>/<run>/<flow name>/takeScreenshot/`.
+   For the boards' look, set the simulator to dark appearance and the status bar to 10:25:
+   `xcrun simctl status_bar $SIMULATOR_UDID override --time 10:25`.

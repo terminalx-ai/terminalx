@@ -77,7 +77,7 @@ async fn connect_saved_phone(manager: &PairingManager, port: u16) {
 #[test]
 fn startup_restores_the_listener_for_a_saved_phone_without_sign_in_or_a_new_code() {
     let _home = crate::store::temp_home();
-    DeviceRegistry::default().add(saved_device()).unwrap();
+    DeviceRegistry.add(saved_device()).unwrap();
     let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = reserved.local_addr().unwrap().port();
     drop(reserved);
@@ -91,7 +91,7 @@ fn startup_restores_the_listener_for_a_saved_phone_without_sign_in_or_a_new_code
 #[test]
 fn startup_retries_a_busy_port_and_accepts_the_saved_phone_when_it_is_released() {
     let _home = crate::store::temp_home();
-    DeviceRegistry::default().add(saved_device()).unwrap();
+    DeviceRegistry.add(saved_device()).unwrap();
     let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = occupied.local_addr().unwrap().port();
     let manager = configure(port);
@@ -120,7 +120,7 @@ fn startup_leaves_the_listener_off_without_a_claimed_unrevoked_device() {
     ] {
         let _home = crate::store::temp_home();
         for device in devices {
-            DeviceRegistry::default().add(device).unwrap();
+            DeviceRegistry.add(device).unwrap();
         }
         let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let manager = configure(reserved.local_addr().unwrap().port());
@@ -132,4 +132,40 @@ fn startup_leaves_the_listener_off_without_a_claimed_unrevoked_device() {
         assert!(!inner.direct_listener_retrying);
         assert!(manager.0.registry.list().unwrap().is_empty());
     }
+}
+
+/// PRO-487: under "Relay only" a saved phone's Mac opens no listener; the
+/// window still follows the setting, and binds once another is chosen.
+#[test]
+fn relay_only_opens_no_phone_listener_until_another_choice() {
+    let _home = crate::store::temp_home();
+    DeviceRegistry.add(saved_device()).unwrap();
+    crate::listen::choose(crate::listen::Listen::Relay, false).unwrap();
+    let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let manager = configure(port);
+    tauri::async_runtime::block_on(async {
+        wait_until(|| manager.0.inner.lock().unwrap().direct_watching).await;
+        assert_eq!(manager.0.ensure_direct_listener().unwrap_err().kind(), std::io::ErrorKind::AddrNotAvailable);
+        assert!(!manager.0.inner.lock().unwrap().direct_listener_started);
+        assert!(manager.0.window_listening().is_empty());
+        assert!(manager.0.has_paired_phones());
+        assert!(std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(), "nothing listens");
+    });
+}
+
+/// PRO-487 review: while the runtime holds the port the window still
+/// follows the listen setting, so its phone offers name what is chosen now.
+#[test]
+fn the_window_follows_the_listen_setting_while_the_runtime_holds_the_port() {
+    let _home = crate::store::temp_home();
+    let manager = configure(0);
+    manager.0.machine.lock().unwrap().set_status_for_test(true);
+    assert!(manager.0.runtime_owns_direct());
+    // No runtime is attached to hand phones over: the error is that, not the bind.
+    let _ = manager.0.ensure_direct_listener();
+    assert!(manager.0.inner.lock().unwrap().direct_watching, "the watcher runs whoever holds the port");
+    assert!(!manager.0.inner.lock().unwrap().direct_listener_started || manager.0.inner.lock().unwrap().direct_via_runtime);
+    assert!(manager.0.window_listening().is_empty(), "the window holds no address of its own");
 }

@@ -41,9 +41,12 @@ pub fn pair(data: &Path, id: &str, token: &str, relay_device_id: Option<&str>) {
             platform: Some("macos".into()),
             client_public_key_b64: None,
             fingerprint: None,
-            approved_at: 1,
+            // Now: a credential unused for 90 days would expire (PRO-357).
+            approved_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
             last_seen_at: None,
             relay_device_id: relay_device_id.map(str::to_string),
+            next_token_hash: None,
+            disconnected_at: None,
             other: Default::default(),
         })
         .unwrap();
@@ -57,7 +60,16 @@ pub fn status(serve: &Serve) -> Value {
 pub fn listening(serve: &Serve) -> String {
     let deadline = std::time::Instant::now() + super::agent::AGENT_WAIT;
     loop {
-        let last = status(serve);
+        // The runtime prints "ready" before it installs its machine host
+        // (src/serve.rs), so a status asked in between is refused as
+        // "unsupported": not listening yet, rather than a failure.
+        let response = serve.try_control("runtime.machineHost.status", json!({}));
+        let last = if response["ok"] == true {
+            response["result"].clone()
+        } else {
+            assert_eq!(response["error"]["code"], "unsupported", "runtime.machineHost.status failed: {response}");
+            response
+        };
         if let Some(address) = last["listening"].as_str() {
             return address.to_string();
         }
@@ -120,6 +132,10 @@ pub async fn connect(port: u16, host_public_key_b64: &str, token: &str) -> Outco
 
 impl Computer {
     pub async fn call(&mut self, method: &str, params: Value) -> Value {
+        self.call_observing(method, params, |_| {}).await
+    }
+
+    pub async fn call_observing(&mut self, method: &str, params: Value, mut observe: impl FnMut(Value)) -> Value {
         let id = format!("r{}", self.next);
         self.next += 1;
         let request = json!({ "id": id, "method": method, "params": params });
@@ -131,6 +147,27 @@ impl Computer {
             let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
             if message["id"] == id.as_str() {
                 return message;
+            }
+            if message["event"].is_string() {
+                observe(message);
+            }
+        }
+    }
+
+    /// The params of the next matching `event` notification within `within`.
+    /// Returns `None` if the deadline expires or the connection closes first.
+    pub async fn notification(&mut self, event: &str, within: Duration, matches: impl Fn(&Value) -> bool) -> Option<Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            match tokio::time::timeout_at(deadline, self.socket.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let message: Value = serde_json::from_slice(&self.session.open(&STANDARD.decode(text.as_bytes()).unwrap(), PayloadKind::Text).unwrap()).unwrap();
+                    if message["event"] == event && matches(&message["params"]) {
+                        return Some(message["params"].clone());
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                Err(_) | Ok(None) | Ok(Some(Err(_))) => return None,
             }
         }
     }

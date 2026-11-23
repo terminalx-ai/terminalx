@@ -16,6 +16,7 @@
 //! none with a name TerminalX uses for its own files
 //! (`src/lib/reservedAttachmentNames.json`, the one list both sides read).
 
+use crate::paths::Canonical;
 use std::{
     collections::HashSet,
     io::ErrorKind,
@@ -115,7 +116,50 @@ fn session_folder(session_id: &str) -> Result<PathBuf> {
         "That is not a session."
     );
     let dir = store::attachments_dir(session_id)?;
-    dir.canonicalize().with_context(|| format!("open the attachments folder {}", dir.display()))
+    dir.canonical().with_context(|| format!("open the attachments folder {}", dir.display()))
+}
+
+/// The name a file sent from another computer is stored under (PRO-407),
+/// checked as [`store`] checks it: its last segment, not a name TerminalX
+/// uses for its own files.
+pub fn admissible_name(name: &str) -> Result<String> {
+    let name = sanitized(name)?;
+    if is_reserved(&name) { return Err(reserved(&name)); }
+    Ok(name)
+}
+
+/// One part of a file, read for an upload to another computer (PRO-407).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct FilePart {
+    /// Base64 of at most [`READ_PART_BYTES`] bytes from the offset asked for.
+    pub data: String,
+    /// How many bytes `data` holds.
+    pub bytes: u64,
+    /// The whole file's size, as it is now.
+    pub size: u64,
+}
+
+/// What one part read for an upload holds: 384 KiB, as one `session.attach` part takes.
+pub const READ_PART_BYTES: u64 = 384 * 1024;
+
+/// The bytes of `path` from `offset`, at most [`READ_PART_BYTES`] of them,
+/// for a file attached to a message for a machine (PRO-407). Refused as
+/// [`store`] refuses it: not a regular file, or over [`MAX_ATTACHMENT_BYTES`].
+pub fn read_part(path: &str, offset: u64) -> Result<FilePart> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = sanitized(path)?;
+    let mut file = std::fs::File::open(path).with_context(|| format!("{name} can’t be read."))?;
+    let meta = file.metadata().with_context(|| format!("{name} can’t be read."))?;
+    ensure!(meta.is_file(), "{name} is not a file that can be attached.");
+    if meta.len() > MAX_ATTACHMENT_BYTES { return Err(too_large(&name)); }
+    let mut bytes = Vec::new();
+    if offset < meta.len() {
+        file.seek(SeekFrom::Start(offset)).with_context(|| format!("{name} can’t be read."))?;
+        file.take(READ_PART_BYTES).read_to_end(&mut bytes).with_context(|| format!("{name} can’t be read."))?;
+    }
+    use base64::Engine as _;
+    Ok(FilePart { data: base64::engine::general_purpose::STANDARD.encode(&bytes), bytes: bytes.len() as u64, size: meta.len() })
 }
 
 /// Six lowercase base36 characters.
@@ -226,14 +270,14 @@ pub fn inspect(paths: &[String]) -> Vec<FileFacts> {
 fn attachments_root() -> Result<PathBuf> {
     let root = store::root()?.join("attachments");
     std::fs::create_dir_all(&root)?;
-    Ok(root.canonicalize()?)
+    Ok(root.canonical()?)
 }
 
 /// Write a copy of a stored attachment to `to`, which the person chose in a
 /// save dialog (so it may replace a file there). `path` must be inside an
 /// attachments folder.
 pub fn save_copy(path: &str, to: &str) -> Result<()> {
-    let from = Path::new(path).canonicalize().with_context(|| format!("{} is no longer on this computer.", base_name(path)))?;
+    let from = Path::new(path).canonical().with_context(|| format!("{} is no longer on this computer.", base_name(path)))?;
     ensure!(from.starts_with(attachments_root()?), "Only an attached file can be saved from here.");
     ensure!(from.is_file(), "{} is not a file.", base_name(path));
     std::fs::copy(&from, to).with_context(|| format!("save a copy to {to}"))?;
@@ -248,7 +292,7 @@ pub(crate) fn admit_refs(session_id: &str, files: &[FileRef], images: usize) -> 
     let folder = session_folder(session_id)?;
     files.iter().map(|file| {
         let shown = if file.name.is_empty() { base_name(&file.path) } else { &file.name };
-        let path = Path::new(&file.path).canonicalize().with_context(|| format!("{shown} is no longer in this session’s attachments."))?;
+        let path = Path::new(&file.path).canonical().with_context(|| format!("{shown} is no longer in this session’s attachments."))?;
         ensure!(path.starts_with(&folder) && path != folder, "{shown} is not one of this session’s attachments.");
         let meta = std::fs::metadata(&path)?;
         ensure!(meta.is_file(), "{shown} is not a file.");
@@ -334,6 +378,7 @@ fn only_image_labels(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
     use base64::Engine as _;
 
@@ -361,7 +406,7 @@ mod tests {
         assert_eq!(stored.len(), 2);
         let folder = folder_of(&stored[0]);
         assert_eq!(folder_of(&stored[1]), folder, "one call, one folder");
-        assert_eq!(folder.parent().unwrap(), store::attachments_dir("s1").unwrap().canonicalize().unwrap());
+        assert_eq!(folder.parent().unwrap(), store::attachments_dir("s1").unwrap().canonical().unwrap());
         let leaf = folder.file_name().unwrap().to_str().unwrap();
         assert_eq!(leaf.len(), 6);
         assert!(leaf.chars().all(|c| c.is_ascii_digit() || c.is_ascii_lowercase()), "{leaf}");
@@ -491,7 +536,7 @@ mod tests {
         std::fs::write(&loose, "a").unwrap();
         let loose = FileRef { path: loose.to_string_lossy().into_owned(), name: "a.md".into(), media_type: None, size: None };
         assert!(admit_refs("s1", &[loose], 0).is_err());
-        let climbing = FileRef { path: format!("{}/../../s2/{}", folder_of(&mine[0]).display(), Path::new(&theirs[0].path).strip_prefix(store::attachments_dir("s2").unwrap().canonicalize().unwrap()).unwrap().display()), ..mine[0].clone() };
+        let climbing = FileRef { path: format!("{}/../../s2/{}", folder_of(&mine[0]).display(), Path::new(&theirs[0].path).strip_prefix(store::attachments_dir("s2").unwrap().canonical().unwrap()).unwrap().display()), ..mine[0].clone() };
         assert!(admit_refs("s1", &[climbing], 0).is_err(), "a path that climbs out is judged where it lands");
         std::fs::remove_file(&mine[0].path).unwrap();
         assert!(admit_refs("s1", &mine, 0).is_err(), "a file that is gone is refused");
@@ -500,6 +545,7 @@ mod tests {
         assert!(admit_refs("s1", &ten, 1).unwrap_err().to_string().contains("At most 10"), "images count toward the ten");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_block_follows_the_text_and_comes_off_again() {
         let file = |path: &str| FileRef { path: path.into(), name: base_name(path).into(), media_type: None, size: None };

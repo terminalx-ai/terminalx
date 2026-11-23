@@ -360,16 +360,23 @@ export function DictationStatus({ dictation }: { dictation: Dictation }) {
   return (
     <>
       {state.error && state.target === null && state.settings === "microphone" && (
-        // A narrow composer puts the actions under the words rather than squeezing them into a column.
-        <div role="alert" data-dictation-error className="mb-2 flex flex-wrap items-start gap-x-2.5 gap-y-2 rounded-lg border border-destructive/35 bg-destructive/[0.07] px-3 py-2.5">
-          <MicOff className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <div className="min-w-48 flex-1">
-            <div className="text-[12.5px] font-medium">Microphone access is off for TerminalX</div>
-            <div className="mt-0.5 text-xs text-muted-foreground">{message}</div>
+        // A narrow composer puts the actions under the words rather than squeezing them into a column. Neither asks for
+        // more than the row has: in a composer under about 200px (760px window at 150% zoom) the words take the row's
+        // width and the button's label shortens, where a fixed minimum pushed both through the row's edge.
+        // In a composer under 24rem, where the actions always stand under the words, the row is a column instead, and in
+        // a chat too short for it and the composer (760×600 at 150% zoom) it shrinks: the words scroll, the actions stay.
+        <div role="alert" data-dictation-error className="mb-2 flex min-h-0 flex-wrap items-start gap-x-2.5 gap-y-2 rounded-lg border border-destructive/35 bg-destructive/[0.07] px-3 py-2.5 @max-[24rem]:flex-col @max-[24rem]:flex-nowrap @max-[24rem]:items-stretch">
+          {/* The icon and the words, as one: where they meet the actions on one row is where they did when they were apart. */}
+          <div className="flex min-w-[min(13.625rem,100%)] flex-1 items-start gap-x-2.5 @max-[24rem]:min-h-0 @max-[24rem]:flex-[0_1_auto] @max-[24rem]:overflow-y-auto overscroll-contain scrollbar-thin" data-dictation-error-words>
+            <MicOff className="mt-0.5 size-4 shrink-0 text-destructive" />
+            <div className="min-w-[min(12rem,100%)] flex-1 @max-[24rem]:min-w-0">
+              <div className="text-[12.5px] font-medium">Microphone access is off for TerminalX</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">{message}</div>
+            </div>
           </div>
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button size="sm" onClick={() => void openUrl(PRIVACY_SETTINGS_URLS.microphone)}>Open System Settings</Button>
-            <button type="button" aria-label="Dismiss" className="rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground" onClick={clearDictationError}>
+          <div className="ml-auto flex max-w-full min-w-0 items-center gap-2 @max-[24rem]:shrink-0">
+            <Button size="sm" className="min-w-0 shrink" onClick={() => void openUrl(PRIVACY_SETTINGS_URLS.microphone)}><span className="truncate">Open System Settings</span></Button>
+            <button type="button" aria-label="Dismiss" className="shrink-0 rounded-sm p-0.5 text-faint hover:bg-veil-strong hover:text-foreground" onClick={clearDictationError}>
               <X className="size-3.5" />
             </button>
           </div>

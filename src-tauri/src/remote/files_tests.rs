@@ -23,7 +23,7 @@ impl Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+    let root = crate::paths::canonicalize(dir.path()).unwrap().join("workspace");
     std::fs::create_dir(&root).unwrap();
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
     listed(&rpc);
@@ -298,7 +298,7 @@ async fn search_results_are_bounded_and_say_so() {
 #[test]
 fn searches_stop_when_cancelled_replaced_or_disconnected() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join("a.txt"), "needle").unwrap();
 
     // A search whose flag is already set reads nothing and says it stopped.

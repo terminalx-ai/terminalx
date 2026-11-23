@@ -15,6 +15,7 @@
 //! Local-owner deciding hooks instead return an explicit denial on failure; a
 //! lost owner must never authorize a tool through an empty hook response.
 
+use crate::paths::Canonical;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::io::{BufRead, BufReader};
@@ -133,8 +134,8 @@ impl ConversationFile {
         if named.file_name().and_then(|n| n.to_str()) != Some(self.name.as_str()) || !regular_file(named) {
             return false;
         }
-        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
-        let Ok(projects) = self.projects.canonicalize() else { return false };
+        let Some(folder) = named.parent().and_then(|f| f.canonical().ok()) else { return false };
+        let Ok(projects) = self.projects.canonical() else { return false };
         if folder.parent() != Some(projects.as_path()) {
             return false;
         }
@@ -155,7 +156,7 @@ impl ConversationFile {
         if self.adopt(named) {
             return true;
         }
-        let Some(folder) = named.parent().and_then(|f| f.canonicalize().ok()) else { return false };
+        let Some(folder) = named.parent().and_then(|f| f.canonical().ok()) else { return false };
         let Some(file) = named.file_name().and_then(|n| n.to_str()) else { return false };
         if !self.folders.contains(&folder) || named.is_symlink() || named.is_dir() {
             return false;
@@ -221,7 +222,7 @@ pub struct ControlEndpoint {
 impl ControlEndpoint {
     /// The endpoint the runtime this process was served on, handed over with
     /// it (#765): the same socket path and token its agents were given.
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub fn adopted(socket: PathBuf, token: String) -> Self {
         Self { socket, token, published: Default::default() }
     }
@@ -259,7 +260,7 @@ pub fn under_root(root: &Path, candidate: &Path) -> bool {
     if lexically_under(root, candidate) {
         return true;
     }
-    match (root.canonicalize(), resolve_existing(candidate)) {
+    match (root.canonical(), resolve_existing(candidate)) {
         (Ok(root), Some(candidate)) => lexically_under(&root, &candidate),
         _ => false,
     }
@@ -276,7 +277,7 @@ fn resolve_existing(path: &Path) -> Option<PathBuf> {
     let mut tail = Vec::new();
     let mut here = path;
     loop {
-        if let Ok(real) = here.canonicalize() {
+        if let Ok(real) = here.canonical() {
             return Some(tail.iter().rev().fold(real, |acc, part| acc.join(part)));
         }
         tail.push(here.file_name()?.to_owned());
@@ -442,6 +443,50 @@ thread_local! {
     static CALLER: std::cell::RefCell<Option<std::sync::Arc<std::os::unix::net::UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The caller a test's in-process control request stands for.
+    pub(crate) static TEST_CALLER_PID: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Who sent the frame being answered on this thread, as the kernel says (PRO-468).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peer {
+    /// No transport: a direct call inside this process.
+    InProcess,
+    /// The process at the other end, whatever it claims.
+    Pid(i32),
+    /// A transport whose other end cannot be read: on macOS, one the client
+    /// closed after sending. Who sent it cannot be told.
+    Unreadable,
+}
+
+/// The sender of the frame being answered on this thread.
+pub(crate) fn caller() -> Peer {
+    #[cfg(test)]
+    if let Some(pid) = TEST_CALLER_PID.with(std::cell::Cell::get) {
+        return Peer::Pid(pid);
+    }
+    #[cfg(unix)]
+    {
+        let Some(stream) = CALLER.with(|caller| caller.borrow().clone()) else { return Peer::InProcess };
+        match crate::serve_cli::consent::peer_pid(&stream) {
+            Ok(pid) => Peer::Pid(pid),
+            Err(_) => Peer::Unreadable,
+        }
+    }
+    #[cfg(not(unix))]
+    Peer::InProcess
+}
+
+/// [`caller`]'s process, when the kernel names one.
+pub(crate) fn caller_pid() -> Option<i32> {
+    match caller() {
+        Peer::Pid(pid) => Some(pid),
+        Peer::InProcess | Peer::Unreadable => None,
+    }
+}
+
 /// Inspect the hook transport without consuming bytes or spawning a watcher.
 /// No transport is installed for direct in-process calls and unit tests.
 #[derive(Clone, Default)]
@@ -575,7 +620,7 @@ where
 /// one. Nothing is published until the publisher is asked to look: `serve`
 /// asks once and then on a timer, and that timer is the only clock in any of
 /// this, so everything a look does can be had by asking for one.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn listen<F, C>(endpoint: ControlEndpoint, hook_handler: F, control_handler: C) -> anyhow::Result<Publisher>
 where
     F: Fn(HookFrame) -> HookReply + Send + Sync + 'static,
@@ -862,16 +907,71 @@ fn answer_frame(stream: std::os::unix::net::UnixStream, busy: Busy, answer: impl
     CALLER.with(|caller| *caller.borrow_mut() = None);
     FRAME.with(|frame| *frame.borrow_mut() = None);
     let then = AFTER_REPLY.with(|after| after.borrow_mut().take());
-    drop(busy);
+    let mobile = MOBILE_REPLY.with(|guard| guard.borrow_mut().take());
     let mut stream = stream;
-    if let Ok(mut bytes) = serde_json::to_vec(&reply) {
-        bytes.push(b'\n');
-        let _ = stream.write_all(&bytes);
-        let _ = stream.flush();
+    if let Some(MobileReply { denied, deliver }) = mobile {
+        deliver(&mut |authorized| write_frame_reply(&mut stream, if authorized { &reply } else { &denied }, true));
+        drop(busy);
+    } else {
+        drop(busy);
+        write_frame_reply(&mut stream, &reply, false);
     }
     if let Some(then) = then {
         then();
     }
+}
+
+#[cfg(unix)]
+fn write_frame_reply(stream: &mut std::os::unix::net::UnixStream, reply: &Value, bounded: bool) -> bool {
+    let Ok(mut bytes) = serde_json::to_vec(reply) else { return false };
+    bytes.push(b'\n');
+    if !bounded {
+        return stream.write_all(&bytes).and_then(|()| stream.flush()).is_ok();
+    }
+    // Use one deadline across partial writes while revocation waits for the
+    // grant, including when a hook caller keeps draining only a few bytes.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        let budget = deadline.saturating_duration_since(std::time::Instant::now());
+        if budget.is_zero() || stream.set_write_timeout(Some(budget)).is_err() { return false; }
+        match stream.write(remaining) {
+            Ok(0) => return false,
+            Ok(written) => remaining = &remaining[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+    stream.flush().is_ok()
+}
+
+#[cfg(unix)]
+type MobileDelivery = Box<dyn FnOnce(&mut dyn FnMut(bool) -> bool)>;
+
+#[cfg(unix)]
+struct MobileReply {
+    denied: Value,
+    deliver: MobileDelivery,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static MOBILE_REPLY: std::cell::RefCell<Option<MobileReply>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Carry mobile authority to the hook transport's actual reply write.
+pub(crate) fn guard_mobile_reply(denied: HookReply,
+    deliver: impl FnOnce(&mut dyn FnMut(bool) -> bool) + 'static) -> bool {
+    #[cfg(unix)]
+    if FRAME.with(|frame| frame.borrow().is_some()) {
+        MOBILE_REPLY.with(|guard| *guard.borrow_mut() = Some(MobileReply {
+            denied: serde_json::to_value(denied).unwrap_or_default(), deliver: Box::new(deliver),
+        }));
+        return true;
+    }
+    let _ = denied;
+    deliver(&mut |_| false);
+    false
 }
 
 /// What the hook bridge holds off on while the runtime is handed over (#765).
@@ -951,6 +1051,7 @@ thread_local! {
 
 /// Do `then` once the reply to the frame this thread is answering has been
 /// written: at once, for a direct call that has no frame.
+#[cfg(unix)]
 pub(crate) fn after_reply(then: Box<dyn FnOnce() + Send>) {
     #[cfg(unix)]
     if FRAME.with(|frame| frame.borrow().is_some()) {
@@ -1003,11 +1104,13 @@ impl Drop for Resumable {
 
 /// The frame this thread is answering is the handover itself: a freeze does
 /// not wait for it, and it is answered while frozen (#765).
+#[cfg(unix)]
 pub(crate) struct Aside {
     #[cfg(unix)]
     gate: Option<std::sync::Arc<Gate>>,
 }
 
+#[cfg(unix)]
 pub(crate) fn step_aside() -> Aside {
     #[cfg(unix)]
     {
@@ -2317,6 +2420,53 @@ mod tests {
         assert_eq!(origin.transcript(&frame("", named.to_str().unwrap())), Some(named.as_path()));
         let elsewhere = dir.path().join("real/elsewhere.jsonl");
         assert_eq!(origin.transcript(&frame("", elsewhere.to_str().unwrap())), None);
+    }
+
+    /// PRO-489: a control frame read and held as a handover begins is
+    /// answered by the runtime that takes over, once it thaws, and that
+    /// runtime sees its sender as the kernel says: what lets the window's
+    /// frames through there (`window::Registry::handed_over`).
+    #[cfg(unix)]
+    #[test]
+    fn a_control_frame_held_across_a_handover_is_answered_there_as_its_senders() {
+        let _home = crate::store::temp_home();
+        let endpoint = prepare_control().unwrap();
+        let (own, token) = (endpoint.socket.clone(), endpoint.token.clone());
+        let (_socket, bridge) = serve(endpoint, |_| HookReply::default(), |request| crate::control::ControlResponse::success(request.id, json!({"by": "old"}))).unwrap();
+        // Accepted before the freeze, which waits for it: the frame it sends
+        // once the bridge is frozen is read and held, not left in the queue.
+        let mut stream = std::os::unix::net::UnixStream::connect(&own).unwrap();
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait("the connection is accepted", &|| bridge.gate.lock().busy > 0);
+        let freezing = { let bridge = bridge.clone(); std::thread::spawn(move || bridge.freeze(Duration::from_secs(5))) };
+        wait("the bridge freezes", &|| bridge.gate.lock().frozen);
+        let request = json!({"id": "held", "token": token, "command": "probe", "params": {}});
+        stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+        freezing.join().unwrap().expect("frozen once the frame is held");
+        let sender = std::thread::spawn(move || {
+            let mut reply = String::new();
+            BufReader::new(stream).read_line(&mut reply).unwrap();
+            serde_json::from_str::<Value>(&reply).unwrap()
+        });
+        wait("the frame is read and held", &|| !bridge.gate.lock().held.is_empty());
+        let frozen = bridge.take(|_| false).unwrap();
+        assert_eq!(frozen.held.len(), 1);
+        let adopted = Adopted { own: frozen.own, published: frozen.published, held: frozen.held.into_iter().map(|(fd, line)| (std::os::unix::net::UnixStream::from(fd), line)).collect() };
+        let (_socket, replacement) = serve_adopted(ControlEndpoint::adopted(own, token), adopted, |_| HookReply::default(), |request| {
+            crate::control::ControlResponse::success(request.id, json!({"by": "new", "pid": caller_pid()}))
+        }).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!sender.is_finished(), "not answered before the new runtime thaws");
+        replacement.thaw();
+        let reply = sender.join().unwrap();
+        assert_eq!(reply["result"]["by"], "new", "{reply}");
+        assert_eq!(reply["result"]["pid"], json!(std::process::id()), "its sender, as the kernel says: {reply}");
     }
 
     /// #765 review: a hook parked on a card answered after the bridge froze,

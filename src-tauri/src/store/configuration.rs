@@ -2,6 +2,7 @@
 //! deliberately opt-in: adding a field to Settings never gives a repository
 //! permission to set it. No scripts are executed by this module: [`scripts`]
 //! only says which setup and archive commands a repository's hooks may run.
+use crate::paths::Canonical;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -123,23 +124,30 @@ pub struct Repository {
 /// No hooks, fsmonitor, inherited Git discovery variables or shell are used to
 /// discover the checkout. All workspaces inherit the primary checkout's files.
 fn git(root: &Path, args: &[&str]) -> Result<String> {
+    Ok(git_output(root, args)?.trim().into())
+}
+/// A path Git printed, without only its line ending (see `git::path_line`).
+fn git_path(root: &Path, args: &[&str]) -> Result<PathBuf> {
+    Ok(PathBuf::from(crate::git::path_line(&git_output(root, args)?)))
+}
+fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")))
         .env("GIT_NO_LAZY_FETCH", "1").current_dir(root).env_remove("GIT_DIR").env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE").env_remove("GIT_OBJECT_DIRECTORY").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .args(["-c", "core.fsmonitor=false"]).args(args).output()?;
     ensure!(output.status.success(), "Cannot read repository configuration metadata.");
-    Ok(String::from_utf8(output.stdout)?.trim().into())
+    Ok(String::from_utf8(output.stdout)?)
 }
 pub fn repository(path: &Path) -> Result<Repository> {
-    let checkout = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
-    let common = PathBuf::from(git(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonicalize()?;
+    let checkout = git_path(path, &["rev-parse", "--show-toplevel"])?.canonical()?;
+    let common = git_path(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.canonical()?;
     // Configuration belongs to the primary checkout, including local overrides.
     // A linked workspace must not silently lose ignored local values or adopt
     // executable settings from an arbitrary branch it checks out.
     let worktrees = git(&checkout, &["worktree", "list", "--porcelain", "-z"])?;
     let primary = worktrees.split('\0').find_map(|line| line.strip_prefix("worktree ")).context("Repository has no primary checkout.")?;
-    let root = PathBuf::from(primary).canonicalize()?;
-    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()) })
+    let root = PathBuf::from(primary).canonical()?;
+    Ok(Repository { root, identity: common.to_string_lossy().into_owned(), project: path.canonical().unwrap_or_else(|_| path.to_path_buf()) })
 }
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 /// What trust is bound to. A file that sets scripts gets a hash no earlier
@@ -234,7 +242,7 @@ pub struct Store {
     saved_scripts: Option<super::projects::RepositoryScripts>,
 }
 impl Store {
-    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonicalize()?, #[cfg(test)] managed_fixture: None, #[cfg(test)] saved_scripts: None }) }
+    pub fn current() -> Result<Self> { Ok(Self { home: super::root()?.canonical()?, #[cfg(test)] managed_fixture: None, #[cfg(test)] saved_scripts: None }) }
     /// The Scripts page's own values for this repository: its user layer.
     fn saved_scripts(&self, repository: &Repository) -> Result<super::projects::RepositoryScripts> {
         #[cfg(test)]

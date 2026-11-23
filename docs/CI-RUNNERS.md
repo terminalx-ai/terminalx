@@ -6,18 +6,47 @@ or activate Hetzner. No repository settings, rulesets or variables are changed.
 The latency target and both ten-run comparisons remain unproven; see
 [measurements](CI-RUNNERS-MEASUREMENTS.md).
 
+## Instabox was tried and dropped (21 November 2026)
+
+For a few hours on 21 November 2026 every Linux job ran on Instabox machines
+(`runs-on: instabox-medium`, 4 vCPU and 8 GiB; pull requests #1448 and #1458).
+It was taken back the same day, for cost and because it was not faster:
+
+- GitHub's runners cost nothing for a public repository. Instabox bills compute
+  by the second ($0.004 a vCPU-hour and $0.00225 a GiB-hour when this was
+  written); at that week's volume, about 1,100 CI runs of some 79
+  machine-minutes each, that came to roughly $200 a month.
+- Jobs started within 10 seconds of being queued, against a median of 15
+  seconds and a worst case of 9 minutes on GitHub's runners, and the four
+  Vitest parts took about 2 minutes against 3. The Rust jobs were slower on
+  `instabox-medium`: the longest, `linux-rust-tests (rest)`, took 17.4 and 21.1
+  minutes in two runs against a hosted median of 14.5, and Clippy 6.1 and 6.2
+  against 4.1.
+- On `instabox-large`, at twice the price a minute, Clippy took 4.8 minutes in
+  the one run made (#1458): still not faster than GitHub's runner.
+
+Instabox's larger sizes are `instabox-large` (8 vCPU, 16 GiB), `instabox-xlarge`
+(16, 32) and `instabox-2xlarge` (32, 64), on its paid plans. Its machines are
+Ubuntu 24.04 with Docker and passwordless `sudo`, one fresh machine a job. The
+`instabox-cloud` GitHub App is installed on the organisation, not in this
+repository: while it is, a workflow that names an Instabox label gets a
+machine, a pull request's edited workflow included.
+
 ## What runs where
 
 | Job | Runner | Checks |
 | --- | --- | --- |
-| `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, full Vitest, frontend build, portable icon tests, CI policy/selector/measurement tests. |
+| `frontend` | GitHub-hosted Ubuntu | Desktop/mobile TypeScript, frontend build, portable icon tests, CI policy/selector/measurement tests. |
+| `vitest` | GitHub-hosted Ubuntu, four at once | The full Vitest run in four parts (`--shard=N/4`): every test file is in exactly one. |
 | `webkit-layout` | GitHub-hosted macOS | All WebKit layout checks, permission-details among them, after the frontend build. `scripts/webkit/run-all.mjs` runs several at once. |
-| `linux-rust` | GitHub-hosted Ubuntu on **every PR** | Full default-feature `cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
-| `macos-native` | GitHub-hosted macOS | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and selected full macOS Rust suite below. |
+| `linux-rust` | GitHub-hosted Ubuntu on **every PR** | `cargo clippy --locked --all-targets -- -D warnings`; GTK/WebKit/audio dependencies installed. Main push/nightly/manual runs alone may use the owner-approved `CI_LINUX_RUNNER` label; unset/empty falls back to Ubuntu. |
+| `linux-rust-tests` | GitHub-hosted Ubuntu, three at once, on **every PR** | Full default-feature `cargo test --locked` in three exact parts (below). |
+| `macos-native` | GitHub-hosted macOS, **when selected** | Full Apple/source/packaged/compiled icon checks, Swift tests, helper build, macOS Clippy, and the full macOS Rust suite. |
+| `machine-compat` | GitHub-hosted macOS, **when selected** | This build against the previous two released runtimes (PRO-354). |
 | `desktop-platforms` | GitHub-hosted Ubuntu | Off-macOS helper build, local UI control, Linux renderer/launcher tests. The platform build, computer contract and input safety steps run off Linux only: on Linux they are `linux-rust`'s Clippy and full suite and `frontend`'s Vitest run. Disabled Windows steps retained. |
 | `headless-serve` | GitHub-hosted Ubuntu | Existing headless build, dependency exclusions, Clippy, integration tests and self-test. |
-| `legacy-runtime-probe` | GitHub-hosted Ubuntu/macOS | Existing legacy AppImage diagnostics. |
-| `macos-rust-changes` / `check` | GitHub-hosted Ubuntu | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or any skipped dependency fails `check`. |
+| `legacy-runtime-probe` | GitHub-hosted Ubuntu | Existing legacy AppImage diagnostics. Its tests set the operating system themselves, so one runner covers Linux and macOS. |
+| `macos-rust-changes` / `check` | GitHub-hosted Ubuntu | Coverage selector / aggregate status requiring **every** other job to succeed. Failure, cancellation or a skipped dependency fails `check`; the two macOS jobs alone may be skipped, and only when the selector succeeded and did not select them. |
 
 Every command from main's split is retained. `check` becomes the aggregate so
 its existing required status still gates Rust and native checks. The separate
@@ -102,6 +131,87 @@ reproduced its intermittent Linux failure. The fixture now explicitly advances
 the rewritten file's mtime; the production cache and all cost/retention
 assertions are unchanged.
 
+## Tests that failed now and then
+
+`.github/workflows/repeat-flaky-tests.yml` (PRO-334, PRO-488) runs five tests
+that used to fail by timing or shared state, many times in a row on the kind
+of runner CI runs each on: the large-tab send cost and the cloud sections'
+search 20 times, the far-behind terminal view and the checkpoint undo 20
+times, and the Codex capability tests 300 times with every core busy. It runs
+only when one of those tests or the workflow changes, and by hand
+(`gh workflow run repeat-flaky-tests.yml -f runs=50`). It is not a required
+status, and it takes one macOS runner for the search.
+
+The send test no longer holds a time in milliseconds. It measures a send in
+units of a reference workload timed beside it in the same run, so the figure
+is the same on a laptop and a hosted runner, and a second test fails if a send
+made twice the work would still pass. The job prints what each run measured;
+set `SEND_COST_LOG` to a file to get the same locally before changing the
+budgets in `src/components/session/TabView.send.test.tsx`.
+
+## macOS runner time
+
+GitHub runs only a few macOS jobs at once for the whole account, and a job
+that needs one waits behind all the others. Measured 16 to 19 November 2026,
+CI used 6,000 to 6,500 macOS minutes a day, close to all there is, and a macOS
+job waited a median of 13 to 18 hours: a run that takes 21 minutes on Linux
+reported a day later. `macos-native` was 70% of those minutes and
+`webkit-layout` 23%. The hosted macOS runner also has 7 GB of memory and one
+compiler on this crate needs more, so a build that takes under four minutes on
+Linux takes 20 to 33 there.
+
+`webkit-layout` takes a macOS runner on every run. Two more take one only
+when they are selected:
+
+- `macos-native`: pushes to `main`, nightly, manual runs, and pull requests
+  selected by `infra/ci-runners/macos-rust.py` (next section). An unselected
+  pull request no longer runs macOS Clippy, the Swift tests or the Apple icon
+  checks before merge: they run on `main` after it.
+- `machine-compat`: the same events, and pull requests that touch the machines
+  (`scripts/machine-e2e/relevant.py`, the list `machines-e2e` uses).
+
+`macos-rust-changes` decides both and `check` accepts a skipped macOS job on
+its word alone. On `main`, each of the two jobs keeps the run in progress and
+the newest waiting commit: an older commit still waiting when a newer one
+arrives is cancelled and its `check` fails. The newest commit of a burst of
+merges is always tested.
+
+The WebKit layout checks stay on macOS. They were tried on Linux on 19
+November 2026, in the WebKit build Playwright ships there: 40 of the 107
+failed, against 6 on macOS that day. The fixtures use macOS paths
+(`/private/...`), the app shows Ctrl where the checks read ⌘, and others
+time out. Moving them needs those checks made portable first.
+
+The legacy runtime diagnostic's macOS leg is gone: its tests patch
+`platform.system` to Linux and to Darwin themselves.
+
+## The suites in parts
+
+Linux runners start at once, so the two long suites run in parts on several:
+
+- **Vitest**, four parts: `pnpm vitest run --shard=N/4`. Vitest deals each test
+  file to exactly one part.
+- **The Linux Rust suite**, three parts of the library's tests, by name. A
+  filter matches every test whose name contains it:
+  `session::watch_tests::prompts`; the other names containing `session::` or
+  `remote::`; and every name containing neither. The last part also runs the
+  other test binaries (`--bins --test '*'`) and the doc tests. Together they
+  are `cargo test --locked`. A renamed module moves tests between runners; it
+  cannot leave one out.
+
+`infra/ci-runners/test_workflow_security.py` holds both to these shapes.
+
+## Cargo caches
+
+A cache holds the built dependencies. Its key is the job, the trust scope, the
+platform, `Cargo.lock` and the compiler version, not the commit: this crate
+is rebuilt on every checkout whatever is restored. A job saves a cache only
+when it restored none, so `main` keeps one per job and a pull request writes
+its own only when it changes the lock file. A job whose build was whole saves
+even when a test then failed. Keyed by commit, every run saved a new cache,
+the repository's 10 GB limit evicted them within hours, and the macOS jobs,
+which failed and so never saved, built every dependency on every run.
+
 ## macOS Rust coverage
 
 The full macOS suite runs on pushes to `main`, nightly at 02:23 UTC, manual
@@ -129,9 +239,10 @@ python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
 ```
 
 **Coverage no longer provided on every PR:** frontend-only, documentation-only,
-and shared Rust changes outside those paths no longer execute Rust tests on
-macOS before merge. They still run the full Linux Rust suite, macOS Clippy, Swift,
-WebKit and Apple icon checks. Platform differences in otherwise shared Rust code
+and shared Rust changes outside those paths no longer take a macOS runner
+before merge: no macOS Rust tests, Clippy, Swift tests or Apple icon checks.
+They still run the full Linux Rust suite, Linux Clippy and the WebKit checks
+(on macOS). Platform differences in otherwise shared Rust code
 can therefore be detected only by main/nightly macOS tests; use manual dispatch
 on the PR branch when that risk is relevant. macOS-selected PRs retain the full
 suite, so their latency can exceed the ordinary PR target.

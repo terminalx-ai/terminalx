@@ -14,8 +14,11 @@ import { ComputerPanel } from "@/components/computer/ComputerPanel";
 import { BrowserPanel } from "@/components/browser/BrowserPanel";
 import { openWorkspaceDelete, openWorkspaceRemove } from "@/lib/dialogs";
 import { api, type PullRequest } from "@/lib/api";
-import type { GitSource } from "@/lib/gitSource";
-import type { FileSource } from "@/lib/workspaceFiles";
+import { localGitSource, type GitSource } from "@/lib/gitSource";
+import { noteChangesCount, useChangesCount, useChecksMark } from "@/lib/panelMarks";
+import { openFile } from "@/lib/editors";
+import { pathInFileRoot, type FileSource } from "@/lib/workspaceFiles";
+import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import type { AgentEvent } from "@/types/events";
 import type { WorkStatus } from "@/types/session";
 import { onPanelTab, rememberPanelTab, rememberedPanelTab, takePanelTab, type PanelTab } from "@/lib/panelTab";
@@ -23,18 +26,14 @@ import { onPrLinksChanged } from "@/lib/prLinks";
 
 export type { PanelTab };
 const TABS: { id: PanelTab; label: string; shortcut?: ShortcutId }[] = [
-  // Branch holds Overview (the pull request, the next step) and Changes (committing and history) as its two views.
-  { id: "branch", label: "Branch", shortcut: "panel.repository" },
+  // Changes (committing and history) and Checks (the pull request, its checks and the branch's next step) are tabs
+  // of their own (PRO-394, design 05.02). Checks keeps the "branch" id, so every link and shortcut to it still lands.
+  { id: "changes", label: "Changes", shortcut: "panel.changes" },
+  { id: "branch", label: "Checks", shortcut: "panel.repository" },
   { id: "files", label: "Files", shortcut: "panel.files" },
   { id: "browser", label: "Browser" },
   { id: "ports", label: "Ports" },
   { id: "computer", label: "Computer" },
-];
-
-/** Branch's two views: where it stands, and what is in it. */
-const BRANCH_VIEWS: { id: "branch" | "changes"; label: string; shortcut: ShortcutId }[] = [
-  { id: "branch", label: "Overview", shortcut: "panel.repository" },
-  { id: "changes", label: "Changes", shortcut: "panel.changes" },
 ];
 
 /**
@@ -63,14 +62,17 @@ export function RightPanel({
   labelMode,
   settleSessionId,
   workspace,
+  machineWorkspace,
   gitSource,
   fileSource,
   repositories,
   readOnlyReason,
   ports,
+  portsCount = 0,
   terminals = false,
   computer = false,
   browser = false,
+  dock,
 }: {
   cwd: string;
   isGit?: boolean;
@@ -97,6 +99,7 @@ export function RightPanel({
   settleSessionId?: string;
   /** Present only for a managed, non-main workspace. */
   workspace?: { projectPath: string; name: string };
+  machineWorkspace?: RemovableWorkspace;
   /** Where Branch and Changes read Git; the local checkout at `cwd` when absent. */
   gitSource?: GitSource;
   /** Where Files reads; the local checkout at `cwd` when absent. */
@@ -107,21 +110,32 @@ export function RightPanel({
   readOnlyReason?: string | null;
   /** A cloud workspace's Ports tab (PRO-28), drawn only while it is the tab shown; absent for anyone who may not use previews. */
   ports?: () => ReactNode;
+  /** Ports forwarded to this Mac now, shown on the tab ("Ports 3", 14.11); none shown at 0. */
+  portsCount?: number;
   /** A local session's panel: shells in its folder, docked below the tabs. */
   terminals?: boolean;
   /** A local session's panel: the Computer tab, a desktop to watch and that agents can use. */
   computer?: boolean;
   /** A local session's panel: the Browser tab, the workspace's pages beside the chat, shared with the agent. */
   browser?: boolean;
+  /** Terminals that are not this computer's, docked below the tabs instead (a machine session's, PRO-347). */
+  dock?: ReactNode;
 }) {
   const prefs = usePrefs();
-  // A cloud session's panel (the one with Ports) reopens on the tab it last showed.
-  const remembers = !!ports && !!sessionId;
+  // A session's panel reopens on the tab it last showed (PRO-130), after a switch to another session or a relaunch.
   // Null until a tab is picked: the first one depends on the Git source, which a cloud session learns after drawing.
-  const [picked, setTab] = useState<PanelTab | null>(() => takePanelTab() ?? (remembers ? rememberedPanelTab(sessionId!) : null));
+  // The panel stays mounted from one session to the next, so the pick is kept with the session it was made in.
+  const [choice, setChoice] = useState<{ sessionId: string | undefined; tab: PanelTab | null }>(() => ({
+    sessionId,
+    tab: takePanelTab() ?? (sessionId ? rememberedPanelTab(sessionId) : null),
+  }));
+  const picked = choice.sessionId === sessionId ? choice.tab : sessionId ? rememberedPanelTab(sessionId) : null;
+  const current = useRef(sessionId);
+  current.current = sessionId;
+  const setTab = useCallback((tab: PanelTab) => setChoice({ sessionId: current.current, tab }), []);
   useEffect(() => {
-    if (remembers && picked) rememberPanelTab(sessionId!, picked);
-  }, [remembers, sessionId, picked]);
+    if (sessionId && picked) rememberPanelTab(sessionId, picked);
+  }, [sessionId, picked]);
   // A menu elsewhere asked for a tab (the session's "Ports and previews").
   useEffect(
     () =>
@@ -129,7 +143,7 @@ export function RightPanel({
         takePanelTab();
         setTab(asked);
       }),
-    [],
+    [setTab],
   );
   const [focusPr, setFocusPr] = useState(0);
   // A pull request just linked to this session (PRO-294): scroll to it in the Branch tab.
@@ -156,14 +170,23 @@ export function RightPanel({
         : isGit
           ? selectedTab
           : "files";
-  // Branch's two views keep their own tab ids, so every link and shortcut to "changes" lands on that view.
-  const onBranch = tab === "branch" || tab === "changes";
-  // The view Branch reopens on: the one last shown.
-  const [branchView, setBranchView] = useState<"branch" | "changes">(tab === "changes" ? "changes" : "branch");
-  useEffect(() => {
-    if (onBranch) setBranchView(tab);
-  }, [onBranch, tab]);
   const dragging = useRef<{ x: number; w: number } | null>(null);
+  // What the tab row says of the tabs not shown: Checks' red dot, the number of files in Changes (PRO-394).
+  const checksMark = useChecksMark(sessionId);
+  const changesSource = isGit ? (gitSource ?? localGitSource(cwd)) : null;
+  const changesCount = useChangesCount(changesSource?.key);
+  useEffect(() => {
+    // A cloud workspace's Changes view counts itself once read; a local branch is counted here, after each turn.
+    if (!changesSource || changesSource.cloud) return;
+    let cancelled = false;
+    const id = window.setTimeout(() => {
+      changesSource.reviewRange(null, false)
+        .then((range) => changesSource.changesBetween(range.base, range.head, false))
+        .then((files) => { if (!cancelled) noteChangesCount(changesSource.key, files.length); })
+        .catch(() => { /* The count is left unsaid; the Changes view says what went wrong. */ });
+    }, 400);
+    return () => { cancelled = true; window.clearTimeout(id); };
+  }, [changesSource, refreshTick, statusKey]);
 
   useEffect(() => {
     if (!isGit || (branch !== undefined && !labelMode)) return;
@@ -175,6 +198,11 @@ export function RightPanel({
       cancelled = true;
     };
   }, [cwd, gitSource, branch, labelMode, refreshTick, isGit]);
+
+  // Git paths are relative to the selected repository, which can differ from the Files root.
+  const [gitWorkspace, gitRepository] = gitSource?.cloud ? gitSource.key.split("|") : [];
+  const fileBase = fileSource?.key === gitWorkspace ? "" : gitWorkspace && fileSource?.key.startsWith(`${gitWorkspace}/`) ? fileSource.key.slice(gitWorkspace.length + 1) : null;
+  const repository = gitRepository === "." ? "" : gitRepository;
 
   const resolvedBranch = branch === undefined ? (status?.branch ?? null) : branch;
   const targetLabel = !isGit ? "Folder" : tab === "changes" && labelMode === "base" ? null : labelMode === "base" ? `base: ${status?.defaultBranch ?? "default"}` : labelMode === "branch" ? (resolvedBranch ?? "current branch") : null;
@@ -223,19 +251,25 @@ export function RightPanel({
       />
       <div data-tauri-drag-region="deep" className="flex h-(--titlebar-h) shrink-0 items-center gap-0.5 border-b border-hairline px-2">
         {TABS.filter((t) => (t.id === "ports" ? !!ports : t.id === "computer" ? computer : t.id === "browser" ? browser && !!sessionId : isGit || t.id === "files")).map((t) => (
-          <WithTooltip key={t.id} label={t.label} shortcut={t.shortcut}>
+          <WithTooltip key={t.id} label={t.id === "branch" && checksMark === "failed" ? "Checks · failing" : t.label} shortcut={t.shortcut}>
             <button
               type="button"
-              onClick={() => setTab(t.id === "branch" ? branchView : t.id)}
+              onClick={() => setTab(t.id)}
+              aria-pressed={tab === t.id}
               className={cn(
-                // Tabs, like the chat's: the open one is underlined on the hairline below.
-                "relative flex h-full items-center px-2 text-xs font-medium transition-colors",
-                (t.id === "branch" ? onBranch : tab === t.id)
-                  ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
-                  : "text-muted-foreground hover:text-foreground",
+                // Tabs as the design's pills (05.02): the open one filled.
+                "flex h-7 shrink-0 items-center rounded-md px-2 text-[12.5px] whitespace-nowrap transition-colors",
+                tab === t.id ? "bg-veil-strong text-foreground" : "text-muted-foreground hover:text-foreground",
               )}
             >
               {t.label}
+              {t.id === "ports" && portsCount > 0 && (
+                <span className="ml-1 font-normal tabular-nums text-faint" data-testid="panel-ports-count">
+                  {portsCount}
+                </span>
+              )}
+              {t.id === "changes" && changesCount != null && changesCount > 0 && <span className="ml-1 font-mono text-xs text-faint" data-testid="panel-changes-count">{changesCount}</span>}
+              {t.id === "branch" && checksMark === "failed" && <span className="ml-1.5 inline-block size-1.5 rounded-full bg-destructive" role="img" aria-label="failing" data-testid="panel-checks-failing" />}
             </button>
           </WithTooltip>
         ))}
@@ -250,30 +284,6 @@ export function RightPanel({
           </Button>
         </WithTooltip>
       </div>
-      {isGit && onBranch && (
-        // Branch's two views, drawn like the Browser's and Computer's second row and level with the chat's tabs: those
-        // are 36px tall with a 1px rule under them, so this row is 37px with its rule inside.
-        <div role="tablist" aria-label="Branch" className="flex h-[37px] shrink-0 items-stretch gap-1 border-b border-hairline px-2 text-xs" data-testid="branch-views">
-          {BRANCH_VIEWS.map((view) => (
-            <WithTooltip key={view.id} label={view.label} shortcut={view.shortcut}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={tab === view.id}
-                onClick={() => setTab(view.id)}
-                className={cn(
-                  "relative flex items-center px-2 transition-colors",
-                  tab === view.id
-                    ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-t-full after:bg-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {view.label}
-              </button>
-            </WithTooltip>
-          ))}
-        </div>
-      )}
       {repositories && (
         <div className="flex shrink-0 items-center gap-2 border-b border-hairline px-2 py-1">
           <select
@@ -318,6 +328,7 @@ export function RightPanel({
                   branch: resolvedBranch,
                   active: tab === "branch",
                   busy: live,
+                  machineWorkspace,
                   onSettle:
                     settleSessionId && workspace
                       ? () => openWorkspaceRemove({ projectPath: workspace.projectPath, path: cwd, name: workspace.name, mode: "settle", sessionId: settleSessionId })
@@ -338,6 +349,10 @@ export function RightPanel({
                 key={refreshTick}
                 cwd={cwd}
                 source={gitSource}
+                openFileAction={fileSource && fileBase !== null && repository !== undefined ? (path) => {
+                  const relative = pathInFileRoot(fileBase, repository ? `${repository}/${path}` : path);
+                  return relative ? () => openFile(sessionId ?? `checkout:${cwd}`, cwd, relative, undefined, cwd, fileSource.key) : undefined;
+                } : undefined}
                 events={events}
                 version={version}
                 baseRef={baseRef}
@@ -373,6 +388,7 @@ export function RightPanel({
         </div>
       </div>
       {terminals && sessionId && <TerminalDock sessionId={sessionId} cwd={cwd} />}
+      {dock}
     </aside>
   );
 }

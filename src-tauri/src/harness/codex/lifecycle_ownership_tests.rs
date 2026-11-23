@@ -96,7 +96,7 @@ fn canonical_parent_alias_contends_and_unsafe_sidecar_is_refused() {
     symlink(&real, &alias).unwrap();
     let path = real.join("journal.jsonl");
     let owner = Journal::<Envelope>::create_owned(&path).unwrap();
-    assert_eq!(owner.owned_namespace().unwrap(), fs::canonicalize(&real).unwrap().join("journal.jsonl"));
+    assert_eq!(owner.owned_namespace().unwrap(), crate::paths::canonicalize(&real).unwrap().join("journal.jsonl"));
     assert!(Journal::<Envelope>::begin_owned(&alias.join("journal.jsonl")).is_err());
     drop(owner);
     let lock = path.with_extension("owner.lock");

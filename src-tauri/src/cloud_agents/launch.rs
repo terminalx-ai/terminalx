@@ -788,7 +788,7 @@ fn at_root(repository: &Repository, root: &Path) -> Repository {
     let path = Path::new(&repository.path);
     let moved = match (path.parent(), path.file_name()) {
         (Some(parent), Some(name)) if parent != root && valid_repository_path(&repository.path) => {
-            let same = std::fs::canonicalize(parent).ok().zip(std::fs::canonicalize(root).ok()).is_some_and(|(parent, root)| parent == root);
+            let same = crate::paths::canonicalize(parent).ok().zip(crate::paths::canonicalize(root).ok()).is_some_and(|(parent, root)| parent == root);
             same.then(|| root.join(name).to_string_lossy().into_owned())
         }
         _ => None,

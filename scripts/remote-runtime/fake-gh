@@ -7,15 +7,20 @@ repository; this answers the calls they make, from JSON files in
 
   gh pr list --head <branch> --state all|open --json <fields> --limit <n>
   gh pr create --title <t> --body <b> --base <base> --head <branch> [--draft]
-  gh pr view <number> --json <fields>
-  gh pr ready <number>
-  gh pr merge <number> --merge|--squash|--rebase
+  gh pr view <number|url> --json <fields>
+  gh pr ready <number|url>
+  gh pr merge <number|url> --merge|--squash|--rebase [--match-head-commit <sha>]
 
 Faults, by file in the state directory:
   auth-expired       every call fails as GitHub does for a revoked token
   offline            every call fails to connect
   drop-after-create  the next create lands, then reports a dropped connection
+  view-offline       exact pull request reads fail to connect
+  pr-head            override the head SHA reported on newly opened PRs
+  live-pr-head       read the PR's current head from origin on exact reads
+  default-pr-repo    override the default repository if --repo is omitted
   mergeable          its text is the mergeable state of new pull requests
+  redirect-from      the old URL of a pull request the server has relocated
   checks.json        statusCheckRollup of every pull request
   pr-<n>.json        a pull request; a test may write one (e.g. a fork's,
                      "isCrossRepository": true)
@@ -75,10 +80,10 @@ def fail(message, code=1):
     sys.exit(code)
 
 
-def remote_has(branch):
-    """Whether origin (as the checkout's remote knows it) has `branch`."""
+def remote_head(branch):
+    """The commit in origin's fetch repository for this branch."""
     out = subprocess.run(["git", "ls-remote", "origin", "refs/heads/" + branch], capture_output=True, text=True)
-    return out.returncode == 0 and out.stdout.strip() != ""
+    return out.stdout.split()[0] if out.returncode == 0 and out.stdout.strip() else None
 
 
 def main(args):
@@ -88,10 +93,15 @@ def main(args):
         fail("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login")
     if flag("offline"):
         fail("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com")
-    if args[:2] == ["repo", "view"] and flag("repo-url"):
-        with open(path("repo-url")) as f:
-            print(json.dumps({"url": f.read().strip()}))
-        return
+    if args[:2] == ["repo", "view"]:
+        if flag("repo-url"):
+            with open(path("repo-url")) as f:
+                print(json.dumps({"url": f.read().strip()}))
+            return
+        configured = subprocess.run(["git", "config", "--get", "terminalx.testGithubRepoUrl"], capture_output=True, text=True)
+        if configured.returncode == 0:
+            print(json.dumps({"url": configured.stdout.strip()}))
+            return
     if args[:2] == ["api", "graphql"] and flag("conversation.json") and "PullRequestConversation" in option(args, "-f", ""):
         with open(path("conversation.json")) as f:
             print(f.read())
@@ -99,6 +109,34 @@ def main(args):
     prs = load_all()
     if args[:2] == ["api", "graphql"]:
         query = option(args, "-f", "")
+        variables = dict(
+            args[index + 1].split("=", 1)
+            for index, arg in enumerate(args[:-1]) if arg == "-f"
+        )
+        if "id" in variables:
+            pr = next((item for item in prs if item.get("id") == variables["id"]), None)
+            if pr is None:
+                fail("GraphQL: unknown pull request ID")
+            if "node(id:" in query:
+                if "isMergeQueueEnabled" in query and flag("queue-offline"):
+                    fail("error connecting to api.github.com")
+                print(json.dumps({"data": {"node": {**pr, "isMergeQueueEnabled": flag("merge-queue")}}}))
+                return
+            if variables.get("head", pr.get("headRefOid")) != pr.get("headRefOid"):
+                fail("GraphQL: Head branch was modified.")
+            if "markPullRequestReadyForReview(" in query:
+                pr["isDraft"] = False
+            elif "mergePullRequest(" in query:
+                pr["state"] = "MERGED"
+            elif "enqueuePullRequest(" in query:
+                pr["mergeQueueEntry"] = {"position": 2, "state": "QUEUED"}
+            elif "enablePullRequestAutoMerge(" in query:
+                pr["autoMergeRequest"] = {"enabledAt": "2026-11-19T00:00:00Z"}
+            else:
+                fail("fake-gh: unexpected node mutation")
+            save(pr)
+            print(json.dumps({"data": {"change": {"pullRequest": pr, "mergeQueueEntry": pr.get("mergeQueueEntry")}}}))
+            return
         match = re.search(r"pullRequest\(number:(\d+)\)", query)
         pr = next((pr for pr in prs if match and pr["number"] == int(match[1])), None)
         if flag("queue-offline"):
@@ -127,18 +165,22 @@ def main(args):
         head, base = option(rest, "--head"), option(rest, "--base")
         if not head or not base:
             fail("fake-gh: --head and --base are required", 2)
-        if not remote_has(head):
+        sha = remote_head(head)
+        if not sha:
             fail("pull request create failed: GraphQL: Head sha can't be blank, Head ref must be a branch (createPullRequest)")
         if any(pr["headRefName"] == head and pr["state"] == "OPEN" and not pr.get("isCrossRepository") for pr in prs):
             fail('a pull request for branch "%s" into branch "%s" already exists' % (head, base))
         number = len(prs) + 1
         mergeable = open(path("mergeable")).read().strip() if flag("mergeable") else "MERGEABLE"
         checks = json.load(open(path("checks.json"))) if flag("checks.json") else []
+        default_repo = open(path("default-pr-repo")).read().strip() if flag("default-pr-repo") else "github.test/octo/repo"
+        target_repo = option(rest, "--repo", default_repo)
         pr = {
+            "id": "PR_fixture_%d" % number,
             "number": number,
             "title": option(rest, "--title", ""),
             "body": option(rest, "--body", ""),
-            "url": "https://github.test/octo/repo/pull/%d" % number,
+            "url": "https://%s/pull/%d" % (target_repo, number),
             "state": "OPEN",
             "isDraft": "--draft" in rest,
             "baseRefName": base,
@@ -146,13 +188,19 @@ def main(args):
             "additions": 1,
             "deletions": 0,
             "mergeable": mergeable,
-            "headRefOid": "fake-head",
+            "headRefOid": open(path("pr-head")).read().strip() if flag("pr-head") else sha,
             "mergeStateStatus": "DIRTY" if mergeable == "CONFLICTING" else "CLEAN",
             "reviewDecision": "",
             "statusCheckRollup": checks,
             "author": {"login": "octocat"},
             "isCrossRepository": False,
         }
+        if flag("concurrent-create"):
+            os.remove(path("concurrent-create"))
+            pr["title"] = "Opened by another contributor"
+            pr["author"] = {"login": "another-contributor"}
+            save(pr)
+            fail('a pull request for branch "%s" into branch "%s" already exists' % (head, base))
         save(pr)
         if flag("drop-after-create"):
             os.remove(path("drop-after-create"))
@@ -162,9 +210,20 @@ def main(args):
     target = rest[0].rstrip("/").split("/")[-1] if rest else ""
     number = int(target) if target.isdigit() else None
     pr = next((pr for pr in prs if pr["number"] == number), None)
+    if pr is not None and rest and rest[0].startswith("https://"):
+        redirect_from = ""
+        if flag("redirect-from"):
+            with open(path("redirect-from")) as f:
+                redirect_from = f.read().strip()
+        if rest[0].rstrip("/").lower() not in (pr["url"].rstrip("/").lower(), redirect_from):
+            pr = None
     if pr is None:
         fail("GraphQL: Could not resolve to a PullRequest with the number of %s." % (rest[0] if rest else ""))
     if command == "view":
+        if flag("view-offline"):
+            fail("error connecting to api.github.com")
+        if flag("live-pr-head"):
+            pr["headRefOid"] = remote_head(pr["headRefName"])
         print(json.dumps(fields(pr, option(rest, "--json"))))
     elif command == "checks":
         print(json.dumps([{"name": name} for name in pr.get("requiredChecks", [])]))
@@ -174,6 +233,9 @@ def main(args):
     elif command == "merge":
         if pr["mergeable"] == "CONFLICTING":
             fail("Pull request #%d is not mergeable: the merge commit cannot be cleanly created." % number)
+        pinned = option(rest, "--match-head-commit")
+        if pinned is not None and pinned != pr.get("headRefOid"):
+            fail("GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)")
         if "--auto" in rest and flag("merge-queue"):
             pr["mergeQueueEntry"] = {"position": 2, "state": "QUEUED"}
         else:

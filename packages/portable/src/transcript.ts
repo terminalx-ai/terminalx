@@ -1,5 +1,5 @@
-import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ToolResult, Usage } from "./events";
-import { withoutHarnessBlocks } from "./harnessText";
+import type { AgentEvent, BackgroundTask, FileEdit, FileRef, Goal, Payload, PermissionOption, Question, ScreenPrompt, ToolResult, Usage } from "./events";
+import { shellRecord, withoutHarnessBlocks, type ShellRecord } from "./harnessText";
 import { compactionOperationKey, emptyCompactionLifecycle, reduceCompactionLifecycle, type CompactionLifecycle, type CompactionOperation } from "./compactionLifecycle";
 
 /** Turns an event log into the platform-neutral transcript model. */
@@ -14,6 +14,9 @@ export interface ToolCall {
   abandoned?: boolean;
   seq: number;
   subagent?: { id: string; label?: string };
+  /** When the call started and when its result came: a command's row says how long it ran. */
+  startedTs?: string;
+  endedTs?: string;
 }
 
 /** How the cloud runtime's "this turn ended with the restart" notice begins (src-tauri `cloud_agents`). */
@@ -29,6 +32,8 @@ const COMPACTION_SUMMARY_OPENING = "This session is being continued from a previ
 export interface Delivery {
   /** Not typed yet: the agent's input box holds something else. */
   inputOccupied?: boolean;
+  /** What holds it up is a question the agent drew in place of its input box, not text in it (PRO-462). */
+  inputChoice?: boolean;
   /** The agent dropped its turn before answering it, and took another prompt in its place. */
   replaced?: boolean;
   /** Stopped while it waited on the agent's input box: never typed. */
@@ -43,7 +48,8 @@ export type WorkItem =
   | { kind: "tool"; call: ToolCall; key: string }
   | { kind: "tool_group"; name: string; calls: ToolCall[]; key: string }
   | { kind: "text"; text: string; key: string; seq: number; messageTs?: string }
-  | { kind: "reasoning"; text: string; key: string; seq: number }
+  /** `durationMs`: from the turn's previous event to this one, how long the agent thought, where the log's times say. */
+  | { kind: "reasoning"; text: string; key: string; seq: number; durationMs?: number }
   | ({ kind: "queued"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
   /** A queued message the agent took mid-turn (#551): the reader's own words, where the agent read them. */
   | ({ kind: "message"; baseline?: string; author?: { userId: string; displayName: string }; text: string; key: string; seq: number; ts?: string; messageTs?: string; images?: { url: string; name?: string }[]; files?: FileRef[] } & Delivery)
@@ -55,7 +61,14 @@ export type WorkItem =
   | { kind: "subagent"; agentId: string; label?: string; done: boolean; key: string; seq: number }
   | { kind: "decision"; label: string; allowed: boolean; automatic: boolean; key: string; seq: number }
   /** Pictures a tool made (an image generator's output), shown even when the tool calls fold. */
-  | { kind: "media"; paths: string[]; key: string; seq: number };
+  | { kind: "media"; paths: string[]; key: string; seq: number }
+  /**
+   * A command the reader ran through Claude Code's `!` shell passthrough
+   * (#1294): not a prompt, and nothing the agent did. `command` is absent when
+   * only its output is on record; `done` once that output came. Empty output
+   * is "".
+   */
+  | { kind: "shell"; command?: string; stdout: string; stderr: string; exitCode?: number; done: boolean; author?: { userId: string; displayName: string }; key: string; seq: number; ts?: string };
 
 export interface Turn {
   key: string;
@@ -72,6 +85,12 @@ export interface Turn {
   usage?: Usage;
   agent?: string;
   model?: string;
+  /**
+   * The settings the app last recorded a change to before the turn ended
+   * (PRO-379). A key is absent when no change to it came before the turn;
+   * `Transcript.changedSettings` says whether one came later.
+   */
+  settings?: { effort?: string; permissionMode?: string };
   toolCount: number;
   editedFiles: number;
   live: boolean;
@@ -144,8 +163,12 @@ export interface Transcript {
   workingSince?: number;
   authFailed: boolean;
   rateLimit?: { status?: string; resetsAt?: number; window?: string };
+  /** A question the agent's CLI drew in its own terminal and is stopped on (PRO-460). */
+  terminalPrompt?: ScreenPrompt;
   usageWindows?: Record<string, { utilization: number; resetsAt: number }>;
   codexUsage?: { usedPercent: number; resetsAt: number; windowMins: number; plan?: string };
+  /** Settings the app recorded a change to somewhere in this transcript: a turn without its own record of one ran before it. */
+  changedSettings?: { effort?: boolean; permissionMode?: boolean };
 }
 
 const GROUPABLE = new Set(["Read", "Glob", "Grep", "LS", "Edit", "Write", "MultiEdit", "Bash", "shell", "apply_patch"]);
@@ -207,8 +230,8 @@ function takeMessage(turns: Turn[], seq: number): { prompt: NonNullable<Turn["pr
   if (at == null) return undefined;
   const [item] = turn.work.splice(at, 1);
   if (item.kind !== "queued" && item.kind !== "message") return undefined;
-  const { inputOccupied, replaced, withdrawn, unconfirmed, sent } = item;
-  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, replaced, withdrawn, unconfirmed, sent }, from: turn };
+  const { inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent } = item;
+  return { prompt: { baseline: item.baseline, author: item.author, text: item.text, images: item.images, files: item.files, ts: item.ts ?? "", messageTs: item.messageTs, seq: item.seq, inputOccupied, inputChoice, replaced, withdrawn, unconfirmed, sent }, from: turn };
 }
 
 /** Where the reader's message published under `seq` is drawn now: a turn's prompt (no `at`), or a note at `at` in a turn's work. */
@@ -286,6 +309,8 @@ export class TranscriptReducer {
   /** A replayed request cannot reopen an answer, even if it arrives after the decision. */
   private readonly decidedAsks = new Set<string>();
   private readonly calls = new Map<string, ToolCall>();
+  /** The seqs of the reader's messages read so far, each drawn once. */
+  private readonly messageSeqs = new Set<number>();
   /** The calls in `calls` that have no result yet: what a new prompt or a turn's end abandons. */
   private readonly unresolved = new Set<ToolCall>();
   /** The turn whose work holds a call (a subagent's calls are in none). */
@@ -300,14 +325,18 @@ export class TranscriptReducer {
   private contextUsed: number | undefined;
   private contextMax: number | undefined;
   private model: string | undefined;
+  private settings: { effort?: string; permissionMode?: string } = {};
   private compacting = false;
   private retry: Transcript["retry"];
   private modelRequestOpen = false;
   private authFailed = false;
   private rateLimit: Transcript["rateLimit"];
+  private terminalPrompt: ScreenPrompt | undefined;
   private usageWindows: Transcript["usageWindows"];
   private codexUsage: Transcript["codexUsage"];
   private workingSince: number | undefined;
+  /** The time of the last event this turn was given, for how long a thought took. */
+  private lastTs: number | undefined;
   private current: Turn | null = null;
   private afterCompaction = false;
 
@@ -377,6 +406,38 @@ export class TranscriptReducer {
     else turn.work.push({ kind: "compaction", summary, key: `k${event.seq}`, seq: event.seq });
   }
 
+  /**
+   * A `!` command's record (#1294). Its input and its output are written
+   * apart and drawn as one block, in the turn already open or a turn of its
+   * own; neither is a prompt. Typed in the composer, the command went out as
+   * `!command` and was drawn as one: its output turns that prompt, which the
+   * agent has done nothing about, into the block.
+   */
+  private addShell(event: AgentEvent, record: ShellRecord) {
+    const done = record.stdout !== undefined || record.stderr !== undefined || record.exitCode !== undefined;
+    const filled = { stdout: record.stdout ?? "", stderr: record.stderr ?? "", ...(record.exitCode !== undefined ? { exitCode: record.exitCode } : {}), done };
+    const current = this.current;
+    if (record.command === undefined && current) {
+      const last = current.work[current.work.length - 1];
+      if (last?.kind === "shell" && !last.done) {
+        Object.assign(last, filled);
+        this.touch(current);
+        return;
+      }
+      const typed = current.prompt?.text.trim();
+      if (event.harness === "claude" && typed?.startsWith("!") && !current.completed && !current.work.some((item) => item.kind !== "queued")) {
+        const prompt = current.prompt!;
+        delete current.prompt;
+        current.work.unshift({ kind: "shell", command: typed.slice(1).trim(), ...filled, ...(prompt.author ? { author: prompt.author } : {}), key: `sh${prompt.seq}`, seq: prompt.seq, ts: prompt.ts });
+        // The tab is not working on it: nothing was asked of the agent.
+        this.workingSince = undefined;
+        this.touch(current);
+        return;
+      }
+    }
+    this.ensureTurn(event).work.push({ kind: "shell", ...(record.command !== undefined ? { command: record.command } : {}), ...filled, key: `sh${event.seq}`, seq: event.seq, ts: event.ts });
+  }
+
   private newTurn(event: AgentEvent, prompt?: Turn["prompt"]): Turn {
     const turn: Turn = { key: `t${event.seq}`, seq: event.seq, ts: event.ts, agent: event.harness, model: this.model, work: [], toolCount: 0, editedFiles: 0, live: false };
     if (prompt) turn.prompt = prompt;
@@ -390,8 +451,11 @@ export class TranscriptReducer {
     this.version++;
     const payload: Payload = event.payload;
     const followsCompaction = this.afterCompaction;
+    const previousTs = this.lastTs;
+    const eventAt = Date.parse(event.ts);
+    if (!event.subagent && Number.isFinite(eventAt)) this.lastTs = eventAt;
     // The app may clear a standing recovery between the two as the summary is taken for a prompt.
-    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared") this.afterCompaction = payload.type === "context_compacted";
+    if (!event.subagent && payload.type !== "recovery" && payload.type !== "goal_updated" && payload.type !== "goal_cleared" && payload.type !== "terminal_prompt") this.afterCompaction = payload.type === "context_compacted";
     switch (payload.type) {
       case "goal_updated":
         if (!event.subagent && event.harness === "codex") this.goal = payload.goal;
@@ -402,6 +466,18 @@ export class TranscriptReducer {
       case "user_message": {
         if (followsCompaction && !payload.queued && !payload.author && payload.text.startsWith(COMPACTION_SUMMARY_OPENING)) {
           this.attachSummary(event, payload.text);
+          break;
+        }
+        // A second copy of a message already drawn (#1284) is not a second
+        // message: a late copy of a queued one would otherwise wait as a
+        // Queued card that nothing clears, after the agent has answered it.
+        if (this.messageSeqs.has(event.seq)) break;
+        this.messageSeqs.add(event.seq);
+        // Only Claude Code's own record of a `!` command, which names nobody:
+        // a message someone sent is drawn as theirs, whatever it holds.
+        const shell = event.harness === "claude" && !payload.author ? shellRecord(visibleUserText(payload.text)) : null;
+        if (shell) {
+          this.addShell(event, shell);
           break;
         }
         const text = withoutHarnessBlocks(visibleUserText(payload.text));
@@ -494,7 +570,7 @@ export class TranscriptReducer {
         break;
       }
       case "input_occupied": {
-        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ inputOccupied: payload.occupied || undefined, inputChoice: (payload.occupied && payload.choice) || undefined }));
         break;
       }
       case "prompt_replaced": {
@@ -503,7 +579,7 @@ export class TranscriptReducer {
         break;
       }
       case "prompt_withdrawn": {
-        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined }));
+        this.changeMessage(payload.promptSeq, () => ({ withdrawn: true, unconfirmed: payload.unconfirmed, inputOccupied: undefined, inputChoice: undefined }));
         break;
       }
       case "prompt_joined": {
@@ -534,7 +610,8 @@ export class TranscriptReducer {
       }
       case "reasoning": {
         const turn = this.ensureTurn(event);
-        if (payload.text.trim()) turn.work.push({ kind: "reasoning", text: payload.text, key: `r${event.seq}`, seq: event.seq });
+        const durationMs = !event.subagent && previousTs != null && Number.isFinite(eventAt) && eventAt >= previousTs ? eventAt - previousTs : undefined;
+        if (payload.text.trim()) turn.work.push({ kind: "reasoning", text: payload.text, key: `r${event.seq}`, seq: event.seq, ...(durationMs != null ? { durationMs } : {}) });
         break;
       }
       case "tool_call_started": {
@@ -547,6 +624,7 @@ export class TranscriptReducer {
           title: payload.title,
           seq: event.seq,
           subagent: event.subagent,
+          startedTs: event.ts,
         };
         // One id names one call: a second start replaces the first, which no later event reaches.
         const replaced = this.calls.get(payload.callId);
@@ -566,6 +644,7 @@ export class TranscriptReducer {
         if (call) {
           call.result = payload.result;
           call.abandoned = false;
+          call.endedTs = event.ts;
           if (call.result) this.unresolved.delete(call);
           else this.unresolved.add(call);
           this.touchCall(call);
@@ -607,6 +686,7 @@ export class TranscriptReducer {
           turn.usage = payload.usage;
           turn.model = payload.usage.model ?? turn.model;
         }
+        if (this.settings.effort || this.settings.permissionMode) turn.settings = { ...this.settings };
         if (payload.authFailed) this.authFailed = true;
         this.modelRequestOpen = false;
         this.compacting = false;
@@ -778,7 +858,16 @@ export class TranscriptReducer {
         break;
       }
       case "settings_changed":
+        if (payload.effort) this.settings = { ...this.settings, effort: payload.effort };
+        if (payload.permissionMode) this.settings = { ...this.settings, permissionMode: payload.permissionMode };
+        break;
+      case "terminal_prompt":
+        if (!event.subagent) this.terminalPrompt = payload.prompt ?? undefined;
+        break;
       case "conversation":
+        // What the terminal asked belonged to the conversation before.
+        this.terminalPrompt = undefined;
+        break;
       case "delta":
       case "unknown":
         break;
@@ -805,6 +894,7 @@ export class TranscriptReducer {
           return { kind: "tool", call, key: item.key };
         }
         case "subagent":
+        case "shell":
           return { ...item };
         case "compaction": {
           const lifecycle = overrides?.get(item);
@@ -871,8 +961,10 @@ export class TranscriptReducer {
       workingSince: live ? this.workingSince : undefined,
       authFailed: this.authFailed,
       rateLimit: this.rateLimit,
+      terminalPrompt: this.terminalPrompt,
       usageWindows: this.usageWindows,
       codexUsage: this.codexUsage,
+      changedSettings: this.settings.effort || this.settings.permissionMode ? { effort: !!this.settings.effort, permissionMode: !!this.settings.permissionMode } : undefined,
     };
     this.last = { version: this.version, live, transcript };
     return transcript;

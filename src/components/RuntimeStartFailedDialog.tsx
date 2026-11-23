@@ -57,6 +57,25 @@ export function reportUrl(failed: LocalRuntimeStartFailed): string {
 }
 
 /**
+ * Where the log is, and what it can hold, on one line whatever the path's
+ * length: the folder gives way first, so the file's name always shows. The
+ * whole path is still what a selection copies, and what the title says.
+ */
+function LogFooter({ path }: { path: string }) {
+  const cut = path.lastIndexOf("/");
+  return (
+    <div className="mt-5 flex min-w-0 items-center gap-x-1.5 whitespace-nowrap border-t border-hairline pt-3 text-xs text-faint">
+      <ScrollText className="size-3 shrink-0" aria-hidden />
+      <span className="flex min-w-0 font-mono select-text" title={path} data-testid="runtime-log-path">
+        <span className="min-w-0 truncate">{path.slice(0, Math.max(cut, 0))}</span>
+        <span className="shrink-0">{path.slice(Math.max(cut, 0))}</span>
+      </span>
+      <span className="shrink-0">· logs can include file paths and branch names</span>
+    </div>
+  );
+}
+
+/**
  * The runtime that runs the agents exited, or could not be started, before
  * this app could attach to it (PRO-287). No session can run without it, so
  * this holds the window: what failed, and the ways on. The desktop goes on
@@ -101,7 +120,7 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
             </DialogDescription>
           </div>
         </div>
-        <div aria-label="What failed" role="group" className="mt-4 rounded-md border border-border bg-well px-3 py-2.5 font-mono text-[11.5px] leading-[18px] select-text">
+        <div aria-label="What failed" role="group" className="mt-4 rounded-md border border-border bg-well px-3 py-2.5 font-mono text-xs leading-[18px] select-text">
           <div className="text-destructive">{endedLine(failed)}</div>
           {failed.error && <div className="truncate text-foreground/80" title={failed.error}>{failed.error}</div>}
           <div className="text-faint">{contextLine(failed)}</div>
@@ -122,14 +141,7 @@ export function RuntimeStartFailedDialog({ failed }: { failed: LocalRuntimeStart
             </Button>
           </div>
         </div>
-        {failed.log && (
-          <div className="mt-5 flex flex-wrap items-center gap-x-1.5 border-t border-hairline pt-3 text-[11.5px] text-faint">
-            <ScrollText className="size-3 shrink-0" aria-hidden />
-            {/* The dot goes with the path, so a narrow window breaks the line after it. */}
-            <span className="min-w-0 [overflow-wrap:anywhere]"><span className="font-mono select-text">{shortPath(failed.log)}</span> ·</span>
-            <span>logs can include file paths and branch names</span>
-          </div>
-        )}
+        {failed.log && <LogFooter path={shortPath(failed.log)} />}
       </DialogContent>
     </Dialog>
   );

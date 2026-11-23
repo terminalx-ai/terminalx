@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { confirmInApp } from "@/lib/confirm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowLeft,
@@ -20,6 +20,9 @@ import {
 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AutomationEditor } from "@/components/automations/AutomationEditor";
+import { shownOnAutomations } from "@/lib/botDuties";
+import { useBotStore } from "@/lib/bots";
+import { eventTriggerSentence } from "@/components/automations/AutomationSourceFields";
 import { Markdown } from "@/components/chat/Markdown";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
@@ -37,7 +40,7 @@ import {
 import { cn } from "@/lib/cn";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { formatDuration, relativeTime } from "@/lib/time";
-import type { Automation, AutomationInput, AutomationRun, AutomationRunStatus } from "@/types/automations";
+import type { Automation, AutomationInput, AutomationRun, AutomationRunStatus, PullRequestEvent } from "@/types/automations";
 
 const STATUS_LABEL: Record<AutomationRunStatus, string> = {
   pending: "Starting",
@@ -46,18 +49,23 @@ const STATUS_LABEL: Record<AutomationRunStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   timedOut: "Timed out",
-  skippedPrecheck: "Precheck skipped",
+  skippedPrecheck: "Nothing new",
   skippedMissed: "Missed",
   skippedUnavailable: "Unavailable",
 };
 
 function statusColor(status: AutomationRunStatus | null | undefined): string {
   if (status === "completed") return "bg-add";
+  // A first check that found nothing to do is a quiet success, not a warning.
+  if (status === "skippedPrecheck") return "bg-faint";
   if (status === "pending" || status === "running") return "bg-info animate-pulse-soft";
   if (status === "failed" || status === "timedOut") return "bg-destructive";
   if (status?.startsWith("skipped") || status === "cancelled") return "bg-warning";
   return "bg-faint";
 }
+
+const PR_EVENT_LABEL: Record<PullRequestEvent, string> = { opened: "Opened", pushed: "Pushed", reviewRequested: "Review requested", checkFailed: "Check failed" };
+const TRIGGER_LABEL: Partial<Record<AutomationRun["trigger"], string>> = { linearIssue: "Linear issue", pullRequest: "Pull request" };
 
 function toInput(automation: Automation): AutomationInput {
   return {
@@ -80,10 +88,12 @@ function toInput(automation: Automation): AutomationInput {
     missedRunGraceMinutes: automation.missedRunGraceMinutes,
     runTimeoutMinutes: automation.runTimeoutMinutes ?? null,
     issueTrigger: automation.issueTrigger ?? null,
+    eventTrigger: automation.eventTrigger ?? null,
   };
 }
 
 function issueTriggerSentence(automation: Automation): string | null {
+  if (automation.eventTrigger) return eventTriggerSentence(automation.eventTrigger);
   const trigger = automation.issueTrigger;
   if (!trigger) return null;
   return `GitHub: ${trigger.query} in ${trigger.repo}, checked every ${trigger.pollIntervalMinutes} min`;
@@ -91,7 +101,11 @@ function issueTriggerSentence(automation: Automation): string | null {
 
 /** One full workspace surface at a time: list, selected automation, or editor. */
 export function AutomationsView({ initialAutomationId = null }: { initialAutomationId?: string | null }) {
-  const automationStore = useAutomationStore();
+  const store = useAutomationStore();
+  const botStore = useBotStore();
+  // A bot's duties are listed on its bot's Duties tab (PRO-471); one whose bot was deleted is listed here.
+  const owned = store.automations.filter((automation) => shownOnAutomations(automation, botStore));
+  const automationStore = { ...store, automations: owned };
   const sessionStore = useSessionStore();
   const [selectedId, setSelectedId] = useState(initialAutomationId);
   const [editing, setEditing] = useState<Automation | null | undefined>(undefined);
@@ -114,7 +128,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
       name: sessionStore.projects.find((project) => project.path === path)?.name ?? path.split("/").pop() ?? path,
       automations: automations.sort((a, b) => a.name.localeCompare(b.name)),
     }));
-  }, [automationStore.automations, sessionStore.projects]);
+  }, [store.automations, botStore, sessionStore.projects]);
 
   useEffect(() => {
     if (selected) void loadAutomationRuns(selected.id).catch((cause) => setError(errorMessage(cause)));
@@ -158,10 +172,12 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
 
   const remove = async () => {
     if (!selected) return;
-    const yes = await ask(
-      `Delete “${selected.name}”? Its run history is removed, but its sessions and worktrees stay available for inspection.`,
-      { title: "Delete automation", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" },
-    ).catch(() => false);
+    const yes = await confirmInApp({
+      title: `Delete “${selected.name}”?`,
+      body: "Its run history is removed, but its sessions and worktrees stay available for inspection.",
+      action: "Delete",
+      destructive: true,
+    });
     if (!yes) return;
     try {
       await deleteAutomation(selected.id);
@@ -206,7 +222,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
             <div className="mx-1 h-5 w-px bg-hairline" />
             <div className="flex min-w-48 flex-1 items-center gap-2">
               <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-veil-raised">
-                {selected.issueTrigger ? <CircleDot className="size-4 text-muted-foreground" /> : <CalendarClock className="size-4 text-muted-foreground" />}
+                {selected.issueTrigger || selected.eventTrigger ? <CircleDot className="size-4 text-muted-foreground" /> : <CalendarClock className="size-4 text-muted-foreground" />}
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
@@ -233,18 +249,21 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
               <SummaryItem label="Agent" value={sessionStore.harnesses.find((harness) => harness.id === selected.harness)?.name ?? selected.harness} />
               <SummaryItem label="Workspace" value={selected.workspace === "newWorktree" ? "New worktree per run" : "Existing session"} />
               <div className="col-span-2 flex min-w-0 items-start gap-2 text-muted-foreground">
-                {selected.issueTrigger ? <CircleDot className="mt-0.5 size-3.5 shrink-0" /> : <Clock3 className="mt-0.5 size-3.5 shrink-0" />}
+                {selected.issueTrigger || selected.eventTrigger ? <CircleDot className="mt-0.5 size-3.5 shrink-0" /> : <Clock3 className="mt-0.5 size-3.5 shrink-0" />}
                 <div className="min-w-0">
                   <div className="truncate text-foreground">
-                    {selected.issueTrigger
+                    {selected.issueTrigger || selected.eventTrigger
                       ? issueTriggerSentence(selected)
                       : `${describeSchedule(selected.schedule)}, next ${nextWallTime(selected.nextRunAt, selected.schedule.timezone)} (${relativeNext(selected.nextRunAt)})`}
                   </div>
-                  <div className="mt-0.5 truncate text-[11px] text-faint">{selected.issueTrigger ? `Up to ${selected.issueTrigger.maxRunsPerTick} new runs per tick` : selected.schedule.timezone}</div>
-                  {selected.issueTrigger && automationStore.issueStates[selected.id]?.lastPollError && (
+                  <div className="mt-0.5 truncate text-[11px] text-faint">{selected.issueTrigger || selected.eventTrigger ? `Up to ${(selected.eventTrigger ?? selected.issueTrigger)!.maxRunsPerTick} new runs per tick` : selected.schedule.timezone}</div>
+                  {(selected.issueTrigger || selected.eventTrigger) && automationStore.issueStates[selected.id]?.lastPollError && (
                     <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{automationStore.issueStates[selected.id].lastPollError}</div>
                   )}
-                  {!selected.issueTrigger && selected.schedule.kind === "cron" && (
+                  {(selected.issueTrigger || selected.eventTrigger) && automationStore.issueStates[selected.id]?.notice && (
+                    <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{automationStore.issueStates[selected.id].notice}</div>
+                  )}
+                  {!selected.issueTrigger && !selected.eventTrigger && selected.schedule.kind === "cron" && (
                     <code className="mt-1 block truncate font-mono text-[11px] text-faint">{selected.schedule.cron}</code>
                   )}
                 </div>
@@ -324,7 +343,7 @@ export function AutomationsView({ initialAutomationId = null }: { initialAutomat
                     <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{issueTriggerSentence(automation) ?? describeSchedule(automation.schedule)}</div>
                   </div>
                   <div className="hidden shrink-0 text-right text-[11px] text-faint sm:block">
-                    <div>{automation.issueTrigger ? (automationStore.issueStates[automation.id]?.lastPolledAt ? `Checked ${relativeTime(automationStore.issueStates[automation.id].lastPolledAt!)}` : "Waiting for check") : `Next ${relativeNext(automation.nextRunAt)}`}</div>
+                    <div>{automation.issueTrigger || automation.eventTrigger ? (automationStore.issueStates[automation.id]?.lastPolledAt ? `Checked ${relativeTime(automationStore.issueStates[automation.id].lastPolledAt!)}` : "Waiting for check") : `Next ${relativeNext(automation.nextRunAt)}`}</div>
                     {automation.lastOutcome && <div>{STATUS_LABEL[automation.lastOutcome]}</div>}
                   </div>
                   <ChevronRight className="size-4 shrink-0 text-faint" />
@@ -383,14 +402,15 @@ function RunTable({ runs, loading, expandedRun, onExpandedRunChange }: { runs: A
           const end = run.endedAt ? Date.parse(run.endedAt) : Date.now();
           const duration = Number.isFinite(start) ? formatDuration(Math.max(0, end - start)) : null;
           const session = sessionStore.sessions.find((value) => value.id === run.sessionId);
-          return <RunTableRows key={run.runId} run={run} expanded={expanded} duration={duration} sessionTitle={session?.title ?? null} sessionArchived={!!session?.archived} onToggle={() => onExpandedRunChange(expanded ? null : run.runId)} />;
+          const waiting = (run.status === "running" || run.status === "pending") && session?.tabs?.find((tab) => tab.id === run.tabId)?.status === "waiting";
+          return <RunTableRows key={run.runId} run={run} waiting={waiting} expanded={expanded} duration={duration} sessionTitle={session?.title ?? null} sessionArchived={!!session?.archived} onToggle={() => onExpandedRunChange(expanded ? null : run.runId)} />;
         })}
       </tbody>
     </table>
   );
 }
 
-function RunTableRows({ run, expanded, duration, sessionTitle, sessionArchived, onToggle }: { run: AutomationRun; expanded: boolean; duration: string | null; sessionTitle: string | null; sessionArchived: boolean; onToggle: () => void }) {
+function RunTableRows({ run, waiting, expanded, duration, sessionTitle, sessionArchived, onToggle }: { run: AutomationRun; waiting: boolean; expanded: boolean; duration: string | null; sessionTitle: string | null; sessionArchived: boolean; onToggle: () => void }) {
   const repeated = run.repeatCount > 1 ? `${run.repeatCount}× · ${relativeTime(run.lastRepeatAt ?? run.endedAt ?? "")}` : null;
   return (
     <>
@@ -409,16 +429,22 @@ function RunTableRows({ run, expanded, duration, sessionTitle, sessionArchived, 
               <span className="truncate text-muted-foreground">{run.issue.title}</span>
               <ExternalLink className="mt-0.5 size-3 shrink-0" />
             </button>
-          ) : <span className="capitalize text-muted-foreground">{run.trigger}</span>}
+          ) : run.pullRequest ? (
+            <button type="button" onClick={() => void openUrl(run.pullRequest!.url)} className="flex max-w-full items-start gap-1 text-left text-info hover:underline">
+              <span className="shrink-0 font-mono">#{run.pullRequest.number}</span>
+              <span className="truncate text-muted-foreground">{PR_EVENT_LABEL[run.pullRequest.event]} · {run.pullRequest.title}</span>
+              <ExternalLink className="mt-0.5 size-3 shrink-0" />
+            </button>
+          ) : <span className="capitalize text-muted-foreground">{TRIGGER_LABEL[run.trigger] ?? run.trigger}</span>}
         </td>
-        <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span aria-hidden className={cn("size-1.5 rounded-full", statusColor(run.status))} />{STATUS_LABEL[run.status]}</span></td>
+        <td className="px-3 py-2.5"><span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span aria-hidden className={cn("size-1.5 rounded-full", waiting ? "bg-warning" : statusColor(run.status))} />{waiting ? "Waiting" : STATUS_LABEL[run.status]}</span></td>
         <td className="automation-column-timing px-3 py-2.5 text-muted-foreground"><div>{relativeTime(run.startedAt ?? run.endedAt ?? "")}</div><div className="text-[10px] text-faint">{duration ?? "—"}</div></td>
         <td className="automation-column-workspace px-3 py-2.5">
           {sessionArchived && <div className="mb-0.5 text-[10px] text-faint">Archived</div>}
           {run.worktreeName ? <span className="flex min-w-0 items-center gap-1.5"><GitBranch className="size-3 shrink-0 text-faint" /><span className="truncate font-mono text-[11px]">{run.worktreeName}</span></span> : run.sessionId ? <span className="block truncate text-muted-foreground">{sessionTitle ?? "Session"}</span> : <span className="text-faint">—</span>}
         </td>
         <td className="automation-column-result px-3 py-2.5">
-          {run.reported?.prUrl ? <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
+          {run.reported?.prUrl ? <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="inline-flex items-center gap-1 text-info hover:underline">Open PR <ExternalLink className="size-3" /></button> : run.error ? <span className="text-destructive">Error</span> : run.status === "skippedPrecheck" && run.precheck ? <button type="button" aria-expanded={expanded} onClick={onToggle} className="text-muted-foreground hover:text-foreground hover:underline">Check output</button> : run.finalMessage ? <span className="text-muted-foreground">Output</span> : <span className="text-faint">—</span>}
           {run.changedFiles != null && <div className="text-[10px] text-faint">{run.changedFiles} file{run.changedFiles === 1 ? "" : "s"} changed</div>}
         </td>
       </tr>
@@ -436,9 +462,25 @@ function RunDetails({ run }: { run: AutomationRun }) {
         {run.reported?.prUrl && <button type="button" onClick={() => void openUrl(run.reported!.prUrl!)} className="text-[11px] text-info hover:underline">Open pull request</button>}
         {(run.reported?.labels?.length ?? 0) > 0 && <span className="text-[11px] text-faint">Labels: {run.reported!.labels!.join(", ")}</span>}
       </div>
-      {run.finalMessage ? <div><div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-faint">Output snapshot</div><Markdown text={run.finalMessage} /></div> : run.error ? <div className="text-xs leading-relaxed text-destructive">{run.error}</div> : <div className="text-xs text-muted-foreground">{run.status === "running" || run.status === "pending" ? "The agent is still working." : "This run did not produce an assistant message."}</div>}
-      {run.precheck && <div className="mt-3 border-t border-hairline pt-3"><div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-faint">Precheck output</div>{run.precheck.stdoutTail && <pre className="overflow-x-auto whitespace-pre-wrap text-[11px] text-foreground">{run.precheck.stdoutTail}</pre>}{run.precheck.stderrTail && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-destructive">{run.precheck.stderrTail}</pre>}</div>}
+      {run.status === "skippedPrecheck" ? <div className="text-xs text-muted-foreground">Nothing new: the first check printed nothing, so no session started and no model was called.</div> : run.finalMessage ? <div><div className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-faint">Output snapshot</div><Markdown text={run.finalMessage} /></div> : run.error ? <div className="text-xs leading-relaxed text-destructive">{run.error}</div> : <div className="text-xs text-muted-foreground">{run.status === "running" || run.status === "pending" ? "The agent is still working." : "This run did not produce an assistant message."}</div>}
+      {run.precheck && <PrecheckDetails run={run} />}
       {run.finalMessage && run.error && <div className="mt-2 text-[11px] text-destructive">{run.error}</div>}
+    </div>
+  );
+}
+
+function PrecheckDetails({ run }: { run: AutomationRun }) {
+  const precheck = run.precheck!;
+  const facts = [
+    precheck.exitCode != null ? `exit ${precheck.exitCode}` : precheck.timedOut ? "timed out" : null,
+    formatDuration(precheck.durationMs),
+    precheck.truncated ? "output cut short" : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <div className="mt-3 border-t border-hairline pt-3">
+      <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-faint">First check · {facts}</div>
+      {precheck.stdoutTail.trim() ? <pre className="overflow-x-auto whitespace-pre-wrap text-[11px] text-foreground">{precheck.stdoutTail}</pre> : <div className="text-[11px] text-faint">It printed nothing.</div>}
+      {precheck.stderrTail && <pre className="mt-1 overflow-x-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{precheck.stderrTail}</pre>}
     </div>
   );
 }

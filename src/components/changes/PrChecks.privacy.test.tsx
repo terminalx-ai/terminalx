@@ -6,6 +6,10 @@ import type { CheckAuthority, PullRequest } from "@/lib/api";
 import { PRIVACY_MESSAGE, refreshDataPrivacy, setDataPrivacy } from "@/lib/dataPrivacy";
 import { sendFailedChecks, useFixCheckErrors } from "@/lib/fixCheckErrors";
 import { PrPanel } from "./PrPanel";
+import { dismissError, getErrorToasts } from "@/lib/errorToasts";
+
+/** A refused re-run is said in a toast naming the PR (PRO-394). */
+const rerunToast = () => getErrorToasts().find((toast) => toast.title === "Couldn't re-run checks on #1");
 
 const render = (node: ReactNode) => renderView(<TooltipProvider>{node}</TooltipProvider>);
 
@@ -70,7 +74,7 @@ beforeEach(async () => {
   });
   await refreshDataPrivacy();
 });
-afterEach(async () => { cleanup(); policy.enabled = false; policy.managed = false; await refreshDataPrivacy(); });
+afterEach(async () => { cleanup(); for (const toast of getErrorToasts()) dismissError(toast.id); policy.enabled = false; policy.managed = false; await refreshDataPrivacy(); });
 
 async function revoke(managed: boolean, cycle: boolean) {
   if (managed) { policy.enabled = true; policy.managed = true; policy.epoch++; await refreshDataPrivacy(); }
@@ -105,15 +109,14 @@ it.each(cases)("retains direct failed-log delivery authority across a delayed re
 
 it.each(cases)("keeps the completed workflow and refuses the later batch continuation: %o", async ({ managed, cycle }) => {
   const view = render(<PrPanel cwd={input.cwd} branch="feature" active busy={false} />);
-  const button = await screen.findByRole("button", { name: "Re-run all" });
+  const button = await screen.findByRole("button", { name: "Re-run failed" });
   await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
   hold = "rerun";
   fireEvent.click(button);
   await waitFor(() => expect(release).toBeTypeOf("function"));
   expect(writes).toEqual([12]); // Native reply is complete; only delivery is delayed.
   await act(async () => { await revoke(managed, cycle); release!(); });
-  fireEvent.click(await screen.findByRole("button", { name: "Show details" }));
-  await screen.findByText(PRIVACY_MESSAGE);
+  await waitFor(() => expect(rerunToast()?.action).toContain(PRIVACY_MESSAGE.replace(/[.:]+$/, "")));
   expect(writes).toEqual([12]);
   expect(screen.getByLabelText("test: queued")).toBeTruthy();
   expect(screen.getByLabelText("lint: failure")).toBeTruthy();
@@ -125,7 +128,7 @@ it.each(cases)("keeps the completed workflow and refuses the later batch continu
   expect(writes).toEqual([12]); // Disabling never resumes the old loop.
   view.unmount();
   render(<PrPanel cwd={input.cwd} branch="feature" active busy={false} />);
-  const fresh = await screen.findByRole("button", { name: "Re-run all" });
+  const fresh = await screen.findByRole("button", { name: "Re-run failed" });
   await waitFor(() => expect((fresh as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(fresh);
   await screen.findByText("Re-run requested for 2 Actions runs.");
@@ -175,7 +178,7 @@ for (const count of [1, 2]) {
         const before = [...reads()];
         expect(before.some(([command]) => command === "pr_list")).toBe(true);
         expect(before.some(([command]) => command === "workspace_disposition")).toBe(true);
-        const button = screen.getByRole("button", { name: "Re-run all" });
+        const button = screen.getByRole("button", { name: "Re-run failed" });
         expect((button as HTMLButtonElement).disabled).toBe(false);
         await act(async () => { fireEvent.click(button); });
         expect(release).toBeTypeOf("function");
@@ -183,10 +186,7 @@ for (const count of [1, 2]) {
         expect(writes).toEqual(completed);
         await act(async () => { await revoke(managed, cycle); release!(); });
         if (outcome === "success") expect(screen.getByRole("status").textContent).toContain(`Re-run requested for ${count} Actions`);
-        else {
-          fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-          expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
-        }
+        else expect(rerunToast()?.action).toContain("GitHub rejected this workflow rerun");
         for (const check of current.checks) {
           expect(screen.getByLabelText(`${check.name}: ${completed.includes(check.actions!.runId) ? "queued" : "failure"}`)).toBeTruthy();
         }
@@ -199,7 +199,7 @@ for (const count of [1, 2]) {
         expect(reads().filter(([command]) => command === "pr_list")).toHaveLength(before.filter(([command]) => command === "pr_list").length + 2);
         expect(reads().filter(([command]) => command === "workspace_disposition")).toHaveLength(before.filter(([command]) => command === "workspace_disposition").length + 2);
         expect(writes).toEqual(completed);
-        if (outcome === "ordinary-error") expect(screen.getByRole("alert").textContent).toContain("GitHub rejected this workflow rerun");
+        if (outcome === "ordinary-error") expect(rerunToast()?.action).toContain("GitHub rejected this workflow rerun");
       } finally {
         cleanup();
         vi.useRealTimers();

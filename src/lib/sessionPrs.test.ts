@@ -79,7 +79,7 @@ describe("session PR transport", () => {
     expect(rows.map((row) => row.identity)).toEqual([b.url, a.url]);
     expect(call).toHaveBeenCalledWith("git.prs", expect.objectContaining({ repo: "old-repo", branch: "initial", number: 1 }));
     await source.prAccess!(saved).ready();
-    expect(mutate).toHaveBeenCalledWith("git.prReady", expect.objectContaining({ repo: "old-repo", number: 1 }));
+    expect(mutate).toHaveBeenCalledWith("git.prReady", { repo: "old-repo", number: a.number });
   });
 
   it("persists local PR creation with explicit session identity", async () => {
@@ -87,6 +87,39 @@ describe("session PR transport", () => {
     await localGitSource("/fixture").createPr({ title: "Follow-up", body: "", base: "main", draft: false, sessionId: "author" });
     expect(invoke).toHaveBeenCalledWith("pr_create", { cwd: "/fixture", title: "Follow-up", body: "", base: "main", draft: false, sessionId: "author" });
   });
+});
+
+it.each([
+  { machine: false, enterprise: false },
+  { machine: true, enterprise: false },
+  { machine: true, enterprise: true },
+])("checks legacy routing before PR writes (machine: $machine, Enterprise: $enterprise)", async ({ machine, enterprise }) => {
+  const workspaceKey = machine ? "machine:mini:project" : "cloud:org:workspace";
+  const url = enterprise ? a.url.replace("github.com", "github.example.com") : a.url;
+  const association: PrAssociation = { ...reference(a), url, scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } };
+  const sameNumber = { ...a, url: "https://github.com/acme/other/pull/1" };
+  const call = vi.fn().mockResolvedValueOnce({ prs: [sameNumber] }).mockResolvedValue({ prs: [a] });
+  const mutate = vi.fn(async () => ({}));
+  const client = { call, mutate, hasCapability: () => false } as unknown as WorkspaceRpcClient;
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit(client, "."), canWrite: true, author: async () => null });
+  const access = source.prAccess!(association);
+  if (enterprise) {
+    await expect(access.ready()).rejects.toThrow("Update this machine");
+    await expect(access.merge("squash")).rejects.toThrow("Update this machine");
+    expect(call).not.toHaveBeenCalled();
+    expect(mutate).not.toHaveBeenCalled();
+  } else {
+    await expect(access.ready()).rejects.toThrow("did not return associated PR");
+    expect(mutate).not.toHaveBeenCalled();
+    await access.ready();
+    await access.merge("squash");
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(call).toHaveBeenLastCalledWith("git.prs", { repo: "app", branch: a.head, number: a.number });
+    expect(mutate.mock.calls).toEqual([
+      ["git.prReady", { repo: "app", number: a.number }],
+      ["git.prMerge", { repo: "app", number: a.number, method: "squash" }],
+    ]);
+  }
 });
 
 it("saves cloud creation immediately, before a later branch change or refresh", async () => {
@@ -166,7 +199,7 @@ it("recovers runtime agent and pipeline PRs on a fresh desktop, retaining each c
     ]);
   }
   const requests = call.mock.calls.length;
-  await expect(sessionPrs(source(), "cloud:other:workspace:author", null)).rejects.toThrow("different cloud workspace");
+  await expect(sessionPrs(source(), "cloud:other:workspace:author", null)).rejects.toThrow("This session belongs to a different workspace.");
   expect(call.mock.calls).toHaveLength(requests);
 });
 
@@ -175,6 +208,72 @@ it("does not offer a fetching landed check to a read-only cloud viewer", () => {
   expect(source.landed).toBeUndefined();
 });
 
+it.each([true, false, undefined])("uses live machine PR provenance (linked: %s)", async (linked) => {
+  const workspaceKey = "machine:mini:project";
+  const cached = { ...reference(b), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } };
+  invoke.mockResolvedValue([cached]);
+  const call = vi.fn(async (method: string) => method === "git.prAssociations"
+    ? { associations: [{ url: b.url, number: b.number, head: b.head, repo: "app", linked }] }
+    : { prs: [b] });
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null });
+
+  const { rows } = await sessionPrs(source, `${workspaceKey}:author`, null);
+  expect(rows).toEqual([{ identity: b.url, pr: b, current: false, association: { ...cached, linked: linked ?? true } }]);
+  expect(invoke).not.toHaveBeenCalled();
+});
+
+it("drops a withdrawn machine link even while the checkout's branch still lists the PR", async () => {
+  const workspaceKey = "machine:mini:project";
+  invoke.mockResolvedValue([{ ...reference(b), scope: { kind: "cloud", workspace: workspaceKey, repo: "app" } }]);
+  let associations = [{ url: b.url, number: b.number, head: b.head, repo: "app", linked: true }];
+  const call = vi.fn(async (method: string) => method === "git.prAssociations"
+    ? { associations, branchPrLinks: true }
+    : { prs: [b] });
+  const mutate = vi.fn();
+  const source = cloudGitSource({ workspaceKey, remote: new RemoteGit({ call, mutate } as unknown as WorkspaceRpcClient, "app"), canWrite: true, author: async () => null, sessionCheckout: true });
+  const sessionId = `${workspaceKey}:author`;
+
+  expect((await sessionPrs(source, sessionId, b.head)).rows).toMatchObject([{ pr: b, current: true }]);
+  expect(invoke).not.toHaveBeenCalled();
+  associations = [];
+  expect(await sessionPrs(source, sessionId, b.head)).toMatchObject({ rows: [], branchPrLinks: true });
+  expect(invoke).not.toHaveBeenCalled();
+  expect(mutate).not.toHaveBeenCalled();
+});
+
+it("records Branch panel PR creation on the machine under its native session ID", async () => {
+  const workspaceKey = "machine:mini:project";
+  const repo = "/machine/worktrees/followup";
+  const pr = { ...b, url: "https://github.example.com/acme/widgets/pull/2" };
+  const { url, number, head } = pr;
+  const call = vi.fn(async (method: string) => {
+    if (method === "git.prAssociations") return { associations: [{ url, number, head, repo }] };
+    if (method === "git.prs") return { prs: [pr] };
+    if (method === "git.prConversation") return { activity: [] };
+    throw Error(method);
+  });
+  const mutate = vi.fn(async () => ({ pr, created: true, existing: false, sessionAssociated: true }));
+  const client = { call, mutate, hasCapability: (capability: string) => capability === "git-pr-target/1" } as unknown as WorkspaceRpcClient;
+  const source = (locator: string) => cloudGitSource({ workspaceKey, remote: new RemoteGit(client, locator), canWrite: true, author: async () => null });
+  const sessionId = `${workspaceKey}:author`;
+  const create = { title: pr.title, body: "", base: "main", draft: false, sessionId };
+  await source(repo).createPr(create);
+  expect(mutate).toHaveBeenCalledExactlyOnceWith("git.prCreateForSession", { ...create, repo, sessionId: "author" });
+
+  const reopened = source(".");
+  const { associations: [association] } = await reopened.prAssociations!(sessionId);
+  expect(association.scope).toEqual({ kind: "cloud", workspace: workspaceKey, repo });
+  const access = reopened.prAccess!(association);
+  await expect(access.read()).resolves.toEqual(pr);
+  await access.ready();
+  await access.merge("squash");
+  await reopened.conversation!(pr, association).read();
+  expect(call).toHaveBeenCalledWith("git.prs", { repo, number, branch: head, url });
+  expect(mutate).toHaveBeenCalledWith("git.prReady", { repo, url });
+  expect(mutate).toHaveBeenCalledWith("git.prMerge", { repo, url, method: "squash" });
+  expect(call).toHaveBeenCalledWith("git.prConversation", { repo, url });
+  expect(invoke).not.toHaveBeenCalled();
+});
 
 it("keeps legacy runtime branch discovery and cached history without adopting branch PRs", async () => {
   const sessionId = "cloud:org:workspace:author";

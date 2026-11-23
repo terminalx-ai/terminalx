@@ -32,7 +32,7 @@ thread_local! {
     static TEST_LINEAR_API: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn with_linear_api<T>(url: String, test: impl FnOnce() -> T) -> T {
     struct Reset(Option<String>);
     impl Drop for Reset {
@@ -183,7 +183,7 @@ pub(crate) fn gh() -> Result<Command> {
     Ok(c)
 }
 
-fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn run_gh(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut command = gh()?;
     command.current_dir(gh_dir(cwd)).args(args);
     let out = crate::github_process::output(command, crate::github_process::TIMEOUT, None).with_context(|| format!("gh {}", args.join(" ")))?;
@@ -544,7 +544,7 @@ pub fn github_comment(cwd: &Path, repo: &str, number: i64, body: &str) -> Result
 
 // ------------------------------------------------------------------ Linear
 
-fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
+pub(crate) fn graphql(key: &str, query: &str, variables: Value) -> Result<Value> {
     let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(20)).build();
     let resp = agent
         .post(linear_api().as_ref())
@@ -705,9 +705,18 @@ pub fn linear_list_variables(filter: &IssueFilter) -> Result<Value> {
 }
 
 pub fn linear_list(key: &str, filter: &IssueFilter) -> Result<Vec<Issue>> {
-    let query = format!("query($first: Int!, $filter: IssueFilter, $sort: [IssueSortInput!]) {{ issues(first: $first, filter: $filter, sort: $sort) {{ nodes {{ {ISSUE_FIELDS} }} }} }}");
-    let data = graphql(key, &query, linear_list_variables(filter)?)?;
-    Ok(parse_linear_issues(&data))
+    Ok(linear_page(key, linear_list_variables(filter)?, None)?.0)
+}
+
+/// One page of `linear_list`'s query with variables a caller has adjusted,
+/// after `after`; with the cursor of the next page when there is one.
+pub fn linear_page(key: &str, mut variables: Value, after: Option<&str>) -> Result<(Vec<Issue>, Option<String>)> {
+    variables["after"] = after.map_or(Value::Null, |cursor| json!(cursor));
+    let query = format!("query($first: Int!, $after: String, $filter: IssueFilter, $sort: [IssueSortInput!]) {{ issues(first: $first, after: $after, filter: $filter, sort: $sort) {{ nodes {{ {ISSUE_FIELDS} }} pageInfo {{ hasNextPage endCursor }} }} }}");
+    let data = graphql(key, &query, variables)?;
+    let page = &data["issues"]["pageInfo"];
+    let next = page["hasNextPage"].as_bool().unwrap_or(false).then(|| page["endCursor"].as_str().map(String::from)).flatten();
+    Ok((parse_linear_issues(&data), next))
 }
 
 /// The issue as an agent's first prompt carries it: the description with the

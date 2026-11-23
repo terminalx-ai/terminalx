@@ -1,11 +1,13 @@
 import { CloudWorkspaceSections } from "./CloudWorkspaceSections";
+import { OrgMark } from "./OrgMark";
 import { cloudPresence } from "@/lib/cloudPresence";
 import { OrganizationPresenceCount } from "./WorkspaceFollowingSection";
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "@/components/settings/DataPrivacySettings";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeftRight, Check, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Plus, RefreshCw, Trash2, X } from "@/icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ArrowLeftRight, Check, Ellipsis, EyeOff, Folder, FolderGit2, FolderPlus, Loader2, Plus, RefreshCw, Settings, Trash2, X } from "@/icons";
+import { openOrganizationSettings } from "@/lib/settingsLinks";
+import { confirmInApp } from "@/lib/confirm";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import {
@@ -39,6 +41,7 @@ import {
 import { mayStartCloudSessions } from "@/lib/multiOrg";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs, type CloudSidebarSection } from "@/lib/prefs";
+import { bootCloudPins, useCloudPins, useCloudPinsError } from "@/lib/cloudPins";
 import { workspaceUsage } from "@/lib/runningLimit";
 import { selectSession, useSessionStore } from "@/lib/sessions";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
@@ -171,6 +174,8 @@ function OrganizationSection({
 }) {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
+  const pinsError = useCloudPinsError();
   const store = useSessionStore();
   const { status } = useAccount();
   const filter = useSidebarFilter();
@@ -183,8 +188,8 @@ function OrganizationSection({
   const name = sectionName(org);
   const cached = catalog.orgs[org.id];
   const placed = useMemo(
-    () => placeCloudProjects(cached ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, { pinned: prefs.cloudPinned[org.id], added: prefs.cloudProjects[org.id], blank: prefs.cloudBlankProjects[org.id] }),
-    [cached, org.id, catalog.createMemory, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects],
+    () => placeCloudProjects(cached ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, { pinned: cloudPins[org.id], added: prefs.cloudProjects[org.id], blank: prefs.cloudBlankProjects[org.id] }),
+    [cached, org.id, catalog.createMemory, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects],
   );
   // Creating a workspace is the API's owner-or-admin action, the same rule as
   // a project's "+": true for them, false for a member, null while this
@@ -200,12 +205,11 @@ function OrganizationSection({
   const switchOrg = async () => {
     setSwitchError(null);
     const current = status.identity?.organization ?? "the current organization";
-    const yes = await ask(`Cloud sessions open in ${current} will close. Switch the default organization to ${org.name}?`, {
-      title: "Switch organization",
-      kind: "info",
-      okLabel: "Switch",
-      cancelLabel: "Cancel",
-    }).catch(() => false);
+    const yes = await confirmInApp({
+      title: `Switch the default organization to ${org.name}?`,
+      body: `Cloud sessions open in ${current} will close.`,
+      action: "Switch",
+    });
     if (!yes) return;
     try {
       cloudPresence.leave();
@@ -216,24 +220,21 @@ function OrganizationSection({
     }
   };
 
+  // The organization's row says it is the cloud and how many of its workspaces run; the tooltip has the limit where
+  // the organization has one (PRO-371: only the count where it has none).
+  const note = usage ? (
+    <span
+      className={cn("block min-w-0 truncate", usage.atLimit && "text-warning")}
+      data-testid="cloud-org-quota"
+      data-at-limit={usage.atLimit || undefined}
+    >
+      cloud · {usage.used} running
+    </span>
+  ) : "cloud";
+
   const actions = (
     <>
       <OrganizationPresenceCount orgId={org.id} />
-      {/* Stays beside the header's actions: its tooltip says how many run, and the limit. */}
-      {usage && (
-        <WithTooltip label={usage.card.replace(/\n/g, " · ")}>
-          <span
-            tabIndex={0}
-            role="note"
-            aria-label={`${usage.label}. ${usage.card}`}
-            className={cn("shrink-0 rounded-sm bg-veil-raised px-1 text-[9px] text-faint outline-none focus-visible:ring-2 focus-visible:ring-ring/40", usage.atLimit && "text-warning")}
-            data-testid="cloud-org-quota"
-            data-at-limit={usage.atLimit || undefined}
-          >
-            {usage.label}
-          </span>
-        </WithTooltip>
-      )}
       <RowActions persistent className={anyMenuOpen ? "not-sr-only" : undefined}>
         {/* Adding a repository only pins it to this sidebar, so a member may; a new project is created with its first session, so it says who can. */}
         {live && mayCreate !== null && (
@@ -256,6 +257,12 @@ function OrganizationSection({
             </DropdownMenuContent>
           </DropdownMenu>
         )}
+        {/* Every member: the settings page itself limits what each role may change (#1286). */}
+        <WithTooltip label={`Settings for ${name}`}>
+          <Button variant="ghost" size="icon-xs" aria-label={`Settings for ${name}`} onClick={() => openOrganizationSettings(org.id)} data-testid="cloud-org-settings">
+            <Settings />
+          </Button>
+        </WithTooltip>
         <DropdownMenu {...menu.root}>
           <DropdownMenuTrigger asChild {...menu.trigger}>
             <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${name}`}>
@@ -285,6 +292,9 @@ function OrganizationSection({
                 <ArrowLeftRight /> Switch to show cloud sessions
               </DropdownMenuItem>
             )}
+            <DropdownMenuItem onSelect={() => openOrganizationSettings(org.id)} data-testid="cloud-org-settings-item">
+              <Settings /> Organization settings…
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             {prefs.organizationDisplay === "one" ? (
               // One organization at a time: which one, chosen here; nothing changes on the server and nothing wakes.
@@ -325,6 +335,15 @@ function OrganizationSection({
   const notes = (
     <>
       {switchError && <p className="px-2 text-[11px] text-destructive">{switchError}</p>}
+      {/* Unread, the pins are not shown, and every project reads as unpinned: say so, rather than drop them silently. */}
+      {live && pinsError && (
+        <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[11px] text-destructive" title={pinsError} data-testid="cloud-pins-error">
+          <span className="min-w-0 flex-1 truncate">Pinned projects could not be read.</span>
+          <button type="button" onClick={() => void bootCloudPins()} className="shrink-0 rounded-sm underline underline-offset-2 outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40" data-testid="cloud-pins-retry">
+            Try again
+          </button>
+        </div>
+      )}
       {!live && (
         <div className="flex min-w-0 items-center gap-1.5 px-2 py-1 text-[12px] text-faint" title={HINT} data-testid="cloud-org-not-live">
           <span className="min-w-0 flex-1 truncate">Its cloud sessions show when it is the default organization.</span>
@@ -347,6 +366,9 @@ function OrganizationSection({
     <ListSection
       id={`org:${org.id}`}
       label={name}
+      mark={<OrgMark name={name} />}
+      note={note}
+      description={usage?.card.replace(/\n/g, " · ")}
       title={temporary ? "Shown while selected; your sidebar preference is unchanged" : org.isPersonal ? `${org.name} (personal)` : org.name}
       forceOpen={temporary}
       actions={actions}

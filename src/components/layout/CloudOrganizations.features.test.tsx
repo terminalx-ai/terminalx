@@ -48,7 +48,7 @@ vi.mock("@/lib/account", () => ({
   subscribeAccount: () => () => undefined,
   refreshAccount: mocks.refreshAccount,
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 // The dialog has its own tests (CloudWorkspaceLifecycle.test.tsx); here only what the sidebar hands it.
 vi.mock("@/components/cloud/CloudWorkspaceLifecycle", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/components/cloud/CloudWorkspaceLifecycle")>()),
@@ -188,7 +188,8 @@ afterEach(async () => {
 
 describe("cloud context menus (PRO-187)", () => {
   it.each(["project", "workspace", "session"])("opens a cloud %s menu with Shift+F10", async (surface) => {
-    await standard();
+    if (surface === "workspace") await load([item("fix-login", { repositories: [acmeApi] }), item("perf-sweep", { repositories: [acmeApi] })]);
+    else await standard();
     mount();
     const target = surface === "project"
       ? within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" })
@@ -404,7 +405,7 @@ describe("the Unread / Needs you filter", () => {
     expect(within(project("acme/api")).getByRole("button", { name: "Collapse acme/api" }).getAttribute("aria-expanded")).toBe("true");
     // The other project has nothing waiting; the sibling workspace has no row.
     expect(screen.queryByRole("group", { name: "acme/web" })).toBeNull();
-    expect(screen.queryAllByTestId("cloud-workspace-group").map((group) => group.getAttribute("data-workspace"))).toEqual(["asks"]);
+    expect(screen.queryAllByTestId("cloud-workspace-group")).toHaveLength(0);
     expectNoAttachOrResume();
   });
 
@@ -453,8 +454,8 @@ describe("workspace lifecycle menus", () => {
     expectNoAttachOrResume();
   });
 
-  it("names each workspace of a project with several, with its state and its own menu; Resume runs only when chosen", async () => {
-    await standard();
+  it("keeps empty workspaces actionable; Resume runs only when chosen", async () => {
+    await load([item("fix-login", { repositories: [acmeApi], lastActivityAt: 50 }), item("perf-sweep", { state: "suspended", repositories: [acmeApi], lastActivityAt: 40 })]);
     mount();
     const groups = within(project("acme/api")).getAllByTestId("cloud-workspace-group");
     expect(groups.map((group) => group.getAttribute("data-workspace"))).toEqual(["fix-login", "perf-sweep"]);
@@ -542,7 +543,7 @@ describe("workspace lifecycle menus", () => {
     mocks.api.cloudWorkspaces.mockResolvedValue({ workspaces: [] });
     mount();
     let menu = await openMenu("Menu for Acme");
-    expect(items(menu)).toEqual(["Refresh cloud workspaces", "New section", "New cloud workspace…", "Hide organization"]);
+    expect(items(menu)).toEqual(["Refresh cloud workspaces", "New section", "New cloud workspace…", "Organization settings…", "Hide organization"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: "New cloud workspace…" }));
     expect(openNewWorkspace).toHaveBeenCalledTimes(1);
     menu = await openMenu("Menu for Acme");
@@ -563,6 +564,34 @@ describe("workspace lifecycle menus", () => {
     expect(within(menu).getByRole("menuitem", { name: "From repository…" }).getAttribute("aria-disabled")).toBeNull();
     expect(within(menu).getByTestId("cloud-add-blank-project").getAttribute("aria-disabled")).toBe("true");
     expect(within(menu).getByTestId("cloud-add-blank-project").textContent).toContain("admins only");
+  });
+
+  // #1286: one click from an organization's row to its settings, for every member and any organization, active or not.
+  it("opens an organization's settings from its gear and its menu, also when it is not the active one", async () => {
+    const { onOpenOrganizationSettings, takeOrganizationRequest } = await import("@/lib/settingsLinks");
+    const opened = vi.fn();
+    const stop = onOpenOrganizationSettings(opened);
+    try {
+      await standard();
+      mount();
+      // Beta is a member's, and not the active organization.
+      const gear = within(org(OTHER)).getByRole("button", { name: "Settings for Beta" });
+      expect(gear.tagName).toBe("BUTTON");
+      expect(gear.tabIndex).toBe(0);
+      act(() => gear.focus());
+      expect((await screen.findByRole("tooltip")).textContent).toBe("Settings for Beta");
+      fireEvent.click(gear);
+      expect(opened).toHaveBeenLastCalledWith("organizations.overview");
+      expect(takeOrganizationRequest()).toBe(OTHER);
+
+      const menu = await openMenu("Menu for Acme");
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Organization settings…" }));
+      expect(opened).toHaveBeenCalledTimes(2);
+      expect(takeOrganizationRequest()).toBe(ORG);
+      expectNoAttachOrResume();
+    } finally {
+      stop();
+    }
   });
 
   // PRO-107: GitHub is on the organization's own page now, not in Settings → Account.
@@ -642,6 +671,7 @@ describe("an organization's states", () => {
     fireEvent.click(within(line).getByRole("button", { name: "Switch" }));
     await waitFor(() => expect(mocks.api.organizationSelect).toHaveBeenCalledWith(OTHER, "s:1"));
     expect(mocks.ask).toHaveBeenCalledTimes(1);
+    expect(mocks.ask.mock.calls[0][0]).toMatchObject({ title: expect.stringMatching(/^Switch the default organization to .+\?$/), body: expect.stringContaining("will close"), action: "Switch" });
   });
 
   it("says once what this Mac dropped of a workspace deleted elsewhere, and the notice can be dismissed", async () => {

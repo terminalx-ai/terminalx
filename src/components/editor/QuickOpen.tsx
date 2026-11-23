@@ -50,6 +50,7 @@ const fileWord = (n: number) => `${n.toLocaleString()} ${n === 1 ? "file" : "fil
  * files the branch changed carry their line counts and status, ⌘Enter opens
  * such a file's diff, and ⌥⌘C copies the selected file's path. A search
  * with no match offers search in files and a rerun over ignored files.
+ * It sits under the title bar, at the same place whatever it lists.
  */
 export function QuickOpen({ sessionId, root, source, branch }: { sessionId: string; root: string; source?: FileSource; branch?: string | null }) {
   const reader = useMemo(() => source ?? localFileSource(root), [source, root]);
@@ -215,7 +216,7 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-[12%] gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
+      <DialogContent showClose={false} width="max-w-[38.5rem]" className="bottom-auto top-11 gap-0 overflow-hidden p-0" onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogTitle className="sr-only">Open file</DialogTitle>
         <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4">
           <Search className="size-4 shrink-0 text-muted-foreground" />
@@ -257,7 +258,7 @@ export function QuickOpen({ sessionId, root, source, branch }: { sessionId: stri
             onToggleIgnored={() => setIncludeIgnored((v) => !v)}
           />
         ) : (
-          <ul className="max-h-[26rem] overflow-auto p-1.5 scrollbar-thin" role="listbox" aria-label="Files">
+          <ul className="max-h-[min(26rem,calc(100dvh-10rem))] overflow-auto p-1.5 scrollbar-thin" role="listbox" aria-label="Files">
             {rows.map((row) =>
               row.kind === "heading" ? (
                 <li key={`h:${row.label}`} role="presentation" className="px-2.5 pb-1 pt-2 text-[11px] font-medium uppercase tracking-[.08em] text-faint">

@@ -546,7 +546,7 @@ while IFS= read -r line; do printf '%s\n' "$line" >> "$0.requests"; done
     let requests = || store::read_lines::<serde_json::Value>(&requests_path).unwrap_or_default();
     let launch = || {
         let tab = index::get(SESSION).unwrap().tab(TAB).unwrap().clone();
-        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
+        rig.manager.start_acp(&mut rig.rt.lock().unwrap(), &rig.rt, &index::get(SESSION).unwrap(), &tab, rig._dir.path().to_str().unwrap(), program.to_str().unwrap()).unwrap();
     };
     let begin = || {
         let mut rt = rig.rt.lock().unwrap();
@@ -719,9 +719,14 @@ exec cat
         if change == "after-reservation" { policy.install_v2(snapshot("2", "driver", false, "explicit")).unwrap(); }
         rig.manager.complete_cli_restart(&rig.rt, work).unwrap();
         let launches = program.with_extension("launches");
-        let until = Instant::now() + Duration::from_secs(5);
-        while !launches.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
-        let args = std::fs::read_to_string(launches).unwrap();
+        // The fake CLI's `printf >>` creates the file before it writes the line: wait for the whole line.
+        let until = Instant::now() + Duration::from_secs(30);
+        let args = loop {
+            let seen = std::fs::read_to_string(&launches).unwrap_or_default();
+            if seen.starts_with("LAUNCH ") && seen.ends_with('\n') { break seen; }
+            assert!(Instant::now() < until, "{change}: no launch recorded: {seen:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert_eq!(args.contains("remote-model"), change == "safe", "{change}: {args}");
         assert_eq!(args.contains("--dangerously-bypass-approvals-and-sandbox"), change == "safe", "{change}: {args}");
         assert!(args.contains("high"), "{change}: the local effort edit was lost: {args}");

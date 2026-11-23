@@ -7,8 +7,8 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
   default: { getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn() },
 }));
 
-function hostApi(request: ReturnType<typeof vi.fn>) {
-  return new HostApi({ request, onEvent: () => () => {} } as unknown as HostConnection);
+function hostApi(request: ReturnType<typeof vi.fn>, fitted = false) {
+  return new HostApi({ request, onEvent: () => () => {}, reassemblesFragments: async () => fitted } as unknown as HostConnection);
 }
 
 describe("mobile transcript pages", () => {
@@ -40,6 +40,90 @@ describe("mobile transcript pages", () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
     await expect(hostApi(request).tail("session", "tab", 12)).resolves.toEqual({ events: [], hasMore: false });
     expect(request).toHaveBeenCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 12, limit: 1 });
+  });
+});
+
+describe("phone caching and sending ahead (#1283)", () => {
+  const syncEvent = (seq: number) => ({ id: `event-${seq}`, sessionId: "session", tabId: "tab", harness: "codex", seq, ts: "2026-11-19T00:00:00Z", payload: { type: "user_message", text: `turn ${seq}` } });
+  const cursor = (offset: number) => ({ offset, digest: String(offset % 10).repeat(64) });
+
+  it("asks a Mac that bounds its pages for several earlier turns at a time", async () => {
+    const request = vi.fn().mockResolvedValue({ ok: true, value: { events: [], hasMore: false } });
+    await hostApi(request, true).tail("session", "tab", 40);
+    expect(request).toHaveBeenLastCalledWith("session.tail", { sessionId: "session", tabId: "tab", before: 40, limit: 10 });
+  });
+
+  it("sends a session list version kept from an earlier launch, and shows that list when it did not change", async () => {
+    const sessions = [{ id: "kept" }];
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: true, value: { conditionalLists: 1 } }
+      : { ok: true, value: { notModified: true, version: "v-launch" } });
+    const api = hostApi(request);
+    api.rememberList("sessions.summaries", {}, "v-launch", { sessions });
+    expect(api.listVersion("sessions.summaries")).toBe("v-launch");
+    expect(await (api as unknown as { list(method: string): Promise<unknown> }).list("sessions.summaries")).toEqual({ sessions, version: "v-launch" });
+    expect(request).toHaveBeenLastCalledWith("sessions.summaries", { version: "v-launch" });
+  });
+
+  it("does not let a kept list replace one already read on this connection", async () => {
+    const request = vi.fn(async (method: string) => method === "sync.capabilities"
+      ? { ok: true, value: { conditionalLists: 1 } }
+      : { ok: true, value: { sessions: [], version: "v-now" } });
+    const api = hostApi(request);
+    await api.summaries();
+    api.rememberList("sessions.summaries", {}, "v-old", { sessions: [] });
+    expect(api.listVersion("sessions.summaries")).toBe("v-now");
+  });
+
+  it("asks for a prefetch only from a Mac that names it, and stops it the same way", async () => {
+    const older = vi.fn().mockResolvedValue({ ok: true, value: { transcript: 1 } });
+    expect(await hostApi(older).prefetch(true, [])).toBe(false);
+    expect(older).toHaveBeenCalledTimes(1);
+    const request = vi.fn(async (method: string, params?: { enabled?: boolean }) => method === "sync.capabilities"
+      ? { ok: true, value: { transcript: 1, prefetch: 1 } }
+      : { ok: true, value: { enabled: params?.enabled } });
+    const api = hostApi(request);
+    const known = [{ sessionId: "session", tabId: "tab", cursor: cursor(20) }];
+    expect(await api.prefetch(true, known)).toBe(true);
+    expect(request).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known });
+    expect(await api.prefetch(false)).toBe(false);
+    expect(request).toHaveBeenLastCalledWith("sync.prefetch", { enabled: false });
+  });
+
+  it("names the conversations on screen only to a Mac that takes them (#1337)", async () => {
+    const open = [{ sessionId: "session", tabId: "tab" }];
+    const mac = (features: Record<string, number>) => vi.fn(async (method: string, params?: { enabled?: boolean }) => method === "sync.capabilities"
+      ? { ok: true, value: features }
+      : { ok: true, value: { enabled: params?.enabled } });
+    // A Mac that refuses fields it does not know is not sent one.
+    const older = mac({ transcript: 1, prefetch: 1 });
+    expect(await hostApi(older).prefetch(true, [], open)).toBe(true);
+    expect(older).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [] });
+    const newer = mac({ transcript: 1, prefetch: 1, prefetchOpen: 1 });
+    expect(await hostApi(newer).prefetch(true, [], open)).toBe(true);
+    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [], open });
+    // None open is named too, so a conversation just closed is prefetched (#1381).
+    await hostApi(newer).prefetch(true, [], []);
+    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [], open: [] });
+  });
+
+  it("passes on only prefetched pages that are contiguous with the checkpoint they continue", () => {
+    let emit: (event: { method: string; params?: unknown }) => void = () => {};
+    const api = new HostApi({ request: vi.fn(), onEvent: (listener: typeof emit) => { emit = listener; return () => {}; } } as unknown as HostConnection);
+    const seen: unknown[] = [];
+    api.onPrefetched((prefetched) => seen.push(prefetched));
+    const page = { events: [syncEvent(21)], cursor: cursor(21), reset: false, hasMore: false, hasEarlier: true };
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: cursor(20), page } });
+    // Not contiguous, another conversation's events, and no checkpoint for a forward page: all dropped.
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: cursor(19), page } });
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "other", after: cursor(20), page } });
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: null, page } });
+    const reset = { ...page, reset: true };
+    emit({ method: "session.prefetch", params: { sessionId: "session", tabId: "tab", after: null, page: reset } });
+    expect(seen).toEqual([
+      { sessionId: "session", tabId: "tab", after: cursor(20), page },
+      { sessionId: "session", tabId: "tab", after: undefined, page: reset },
+    ]);
   });
 });
 
@@ -181,6 +265,14 @@ describe("the computer's name and unpairing", () => {
     await expect(hostApi(vi.fn().mockResolvedValue({ ok: true, value: { name: { evil: true } } })).describe()).resolves.toBeNull();
   });
 
+  it("hears whether a TerminalX window runs there and the OS, and nothing of either from an older computer (PRO-359)", async () => {
+    const answer = (value: unknown) => hostApi(vi.fn().mockResolvedValue({ ok: true, value })).describeHost();
+    await expect(answer({ name: "build-01", hasWindow: false, platform: "linux" })).resolves.toEqual({ name: "build-01", hasWindow: false, platform: "linux" });
+    await expect(answer({ name: "Paresh’s Mac mini" })).resolves.toEqual({ name: "Paresh’s Mac mini", hasWindow: null, platform: null });
+    await expect(answer({ name: "x", hasWindow: "no", platform: "Linux\u0000; rm" })).resolves.toEqual({ name: "x", hasWindow: null, platform: null });
+    await expect(hostApi(vi.fn().mockResolvedValue({ ok: false, refusal: { code: "forbidden", message: "no" } })).describeHost()).resolves.toBeNull();
+  });
+
   it("reports whether the computer dropped this phone", async () => {
     const request = vi.fn().mockResolvedValue({ ok: true, value: { forgotten: true } });
     await expect(hostApi(request).forgetPairing()).resolves.toBe(true);
@@ -304,5 +396,92 @@ describe("answering an agent's question (#979)", () => {
     await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: false, message: "internal: that question is no longer open" });
     request.mockResolvedValueOnce({ ok: true, value: {} });
     await expect(api.answerQuestions("session", "tab", "q1", answers)).resolves.toEqual({ answered: false, message: "The host did not answer this question." });
+  });
+});
+
+// PRO-479: the bots, only from a Mac that names them; a person's answer goes as `bots.answer`.
+describe("bots", () => {
+  const overview = { bots: { revision: 1, bots: [{ id: "b1", name: "Atlas", roleTitle: "CTO", roleTemplateId: "cto" }], unreadable: 0 }, needsYou: { entries: [], counts: [] }, team: [] };
+  const mac = (features: Record<string, number>, answer: (method: string, params: unknown) => unknown) => {
+    const listeners = new Set<(event: { method: string }) => void>();
+    const request = vi.fn(async (method: string, params?: unknown) => method === "sync.capabilities" ? { ok: true, value: features } : answer(method, params));
+    const api = new HostApi({ request, onEvent: (listener: (event: { method: string }) => void) => { listeners.add(listener); return () => listeners.delete(listener); }, reassemblesFragments: async () => false } as unknown as HostConnection);
+    return { api, request, emit: (method: string) => { for (const listener of listeners) listener({ method }); } };
+  };
+
+  it("reads nothing from a Mac that does not name bots", async () => {
+    const { api, request } = mac({}, () => ({ ok: true, value: overview }));
+    await expect(api.botsOverview()).resolves.toBeNull();
+    await expect(api.answerBot("b1", 4, { answer: 0 }, "q1")).rejects.toThrow("Bots are off on this Mac");
+    expect(request.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
+  });
+
+  it("reads the team and a bot's home, and refuses what it cannot read", async () => {
+    const { api } = mac({ bots: 1 }, (method) => method === "bots.list" ? { ok: true, value: overview } : { ok: true, value: { bot: {} } });
+    await expect(api.botsOverview()).resolves.toMatchObject({ bots: { bots: [{ id: "b1" }] } });
+    await expect(api.botHome("b1")).rejects.toThrow("cannot read");
+  });
+
+  it("answers by index or in words, to the question shown, and passes the Mac's refusal on", async () => {
+    const { api, request } = mac({ bots: 1 }, (method, params) => {
+      if ((params as { number?: number }).number === 9) return { ok: false, refusal: { code: "refused", message: "Atlas no longer asks this on item #9." } };
+      return method === "bots.answer" ? { ok: true, value: { item: null, delivery: { sent: true } } } : { ok: true, value: null };
+    });
+    await expect(api.answerBot("b1", 4, { answer: 1 }, "q1")).resolves.toEqual({ item: null, delivery: { sent: true } });
+    await api.answerBot("b1", 4, { text: "File it" }, "q1");
+    await expect(api.answerBot("b1", 9, { answer: 0 }, "q1")).rejects.toThrow("no longer asks");
+    await api.pauseBot("b1");
+    await api.resumeBot("b1");
+    await api.pauseAllBots();
+    expect(request.mock.calls.filter(([method]) => method !== "sync.capabilities")).toEqual([
+      ["bots.answer", { id: "b1", number: 4, answer: 1, question: "q1" }],
+      ["bots.answer", { id: "b1", number: 4, text: "File it", question: "q1" }],
+      ["bots.answer", { id: "b1", number: 9, answer: 0, question: "q1" }],
+      ["bots.pause", { id: "b1" }],
+      ["bots.resume", { id: "b1" }],
+      ["bots.pauseAll", {}],
+    ]);
+  });
+
+  it("tells what is on screen to read again when the Mac says the bots changed", () => {
+    const { api, emit } = mac({ bots: 1 }, () => ({ ok: true, value: null }));
+    const heard = vi.fn();
+    const stop = api.onBotsChanged(heard);
+    emit("bots.changed");
+    emit("sessions.changed");
+    stop();
+    emit("bots.changed");
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pins on the Mac (#1403)", () => {
+  const mac = (features: Record<string, number>, answer: (method: string, params: unknown) => unknown) => vi.fn(async (method: string, params?: unknown) => method === "sync.capabilities"
+    ? { ok: true, value: features }
+    : answer(method, params));
+
+  it("pins and unpins through a Mac that names pin, and says its refusal in its own words", async () => {
+    const request = mac({ pin: 1 }, (_method, params) => (params as { sessionId?: string }).sessionId === "gone"
+      ? { ok: false, refusal: { code: "internal", message: "This session is no longer on this Mac." } }
+      : { ok: true, value: { sessionId: "s1", pinned: true } });
+    const api = hostApi(request);
+    await expect(api.pins()).resolves.toBe(true);
+    await expect(api.setPinned("s1", true)).resolves.toEqual({ done: true });
+    expect(request).toHaveBeenCalledWith("sessions.pin", { sessionId: "s1", pinned: true });
+    await expect(api.setPinned("gone", false)).resolves.toEqual({ done: false, message: "This session is no longer on this Mac.", code: "internal" });
+    await expect(api.setCloudPinned("org-1", "github.com/acme/web", true)).resolves.toEqual({ done: true });
+    expect(request).toHaveBeenCalledWith("cloud.pin", { orgId: "org-1", identity: "github.com/acme/web", pinned: true });
+  });
+
+  it("reads the Mac's cloud pins, keeping only lists of names, and asks an older Mac for none", async () => {
+    const request = mac({ pin: 1 }, () => ({ ok: true, value: { orgs: { "org-1": ["github.com/acme/web", 7, ""], "org-2": "not a list", "org-3": [] } } }));
+    await expect(hostApi(request).cloudPins()).resolves.toEqual({ "org-1": ["github.com/acme/web"] });
+    const refused = mac({ pin: 1 }, () => ({ ok: false, refusal: { code: "internal", message: "Not now." } }));
+    await expect(hostApi(refused).cloudPins()).resolves.toBeNull();
+    const older = mac({ closeTab: 1 }, () => { throw new Error("an older Mac is never asked"); });
+    const api = hostApi(older);
+    await expect(api.pins()).resolves.toBe(false);
+    await expect(api.cloudPins()).resolves.toEqual({});
+    expect(older.mock.calls.map(([method]) => method)).toEqual(["sync.capabilities"]);
   });
 });

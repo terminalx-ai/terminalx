@@ -110,20 +110,22 @@ export function useTeamOverview<T extends TeamRow>(rows: T[], orgId: string | nu
     </DropdownMenu>
   </>;
   const views = <nav aria-label="Views" className="flex w-full shrink-0 flex-wrap gap-1 border-b border-border px-2 pb-3 @min-[600px]:w-44 @min-[600px]:flex-col @min-[600px]:flex-nowrap @min-[600px]:border-b-0 @min-[600px]:border-r"><span className="w-full px-2 py-2 text-[10px] uppercase text-faint">Views</span>{TEAM_VIEWS.map(({ id, label }) => <Button key={id} size="sm" variant={view === id ? "secondary" : "ghost"} className="min-w-0 justify-start gap-2" aria-pressed={view === id} disabled={!known[id]} title={known[id] ? undefined : "Current authorized data is unavailable"} onClick={() => setView({ key, view: id })}>{label}<span className="ml-auto text-faint tabular-nums">{known[id] ? counts[id] : "—"}</span></Button>)}{!known[view] && <p role="status" className="px-2 py-1 text-xs text-faint">Current {view === "active" ? "presence" : "workspace data"} is unavailable. Refresh or choose Everyone.</p>}</nav>;
-  return { rows: filtered, controls, views };
+  return { rows: filtered, controls, views, scoped: view !== "everyone" || selected.length > 0, clearScope: () => { setView({ key, view: "everyone" }); choose([]); } };
 }
 
 /** Reuse PRO-128's current roster and profile. Missing roles/emails stay unavailable. */
-export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean; compact?: boolean }) {
+/** `quiet` renders nothing unless presence is live and someone is there (a table cell beside other text). */
+export function PresenceFaces({ orgId, workspaceId, othersOnly = false, compact = false, quiet = false }: { orgId: string; workspaceId?: string; othersOnly?: boolean; compact?: boolean; quiet?: boolean }) {
   const presence = useCloudPresence(orgId);
   const { roster } = useOrganizationRoster(orgId, presence.state === "live");
   const catalog = useCloudCatalog();
   const privacy = useDataPrivacy();
-  const unavailable = (label: string) => <span className="shrink-0 text-[10px] text-faint" aria-label={compact ? label : undefined} title={compact ? label : undefined}>{compact ? "—" : label}</span>;
+  const unavailable = (label: string) => quiet ? null : <span className="shrink-0 text-[10px] text-faint" aria-label={compact ? label : undefined} title={compact ? label : undefined}>{compact ? "—" : label}</span>;
   if (privacy.enabled || presence.state !== "live") return unavailable(presence.state === "loading" ? "Loading presence…" : presence.state === "stale" ? "Presence stale" : "Presence unavailable");
   const people = (workspaceId ? presence.workspaces.find((row) => row.workspaceId === workspaceId)?.activeMembers : presence.activeMembers);
   if (!people) return unavailable("Presence unavailable");
   const visible = othersOnly ? people.filter((person) => person.userId !== catalog.viewerUserId) : people;
+  if (quiet && !visible.length) return null;
   return <span className="inline-flex items-center gap-1" aria-label={workspaceId ? "People here" : "Active now"}>
     {!workspaceId && <span className="mr-1 text-xs text-faint">Active now</span>}
     {visible.map((person: PresencePerson) => {

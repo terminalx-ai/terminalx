@@ -17,6 +17,7 @@ import {
   PHASES,
   createErrorMessage,
   createWorkspace,
+  creationPausedText,
   failureMessage,
   isClientError,
   launchLatencyText,
@@ -34,12 +35,16 @@ import {
   type PhaseId,
 } from "@/lib/cloudCreate";
 import { cloudOrgArg, rememberCreatedWorkspace } from "@/lib/cloudCatalog";
-import { creatableProviders } from "@/lib/hiddenProviders";
+import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
+import { cloudProviderLabel } from "@/lib/cloudProviders";
+import { AllowNewMachines } from "./AllowNewMachines";
 import { errorCode } from "@/lib/cloudTerminals";
 import { getAccount } from "@/lib/account";
 import { managesOrganization } from "@/lib/multiOrg";
 import { AgentLoginsLink } from "./AgentLoginsLink";
 import { quoteText } from "@/components/session/CloudNewSession";
+import { IdleSuspendSelect } from "@/components/cloud/IdleSuspendSelect";
+import { idleSuspendChoices, initialIdleSuspend } from "@/lib/idleSuspend";
 import { SessionAgentControls } from "@/components/session/SessionAgentControls";
 import { useSessionStore } from "@/lib/sessions";
 import { launchDefaults, useSessionAgent } from "@/lib/useSessionAgent";
@@ -94,10 +99,30 @@ export function CloudCreateWorkspace({
   const agent = useSessionAgent(harnesses, false, null, { value: launch, onChange: setLaunch });
   const pipelineLaunch = usePipelineLaunch(null, pipelineSettings(null), "This session starts on the base checkout. Start a worktree session from the cloud project to automate conflicts.", "Cloud workspaces require a person to merge.");
   const agentId = agent.harness?.id ?? "";
+  // "Stop when idle" (PRO-410): the chosen provider's windows under the
+  // organization's cap. Unreadable, the form has no picker and quotes with
+  // the provider's default, as before.
+  const [idleSetup, setIdleSetup] = useState<{ provider: CloudWorkspaceProviderId; choices: number[]; defaultMinutes: number; cap: number | null } | null>(null);
+  useEffect(() => {
+    const provider = form.provider;
+    if (!provider) return;
+    let live = true;
+    api
+      .cloudWorkspaceSetup(provider)
+      .then((setup) => {
+        if (live) setIdleSetup({ provider, choices: idleSuspendChoices(setup.allowedIdleSuspendMinutes), defaultMinutes: setup.defaults.idleSuspendMinutes, cap: setup.maxIdleSuspendMinutes ?? null });
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [form.provider]);
+  const idleOptions = idleSetup && idleSetup.provider === form.provider && idleSetup.choices.length > 0 ? idleSetup : null;
+  const idleMinutes = idleOptions ? initialIdleSuspend(idleOptions.choices, idleOptions.defaultMinutes, form.idleSuspendMinutes ?? null) : null;
   // What is checked, priced and created: the settings as the pickers show them, never a model or effort they dropped.
   const request = useMemo<CreateForm>(
-    () => ({ ...form, agent: agentId, model: agent.modelId, effort: agent.effort ?? "", mode: agent.mode }),
-    [form, agentId, agent.modelId, agent.effort, agent.mode],
+    () => ({ ...form, idleSuspendMinutes: idleMinutes, agent: agentId, model: agent.modelId, effort: agent.effort ?? "", mode: agent.mode }),
+    [form, idleMinutes, agentId, agent.modelId, agent.effort, agent.mode],
   );
   const [step, setStep] = useState<CreateStep | null>(null);
   const [error, setError] = useState<{ code: string; message: string; retry: boolean } | null>(null);
@@ -122,17 +147,19 @@ export function CloudCreateWorkspace({
       .catch((e: unknown) => setRepositoriesError(errorCode(e)));
   }, []);
 
+  const showProviders = useCallback((list: CloudProviderSummary[]) => {
+    setProviders(list);
+    const usable = creatableProviders(list);
+    setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
+  }, []);
+
   useEffect(() => {
     loadRepositories();
     api
       .cloudProviders()
-      .then((result) => {
-        setProviders(result.providers);
-        const usable = creatableProviders(result.providers);
-        setForm((current) => (current.provider || !usable[0] ? current : { ...current, provider: usable[0].id }));
-      })
+      .then((result) => showProviders(result.providers))
       .catch((e: unknown) => setLoadError(errorCode(e)));
-  }, [loadRepositories]);
+  }, [loadRepositories, showProviders]);
 
   const keep = useCallback(
     (next: PendingCreate | null) => {
@@ -224,7 +251,7 @@ export function CloudCreateWorkspace({
     >
       {loadError && <p className="text-xs text-muted-foreground">Cloud workspaces are unavailable ({loadError}).</p>}
       {providers && usable.length === 0 && (
-        <p className="text-xs text-muted-foreground">No compute provider is ready. An admin connects one in Settings → Cloud compute.</p>
+        <NoProvider providers={providers} organizationId={organizationId} onAllowed={showProviders} />
       )}
 
       <label className="flex flex-col gap-1 text-xs">
@@ -244,7 +271,7 @@ export function CloudCreateWorkspace({
           >
             {usable.map((provider) => (
               <option key={provider.id} value={provider.id}>
-                {provider.displayName}
+                {cloudProviderLabel(provider)}
               </option>
             ))}
           </select>
@@ -350,6 +377,10 @@ export function CloudCreateWorkspace({
         />
       </div>
 
+      {idleOptions && idleMinutes !== null && (
+        <IdleSuspendSelect choices={idleOptions.choices} value={idleMinutes} cap={idleOptions.cap} disabled={busy} onChange={(minutes) => update("idleSuspendMinutes", minutes)} testId="cloud-create-idle" />
+      )}
+
       {error && (
         <div className="flex items-center gap-2 text-xs" role="alert" data-testid="cloud-create-error">
           <span className="text-red-500">{error.message}</span>
@@ -373,7 +404,7 @@ export function CloudCreateWorkspace({
         </div>
       )}
       {quoted ? (
-        <QuotedCreate quote={quoted.quote} providerLabel={providers?.find((item) => item.id === form.provider)?.displayName ?? form.provider ?? ""} busy={busy} onConfirm={() => void submit(false)} onBack={() => setQuoted(null)} />
+        <QuotedCreate quote={quoted.quote} providerLabel={form.provider ? cloudProviderLabel(providers?.find((item) => item.id === form.provider) ?? form.provider) : ""} busy={busy} onConfirm={() => void submit(false)} onBack={() => setQuoted(null)} />
       ) : (
         <div className="flex items-center gap-2">
           <Button type="submit" size="sm" disabled={busy || Object.keys(errors).length > 0 || Boolean(pending)}>
@@ -565,4 +596,23 @@ function lastReached(snapshot: CloudWorkspaceSnapshot): number {
   if (stage === "bootstrapping") return 1;
   if (stage === "connecting-relay") return 2;
   return 0;
+}
+
+/**
+ * Why there is no provider to choose, in the words the create would refuse
+ * with (PRO-372): paused new machines come with the button that allows them,
+ * for whoever may manage the provider.
+ */
+function NoProvider({ providers, organizationId, onAllowed }: { providers: CloudProviderSummary[]; organizationId: string; onAllowed: (providers: CloudProviderSummary[]) => void }) {
+  const refusal = noProviderRefusal(providers);
+  const paused = pausedProviders(providers);
+  const canAllow = paused.some((provider) => provider.canManage) && Boolean(getAccount().status.context?.revision);
+  // The provider's own `canManage` answers who may allow it; the role is the fallback for the rest.
+  const manages = canAllow || managesOrganization(getAccount().status, organizationId);
+  return (
+    <div className="flex flex-col gap-2 text-xs" data-testid="cloud-create-no-provider">
+      <p className="text-muted-foreground">{canAllow ? creationPausedText(refusal.detail) : createErrorMessage(refusal.code, refusal.detail, manages)}</p>
+      <AllowNewMachines providers={paused} onAllowed={onAllowed} />
+    </div>
+  );
 }

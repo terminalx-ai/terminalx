@@ -6,7 +6,8 @@ import type { Project, SessionEntry } from "@/types/session";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), ask: vi.fn(), reveal: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, open: vi.fn(), message: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), message: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask, chooseInApp: vi.fn() }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: mocks.reveal }));
 vi.mock("./AppShell", () => ({ TITLEBAR_INSET: 78 }));
 vi.mock("@/components/account/AccountSidebarEntry", () => ({ AccountSidebarEntry: () => null }));
@@ -46,7 +47,8 @@ it("says a project could not be removed, with what the backend reported", async 
   await act(() => confirmRemoveProject({ path: project.path, name: "web", project, sessions: [], archived: [], branches: {} }));
   const alert = screen.getByRole("alert");
   expect(alert.textContent).toContain("Something went wrong");
-  expect(alert.textContent).toContain("Couldn't remove “web” from TerminalX: database is locked (SQLITE_BUSY)");
+  expect(alert.textContent).toContain("Couldn't remove “web” from TerminalX:");
+  expect(within(alert).getByText("database is locked (SQLITE_BUSY)")).toBeTruthy();
   expect(console.error).not.toHaveBeenCalled();
 });
 
@@ -63,7 +65,7 @@ it("says an unarchive failed", async () => {
   fail("set_session_archived", "session not found");
   render(<TooltipProvider><Toasts /><UnarchiveButton session={{ ...session, archived: true }} title="Notarize release builds" /></TooltipProvider>);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Unarchive Notarize release builds" })));
-  expect(screen.getByRole("alert").textContent).toContain("Couldn't unarchive “Notarize release builds”: session not found");
+  expect(screen.getByRole("alert").textContent).toContain("Couldn't unarchive “Notarize release builds”:session not found");
 });
 
 it("says when a row's menu action fails: archive, pin, reveal", async () => {
@@ -75,15 +77,17 @@ it("says when a row's menu action fails: archive, pin, reveal", async () => {
   const menu = () => render(<TooltipProvider><Toasts /><DropdownMenu open><DropdownMenuTrigger>Menu</DropdownMenuTrigger><DropdownMenuContent>
     <ConversationMenuItems session={session} branch="main" rename={null} />
   </DropdownMenuContent></DropdownMenu></TooltipProvider>);
-  for (const name of [/^Archive/, /^Pin/, /^Reveal in Finder/]) {
+  for (const name of [/^Archive/, /^Pin/, /^Finder/]) {
     const view = menu();
-    await act(async () => fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name })));
+    // Reveal in Finder is under Open in (02.13).
+    if (String(name) === String(/^Finder/)) fireEvent.keyDown(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Open in" }), { key: "ArrowRight" });
+    await act(async () => fireEvent.click(await screen.findByRole("menuitem", { name })));
     view.unmount();
   }
   render(<Toasts />);
   const texts = screen.getAllByRole("alert").map((alert) => alert.textContent);
   expect(texts).toHaveLength(3);
-  expect(texts[0]).toContain("Couldn't archive “Notarize release builds”: set_session_archived failed");
-  expect(texts[1]).toContain("Couldn't pin “Notarize release builds”: set_session_pinned failed");
-  expect(texts[2]).toContain("Couldn't reveal “Notarize release builds” in Finder: no such folder");
+  expect(texts[0]).toContain("Couldn't archive “Notarize release builds”:set_session_archived failed");
+  expect(texts[1]).toContain("Couldn't pin “Notarize release builds”:set_session_pinned failed");
+  expect(texts[2]).toContain("Couldn't reveal “Notarize release builds” in Finder:no such folder");
 });

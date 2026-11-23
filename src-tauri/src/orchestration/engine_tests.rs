@@ -107,11 +107,13 @@ struct Fake {
     repository: bool,
     /// The lead was started with Orchestrate.
     ask_first: bool,
+    /// The paused bot the lead works for (PRO-474), by name.
+    paused_bot: Mutex<Option<String>>,
 }
 
 impl Fake {
     fn new() -> Self {
-        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true, ask_first: false }
+        Self { world: Mutex::new(World::default()), settings: Mutex::new(OrchestratorSettings::default()), repository: true, ask_first: false, paused_bot: Mutex::new(None) }
     }
 
     fn world(&self) -> std::sync::MutexGuard<'_, World> {
@@ -151,6 +153,10 @@ impl Fake {
 impl Host for Fake {
     fn stop_worker_for_cleanup(&self, worker: &SessionRef) -> anyhow::Result<bool> {
         self.stop_worker(worker)
+    }
+
+    fn held_by_pause(&self, _run: &Run) -> Option<String> {
+        self.paused_bot.lock().unwrap().clone()
     }
 
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
@@ -651,6 +657,51 @@ fn a_lead_started_with_orchestrate_waits_for_approval_with_approval_off() {
     let approved = engine::approve(&host, &run.id).unwrap();
     assert_eq!(approved.run.state, RunState::Running);
     assert_eq!(host.made(), vec!["map"]);
+}
+
+#[test]
+fn a_run_led_by_a_paused_bot_starts_no_worker_until_the_bot_is_resumed_then_each_once() {
+    let _home = crate::store::temp_home();
+    let (host, run) = started_free();
+    let id = run.id.as_str();
+    assert_eq!(engine::start(&host, id).unwrap().started, vec!["map"]);
+
+    // Paused while `map` works: it finishes its step, and nothing starts after it.
+    *host.paused_bot.lock().unwrap() = Some("Atlas".into());
+    host.reports("map", Status::Done, "41 call sites in 9 files.");
+    engine::fill_slots(&host);
+    assert_eq!(host.made(), vec!["map"], "the engine's own start waits for the resume");
+    let refused = engine::start(&host, id).unwrap_err();
+    assert_eq!(refused.code, "bot_paused");
+    assert!(refused.message.contains("led by Atlas, who is paused"), "{}", refused.message);
+    let current = store::get(id).unwrap();
+    assert_eq!((current.state, current.piece("map").unwrap().state, current.piece("store").unwrap().state), (RunState::Running, PieceState::Done, PieceState::Queued));
+
+    // Resumed: what became ready starts, once; a second resume starts nothing more.
+    *host.paused_bot.lock().unwrap() = None;
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map", "store"]);
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map", "store"], "each held piece starts once");
+}
+
+#[test]
+fn a_run_its_paused_lead_starts_before_any_worker_is_started_on_the_resume_and_the_lead_is_told() {
+    let _home = crate::store::temp_home();
+    let (host, run) = started_free();
+    let id = run.id.as_str();
+    assert_eq!(store::get(id).unwrap().state, RunState::Planned);
+
+    // The lead's first `runs start` while its bot is paused: refused, and the run counts as started.
+    *host.paused_bot.lock().unwrap() = Some("Atlas".into());
+    assert_eq!(engine::start(&host, id).unwrap_err().code, "bot_paused");
+    assert!(host.made().is_empty(), "no worker starts while paused");
+    assert_eq!(store::get(id).unwrap().state, RunState::Running);
+
+    *host.paused_bot.lock().unwrap() = None;
+    engine::bot_resumed(&host, &|_| true);
+    assert_eq!(host.made(), vec!["map"], "its ready piece starts on the resume");
+    assert!(host.world().told.iter().any(|text| text.contains("resumed you") && text.contains("map")), "the lead is told: {:?}", host.world().told);
 }
 
 #[test]
@@ -3303,8 +3354,25 @@ fn the_persons_own_check_and_finish_of_a_held_piece_takes_the_files_outside_it_a
     assert_eq!(error.code, "person_only");
     assert!(error.message.contains("Check and finish in the session's Run view accepts them as theirs"), "{}", error.message);
     assert!(error.recovery.as_deref().unwrap().contains("Check and finish in the Run view accepts them as their widening"), "{:?}", error.recovery);
-    // The person saw it and finishes it from the Run view: that is their widening, recorded on the piece.
-    let finished = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap();
+    // The Run view shows the person what Check and finish would add, before anything runs.
+    assert_eq!(engine::finish_widens(&host, &id, "cli").unwrap(), vec!["src/store/projects.rs".to_string()]);
+    // Unconfirmed, the person's finish is refused, naming the files, and nothing is checked.
+    let error = engine::finish(&host, &id, "cli", engine::By::Person, false).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("confirm_widening", json!(["src/store/projects.rs"])));
+    assert_eq!(store::get(&id).unwrap().piece("cli").unwrap().state, PieceState::Lead, "still with the lead");
+    // The lead committed one more outside file after the person looked: confirming the first alone is asked again.
+    let more = vec![
+        verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) },
+        verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) },
+        verify::FileChange { path: "src/store/index.rs".into(), added: Some(2), removed: Some(0) },
+    ];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: more, uncommitted: Vec::new() });
+    let error = engine::finish_accepting(&host, &id, "cli", engine::By::Person, false, &["src/store/projects.rs".into()]).unwrap_err();
+    assert_eq!((error.code, error.details["files"].clone()), ("confirm_widening", json!(["src/store/projects.rs", "src/store/index.rs"])));
+    let outside = vec![verify::FileChange { path: "src/cli.rs".into(), added: Some(4), removed: Some(1) }, verify::FileChange { path: "src/store/projects.rs".into(), added: Some(12), removed: Some(0) }];
+    host.world().lead_work = Some(engine::LeadWork { head: "4c1d0e2aa".into(), changes: outside, uncommitted: Vec::new() });
+    // The person saw it and confirmed it from the Run view: that is their widening, recorded on the piece.
+    let finished = engine::finish_accepting(&host, &id, "cli", engine::By::Person, false, &["src/store/projects.rs".into()]).unwrap();
     let piece = finished.run.piece("cli").unwrap();
     assert_eq!((piece.state, piece.owns.clone()), (PieceState::Done, vec!["src/cli.rs".to_string(), "src/store/projects.rs".to_string()]));
     assert_eq!(piece.note.as_deref(), Some("Finished by the lead in its own checkout, at 4c1d0e2; its checks passed there. The person widened it to src/store/projects.rs."));

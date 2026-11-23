@@ -32,6 +32,8 @@ beforeEach(() => {
     if (command === "machines_pair") return pairAnswer.promise;
     if (command === "machines_cancel_pairing") return null;
     if (command === "machines_set_route") return null;
+    if (command === "machines_account_list") return { signedIn: false };
+    if (command === "machine_name") return { name: "Paresh’s MacBook Pro", chosen: false, computerName: "Paresh’s MacBook Pro" };
     throw new Error(`unexpected ${command}`);
   });
 });
@@ -39,25 +41,28 @@ afterEach(cleanup);
 
 function open(onOpenChange = vi.fn(), onPaired = vi.fn()) {
   render(<AddMachineDialog open onOpenChange={onOpenChange} onPaired={onPaired} />);
-  return { dialog: screen.getByRole("dialog", { name: "Add a machine" }), onOpenChange, onPaired };
+  const dialog = screen.getByRole("dialog", { name: "Add a machine" });
+  fireEvent.click(within(dialog).getByRole("tab", { name: "Pairing code" }));
+  return { dialog, onOpenChange, onPaired };
 }
 
 const paste = (dialog: HTMLElement, text = CODE) => fireEvent.change(within(dialog).getByLabelText("Pairing code"), { target: { value: text } });
 
 describe("Add a machine (screen 21.04)", () => {
-  it("is empty at first: the pairing code only, no tab bar, and a route hint per owner decision 4", () => {
+  it("has On your account, Pairing code and Headless server tabs; Pairing code is empty at first, with a route hint per owner decision 4", () => {
     const { dialog } = open();
     expect(within(dialog).getByText("Operate another computer that runs TerminalX")).toBeTruthy();
-    expect(within(dialog).queryByRole("tablist")).toBeNull();
-    expect(within(dialog).queryByText("On your account")).toBeNull();
-    expect(within(dialog).queryByText("Headless server")).toBeNull();
+    const tabs = within(within(dialog).getByRole("tablist")).getAllByRole("tab");
+    expect(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")])).toEqual([["On your account", "false"], ["Pairing code", "true"], ["Headless server", "false"]]);
+    // No stray source text (a leftover `return (` once rendered as a text node).
+    expect(dialog.textContent).not.toMatch(/return \(|=>|\{\s*\}/);
     expect(within(dialog).getByText("On the other computer, open Settings → Machines and choose Create pairing code.")).toBeTruthy();
     expect(within(dialog).getByText("The fingerprint shows here once a code is pasted.")).toBeTruthy();
     expect(within(dialog).getByRole("radio", { name: "Relay and nearby" }).getAttribute("aria-checked")).toBe("true");
     const hint = dialog.textContent ?? "";
     expect(hint).toContain("directly on this network or Tailscale first");
     expect(hint).toContain("TerminalX Relay is used once this Mac and the machine are signed in to the same account");
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command !== "machines_account_list")).toEqual([]);
   });
 
   it("refuses text that is not a machine code without asking the runtime, and shows the runtime's reason for one it cannot read", async () => {
@@ -65,7 +70,7 @@ describe("Add a machine (screen 21.04)", () => {
     paste(dialog, "hello");
     expect(within(dialog).getByRole("alert").textContent).toContain("This is not a machine pairing code");
     expect(within(dialog).getByLabelText("Pairing code").getAttribute("aria-invalid")).toBe("true");
-    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.invoke.mock.calls.filter(([command]) => command !== "machines_account_list")).toEqual([]);
 
     inspectAnswer = async () => Promise.reject("the code's machine id does not match its key");
     paste(dialog, "txm2.broken");

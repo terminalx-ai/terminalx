@@ -4,7 +4,7 @@ import { BYPASS_MODE, PERMISSION_MODES, bypassEffect, effortChoices, EFFORT_LABE
 import type { ContextMode } from "@terminalx/portable/continuation";
 import type { AgentEvent } from "@terminalx/portable/events";
 import type { NewTabSettings, TabControls } from "../data/host-api";
-import { continueHere, continueInNewTab, recoveryState, retrySafely, settingsView } from "../data/session-controls";
+import { continueHere, continueInNewTab, oneAtATime, recoveryState, resendLast, resumeLogDetail, retrySafely, settingsView, type ResumeFailure, type ResumeResult } from "../data/session-controls";
 import { cacheEpoch, readSaved, writeSaved } from "../data/transcript-cache";
 import { useApp } from "../state/AppProvider";
 import { useHostFeatures } from "../state/host-features";
@@ -65,20 +65,22 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
     return () => { active = false; };
   }, [host, tabKey]);
   const [working, setWorking] = useState(false);
-  const [feedback, setFeedback] = useState<{ error: boolean; text: string } | null>(null);
+  // One action at a time, also between a tap and the render that disables the buttons: a resume is never sent twice.
+  const [gate] = useState(oneAtATime);
+  /** `tone`: an error, news, or a resume that may still be under way on the Mac. `reconnect`: offer to connect again. */
+  const [feedback, setFeedback] = useState<{ tone: "error" | "success" | "pending"; text: string; reconnect?: boolean } | null>(null);
   const [picker, setPicker] = useState<{ title: string; choices: Choice[] } | null>(null);
   const [continuing, setContinuing] = useState(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(() => {
     // Taken before the request: a Mac forgotten while it is under way is not saved again.
     const epoch = host ? cacheEpoch(host) : 0;
-    try {
-      const next = await app.api.tabControls(sessionId, tabId);
+    return app.api.tabControls(sessionId, tabId).then((next) => {
       setTab(next);
       if (next && host) void writeSaved(host, tabKey, next, epoch);
-    } catch {
+    }).catch(() => {
       // The connection failed: what is shown stays, dimmed, until it is back.
-    }
+    });
   }, [app.api, host, sessionId, tabId, tabKey]);
   // A setting applied, a turn begun or ended: each arrives as an event.
   useEffect(() => { if (supported && connected) void refresh(); }, [connected, events.length, refresh, supported]);
@@ -100,23 +102,53 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
   // What was saved may be out of date: the agent's state is not claimed, and nothing is asked of the Mac, until it answers.
   const busy = connected && tab.status === "in_progress";
   const locked = working || !connected;
+  // A resume may be asked for while the phone reconnects: it waits for the connection (#1290).
+  const reconnecting = app.connectionStage === "connecting" || app.connectionStage === "reconnecting";
+  const resumeLocked = working || !(connected || reconnecting);
 
   /** One action at a time; its error, or its outcome when that is news, is said under the controls. */
   const act = async (action: () => Promise<string | null>, success?: string) => {
+    if (!gate.enter()) return;
     setWorking(true);
     setFeedback(null);
     try {
       const error = await action();
-      setFeedback(error ? { error: true, text: error } : success ? { error: false, text: success } : null);
+      setFeedback(error ? { tone: "error", text: error } : success ? { tone: "success", text: success } : null);
     } catch (cause) {
-      setFeedback({ error: true, text: cause instanceof Error ? cause.message : String(cause) });
+      setFeedback({ tone: "error", text: cause instanceof Error ? cause.message : String(cause) });
     } finally {
+      gate.leave();
       setWorking(false);
       void refresh();
     }
   };
+  /** A resume: what failed is said with the next step, and written to the connection log with its step and code. */
+  const resume = (action: () => Promise<ResumeResult & { tabId?: string }>, success: string | null, then?: (tabId: string) => Promise<void> | void) => {
+    if (!gate.enter()) return;
+    setWorking(true);
+    setFeedback(null);
+    void (async () => {
+      try {
+        const result = await action();
+        if (!result.done) return report(result.failure);
+        if (result.tabId && then) await then(result.tabId);
+        setFeedback(result.note ? { tone: "error", text: result.note } : success ? { tone: "success", text: success } : null);
+      } catch (cause) {
+        // Nothing above throws; should anything, it is said and logged like any other failure.
+        app.connection.note("error", "Session resume failed", cause instanceof Error ? cause.message : String(cause));
+        setFeedback({ tone: "error", text: "Not resumed: something on this phone stopped the request. Try again." });
+      } finally {
+        gate.leave();
+        setWorking(false);
+        void refresh();
+      }
+    })();
+  };
+  const report = (failure: ResumeFailure) => {
+    app.connection.note(failure.pending ? "warning" : "error", failure.pending ? "Session resume not confirmed" : "Session resume failed", resumeLogDetail(failure));
+    setFeedback({ tone: failure.pending ? "pending" : "error", text: failure.text, reconnect: failure.next === "reconnect" });
+  };
   const done = (result: { done: true } | { done: false; message: string }) => result.done ? null : result.message;
-  const sent = (result: { sent: true; queued: boolean } | { sent: false; message: string }) => result.sent ? null : result.message;
   // Models the Mac re-reads as a picker opens, as the desktop's does.
   const freshModels = () => { void app.api.models(true).then((list) => { if (list.length) setModels(list); }).catch(() => undefined); };
   const modelChoices = (select: (model: ModelInfo) => void): Choice[] => view.groups.flatMap((group) => group.models.map((model) => {
@@ -148,27 +180,25 @@ export function SessionControls({ sessionId, tabId, events, asks, connected, onO
       <Text style={[styles.title, { color: palette.ink }]}>{offer.title}</Text>
       <Text style={[styles.message, { color: palette.muted }]}>{offer.message}</Text>
       <View style={styles.actions}>
-        {offer.resend ? <Button label="Resend last prompt" disabled={locked} onPress={() => void act(async () => sent(await app.api.resendUnsent(sessionId, tabId)))} /> : null}
-        {offer.retry ? <Button label={offer.retry} kind={kind === "signed_out" ? "secondary" : "primary"} disabled={locked} onPress={() => void act(async () => sent(await retrySafely(app.api, sessionId, tabId)))} /> : null}
-        {offer.sendContinue ? <Button label="Continue here" kind="secondary" disabled={locked} onPress={() => void act(async () => sent(await continueHere(app.api, tabId)))} /> : null}
-        {offer.chooseModel ? <Button label="Choose another model" kind="secondary" disabled={locked} onPress={() => { freshModels(); setPicker({ title: "Retry on another model", choices: modelChoices((model) => void act(async () => sent(await retrySafely(app.api, sessionId, tabId, model.id)))) }); }} /> : null}
+        {offer.resend ? <Button label="Resend last prompt" disabled={resumeLocked} onPress={() => resume(() => resendLast(app.api, sessionId, tabId), null)} /> : null}
+        {offer.retry ? <Button label={offer.retry} kind={kind === "signed_out" ? "secondary" : "primary"} disabled={resumeLocked} onPress={() => resume(() => retrySafely(app.api, sessionId, tabId), null)} /> : null}
+        {offer.sendContinue ? <Button label="Continue here" kind="secondary" disabled={resumeLocked} onPress={() => resume(() => continueHere(app.api, tabId), null)} /> : null}
+        {offer.chooseModel ? <Button label="Choose another model" kind="secondary" disabled={resumeLocked} onPress={() => { freshModels(); setPicker({ title: "Retry on another model", choices: modelChoices((model) => resume(() => retrySafely(app.api, sessionId, tabId, model.id), null)) }); }} /> : null}
         <Button label="Stop session" kind="secondary" disabled={locked} onPress={stop} />
-        {offer.continueInNewSession ? <Button label="Continue in new session" kind="secondary" disabled={locked} onPress={() => setContinuing(true)} /> : null}
+        {offer.continueInNewSession ? <Button label="Continue in new session" kind="secondary" disabled={resumeLocked} onPress={() => setContinuing(true)} /> : null}
       </View>
     </Card> : null}
-    {feedback ? <Text accessibilityLiveRegion="polite" style={[styles.note, { color: feedback.error ? palette.danger : palette.success }]}>{feedback.text}</Text> : null}
+    {feedback ? <View style={styles.feedback}>
+      <Text accessibilityLiveRegion="polite" style={[styles.note, styles.flex, { color: feedback.tone === "error" ? palette.danger : feedback.tone === "pending" ? palette.muted : palette.success }]}>{feedback.text}</Text>
+      {feedback.reconnect && !connected ? <Button label="Reconnect" kind="secondary" size="small" onPress={() => app.retryConnection()} /> : null}
+    </View> : null}
     <ChoiceSheet picker={picker} onClose={() => setPicker(null)} />
     {continuing ? <ContinueSheet tab={tab} models={models} onClose={() => setContinuing(false)} onStart={(settings, mode) => {
       setContinuing(false);
-      void act(async () => {
-        const result = await continueInNewTab(app.api, sessionId, tabId, settings, mode);
-        if (!result.started) return result.message;
+      resume(() => continueInNewTab(app.api, sessionId, tabId, settings, mode), "Continued in a new conversation.", async (next) => {
         await app.refreshSessions();
-        onOpenTab(result.tabId);
-        return result.delivered ? null : result.inInput
-          ? "The handoff is in the new conversation's input but has not been sent yet."
-          : `The new conversation opened, but the handoff could not be confirmed. ${result.message ?? ""}`.trim();
-      }, "Continued in a new conversation.");
+        onOpenTab(next);
+      });
     }} /> : null}
   </>;
 
@@ -250,6 +280,7 @@ const styles = StyleSheet.create({
   wrap: { paddingHorizontal: 12, paddingTop: 6, gap: 6 },
   row: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   flex: { flex: 1 },
+  feedback: { flexDirection: "row", alignItems: "center", gap: 8 },
   chip: { borderRadius: 14, paddingHorizontal: 9, paddingVertical: 6, maxWidth: 180 },
   outlined: { borderWidth: StyleSheet.hairlineWidth },
   disabled: { opacity: 0.4 },

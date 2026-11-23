@@ -1,4 +1,4 @@
-import type { NewSessionAgent, NewSessionModel, NewSessionOptions, NewSessionRequest } from "./host-api";
+import type { NewSessionAccount, NewSessionAgent, NewSessionModel, NewSessionOptions, NewSessionRequest } from "./host-api";
 
 /** Where a new session runs: a quick chat, or a project's new worktree or checkout. */
 export type Where = { quick: true } | { projectId: string; useWorktree: boolean };
@@ -10,6 +10,11 @@ export interface NewSessionChoices {
   model: string;
   effort: string | null;
   mode: string;
+  /**
+   * The account picked for the agent (#980), or null to start on the
+   * project's default, then the agent's, as the Mac resolves it.
+   */
+  account?: string | null;
   title: string;
   text: string;
 }
@@ -28,9 +33,10 @@ export function initialChoices(options: NewSessionOptions): NewSessionChoices {
 }
 
 /** An agent's own defaults: its default model, and that model's default effort. */
-export function agentDefaults(agent: NewSessionAgent | null): Pick<NewSessionChoices, "agent" | "model" | "effort"> {
+export function agentDefaults(agent: NewSessionAgent | null): Pick<NewSessionChoices, "agent" | "model" | "effort" | "account"> {
   const model = agent ? defaultModel(agent) : null;
-  return { agent: agent?.id ?? null, model: model?.id ?? "", effort: model ? defaultEffort(model) : null };
+  // Another agent's accounts are its own: a pick does not carry over.
+  return { agent: agent?.id ?? null, model: model?.id ?? "", effort: model ? defaultEffort(model) : null, account: null };
 }
 
 function defaultModel(agent: NewSessionAgent): NewSessionModel | null {
@@ -46,6 +52,24 @@ export function chooseModel(choices: NewSessionChoices, agent: NewSessionAgent, 
   const model = agent.models.find((candidate) => candidate.id === modelId);
   if (!model) return choices;
   return { ...choices, model: model.id, effort: choices.effort && model.efforts.includes(choices.effort) ? choices.effort : defaultEffort(model) };
+}
+
+/** The agent's accounts to choose from: only when it has more than one on the Mac. */
+export function accountsOf(agent: NewSessionAgent | null): NewSessionAccount[] | null {
+  return agent?.accounts && agent.accounts.length > 1 ? agent.accounts : null;
+}
+
+/**
+ * The account the session starts on, as the Mac resolves it: the one
+ * picked, else the project's default, else the agent's, each only while
+ * listed. `null` when the agent offers no choice.
+ */
+export function chosenAccount(choices: NewSessionChoices, agent: NewSessionAgent | null): NewSessionAccount | null {
+  const accounts = accountsOf(agent);
+  if (!accounts || !agent) return null;
+  const projectId = choices.where && "projectId" in choices.where ? choices.where.projectId : null;
+  const candidates = [choices.account, projectId ? agent.projectDefaults?.[projectId] : undefined, agent.defaultAccount, "local"];
+  return candidates.map((id) => accounts.find((account) => account.id === id)).find(Boolean) ?? accounts[0];
 }
 
 /** Why the form cannot be started yet, or null when it can. */
@@ -65,9 +89,12 @@ export function blocked(choices: NewSessionChoices, options: NewSessionOptions):
 }
 
 /** What the Mac is asked to start. */
-export function request(choices: NewSessionChoices): NewSessionRequest {
+export function request(choices: NewSessionChoices, options?: NewSessionOptions): NewSessionRequest {
   if (!choices.where || !choices.agent) throw new Error("The new session is not complete.");
+  // With several accounts the one shown is the one asked for; with one, nothing is named, as before accounts.
+  const account = options ? chosenAccount(choices, options.agents.find((agent) => agent.id === choices.agent) ?? null) : null;
   return {
+    ...(account ? { account: account.id } : {}),
     where: choices.where,
     agent: choices.agent,
     model: choices.model,

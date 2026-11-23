@@ -396,20 +396,64 @@ it("filters table sessions by cloud owner and archive state and opens an archive
   act(() => catalog.cacheCloudSessions(ORG, "ws-1", [session("old", "Archived cloud work", "idle", { archived: true })] as never, ["session/2"]));
   render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Table" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Display" }), { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole("button", { name: "Table" }));
+  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   expect(screen.queryByRole("row", { name: /Archived cloud work/ })).toBeNull();
-  fireEvent.pointerDown(screen.getByRole("button", { name: "Filter" }), { button: 0, ctrlKey: false });
-  fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Archived" }));
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
-  fireEvent.pointerDown(screen.getByRole("button", { name: "By Anyone" }), { button: 0, ctrlKey: false });
-  fireEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Amy" }));
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Hiding archived" }), { button: 0, ctrlKey: false });
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "Only archived" }));
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  // The people picker (02.05): Amy alone.
+  fireEvent.click(screen.getByRole("button", { name: /^People: Everyone/ }));
+  const picker = await screen.findByRole("dialog", { name: "Filter by people" });
+  expect(within(picker).getByRole("checkbox", { name: /Anyone/ }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.change(within(picker).getByRole("textbox", { name: "Filter people" }), { target: { value: "am" } });
+  expect(within(picker).queryByRole("checkbox", { name: /Zoe/ })).toBeNull();
+  fireEvent.click(within(picker).getByRole("checkbox", { name: /Amy/ }));
+  expect(within(picker).getByText(/Owner filter is saved on this Mac/)).toBeTruthy();
+  fireEvent.keyDown(picker, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByRole("button", { name: "People: Amy" })).toBeTruthy();
   const row = await screen.findByRole("row", { name: /Archived cloud work/ });
-  expect(within(row).getByText("Amy")).toBeTruthy();
+  // A cloud owner is the member's profile, named beside it (PRO-288).
+  expect(within(row).getByRole("button", { name: "View profile: Amy" })).toBeTruthy();
   act(() => rememberPeople([{ userId: "amy", displayName: "Amy Updated" }]));
-  expect(within(row).getByText("Amy Updated")).toBeTruthy();
+  expect(within(row).getByRole("button", { name: "View profile: Amy Updated" })).toBeTruthy();
   expect(screen.queryByRole("row", { name: /Landing page copy/ })).toBeNull();
   fireEvent.click(row);
   expect(sessions.getSessionStore().selectedSessionId).toBe(`cloud:${ORG}:ws-1:old`);
   expectNoWake();
+});
+
+it("shows a cloud row's Active time from its workspace's lastActivityAt only, and a local row's from its own messages", async () => {
+  const reported = Date.parse("2026-09-29T08:15:00.000Z");
+  // ws-1 reports its last activity; ws-2 reports none. Both sessions saw a message at 10:30.
+  await poll(ORG, [item("ws-1", ORG, { lastActivityAt: reported }), item("ws-2", ORG)]);
+  const invoke = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, ...rest: unknown[]) => command === "list_sessions"
+    ? [session("local-1", "Local work", "idle", { projectPath: "/repo", cwd: "/repo" })]
+    : invoke(command, ...rest));
+  try {
+    await act(async () => { await sessions.refreshSessions(); });
+    render(<TooltipProvider><AgentDashboard /></TooltipProvider>);
+    await settle();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Display" }), { button: 0, ctrlKey: false });
+    fireEvent.click(await screen.findByRole("button", { name: "Table" }));
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    const active = screen.getAllByRole("columnheader").findIndex((header) => header.textContent === "Active");
+    const cell = async (name: RegExp) => within(await screen.findByRole("row", { name })).getAllByRole("cell")[active];
+    // The workspace's time, not the session's last message or change.
+    expect((await cell(/Fix login redirect/)).querySelector("time")?.dateTime).toBe("2026-09-29T08:15:00.000Z");
+    // None reported: unknown, with no time borrowed from the session or the workspace's update.
+    const unknown = await cell(/Add tests/);
+    expect(unknown.querySelector("time")).toBeNull();
+    expect(unknown.textContent).toBe("—");
+    // A local row keeps its own last message.
+    expect((await cell(/Local work/)).querySelector("time")?.dateTime).toBe("2026-09-30T10:30:00.000Z");
+  } finally {
+    mocks.invoke.mockImplementation(invoke);
+    await act(async () => { await sessions.refreshSessions(); });
+  }
 });

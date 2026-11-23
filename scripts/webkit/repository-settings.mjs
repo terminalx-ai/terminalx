@@ -31,20 +31,26 @@ try {
           })();`,
       });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("button", { name: /^Projects \d+$/ }).click();
       const repositories = page.getByRole("group", { name: "Projects", exact: true });
       await repositories.waitFor();
       await page.getByRole("combobox", { name: "Search settings" }).fill("worktreeinclude");
       await page.getByRole("option", { name: /^Files to copy/ }).click();
       await repositories.getByRole("button", { name: "local-0", exact: true }).click();
-      const projectNav = page.getByRole("navigation", { name: "Project settings", exact: true });
+      const projectNav = page.getByRole("group", { name: "local-0 settings", exact: true });
       await projectNav.getByRole("button", { name: "General", exact: true }).click();
       await page.getByText("/repos/p0/.raccoon/worktrees", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `general-${mode}.png`) });
-      const paths = await page.getByRole("button", { name: /^(Copy|Reveal) (root path|worktree folder)$/ }).count();
+      const paths = await page.getByRole("button", { name: /^(Root path|Worktree folder): / }).count();
       const navEntries = await projectNav.getByRole("button").allTextContents();
       await page.getByText(".env.local", { exact: true }).waitFor();
-      await page.getByRole("textbox", { name: "Glob patterns (one per line)" }).fill(".env*\nconfig/local/**");
-      await page.getByRole("button", { name: "Save", exact: true }).click();
+      // No Save button (PRO-387): a valid edit is saved on leaving the field; its preview alone saves nothing.
+      const editor = page.getByRole("textbox", { name: "Files to copy" });
+      await editor.fill(".env*\nconfig/local/**");
+      await page.getByText(/^config\/local\/(long-folder-name-){8}\/app\.json$/).waitFor();
+      const savesBeforeLeaving = await page.evaluate(() => window.__SAVES__.length);
+      const noSaveButton = (await page.getByRole("main", { name: "Settings", exact: true }).getByRole("button", { name: /^Save/ }).count()) === 0;
+      await editor.blur();
       await page.waitForFunction(() => window.__SAVES__.length === 1);
       await page.getByText(".env.local", { exact: true }).waitFor();
       if (shots && width === 1100) await page.getByRole("main", { name: "Settings", exact: true }).screenshot({ path: join(shots, `files-${mode}.png`) });
@@ -70,9 +76,10 @@ try {
           overflow: main.scrollWidth > main.clientWidth + 1, readOnly: textarea.readOnly, value: textarea.value, saves: window.__SAVES__ };
       });
       failed += report(`${width}px ${mode}`, {
-        "both paths have Reveal and Copy": paths === 4,
-        "Files to copy and Preview URLs have no nav entries": JSON.stringify(navEntries) === JSON.stringify(["General", "Scripts", "Actions", "Environment"]),
-        "editor saves both patterns": JSON.stringify(measured.saves) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }]),
+        "both paths are folder paths with a menu": paths === 2,
+        "Files to copy and Preview URLs have no nav entries": JSON.stringify(navEntries) === JSON.stringify(["General", "Scripts", "Actions", "Environment", "Settings files"]),
+        "a previewed edit is not saved while the field has focus, and there is no Save button": savesBeforeLeaving === 0 && noSaveButton,
+        "leaving the field saves both patterns": JSON.stringify(measured.saves) === JSON.stringify([{ repositorySettings: { filesToCopy: [".env*", "config/local/**"] } }]),
         "repository file overrides the editor": measured.readOnly && measured.value === "config/local/**",
         "controls and long paths fit": measured.editorVisible && !measured.overflow && measured.outside.length === 0,
         "Files to copy sits on General with its cleanup controls": measured.cleanupShown,

@@ -172,7 +172,7 @@ fn base_checkout(repo: &Path, root: &Path, project: &str, base: &str, commit: &s
     let dir = base_dir(root, project);
     let ours = crate::git::run(&dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
     let theirs = crate::git::run(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).context("read the project's repository")?;
-    if ours.as_deref().map(str::trim) != Some(theirs.trim()) {
+    if ours.as_deref().map(crate::git::path_line) != Some(crate::git::path_line(&theirs)) {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
         }
@@ -289,6 +289,9 @@ impl Host for ManagerHost {
         Ok(())
     }
 
+    fn held_by_pause(&self, run: &Run) -> Option<String> {
+        crate::bots::pause::holds_run(&run.lead.session_id)
+    }
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError> {
         let session = index::get(session_id).map_err(|_| EngineError::new("lead_not_found", format!("No session {session_id} to lead the run."), Some("Run the command inside the lead's session, or name it with --lead.")))?;
         let (agent, model) = session.tabs.iter().find(|tab| !tab.is_terminal()).map(|tab| (tab.harness.clone(), tab.model.clone())).unwrap_or_default();
@@ -567,6 +570,8 @@ impl Host for ManagerHost {
         if let Err(error) = self.manager.send(&lead.id, &tab.id, text.to_string(), Vec::new()) {
             log::warn!("tell the lead {} about run {}: {error:#}", lead.id, run.id);
         }
+        // A bot's item that waits to check back when this run reports (PRO-476).
+        crate::bots::runs::lead_told(&self.manager, run);
     }
 
     fn changed(&self, run: &Run) {
@@ -696,7 +701,7 @@ impl Checkouts for ManagerHost {
 
     fn reserve(&self, run: &Run, cwd: &Path, by_lead: bool) -> Result<Box<dyn std::any::Any + Send>, String> {
         use crate::issue_pipeline::admission::{self, Kind, Scope};
-        let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical = |path: &Path| crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let checkout = canonical(cwd);
         // The lock a prompt is admitted under, and a pipeline reserves a checkout under: what is
         // found free here cannot be taken before the fence stands.
@@ -802,6 +807,7 @@ mod tests {
         crate::git::run(cwd, args).unwrap().trim().to_string()
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_a_lead_changed_names_both_sides_of_a_rename_and_every_path_as_it_is() {
         let repo = repository();
@@ -995,7 +1001,8 @@ mod tests {
         assert_eq!((again.clone(), git(&again, &["rev-parse", "HEAD"])), (dir.clone(), base.clone()));
         assert!(!again.join("left-over").exists() && again.join("target/cache").exists());
         // The repository knows it as a worktree of its own, detached: no branch is held.
-        let listed = format!("worktree {}\nHEAD", std::fs::canonicalize(&dir).unwrap().display());
+        // Git spells a worktree's path with `/`, on Windows too.
+        let listed = format!("worktree {}\nHEAD", crate::paths::canonicalize(&dir).unwrap().display()).replace('\\', "/");
         assert!(git(repo.path(), &["worktree", "list", "--porcelain"]).contains(&listed));
         // The project's last run ended: the checkout goes, with what was built in it, and the repository forgets it.
         drop(_held);

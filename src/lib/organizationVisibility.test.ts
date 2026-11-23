@@ -6,7 +6,7 @@ import { getCloudCatalog } from "@/lib/cloudCatalog";
 
 const mocks = vi.hoisted(() => ({ status: null as unknown as AccountStatus, ask: vi.fn() }));
 vi.mock("@/lib/account", () => ({ getAccount: () => ({ status: mocks.status }), subscribeAccount: () => () => {}, useAccount: () => ({ status: mocks.status }) }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 
 const org = (id: string, name: string) => ({ id, name, role: "admin", isPersonal: false, cloud: { enabled: true, flags: {} } });
 const account: AccountStatus = { state: "signed-in", identity: { name: "Ada", email: "ada@example.com", organization: "Beta", organizationId: "b" }, expiresAt: null, lastError: null, multiOrg: true, organizations: [org("a", "Acme"), org("b", "Beta"), org("c", "Gamma")] };
@@ -91,5 +91,7 @@ describe("running workspace counts", () => {
     expect(organizationRunningCount("a", { ...catalog, orgs: { a: orgCatalog } })).toBe(3);
     const quota = { used: 9, limit: 10, running: { used: 5, limit: 10 } };
     expect(organizationRunningCount("a", { ...catalog, orgs: { a: { ...orgCatalog, quota } } })).toBe(5);
+    // With no running limit (PRO-371) the server still says how many run.
+    expect(organizationRunningCount("a", { ...catalog, orgs: { a: { ...orgCatalog, quota: { used: 5, running: { used: 5 }, total: { used: 9 } } } } })).toBe(5);
   });
 });

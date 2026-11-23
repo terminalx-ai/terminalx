@@ -14,16 +14,18 @@ import {
   type CloudWorkspace,
   type CloudWorkspaceList,
   type CloudWorkspaceListItem,
+  type CloudWorkspaceQuota,
   type CloudWorkspaceRepositoryInput,
   type CloudWorkspaceSnapshot,
   type OrganizationSummary,
 } from "@/lib/api";
+import { learnCloudProviders } from "@/lib/cloudProviders";
 import { getAccount, refreshAccount, subscribeAccount } from "@/lib/account";
 import { noteListedOrgRole, refreshAccountRoles, roleAskStamp } from "@/lib/accountRoles";
 import { isMultiOrg } from "@/lib/multiOrg";
 import { phaseOf, settled } from "@/lib/cloudCreate";
 import { reconcileCloudAttention } from "@/lib/cloudAttention";
-import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
+import { forgetDeletedCloudWorkspaces, isArchived, isOpen, machineRunning, machineStarting, purgeTombstones, type PurgeNotice } from "@/lib/cloudLifecycle";
 import { closeCloudConnection, noteCloudWorkspaceListed } from "@/lib/cloudConnections";
 import { purgeCloudMirrors } from "@/lib/cloudMirror";
 import { onAccessChanged } from "@/lib/cloudCollab";
@@ -59,7 +61,8 @@ export interface OrgCatalog {
   /** The organization's selected repositories; null until first listed. */
   repositories: CloudSelectedRepository[] | null;
   repositoriesAt: number | null;
-  quota: { used: number; limit: number } | null;
+  /** The organization's slots as the last list counted them; a limit is absent where there is none (PRO-371). */
+  quota: CloudWorkspaceQuota | null;
   /** When the workspace list last answered; null for never. */
   fetchedAt: number | null;
   /**
@@ -343,7 +346,7 @@ const listedAt = new Map<string, number>();
  */
 function tellConnections(workspaces: readonly CloudWorkspaceListItem[], at: number) {
   for (const item of workspaces) {
-    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), at });
+    noteCloudWorkspaceListed({ orgId: item.workspace.orgId, workspaceId: item.workspace.id }, { running: machineRunning(item), starting: machineStarting(item), at });
   }
 }
 
@@ -372,6 +375,7 @@ export async function ingestCloudList(
     const repository = repositoryOf(item, state.createMemory);
     projectNames.set(item.workspace.id, repository ? (repository.fullName ?? nameOfIdentity(repository.identity)) : item.workspace.name);
   }
+  learnCloudProviders(list.workspaces.map((item) => item.workspace.provider));
   const org = orgId ?? defaultOrgId(getAccount().status) ?? list.workspaces[0]?.workspace.orgId ?? null;
   const newer = org !== null && (listedAt.get(org) ?? -Infinity) > requestedAt;
   if (org && !newer) {
@@ -1208,6 +1212,16 @@ function parsePipelines(value: unknown, workspaces: ReadonlySet<string>): Record
   return out;
 }
 
+/**
+ * A saved quota: how many are in use, and the limit where the organization
+ * has one. A quota saved without a limit (PRO-371) is kept; it means no limit.
+ */
+function parseQuota(raw: unknown): CloudWorkspaceQuota | null {
+  if (!isObject(raw) || typeof raw.used !== "number") return null;
+  if (raw.limit === undefined || raw.limit === null) return { used: raw.used };
+  return typeof raw.limit === "number" ? { used: raw.used, limit: raw.limit } : null;
+}
+
 /** A saved catalog, or null for anything this version cannot read. */
 export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "createMemory"> | null {
   if (!isObject(value) || value.version !== CATALOG_VERSION || !isObject(value.orgs)) return null;
@@ -1220,7 +1234,7 @@ export function parseCatalog(value: unknown): Pick<CloudCatalogState, "orgs" | "
       workspaces,
       repositories: Array.isArray(raw.repositories) ? (raw.repositories as CloudSelectedRepository[]) : null,
       repositoriesAt: typeof raw.repositoriesAt === "number" ? raw.repositoriesAt : null,
-      quota: isObject(raw.quota) && typeof raw.quota.used === "number" && typeof raw.quota.limit === "number" ? { used: raw.quota.used, limit: raw.quota.limit } : null,
+      quota: parseQuota(raw.quota),
       fetchedAt: typeof raw.fetchedAt === "number" ? raw.fetchedAt : null,
       sessions: parseSessions(raw.sessions, new Set(workspaces.map((item) => item.workspace.id))),
       pipelines: parsePipelines(raw.pipelines, new Set(workspaces.map((item) => item.workspace.id))),

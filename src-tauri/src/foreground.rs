@@ -59,6 +59,7 @@ pub struct Process {
 }
 
 /// `ps -o pid=,ppid=,pgid=,args=`: three numbers, then the command line.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn parse_ps(output: &str) -> Vec<Process> {
     output
         .lines()
@@ -100,7 +101,67 @@ pub fn agent_in(processes: &[Process], foreground: u32) -> Option<Agent> {
     Some(Agent { harness, pid: outermost.pid, pids, job: foreground })
 }
 
+/// The processes a look at `front` reads: those on its terminal on Unix,
+/// and on Windows those its shell started (see [`windows`]).
+fn processes_of(front: &PaneFront) -> Vec<Process> {
+    #[cfg(unix)]
+    {
+        front.tty.as_deref().map(processes_on).unwrap_or_default()
+    }
+    #[cfg(windows)]
+    {
+        windows::processes_under(front.pid)
+    }
+}
+
+/// A pseudo-console says neither which process has its input nor whether
+/// it is read a key at a time. A shell at its prompt runs one command in
+/// front at a time, so on Windows the job in front is the newest process
+/// the pane's shell started that still runs, and each process below the
+/// shell belongs to the job of the shell's child it descends from.
+#[cfg(windows)]
+pub(crate) mod windows {
+    use super::Process;
+    use crate::win::process::{processes, started, Entry};
+
+    /// The shell's children, with when each started; a recorded child that
+    /// started before the shell is a reused pid, not the shell's.
+    fn children(table: &[Entry], shell: u32) -> Vec<(u32, u64)> {
+        let Some(shell_started) = started(shell) else { return Vec::new() };
+        table.iter()
+            .filter(|entry| entry.parent == shell && entry.pid != shell)
+            .filter_map(|entry| Some((entry.pid, started(entry.pid)?)))
+            .filter(|(_, when)| *when >= shell_started)
+            .collect()
+    }
+
+    /// The job in front of the pane whose shell is `shell`: its newest child,
+    /// or the shell itself at its prompt.
+    pub(crate) fn foreground(shell: u32) -> u32 {
+        let Ok(table) = processes() else { return shell };
+        children(&table, shell).into_iter().max_by_key(|(_, when)| *when).map_or(shell, |(pid, _)| pid)
+    }
+
+    /// Every process below `shell`, each in the job of the child of the
+    /// shell it descends from.
+    pub(crate) fn processes_under(shell: u32) -> Vec<Process> {
+        let Ok(table) = processes() else { return Vec::new() };
+        let mut found = Vec::new();
+        for (child, _) in children(&table, shell) {
+            let mut frontier = vec![child];
+            while let Some(pid) = frontier.pop() {
+                let Some(entry) = table.iter().find(|entry| entry.pid == pid) else { continue };
+                if found.iter().any(|process: &Process| process.pid == pid) { continue; }
+                found.push(Process { pid, ppid: entry.parent, pgid: child, argv: crate::stray_processes::arguments(pid) });
+                frontier.extend(table.iter().filter(|other| other.parent == pid && other.pid != pid).map(|other| other.pid));
+            }
+        }
+        found
+    }
+}
+
 /// The processes on a terminal, by its device (`/dev/ttys004`).
+#[cfg(unix)]
 fn processes_on(tty: &std::path::Path) -> Vec<Process> {
     let Some(name) = tty.to_str().map(|path| path.strip_prefix("/dev/").unwrap_or(path)) else { return Vec::new() };
     let listed = std::process::Command::new("ps").env("LC_ALL", "C").args(["-o", "pid=,ppid=,pgid=,args=", "-t", name]).output();
@@ -147,7 +208,7 @@ impl Watch {
         let watch = Watch::default();
         let spawned = std::thread::Builder::new().name("pane-foreground".into()).spawn(move || loop {
             std::thread::sleep(TICK);
-            watch.look(&terminals.fronts(), Instant::now(), |front| front.tty.as_deref().map(processes_on).unwrap_or_default(), &changed);
+            watch.look(&terminals.fronts(), Instant::now(), processes_of, &changed);
         });
         if let Err(error) = spawned {
             log::warn!("watch the terminals' foreground: {error}");
@@ -444,7 +505,7 @@ mod tests {
         let until = |what: &str, wanted: &dyn Fn(&Option<Agent>) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
-                watch.look(&terminals.fronts(), Instant::now(), |front| front.tty.as_deref().map(processes_on).unwrap_or_default(), &|_: &str, agent: Option<&Agent>| seen.send(agent.cloned()).unwrap());
+                watch.look(&terminals.fronts(), Instant::now(), processes_of, &|_: &str, agent: Option<&Agent>| seen.send(agent.cloned()).unwrap());
                 if let Ok(change) = changes.try_recv() {
                     assert!(wanted(&change), "{what}: {change:?}");
                     return change;
@@ -471,7 +532,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         while !own(&terminals) {
-            watch.look(&terminals.fronts(), Instant::now(), |front| front.tty.as_deref().map(processes_on).unwrap_or_default(), &|_: &str, agent: Option<&Agent>| seen.send(agent.cloned()).unwrap());
+            watch.look(&terminals.fronts(), Instant::now(), processes_of, &|_: &str, agent: Option<&Agent>| seen.send(agent.cloned()).unwrap());
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(changes.try_recv().is_err(), "a job that left the terminal as it was is not an agent's session");

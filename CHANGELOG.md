@@ -1,6 +1,903 @@
 # TerminalX changelog
 
-## Unreleased
+## 0.2.39
+
+- Bots (experimental): a bot whose session is running no longer reads
+  "Quiet". Its sidebar row and the Bots page's **Doing now** say
+  "Working · <the chat or duty it is on>", with its runs' workers counted
+  ("· 2 workers"), or "Waiting for you · …" when a session of its is stopped
+  on you, and go back to "Quiet" when the turn ends, with no reload. Both
+  were a fixed "Quiet" for every bot that was not paused. On the phone's Bots
+  tab a bot with a running session and no work item in progress was shown as
+  quiet too; it now says what the session is on (PRO-515).
+- Shortcuts: on macOS, Switch light and dark is now ⌥⌘T, as designed, and
+  Reopen closed tab moves to ⌥⇧⌘T, the keys it already had on Windows and
+  Linux. Elsewhere light and dark stays Ctrl+Alt+Shift+L, since Ctrl+Alt+T
+  opens a terminal on GNOME and Ubuntu. Keys you set yourself for either are
+  kept (#1131).
+- Bots (experimental): a bot works in cloud workspaces with the access it has
+  on this Mac. A session that works for a bot may start a cloud session,
+  prompt it and resume its workspace, where before every one was refused. A
+  bot with full access runs there with permissions bypassed; one that asks
+  before outward actions is held to Ask every time, and one that reads and
+  reports to plan, whatever mode it asks for. A change to a bot's access
+  reaches its cloud sessions at their next prompt or resume. A paused bot is
+  still refused, and so are another computer and starting an issue pipeline
+  (PRO-514).
+
+- Bots (experimental): a bot's chat rows ("Chats with", "Started by", "Duty
+  runs") have the sidebar's session actions: right-click or ⋯ to rename,
+  pin, archive or delete, and double-click to rename. A renamed chat shows its
+  new title everywhere, and closing a chat leaves you on the bot's page.
+  Deleting the chat a hand-off was being worked on now tells its sender
+  instead of leaving it "working" for ever (PRO-521, #1484).
+- Bots (experimental): fixes from the role and memory review. The window's
+  cached key is read again from Keychain after 60 s and wiped when dropped;
+  undoing an old memory change lands where the notes are kept now; two
+  organisations whose ids differ only in case are told where earlier notes
+  were left; `forget --line` counts lines in the file's own bytes (PRO-512,
+  #1486).
+- Bots (experimental): window consent fixes. With Bots off no Restart runtime
+  offer is made; a registration without the window's proof is validated
+  before it changes anything and cannot unseat a window a handover carried
+  over; an unanswered proven registration fails after two tries (PRO-508,
+  #1488).
+- Phone: turning off public callers now closes connections already open
+  from public addresses, including ones still pairing or serving a shared
+  session; phones on private addresses stay connected (PRO-495, #1485).
+- Phone: a failed resume no longer shows a spurious "Connection lost" or
+  starts a second connect loop, and a cloud tab's layout is pruned only once
+  the runtime's own agent list has arrived (#1375, #1379, #1480). A cloud
+  session whose history is reset during its first subscription replays the
+  new history, and the phone's open list replaces the 45 s recently-read
+  rule when prefetching (#1398, #1381, #1492).
+- Machines: Machine Files keep literal backslashes in relative Unix paths
+  (#1263, #1481). A machine's pull request push goes to exactly the
+  destination that was checked: the push runs from a private copy of the
+  config, while the checkout's pre-push hook still runs in the checkout
+  (#1393, #1394, #1491). Checkouts whose names end in a space are verified
+  and served correctly (#1264, #1262, #1267, #1494), and every place that
+  reads a path Git prints now strips only the line ending (#1495, #1497).
+- Sessions: a `!command` echo matches only a whole shell record, a resent
+  prompt retires its lapsed echo, and a lapsed card a resend retired is
+  marked delivery unconfirmed (#1383, #1385, #1386, #1377, #1483).
+- Sessions: Undo's checkpoint RPC is tested end to end, leftover cleanup
+  waits for a pending pull request, and forking a session whose worktree is
+  gone recovers from the recorded checkout identity (#1399, #1382, #1228,
+  #1493).
+- OpenCode: editing its key no longer rewrites `auth.json` when nothing
+  changed, and the final check runs just before the rename (#1374, #1373,
+  #1391, #1482).
+- Agent configs: a refused linked skill folder names the resolved folder or
+  why its link can't be read, and a failed copy removes the empty folders it
+  made and names any left (#1376, #1396, #1490).
+- GitHub connect polls for its own 30-minute budget instead of an assumed
+  server lifetime (#1370, #1371, #1407, #1479).
+- Tests: flaky send-cost and Codex stand-in tests fixed, and a layout check
+  waits for the link dialog's entrance (PRO-334, PRO-488, #1487, #1489).
+- Mobile app 0.1.3 (build 4) (#1476).
+
+## 0.2.38
+
+- Bots (experimental): a chat-app link code is shown only to the window that
+  made it: an agent tab's read of the bot's channels says only that a code
+  waits. Unlinking a chat now asks for you, as linking does. Wrong codes are
+  counted per chat, so a stranger who finds the bot cannot use up your tries,
+  and a word that only looks like a code is not answered. Connecting another
+  Telegram bot in place of the first no longer drops its first messages and
+  button presses (PRO-509).
+- Mobile: the Bots tab, pinning from the phone and the Pinned section's
+  cloud projects, and the phone's prefetch of recent conversations now reach
+  the Mac. Their calls (`bots.*`, `sessions.pin`, `cloud.pins`, `cloud.pin`,
+  `sync.prefetch`, `sync.prefetchTargets` and `configuration.resolve`) were
+  missing from the list of what a paired phone may call, so the Mac refused
+  each one ("not available to this paired device") before it was handled,
+  since they were added. Reads are open to every paired phone; answering or
+  pausing a bot and pinning stay with a phone allowed to drive (PRO-510).
+- Bots (experimental): message a bot from Slack or Telegram. Connect your own
+  Slack app (Socket Mode) or Telegram bot in Settings → the bot → Channels,
+  then link a chat by sending it the one-time code shown there; messages from
+  any other chat are refused. The owner's direct messages reach the bot's home
+  chat, a group's or channel's its own chat, and the bot's reply goes back
+  where it was asked. Duty reports and "Needs you" questions go to your linked
+  direct chats, the answers as buttons (a run's approval stays in TerminalX).
+  "Also sends to" beside the home chat's send button forwards its replies
+  there too. Tokens are kept in the store, readable by you alone, never in the
+  bot's settings. WhatsApp needs a relay and stays off (PRO-481).
+- Bots (experimental): the week calendar of duties starts on the first day of
+  the week of the system's region. Too many duties at one time to read side
+  by side show "+N more", which lists the rest. The grid is keyboard-driven:
+  the arrow keys move between hours and days, Enter adds a duty at the hour,
+  and Alt (Option) with the arrows moves a block still to come, Enter saving
+  it. A deleted duty's past runs stay on the weeks they ran, dimmed and named,
+  and open its kept run log. A run that goes on past midnight carries on as a
+  second block on the next day (PRO-499).
+- Sidebar: a quick chat is no longer a project of its own named by its
+  session id. It is listed under Chats by its title, saying in its tooltip
+  where it runs (its scratch folder, or the folder it was pointed at); one
+  pointed into a listed project's folder or one of its worktrees is listed
+  under that project, and with orchestration on, one another session started
+  joins its parent's project, where it nests (#1464).
+
+- Mobile: the Sessions list has a Pinned section, after Needs you and before
+  the projects, holding what the Mac pinned: its sessions, out of their
+  projects as on the sidebar, in the sidebar's own order when it is in its
+  custom order and newest first otherwise, and the workspaces of cloud
+  projects pinned on the Mac, with a cloud mark. A pinned session waiting on
+  you stays in Needs you only, with a pin; under Working and in a search
+  pinned sessions keep their projects and their pin. A long press on a row
+  pins or unpins it on the Mac (a cloud workspace's project, also from the
+  Cloud tab), and the row moves once the Mac has confirmed; a phone that may
+  only watch is told no. Pinned cloud projects are now kept by the app rather
+  than a window's preferences, so the phone reads and changes them too; those
+  pinned before are moved over once (#1403). A pin an older build of the app
+  sets afterwards is moved over on the next launch too, rather than dropped;
+  one entry that could never be pinned no longer stops the others moving; the
+  sidebar says when the pins could not be read, with Try again; and pins are
+  kept for at most 100 organizations (PRO-510).
+- Bots (experimental): below Full access a bot asks before it fetches a web
+  page (`WebFetch`), at Read and report as it asks before a report: the
+  address can carry what it read off this computer, and the card shows it. A
+  paused bot, and its look around or memory tidy, fetch none. Web searches
+  and a connected server's resources still count as reads, and the access
+  picker now says what each level lets through, the web included (PRO-496).
+- Bots (experimental): a bot's Claude Code sessions run no inline `!` command
+  of a skill or custom slash command, which runs as it loads with no tool call
+  the access gate could see; the command is replaced by a placeholder and the
+  skill's text still loads. A help or version flag counts as a read only after
+  one of the command line's own groups (not `service`, `update`, `pair` or
+  another command of the headless runtime), and a `terminalx` the session's
+  path finds in a relative folder (`bin`, `.`) before the app's own is not
+  taken for the app's command line. On a bot's settings page the arrow keys
+  move between the access levels and Space or Enter picks one, so passing over
+  a level saves nothing and the focus stays put while a save runs; two
+  sections saved at once no longer refuse each other (PRO-494).
+- Automations: an automation that runs on a Linear issue or a pull request
+  starts at most 48 runs in any 24 hours, across everything it wakes on, so a
+  chain of runs that each make the next event stops there. The editor shows
+  "Runs a day, at most" (1 to 1000) beside "New runs per tick", saved per
+  automation; ones saved before read as 48. Past it, what was read waits and
+  the status says until when (PRO-490). A GitHub issue search has the same
+  cap, field and notice; an empty field is the default, and a decimal is
+  refused in the editor. A pull request held by its own rate
+  limit stays held on a tick the per-tick cap filled, and lets go once it is
+  closed; a run's last head is written with its ending.
+- Bots (experimental): a bot switches off one of its own duties from its own
+  session with `terminalx bots duty-off "<duty>"`. A failed duty run reports
+  as the duty does and keeps to the bot's quiet hours; a run with no reply is
+  reported, not dropped; a pause while a run's session opens sends it nothing;
+  the duty page shows the model its runs use and stays open after Save or
+  Duplicate (PRO-492). A comment edited to add a mention wakes a duty, a
+  hand-off's work chat counts the passes it was handed with, and a duty's wake
+  changed while its bot is paused starts at the save (PRO-503).
+- Bots (experimental): the gate on a bot's unsigned GitHub posts also refuses
+  `gh pr -R owner/repo comment`, `gh issue --repo=owner/repo comment` and
+  `gh pr -R owner/repo review`, and a `gh api graphql` call that sends its
+  query with `--input` or reads it from a file (`-F query=@file`), since what
+  it sends cannot be read. Whether a bot is at Full access is read at most
+  once a second, not on every tool call (PRO-505).
+- Bots (experimental): a bot posts on GitHub only signed. At every access
+  level its session is refused `gh pr comment`, `gh issue comment`, `gh pr
+  review` and `gh api` calls that write a comment or a review, and is told to
+  use `terminalx bots post` or `bots reply`. A mention of a bot from the
+  owner's account written while one of their bots at Full access was working
+  is kept as "not accepted" and asked for again, since the bot could have
+  posted it with the owner's login (PRO-502).
+- Bots (experimental): a bot's run the owner approves or starts from its Run
+  view, rather than from the item's question, no longer refuses the lead's
+  later `runs start` with `awaits_owner`; the item records the start and
+  closes its question, as "Approve and start" there would (PRO-501). A done
+  or dropped item that links the run is left as it closed (PRO-506).
+- Issue pipeline: an approved review carries across a merge of main again in a
+  worktree with its dependencies installed. The check for a stray
+  `.gitattributes` took each ignored folder `git status` names (`node_modules/`)
+  for one, so every merge after the final review stopped at "Needs you". Now
+  only real `.gitattributes` files count, and one inside a folder no merged
+  tree has files in (a package's, in `node_modules`) is skipped (PRO-500).
+- Bots (experimental): a lead bot plans and starts orchestration runs. It leads
+  a run from a session it starts in the project, then `terminalx bots items
+  plan` asks "Approve the plan and start the run?" with a run plan card in its
+  chat (pieces, workers, estimate). Only the owner's answer approves and starts
+  the run; "Start, but ask before merging" holds the bot's `runs merge` until
+  the owner says Merge (`bots items ask-merge`). The item links the run and its
+  workers, shows each hand-off with its cost and report, cannot close until the
+  run ends, and `--check-back TIME|report` wakes the bot without spending
+  anything while it waits. "Started by <bot>" shows the bot's runs with their
+  state. Needs Orchestrator runs on too (PRO-476).
+- Bots (experimental, off by default): the foundation for AI employees with
+  standing roles. Settings → Experimental → Bots turns on the bots' store and
+  `terminalx bots list|show|create|rename|pause|resume|delete|pause-all|resume-all`.
+  A bot is hired from one of eight bundled role templates with a role and a
+  name, and gets a home folder with its `ROLE.md`, `MEMORY.md` and `memory/`;
+  deleting it moves that folder, with its record, to `trash/bots/` (PRO-466).
+  With the switch on, a Bots section sits above the sidebar's project lists
+  (each bot's role, status and where it runs, with a + to hire), and a Bots
+  page (⇧⌘J) shows the team table with Pause all and each bot's pause; with
+  no bots it offers three roles to hire in one click, and Hire a bot lists
+  every role with its duties and skills and asks only for a name (PRO-467).
+- Bots (experimental): each bot has a home chat, made at hire, that runs in its
+  home folder; its agent is given the bot's role, the newest 200 lines of its
+  memory and a few fixed rules each time it starts, so an edited `ROLE.md`
+  reaches the next conversation. A bot's view has its header and tabs, with
+  Chat filled: its chats and the sessions they started beside the transcript.
+  Its chats leave the sidebar's lists, and are never archived for being quiet
+  or removed by retention. A bot's sessions, and what they start, run in no
+  wider a permission mode than its access allows, and in plan mode while it is
+  paused; a paused bot still answers. A resume from the `terminalx` CLI waits
+  for the owner to confirm it in the app (shown on the team page and the
+  sidebar for a day), and a bot's own sessions cannot hire, delete or resume
+  bots, start cloud, pipeline or other-computer work, approve permissions, or
+  change sessions through the runtime's calls while they run in its tabs. The
+  app places a command in the pane that started it where it can (by its
+  process, its session and its terminal) and then ignores the session it
+  names; a command it cannot place counts as the owner's only from a terminal
+  of the person's own, one whose process has already exited or closed its
+  connection is refused, and one that has made itself a terminal of its own
+  (`script`, tmux) is not placed. While Bots is on, the runtime's own calls
+  that change sessions or terminals are taken from the window (by its
+  process and start time, carried across a runtime update), from a session
+  no bot works for, or from a terminal of the person's own, and refused
+  otherwise. Not held (PRO-489): a bot's process that has left its tab and
+  runs code of its own choosing, such as one with a terminal of its own. A bot's work on an agent that cannot
+  be given its rules (ACP, OpenCode) is refused at launch.
+- Bots (experimental): a bot keeps a list of work items, each with a summary,
+  what "done" means, links to its sessions, pull requests, tickets and runs,
+  what it cost and an activity log. A bot changes only its own list, with
+  `terminalx bots items add|set|ask|check|comment|done`, and cannot mark an
+  item done while a line of done means is unmet. A bot that needs a decision
+  asks once, with two to four answers and the one it recommends; the owner
+  answers from the bot's Home tab, the item's page or the Bots page's Needs
+  you queue, by choice or in their own words, and the answer is recorded as
+  the owner's and sent to the bot's home chat, never with the bot's own title
+  or question: typed words as the owner's, a chosen answer as its number with
+  the bot's label fenced as the bot's text. An answer, comment or piece of
+  work that cannot be sent waits on the item, is shown as not delivered yet
+  with Send again, and is sent as a message once the home chat's agent next
+  starts. A question card open in a bot's session waits there too. The Home tab
+  lists what needs you, what is in progress and planned, with Give work; an
+  item's page has Take it over, Stop this item and, once it is closed, Reopen.
+  Needs you counts show on the Bots page, each sidebar row and the Bots
+  destination, and a list that cannot be read is shown as an error there. A
+  list is bounded in size, its history keeps the owner's entries before the
+  bot's, and a bot may add, ask and change states 40 times in 10 minutes
+  (PRO-469).
+  Hiring, resuming, deleting and raising access are confirmed by the
+  TerminalX window on a Mac, which restarts its runtime to do so when needed,
+  as pairing does. A resume or more access gives each tab back its own mode,
+  within the bot's limit, unless it was set by hand since. Deleting a bot
+  stops every session that works for it and archives its chats; turning Bots
+  off stops them. A bot's memory reaches its agent as its own notes, read safely
+  and capped (PRO-468).
+- Bots (experimental): a bot's sessions merge, steer and write to issues
+  (`terminalx pipelines auto-merge|act|resolve-conflicts`, `terminalx issues
+  comment|create|…`) only when the bot has full access and is not paused; a bot
+  that asks first has its owner do them. Its role, memory and rules are capped
+  to fit one launch on Linux, a launch too long to make says what to shorten,
+  and a csh or tcsh login shell starts a bot's chat. Bots stay off on Windows,
+  where TerminalX cannot yet tell a bot's commands from yours. While a bot is
+  paused, a script with no terminal (launchd, cron) writes to no issue and
+  merges no pipeline either; run it from a terminal. On a Mac only the
+  TerminalX window, proved with its Keychain key when it registers, changes
+  sessions and terminals through the runtime directly or acts for a paired
+  phone or a share. On Linux and servers, `terminalx bots resume` in a
+  terminal of your own resumes a bot at once. A Mac window that cannot read
+  its Keychain key still connects, says so at once, and Try again proves it
+  once Keychain is unlocked; a process with a terminal of its own registers
+  as the window only with the key. A runtime started without the key says
+  so too. A bot's own week of duties reads on a Mac as its duties do. A
+  role saved under the older 32 KB limit is shown whole, with what a
+  conversation cuts, and saved once shortened; work items, hand-offs and the
+  team brief that would make a bot's launch too long are left out and named
+  (PRO-489).
+- Settings → Machines: Restart runtime is offered only for the runtime running
+  now, restarts only what the window showed, and a failure stays on screen
+  when a handover withdraws the offer (PRO-489).
+- Bots (experimental): a bot's Role and memory. The owner edits its job title,
+  who it reports to and its standing instructions (`ROLE.md`, with a saved
+  state, Open in editor, every earlier version and the role it was built from).
+  Memory is one dated note per line, kept with the bot, in each organisation it
+  works in, or as personal notes; a conversation is given the bot's own and its
+  place's, 200 lines in all, and older notes move to `memory/archive.md`. The
+  bot writes memory with `terminalx bots memory add|forget|list` from its own
+  chat or a session it started (a read-and-report bot too), notes that look
+  like secrets are refused, and memory can be switched off per bot. The
+  owner's changes to a role or memory, and turning memory back on, need the
+  TerminalX window. The screen is the bot's Role and memory tab, and is
+  reached from its row on the team page too. Every change, the bot's own and
+  edits made to the files outside the app included (found when the Bots page
+  or the bot's page opens and before each of its chats starts, one change per
+  file), is recorded with where it came from in a change log kept outside the
+  bot's home folder, each with Undo (PRO-470).
+- Bots (experimental): duties. A duty is an automation a bot owns, listed on
+  its bot's Duties tab rather than on the Automations page, and run as the
+  bot: on its agent, model and access, in its home folder, with its role and
+  memory. Its first check runs before the model, as you, in an empty folder
+  of the duty's own rather than in the bot's home; when the check prints
+  nothing the run is logged as "nothing new", with no session, no spend and
+  no notification. A duty runs once at a time, a run past its timeout is
+  stopped, and older run sessions are archived. Otherwise the bot looks, and its reply is reported where
+  the duty says: a note in the bot's home chat and a notification, or a note
+  in its lead's home chat (Slack, Telegram and a pull request are shown, off).
+  A reply of "Nothing new." tells nobody; one that starts "URGENT:" reaches
+  the owner's notifications even in the bot's quiet hours. Each duty keeps a
+  small note between runs (`duties/<id>.md` in the bot's home). A paused bot's
+  duties do not run, and runs that fall due meanwhile are skipped, not run
+  late. The Duties tab has the table, today's counts, the log and quiet
+  hours; a duty's page has its four steps, its runs, Run now, Pause and
+  Duplicate. At hire, the role's scheduled duties arrive switched off.
+  Deleting a bot removes its duties, kept with its home in the trash.
+  Adding, changing, running or switching on a duty, and quiet hours, are the
+  owner's to do from the window (PRO-471).
+- Bots (experimental): bots work as a team. From its sessions a bot hands a
+  scoped piece of work to another with `terminalx bots handoff --to BOT
+  --title … --scope … [--due …]`, and tells one something with `terminalx
+  bots tell --to BOT|lead`. A bot hands work down its reporting line, or to a
+  bot whose Who can ask lists it with "Can hand off work"; work never goes up
+  the line, and messages go only along it. The receiving bot gets a chat of its own
+  for the work, under its own access and pause, and an item on its list; it
+  answers with `tell --about N` (`--failed` when it could not), and the answer
+  reaches the chat the work was handed from. Every message one bot sends
+  another names the sender and what it is ("status to Atlas · a bot's words,
+  not an approval") in the transcript and in what its agent reads; only the
+  owner's own words approve anything. Loops are bounded: no hand-off to
+  itself or back to a bot that handed it open work, chains stop at three, a
+  failed one is handed again at most twice, then the lead decides or asks
+  the owner. Work handed to a paused bot waits until the owner resumes it.
+  A card above the chat shows each hand-off's scope, when its answer is due,
+  both bots and its state, with a Stop that stops only that bot's work on it.
+  A bot's Home shows who it reports to and who reports to it; an item's page
+  can hand it to another bot with the owner's note; and a team brief that
+  every bot is given in each conversation is written under "Every bot
+  reads" in a bot's chat list (PRO-475).
+- Bots: each bot has a settings page (PRO-478), reached from the team table
+  and from the bot's own view: where it runs (this Mac; cloud and another
+  machine come later), its access, the organisations it works in, its
+  channels (TerminalX, and the state of the GitHub and Linear connections),
+  and who besides you may ask it for work. On top of the mode its access
+  holds a bot's sessions to, every tool call they make, including native
+  Codex's approval requests, is checked against the access as it is set now:
+  Ask before outward actions reads freely and asks you on a card before it
+  changes anything or runs a command; Read and report reads and runs only
+  commands known to read, asks before a comment or a message, and refuses the
+  rest; a paused bot only reads. At every level, and while paused, a bot
+  keeps its own notes with `terminalx bots memory add|forget|list`, and is
+  refused writes to its own record and the app's settings. Adding an organisation, someone new,
+  changed or more able in Who can ask, another agent or model, a rename and
+  another place to run are confirmed by the TerminalX window, as raising
+  access is, and a runtime that cannot confirm it offers Restart runtime on
+  the page; taking any of them away needs no confirming. This is not a sandbox: a bot with full access can still write
+  files on this Mac by other means. Agent and model, rename and delete are
+  under the page's menu.
+- Bots (experimental): a duty wakes on events as well as a schedule. The
+  Duties tab's GitHub, Linear, Another bot and Wait until tiles open the
+  editor on that source: a pull request opened, pushed, asking for your
+  review or failing a check; a comment that mentions the bot, a Dependabot
+  security alert, or a failed check on a branch (read with `gh`); a Linear
+  issue matching a filter or a comment that mentions the bot (read with the
+  Linear key); a hand-off, question or status another bot leaves it
+  (`terminalx bots message`, and a duty reporting to its lead leaves one); or
+  a URL, a file or a command's output that changes. Each event wakes the duty
+  once, and what is there when it starts never does. The first check is given
+  the events (`$TERMINALX_EVENTS`) and the agent is given them fenced, as
+  information. Events that arrive while the bot is paused wait and wake it on
+  resume. A duty wakes at most 6 times an hour and 48 a day, one run at a
+  time; what that holds back waits and the duty says until when, and a
+  message passed between bots three times wakes nobody. A GitHub mention
+  wakes it only from the repository's owner, members and collaborators
+  unless you choose anyone, and never from your own `gh` or Linear user.
+  Messages go once read; one bot leaves at most 30 an hour, and an unread
+  message is never let go to make room. Security alerts are Dependabot's;
+  mentions are conversation comments only. Slack, Telegram or WhatsApp and
+  webhooks stay off until they have a connector (PRO-472).
+- TerminalX runs on Windows 10 and 11: the desktop app, its background
+  runtime, Claude Code and Codex tabs, terminals, worktree sessions, undo,
+  machines, phone pairing and the headless `terminalx-serve` tools. Named
+  pipes with owner-only access stand in for Unix sockets, DPAPI for the
+  Keychain, Job Objects and ConPTY for process groups and terminals, and Git
+  for Windows' `sh` runs setup, archive and action scripts. Not yet on
+  Windows: keeping agents running through a runtime update (an update
+  restarts the runtime), Local VM tasks, and the runtime's self-update.
+- Bots (experimental): a week calendar of duties. The Bots page's Calendar
+  button, and a List | Calendar switch on a bot's Duties tab, show the week
+  with one block per scheduled run: ran and did its work, ran and reported,
+  ran and found nothing new, or still to come (and failed or skipped when the
+  log says so), with a line at now. Duties that wake many times a day, and
+  those that wake on events, are counted per day in two rows on top. It is
+  read from the run logs and the schedules, in your time zone, so it agrees
+  with both. Filter by bot, step between weeks, click an empty hour to add a
+  duty there, or drag a block still to come to move its duty's time. Beside
+  it: what is next today, the week so far, the key and quiet hours. Days a
+  duty's log no longer reaches back over say "history not kept" and the
+  totals "at least"; a move says what changed, with an Undo (PRO-473).
+- Bots (experimental): a bot proposes work by itself. Each bot has two
+  built-in duties, on from hire. Look around (08:00 to 20:00, every four
+  hours, with an optional focus line) reads what changed and suggests work;
+  while it looks it may only read, enforced in the session's hooks, and an
+  action it tries anyway is refused with a note to suggest it instead. Its
+  suggestions are on the bot's Home tab, each with why, Start (an item you
+  asked for, sent to the bot as your message, so it begins) and Dismiss,
+  under a line saying when it last looked, what it suggested and what was
+  refused. Tidy memory (nightly) merges duplicate notes and removes
+  contradicted ones as one change with one Undo. A free check skips either
+  when nothing has changed, logged as "Nothing new" with no model run. The
+  Home tab's right column also shows Up next, the bot's next duty runs
+  (PRO-477).
+- Bots (experimental): the bots on the phone. While a paired Mac has Bots on,
+  the phone gets a Bots tab: what needs you across every bot first, the
+  newest question answerable from the list with its recommended answer, then
+  the team with what each bot is doing, and Pause all. A bot's page has Home
+  (its questions and open work), Chat, Duties and Role, with Pause or Resume
+  in its header. A question opens as a sheet with the recommended answer on
+  top and room to type a reply. Each new question notifies the phone while it
+  is connected, under the Questions choice; its buttons answer it and a tap
+  opens the sheet over the bot's home chat. An answer from the phone, from the
+  list, the sheet or a notification, goes through the same route as the
+  app's, the Mac's own `bots.answer` for a paired phone that may drive, which
+  no bot's session can call. With Bots off the phone is as it was (PRO-479).
+- Bots (experimental): Pause and Pause all say what they stopped. Pause a bot
+  from its header or its sidebar row's menu, and every bot from the Bots page
+  or with ⌥⇧⌘P from anywhere (⇧⌘P stays the markdown preview's). A pause
+  records where it came from and what the bot was doing. A run's worker
+  finishes the step it is on, then takes plan mode; no new worker starts in a
+  run a paused bot leads. Due scheduled checks are skipped, events wait at
+  their source, and work handed to it and your answers on its items are kept
+  and used on resume, each once. A message to a paused bot is answered, and
+  the answer says it is paused. With every bot paused, the Bots page shows
+  who paused them, from where and when, what is working, what needs you,
+  what is held and what was spent since, each bot's state and what is held
+  for it, with Resume one by one and Resume all (PRO-474).
+- Bots (experimental): GitHub and Linear are a bot's channels. A bot posts
+  its review or finding on a pull request, a comment on a GitHub issue, or a
+  comment on a Linear issue with `terminalx bots post`, through your `gh`
+  login and Linear key; each post ends with a line saying which bot wrote it
+  on your behalf, and a review never approves. Mention a bot as `@<slug>` in
+  a pull request, issue or Linear comment and it starts a conversation with
+  it, listed under "Chats with <bot>" with where it came from; the bot
+  answers in that thread with `terminalx bots reply`. You and the people in
+  its Who can ask (known by the GitHub login you give them, and on Linear by
+  their email) are accepted; anyone else's mention, and a bot's own post,
+  starts nothing. What people write there is a request, never an approval.
+  The bot's settings list what reached it and what it posted (PRO-480).
+- Stats & usage is a Settings page (Personal, after Machines), with Refresh
+  at the top right. The status bar menu, a session's cost link, the Stats
+  shortcut and ⌘K open it there. The main window's Stats view and General's
+  Usage row are gone, and a window that last showed Stats reopens on Home
+  (PRO-463, #1417).
+- Settings menu: Projects and Organizations are one closed row each, with a
+  count, under "Projects & organizations". An organization opens to its own
+  pages, filtered by your role, with breadcrumbs; links, search and messages
+  open the right group (PRO-464, #1418).
+- Automations: a First check script runs through `/bin/sh` before any session
+  is made. No output gives a "Nothing new" run with no session, output is
+  added to the prompt, and a failure or timeout fails the run. The editor has
+  a First check section with Try it, and the runs list shows nothing-new runs
+  in a neutral colour (PRO-484, #1425).
+- Automations wake on new Linear issues and on GitHub pull request events:
+  opened, new commits pushed, review requested from me, a check failed. Each
+  source keeps its own record of what it has seen, starts from now, backs off
+  on errors and says when it can't be read. The editor has both triggers,
+  with a live preview of what matches (PRO-485, #1426).
+- Codex: a resumed session no longer stops at "Working directory · resume".
+  Codex is resumed in the current directory, so the message that resumed it
+  goes straight in. If Codex does draw a list of choices, the held message
+  says the agent is asking a question in its terminal, and is sent once it is
+  answered (PRO-462, #1414).
+- Terminal prompt cards: the card for a CLI's own in-terminal question is
+  taken down when its CLI stops, exits or leaves the terminal, also after a
+  restart. It shows while the pane keeps redrawing instead of waiting for
+  quiet, and an answer is refused while a hook's request is open (PRO-460,
+  #1422).
+- Pairing: "window consent key is missing from Keychain" after the app adopts
+  an older runtime no longer stops Create pairing code. The app relaunches
+  that runtime with its own key when nothing would be cut short; when work is
+  running it names the work and offers Restart runtime. The offer reaches the
+  window when an account grant makes it, and what would stop is read again
+  before the restart (PRO-486, #1428, #1431).
+- Headless runtime: a setting for where it listens. Relay only is the
+  default, callers from the public internet are refused unless allowed, and
+  an existing install is asked once. Pairing by code goes through the relay,
+  and the runtime shows when it runs as root or with sudo (PRO-487, #1434).
+- Runtime releases carry the version their binary reports, so the install
+  one-liner and `terminalx-serve update` accept the download and offer newer
+  releases (#1424).
+- Machines: the session header's Create PR on a branch the machine never
+  pushed uses the verified push, as the PR panel does, so no commit reaches a
+  `pushurl` or `pushInsteadOf` destination before it is checked (#1421).
+- Mobile: the Sessions header's machine name opens a Switch machine list:
+  paired machines with their state, a check on the one in use, offline ones
+  dimmed, and Add a machine. Machine actions moved to a "…" button, also
+  opened by a long press on the name, and gained Disconnect (PRO-465, #1416).
+  The mobile app is 0.1.2, build 3 (#1420).
+- Composer: in a narrow chat the toolbar wraps instead of running Attach,
+  Dictate and Send off its edge. The footer and the microphone alert stay
+  inside the chat, and a bot's run plan card leaves room for the chat at
+  760×520 (#1473).
+- Bots (experimental): window consent hardening. An unproven window gives way
+  to the proven one and serves nothing while Bots is on, and serves again
+  once Bots is off. Stale recognitions are cleared, a replaced Keychain key
+  offers Restart runtime, a proven registration that timed out is retried,
+  and the errors say more (PRO-507, #1468, #1471).
+- Bots (experimental): hand-offs. Work the owner stopped cannot be handed
+  again as a new hand-off for 24 hours, and the refusal says so; after that,
+  recurring work such as a daily duty's hand-off goes on. A title with no
+  letters or digits is never matched, and a question no longer drops out
+  while its tab is held (PRO-498, PRO-493, #1453, #1456).
+- Bots (experimental): Role and memory fixes left from review, among them
+  the app's own archive move, undoing it, the retry after a runtime restart,
+  line numbers in a memory over the read limit, and topic files with spaces
+  or non-ASCII names (PRO-491, #1474).
+- Bots (experimental): calendar fixes. A run that began and was stopped reads
+  "Stopped before it finished". A block is as tall as its run went on, cut at
+  midnight. The week label says its year outside this year. The timers stop
+  while the window is hidden. "History not kept" covers a day only when it is
+  true of every duty drawn. A block dragged away and brought back opens
+  nothing. An older runtime is offered Restart runtime (PRO-497, #1442).
+- For contributors: `docs/BOTS.md` maps the Bots work and its rules (PRO-459,
+  #1433). The calendar's WebKit check clicks the hour cell and confirms all
+  168 hours take a click (PRO-511, #1475), the machines break check applies
+  again (PRO-504, #1452), and Linux CI is on GitHub's runners after a trial
+  on Instabox (#1448, #1460).
+
+## 0.2.37
+
+- Cloud and machine sessions catch up with local ones: the shared tab strip
+  with the runtime's agent tabs, shells and split panes, layout saved per
+  viewer (#1362); Fork, Reset and turn checkpoints (#1388); second opinion,
+  agent handoff and Retry in a new chat (#1401); the held follow-ups tray and
+  Send now on a queued message (#1412); any-file attachments, the # PR list
+  and dropped files attached rather than mentioned (#1410). Queued cards on a
+  sleeping cloud tab wait for its checkpoint history before matching
+  delivery (#1395).
+- Claude Code's own in-terminal prompts (such as the compacting offer) show
+  as a chat card answered with the CLI's keys, or an Open terminal card when
+  the prompt can't be read (PRO-460, #1413).
+- Composer: attached files show previews: image thumbnails that open the
+  viewer, and cards with type, size and a text snippet, also on the sent
+  message (PRO-461, #1411).
+- Orchestration runs (experimental): a session that leads no run looks like
+  any other session. The Run | Lead chat strip and the Idle pill no longer
+  show on it; Go → Run View (⇧⌘O) opens the page that says how to start a run
+  (#1404, #1405).
+- Queued prompts: a stale lapsed echo is retired after a resend or a
+  conversation reset, so a later identical prompt no longer inherits its
+  card (#1365). Claude shell records are recognised with the same strict
+  grammar on the Rust and TypeScript sides (#1366).
+- Phone: the phone closes with its own codes and the Mac records why a
+  connection ended (#1353); a disconnect on the Mac stops live output even
+  mid-request (#1355), and the revoke acknowledgement goes out before the
+  close (#1397); a stream's opening snapshot arrives before its deltas
+  (#1351); the backpressure tests tell falling behind from a write timeout
+  (#1369). Prefetch keeps the open transcript's sync checkpoint and skips
+  conversations the phone has open (#1368), runs one bounded worker per
+  connection (#1402), and asks which conversations the Mac will prefetch so
+  cached ones get only new events (#1409). The transcript cache reclaims
+  chunks orphaned by interrupted writes (#1364).
+- Phone support reports keep each connection path's typed cause when all
+  fail (#1378), and a credential refusal ends that pairing's report access
+  (#1359).
+- Machines: PR publish refuses unless every push URL Git would use is the
+  verified origin (#1387); a nested project's session can no longer claim
+  its parent's PR (#1352); a pending PR creation can be reconciled by URL
+  once the PR is merged or closed (#1361) and protects its worktree from
+  bulk cleanup (#1367); PR associations keep GitHub Enterprise repository
+  locators (#1274).
+- OpenCode: Connect and Disconnect re-read auth.json before writing, so a
+  refreshed sign-in is not reverted (#1354); Disconnect works for hand-made
+  servers, also offline (#1406, #1408); a saved custom base URL is kept on
+  reconnect, and clearing it warns (#1400, #1380).
+- Agent config copy validates an existing skill folder even without
+  SKILL.md (#1356) and reports files already written when a copy fails
+  (#1384).
+- GitHub connect no longer expires a waiting attempt by the desktop's wall
+  clock (#1360). Organization deletion reads the server's 401 as a sign-in
+  refusal (#1350).
+- Cloud scheduled tasks: the fresh-workspace and single GitHub-event
+  automation editor is back (PRO-228, PRO-231, #1357).
+- Tests and CI: the glass-mode check renders the real RecoveryBanner
+  (#1358); the WebKit layout job gets 50 minutes and its session-start and
+  machine-screen checks were fixed (#1372, #1363); a capability-list test
+  reads the slice declaration (#1415); close_open_turn documentation moved
+  to the right function (#1392).
+
+## 0.2.36
+
+- Machines: operate TerminalX on another computer from this desktop (PRO-338,
+  #1266). A machine session runs its project's Setup and Run scripts on the
+  machine (PRO-403, #1198); shows its branch, diff size and the Git button
+  with Create PR, push and merge in its header (PRO-404, #1192, #1248); opens
+  Files and Changes on a worktree outside its project (PRO-405, #1191, #1252);
+  removes its worktree on the machine from the desktop, also after its PR
+  merges (PRO-406, #1190, #1249), and links PRs it had on the desktop when
+  you opt in, keeping withdrawn links withdrawn (#1272); attaches files other than images
+  (PRO-407, #1197); and shows cost and the agent account, with Continue in a
+  new tab and Fix check errors (PRO-408, #1195, #1250). Headless machines are
+  listed and paired on the phone (PRO-359, #1251). Machine script runs keep
+  their exit order and retention limit (#1222), Files keeps a session's
+  subfolder root (#1220), and workspace removal has more coverage (#1221,
+  #1234).
+- Checks is its own panel tab, with a header button to fix failing checks,
+  "Waiting for N checks" instead of Blocked, logs in a centre tab and errors
+  that say why (PRO-394, #1062).
+- First run and Home are three numbered steps: agent, project and permissions
+  (PRO-399, #1170).
+- Confirmations use the app's own dialog, with a Sign out dialog, a Discard
+  dialog that names the file, theme preview cards and macOS key order
+  (PRO-400, #1177); Quit confirmations too (PRO-455, #1193, #1253).
+- Session start and composer: the first message and its attachments show at
+  once after Create, with the designed session menu, composer controls and
+  model picker (PRO-397, #1229, #1261, #1205); attachment previews have
+  refined Markdown typography (#1205).
+- Phone: live phone access moved into a Device tab at the lower right, with
+  per-phone Disconnect, and stays visible where the dock is hidden (#1180,
+  #1184). The runtime serves phone relay connections when no window is open
+  (#1236, #1241), and a retired registration closes its forwarded connections
+  (#1243). A resume that fails during runtime setup no longer leaves the
+  workspace saying "This workspace has stopped." (#1188). The Cloud tab lists
+  workspaces of every registered provider (#1175) and no longer hides an
+  accessible workspace (PRO-456, #1186).
+- Pairing: on a desktop-launched runtime, a detached agent can no longer pass
+  for the window (PRO-369, #1194, #1265); pairing is refused when the window
+  cannot be identified (#1233); Keychain failures are reported as such, with
+  recovery steps (#1224); the window's key installation has integration tests
+  (#1225).
+- Guarded commits keep repository, worktree and checkout-path Git
+  configuration, including hooks and signing, without promoting repository
+  configuration into the protected command scope (PRO-458, #1269; PRO-457,
+  #1270; #1278).
+- Forks: a session can be forked when its source worktree folder is missing
+  and its repository is verified (#1232, #1245), and refused otherwise
+  (#1242); turn forks are isolated from Git sessions in the main checkout
+  (#1223) and clean up their new worktree and branch when saving fails
+  (#1199); the turn-fork notice describes copied quick-chat scratch files
+  accurately (#1200); footer wording and the fork-to-tab shortcut no longer
+  conflict (#1230). Workspace removal resolves a subdirectory session to its
+  checkout (#1235, #1244).
+- Cloud: the sidebar lists each agent tab of a cloud session under its row
+  (#1174); an untitled Claude tab is called Claude Code (#1179); unknown
+  agent IDs no longer resolve to inherited labels (#1189).
+- `terminalx sessions pin` and `unpin`, with skill support (#1231).
+  Orchestration asks to confirm the files Check and finish adds to a held
+  piece (#1217). The Overview rail and Working use live local activity
+  (#1219, #1204). An automation run no longer shows Completed while its
+  session is still working (#1196). Read aloud is scoped to its session, tab
+  and turn (#1201). Local VM bounds worker messages by absolute deadlines
+  (#1181).
+- Cloud sessions open in the same session view as local ones, with Retry,
+  Send again, Git and Share; options a cloud session cannot offer are shown
+  disabled with the reason (#1331). A message sent to a starting or busy
+  workspace shows as a Queued card with the workspace status under it
+  (#1309). A booting cloud runtime is waited for instead of cycling through
+  Reconnecting, and the header only moves forward (#1308).
+- Phone: sessions and conversations load faster: the Mac sends only what is
+  new since the last sync, the phone caches transcripts and loads ten earlier
+  turns per tap, and an optional setting lets the Mac send recent data ahead
+  of time (#1299). Phone sessions no longer drop within seconds when the
+  outbound queue fills (#1300). Resume failures say what failed with a next
+  step (#1307). Organizations can be deleted from the phone (#1305).
+  Revoking the last phone fences window takeover and clears unused runtime
+  account tokens (#1276, #1324).
+- Agents: choose each agent's executable, open its settings file, and manage
+  OpenCode providers and models behind an Experimental switch (PRO-157,
+  #1296, #1343). Copy MCP servers, slash commands and skills between Claude
+  Code and Codex from Settings › General (PRO-153, #1295).
+- The app reopens the last view on launch, lists recent projects, and opens
+  terminalx:// links through one router that asks before creating a session
+  (PRO-130, #1275, #1306).
+- Chat: Claude Code `!` shell commands render as a shell block (#1330); native
+  Codex tab replies no longer go missing behind a stuck Queued card (#1301);
+  the transcript and composer show a scrollbar (#1303); question and
+  permission cards stay solid in glass mode (#1304).
+- Organizations: a settings gear on each organization in the sidebar (#1298);
+  installing the GitHub App on an organization no longer ends in
+  "Connection canceled." and each failure says why (#1297); the name to type
+  when deleting one can be selected and copied (#1305).
+- Send scoped server, desktop and mobile diagnostics to support (#1277).
+  Headless logout recovers from an expired or revoked pending session with
+  `terminalx-serve logout --forget-ended` (#1310). Machine PR creation checks
+  the session checkout before recording owned work (#1273). The quit dialog
+  ignores forged events from other windows (#1302).
+- Releases are built from a release/<version> branch, so merges to main
+  cannot stop one (PRO-411, #1280). Phone evidence publication for frame
+  22.06-2 (#1279). Fixes for main after the merges of 2026-11-19 and the
+  team presence layout check (#1342, #1348).
+- Small layout fixes the WebKit layout checks found: a project's Actions page
+  has one title and no path, PR conversation headings and small labels are
+  at least 12px, the Overview table's default columns fit 1440px beside the
+  Views rail, a machine session's port forwards show as expired after they
+  close, and a narrow cloud header leaves out an empty port chip (#1271).
+- Code cleanups and CI fixes; CI keeps macOS runners for the jobs that need
+  them and runs the long suites in parts (#1207, #1213, #1214, #1271).
+
+## 0.2.35
+
+- Machines is on for everyone: work on your other Macs and Linux servers from
+  this Mac, with their projects and sessions in your sidebar. Settings →
+  Experimental no longer has a Machines switch. Settings → Machines shows how
+  to add a first machine and links the new guide, docs/MACHINES-GUIDE.md. Until
+  a machine is added the app looks as before, and "Let other computers operate
+  this Mac" stays off until you turn it on. Agents can use the machines you
+  added through the terminalx command line (PRO-360, #1112).
+- Machines: add and remove a machine's projects from the desktop (PRO-351,
+  #1054) and from the command line, `terminalx projects add/remove` (#1080);
+  forward a machine's ports and open its previews on this Mac (PRO-355,
+  #1055); target a machine from the terminalx command line (PRO-356, #1084);
+  reach a headless machine from the phone, which now lists every machine
+  (PRO-359, #1109); a signed-in machine registers with the relay, so paired
+  computers reach it away from home (PRO-368, #1110).
+- Operating another computer has a written threat model, boundary tests and
+  an activity log of what was done, with Disconnect and Let back (PRO-357,
+  #1042). Two-machine end-to-end tests run in CI (PRO-358, #1085).
+- Design pass across the app, matching the reviewed designs: the session
+  overview table (PRO-385, #1038), the new-session box and Start from rows
+  (PRO-396, #1045), sidebar menus, dialogs and toasts (PRO-386, #1049), files,
+  terminal and file tabs (PRO-402, #1053), the Changes panel and diff tab
+  (PRO-393, #1057), project scripts and actions (PRO-388, #1063), the review
+  tab and comments (PRO-392, #1068), the orchestrator run view (PRO-383,
+  #1069), the chat transcript (PRO-378, #1072), the share session dialog
+  (PRO-390, #1074), the PR panel (PRO-395, #1077), the approval card (PRO-382,
+  #1079), chat tabs (PRO-381, #1081), and turn details with context and usage
+  popovers (PRO-379, #1082).
+- Settings: the designed menu, page header, rows and switches (PRO-374,
+  #1075); Account (PRO-375, #1065); Environment variables as compact rows with
+  a side sheet (PRO-376, #1056); Appearance, Keyboard shortcuts and Agents
+  (PRO-377, #1073); nested project settings pages with a breadcrumb and a
+  Settings files page (PRO-387, #1070).
+- Sidebar sections have Change icon, Sort by and Collapse, with built-in
+  sections for cloud workspaces (PRO-288, #1161); cloud sidebar rows show a
+  single session and the owner (#1141).
+- Cloud: "Creating the workspace…" shows from the first click (PRO-409,
+  #1051); choose how long a cloud VM stays up when idle, including Never
+  (PRO-410, #1059); compute has an Environment tab with version rows,
+  Activate and an unbuilt-changes bar (PRO-391, #1061); the setup flow keeps
+  its coach mark off the composer and offers Fix with an agent (PRO-389,
+  #1066); providers come from one registry described by the server (PRO-415,
+  #1076), and a platform-credential provider is used without a connect step
+  (PRO-452, #1113).
+- New session no longer stacks agent setup cards above the prompt box
+  (#1083). GitHub and Linear issue tools ask for approval only to delete
+  (#1128). Local VM runs its Linux guest owner under its own account, away
+  from workers (#1159, #1162).
+- Pipelines: a pipeline stops for good when its author tab is gone after a
+  restart (#1067), and a review whose branch moved reviews the new head by
+  itself (#1071, #1105).
+- Held follow-ups and steering: /goal is validated, queue failures are
+  explained, and the tray and goal card follow the design (#1058, #1124).
+- Fixes from the design review: Mark as unread is disabled on a tab already
+  marked unread (#1120); one terminal-view switch per pane (#1123); Home and
+  Overview navigation and shortcuts (#1125, #1126, #1160); the cloud quota note
+  is reachable by keyboard (#1127); renaming a session title no longer renames
+  its Git branch (#1136); action reset is scoped to one action (#1137); script
+  edits survive closing Settings (#1138); dropping onto a pinned session keeps
+  its section (#1139); linked cloud-compute settings get focus (#1140);
+  managed privacy switches use muted amber (#1142); Changes scope lists only
+  the current branch's commits (#1144); environment repository and commit
+  details for owners and admins (#1145); a too-large diff shows its size and
+  Open file (#1146); environment build retry and current stage stay visible
+  (#1147, #1148); an unsaved orchestration brief survives a column change
+  (#1149); Retry in a new chat keeps images and attachments (#1150); the
+  project settings file button no longer opens personal settings (#1151);
+  settings search, settings files and Files to copy fixes (#1153, #1155,
+  #1156); running tabs keep their login after an API key is removed, and the
+  app says so (#1154); Machines and Agents introductions (#1157); an older
+  agent prerelease is not labelled up to date (#1158).
+- Code cleanups and CI fixes (#1060, #1111, #1119, #1121, #1122, #1129, #1143).
+
+## 0.2.34
+
+- Machines (Experimental, Settings → Experimental → Machines): the desktop
+  connects to a paired machine directly first, falls back to the relay and
+  stays connected (PRO-345, #1020); each machine is a sidebar section with
+  its projects and sessions, and its sessions join the overview with a Where
+  column (PRO-346, #1027); Settings → Machines lists, adds, renames and
+  removes machines (PRO-349, #1029); an offline machine says Offline, a Mac
+  has one icon, and the pairing and settings details follow the design
+  (PRO-398, #1033, #1039).
+- Machines: open and drive a session that runs on another machine (send,
+  steer, stop, decide, its files, git and terminals) (PRO-347, #1036); create
+  a session on a machine from the new-session form, including issue starts
+  and handoffs (PRO-348, #1044); a machine's own page shows its agents, their
+  sign-in state and its resources (PRO-350, #1040); connection states say
+  what still works while a machine is away, and the composer holds typed
+  prompts until it is back (PRO-352, #1048); version differences are handled
+  and a machine can be updated from the desktop (PRO-354, #1030).
+- Install TerminalX on your own server with one command, run it as a
+  service and pair it from its terminal; the installer checks the release's
+  signature first (PRO-353, #1017).
+- Agent accounts: sign in to several Claude and Codex accounts and choose one
+  per session (#1016), and switch to another account on its own when one
+  reaches a usage threshold (#1028).
+- Organisations: create one from the app and set it up in one flow (GitHub,
+  repositories, compute, environment) (PRO-370, #1023); cloud limits are
+  unlimited unless one is set (PRO-371, #1022); a compute provider connected
+  at login.terminalx.ai is no longer asked for again (PRO-372, #1021); Create
+  in the new-session form starts a cloud workspace at once, without a second
+  confirmation (PRO-409, #1047).
+- Sidebar rows are named by session title, with compact rows, section and
+  project headings, a Pinned group and a View menu for grouping and sorting
+  (PRO-384, #1046); the fold chevron no longer covers the project icon
+  (PRO-373, #1024).
+- Command palette: Move to section is a palette view, actions are one-line
+  rows, and the palette and quick-open dialogs keep fixed positions
+  (PRO-401, #1037).
+- Phone: choose which notifications reach the phone by event, session,
+  machine and time (#1013), and the app matches the reviewed designs
+  (#1015, #1026).
+- Cloud workspaces: the runtime starts where `/home` is closed to it, which
+  had made every new workspace fail its bootstrap on 0.2.33's runtime
+  (#1034); a Box workspace's first launch is tested as the server sends it
+  (#1031); the runtime is released after every green CI on main (#1032); a
+  machine's direct endpoints are no longer cached empty (#1052).
+- CI fixes after the day's merges (#1035, #1041, #1043, #1050, #1052).
+
+## 0.2.33
+
+- Orchestration runs (Experimental): the run's own lead can take a blocked
+  piece of an approved plan over itself, held to the files that piece owns,
+  so it no longer waits on a person. Settings → Orchestrator → "Let the
+  lead take over blocked pieces" (on by default) turns it off. A late
+  report from the old worker can no longer undo the lead's finish. (#1007)
+- Orchestration runs decide on their own when a stop needs no person's
+  judgment: a verifier with no verdict is asked again, a check that fails the
+  same way on the base does not fail the piece, a piece goes to the lead when
+  no model is left above its last try, and the run goes on after its usage
+  window resets. Each has a switch in Settings → Orchestrator, on by default,
+  and the Run view shows these events. (#1008)
+- Orchestration runs: queued pieces start on their own once worker slots
+  free up, even after a missed completion event (#977); a planned run in a
+  project with approval off can be started from the Run view, also after
+  editing it (PRO-365, #955); verifier questions and permission requests stay
+  answerable and their later verdict settles the piece, and read-only lookups
+  accept `head` pipelines and `sed -n` line reads with clearer refusals
+  (#971); superseded tries are backed up to a remote branch and archived once
+  the run completes, and cleanup treats them as landed (#974).
+- Pair two computers with a one-time code and a fingerprint both sides
+  confirm, in Settings → Machines (Experimental). (PRO-342, #1002)
+- Machines groundwork: the architecture note (PRO-339, #964); one runtime
+  serves every project of its machine over one connection (PRO-340, #970);
+  send, steer, stop and answer approvals on a machine without the cloud
+  mailbox (PRO-343, #969); the runtime accepts paired operating computers
+  itself, directly and over the relay (PRO-341, #997).
+- Local VM tasks and Linux desktop targets, behind Settings → Experimental →
+  Local VM tasks (off by default): a tab can choose the exact computer its
+  agent controls, Local VM task cards and Settings → Local VMs. (PRO-114,
+  #672) Follow-ups: the guest runtime key reaches only a checked root-owned
+  runtime, abandoned tasks record an unknown outcome, finished tasks leave
+  the journal and one-shot desktop calls share the admission lock. (#999)
+- Phone: answer an agent's question from the phone (#982); the Sessions
+  list shows each session's agent status with a "Needs you" section first
+  (#998); one list of machines with rename and remove for offline ones, and
+  Settings in plain words (#994); one quiet connection state on every screen,
+  with held messages sent on connect (#995); the session screen shows what
+  the agent is doing, with readable tables and commands (#1003); scrolled
+  pages no longer draw under the status bar (#996); the Cloud tab no longer
+  opens blank, hides empty organizations and offers a way on from a stopped
+  workspace (#1006). A research report on the phone connection's keep-alive,
+  reconnect and push notifications is in the repository (#1011).
+- Wide Markdown tables in chat scroll sideways instead of squeezing their
+  columns. (#1012)
+- Show teammates' profiles from their avatars, from a cached organisation
+  roster that respects data privacy settings. (PRO-128, #968)
+- Working marks keep moving when Pixel raccoon is off (only Reduce motion
+  stops them), and draft rows show a pencil instead of "Draft:".
+  (PRO-366, #993)
+- Cloud workspaces that need attention say why and offer the matching
+  recovery on the sidebar row and workspace pane. (#958)
+- Continue in New Session lets you choose the project, including no project
+  (quick chat), and keeps a matching worktree and its changes. (#957)
+- A closed or signed-out conflict resolver no longer leaves its pipeline
+  stuck at Resolve: Restart resolver (and `terminalx pipelines resolve
+  --restart`) picks it up again. (#972)
+- A runtime update that finds the runtime busy retries on its own and says
+  what it is waiting for, instead of staying on the old runtime. (#965)
+- Quitting after dictation no longer crashes in the speech model's teardown.
+  (#966)
+- Startup stall recovery keeps its evidence through permission waits and
+  restarts, and reports one incident per failure. (#973)
+- New sessions no longer show setup details above the composer for an agent
+  that is already ready. (#963)
+- CI runs in about 22 minutes: the macOS Rust build fits the runner and the
+  WebKit checks run in parallel (#956); the editor toolbar WebKit check waits
+  for the disabled Copy button (#991).
 
 ## 0.2.32
 

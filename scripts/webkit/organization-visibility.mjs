@@ -27,18 +27,22 @@ try {
       window.__VISIBILITY_CALLS__.push({ command, args });
       return invoke(command, args);
     };
-    window.__PW_STUB__.answers["plugin:dialog|message"] = "Hide organization";
   });
   const calls = () => page.evaluate(() => window.__VISIBILITY_CALLS__);
-  const confirmations = async () => (await calls()).filter((call) => call.command === "plugin:dialog|message").map((call) => call.args.message);
+  // PRO-400: the confirmation is the app's own dialog; the dialog plugin's alert is never asked for.
+  const alerts = async () => (await calls()).filter((call) => call.command.startsWith("plugin:dialog|")).length;
+  const asking = page.getByRole("dialog", { name: "Hide Demo?" });
   const prefs = () => page.evaluate(() => window.__PW_STUB__.settingsFile.preferences);
   const openOrganizations = async () => {
     await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("button", { name: "Organizations", exact: true }).click();
+    // PRO-464: Organizations is one row in the menu; All organizations leads what it lists.
+    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    await nav.getByRole("button", { name: /^Organizations \d+$/ }).click();
+    await nav.getByRole("button", { name: "All organizations", exact: true }).click();
     await page.getByRole("heading", { name: "Organizations", exact: true }).waitFor();
   };
   const closeSettings = async () => {
-    await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
+    await page.getByRole("button", { name: "Back to app", exact: true }).click(); // Settings leaves by its one Back.
     await sidebar(page);
   };
   const shown = (org) => page.getByRole("switch", { name: `Show ${org} in sidebar` }).getAttribute("aria-checked");
@@ -46,11 +50,15 @@ try {
   await openOrganizations();
   // Hiding a member organization with nothing running asks nothing and is saved at once.
   await page.getByRole("switch", { name: "Show Other 0 in sidebar" }).click();
-  const hidden = { switch: await shown("Other 0"), prefs: (await prefs()).hiddenOrganizations, asked: (await confirmations()).length };
+  const hidden = { switch: await shown("Other 0"), prefs: (await prefs()).hiddenOrganizations, asked: (await page.getByRole("dialog").count()) + (await alerts()) };
   await page.getByRole("switch", { name: "Show Other 0 in sidebar" }).click();
   // Hiding the default organization, with two workspaces running, asks first.
   await page.getByRole("switch", { name: "Show Demo in sidebar" }).click();
-  const confirmation = (await confirmations())[0];
+  await asking.waitFor();
+  const confirmation = await asking.innerText();
+  const choices = await asking.getByRole("button").allTextContents();
+  await asking.getByRole("button", { name: "Hide organization", exact: true }).click();
+  await asking.waitFor({ state: "detached" });
   const demoHidden = { switch: await shown("Demo"), prefs: (await prefs()).hiddenOrganizations };
   await page.getByRole("radio", { name: "One organization", exact: true }).click();
   const defaultPick = await page.getByRole("combobox", { name: "Organization in sidebar" }).inputValue();
@@ -92,6 +100,7 @@ try {
   failed += report("organization visibility", {
     "hiding an organization with nothing running asks nothing, unchecks its switch and is saved": hidden.switch === "false" && hidden.prefs.includes("o0") && hidden.asked === 0,
     "running confirmation states the count and continuing cost": /2 running workspaces.*keep running and costing money/.test(confirmation) && demoHidden.switch === "false" && demoHidden.prefs.includes("org-a"),
+    "the confirmation is the app's own dialog, Cancel left and the action right, with no system alert": JSON.stringify(choices) === JSON.stringify(["Cancel", "Hide organization"]) && !made.some(({ command }) => command.startsWith("plugin:dialog|")),
     "One defaults to the default organization": defaultPick === "org-a",
     "One with a chosen organization is saved as such": onePrefs.organizationDisplay === "one" && onePrefs.selectedOrganization === "o1",
     "All restores the hidden choices": restored.prefs.organizationDisplay === "all" && restored.demo === "false" && restored.other === "true" && restored.prefs.hiddenOrganizations.includes("org-a") && !restored.prefs.hiddenOrganizations.includes("o0"),

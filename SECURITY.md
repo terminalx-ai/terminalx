@@ -46,7 +46,10 @@ In scope, roughly in the order that matters:
   them also answers on) and everything that speaks over them. Each is created
   `0600` inside a `0700` directory and is meant to be reachable only by the
   user running the app. One running app replacing or impersonating another's
-  socket or `control.token` is in scope too.
+  socket or `control.token` is in scope too. On Windows the same endpoints are
+  named pipes with an owner-only access list, whose server and client each
+  check that the other is the same user; secrets the macOS Keychain holds
+  are sealed with DPAPI there (`docs/LOCAL-RUNTIME.md`, "Windows").
 - **Credential handling**: the Linear API key in `$TERMINALX_HOME/settings.json`,
   and the symlinks in the managed Codex home that point at your real
   `~/.codex/auth.json`.

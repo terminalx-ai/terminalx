@@ -37,7 +37,7 @@ fn invoke_panel(operation: &str, cwd: &Path) -> bool {
         "details" => crate::github::panel_pr_details(cwd, 7, None).is_ok_and(|pr| panel_ok(vec![pr])),
         "queue" => crate::github::merge_associated_pr(cwd, 7, "queue", None).is_ok(),
         "workspace" | "workspace-queue" => {
-            let cwd = std::fs::canonicalize(cwd).unwrap();
+            let cwd = crate::paths::canonicalize(cwd).unwrap();
             let workspace = WorkspaceGit::new(cwd.clone(), Arc::new(WorkspaceFiles::new(cwd)));
             let method = if operation == "workspace" { "git.prs" } else { "git.prMerge" };
             let answer = workspace.handle(method, &serde_json::json!({"repo":".","branch":"main","number":7,"method":"queue"})).unwrap();

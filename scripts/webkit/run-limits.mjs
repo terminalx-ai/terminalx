@@ -162,7 +162,8 @@ try {
         const budget = await view.getByTestId("run-budget").textContent();
         const label = await resetLabel(page);
         const checks = {
-          "spend is in dollars first, with the window's points, level and reset as a second line (PRO-361)": budget.startsWith("Spend$") && budget.includes(" of $15.00") && (await view.getByTestId("run-points").textContent()).startsWith(`9 of 25 points · 5h window at 41% · resets ${label}`) && budget.indexOf("$") < budget.indexOf("9 of 25 points"),
+          // PRO-383 (18.01): a subscription's points lead, the window and its reset under them, the dollars last.
+          "the budget leads with the subscription's points, then the window and its reset, then the dollars": budget.startsWith("Budgetsubscription 9 of 25 points") && (await view.getByTestId("run-window").textContent()) === `5h window at 41% · resets ${label}` && (await view.getByTestId("run-window").getAttribute("title")) === "The run pauses past 85% of the window" && budget.indexOf("9 of 25 points") < budget.indexOf("$"),
           "the lead card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2 running·2 workers at a time"),
           "a stalled worker's piece says so": (await view.locator('[data-piece="pipeline"]').getAttribute("data-piece-state")) === "stalled" && (await view.locator('[data-piece="pipeline"]').textContent()).includes("Stalled"),
           "a queued piece says the run's limit holds it": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Queued: 2 workers at a time in this run"),
@@ -219,6 +220,8 @@ try {
         const summary = view.getByRole("region", { name: "Plan summary" });
         await summary.getByRole("alert").waitFor();
         const label = await resetLabel(page);
+        // The run's own limits and its windows open from the plan card's Budget chip (PRO-383).
+        await summary.getByRole("button", { name: /^Budget: / }).click();
         const layout = await layoutOf(view);
         await shot(page, "approval");
         const checks = {
@@ -246,7 +249,7 @@ try {
         const budget = await view.getByTestId("run-budget").textContent();
         const checks = {
           "points and dollars are shown as used and spent, with No limit for each": budget.includes("9 points usedNo limit") && budget.includes("$12345.60 spentNo limit") && !budget.includes(" of $"),
-          "the window level still holds, and says so": budget.includes("pauses past 85%"),
+          "the window level still holds, and says so": (await view.getByTestId("run-window").getAttribute("title")) === "The run pauses past 85% of the window",
           "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
           "no browser errors": errors.length === 0,
         };
@@ -263,10 +266,11 @@ try {
         const layout = await layoutOf(view);
         await shot(page, "no-limit-approval");
         const alerts = await summary.getByRole("alert").allTextContents();
+        await summary.getByRole("button", { name: /^Budget: / }).click();
         const checks = {
           "one warning says the run has no limit and what still stops it": alerts.length === 1 && alerts[0].includes("no limit on dollars or points") && alerts[0].includes("passes 85%"),
-          // Dollars first (owner decision, PRO-361).
-          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo dollar limit · No points limit"),
+          // A subscription's points first (PRO-383).
+          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo points limit · No dollar limit"),
           "neither budget has a field while it is No limit": (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).count()) === 0 && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
           "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
         };
@@ -315,6 +319,7 @@ try {
         const calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
         checks["each changed limit is saved by itself, and a limit out of range is not"] = JSON.stringify(calls) === JSON.stringify([{ budgetPoints: 30 }, { windowCeiling: 90 }]);
         // A repository's own budget.
+        await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
         await nav.getByRole("button", { name: "local-0", exact: true }).click();
         const own = settings.getByTestId("repository-orchestrator-settings");
         await own.waitFor();

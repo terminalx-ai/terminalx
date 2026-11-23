@@ -67,6 +67,8 @@ pub(crate) struct TabRecord {
     #[serde(default)]
     pub turn_open: bool,
     #[serde(default)]
+    pub turn_generation: u64,
+    #[serde(default)]
     pub turn_opener: Option<(String, String)>,
     #[serde(default)]
     pub turn_by_command: bool,
@@ -144,6 +146,8 @@ pub(crate) struct CliRecord {
     #[serde(default)]
     pub recorded: bool,
     pub tail: TailRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<claude::background::WatchRecord>,
     #[serde(default)]
     pub echoed: Vec<EchoRecord>,
     #[serde(default)]
@@ -238,6 +242,16 @@ pub(crate) struct InputRecord {
     pub marks: Vec<u64>,
     pub made_waiting: bool,
     pub stops: u64,
+    /// What the marks wait on is a question the CLI drew, not text in its box (PRO-462).
+    #[serde(default)]
+    pub choice: bool,
+    /// A question the CLI drew in its own screen, as the chat was told of it (PRO-460).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_prompt: Option<tui::ScreenPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_prompt_was: Option<crate::store::index::TabStatus>,
+    #[serde(default)]
+    pub box_seen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,7 +472,7 @@ impl SessionManager {
         if rt.held_queue.sending.is_some() {
             return Err(Unsettled(format!("A held follow-up in {} is being delivered", name())).into());
         }
-        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting {
+        if rt.stopping || rt.stop_in_flight || rt.restart_claim.is_some() || rt.stdio_starting || rt.automation_completions_in_flight != 0 {
             return Err(Unsettled(format!("The agent in {} is starting or stopping", name())).into());
         }
         if !rt.compaction.is_idle() {
@@ -480,6 +494,7 @@ impl SessionManager {
             queued: rt.queued.clone(),
             held_queue: rt.held_queue.clone(),
             turn_open: rt.turn_open,
+            turn_generation: rt.turn_generation,
             turn_opener: rt.turn_opener.map(|(source, kind)| (source.to_string(), kind.to_string())),
             turn_by_command: rt.turn_by_command,
             signed_out_in_turn: rt.signed_out_in_turn,
@@ -526,6 +541,10 @@ impl SessionManager {
             ready_ms: p.ready.since().map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX)),
             recorded: p.recorded,
             tail: TailRecord { path, offset, began, carried: carried.into_iter().collect(), usage: p.tail.usage() },
+            background: match &rt.background {
+                Some(watch) => Some(watch.try_lock().map_err(|_| Unsettled("Background work is being read".into()))?.handover()),
+                None => None,
+            },
             echoed: p.echoed.iter().map(|echo| EchoRecord {
                 collaboration_required: echo.collaboration_required, text: echo.text.clone(), image_count: echo.image_count, sent_ms: ago(echo.sent_at), typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
@@ -534,7 +553,10 @@ impl SessionManager {
             prompts: p.prompts.0.iter().map(|prompt| PromptRecord {
                 uuid: prompt.lineage.uuid.clone(), parent: prompt.lineage.parent.clone(), seq: prompt.seq, text: prompt.text.clone(), worked_on: prompt.worked_on,
             }).collect(),
-            input: InputRecord { waiting: p.input.waiting, marks: p.input.marks.clone(), made_waiting: p.input.made_waiting, stops: p.input.stops },
+            input: InputRecord {
+                waiting: p.input.waiting, marks: p.input.marks.clone(), made_waiting: p.input.made_waiting, stops: p.input.stops, choice: p.input.choice,
+                screen_prompt: p.input.prompt.shown.clone(), screen_prompt_was: p.input.prompt.was, box_seen: p.input.prompt.box_seen,
+            },
             resend_after_abort: p.resend_after_abort,
             codex_interrupt_hooks_owed: p.codex_interrupt_hooks_owed,
             codex_prompt_starts_turn: p.codex_prompt_starts_turn,
@@ -575,6 +597,7 @@ impl SessionManager {
         rt.queued = record.queued;
         rt.held_queue = record.held_queue;
         rt.turn_open = record.turn_open;
+        rt.turn_generation = record.turn_generation;
         rt.turn_opener = record.turn_opener.as_ref().and_then(|(source, kind)| Some((label(source)?, label(kind)?)));
         rt.turn_by_command = record.turn_by_command;
         rt.signed_out_in_turn = record.signed_out_in_turn;
@@ -595,9 +618,12 @@ impl SessionManager {
         anyhow::ensure!(self.terminals.is_live(&cli.pane_id), "its terminal {} was not handed over", cli.pane_id);
         let (decode, marker) = follow::decoders(kind);
         let tail = Arc::new(tui::Tail::resumed(cli.tail.path, cli.tail.offset, cli.tail.began, decode, cli.tail.carried.into_iter().collect::<HashSet<_>>()).with_usage(cli.tail.usage).marking(marker));
-        // Read on from where its CLI began: what the CLI started in the
-        // background since is found again (#696).
-        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(claude::background::Watch::new(tail.clone()))));
+        // Preserve acknowledgments and partial records with the cursor. An
+        // older owner has no snapshot, so keep its conservative replay path.
+        rt.background = (kind == CliKind::Claude).then(|| Arc::new(Mutex::new(match cli.background {
+            Some(background) => claude::background::Watch::from_handover(tail.clone(), background),
+            None => claude::background::Watch::new(tail.clone()),
+        })));
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pane = cli.pane_id.clone();
         let asks: HashMap<String, AskRecord> = record.pending.into_iter().map(|ask| (ask.request_id.clone(), ask)).collect();
@@ -624,11 +650,15 @@ impl SessionManager {
                 collaboration_required: echo.collaboration_required, text: echo.text, image_count: echo.image_count, sent_at: back(echo.sent_ms), receipt: None, typing: echo.typing, submitted: echo.submitted,
                 queued: echo.queued, command: echo.command, seq: echo.seq, overtaken: echo.overtaken, continuation: echo.continuation,
             }).collect(),
+            // Not carried over: what lapsed before the handover is not waited on.
+            lapsed: Default::default(),
             held: cli.held,
             prompts: RecordedPrompts(cli.prompts.into_iter().map(|prompt| RecordedPrompt {
                 lineage: tui::Lineage { uuid: prompt.uuid, parent: prompt.parent }, seq: prompt.seq, text: prompt.text, worked_on: prompt.worked_on,
             }).collect()),
-            input: InputBox { waiting: cli.input.waiting, marks: cli.input.marks, made_waiting: cli.input.made_waiting, stops: cli.input.stops },
+            input: InputBox { waiting: cli.input.waiting, marks: cli.input.marks, made_waiting: cli.input.made_waiting, stops: cli.input.stops, choice: cli.input.choice, prompt: ScreenPromptState {
+                shown: cli.input.screen_prompt, was: cli.input.screen_prompt_was, box_seen: cli.input.box_seen, unread_passes: 0, candidate: None,
+            } },
             resend_after_abort: cli.resend_after_abort,
             codex_interrupt_hooks_owed: cli.codex_interrupt_hooks_owed,
             codex_prompt_starts_turn: cli.codex_prompt_starts_turn,
@@ -656,7 +686,7 @@ impl SessionManager {
     /// it there as it would have been replied to (#765).
     pub(crate) fn resume_decision(&self, bridge: &crate::hooks::Bridge, wait: Wait, stream: std::os::unix::net::UnixStream) {
         let Wait { tab: rt_arc, ask, gate } = wait;
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         let local_owner = crate::local_runtime::permissions::enabled();
         let (kind, token, generation) = {
             let mut rt = rt_arc.lock().unwrap();

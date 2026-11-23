@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Download, KeyRound, Loader2, RotateCw, X } from "@/icons";
+import { Download, KeyRound, Loader2, RotateCw, UserRound, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 import { dismissAgentLoginNotice, restartAgentTabs, useAgentLoginNotices, type AgentLoginNotice } from "@/lib/agentLogins";
 import { errorMessage } from "@/lib/api";
 
-/** What became of an agent's API key, with its running tabs one press from the new login (PRO-306). */
+/** What became of an agent's API key or account (#980), with its running tabs one press from the new login (PRO-306). */
 export function AgentLoginToasts() {
   return useAgentLoginNotices().map((notice) => <AgentLoginToast key={notice.id} notice={notice} />);
 }
@@ -14,7 +14,7 @@ function AgentLoginToast({ notice }: { notice: AgentLoginNotice }) {
   const [restarting, setRestarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const count = notice.stale.length;
-  const Icon = notice.kind === "imported" ? Download : KeyRound;
+  const Icon = notice.kind === "imported" ? Download : notice.kind === "account" ? UserRound : KeyRound;
   const restart = async () => {
     setRestarting(true);
     setError(null);

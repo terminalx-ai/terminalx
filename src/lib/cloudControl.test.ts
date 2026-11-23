@@ -1770,3 +1770,108 @@ describe("the owner's switch (PRO-40): the command line may be an agent, not the
     });
   });
 });
+
+describe("a command from a session that works for a bot (PRO-514)", () => {
+  // What the native side writes into the command for a bot that asks before acting, and for one that only reads.
+  const rule = (limit: string, modes: Record<string, string>) => ({ limit, why: "Iris has ask-before-acting access", modes });
+  const asks = { terminal: rule("manual", { plan: "plan", manual: "manual", default: "default", ask: "ask", auto: "manual", acceptEdits: "manual", bypassPermissions: "manual", bypass: "manual" }), nativeCodex: rule("plan", { plan: "plan", manual: "plan", default: "plan", ask: "plan", auto: "plan", acceptEdits: "plan", bypassPermissions: "plan", bypass: "plan" }) };
+  const reads = { terminal: rule("plan", { plan: "plan", manual: "plan", default: "plan", ask: "plan", auto: "plan", acceptEdits: "plan", bypassPermissions: "plan", bypass: "plan" }), nativeCodex: asks.nativeCodex };
+  const target = `cloud:${ORG}:ws-1:s1`;
+  /** The tab as this desktop last saw it in the workspace. */
+  const tabIn = (workspaceId: string, sessionId: string, fields: Record<string, unknown>) => {
+    cached[workspaceId] = { [`${sessionId}-tab`]: { tab: { ...tabInfo(sessionId), ...fields }, events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 } };
+  };
+  const sentMode = () => (enqueued.at(-1)!.payload as { mode?: string }).mode;
+
+  it("sets the tab to the bot's limit with the prompt when it runs wider, and leaves a narrower mode as it is", async () => {
+    tabIn("ws-1", "s1", { permissionMode: "bypassPermissions" });
+    await handleCloudControl("send", { target, text: "go", botHold: { mode: asks } });
+    expect(enqueued).toEqual([expect.objectContaining({ tabId: "s1-tab", kind: "send", payload: expect.objectContaining({ text: "go", mode: "manual" }) })]);
+    // The mode is named on every prompt, so one widened elsewhere since is brought back.
+    await handleCloudControl("send", { target, text: "again", botHold: { mode: reads } });
+    expect(sentMode()).toBe("plan");
+  });
+
+  it("keeps a tab that is already within the limit in its own mode, and holds a mode it does not know to the limit", async () => {
+    tabIn("ws-1", "s1", { permissionMode: "plan" });
+    await handleCloudControl("send", { target, text: "go", botHold: { mode: asks } });
+    expect(sentMode()).toBe("plan");
+    resetCloudAgents();
+    tabIn("ws-1", "s1", { permissionMode: "never, danger-full-access" });
+    await handleCloudControl("send", { target, text: "go", botHold: { mode: asks } });
+    expect(sentMode()).toBe("manual");
+    // A mode still on its way to the agent is the one that counts.
+    resetCloudAgents();
+    tabIn("ws-1", "s1", { permissionMode: "plan", requestedPermissionMode: "bypassPermissions" });
+    await handleCloudControl("send", { target, text: "go", botHold: { mode: asks } });
+    expect(sentMode()).toBe("manual");
+  });
+
+  it("holds a native Codex tab to plan where the limit is to ask, as a local one is", async () => {
+    tabIn("ws-1", "s1", { harness: "codex", transport: "experimentalCodexStdio", permissionMode: "bypassPermissions" });
+    await handleCloudControl("send", { target, text: "go", botHold: { mode: asks } });
+    expect(sentMode()).toBe("plan");
+  });
+
+  it("names no mode for a bot with full access: nothing is narrowed", async () => {
+    tabIn("ws-1", "s1", { permissionMode: "bypassPermissions" });
+    await handleCloudControl("send", { target, text: "go", botHold: {} });
+    expect(enqueued).toHaveLength(1);
+    expect(sentMode()).toBeUndefined();
+  });
+
+  it("refuses the prompt, and sends nothing, where the mode could not be set with it", async () => {
+    // A driver without approval rights: the runtime would deliver the prompt and ignore the mode.
+    await list(OTHER, [item("ws-b", OTHER, { authority: "participate", you: { role: "driver", canApprove: false, canManageShares: false } })]);
+    const refused = await refusal("send", { target: `cloud:${OTHER}:ws-b:sb`, text: "go", botHold: { mode: asks } });
+    expect(refused.code).toBe("forbidden");
+    expect(refused.message).toContain("cannot be held to its bot's access");
+    expect(enqueued).toEqual([]);
+    // With full access there is nothing to set, so the same driver's message goes.
+    await handleCloudControl("send", { target: `cloud:${OTHER}:ws-b:sb`, text: "go", botHold: {} });
+    expect(enqueued).toHaveLength(1);
+  });
+
+  it("takes a workspace's first session for the bot's only when it is the one its launch started", async () => {
+    const launch = (sessionId: string) => ({ launchId: "l1", phase: "running", state: "running", workBranch: "terminalx/x", agent: "claude", model: null, effort: null, mode: "manual", hasPrompt: true, category: null, sessionId, tabId: `${sessionId}-tab`, timings: {} });
+    await list(ORG, [item("ws-1", ORG, { launch: launch("another") }), item("ws-stopped", ORG, { state: "suspended", repositories: [acmeWeb] })]);
+    const refused = await refusal("send", { target, text: "go", botHold: { launchOnly: true, mode: asks } });
+    expect(refused).toMatchObject({ code: "forbidden" });
+    expect(refused.message).toContain("does not work for the same bot");
+    expect(enqueued).toEqual([]);
+    await list(ORG, [item("ws-1", ORG, { launch: launch("s1") }), item("ws-stopped", ORG, { state: "suspended", repositories: [acmeWeb] })]);
+    await handleCloudControl("send", { target, text: "go", botHold: { launchOnly: true, mode: asks } });
+    expect(sentMode()).toBe("default");
+  });
+
+  it("refuses a hold it cannot read rather than run the command unheld", async () => {
+    for (const botHold of ["manual", [], { mode: { terminal: { limit: "manual" } } }, { mode: { terminal: asks.terminal, nativeCodex: { limit: "", modes: {} } } }, { mode: asks, sessions: "all" }]) {
+      expect(await refusal("send", { target, text: "go", botHold })).toMatchObject({ code: "forbidden" });
+      expect(await refusal("resume", { workspace: `cloud:${ORG}:ws-stopped`, botHold })).toMatchObject({ code: "forbidden" });
+    }
+    expect(enqueued).toEqual([]);
+    expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
+  });
+
+  it("on a resume, holds the bot's sessions in the workspace to the limit, and no other session", async () => {
+    cached["ws-stopped"] = {
+      "s2-tab": { tab: { ...tabInfo("s2"), permissionMode: "bypassPermissions" }, events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 },
+      "owners-tab": { tab: { ...tabInfo("owners"), permissionMode: "bypassPermissions" }, events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 },
+    };
+    mocks.api.cloudWorkspaceResume.mockResolvedValue({ workspace: item("ws-stopped", ORG, { state: "provisioning" }).workspace, operation: { id: "op-9", workspaceId: "ws-stopped", action: "resume", state: "queued" } });
+    const workspace = `cloud:${ORG}:ws-stopped`;
+    await handleCloudControl("resume", { workspace, botHold: { mode: reads, sessions: [`${workspace}:s2`, `cloud:${ORG}:ws-1:s1`], launch: false } });
+    expect(mocks.api.cloudWorkspaceResume).toHaveBeenCalledTimes(1);
+    const agents = await import("@/lib/cloudAgents");
+    const tabs = agents.getCloudAgents({ organizationId: ORG, workspaceId: "ws-stopped" }).tabs;
+    // It waits with the tab and goes with its next message, before the prompt, whoever sends it.
+    expect(tabs.find((tab) => tab.tabId === "s2-tab")).toMatchObject({ pendingConfig: { mode: "plan" }, info: { permissionMode: "plan" } });
+    expect(tabs.find((tab) => tab.tabId === "owners-tab")).toMatchObject({ pendingConfig: null, info: { permissionMode: "bypassPermissions" } });
+    await handleCloudControl("send", { target: `${workspace}:s2`, text: "continue" });
+    expect(sentMode()).toBe("plan");
+    // Full access: nothing is set.
+    resetCloudAgents();
+    await handleCloudControl("resume", { workspace, botHold: { sessions: [`${workspace}:s2`], launch: false } });
+    expect(agents.getCloudAgents({ organizationId: ORG, workspaceId: "ws-stopped" }).tabs.every((tab) => tab.pendingConfig === null)).toBe(true);
+  });
+});

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", async (original) => ({ ...(await original<object>()), invoke: native }));
+import { THEMES } from "@/lib/theme";
 import { refreshDataPrivacy } from "@/lib/dataPrivacy";
 import { DataPrivacySettings } from "./DataPrivacySettings";
 import { DevicesTab } from "./DevicesTab";
@@ -10,7 +11,44 @@ import { OrganizationsTab } from "./OrganizationsTab";
 import { PrivacyImage } from "@/components/ui/privacy-image";
 
 beforeEach(() => native.mockReset());
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  document.documentElement.removeAttribute("data-theme");
+  document.documentElement.removeAttribute("data-mode");
+});
+
+const appearances = THEMES.flatMap(({ id, darkOnly }) =>
+  (darkOnly ? ["dark"] : ["light", "dark"]).map((mode) => ({ theme: id, mode })),
+);
+
+it.each(appearances)("uses muted amber only for managed privacy in $theme/$mode", async ({ theme, mode }) => {
+  document.documentElement.setAttribute("data-theme", theme);
+  document.documentElement.setAttribute("data-mode", mode);
+  native.mockResolvedValue({ enabled: true, managed: true });
+  await act(refreshDataPrivacy);
+  render(<DataPrivacySettings />);
+  const control = screen.getByRole("switch", { name: "Data privacy mode" });
+  expect(control.getAttribute("data-state")).toBe("checked");
+  expect(control.matches(":disabled")).toBe(true);
+  expect(control.classList.contains("disabled:opacity-100")).toBe(true);
+  expect(control.classList.contains("data-[state=checked]:bg-warning/70")).toBe(true);
+  expect(control.className).not.toContain("bg-accent");
+
+  native.mockResolvedValue({ enabled: true, managed: false });
+  await act(refreshDataPrivacy);
+  expect(control.getAttribute("data-state")).toBe("checked");
+  expect(control.matches(":disabled")).toBe(false);
+  expect(control.classList.contains("data-[state=checked]:bg-accent")).toBe(true);
+  expect(control.className).not.toContain("bg-warning");
+  expect(control.className).not.toContain("disabled:opacity-100");
+
+  native.mockResolvedValue({ enabled: false, managed: false });
+  await act(refreshDataPrivacy);
+  expect(control.getAttribute("data-state")).toBe("unchecked");
+  expect(control.matches(":disabled")).toBe(false);
+  expect(control.classList.contains("data-[state=unchecked]:bg-(--switch-off)")).toBe(true);
+  expect(control.className).not.toContain("bg-warning");
+});
 
 it("locks a forced setting and explains what it disables", async () => {
   native.mockResolvedValue({ enabled: true, managed: true });
@@ -20,6 +58,10 @@ it("locks a forced setting and explains what it disables", async () => {
   expect(control.getAttribute("aria-checked")).toBe("true");
   expect(control.matches(":disabled")).toBe(true);
   expect(screen.getByText("Managed by your organisation")).toBeTruthy();
+  // PRO-375: locked on, not greyed out: the managed switch keeps full opacity on a muted amber track.
+  expect(control.className).toContain("disabled:opacity-100");
+  expect(screen.getByText("Turned off while it’s on")).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toContain("configuration profile");
   for (const label of ["Cloud workspaces", "Organisations", "Remote control and pairing", "MCP servers from organisation config", "External logging"]) {
     expect(screen.getByText(label)).toBeTruthy();
   }
@@ -69,4 +111,15 @@ it("shows applied off with the synchronization error and does not invent protect
   expect(screen.getByRole("switch", { name: "Data privacy mode" }).getAttribute("aria-checked")).toBe("false");
   expect(screen.getByRole("switch", { name: "Data privacy mode" }).matches(":disabled")).toBe(true);
   expect(screen.getByRole("alert").textContent).toContain("Could not verify");
+});
+
+it("is a plain row while off and yours to change, with no list of what it turns off", async () => {
+  native.mockResolvedValue({ enabled: false, managed: false });
+  await act(refreshDataPrivacy);
+  render(<DataPrivacySettings />);
+  const control = screen.getByRole("switch", { name: "Data privacy mode" });
+  expect(control.matches(":disabled")).toBe(false);
+  expect(control.className).not.toContain("disabled:opacity-100");
+  expect(screen.queryByText("Turned off while it’s on")).toBeNull();
+  expect(screen.queryByText("Managed by your organisation")).toBeNull();
 });

@@ -127,6 +127,11 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { resetPanelTabs } from "@/lib/panelTab";
 import { resetPurged } from "@/lib/cloudLifecycle";
 import { takeAgentLoginsRequest, takeAgentLoginsSignIn, takeOrganizationRequest } from "@/lib/settingsLinks";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 // jsdom lays nothing out; the file tree scrolls its focused row into view.
@@ -244,10 +249,12 @@ class FakeRuntime implements WorkspaceTransport {
       runtimeGeneration: this.generation,
       runtimeEpoch: this.epoch,
       runtimeVersion: "0.3.0",
-      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer()],
+      capabilities: ["pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "keys/1", "agents/1", ...this.composer(), ...(this.followUps ? (["follow-ups/1"] as const) : [])],
       authority,
     });
   }
+  /** #1328: whether the runtime takes changes to its held follow-ups (`follow-ups/1`). */
+  followUps = false;
   /** PRO-22: what `session.commands` answers; null is a runtime from before `composer/1`. */
   commands: { commands: { name: string; description: string; source: string }[]; restricted: boolean } | null = null;
   /** PRO-22: what `session.files` answers; null is a runtime from before `composer/2`. */
@@ -366,7 +373,8 @@ function cloudHandlers() {
     cloud_agent_cache_load: () => ({ tabs: cache }),
     cloud_agent_cache_save: () => undefined,
     cloud_agent_outbox: () => outbox,
-    cloud_agent_outbox_sync: () => outbox,
+    // The runtime applies a held follow-up's change at once (#1328).
+    cloud_agent_outbox_sync: () => (outbox = outbox.map((entry) => (entry.kind === "follow-up" ? { ...entry, state: "applied" } : entry))),
     cloud_agent_checkpoints: () => [],
     cloud_agent_checkpoint: () => null,
     cloud_agent_enqueue: (args) => {
@@ -392,6 +400,11 @@ function cloudHandlers() {
     // The command does not read checkout files; those still go through runtime Git.
     review_comments: () => [],
   };
+}
+
+/** A list item from an API that takes the `follow-up` mailbox kind (terminalx-saas#289). */
+function withFollowUpKind(item: CloudWorkspaceListItem): CloudWorkspaceListItem {
+  return { ...item, workspace: { ...item.workspace, agentCommandKinds: ["send", "steer", "stop", "permission-decision", "follow-up"] } };
 }
 
 function setCatalog(item: CloudWorkspaceListItem) {
@@ -638,12 +651,15 @@ describe("cloud session actions", () => {
     await screen.findByText("Fix login redirect");
 
     await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(0));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     // Answer the permission.
     fireEvent.click(await screen.findByRole("button", { name: /^Allow/ }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "permission-decision")?.payload).toEqual({ requestId: "req-9", optionId: "allow" }));
 
     // Steer while the turn runs, then stop it.
+    // A /goal is never steered past the composer's check (PRO-380).
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/goal keep the tests green" } });
+    expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
     fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
     fireEvent.click(screen.getByRole("button", { name: "Steer now" }));
     await waitFor(() => expect(enqueued.find((entry) => entry.kind === "steer")?.payload).toEqual({ text: "use the staging config" }));
@@ -668,6 +684,81 @@ describe("cloud session actions", () => {
     // Connected: nothing needed waking.
     expect(activate).not.toHaveBeenCalled();
     expect(guard.violations).toEqual([]);
+  });
+
+  it("#1328: the runtime's held follow-ups are in the tray, where one is edited, deleted or sent now through the mailbox", async () => {
+    setCatalog(withFollowUpKind(workspaceItem("ready")));
+    runtime.followUps = true;
+    runtime.events = [ev({ type: "user_message", text: "clean up", queued: false })];
+    runtime.tabs = [tabInfo({ status: "in_progress", followUps: [
+      { clientCommandId: "cmd-a", text: "then run the tests", actorId: null },
+      { clientCommandId: "cmd-b", text: "and deploy", actorId: null, images: 1 },
+    ] })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    const tray = await screen.findByRole("region", { name: "Held follow-ups" });
+    expect(within(tray).getByText("then run the tests")).toBeTruthy();
+    expect(within(tray).getByText("Image")).toBeTruthy();
+    // In the tray, not drawn again as Queued cards in the chat.
+    expect(screen.queryByTestId("cloud-pending-messages")).toBeNull();
+    // The runtime keeps them in the order they were sent and never pauses them: said, not offered.
+    expect(within(tray).getByRole("button", { name: /Pause queue/ }).hasAttribute("disabled")).toBe(true);
+    expect(within(tray).getByRole("button", { name: "Drag follow-up 1" }).getAttribute("title")).toMatch(/order they were sent/);
+
+    fireEvent.click(within(tray).getByRole("button", { name: "Edit follow-up 1" }));
+    fireEvent.change(within(tray).getByLabelText("Edit held follow-up"), { target: { value: "then run the unit tests" } });
+    fireEvent.click(within(tray).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(enqueued.find((entry) => entry.kind === "follow-up")?.payload).toEqual({ op: "edit", followUpId: "cmd-a", text: "then run the unit tests" }));
+    await waitFor(() => expect(within(tray).queryByTestId("held-editor")).toBeNull(), { timeout: 3_000 });
+
+    fireEvent.click(within(tray).getByRole("button", { name: "Send follow-up 2 now" }));
+    await waitFor(() => expect(enqueued.filter((entry) => entry.kind === "follow-up").map((entry) => entry.payload)).toContainEqual({ op: "release", followUpId: "cmd-b" }), { timeout: 3_000 });
+    // The tray waits for each change's receipt before taking the next.
+    await waitFor(() => expect(within(tray).getByRole("button", { name: "Delete follow-up 1" }).hasAttribute("disabled")).toBe(false), { timeout: 3_000 });
+    fireEvent.click(within(tray).getByRole("button", { name: "Delete follow-up 1" }));
+    await waitFor(() => expect(enqueued.filter((entry) => entry.kind === "follow-up").map((entry) => entry.payload)).toContainEqual({ op: "withdraw", followUpId: "cmd-a" }), { timeout: 3_000 });
+    expect(guard.violations).toEqual([]);
+  });
+
+  it("#1328: through an API that does not list the follow-up kind, there is no tray to change them in, whatever the runtime takes", async () => {
+    runtime.followUps = true;
+    runtime.tabs = [tabInfo({ status: "in_progress", followUps: [{ clientCommandId: "cmd-a", text: "then run the tests", actorId: null }] })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    await screen.findByText("Fix login redirect");
+    await waitFor(() => expect(runtime.methods("session.subscribe").length).toBeGreaterThan(0));
+    expect(screen.queryByRole("region", { name: "Held follow-ups" })).toBeNull();
+    // The message still shows as held, and a mid-turn message is still the runtime's to hold.
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+    await waitFor(() => expect(enqueued.map((entry) => entry.kind)).toEqual(["send"]));
+  });
+
+  it("#1328: with follow-ups sent now, a message mid-turn steers the running turn; holding sends it for the runtime to hold", async () => {
+    setCatalog(withFollowUpKind(workspaceItem("ready")));
+    runtime.followUps = true;
+    runtime.tabs = [tabInfo({ status: "in_progress" })];
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.connect());
+    await screen.findByText("Fix login redirect");
+    const prefs = mocks.prefs as typeof mocks.prefs & { followUps?: "now" | "hold" };
+    try {
+      prefs.followUps = "now";
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "use the staging config" } });
+      // Send already steers: no second way offered.
+      expect(screen.queryByRole("button", { name: "Steer now" })).toBeNull();
+      fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+      await waitFor(() => expect(enqueued.map((entry) => entry.kind)).toEqual(["steer"]));
+      // A command is never steered into a turn: it is held.
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "/compact" } });
+      fireEvent.click(within(composer()).getByRole("button", { name: "Queue" }));
+      await waitFor(() => expect(enqueued.map((entry) => [entry.kind, entry.payload.text])).toEqual([["steer", "use the staging config"], ["send", "/compact"]]));
+    } finally {
+      delete prefs.followUps;
+    }
   });
 
   it("selecting a stopped session makes no resume; sending there wakes it exactly once and keeps the selection", async () => {
@@ -835,7 +926,7 @@ describe("the right panel of a cloud session", () => {
     const picker = (await screen.findByRole("combobox", { name: "Repository" })) as HTMLSelectElement;
     expect([...picker.options].map((option) => option.value)).toEqual(["api", "web"]);
     await waitFor(() => expect(runtime.methods("git.status").some((frame) => (frame.params as { repo: string }).repo === "api")).toBe(true));
-    expect(await screen.findByText("All changes · 1 file")).toBeTruthy();
+    expect(await screen.findByText("0 of 1 viewed")).toBeTruthy();
     expect(await screen.findByRole("button", { name: /login\.ts/ })).toBeTruthy();
     expect(runtime.methods("git.reviewRange").map((frame) => (frame.params as { repo: string }).repo)).toContain("api");
 
@@ -866,6 +957,16 @@ describe("the session header's location and connection chips", () => {
     fireEvent.pointerUp(element, { button: 0, pointerType: "mouse" });
     fireEvent.click(element, { button: 0 });
   };
+
+  it("has Run, Git and Share where a local session has them: Run off with why, Git opening Changes, Share the workspace's people (#1289)", async () => {
+    await openConnected();
+    const run = screen.getByTestId("cloud-run-menu-unavailable");
+    expect(run.getAttribute("title")).toContain("Saved actions and previews run on this computer");
+    expect((within(run).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("cloud-git-button")).toBeDefined();
+    fireEvent.click(screen.getByTestId("cloud-share-button"));
+    expect(await screen.findByTestId("cloud-share-dialog")).toBeDefined();
+  });
 
   it("the location chip holds the workspace's Stop, Archive and Delete", async () => {
     await openConnected();
@@ -948,6 +1049,73 @@ describe("the session header's location and connection chips", () => {
     expect(seen).toEqual(["Resuming…", "Connecting…", "Connecting…", "Connecting…", "Live"]);
   });
 
+  it("#1291: a message to a stopped workspace is a Queued card at once, its line follows the wake, and it becomes the delivered message once", async () => {
+    setCatalog(workspaceItem("suspended"));
+    cache["t-1"] = { tab: tabInfo(), events: [ev({ type: "user_message", text: "earlier question", queued: false })], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    expect(await screen.findByText("earlier question")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "wake up and fix it" } });
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send" }));
+    const card = await screen.findByTestId("queued-message");
+    expect(card.textContent).toContain("wake up and fix it");
+    expect(card.textContent).toContain("Queued");
+    const line = () => within(screen.getByTestId("queued-message")).getByTestId("queued-status").textContent;
+    await waitFor(() => expect(line()).toBe("Resuming the workspace…"));
+    // Never also a row above the transcript.
+    expect(screen.queryByTestId("cloud-agent-outbox")).toBeNull();
+    await act(async () => runtime.emit({ state: "connecting", attempt: 1 }));
+    expect(line()).toBe("Connecting…");
+    runtime.tabs = [tabInfo()];
+    await act(async () => runtime.connect("manage"));
+    expect(line()).toBe("Delivering to the agent…");
+    // The agent takes it: the card goes and the message is drawn once, by the conversation.
+    await act(async () => runtime.stream(ev({ type: "user_message", text: "wake up and fix it", queued: false })));
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(screen.getAllByText("wake up and fix it")).toHaveLength(1);
+  });
+
+  it("#1341: a stopped tab's queued card waits for its checkpoint, so an older identical prompt there is not taken for its delivery", async () => {
+    setCatalog(workspaceItem("suspended"));
+    // Saved history of the same words, from an earlier turn; this desktop has none of it cached yet.
+    const older = [ev({ type: "user_message", text: "run the tests", queued: false }), ev({ type: "assistant_text", text: "all green" })];
+    const lastSeq = older.at(-1)!.seq;
+    cache["t-1"] = { tab: tabInfo({ lastSeq }), events: [], cursor: null, checkpoint: null, unread: false, completed: false, updatedAt: 1 };
+    outbox = [{ clientCommandId: "cmd-1341", tabId: "t-1", kind: "send", text: "run the tests", requestId: null, state: "queued", wake: "queued", createdAt: 1, updatedAt: 1 }];
+    let deliver!: (checkpoint: unknown) => void;
+    const delayed = new Promise((resolve) => (deliver = resolve));
+    let reads = 0;
+    guard.handlers.cloud_agent_checkpoint = () => (++reads === 1 ? delayed : null);
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    await act(async () => runtime.emit({ state: "suspended" }));
+    const card = await screen.findByTestId("queued-message");
+    expect(card.textContent).toContain("run the tests");
+    await waitFor(() => expect(reads).toBeGreaterThan(0));
+
+    // The checkpoint comes in late, with the earlier prompt of the same words.
+    await act(async () =>
+      deliver({
+        epoch: 1,
+        version: 1,
+        projection: { v: 1, tabId: "t-1", sessionId: "s-1", title: "Fix login", harness: "claude", model: "", effort: null, permissionMode: "bypassPermissions", status: "idle", process: "running", followUps: [], events: older, truncated: false, updatedAt: 2 },
+      }),
+    );
+    expect(await screen.findByText("all green")).toBeTruthy();
+    // The older prompt is history, not this message arriving: the card stays.
+    expect(screen.getByTestId("queued-message").textContent).toContain("run the tests");
+
+    // Genuine delivery once the workspace is back: the card goes, and the new prompt is drawn once more than before.
+    runtime.tabs = [tabInfo({ lastSeq })];
+    runtime.events = older;
+    await act(async () => runtime.connect("manage"));
+    expect(screen.getByTestId("queued-message").textContent).toContain("run the tests");
+    await act(async () => runtime.stream(ev({ type: "user_message", text: "run the tests", queued: false })));
+    await waitFor(() => expect(screen.queryByTestId("queued-message")).toBeNull());
+    expect(screen.getAllByText("run the tests")).toHaveLength(2);
+  });
+
   it("says Connecting…, not Starting, while it attaches to a workspace that is already running", async () => {
     // A member opens a session someone else has live: nothing is starting.
     setCatalog(workspaceItem("ready", "participate"));
@@ -984,6 +1152,43 @@ describe("the session header's location and connection chips", () => {
     expect(workspaceStarting(stopping)).toBe(false);
     expect(workspaceStarting(workspaceItem("ready"))).toBe(false);
     expect(workspaceStarting(null)).toBe(false);
+  });
+
+  // #1288: the relay turns dials away while the runtime boots; the header never steps back for it.
+  it("moves only forward while the machine comes up: Starting…, Connecting…, Live, and Reconnecting… only after a live connection was lost", async () => {
+    setCatalog(workspaceItem("provisioning"));
+    render(wrap(<CloudHarness />));
+    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
+    const chip = () => screen.getByTestId("session-connection").textContent;
+    const seen: string[] = [];
+    const step = async (state: WorkspaceConnectionState) => {
+      await act(async () => runtime.emit(state));
+      if (seen.at(-1) !== chip()) seen.push(chip()!);
+    };
+    // A cold start as the supervisor reports it: waits, a dial the relay turns away (4100, then 4101), and up.
+    for (const state of [
+      { state: "opening" },
+      { state: "waitingForRuntime" },
+      { state: "connecting", attempt: 1 },
+      { state: "waitingForRuntime" },
+      { state: "opening" },
+      { state: "connecting", attempt: 2 },
+      { state: "waitingForRuntime" },
+      { state: "connecting", attempt: 3 },
+    ] as WorkspaceConnectionState[]) await step(state);
+    await act(async () => runtime.connect("manage"));
+    seen.push(chip()!);
+    expect(seen).toEqual(["Starting…", "Connecting…", "Live"]);
+    // A connection that was up and is lost does read Reconnecting….
+    await step({ state: "reconnecting", attempt: 1, reason: "relay gone", retryInMs: 250 });
+    expect(chip()).toBe("Reconnecting…");
+
+    const options = { starting: true };
+    expect(cloudConnectionChip({ state: "opening" }, "provisioning", options).label).toBe("Starting…");
+    expect(cloudConnectionChip({ state: "connecting", attempt: 1 }, "provisioning", options).label).toBe("Connecting…");
+    expect(cloudConnectionChip({ state: "waitingForRuntime" }, "provisioning", { ...options, wakeFloor: 1 }).label).toBe("Connecting…");
+    expect(cloudConnectionChip({ state: "opening" }, "suspended", { ...options, wakeFloor: 1 }).label).toBe("Connecting…");
+    expect(cloudConnectionChip({ state: "reconnecting", attempt: 1, reason: "x", retryInMs: 1 }, "provisioning", options).label).toBe("Reconnecting…");
   });
 
   it("ends every in-progress label in an ellipsis, and no settled one (Resuming… like Stopping…, Connecting… and Reconnecting…)", () => {
@@ -1102,7 +1307,9 @@ describe("an open session whose workspace stops and is woken by someone else", (
     return () => view.rerender(wrap(<CloudHarness />));
   }
 
-  it("attaches fresh with connect, subscribes again, shows the other person's turn and lease, and reads Live only once the transport is up", async () => {
+  // #1288: the view is not torn down for it. The connection's own supervisor
+  // opens again (with `connect`) and comes up on the new runtime generation.
+  it("opens its connection again with connect, subscribes again, shows the other person's turn and lease, and reads Live only once the transport is up", async () => {
     const relist = await openAsAlice();
 
     // Alice stops it. The list has the operation: Stopping…, never Starting, and not Live for the whole stop.
@@ -1126,9 +1333,12 @@ describe("an open session whose workspace stops and is woken by someone else", (
     expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
 
     // Bob sends: the mailbox wakes the workspace, his turn runs in a new runtime generation, and he drives the tab.
-    woken.tabs = [tabInfo({ status: "idle", lastSeq: seq + 2 })];
-    woken.events = [ev({ type: "user_message", text: "bob asks from his desktop", queued: false }), ev({ type: "assistant_text", text: "the answer to bob" })];
-    woken.collab = {
+    const before = new Map(["session.tabs", "session.list", "session.subscribe", "collab.state", "pty.list", "git.repositories"].map((method) => [method, runtime.methods(method).length]));
+    runtime.generation = 4;
+    runtime.epoch = "e2";
+    runtime.tabs = [tabInfo({ status: "idle", lastSeq: seq + 2 })];
+    runtime.events = [ev({ type: "user_message", text: "bob asks from his desktop", queued: false }), ev({ type: "assistant_text", text: "the answer to bob" })];
+    runtime.collab = {
       you: ALICE,
       participants: [{ userId: "u-bob", role: "driver", canApprove: false, surfaces: 1, tabId: "t-1", activity: "viewing", since: 1 }],
       leases: [{ tabId: "t-1", holderId: "u-bob", acquiredAt: 1, expiresAt: Date.now() + 60_000 }],
@@ -1138,21 +1348,23 @@ describe("an open session whose workspace stops and is woken by someone else", (
       listed("ready", Date.now() + 1_000);
       relist();
     });
-    await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalledTimes(2));
-    // A fresh attachment, and the old client is torn down.
-    expect(closedFirst).toHaveBeenCalledTimes(1);
-    // The list says ready, but the transport is not up: Reconnecting…, never Live.
-    expect(chip()).toBe("Reconnecting…");
-    await act(async () => woken.emit({ state: "connecting", attempt: 1 }));
-    expect(chip()).toBe("Reconnecting…");
+    await waitFor(() => expect(activate).toHaveBeenCalledWith("connect"));
+    // The same connection opens again: nothing attaches anew, nothing is torn down.
+    expect(mocks.workspaceConnection).toHaveBeenCalledTimes(1);
+    expect(closedFirst).not.toHaveBeenCalled();
+    // The list says ready, but the transport is not up: Connecting…, never Live.
+    await act(async () => runtime.emit({ state: "opening" }));
+    expect(chip()).toBe("Connecting…");
+    await act(async () => runtime.emit({ state: "connecting", attempt: 1 }));
+    expect(chip()).toBe("Connecting…");
+    // The session stayed on screen the whole time.
+    expect(screen.getByText("Fix login redirect")).toBeTruthy();
 
-    await act(async () => woken.connectShared(ALICE, "manage"));
+    await act(async () => runtime.connectShared(ALICE, "manage"));
     expect(chip()).toBe("Live");
     // Everything is read and subscribed again on the new runtime.
     await waitFor(() => {
-      for (const method of ["session.tabs", "session.list", "session.subscribe", "collab.state", "pty.list", "git.repositories"]) {
-        expect(woken.methods(method).length, method).toBeGreaterThan(0);
-      }
+      for (const [method, count] of before) expect(runtime.methods(method).length, method).toBeGreaterThan(count);
     });
     // Bob's turn, which ran while this pane had no connection, is here.
     expect(await screen.findByText("bob asks from his desktop")).toBeTruthy();
@@ -1162,22 +1374,20 @@ describe("an open session whose workspace stops and is woken by someone else", (
     expect((await screen.findAllByTestId("session-presence-person")).length).toBe(1);
 
     // Events flow on the new subscription.
-    await act(async () => woken.stream(ev({ type: "assistant_text", text: "streamed after the wake" })));
+    await act(async () => runtime.stream(ev({ type: "assistant_text", text: "streamed after the wake" })));
     expect(await screen.findByText("streamed after the wake")).toBeTruthy();
 
     // Lease RPC works: no "RPC transport unavailable".
     fireEvent.click(screen.getByRole("button", { name: "Take over" }));
-    await waitFor(() => expect(woken.methods("lease.takeOver")).toHaveLength(1));
+    await waitFor(() => expect(runtime.methods("lease.takeOver")).toHaveLength(1));
     await waitFor(() => expect(screen.getByTestId("cloud-agent-driver").textContent).toBe("You are driving"));
     expect(screen.getByTestId("cloud-agent-lease").textContent).not.toContain("RPC transport unavailable");
 
-    // Looking never wakes compute: both attachments were `connect`, nothing was raised to `wake`, nothing resumed.
-    expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect", "connect"]);
-    expect(activate).not.toHaveBeenCalled();
+    // Looking never wakes compute: one `connect` attachment, opened again with `connect`, nothing raised to `wake`, nothing resumed.
+    expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect"]);
+    expect(activate.mock.calls).toEqual([["connect"]]);
     expect(guard.calls.map((call) => call.command)).not.toContain("cloud_workspace_resume");
     expect(guard.violations).toEqual([]);
-    // Nothing was sent to the runtime that was stopped.
-    expect(runtime.methods("lease.takeOver")).toEqual([]);
   });
 
   it("never reads Live over a connection that was closed underneath the view", async () => {
@@ -1385,7 +1595,7 @@ describe("the session header's New tab menu", () => {
     await openConnected();
     mouseClick(plus());
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getByText("New agent tab with")).toBeTruthy();
+    expect(within(menu).getByText("New tab")).toBeTruthy();
     expect(within(menu).getAllByRole("menuitem").map((entry) => entry.textContent?.trim())).toEqual(["Claude Code", "Terminalon the VM", "Ports and previewsside panel"]);
     expect(plus().getAttribute("aria-expanded")).toBe("true");
     // The tooltip around it must not mark the open menu's trigger closed.
@@ -1482,7 +1692,7 @@ describe("a shared cloud workspace in SessionView (PRO-30)", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission/);
+    await screen.findByTestId("permission-title");
     const allow = await screen.findByRole("button", { name: /^Allow/ });
     expect((allow as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
@@ -2165,7 +2375,7 @@ describe("sharing states found in the live two-user test", () => {
     render(wrap(<CloudHarness />));
     await waitFor(() => expect(mocks.workspaceConnection).toHaveBeenCalled());
     await act(async () => runtime.connectShared(ME));
-    await screen.findByText(/Waiting for permission to run a command/);
+    await screen.findByText("Run a command");
     expect((await screen.findByTestId("permission-detail")).textContent).toBe("touch /tmp/bob-asked");
     expect(screen.getByTestId("answer-blocked").textContent).toBe("Waiting for someone who can approve");
   });

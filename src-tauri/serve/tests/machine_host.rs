@@ -13,7 +13,12 @@ use std::time::Duration;
 
 use common::agent::{wait_until, AgentWorld, Serve};
 use common::machine::{allow, computer, connect, free_port, host_key, listening, pair, status, Outcome};
+use raccoon_lib::remote::client::{ClientEvent, ClientState};
+use raccoon_lib::remote::machine_client::{
+    MachineConnectionState, MachineConnectionView, MachineEnv, MachineRoute, MachineSupervisor, NetDialer, OnState, RelayCredential, RouteKind, RouteUsed, Target, Zeroizing,
+};
 use serde_json::json;
+use std::sync::Arc;
 
 const TOKEN: &str = "a-paired-computers-device-token-0001";
 
@@ -134,4 +139,160 @@ fn a_runtime_hosting_computers_does_not_exit_when_idle() {
         assert!(std::time::Instant::now() < deadline, "with the switch off, an idle runtime exits as before");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// What the operating computer's supervisor is told: its machine states and
+/// the web view's states.
+struct Heard {
+    states: tokio::sync::mpsc::UnboundedReceiver<MachineConnectionState>,
+    client: tokio::sync::mpsc::UnboundedReceiver<ClientEvent>,
+}
+
+impl Heard {
+    async fn state(&mut self, what: &str, within: Duration, wanted: impl Fn(&MachineConnectionState) -> bool) -> MachineConnectionState {
+        let mut seen = Vec::new();
+        let found = tokio::time::timeout(within, async {
+            loop {
+                let state = self.states.recv().await.expect("the supervisor runs");
+                seen.push(state.clone());
+                if wanted(&state) {
+                    return state;
+                }
+            }
+        })
+        .await;
+        found.unwrap_or_else(|_| panic!("never {what}; saw {seen:?}"))
+    }
+
+    /// The web view's last `connected` link, and every message so far.
+    fn drain(&mut self) -> (Option<u64>, Vec<serde_json::Value>) {
+        let (mut link, mut messages) = (None, Vec::new());
+        while let Ok(event) = self.client.try_recv() {
+            match event {
+                ClientEvent::State(ClientState::Connected { link: connected, .. }) => link = connected,
+                ClientEvent::State(_) => {}
+                ClientEvent::Message(message) => messages.push(message),
+            }
+        }
+        (link, messages)
+    }
+}
+
+/// The operating computer's record, token and key, kept in memory.
+struct Paired {
+    target: std::sync::Mutex<Target>,
+    described: std::sync::Mutex<Vec<serde_json::Value>>,
+}
+
+impl MachineEnv for Paired {
+    fn target(&self) -> anyhow::Result<Target> {
+        Ok(self.target.lock().unwrap().clone())
+    }
+    fn signed_in_user(&self) -> Option<String> {
+        None
+    }
+    fn described(&self, described: &serde_json::Value, route: &RouteUsed) {
+        self.described.lock().unwrap().push(described.clone());
+        self.target.lock().unwrap().last_route = Some(route.clone());
+    }
+    fn save_relay(&self, _credential: &RelayCredential) -> anyhow::Result<()> {
+        anyhow::bail!("no relay in this test")
+    }
+    fn drop_relay(&self) {}
+}
+
+/// PRO-345: the desktop's machine supervisor against the real runtime, on
+/// the direct route. It connects, survives the runtime restarting, and
+/// ends in "access removed" once the machine revokes it, retrying nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_machine_supervisor_connects_directly_survives_a_restart_and_ends_in_access_removed() {
+    const COMPUTER_TOKEN: &str = "the-operating-computers-device-token-02";
+    let world = AgentWorld::new();
+    let port = free_port();
+    let command = || {
+        let mut command = world.machine_command();
+        command.env("TERMINALX_MACHINE_HOST_PORT", port.to_string());
+        command
+    };
+    pair(&world.data, "macbook", COMPUTER_TOKEN, None);
+    allow(&world.data, true);
+    let serve = Serve::start(command(), &world.data);
+    listening(&serve);
+    let keypair = host_key(&world.data);
+    let machine_id = keypair.host_id();
+
+    // machine/2 on the machine side: directEndpoints, and no relay without a registration.
+    let mut probe = computer(connect(port, &keypair.public_key_b64(), COMPUTER_TOKEN).await);
+    let hello = probe.call("rpc.hello", json!({ "protocol": "terminalx-workspace-rpc/1", "want": ["machine/1", "machine/2"] })).await;
+    assert!(hello["result"]["capabilities"].as_array().unwrap().iter().any(|granted| granted == "machine/2"), "{hello}");
+    let described = probe.call("machine.describe", json!({})).await;
+    let endpoints = described["result"]["directEndpoints"].as_array().cloned().unwrap_or_default();
+    assert!(!endpoints.is_empty() && endpoints.iter().all(|endpoint| endpoint.as_str().unwrap().ends_with(&format!(":{port}/machine/1"))), "{described}");
+    assert_eq!(probe.call("machine.relayAccess", json!({})).await["result"], json!({ "relay": null }));
+    drop(probe);
+
+    let env = Arc::new(Paired {
+        target: std::sync::Mutex::new(Target {
+            machine_id: machine_id.clone(),
+            public_key_b64: keypair.public_key_b64(),
+            direct_endpoints: vec![format!("ws://127.0.0.1:{port}/machine/1")],
+            route: MachineRoute::RelayAndNearby,
+            last_route: None,
+            last_seen_at: None,
+            device_token: Zeroizing::new(COMPUTER_TOKEN.into()),
+            client_secret: Zeroizing::new([9u8; 32]),
+            label: "Test MacBook".into(),
+            platform: "macos".into(),
+            relay: None,
+        }),
+        described: std::sync::Mutex::new(Vec::new()),
+    });
+    let (events, client) = tokio::sync::mpsc::unbounded_channel();
+    let (states_tx, states) = tokio::sync::mpsc::unbounded_channel();
+    let on_state: OnState = Arc::new(move |view: &MachineConnectionView| {
+        let _ = states_tx.send(view.state.clone());
+    });
+    let supervisor = MachineSupervisor::start(&machine_id, env.clone(), Arc::new(NetDialer), events, on_state);
+    let mut heard = Heard { states, client };
+
+    let direct = |state: &MachineConnectionState| matches!(state, MachineConnectionState::Direct { route, .. } if route.kind == RouteKind::Lan);
+    heard.state("connected directly", Duration::from_secs(30), direct).await;
+    let (first_link, _) = heard.drain();
+    assert!(first_link.is_some(), "the web view was told connected with a link");
+    assert_eq!(env.described.lock().unwrap()[0]["machineId"], machine_id.as_str());
+    // Frames from the web view reach the machine and its answers come back.
+    assert!(supervisor.send(json!({ "id": "web-hello", "method": "rpc.hello", "params": { "protocol": "terminalx-workspace-rpc/1", "want": ["machine/1", "session/1"] } })));
+    assert!(supervisor.send(json!({ "id": "web-list", "method": "session.list", "params": {} })));
+    let answered = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let (_, messages) = heard.drain();
+            if let Some(answer) = messages.into_iter().find(|message| message["id"] == "web-list") {
+                return answer;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("session.list was answered");
+    assert_eq!(answered["ok"], true, "{answered}");
+
+    // The runtime restarts: the link is lost, then found again on its own.
+    drop(serve);
+    heard.state("reconnecting", Duration::from_secs(30), |state| matches!(state, MachineConnectionState::Reconnecting { .. })).await;
+    let serve = Serve::start(command(), &world.data);
+    listening(&serve);
+    heard.state("connected again", Duration::from_secs(90), direct).await;
+    let (second_link, _) = heard.drain();
+    assert!(second_link.is_some() && second_link != first_link, "a new link: {first_link:?} then {second_link:?}");
+
+    // Revoked on the machine: access removed, and nothing retries.
+    let attachment = serve.control("runtime.attach", json!({ "protocol": 1 }));
+    serve.control("runtime.machineHost.revoke", json!({ "epoch": attachment["epoch"], "lease": attachment["lease"], "id": "macbook" }));
+    heard.state("access removed", Duration::from_secs(30), |state| *state == MachineConnectionState::AccessRemoved).await;
+    let (_, _) = heard.drain();
+    supervisor.nudge();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(heard.states.try_recv().is_err(), "nothing retried after access was removed");
+    assert_eq!(supervisor.state(), MachineConnectionState::AccessRemoved);
+    supervisor.stop();
 }

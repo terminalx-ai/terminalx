@@ -172,6 +172,22 @@ fn an_outbox_entry_says_how_many_images_its_message_names() {
     }
 }
 
+/// #1329: files other than images are counted as images are, and files
+/// alone are a message.
+#[test]
+fn an_outbox_entry_says_how_many_files_its_message_names() {
+    let fixture = fixture(&serve(Arc::new(|_, _, _| None)));
+    give_key(&fixture);
+    let plain = fixture.client.enqueue(ORG, WS, "tab-1", "send", json!({ "text": "hi" }), true).unwrap();
+    assert!(serde_json::to_value(&plain).unwrap().get("files").is_none());
+    let with_files = json!({ "text": "", "files": [{ "id": "att-0001", "name": "plan.md" }] });
+    let filed = fixture.client.enqueue(ORG, WS, "tab-1", "send", with_files, true).unwrap();
+    assert_eq!((filed.files, filed.images), (1, 0));
+    assert!(!serde_json::to_string(&filed).unwrap().contains("plan.md"), "a count, never the names");
+    assert_eq!(fixture.client.outbox(ORG, WS, None).unwrap().iter().map(|entry| entry.files).collect::<Vec<_>>(), vec![0, 1], "the count survives a reload");
+    assert_eq!(fixture.client.enqueue(ORG, WS, "tab-1", "steer", json!({ "text": "", "files": [{ "id": "att-0002" }] }), true).unwrap_err(), "cloud_agent_request_invalid");
+}
+
 #[test]
 fn a_command_needs_a_workspace_key_first() {
     let fixture = fixture(&serve(Arc::new(|_, _, _| Some((500, json!({}))))));
@@ -394,6 +410,10 @@ fn invalid_commands_are_refused_before_anything_is_stored() {
         ("send", json!({ "text": "  " })),
         ("permission-decision", json!({ "optionId": "allow" })),
         ("permission-decision", json!({ "requestId": "r1" })),
+        // #1328: a held follow-up's change names it and a known op; an edit carries its text.
+        ("follow-up", json!({ "op": "withdraw" })),
+        ("follow-up", json!({ "op": "move", "followUpId": "c1" })),
+        ("follow-up", json!({ "op": "edit", "followUpId": "c1" })),
         ("delete-everything", json!({})),
         ("send", json!("hi")),
     ] {
@@ -442,6 +462,11 @@ fn status_polling_settles_commands_and_decrypts_their_receipts() {
     assert_eq!(synced[0].state, "applied");
     assert_eq!(synced[0].outcome.as_deref(), Some("applied"));
     assert_eq!(synced[0].receipt.as_ref().unwrap()["queued"], json!(true));
+    // A held follow-up's change travels the same way (#1328).
+    let change = fixture.client.enqueue(ORG, WS, "tab-1", "follow-up", json!({ "op": "edit", "followUpId": "c1", "text": "edited" }), true).unwrap();
+    assert_eq!((change.kind.as_str(), change.text.as_deref()), ("follow-up", Some("edited")));
+    let synced = fixture.client.outbox_sync(ORG, WS).unwrap();
+    assert!(synced.iter().any(|entry| entry.client_command_id == change.client_command_id && entry.state == "applied"));
 }
 
 fn checkpoint_for(tab_id: &str, sealed_for_tab: &str, epoch: u64, version: u64) -> Value {
@@ -711,6 +736,7 @@ fn settled_entries_are_pruned_to_the_newest_per_tab() {
         ciphertext: String::new(),
         text: None,
         images: 0,
+        files: 0,
         request_id: None,
         state: state.into(),
         wake: None,

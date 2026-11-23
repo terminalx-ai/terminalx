@@ -176,6 +176,12 @@ pub trait Host: Send + Sync {
         anyhow::bail!("Worker archival is not configured")
     }
 
+    /// Why no worker starts for `run` now: its lead works for a paused bot
+    /// (PRO-474), named here. The pieces stay as they are and start when the
+    /// bot is resumed ([`bot_resumed`]). `None` for every run of a host with no bots.
+    fn held_by_pause(&self, _run: &Run) -> Option<String> {
+        None
+    }
     fn lead(&self, session_id: &str) -> Result<Lead, EngineError>;
     /// The agents a worker can be here.
     fn worker_agents(&self) -> Vec<String>;
@@ -745,6 +751,36 @@ fn schedule_reset(run: &mut Run, auto: &AutoDecide, now_ms: i64) -> Option<RunEv
 
 fn launch_ready(host: &dyn Host, id: &str, launch: Launch) -> Result<Start, EngineError> {
     let run = stored(id)?;
+    // A paused bot's run starts no worker (PRO-474): what is ready stays ready, and starts on its resume. A
+    // person's own start is told why; the engine's own (a retry, a free slot) simply waits.
+    if let Some(bot) = host.held_by_pause(&run) {
+        // The lead's own start of a run not started yet starts it, as a start every worker limit holds does: it is
+        // running with nothing in a turn, so the resume (`bot_resumed`) starts its ready pieces.
+        let run = if matches!(launch, Launch::Ready) && run.state == RunState::Planned {
+            let (run, ()) = store::update(id, |run| {
+                if run.state == RunState::Planned {
+                    run.state = RunState::Running;
+                }
+                Ok(())
+            })
+            .map_err(EngineError::internal)?;
+            changed(host, &run);
+            run
+        } else {
+            run
+        };
+        if matches!(launch, Launch::Ready) && run.ready().iter().any(|piece| piece.state == PieceState::Queued) {
+            let mut error = EngineError::new(
+                "bot_paused",
+                format!("Run {id} is led by {bot}, who is paused: no worker starts until you resume it."),
+                Some("Resume the bot on its page or the Bots page; its run's ready pieces start then."),
+            );
+            error.details = json!({"run": id});
+            return Err(error);
+        }
+        let waiting = waiting(&run);
+        return Ok(Start { run, started: Vec::new(), waiting, failed: Vec::new(), edited: None });
+    }
     // Until its piece is stored, a worker is known as one by who started it.
     let _limited = guard::starting(&run.lead.session_id);
     let app_limit = host.limits(&run.project_path).workers_at_once as usize;
@@ -2429,16 +2465,72 @@ pub struct Finished {
 /// already, so the merge counts it as merged by hand; failing, it stays with
 /// the lead, and what the check printed is kept on its try.
 pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) -> Result<Finished, EngineError> {
+    finish_accepting(host, id, piece_id, by, by_lead, &[])
+}
+
+/// The commit a piece with the lead was taken over at: what it committed since is its result.
+fn taken_over_at(piece: &Piece) -> Result<String, EngineError> {
+    let since = piece.tries.last().filter(|attempt| attempt.step == Step::Lead && piece.state == PieceState::Lead).and_then(|attempt| attempt.from_commit.clone());
+    since.ok_or_else(|| {
+        let mut error = EngineError::new("not_taken_over", format!("Piece {} is not with the lead: a piece is finished this way once the lead has taken it over.", piece.id), Some("A blocked piece is handed to the lead from the Run view, or with `terminalx runs take-over <piece>`."));
+        error.details = json!({"piece": piece.id, "state": piece.state});
+        error
+    })
+}
+
+/// What the lead's checkout holds as a piece's result: committed since the take-over, or the
+/// piece's branch brought in just before it. Uncommitted changes refuse it.
+fn lead_result(host: &dyn Host, run: &Run, piece: &Piece, since: &str) -> Result<LeadWork, EngineError> {
+    let work = host.lead_work(run, since).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be read: {error:#}"), None))?;
+    if !work.uncommitted.is_empty() {
+        let mut error = EngineError::new("uncommitted", format!("The lead's checkout has changes that are not committed: {}. A piece is finished as a commit.", work.uncommitted.iter().take(8).cloned().collect::<Vec<_>>().join(", ")), Some("Commit them, then finish the piece again."));
+        error.details = json!({"piece": piece.id, "files": work.uncommitted});
+        return Err(error);
+    }
+    // Nothing since the take-over: the lead may have brought the piece's work into its branch
+    // just before it took the piece over. That work, already in the lead's branch, is the result.
+    if work.changes.is_empty() {
+        if let Ok(Some(earlier)) = host.piece_in_lead(run, piece) {
+            if !earlier.changes.is_empty() {
+                return Ok(LeadWork { head: work.head, changes: earlier.changes, uncommitted: work.uncommitted });
+            }
+        }
+    }
+    Ok(work)
+}
+
+/// The files a held piece's result changes outside the files it owns: what finishing it would
+/// widen it by. Empty for a piece that is not held.
+fn outside_owns(piece: &Piece, work: &LeadWork) -> Vec<String> {
+    let held = piece.tries.last().is_some_and(|attempt| attempt.held_to_owns);
+    if !held {
+        return Vec::new();
+    }
+    let mut outside: Vec<String> = work.changes.iter().map(|change| change.path.clone()).filter(|path| !super::plan::owns(&piece.owns, path)).collect();
+    outside.dedup();
+    outside
+}
+
+/// What the person's Check and finish of a piece with the lead would add to its files, as it
+/// stands now: shown in the Run view before they press it. Reads only; runs nothing.
+pub fn finish_widens(host: &dyn Host, id: &str, piece_id: &str) -> Result<Vec<String>, EngineError> {
+    let run = stored(id)?;
+    let piece = piece_of(&run, piece_id)?;
+    let since = taken_over_at(piece)?;
+    if !piece.tries.last().is_some_and(|attempt| attempt.held_to_owns) {
+        return Ok(Vec::new());
+    }
+    Ok(outside_owns(piece, &lead_result(host, &run, piece, &since)?))
+}
+
+/// [`finish`], with the files outside a held piece's own that the person confirmed adding to
+/// it (`accepted`): their Check and finish widens it by those and no others.
+pub fn finish_accepting(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool, accepted: &[String]) -> Result<Finished, EngineError> {
     let starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
     let run = read_workers(host, id)?;
     acting_on(&run, "finish a piece")?;
     let piece = piece_of(&run, piece_id)?;
-    let since = piece.tries.last().filter(|attempt| attempt.step == Step::Lead && piece.state == PieceState::Lead).and_then(|attempt| attempt.from_commit.clone());
-    let Some(since) = since else {
-        let mut error = EngineError::new("not_taken_over", format!("Piece {piece_id} is not with the lead: a piece is finished this way once the lead has taken it over."), Some("A blocked piece is handed to the lead from the Run view, or with `terminalx runs take-over <piece>`."));
-        error.details = json!({"piece": piece_id, "state": piece.state});
-        return Err(error);
-    };
+    let since = taken_over_at(piece)?;
     let commands = piece.done_checks.iter().any(|check| matches!(check, super::Check::Command { .. }));
     // The rule a merge keeps (`verify::may_run_commands`): a plan's commands are run unasked for a
     // person, for an approved plan, or for a lead that runs commands unasked itself.
@@ -2449,28 +2541,22 @@ pub fn finish(host: &dyn Host, id: &str, piece_id: &str, by: By, by_lead: bool) 
             Some("Ask the person to press Check and finish in the session's Run view."),
         ));
     }
-    let work = host.lead_work(&run, &since).map_err(|error| EngineError::new("lead_not_found", format!("The lead's checkout cannot be read: {error:#}"), None))?;
-    if !work.uncommitted.is_empty() {
-        let mut error = EngineError::new("uncommitted", format!("The lead's checkout has changes that are not committed: {}. A piece is finished as a commit.", work.uncommitted.iter().take(8).cloned().collect::<Vec<_>>().join(", ")), Some("Commit them, then finish the piece again."));
-        error.details = json!({"piece": piece_id, "files": work.uncommitted});
-        return Err(error);
-    }
-    // Nothing since the take-over: the lead may have brought the piece's work into its branch
-    // just before it took the piece over. That work, already in the lead's branch, is the result.
-    let work = if work.changes.is_empty() {
-        match host.piece_in_lead(&run, piece) {
-            Ok(Some(earlier)) if !earlier.changes.is_empty() => LeadWork { head: work.head, changes: earlier.changes, uncommitted: work.uncommitted },
-            _ => work,
-        }
-    } else {
-        work
-    };
+    let work = lead_result(host, &run, piece, &since)?;
     // The lead took it over itself on an approved plan: a change outside the files the piece
     // owns would widen it, and that is the person's (`person_only`).
-    let held = piece.tries.last().is_some_and(|attempt| attempt.held_to_owns);
-    let outside: Vec<String> = if held { work.changes.iter().map(|change| change.path.clone()).filter(|path| !super::plan::owns(&piece.owns, path)).collect() } else { Vec::new() };
-    // The person's own Check and finish, from the Run view, is their widening: they saw the
-    // change and accept it, and the piece owns those files from then on. Anyone else is refused.
+    let outside = outside_owns(piece, &work);
+    // The person's own Check and finish, from the Run view, is their widening, by the files
+    // they were shown and confirmed. One the lead committed since they looked is asked again.
+    let unconfirmed: Vec<String> = outside.iter().filter(|path| !accepted.contains(path)).cloned().collect();
+    if by == By::Person && !unconfirmed.is_empty() {
+        let mut error = EngineError::new(
+            "confirm_widening",
+            format!("Finishing piece {piece_id} adds {} outside the files it owns to it: {}. Confirm adding {} first.", if outside.len() == 1 { "a file" } else { "files" }, outside.join(", "), if outside.len() == 1 { "it" } else { "them" }),
+            Some("Check and finish in the Run view lists them and asks you to confirm."),
+        );
+        error.details = json!({"piece": piece_id, "files": outside, "owns": piece.owns});
+        return Err(error);
+    }
     let widened: Vec<String> = if by == By::Person { outside.clone() } else { Vec::new() };
     if !outside.is_empty() && by != By::Person {
         let owned = if piece.owns.is_empty() { "no files".to_string() } else { piece.owns.join(", ") };
@@ -2794,6 +2880,30 @@ fn resume_locked(host: &dyn Host, id: &str, how: Resume, by_reset: bool) -> Resu
     let started = if start.started.is_empty() { "No piece waited to start; call `terminalx runs start` when the next one is ready.".to_string() } else { format!("Workers were started for: {}.", start.started.join(", ")) };
     host.tell_lead(&start.run, &format!("Run {id} is running again. {how} {started}"));
     Ok(start)
+}
+
+/// After a bot is resumed (PRO-474): every running run it leads (`leads`)
+/// starts what became ready while it was paused, as the lead's `runs start`
+/// would, then whatever waits for a free slot anywhere. Its lead is told.
+pub fn bot_resumed(host: &dyn Host, leads: &dyn Fn(&Run) -> bool) {
+    let runs = match store::list() {
+        Ok(runs) => runs,
+        Err(error) => return log::warn!("read the runs after a bot's resume: {error:#}"),
+    };
+    for run in runs.into_iter().filter(|run| run.state == RunState::Running && leads(run)) {
+        let started = {
+            let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
+            launch_ready(host, &run.id, Launch::Ready)
+        };
+        match started {
+            Ok(start) if !start.started.is_empty() => {
+                host.tell_lead(&start.run, &format!("Your owner resumed you, so run {} goes on. Workers were started for: {}.", run.id, start.started.join(", ")));
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("start run {} after its bot's resume: {error}", run.id),
+        }
+    }
+    fill_slots(host);
 }
 
 /// Start the pieces that wait for a free worker slot, in every running run,

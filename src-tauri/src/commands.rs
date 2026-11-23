@@ -12,6 +12,11 @@ use crate::{git, harness, names, store};
 
 pub use crate::session_ops::{NewSession, NewTab};
 use crate::session_ops::{available_worktree_name, rename_workspace_entries};
+// The fork itself is shared with a runtime's `session.fork` (#1326).
+pub use crate::session_fork::ForkInto;
+use crate::session_fork::fork_session_contents;
+#[cfg(test)]
+use crate::session_fork::{fork_workspace, resolve_missing_path};
 
 type CmdResult<T> = Result<T, String>;
 
@@ -109,6 +114,23 @@ pub async fn organization_select(
     let account = state.account.clone();
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
         account.select_organization_for_revision(&organization_id, &context_revision)?;
+        Ok(account.status(&app))
+    }).await.map_err(err)?.map_err(err)
+}
+
+/// An organization's cloud computer name and colour (PRO-370); owners and admins of it.
+#[tauri::command]
+pub async fn organization_computer_save(
+    app: AppHandle,
+    organization_id: String,
+    context_revision: String,
+    computer_name: Option<String>,
+    computer_color: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> CmdResult<crate::account::AccountStatus> {
+    let account = state.account.clone();
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<crate::account::AccountStatus> {
+        account.save_computer_identity(&organization_id, &context_revision, computer_name.as_deref(), computer_color.as_deref())?;
         Ok(account.status(&app))
     }).await.map_err(err)?.map_err(err)
 }
@@ -558,10 +580,58 @@ fn provider_key_prompt(provider: &str, organization: &str) -> String {
     format!("Enter the {provider} provider key for organization {organization}. The key is sent to the account service only for validation and secure storage.")
 }
 
+/// The dialog text for one credential field of a described provider
+/// (PRO-415): a provider with one field keeps the provider-key wording; one
+/// with several names the field. A help link the server gives is shown when
+/// it is an https URL.
+fn credential_field_prompt(provider: &str, organization: &str, field: &crate::cloud_workspaces::CloudProviderCredentialField, only: bool) -> String {
+    let label = dialog_text(&field.label);
+    let mut text = if only || label.is_empty() {
+        provider_key_prompt(provider, organization)
+    } else {
+        format!("Enter the {label} for {provider} in organization {organization}. It is sent to the account service only for validation and secure storage.")
+    };
+    if let Some(url) = field.help_url.as_deref().map(dialog_text).filter(|url| url.starts_with("https://")) {
+        text.push_str(&format!(" Where to get it: {url}"));
+    }
+    text
+}
+
+/// What is sent as the credential: one field's value as typed, or several
+/// as a JSON object keyed by field name. The object is written into a buffer
+/// sized up front for the worst case (every character escaped as `\uXXXX`,
+/// six bytes for at most four), so it never grows: a growing `String` would
+/// free earlier partial copies of the secret without zeroing them. The only
+/// copy is the zeroized one.
+fn combined_credential(values: &[(String, zeroize::Zeroizing<String>)]) -> zeroize::Zeroizing<String> {
+    if let [(_, only)] = values {
+        return only.clone();
+    }
+    let fields: std::collections::BTreeMap<&str, &str> = values.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+    // `{}` plus, per field, two quoted strings, a colon and a comma.
+    let capacity = 2 + fields.iter().map(|(name, value)| 6 * (name.len() + value.len()) + 6).sum::<usize>();
+    let mut buffer = zeroize::Zeroizing::new(Vec::with_capacity(capacity));
+    let reserved = buffer.capacity();
+    serde_json::to_writer(&mut *buffer, &fields).expect("serialize credential fields");
+    debug_assert_eq!(buffer.capacity(), reserved, "the credential buffer grew");
+    // The bytes move into the String without a copy; the emptied Vec left behind holds nothing.
+    let bytes = std::mem::take(&mut *buffer);
+    zeroize::Zeroizing::new(String::from_utf8(bytes).expect("JSON is UTF-8"))
+}
+
 /// A key typed into a native secure field: it never passes through the
 /// webview, and the field is emptied whichever way the dialog ends.
 #[cfg(target_os = "macos")]
 fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    field_prompt(title, text, placeholder, true)
+}
+
+/// A value typed into a native field: a secure one for a secret, a plain one
+/// for a provider's non-secret credential field (PRO-415). Either way it
+/// never passes through the webview, and the field is emptied whichever way
+/// the dialog ends.
+#[cfg(target_os = "macos")]
+fn field_prompt(title: &str, text: &str, placeholder: &str, secure: bool) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{NSAlert, NSSecureTextField, NSAlertFirstButtonReturn};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -569,7 +639,12 @@ fn secure_prompt(title: &str, text: &str, placeholder: &str) -> Result<zeroize::
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(text));
-    let field = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.)));
+    let frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(360., 24.));
+    let field: objc2::rc::Retained<objc2_app_kit::NSTextField> = if secure {
+        objc2::rc::Retained::into_super(NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), frame))
+    } else {
+        objc2_app_kit::NSTextField::initWithFrame(objc2_app_kit::NSTextField::alloc(mtm), frame)
+    };
     field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
     alert.setAccessoryView(Some(&field));
     alert.addButtonWithTitle(&NSString::from_str("Validate"));
@@ -596,25 +671,38 @@ pub async fn cloud_provider_connect(
     static PROMPT_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _prompt_guard = PROMPT_GUARD.try_lock().map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_operation_in_progress", true))?;
     let service = state.cloud_workspaces.clone();
-    let (authorization, provider_name) = tauri::async_runtime::spawn_blocking(move || {
+    let (authorization, summary) = tauri::async_runtime::spawn_blocking(move || {
         let authorization = service.authorize_connect(provider)?;
-        let provider_name = service.provider_display_name(&authorization);
-        Ok::<_, crate::cloud_workspaces::CloudWorkspaceClientError>((authorization, provider_name))
+        // Refused for a provider TerminalX itself provides (PRO-452): no dialog opens and nothing is sent.
+        let summary = service.connectable_provider_summary(&authorization)?;
+        Ok::<_, crate::cloud_workspaces::CloudWorkspaceClientError>((authorization, summary))
     })
     .await
     .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::task_failed(crate::cloud_workspaces::RequestRisk::Read))??;
-    let text = provider_key_prompt(
-        &dialog_name(provider_name, provider.label()),
-        &dialog_name(state.account.organization_name(authorization.organization_id()), authorization.organization_id()),
-    );
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    app.run_on_main_thread(move || { let _ = sender.send(secure_prompt("Provider connection", &text, "Provider key")); })
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
-    let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
-        .await
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
-        .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
-    let credential = prompt_result.map_err(ProviderPromptError::client_error)?;
+    // What to call the provider and what to ask for come from its descriptor
+    // (PRO-415); the provider's id stands in for a name the list does not give.
+    let provider_name = dialog_name(summary.as_ref().map(|summary| summary.label()), authorization.provider().as_str());
+    let organization = dialog_name(state.account.organization_name(authorization.organization_id()), authorization.organization_id());
+    let fields = summary.map(|summary| summary.credential_fields()).unwrap_or_else(|| {
+        vec![crate::cloud_workspaces::CloudProviderCredentialField { name: "credential".into(), kind: "secret".into(), label: "provider key".into(), help_url: None }]
+    });
+    let only = fields.len() == 1;
+    let mut values = Vec::with_capacity(fields.len());
+    for field in fields {
+        let text = credential_field_prompt(&provider_name, &organization, &field, only);
+        let placeholder = if only { "Provider key".to_owned() } else { dialog_name(Some(field.label.clone()), "Provider key") };
+        let secret = field.secret();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        app.run_on_main_thread(move || { let _ = sender.send(field_prompt("Provider connection", &text, &placeholder, secret)); })
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+        let prompt_result = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?
+            .map_err(|_| crate::cloud_workspaces::CloudWorkspaceClientError::local("cloud_provider_secure_input_unavailable", false))?;
+        values.push((field.name, prompt_result.map_err(ProviderPromptError::client_error)?));
+    }
+    let credential = combined_credential(&values);
+    drop(values);
     let service = state.cloud_workspaces.clone();
     tauri::async_runtime::spawn_blocking(move || service.connect_authorized(authorization, input, credential))
         .await
@@ -623,6 +711,11 @@ pub async fn cloud_provider_connect(
 
 #[cfg(not(target_os = "macos"))]
 fn secure_prompt(_title: &str, _text: &str, _placeholder: &str) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
+    Err(ProviderPromptError::Unavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn field_prompt(_title: &str, _text: &str, _placeholder: &str, _secure: bool) -> Result<zeroize::Zeroizing<String>, ProviderPromptError> {
     Err(ProviderPromptError::Unavailable)
 }
 
@@ -1671,6 +1764,27 @@ pub async fn cloud_workspace_set_access(
 }
 
 #[tauri::command]
+pub async fn cloud_workspace_idle_suspend(
+    workspace_id: String,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::WorkspaceIdleSuspend, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Read, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .idle_suspend(org_id.as_deref(), &workspace_id))
+}
+
+#[tauri::command]
+pub async fn cloud_workspace_set_idle_suspend(
+    workspace_id: String,
+    idle_suspend_minutes: i64,
+    state: tauri::State<'_, crate::AppState>,
+    org_id: Option<String>,
+) -> Result<crate::cloud_workspaces::CloudWorkspace, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service
+        .set_idle_suspend(org_id.as_deref(), &workspace_id, idle_suspend_minutes))
+}
+
+#[tauri::command]
 pub async fn cloud_workspace_operation(
     operation_id: String,
     state: tauri::State<'_, crate::AppState>,
@@ -1831,7 +1945,7 @@ pub fn chats_dir() -> CmdResult<String> {
         log::warn!("write the chats' agent note: {error:#}");
     }
     // Canonical, as a session's project path is, so the sidebar can match them.
-    Ok(std::fs::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
+    Ok(crate::paths::canonicalize(&dir).unwrap_or(dir).to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -1910,6 +2024,7 @@ pub fn project_template_remove(id: String) -> StartResult<()> {
 #[tauri::command]
 pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::message_activity::backfill(std::sync::Arc::new(app));
+    crate::session_ops::backfill_checkout_identities();
     store::conversation_titles::backfill().map_err(err)
 }
 
@@ -1965,6 +2080,14 @@ pub async fn automation_issue_preview(project_path: String, repo: String, query:
         .map_err(err)?
 }
 
+/// What a Linear issue or pull request trigger would wake on now (PRO-485).
+#[tauri::command]
+pub async fn automation_source_preview(project_path: String, source: crate::automations::AutomationEventSource) -> CmdResult<Vec<crate::automations::SourceMatch>> {
+    github_work(move || crate::automations::source_preview(Path::new(&project_path), &source).map_err(err))
+        .await
+        .map_err(err)?
+}
+
 #[tauri::command]
 pub async fn automation_create(state: State<'_, AppState>, input: crate::automations::AutomationInput) -> CmdResult<crate::automations::Automation> {
     let sessions = state.sessions().map_err(err)?;
@@ -1981,6 +2104,14 @@ pub async fn automation_update(state: State<'_, AppState>, id: String, input: cr
 pub async fn automation_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let sessions = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || sessions.delete_automation(&id).map_err(err)).await.map_err(err)?
+}
+
+/// The editor's Try it for an automation's first check (PRO-484). The owner
+/// runs it, with the environment an automation session would get.
+#[tauri::command]
+pub async fn automation_precheck_try(state: State<'_, AppState>, input: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    let sessions = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.try_automation_precheck(input).map_err(err)).await.map_err(err)?
 }
 
 #[tauri::command]
@@ -2034,7 +2165,10 @@ pub async fn stats_usage_refresh(state: State<'_, AppState>, scope: String, gene
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 #[tauri::command]
-pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req: NewSession) -> CmdResult<SessionEntry> {
+pub async fn create_session(app: AppHandle, state: State<'_, AppState>, req: crate::session_ops::OnAccount<NewSession>) -> CmdResult<SessionEntry> {
+    // `account`: the agent account its first tab starts on (#980).
+    let crate::session_ops::OnAccount { mut req, account } = req;
+    let account = crate::session_ops::requested_account(account.as_deref())?;
     let privacy = crate::github_process::ticket();
     if !req.project_path.starts_with("cloud:") && crate::git::is_repo(std::path::Path::new(&req.project_path))
         && !crate::configuration_commands::review(&app, &req.project_path).await? {
@@ -2043,7 +2177,7 @@ pub async fn create_session(app: AppHandle, state: State<'_, AppState>, mut req:
     let sessions = state.sessions().map_err(err)?;
     github_work(move || crate::github_process::with_ticket(privacy, || {
         crate::session_ops::prefer_native_codex_session(&mut req);
-        sessions.create(&req).map_err(err)
+        sessions.create_on(&req, account.as_deref()).map_err(err)
     }))
         .await
         .map_err(err)?
@@ -2094,11 +2228,13 @@ fn announce_session(app: &AppHandle, session_id: &str) {
 }
 
 #[tauri::command]
-pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, mut tab: NewTab) -> CmdResult<TabEntry> {
+pub async fn add_tab(app: AppHandle, state: State<'_, AppState>, session_id: String, mut tab: NewTab, account: Option<String>) -> CmdResult<TabEntry> {
     let sessions = state.sessions().map_err(err)?;
+    // The agent account it starts on (#980); none: its session's.
+    let account = crate::session_ops::requested_account(account.as_deref())?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::session_ops::prefer_native_codex(&mut tab, false);
-        let tab = sessions.add_tab(&session_id, &tab).map_err(err)?;
+        let tab = sessions.add_tab_on(&session_id, &tab, account.as_deref()).map_err(err)?;
         announce_session(&app, &session_id);
         Ok(tab)
     }).await.map_err(err)?
@@ -2152,6 +2288,38 @@ pub async fn sidebar_order() -> CmdResult<index::SidebarOrder> {
 pub async fn set_sidebar_order(app: AppHandle, patch: index::SidebarOrderPatch) -> CmdResult<index::SidebarOrder> {
     let saved = tauri::async_runtime::spawn_blocking(move || index::set_sidebar_order(patch)).await.map_err(err)?.map_err(err)?;
     let _ = app.emit("sidebar_order_changed", &saved);
+    Ok(saved)
+}
+
+/// The cloud projects pinned on this computer, per organization (#1403).
+#[tauri::command]
+pub async fn cloud_pins() -> CmdResult<store::cloud_pins::CloudPins> {
+    tauri::async_runtime::spawn_blocking(store::cloud_pins::load).await.map_err(err)?.map_err(err)
+}
+
+/// A change to the cloud pins, told to every window and phone.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum CloudPinsEdit {
+    /// Pin or unpin one project.
+    Set { org_id: String, identity: String, pinned: bool },
+    /// The window's old preferences, moved here once.
+    Adopt { orgs: std::collections::BTreeMap<String, Vec<String>> },
+    /// Organizations the account is no longer a member of.
+    Forget { org_ids: Vec<String> },
+}
+
+#[tauri::command]
+pub async fn edit_cloud_pins(app: AppHandle, edit: CloudPinsEdit) -> CmdResult<store::cloud_pins::CloudPins> {
+    let saved = tauri::async_runtime::spawn_blocking(move || match edit {
+        CloudPinsEdit::Set { org_id, identity, pinned } => store::cloud_pins::set(&org_id, &identity, pinned),
+        CloudPinsEdit::Adopt { orgs } => store::cloud_pins::adopt(orgs),
+        CloudPinsEdit::Forget { org_ids } => store::cloud_pins::forget_orgs(&org_ids),
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    let _ = app.emit(store::cloud_pins::CHANGED, &saved);
     Ok(saved)
 }
 
@@ -2345,10 +2513,23 @@ pub fn set_active_tab(app: AppHandle, session_id: String, tab_id: String) -> Cmd
 /// Create a quick chat: a session with no project, in a scratch directory of
 /// its own (or in `req.cwd`, which does not become a project).
 #[tauri::command]
-pub async fn create_quick_chat(app: AppHandle, mut req: crate::session_ops::NewQuickChat) -> CmdResult<SessionEntry> {
+pub async fn create_quick_chat(app: AppHandle, req: crate::session_ops::OnAccount<crate::session_ops::NewQuickChat>) -> CmdResult<SessionEntry> {
+    // `account`: the agent account its first tab starts on (#980). The
+    // entry is written here; the runtime starts the tab, and one older than
+    // accounts starts it on This Mac's login, which the reply says.
+    let crate::session_ops::OnAccount { mut req, account } = req;
+    let account = crate::session_ops::requested_account(account.as_deref())?;
+    let older = match &account {
+        Some(_) => !app.state::<AppState>().sessions().and_then(|sessions| sessions.supports_accounts()).map_err(err)?,
+        None => false,
+    };
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(tab) = &mut req.tab { crate::session_ops::prefer_native_codex(tab, false) }
-        crate::session_ops::create_quick_chat_blocking(&app, req)
+        let mut entry = crate::session_ops::create_quick_chat_blocking_on(&app, req, if older { None } else { account.as_deref() })?;
+        if older {
+            for tab in &mut entry.tabs { tab.unknown.insert(crate::session_ops::TAB_ACCOUNT_FALLBACK.into(), serde_json::json!("olderRuntime")); }
+        }
+        Ok(entry)
     })
         .await
         .map_err(err)?
@@ -2443,6 +2624,12 @@ pub async fn check_agent_readiness(harness: String) -> CmdResult<harness::readin
     tauri::async_runtime::spawn_blocking(move || harness::readiness::check(&harness)).await.map_err(err)
 }
 
+/// The latest published release of an agent's CLI, or `None` when it cannot be told (PRO-377).
+#[tauri::command]
+pub async fn agent_latest_version(harness: String) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || harness::readiness::latest_version(&harness)).await.map_err(err)
+}
+
 // ------------------------------------------------------------------ skills
 
 #[tauri::command]
@@ -2457,6 +2644,26 @@ pub async fn skill_detail(dir_path: String) -> CmdResult<crate::skills::SkillDet
     tauri::async_runtime::spawn_blocking(move || crate::skills::detail(Path::new(&dir_path)).map_err(err))
         .await
         .map_err(err)?
+}
+
+/// MCP servers, slash commands and skills in Claude Code's and Codex's own
+/// homes, side by side (PRO-153).
+#[tauri::command]
+pub async fn agent_configs_compare() -> CmdResult<crate::agent_configs::Comparison> {
+    tauri::async_runtime::spawn_blocking(|| crate::agent_configs::compare().map_err(err)).await.map_err(err)?
+}
+
+/// What copying these items would write, before anything is.
+#[tauri::command]
+pub async fn agent_configs_preview(changes: Vec<crate::agent_configs::Change>) -> CmdResult<crate::agent_configs::Preview> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_configs::preview(&changes).map_err(err)).await.map_err(err)?
+}
+
+/// Write the previewed copies, backing each file up first. `token` is the
+/// preview's: anything else (the files changed since) is refused.
+#[tauri::command]
+pub async fn agent_configs_apply(changes: Vec<crate::agent_configs::Change>, token: String) -> CmdResult<Vec<crate::agent_configs::Written>> {
+    tauri::async_runtime::spawn_blocking(move || crate::agent_configs::apply(&changes, &token).map_err(err)).await.map_err(err)?
 }
 
 // ------------------------------------------------------------------ git
@@ -2535,125 +2742,50 @@ pub async fn relocate_session(app: AppHandle, session_id: String) -> CmdResult<S
 /// provider conversation forked on the first send.
 #[tauri::command]
 pub async fn fork_session(app: AppHandle, session_id: String, tab_id: String) -> CmdResult<SessionEntry> {
-    github_work(move || {
-        let src = index::get(&session_id).map_err(err)?;
-        let tab = src.tab(&tab_id).cloned().ok_or("no such tab")?;
-        let project_path = Path::new(&src.project_path);
-        let id = uuid::Uuid::now_v7().to_string();
-        let now = index::now();
-        let mut new_tab = tab.clone();
-        new_tab.id = uuid::Uuid::now_v7().to_string();
-        new_tab.status = TabStatus::Idle;
-        new_tab.created = now.clone();
-        new_tab.modified = now.clone();
-        // Claude can fork a conversation; Codex starts a new thread over the copied log.
-        new_tab.fork_from = if tab.harness == "claude" { tab.provider_session_id.clone() } else { None };
-        new_tab.provider_session_id = None;
-        for key in ["resetLogId", "resetBackupId", "resetSeq"] { new_tab.unknown.remove(key); }
-        // A quick chat's fork is a quick chat with a scratch directory of its
-        // own: sharing the parent's would have either one's deletion take the
-        // other's files. What the parent had there is copied, since the
-        // conversation refers to it.
-        let scratch = if src.is_quick() { Some(store::quick::create(&id).map_err(err)?) } else { None };
-        let in_scratch = src.is_quick() && store::quick::is_scratch(&src.id, &src.cwd);
-        if let (Some(scratch), true) = (&scratch, in_scratch) {
-            let _ = copy_dir(Path::new(&src.cwd), Path::new(scratch));
-            // The fork's CLI reopens the parent conversation from the new
-            // directory, and Claude Code looks for it under that directory's name.
-            if let (Some(parent), Some(projects)) = (new_tab.fork_from.as_deref(), crate::agent_data::claude_projects_root()) {
-                let _ = crate::harness::claude::transcript::rehome_in(&projects, &src.cwd, scratch, parent, true);
-            }
-        }
-        let mut entry = SessionEntry {
-            id: id.clone(),
-            kind: src.kind,
-            project_path: scratch.clone().unwrap_or_else(|| src.project_path.clone()),
-            cwd: if in_scratch { scratch.clone().unwrap_or_else(|| src.cwd.clone()) } else { src.cwd.clone() },
-            worktree_name: None,
-            branch: src.branch.clone(),
-            base_ref: None,
-            worktree_base: None,
-            worktree_removed: false,
-            removed_workspace: None,
-            issue: src.issue.clone(),
-            issue_work: src.issue_work.clone(),
-            automation: src.automation.clone(),
-            title: format!("{} (fork)", src.title),
-            created: now.clone(),
-            modified: now,
-            archived: false,
-            archive: Default::default(),
-            pinned: false,
-            manual_status: Default::default(),
-            tabs: vec![new_tab.clone()],
-            active_tab: Some(new_tab.id.clone()),
-            link: None,
-            parent: None,
-            unknown: BTreeMap::new(),
-        };
-        if src.worktree_name.is_some() && !src.worktree_removed {
-            let taken = index::load().map(|s| index::claimed_worktree_names(&s)).unwrap_or_default();
-            let taken = git::taken_worktree_names(project_path, &taken);
-            let name = names::unclaimed(&taken);
-            let wt = git::create_worktree(project_path, &name, src.branch.as_deref()).map_err(err)?;
-            entry.cwd = wt.path;
-            entry.worktree_name = Some(wt.name);
-            entry.branch = Some(wt.branch);
-            entry.base_ref = Some(wt.base_tree);
-            entry.worktree_base = wt.worktree_base;
-        }
-        // Copy the log, re-stamping envelopes so the new tab owns them.
-        if let Ok(dir) = store::sessions_dir() {
-            let from = store::log_path(&src.id, &tab.id).map_err(err)?;
-            if let Ok(text) = std::fs::read_to_string(&from) {
-                let to_dir = dir.join(&id);
-                let _ = std::fs::create_dir_all(&to_dir);
-                let mut out = String::with_capacity(text.len());
-                for line in text.lines() {
-                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
-                        v["sessionId"] = serde_json::Value::String(id.clone());
-                        v["tabId"] = serde_json::Value::String(new_tab.id.clone());
-                        out.push_str(&v.to_string());
-                        out.push('\n');
-                    }
-                }
-                let _ = std::fs::write(to_dir.join(format!("{}.jsonl", new_tab.id)), out);
-            }
-        }
-        if let Ok(root) = store::root() {
-            let from = root.join("attachments").join(&src.id);
-            if from.is_dir() {
-                let to = root.join("attachments").join(&id);
-                let _ = copy_dir(&from, &to);
-            }
-        }
-        index::update(|sessions| {
-            sessions.push(entry.clone());
-            Ok(())
-        })
-        .map_err(err)?;
-        let _ = app.emit("session_created", &entry);
-        // A fork with a worktree always creates it above; other forks share a checkout.
-        if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
-        Ok(entry)
+    github_work(move || fork_into_session(&app, &session_id, &tab_id, None).map(|(entry, _)| entry))
+    .await
+    .map_err(err)?
+}
+
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkedTurn {
+    pub session: SessionEntry,
+    pub tab_id: String,
+    /// Said beside the fork when it went differently from what was asked: files left as they were.
+    pub note: Option<String>,
+}
+
+/// Fork a tab's conversation as it stood at the end of the turn `end_seq`
+/// (PRO-379): later turns stay with the source only.
+#[tauri::command]
+pub async fn fork_turn(app: AppHandle, session_id: String, tab_id: String, end_seq: u64, into: ForkInto) -> CmdResult<ForkedTurn> {
+    github_work(move || match into {
+        ForkInto::Session => fork_into_session(&app, &session_id, &tab_id, Some(end_seq))
+            .map(|(session, note)| ForkedTurn { tab_id: session.active_tab.clone().unwrap_or_default(), session, note }),
+        ForkInto::Tab => fork_into_tab(&app, &session_id, &tab_id, end_seq),
     })
     .await
     .map_err(err)?
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for e in std::fs::read_dir(from)? {
-        let e = e?;
-        let dest = to.join(e.file_name());
-        if e.file_type()?.is_dir() {
-            copy_dir(&e.path(), &dest)?;
-        } else {
-            std::fs::copy(e.path(), dest)?;
-        }
-    }
-    Ok(())
+fn fork_into_tab(app: &AppHandle, session_id: &str, tab_id: &str, end_seq: u64) -> Result<ForkedTurn, String> {
+    let (session, tab_id) = crate::session_fork::fork_into_tab_contents(session_id, tab_id, end_seq)?;
+    announce_session(app, session_id);
+    announce_tabs(app);
+    Ok(ForkedTurn { session, tab_id, note: None })
 }
+
+/// Fork a tab into a new session; `at` cuts its conversation at a turn and
+/// puts the new worktree's files at that turn's end where they were kept.
+fn fork_into_session(app: &AppHandle, session_id: &str, tab_id: &str, at: Option<u64>) -> Result<(SessionEntry, Option<String>), String> {
+    let (entry, note) = fork_session_contents(session_id, tab_id, at)?;
+    let _ = app.emit("session_created", &entry);
+    if entry.worktree_name.is_some() { let _ = app.emit(crate::workspace_setup::CREATED_EVENT, &entry); }
+    Ok((entry, note))
+}
+
 
 #[tauri::command]
 pub async fn snapshot_tree(cwd: String) -> CmdResult<String> {
@@ -2688,6 +2820,8 @@ pub async fn changes_between(cwd: String, base: String, head: Option<String>, hi
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePair {
+    pub before_size: Option<u64>,
+    pub after_size: Option<u64>,
     pub before: Option<String>,
     pub after: Option<String>,
 }
@@ -2701,12 +2835,12 @@ pub async fn diff_media_content(cwd: String, path: String, tree: Option<String>)
 pub async fn file_contents_at(cwd: String, path: String, base: String, head: Option<String>) -> CmdResult<FilePair> {
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&cwd);
-        let before = git::blob_at(p, &base, &path).map_err(err)?;
-        let after = match head {
-            Some(h) => git::blob_at(p, &h, &path).map_err(err)?,
-            None => git::working_file(p, &path),
+        let (before, before_size) = git::blob_text_at(p, &base, &path, 4 * 1024 * 1024).map_err(err)?;
+        let (after, after_size) = match head {
+            Some(h) => git::blob_text_at(p, &h, &path, 4 * 1024 * 1024).map_err(err)?,
+            None => git::working_file_with_size(p, &path),
         };
-        Ok(FilePair { before, after })
+        Ok(FilePair { before, after, before_size, after_size })
     })
     .await
     .map_err(err)?
@@ -2726,10 +2860,10 @@ use crate::AppState;
 use tauri::State;
 
 #[tauri::command]
-pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<crate::continuation::Context> {
+pub async fn prepare_continuation(state: State<'_, AppState>, session_id: String, tab_id: String, portable: Option<bool>) -> CmdResult<crate::continuation::Context> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
-        m.prepare_continuation(&session_id, &tab_id).map_err(err)
+        m.prepare_continuation(&session_id, &tab_id, portable == Some(true)).map_err(err)
     }).await.map_err(err)?
 }
 
@@ -2778,6 +2912,7 @@ pub async fn send_message(
     confirm_delivery: Option<bool>,
     pressed_at: Option<i64>,
     files: Option<Vec<crate::events::FileRef>>,
+    prompt_request_id: Option<uuid::Uuid>,
 ) -> CmdResult<SendOutcome> {
     let m = state.sessions().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -2786,7 +2921,7 @@ pub async fn send_message(
             if !files.is_empty() { return Err(err("A handoff cannot carry attached files.")); }
             m.send_confirmed(&session_id, &tab_id, text).map_err(err)
         } else {
-            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files).map_err(err)
+            m.send_pressed(&session_id, &tab_id, text, images.unwrap_or_default(), pressed_at, files, prompt_request_id).map_err(err)
         }
     })
         .await
@@ -2805,6 +2940,13 @@ pub async fn store_attachments(session_id: String, files: Vec<crate::attachments
 #[tauri::command]
 pub async fn inspect_attachments(paths: Vec<String>) -> CmdResult<Vec<crate::attachments::FileFacts>> {
     tauri::async_runtime::spawn_blocking(move || Ok(crate::attachments::inspect(&paths))).await.map_err(err)?
+}
+
+/// One part of a file attached to a message for a machine (PRO-407), read
+/// here so only its bytes are uploaded, never its path.
+#[tauri::command]
+pub async fn read_attachment_part(path: String, offset: u64) -> CmdResult<crate::attachments::FilePart> {
+    tauri::async_runtime::spawn_blocking(move || crate::attachments::read_part(&path, offset).map_err(err)).await.map_err(err)?
 }
 
 /// A file tab's Download: a copy of a stored attachment, written where the
@@ -2967,6 +3109,14 @@ pub async fn answer_questions(
     tauri::async_runtime::spawn_blocking(move || m.answer_questions(&session_id, &tab_id, &request_id, answers).map_err(err)).await.map_err(err)?
 }
 
+/// Answer a question the agent's CLI drew in its own terminal (PRO-460):
+/// option `choice`, or with none, dismiss it as its Escape does.
+#[tauri::command]
+pub async fn answer_terminal_prompt(state: State<'_, AppState>, session_id: String, tab_id: String, prompt_id: String, choice: Option<usize>) -> CmdResult<()> {
+    let m = state.sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || m.answer_terminal_prompt(&session_id, &tab_id, &prompt_id, choice).map_err(err)).await.map_err(err)?
+}
+
 #[tauri::command]
 pub async fn set_tab_model(state: State<'_, AppState>, session_id: String, tab_id: String, model: String) -> CmdResult<()> {
     let m = state.sessions().map_err(err)?;
@@ -3015,7 +3165,10 @@ pub async fn list_models(state: State<'_, AppState>, refresh: Option<bool>) -> C
     // Each asks its own CLI; neither waits on the other.
     let claude = tauri::async_runtime::spawn_blocking(move || crate::harness::claude::models::get(refresh));
     let codex = tauri::async_runtime::spawn_blocking(move || cache.get(refresh));
-    Ok(crate::models::offered(claude.await.map_err(err)?, codex.await.map_err(err)?))
+    let (claude, codex) = (claude.await.map_err(err)?, codex.await.map_err(err)?);
+    // Reads settings and OpenCode's files (whose key file is retried while
+    // OpenCode rewrites it), so off the async workers too.
+    tauri::async_runtime::spawn_blocking(move || crate::models::offered(claude, codex)).await.map_err(err)
 }
 
 #[tauri::command]
@@ -3199,8 +3352,8 @@ pub async fn read_image_file(path: String) -> CmdResult<Option<ImageFile>> {
 // ------------------------------------------------------------------ git actions & PRs
 
 fn branch_neighbors(session: &index::SessionEntry) -> anyhow::Result<Vec<index::SessionEntry>> {
-    let cwd = std::fs::canonicalize(&session.cwd)?;
-    Ok(index::load()?.into_iter().filter(|neighbor| std::fs::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
+    let cwd = crate::paths::canonicalize(&session.cwd)?;
+    Ok(index::load()?.into_iter().filter(|neighbor| crate::paths::canonicalize(&neighbor.cwd).ok().as_ref() == Some(&cwd)).collect())
 }
 
 fn neighbors_working(sessions: &crate::local_runtime::sessions::Sessions, neighbors: &[index::SessionEntry]) -> anyhow::Result<bool> {
@@ -3675,6 +3828,11 @@ pub async fn pr_merge(cwd: String, number: u64, method: String, url: Option<Stri
 }
 
 #[tauri::command]
+pub async fn pr_delete_branch(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
+    github_work(move || crate::github::delete_merged_branch(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
 pub async fn pr_ready(cwd: String, number: u64, url: Option<String>) -> CmdResult<()> {
     github_work(move || crate::github::ready_associated_pr(Path::new(&cwd), number, url.as_deref()).map_err(err)).await.map_err(err)?
 }
@@ -3730,10 +3888,31 @@ pub async fn pane_agents(state: State<'_, AppState>) -> CmdResult<Vec<crate::ses
 
 /// Start a tab's agent again on one of the tab's conversations (#437): the
 /// one it holds, or one it held before another agent was run in its terminal.
+///
+/// `account` (#980): on that agent account instead — "Switch account" on a
+/// tab, "Continue with …" at a usage limit. A running agent is restarted on
+/// it and resumes the conversation it holds; one that is not running starts
+/// on it with `provider_session_id`. The account stays the tab's.
 #[tauri::command]
-pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String) -> CmdResult<()> {
+pub async fn tab_resume_conversation(app: AppHandle, session_id: String, tab_id: String, harness: String, provider_session_id: String, account: Option<String>) -> CmdResult<()> {
     let manager = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)).await.map_err(err)?
+    let account = crate::session_ops::requested_account(account.as_deref())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(account) = account.as_deref() {
+            if manager.switch_account(&session_id, &tab_id, account).map_err(err)? {
+                return Ok(());
+            }
+        }
+        manager.resume_conversation(&session_id, &tab_id, &harness, &provider_session_id).map_err(err)
+    }).await.map_err(err)?
+}
+
+/// The person is typing in a tab's composer (#981): automatic account
+/// switching leaves the tab alone meanwhile. Best effort.
+#[tauri::command]
+pub async fn tab_note_typing(state: State<'_, AppState>, session_id: String, tab_id: String) -> CmdResult<()> {
+    let Ok(sessions) = state.sessions() else { return Ok(()) };
+    tauri::async_runtime::spawn_blocking(move || sessions.note_typing(&session_id, &tab_id)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -4003,6 +4182,12 @@ pub async fn read_text_file(path: String) -> CmdResult<crate::files::TextFile> {
 #[tauri::command]
 pub async fn write_text_file(path: String, content: String) -> CmdResult<u64> {
     tauri::async_runtime::spawn_blocking(move || crate::files::write_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
+}
+
+/// Exclusive create: refused when the path already exists.
+#[tauri::command]
+pub async fn create_text_file(path: String, content: String) -> CmdResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || crate::files::create_text(Path::new(&path), &content)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -4443,6 +4628,660 @@ pub async fn issue_pipeline_merge_cloud(
 
 #[cfg(test)]
 mod command_tests {
+    use crate::paths::Canonical;
+    #[test]
+    fn turn_fork_preserves_subdirectory_or_reports_root_fallback() {
+        use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        git::run(root, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(root, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(root, &["config", "user.name", "Test"]).unwrap();
+        std::fs::create_dir(root.join("kept")).unwrap();
+        std::fs::write(root.join("kept/file"), "initial\n").unwrap();
+        git::run(root, &["add", "."]).unwrap();
+        git::run(root, &["commit", "-qm", "initial"]).unwrap();
+        let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+            cwd: Some(root.join("kept").to_str().unwrap().into()),
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            ..Default::default()
+        }).unwrap();
+        src.kind = SessionKind::Project;
+        src.project_path = root.to_str().unwrap().into();
+        store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
+        let tab = src.tabs[0].clone();
+        let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+        crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
+        std::fs::write(root.join("kept/file"), "turn end\n").unwrap();
+        let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
+        crate::checkpoints::observe(&src.id, &tab.id, 2, &mut done).unwrap();
+        std::fs::write(root.join("kept/file"), "source later\n").unwrap();
+        let mut dest = src.clone();
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2), &mut allocation).unwrap().is_none());
+        assert_eq!(std::path::Path::new(&dest.cwd).file_name().unwrap(), "kept");
+        assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("file")).unwrap(), "turn end\n");
+        let fork_root = std::path::Path::new(&dest.cwd).parent().unwrap().to_path_buf();
+        dest.id = "fork-subdirectory-test".into();
+        let mut companion = dest.clone();
+        companion.id = "fork-root-companion-test".into();
+        companion.cwd = fork_root.to_string_lossy().into_owned();
+        store::index::save(&[src.clone(), dest.clone(), companion.clone()]).unwrap();
+        allocation.commit();
+        assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
+        assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
+        let sink = crate::sink::BroadcastSink::new(16);
+        std::fs::remove_dir_all(&dest.cwd).unwrap();
+        assert_eq!(session_ops::sessions_sharing_worktree(&dest.id).unwrap()[0].id, companion.id);
+        assert_eq!(session_ops::sole_workspace_of(&dest.id).unwrap(), None);
+        session_ops::delete_session_blocking(&sink, &companion.id, &|_| {}).unwrap();
+        let path = session_ops::sole_workspace_of(&dest.id).unwrap().unwrap();
+        assert_eq!(std::path::Path::new(&path), fork_root);
+        let request = session_ops::WorkspaceRemoval {
+            project_path: &dest.project_path, path: &path, sessions: session_ops::SessionsFate::Delete,
+            delete_branch: true, confirmation: session_ops::Confirmation::Forced, expected_sessions: None,
+            direct: git::DirectDelete::Allowed, fetch: crate::landed::Fetch::Skip,
+            guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
+        };
+        session_ops::remove_workspace(&sink, &request, &|_| {}).unwrap();
+        assert!(!fork_root.exists());
+        assert!(store::index::get(&dest.id).is_err());
+
+        std::fs::create_dir(root.join("later")).unwrap();
+        std::fs::write(root.join("later/file"), "source only\n").unwrap();
+        src.cwd = root.join("later").to_str().unwrap().into();
+        store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
+        let mut dest = src.clone();
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        let note = super::fork_workspace(&src, &tab, &mut dest, Some(2), &mut allocation).unwrap().unwrap();
+        assert!(note.contains("later") && note.contains("root"), "{note}");
+        assert!(!std::path::Path::new(&dest.cwd).join("later").exists());
+        assert_eq!(std::fs::read_to_string(root.join("kept/file")).unwrap(), "source later\n");
+        assert_eq!(std::fs::read_to_string(root.join("later/file")).unwrap(), "source only\n");
+        assert_eq!(allocation.rollback("failed".into()), "failed");
+    }
+
+    #[test]
+    fn turn_fork_isolates_main_and_worktree_sources_and_restores_checkpoint() {
+        use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let p = repo.path();
+        git::run(p, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(p, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(p, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(p.join("a.txt"), "initial\n").unwrap();
+        git::run(p, &["add", "a.txt"]).unwrap();
+        git::run(p, &["commit", "-qm", "initial"]).unwrap();
+        for worktree in [false, true] {
+            let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+                cwd: Some(p.to_str().unwrap().into()),
+                tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+                ..Default::default()
+            }).unwrap();
+            src.kind = SessionKind::Project;
+            src.project_path = p.to_str().unwrap().into();
+            if worktree {
+                let wt = git::create_worktree(p, "source", Some("main")).unwrap();
+                src.cwd = wt.path;
+                src.worktree_name = Some(wt.name);
+                src.branch = Some(wt.branch);
+            }
+            let tab = src.tabs[0].clone();
+            store::index::update_session(&src.id, |session| { *session = src.clone(); Ok(()) }).unwrap();
+            let cwd = std::path::Path::new(&src.cwd);
+            let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+            crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
+            std::fs::write(cwd.join("a.txt"), "staged\n").unwrap();
+            git::run(cwd, &["add", "a.txt"]).unwrap();
+            std::fs::write(cwd.join("a.txt"), "turn end\n").unwrap();
+            let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
+            crate::checkpoints::observe(&src.id, &tab.id, 2, &mut done).unwrap();
+            std::fs::write(cwd.join("a.txt"), "source later\n").unwrap();
+            let status = git::run(cwd, &["status", "--porcelain"]).unwrap();
+            let mut dest = src.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&src, &tab, &mut dest, Some(2), &mut allocation).unwrap().is_none());
+            assert_ne!(dest.cwd, src.cwd);
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("a.txt")).unwrap(), "turn end\n");
+            assert_eq!(git::run(std::path::Path::new(&dest.cwd), &["show", ":a.txt"]).unwrap(), "staged\n");
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
+            let mut missing = src.clone();
+            missing.worktree_name = None;
+            let mut missing_allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&src, &tab, &mut missing, Some(0), &mut missing_allocation).unwrap().unwrap();
+            assert!(note.contains("no saved file checkpoint"), "{note}");
+            assert_ne!(missing.cwd, src.cwd);
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            let dest_branch = dest.branch.clone().unwrap();
+            assert_eq!(allocation.rollback("persistence failed".into()), "persistence failed");
+            assert!(!std::path::Path::new(&dest.cwd).exists());
+            assert!(!git::run(cwd, &["branch", "--list", &dest_branch]).unwrap().contains(&dest_branch));
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
+            assert_eq!(missing_allocation.rollback("persistence failed".into()), "persistence failed");
+            assert!(!std::path::Path::new(&missing.cwd).exists());
+            let mut published = src.clone();
+            published.worktree_name = None;
+            let mut published_allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&src, &tab, &mut published, Some(2), &mut published_allocation).unwrap().is_none());
+            published_allocation.commit();
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&published.cwd).join("a.txt")).unwrap(), "turn end\n");
+            assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "source later\n");
+            assert_eq!(git::run(cwd, &["status", "--porcelain"]).unwrap(), status);
+            if !worktree {
+                assert_eq!(published.worktree_base.as_ref().unwrap().from.as_deref(), Some("main"));
+                let next = git::run(cwd, &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "advance"]).unwrap();
+                git::run(cwd, &["update-ref", "refs/heads/main", next.trim()]).unwrap();
+                let incoming = git::run(std::path::Path::new(&published.cwd), &["rev-list", "--count", "HEAD..main"]).unwrap();
+                assert_eq!(incoming.trim(), "1");
+                git::run(cwd, &["reset", "--hard", "HEAD"]).unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normally_created_worktree_requires_persisted_identity_when_checkpoint_free() {
+        use crate::{git, session_ops, store};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::paths::canonicalize(repo.path()).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial", "--allow-empty"]).unwrap();
+
+        let session = session_ops::create_session_entry(session_ops::NewSession {
+            project_path: project.to_str().unwrap().into(),
+            use_worktree: true,
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            parent: None, section_id: None, title: None, base_ref: None, worktree_name: None,
+            checkout_branch: None, checkout_pr: None, on_main: false, issue: None, automation: None,
+            cwd: None, orchestrate: false,
+        }).unwrap();
+        let saved = store::index::get(&session.id).unwrap();
+        let checkout = std::path::Path::new(&saved.cwd);
+        let branch = saved.branch.as_deref().unwrap();
+        let created: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339(&saved.created).unwrap().into();
+        assert!(std::fs::metadata(checkout).unwrap().created().unwrap() > created);
+        assert!(saved.checkout_identity().is_some());
+        assert_eq!(saved.checkout_root(), Some(saved.cwd.as_str()));
+        let mut legacy = saved.clone();
+        legacy.unknown.remove("checkoutIdentity");
+        store::index::save(&[legacy.clone()]).unwrap();
+        let legacy = store::index::get(&session.id).unwrap();
+        assert!(legacy.checkout_identity().is_none());
+        std::fs::remove_dir_all(checkout).unwrap();
+        let registered = git::list_worktrees(&project).unwrap();
+        assert!(registered.contains(&(saved.cwd.clone(), Some(branch.into()))));
+
+        for at in [None, Some(1)] {
+            let mut dest = legacy.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let error = super::fork_workspace(&legacy, &legacy.tabs[0], &mut dest, at, &mut allocation).unwrap_err();
+            assert!(error.contains("no saved evidence"), "{error}");
+            assert_eq!(allocation.rollback(error.clone()), error);
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+        }
+
+        store::index::save(std::slice::from_ref(&saved)).unwrap();
+        for at in [None, Some(1)] {
+            let mut dest = saved.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&saved, &saved.tabs[0], &mut dest, at, &mut allocation).unwrap();
+            assert_eq!(note.as_deref().is_some_and(|note| note.contains("no saved file checkpoint")), at.is_some());
+            assert_ne!(dest.cwd, saved.cwd);
+            assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            assert!(!checkout.exists());
+        }
+    }
+
+    /// #1228: an older session saved without `checkoutIdentity` and with no
+    /// checkpoint has it recorded while its checkout is still here, so a fork
+    /// after its subfolder or its whole worktree disappears uses the stored
+    /// branch; a turn fork says no checkpoint was saved. A session that does
+    /// not match its checkout gets nothing recorded and is still refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkpoint_free_older_session_forks_once_its_checkout_was_recorded() {
+        use crate::{git, session_ops, store};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::paths::canonicalize(repo.path()).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::create_dir(project.join("sub")).unwrap();
+        std::fs::write(project.join("sub/file"), "committed").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"]).unwrap();
+        let session = session_ops::create_session_entry(session_ops::NewSession {
+            project_path: project.to_str().unwrap().into(),
+            use_worktree: true,
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            parent: None, section_id: None, title: None, base_ref: None, worktree_name: None,
+            checkout_branch: None, checkout_pr: None, on_main: false, issue: None, automation: None,
+            cwd: None, orchestrate: false,
+        }).unwrap();
+        let saved = store::index::get(&session.id).unwrap();
+        let checkout = std::path::PathBuf::from(&saved.cwd);
+        let branch = saved.branch.clone().unwrap();
+        let head = git::run(&project, &["rev-parse", &format!("refs/heads/{branch}")]).unwrap();
+        // As an older build saved it: working in a subfolder, no identity, no checkpoint.
+        let mut legacy = saved.clone();
+        legacy.unknown.remove("checkoutIdentity");
+        legacy.cwd = checkout.join("sub").to_string_lossy().into_owned();
+        let mut mismatched = legacy.clone();
+        mismatched.id = uuid::Uuid::now_v7().to_string();
+        mismatched.branch = Some("someone-else".into());
+        store::index::save(&[legacy.clone(), mismatched.clone()]).unwrap();
+
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 1);
+        let recorded = store::index::get(&legacy.id).unwrap();
+        assert!(recorded.checkout_identity().is_some());
+        assert_eq!(recorded.checkout_root(), Some(saved.cwd.as_str()));
+        assert_eq!(recorded.cwd, legacy.cwd);
+        assert!(store::index::get(&mismatched.id).unwrap().checkout_identity().is_none(), "a checkout on another branch is not its evidence");
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 0, "recorded once");
+
+        for remove_checkout in [false, true] {
+            if remove_checkout {
+                std::fs::remove_dir_all(&checkout).unwrap();
+            } else {
+                std::fs::remove_dir_all(checkout.join("sub")).unwrap();
+            }
+            let registered = git::list_worktrees(&project).unwrap();
+            for at in [None, Some(1)] {
+                let mut dest = recorded.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                let note = super::fork_workspace(&recorded, &recorded.tabs[0], &mut dest, at, &mut allocation).unwrap();
+                assert_eq!(note.as_deref().is_some_and(|note| note.contains("no saved file checkpoint")), at.is_some(), "{note:?}");
+                let dest_root = std::path::PathBuf::from(dest.checkout_root().unwrap());
+                assert_ne!(dest_root, checkout);
+                assert!(!dest_root.starts_with(&checkout));
+                assert_eq!(std::path::Path::new(&dest.cwd), dest_root.join("sub"));
+                assert_eq!(std::fs::read_to_string(dest_root.join("sub/file")).unwrap(), "committed");
+                assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+                assert!(!dest_root.exists());
+                assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            }
+            let mut dest = mismatched.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&mismatched, &mismatched.tabs[0], &mut dest, None, &mut allocation).is_err());
+            assert_eq!(allocation.rollback("refused".into()), "refused");
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            assert_eq!(git::run(&project, &["rev-parse", &format!("refs/heads/{branch}")]).unwrap(), head);
+            assert_eq!(remove_checkout, !checkout.exists());
+        }
+        // A checkout already gone records nothing.
+        let mut gone = legacy.clone();
+        gone.id = uuid::Uuid::now_v7().to_string();
+        store::index::save(&[gone.clone()]).unwrap();
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 0);
+        assert!(store::index::get(&gone.id).unwrap().checkout_identity().is_none());
+        assert_eq!(std::fs::read_to_string(project.join("sub/file")).unwrap(), "committed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forks_recover_missing_cwd_from_original_worktree_registration() {
+        check_missing_cwd_recovery(false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forks_recover_missing_cwd_with_relative_worktree_links() {
+        check_missing_cwd_recovery(true);
+    }
+
+    #[cfg(unix)]
+    fn check_missing_cwd_recovery(relative_links: bool) {
+        use crate::{events::{Payload, TurnStatus}, git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let root = crate::paths::canonicalize(repo.path()).unwrap();
+        git::run(&root, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&root, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&root, &["config", "user.name", "Test"]).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/file"), "main").unwrap();
+        git::run(&root, &["add", "."]).unwrap();
+        git::run(&root, &["commit", "-qm", "initial"]).unwrap();
+        git::run(&root, &["config", "worktree.useRelativePaths", if relative_links { "true" } else { "false" }]).unwrap();
+        let wt = git::create_worktree(&root, "registered-source", Some("main")).unwrap();
+        let checkout = std::path::Path::new(&wt.path);
+        std::fs::write(checkout.join("sub/file"), "source branch").unwrap();
+        git::run(checkout, &["commit", "-qam", "source change"]).unwrap();
+        let head = git::run(checkout, &["rev-parse", "HEAD"]).unwrap();
+        let sub = checkout.join("sub");
+        let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+            cwd: Some(sub.to_str().unwrap().into()),
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            ..Default::default()
+        }).unwrap();
+        src.kind = SessionKind::Project;
+        src.project_path = root.to_str().unwrap().into();
+        src.worktree_name = Some(wt.name);
+        src.branch = Some(wt.branch.clone());
+        src.set_checkout_root(Some(&wt.path));
+        let mut no_checkpoint = src.clone();
+        no_checkpoint.id = uuid::Uuid::now_v7().to_string();
+        // The session creation timestamp precedes allocation for sessions that
+        // created their worktree. Those need a later historical observation.
+        src.created = "2000-01-01T00:00:00Z".into();
+        store::index::save(&[src.clone(), no_checkpoint.clone()]).unwrap();
+        let legacy = store::index::get(&src.id).unwrap();
+        assert!(legacy.checkout_identity().is_none());
+        src.bind_checkout_root(&wt.path);
+        assert!(src.checkout_identity().is_some());
+        let tab = &src.tabs[0];
+        let mut prompt = Payload::UserMessage { author: None, text: "Change it".into(), images: vec![], files: vec![], baseline: None, queued: false, cwd: None };
+        crate::checkpoints::observe(&src.id, &tab.id, 1, &mut prompt).unwrap();
+        std::fs::write(sub.join("file"), "turn end").unwrap();
+        let mut done = Payload::TurnCompleted { status: TurnStatus::Ok, final_text: None, usage: None, duration_ms: None, head: None, auth_failed: false, detail: None };
+        crate::checkpoints::observe(&src.id, &tab.id, 2, &mut done).unwrap();
+
+        let mut empty_cwd = src.clone();
+        let empty = checkout.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        empty_cwd.cwd = empty.to_str().unwrap().into();
+        std::fs::remove_dir(&empty).unwrap();
+        let mut dest = empty_cwd.clone();
+        dest.worktree_name = None;
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        let note = super::fork_workspace(&empty_cwd, &empty_cwd.tabs[0], &mut dest, Some(0), &mut allocation).unwrap().unwrap();
+        assert!(note.contains("no saved file checkpoint") && note.contains("empty") && note.contains("starts at its root"), "{note}");
+        assert_eq!(dest.checkout_root(), Some(dest.cwd.as_str()));
+        assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+
+        std::fs::remove_dir_all(&sub).unwrap();
+        std::fs::write(checkout.join("private"), "source only").unwrap();
+        let alias = checkout.join("alias");
+        std::os::unix::fs::symlink(root.join("absent"), &alias).unwrap();
+        let mut aliased = src.clone();
+        aliased.cwd = alias.join("sub").to_str().unwrap().into();
+        let mut dest = aliased.clone();
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        assert!(super::fork_workspace(&aliased, &aliased.tabs[0], &mut dest, None, &mut allocation).is_err());
+        assert_eq!(allocation.rollback("refused".into()), "refused");
+        for remove_checkout in [false, true] {
+            if remove_checkout {
+                std::fs::remove_dir_all(checkout).unwrap();
+            }
+            let registered = git::list_worktrees(&root).unwrap();
+            assert!(registered.contains(&(wt.path.clone(), Some(wt.branch.clone()))));
+            let mut forks = Vec::new();
+            let mut no_root_record = legacy.clone();
+            no_root_record.set_checkout_root(None);
+            for (source, at) in [&src, &legacy, &no_root_record].into_iter()
+                .flat_map(|source| [None, Some(0), Some(2)].map(|at| (source, at)))
+                .chain([(&no_checkpoint, None), (&no_checkpoint, Some(0))])
+            {
+                let mut dest = source.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                let note = super::fork_workspace(source, tab, &mut dest, at, &mut allocation).unwrap();
+                if at == Some(0) {
+                    assert!(note.unwrap().contains("no saved file checkpoint"));
+                } else {
+                    assert!(note.is_none());
+                }
+                let dest_root = std::path::Path::new(dest.checkout_root().unwrap());
+                assert_ne!(dest_root, checkout);
+                assert_ne!(dest_root, root);
+                assert_eq!(std::path::Path::new(&dest.cwd), dest_root.join("sub"));
+                let contents = if at == Some(2) { "turn end" } else { "source branch" };
+                assert_eq!(std::fs::read_to_string(dest_root.join("sub/file")).unwrap(), contents);
+                assert!(!dest_root.join("private").exists());
+                assert_eq!(git::run(dest_root, &["rev-parse", "HEAD"]).unwrap(), head);
+                forks.push((dest, allocation));
+            }
+            assert_ne!(forks[0].0.cwd, forks[1].0.cwd);
+            for (dest, allocation) in forks {
+                assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+                assert!(!std::path::Path::new(dest.checkout_root().unwrap()).exists());
+                assert!(!git::branch_exists(&root, dest.branch.as_deref().unwrap()));
+            }
+            assert_eq!(git::list_worktrees(&root).unwrap(), registered);
+            assert!(!sub.exists());
+            if remove_checkout {
+                assert!(!checkout.exists());
+            } else {
+                assert_eq!(std::fs::read_to_string(checkout.join("private")).unwrap(), "source only");
+            }
+            assert_eq!(git::run(&root, &["rev-parse", &format!("refs/heads/{}", wt.branch)]).unwrap(), head);
+            assert_eq!(std::fs::read_to_string(root.join("sub/file")).unwrap(), "main");
+            assert_eq!(store::index::get(&src.id).unwrap(), legacy);
+        }
+
+        for edge in ["start", "index", "end", "end-index"] {
+            let reference = git::checkpoints::reference(&src.id, &format!("{}-1", tab.id), edge).unwrap();
+            git::run(&root, &["update-ref", "-d", &reference]).unwrap();
+        }
+        for at in [None, Some(2)] {
+            let mut dest = legacy.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&legacy, tab, &mut dest, at, &mut allocation).unwrap();
+            if at.is_some() {
+                assert!(note.unwrap().contains("saved file checkpoint is unavailable"));
+            } else {
+                assert!(note.is_none());
+            }
+            assert_eq!(std::fs::read_to_string(std::path::Path::new(&dest.cwd).join("file")).unwrap(), "source branch");
+            assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+        }
+
+        git::run(&root, &["worktree", "prune", "--expire", "now"]).unwrap();
+        for replace in [false, true] {
+            if replace {
+                git::run(&root, &["worktree", "add", "-q", &wt.path, &wt.branch]).unwrap();
+                std::fs::remove_dir_all(&sub).unwrap();
+            }
+            for (source, at) in [&src, &legacy, &no_checkpoint].into_iter().flat_map(|source| [None, Some(0)].map(|at| (source, at))) {
+                let mut dest = source.clone();
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                let before = git::list_worktrees(&root).unwrap();
+                assert!(super::fork_workspace(source, tab, &mut dest, at, &mut allocation).is_err());
+                assert_eq!(allocation.rollback("refused".into()), "refused");
+                assert_eq!(git::list_worktrees(&root).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn forks_reject_unverified_missing_worktree_directories() {
+        use crate::{git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        git::run(root, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(root, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(root, &["config", "user.name", "Test"]).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/file"), "committed\n").unwrap();
+        git::run(root, &["add", "."]).unwrap();
+        git::run(root, &["commit", "-qm", "initial"]).unwrap();
+        let wt = git::create_worktree(root, "missing-source", Some("main")).unwrap();
+        let worktree = std::path::Path::new(&wt.path);
+        let recorded_root = crate::paths::canonicalize(worktree).unwrap();
+        let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+            cwd: Some(worktree.join("sub").to_str().unwrap().into()),
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            ..Default::default()
+        }).unwrap();
+        src.kind = SessionKind::Project;
+        src.project_path = root.to_str().unwrap().into();
+        src.worktree_name = Some(wt.name);
+        src.branch = Some(wt.branch.clone());
+        // An alias and a surviving Git record do not identify the original
+        // checkout instance after its working directory disappears.
+        #[cfg(unix)]
+        {
+            let alias = root.join("project-alias");
+            std::os::unix::fs::symlink(root, &alias).unwrap();
+            src.cwd = alias.join(worktree.strip_prefix(root).unwrap()).join("sub").to_string_lossy().into_owned();
+        }
+        let settings = store::settings::Settings { worktree_dir: ".raccoon/new-worktrees".into(), ..Default::default() };
+        store::settings::save(&settings).unwrap();
+        std::fs::remove_dir_all(worktree.join("sub")).unwrap();
+        for state in 0..3 {
+            if state == 1 {
+                // The stored branch remains, but Git's record now names a
+                // detached checkout and is no longer evidence for that branch.
+                git::run(worktree, &["checkout", "--detach", "-q"]).unwrap();
+                std::fs::remove_dir_all(worktree).unwrap();
+                assert!(git::list_worktrees(root).unwrap().iter().any(|(path, branch)| super::resolve_missing_path(std::path::Path::new(path)).unwrap() == recorded_root && branch.is_none()));
+            }
+            if state == 2 {
+                git::run(root, &["worktree", "prune"]).unwrap();
+                assert!(!git::list_worktrees(root).unwrap().iter().any(|(path, _)| super::resolve_missing_path(std::path::Path::new(path)).unwrap() == recorded_root));
+            }
+            for at in [None, Some(42)] {
+                let mut dest = src.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                let before = git::list_worktrees(root).unwrap();
+                assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
+                assert_eq!(dest.cwd, src.cwd);
+                assert!(dest.worktree_name.is_none());
+                assert_eq!(git::list_worktrees(root).unwrap(), before);
+                assert_eq!(allocation.rollback("failed".into()), "failed");
+            }
+        }
+        assert_eq!(std::fs::read_to_string(root.join("sub/file")).unwrap(), "committed\n");
+
+        let foreign = root.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        git::run(&foreign, &["init", "-q"]).unwrap();
+        src.cwd = foreign.join("missing-source/sub").to_string_lossy().into_owned();
+        let mut dest = src.clone();
+        dest.worktree_name = None;
+        let mut allocation = crate::fork_allocation::ForkAllocation::default();
+        assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, None, &mut allocation).is_err());
+        assert!(!foreign.join("missing-source").exists());
+    }
+
+    #[test]
+    fn fork_rejects_pruned_source_after_project_replacement() {
+        use crate::{git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let project = crate::paths::canonicalize(temp.path()).unwrap().join("project");
+        std::fs::create_dir(&project).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("source"), "original").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["commit", "-qm", "original"]).unwrap();
+        let wt = git::create_worktree(&project, "missing-source", Some("main")).unwrap();
+        let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+            cwd: Some(wt.path.clone()),
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            ..Default::default()
+        }).unwrap();
+        src.kind = SessionKind::Project;
+        src.project_path = project.to_string_lossy().into_owned();
+        src.worktree_name = Some(wt.name);
+        src.branch = Some(wt.branch.clone());
+        src.bind_checkout_root(&wt.path);
+        #[cfg(unix)]
+        assert!(src.checkout_identity().is_some());
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        git::run(&project, &["worktree", "prune"]).unwrap();
+        std::fs::rename(&project, temp.path().join("old-project")).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("source"), "replacement").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["commit", "-qm", "replacement"]).unwrap();
+        git::run(&project, &["branch", &wt.branch]).unwrap();
+        // The replacement can register a different checkout at the exact old
+        // path, then lose its directory while retaining its Git record.
+        git::run(&project, &["worktree", "add", "-q", &wt.path, &wt.branch]).unwrap();
+        // A live replacement checkout with the original subdirectory missing
+        // must not be accepted as evidence of the original session identity.
+        for at in [None, Some(42)] {
+            src.cwd = std::path::Path::new(&wt.path).join("sub").to_string_lossy().into_owned();
+            let before = git::list_worktrees(&project).unwrap();
+            let mut dest = src.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
+            assert_eq!(dest.cwd, src.cwd);
+            assert!(dest.worktree_name.is_none());
+            assert_eq!(git::list_worktrees(&project).unwrap(), before);
+            assert_eq!(allocation.rollback("failed".into()), "failed");
+        }
+        std::fs::remove_dir_all(&wt.path).unwrap();
+        let old_root = super::resolve_missing_path(std::path::Path::new(&wt.path)).unwrap();
+        assert!(git::list_worktrees(&project).unwrap().iter().any(|(path, branch)| super::resolve_missing_path(std::path::Path::new(path)).unwrap() == old_root && branch.as_deref() == Some(wt.branch.as_str())));
+        // Exercise both a missing ancestor in the replacement and one outside Git.
+        for cwd in [std::path::PathBuf::from(&wt.path), temp.path().join("outside/missing-source/sub")] {
+            src.cwd = cwd.to_string_lossy().into_owned();
+            for at in [None, Some(42)] {
+                let before = git::list_worktrees(&project).unwrap();
+                let mut dest = src.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                assert!(super::fork_workspace(&src, &src.tabs[0], &mut dest, at, &mut allocation).is_err());
+                assert_eq!(dest.cwd, src.cwd);
+                assert!(dest.worktree_name.is_none());
+                assert_eq!(git::list_worktrees(&project).unwrap(), before);
+                assert_eq!(allocation.rollback("failed".into()), "failed");
+            }
+        }
+        assert_eq!(std::fs::read_to_string(project.join("source")).unwrap(), "replacement");
+        assert_eq!(std::fs::read_to_string(temp.path().join("old-project/source")).unwrap(), "original");
+    }
+
+    #[test]
+    fn turn_fork_does_not_use_a_different_project_repository() {
+        use crate::{git, session_ops, store::{self, index::SessionKind}};
+        let _home = store::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let foreign = root.path().join("foreign");
+        let folder = root.path().join("folder");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        git::run(&project, &["config", "user.email", "test@example.com"]).unwrap();
+        git::run(&project, &["config", "user.name", "Test"]).unwrap();
+        std::fs::write(project.join("a.txt"), "initial\n").unwrap();
+        git::run(&project, &["add", "a.txt"]).unwrap();
+        git::run(&project, &["commit", "-qm", "initial"]).unwrap();
+        git::run(root.path(), &["clone", "-q", project.to_str().unwrap(), foreign.to_str().unwrap()]).unwrap();
+        assert_eq!(git::run(&project, &["rev-parse", "HEAD"]).unwrap(), git::run(&foreign, &["rev-parse", "HEAD"]).unwrap());
+        std::fs::write(foreign.join("a.txt"), "foreign changes\n").unwrap();
+        for project_path in [&project, &folder] {
+            let mut src = session_ops::create_quick_chat_entry(session_ops::NewQuickChat {
+                cwd: Some(foreign.to_str().unwrap().into()),
+                tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+                ..Default::default()
+            }).unwrap();
+            src.kind = SessionKind::Project;
+            src.project_path = project_path.to_str().unwrap().into();
+            let mut dest = src.clone();
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            let note = super::fork_workspace(&src, &src.tabs[0], &mut dest, Some(1), &mut allocation).unwrap().unwrap();
+            assert!(note.contains("shares this checkout"), "{note}");
+            assert_eq!(dest.cwd, src.cwd);
+            assert!(dest.worktree_name.is_none());
+            assert_eq!(std::fs::read_to_string(foreign.join("a.txt")).unwrap(), "foreign changes\n");
+            assert_eq!(std::fs::read_to_string(project.join("a.txt")).unwrap(), "initial\n");
+        }
+        assert_eq!(git::run(&project, &["worktree", "list", "--porcelain"]).unwrap().matches("worktree ").count(), 1);
+    }
+
     #[test]
     fn commit_message_generation_recognizes_signed_out_agents() {
         assert!(super::is_agent_sign_in_error("Not logged in. Please run /login."));
@@ -4626,7 +5465,6 @@ mod command_tests {
     // PRO-111: the provider key dialog names the provider and the organization, not their ids.
     #[test]
     fn the_provider_key_prompt_names_the_provider_and_the_organization() {
-        use crate::cloud_workspaces::CloudWorkspaceProviderId;
         assert_eq!(
             super::provider_key_prompt("Local Docker (development)", "Org B"),
             "Enter the Local Docker (development) provider key for organization Org B. The key is sent to the account service only for validation and secure storage."
@@ -4635,8 +5473,33 @@ mod command_tests {
         assert_eq!(super::dialog_name(Some(" Org\u{202E} B\n".into()), "08c6afb1"), "Org B");
         assert_eq!(super::dialog_name(Some("\u{200B} ".into()), "08c6afb1"), "08c6afb1");
         assert_eq!(super::dialog_name(None, "08c6afb1"), "08c6afb1");
-        assert_eq!(super::dialog_name(None, CloudWorkspaceProviderId::Box.label()), "Boat");
-        assert_eq!(CloudWorkspaceProviderId::LocalDocker.label(), "Local Docker");
+        assert_eq!(super::dialog_name(None, "acme-cloud"), "acme-cloud");
+    }
+
+    // PRO-415: a described provider's credential fields drive the dialog; one
+    // field keeps the provider-key wording, several name each field and are
+    // sent as one JSON object keyed by field name.
+    #[test]
+    fn credential_fields_come_from_the_descriptor() {
+        use crate::cloud_workspaces::CloudProviderCredentialField;
+        let field = |name: &str, label: &str, help_url: Option<&str>| CloudProviderCredentialField { name: name.into(), kind: "secret".into(), label: label.into(), help_url: help_url.map(Into::into) };
+        assert_eq!(
+            super::credential_field_prompt("Acme Cloud", "Org B", &field("token", "Acme token", Some("https://acme.example/tokens")), true),
+            "Enter the Acme Cloud provider key for organization Org B. The key is sent to the account service only for validation and secure storage. Where to get it: https://acme.example/tokens"
+        );
+        assert_eq!(
+            super::credential_field_prompt("Acme Cloud", "Org B", &field("account", "Account\u{202E} id", Some("javascript:alert(1)")), false),
+            "Enter the Account id for Acme Cloud in organization Org B. It is sent to the account service only for validation and secure storage."
+        );
+        let one = super::combined_credential(&[("token".into(), zeroize::Zeroizing::new("abc".into()))]);
+        assert_eq!(one.as_str(), "abc");
+        let several = super::combined_credential(&[("secret".into(), zeroize::Zeroizing::new("s\"1".into())), ("account".into(), zeroize::Zeroizing::new("a1".into()))]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&several).unwrap(), serde_json::json!({ "account": "a1", "secret": "s\"1" }));
+        // The worst case (every character escaped) fits the buffer sized up front, so it never grew.
+        let controls = "\u{1}".repeat(40);
+        let escaped = super::combined_credential(&[("a".into(), zeroize::Zeroizing::new(controls.clone())), ("b".into(), zeroize::Zeroizing::new(controls.clone()))]);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&escaped).unwrap(), serde_json::json!({ "a": controls, "b": controls }));
+        assert!(escaped.capacity() <= 2 + 2 * (6 * 41 + 6));
     }
     use crate::session_ops::{
         create_session_entry, new_tab_entry, notify_workspace_deleted,
@@ -4754,7 +5617,7 @@ mod command_tests {
         })
         .unwrap();
 
-        assert_eq!(session.cwd, external.canonicalize().unwrap().to_string_lossy());
+        assert_eq!(session.cwd, external.canonical().unwrap().to_string_lossy());
         assert_eq!(session.branch.as_deref(), Some("feature/external"));
         assert_eq!(session.title, "feature/external");
         assert!(session.tabs.is_empty());
@@ -5406,14 +6269,22 @@ pub fn experimental_settings() -> crate::store::settings::ExperimentalSettings {
 /// Each switch is optional: the one the reader flipped is changed and the
 /// others are left as they are.
 #[tauri::command]
-pub fn set_experimental_settings(
+pub async fn set_experimental_settings(
+    state: State<'_, AppState>,
     native_codex: Option<bool>,
     session_cost: Option<bool>,
     orchestrator_runs: Option<bool>,
     local_vm_tasks: Option<bool>,
-    machines: Option<bool>,
+    opencode: Option<bool>,
+    bots: Option<bool>,
 ) -> CmdResult<crate::store::settings::ExperimentalSettings> {
     let mut settings = store::settings::load();
+    if let Some(on) = bots {
+        settings.experimental.bots = on;
+    }
+    if let Some(on) = opencode {
+        settings.experimental.opencode = on;
+    }
     if let Some(on) = native_codex {
         settings.experimental.native_codex = on;
     }
@@ -5426,11 +6297,368 @@ pub fn set_experimental_settings(
     if let Some(on) = local_vm_tasks {
         settings.experimental.local_vm_tasks = on;
     }
-    if let Some(on) = machines {
-        settings.experimental.machines = on;
-    }
     store::settings::save(&settings).map_err(err)?;
+    // Bots switched off: the runtime stops the bots' running chats. Switched
+    // on again: their sessions are held to their bots' access once more (PRO-468).
+    if let Some(on) = bots {
+        if let Err(error) = bots_call::<serde_json::Value>(state, "reconcile", serde_json::json!({})).await {
+            log::warn!("hold the bots' sessions after Bots was switched {}: {error}", if on { "on" } else { "off" });
+        }
+    }
     Ok(settings.experimental)
+}
+
+// ---------------------------------------------------------------- bots (PRO-466)
+
+// The runtime owns the bots' store and announces each change (`bots_changed`).
+// With Settings → Experimental → Bots off it refuses every one of these.
+
+async fn bots_call<T: serde::de::DeserializeOwned + Send + 'static>(state: State<'_, AppState>, operation: &'static str, params: serde_json::Value) -> CmdResult<T> {
+    // Through the window's own path: what gives a bot more carries its proof (PRO-468).
+    let Some(runtime) = state.runtime() else {
+        return Err(err(state.sessions().err().unwrap_or_else(|| anyhow::anyhow!("The runtime is not attached."))));
+    };
+    tauri::async_runtime::spawn_blocking(move || runtime.bots(operation, params).and_then(|value| Ok(serde_json::from_value(value)?)).map_err(err)).await.map_err(err)?
+}
+
+#[tauri::command]
+pub async fn bot_list(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "list", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn bot_get(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "get", serde_json::json!({"id": id})).await
+}
+
+/// The bundled role templates, as the runtime has them.
+#[tauri::command]
+pub async fn bot_templates(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "templates", serde_json::json!({})).await
+}
+
+/// Hire a bot: a role and a name, everything else on its default. The list
+/// answers (`bot_list`, `bots_pause_all`, `bots_resume_all`) and `bots_changed`
+/// carry the store's revision: the higher one is the newer list.
+#[tauri::command]
+pub async fn bot_create(state: State<'_, AppState>, role_template_id: String, name: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "create", serde_json::json!({"roleTemplateId": role_template_id, "name": name})).await
+}
+
+#[tauri::command]
+pub async fn bot_update(state: State<'_, AppState>, id: String, patch: serde_json::Value) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "update", serde_json::json!({"id": id, "patch": patch})).await
+}
+
+/// The bot's home folder goes to the app's trash, not away.
+#[tauri::command]
+pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    bots_call(state, "delete", serde_json::json!({"id": id})).await
+}
+
+/// `from`: where in the window it was paused (`app`, or `shortcut` for Pause all's keys), said on the pause (PRO-474).
+#[tauri::command]
+pub async fn bot_pause(state: State<'_, AppState>, id: String, from: Option<String>) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "pause", serde_json::json!({"id": id, "from": from})).await
+}
+
+#[tauri::command]
+pub async fn bot_resume(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "resume", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+pub async fn bots_pause_all(state: State<'_, AppState>, from: Option<String>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "pauseAll", serde_json::json!({"from": from})).await
+}
+
+/// What the paused bots hold (PRO-474, 23.12): what each is still finishing, every entry of "Held while paused",
+/// and what was spent today and since the pause.
+#[tauri::command]
+pub async fn bots_pause_held(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "pauseHeld", serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn bots_resume_all(state: State<'_, AppState>) -> CmdResult<crate::bots::BotList> {
+    bots_call(state, "resumeAll", serde_json::json!({})).await
+}
+
+/// A bot's standing instructions, its `ROLE.md`.
+#[tauri::command]
+pub async fn bot_role_read(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    bots_call(state, "roleRead", serde_json::json!({"id": id})).await
+}
+
+#[tauri::command]
+/// `expected` is the hash of the text the editor started from: a role changed since is not written over.
+pub async fn bot_role_write(state: State<'_, AppState>, id: String, text: String, expected: Option<String>) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "roleWrite", serde_json::json!({"id": id, "text": text, "expected": expected})).await
+}
+
+/// A bot's role and memory (PRO-470), by the owner: the screen's view,
+/// adding and forgetting a note, undoing a change, putting back a version
+/// of the role, a kept text by hash, the role's changes from its template,
+/// and a look for outside edits (every bot's with no `id`). Every change is
+/// recorded in the bot's history.
+#[tauri::command]
+pub async fn bot_memory(state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let operation: &'static str = match operation.as_str() {
+        "memoryView" => "memoryView",
+        "memoryAdd" => "memoryAdd",
+        "memoryForget" => "memoryForget",
+        "memoryUndo" => "memoryUndo",
+        "roleRestore" => "roleRestore",
+        "memoryLook" => "memoryLook",
+        "memoryText" => "memoryText",
+        "roleDiff" => "roleDiff",
+        other => return Err(err(format!("Unknown bot memory operation {other}"))),
+    };
+    bots_call(state, operation, params).await
+}
+
+/// The bot's home chat (PRO-468), made again when it is missing.
+#[tauri::command]
+pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "homeChat", serde_json::json!({"id": id})).await
+}
+
+/// Another conversation with the bot, in its home folder.
+#[tauri::command]
+pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "newChat", serde_json::json!({"id": id})).await
+}
+
+/// The owner said no to a resume asked for from the `terminalx` CLI (PRO-468).
+#[tauri::command]
+pub async fn bot_dismiss_resume(state: State<'_, AppState>, id: String) -> CmdResult<crate::bots::Bot> {
+    bots_call(state, "dismissResume", serde_json::json!({"id": id})).await
+}
+
+/// A bot's work items, newest first (PRO-469).
+#[tauri::command]
+pub async fn bot_items(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "items", serde_json::json!({"id": id})).await
+}
+
+/// One work item with its activity.
+#[tauri::command]
+pub async fn bot_item(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "item", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// What waits on the owner across the bots: items that ask, and question cards in their sessions.
+#[tauri::command]
+pub async fn bots_needs_you(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "needsYou", serde_json::json!({})).await
+}
+
+/// The owner answers an item's question: one of its answers by index, or their own words.
+/// `asked` is when the question they saw was asked.
+#[tauri::command]
+pub async fn bot_item_answer(state: State<'_, AppState>, id: String, number: u64, answer: Option<u64>, text: Option<String>, question: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemAnswer", serde_json::json!({"id": id, "number": number, "answer": answer, "text": text, "question": question})).await
+}
+
+#[tauri::command]
+pub async fn bot_item_comment(state: State<'_, AppState>, id: String, number: u64, text: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemComment", serde_json::json!({"id": id, "number": number, "text": text})).await
+}
+
+/// "Give <bot> work": a new item the owner asked for, told to the bot in its home chat.
+#[tauri::command]
+pub async fn bot_item_give(state: State<'_, AppState>, id: String, title: String, summary: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemGive", serde_json::json!({"id": id, "title": title, "summary": summary})).await
+}
+
+/// Stop this item: its sessions stop and it is dropped.
+#[tauri::command]
+pub async fn bot_item_stop(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemStop", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// Reopen a done or dropped item: the owner's act, told to the bot.
+#[tauri::command]
+pub async fn bot_item_reopen(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemReopen", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// Send again the owner's messages about an item that did not reach the bot's home chat.
+#[tauri::command]
+pub async fn bot_item_resend(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemResend", serde_json::json!({"id": id, "number": number})).await
+}
+
+// A bot's suggestions and its look around (PRO-477).
+
+/// A bot's open suggestions, newest first, and the status of its look around and memory tidy.
+#[tauri::command]
+pub async fn bot_suggestions(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestions", serde_json::json!({"id": id})).await
+}
+
+/// Start a suggestion: it becomes an item, sent to the bot as the owner's message, and the bot begins.
+#[tauri::command]
+pub async fn bot_suggestion_start(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionStart", serde_json::json!({"id": id, "number": number})).await
+}
+
+#[tauri::command]
+pub async fn bot_suggestion_dismiss(state: State<'_, AppState>, id: String, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "suggestionDismiss", serde_json::json!({"id": id, "number": number})).await
+}
+
+/// A bot's newest mentions on GitHub and Linear, and what it posted there (PRO-480).
+#[tauri::command]
+pub async fn bot_channels(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "channels", serde_json::json!({"id": id})).await
+}
+
+// Slack and Telegram as a bot's channels (PRO-481).
+
+/// A bot's chat apps: each service's account (never its tokens), its connector's state, the chats linked, the
+/// waiting link code, "Also sends to", and the newest messages without their text.
+#[tauri::command]
+pub async fn bot_chat_apps(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatApps", serde_json::json!({"id": id})).await
+}
+
+/// Check a Slack app's or a Telegram bot's tokens with the service and save them where the bots' other logins
+/// are kept, in the store, never in the bot's record. The window writes them itself, as it does the Linear key:
+/// they never travel through the runtime's control socket.
+#[tauri::command]
+pub async fn bot_chat_app_connect(id: String, service: String, tokens: serde_json::Value) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || crate::bots::chat_apps::connect(&id, &service, &tokens).map_err(err)).await.map_err(err)?
+}
+
+/// Forget a bot's Slack or Telegram login: its connector stops and the chats linked with it are unlinked.
+#[tauri::command]
+pub async fn bot_chat_app_disconnect(id: String, service: String) -> CmdResult<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || crate::bots::chat_apps::disconnect(&id, &service).map_err(err)).await.map_err(err)?
+}
+
+/// A one-time code that links the chat it is sent from: a person's act, carrying the window's proof.
+#[tauri::command]
+pub async fn bot_chat_app_link(state: State<'_, AppState>, id: String, service: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppLink", serde_json::json!({"id": id, "service": service})).await
+}
+
+#[tauri::command]
+pub async fn bot_chat_app_unlink(state: State<'_, AppState>, id: String, service: String, chat: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppUnlink", serde_json::json!({"id": id, "service": service, "chat": chat})).await
+}
+
+/// "Also sends to": the services the home chat's replies to the owner also go to.
+#[tauri::command]
+pub async fn bot_chat_app_also_sends(state: State<'_, AppState>, id: String, services: Vec<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "chatAppAlsoSends", serde_json::json!({"id": id, "services": services})).await
+}
+
+// Hand-offs between bots and the team brief (PRO-475).
+
+/// The hand-offs a bot gave or was given (every bot's with no `id`).
+#[tauri::command]
+pub async fn bot_handoffs(state: State<'_, AppState>, id: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffs", serde_json::json!({"id": id})).await
+}
+
+/// Stop one hand-off: only the receiving bot's work on it stops.
+#[tauri::command]
+pub async fn bot_handoff_stop(state: State<'_, AppState>, number: u64) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffStop", serde_json::json!({"number": number})).await
+}
+
+/// Send again, now, a bots' message that could not reach its chat (its count of tries starts again).
+#[tauri::command]
+pub async fn bot_handoff_resend(state: State<'_, AppState>, message: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "handoffResend", serde_json::json!({"message": message})).await
+}
+
+/// Hand a bot's item to another bot, with the owner's own note.
+#[tauri::command]
+pub async fn bot_item_hand(state: State<'_, AppState>, id: String, number: u64, to: String, note: String, due: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "itemHand", serde_json::json!({"id": id, "number": number, "to": to, "note": note, "due": due})).await
+}
+
+/// The team brief every bot reads.
+#[tauri::command]
+pub async fn bot_brief(state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "brief", serde_json::json!({})).await
+}
+
+/// `expected` is the hash of the brief the editor started from: one changed since is not written over.
+#[tauri::command]
+pub async fn bot_brief_write(state: State<'_, AppState>, text: String, expected: Option<String>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "briefWrite", serde_json::json!({"text": text, "expected": expected})).await
+}
+
+/// What a bot's sessions spent today, at Stats' prices (PRO-468).
+#[tauri::command]
+pub async fn bot_spent_today(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "spentToday", serde_json::json!({"id": id})).await
+}
+
+// A bot's duties (PRO-471). The duties themselves arrive as automations
+// (`automations_changed`); these change them, each through the window's own
+// path, which carries a person's proof for what gives the bot more.
+
+/// The bot's quiet hours and each of its duties' notes.
+#[tauri::command]
+pub async fn bot_duties(state: State<'_, AppState>, id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "duties", serde_json::json!({"id": id})).await
+}
+
+/// A week of duties (PRO-473): of bot `id`, or of every bot; `week` is any day in it (`YYYY-MM-DD`); `first_day` the
+/// weekday it starts on, 0 for Monday … 6 for Sunday (PRO-499).
+#[tauri::command]
+pub async fn bot_duty_week(state: State<'_, AppState>, id: Option<String>, week: Option<String>, first_day: Option<u8>) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyWeek", serde_json::json!({"id": id, "week": week, "firstDay": first_day})).await
+}
+
+/// What is kept of bot `id`'s deleted duty `duty_id` (PRO-499): its name, when it was deleted, and its run log.
+#[tauri::command]
+pub async fn bot_duty_kept_log(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<serde_json::Value> {
+    bots_call(state, "dutyKeptLog", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Add a duty (`duty_id` absent) or change one.
+#[tauri::command]
+pub async fn bot_duty_save(state: State<'_, AppState>, id: String, duty_id: Option<String>, input: serde_json::Value) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySave", serde_json::json!({"id": id, "dutyId": duty_id, "input": input})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_switch(state: State<'_, AppState>, id: String, duty_id: String, on: bool) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutySwitch", serde_json::json!({"id": id, "dutyId": duty_id, "on": on})).await
+}
+
+#[tauri::command]
+pub async fn bot_duty_delete(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<()> {
+    bots_call(state, "dutyDelete", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// A copy of a duty, switched off.
+#[tauri::command]
+pub async fn bot_duty_duplicate(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::Automation> {
+    bots_call(state, "dutyDuplicate", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Run a duty now: its first check, then the bot only when the check found something.
+#[tauri::command]
+pub async fn bot_duty_run(state: State<'_, AppState>, id: String, duty_id: String) -> CmdResult<crate::automations::AutomationRun> {
+    bots_call(state, "dutyRun", serde_json::json!({"id": id, "dutyId": duty_id})).await
+}
+
+/// Try a duty's first check once, where its runs run it (its own folder, not the bot's home). Nothing is recorded.
+#[tauri::command]
+pub async fn bot_duty_try_check(state: State<'_, AppState>, id: String, duty_id: Option<String>, precheck: serde_json::Value) -> CmdResult<crate::automations::precheck::PrecheckTrial> {
+    bots_call(state, "dutyTryCheck", serde_json::json!({"id": id, "dutyId": duty_id, "precheck": precheck})).await
+}
+
+/// The bot's quiet hours, or `null` for none.
+#[tauri::command]
+pub async fn bot_quiet_hours(state: State<'_, AppState>, id: String, quiet_hours: serde_json::Value) -> CmdResult<serde_json::Value> {
+    bots_call(state, "quietHours", serde_json::json!({"id": id, "quietHours": quiet_hours})).await
 }
 
 // ---------------------------------------------------------------- orchestration runs (PRO-274)
@@ -5714,9 +6942,17 @@ pub async fn orchestration_take_over(app: AppHandle, id: String, piece: String) 
 
 /// Check what the lead committed for a piece it took over, and make it done when its checks pass.
 #[tauri::command]
-pub async fn orchestration_finish(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+/// `accept`: the files outside a held piece's own the person confirmed adding to it.
+pub async fn orchestration_finish(app: AppHandle, id: String, piece: String, accept: Option<Vec<String>>) -> CmdResult<serde_json::Value> {
     let sessions = app.state::<AppState>().sessions().map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finish", serde_json::json!({"id": id, "piece": piece, "accept": accept.unwrap_or_default()})).map_err(err)).await.map_err(err)?
+}
+
+/// The files outside a held piece's own that Check and finish would add to it, as the lead's checkout stands.
+#[tauri::command]
+pub async fn orchestration_finish_widens(app: AppHandle, id: String, piece: String) -> CmdResult<serde_json::Value> {
+    let sessions = app.state::<AppState>().sessions().map_err(err)?;
+    tauri::async_runtime::spawn_blocking(move || sessions.orchestration("finishWidens", serde_json::json!({"id": id, "piece": piece})).map_err(err)).await.map_err(err)?
 }
 
 /// Widen a blocked piece's files (the ones its last report names outside them, when `own` is empty) and try it again.
@@ -6059,9 +7295,9 @@ pub async fn preview_workspace_restore(app: AppHandle, session_id: String) -> Cm
 }
 
 #[tauri::command]
-pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>) -> CmdResult<serde_json::Value> {
+pub async fn restore_workspace(app: AppHandle, session_id: String, expected: crate::workspace_restore::Preview, new_branch: Option<String>, detached: Option<bool>) -> CmdResult<serde_json::Value> {
     tauri::async_runtime::spawn_blocking(move || {
-        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch })).map_err(err)
+        app.state::<crate::AppState>().sessions().map_err(err)?.workspace("restoreWorkspace", serde_json::json!({ "sessionId": session_id, "expected": expected, "newBranch": new_branch, "detached": detached.unwrap_or(false) })).map_err(err)
     }).await.map_err(err)?
 }
 

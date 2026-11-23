@@ -18,7 +18,12 @@ export interface SettingsFileStatus {
   preferences: Record<string, unknown>;
 }
 /** A save the native layer refused (PRO-140): the toast says which file and line stopped it. */
-export interface SettingsSaveFailure { id: number; cause: string }
+export interface SettingsSaveFailure {
+  id: number;
+  cause: string;
+  /** PRO-374: the refused change's keys under `preferences` ("sendKey"), so the toast can name the setting that stayed. */
+  keys?: string[];
+}
 let state: { file: SettingsFileStatus | null; error: string | null; revision: number; saveFailure: SettingsSaveFailure | null } = { file: null, error: null, revision: 0, saveFailure: null };
 const listeners = new Set<() => void>();
 const pending: Record<string, unknown>[] = [];
@@ -62,7 +67,7 @@ function save(patch: Record<string, unknown>): Promise<void> {
       let latest = state.file;
       try { latest = await invoke<SettingsFileStatus>("settings_file_status"); } catch { /* keep the last view */ }
       if (latest) apply(latest);
-      publish(state.file, state.error, { id: state.revision + 1, cause: String(error) });
+      publish(state.file, state.error, { id: state.revision + 1, cause: String(error), keys: Object.keys(patch) });
       throw error;
     }
   });

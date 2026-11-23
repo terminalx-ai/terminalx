@@ -40,10 +40,13 @@ pub const HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
 ];
 
-/// How long Codex waits for a hook. The two that can park on a person get the
-/// default timeout; the rest only report and must never hold a
-/// turn up.
+/// How long the app keeps a card for Codex's two hooks that can park on a
+/// person; the rest only report and must never hold a turn up.
 const DECIDING_TIMEOUT_SECS: u64 = 600;
+/// Codex waits on those hooks longer than the card does, so the app's answer,
+/// the card's lapse (a refusal) included, always arrives: a hook Codex gives
+/// up on lets the tool run (PRO-478).
+const DECIDING_HOOK_TIMEOUT_SECS: u64 = DECIDING_TIMEOUT_SECS + 30;
 const REPORT_TIMEOUT_SECS: u64 = 10;
 /// The app-side wait must match, or a card would go on offering buttons for a
 /// request the CLI has already given up on.
@@ -74,6 +77,11 @@ pub fn blocking_screen(output: &[u8]) -> Option<&'static str> {
 ///
 /// A box with no blank row under it before the screen ends is not one this
 /// can tell from the footer, and is taken as unseen rather than waited on.
+///
+/// Codex draws its own questions (the working-directory prompt on resume,
+/// PRO-462) as a list whose selected row starts with the same glyph, drawn
+/// in reverse video; the box's glyph is only bold. That row is a choice the
+/// reader has to make in the terminal, not text in the box.
 pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     use crate::harness::tui::Composer;
     let (rows, cols) = screen.size();
@@ -81,6 +89,9 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
     let cell = |row: u16, col: u16| screen.cell(row, col).map_or("", |cell| cell.contents());
     let blank = |row: u16| (0..cols).all(|col| cell(row, col).trim().is_empty());
     let Some(first) = (0..rows).rev().find(|row| cell(*row, 0) == "›" && cell(*row, 1).trim().is_empty()) else { return Composer::Unseen };
+    if screen.cell(first, 0).is_some_and(|cell| cell.inverse()) {
+        return Composer::Choice;
+    }
     let Some(end) = (first + 1..rows).find(|row| blank(*row)) else { return Composer::Unseen };
     let mut words = Vec::new();
     for row in first..end {
@@ -100,7 +111,7 @@ pub fn composer(screen: &vt100::Screen) -> crate::harness::tui::Composer {
 
 fn timeout_for(event: &str) -> u64 {
     if matches!(event, "PermissionRequest" | "PreToolUse") {
-        DECIDING_TIMEOUT_SECS
+        DECIDING_HOOK_TIMEOUT_SECS
     } else {
         REPORT_TIMEOUT_SECS
     }
@@ -150,12 +161,12 @@ static TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(N
 /// they ask Codex's app server: a stand-in, whether or not a real CLI is
 /// installed where the tests run. Process-wide, so the tests that hold one
 /// take turns.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) struct TestProgram {
     _turn: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn codex_program_for_tests(program: PathBuf) -> TestProgram {
     static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,7 +174,7 @@ pub(crate) fn codex_program_for_tests(program: PathBuf) -> TestProgram {
     TestProgram { _turn: turn }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for TestProgram {
     fn drop(&mut self) {
         *TEST_PROGRAM.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -221,6 +232,12 @@ impl Launcher {
         let mut c = format!("{} --no-daemon", quote(&self.program.to_string_lossy()));
         if let Some(id) = opts.resume {
             c.push_str(&format!(" resume {}", quote(id)));
+            // The app chooses the folder a tab runs in. Codex otherwise stops
+            // at start-up to ask whether to use the folder its session last
+            // recorded instead, one that can have been removed with its
+            // worktree, and the message that resumed the tab waits behind
+            // that question (PRO-462). Verified against codex-cli 0.169.0.
+            c.push_str(&format!(" -c {}", quote(RESUME_IN_CURRENT_DIRECTORY)));
         }
         if !opts.model.is_empty() {
             c.push_str(&format!(" -m {}", quote(opts.model)));
@@ -237,6 +254,9 @@ impl Launcher {
         c
     }
 }
+
+/// Resume in the folder the tab is started in, without asking (PRO-462).
+const RESUME_IN_CURRENT_DIRECTORY: &str = "tui.resume_cwd=\"current\"";
 
 /// The stance that means "no sandbox, no questions"; it is a flag of its own
 /// rather than an `-a`/`-s` pair.
@@ -352,6 +372,22 @@ mod tests {
         assert_eq!(composer(drawn(b"").screen()), Composer::Unseen);
     }
 
+    /// Codex 0.169.0 resuming a session whose folder was removed, recorded in
+    /// a 300 by 12 pty with the folders renamed: its working-directory
+    /// question, drawn where the box was (PRO-462). The selected option is
+    /// a choice to make, not text in the box.
+    #[test]
+    fn codexs_own_question_is_a_choice_not_text_in_the_box() {
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(12).unwrap(), std::num::NonZeroU16::new(300).unwrap(), 0);
+        parser.process(include_bytes!("fixtures/resume_cwd_question.bin"));
+        assert!(parser.screen().contents().contains("Working directory · resume"));
+        assert_eq!(composer(parser.screen()), Composer::Choice);
+        // A typed prompt that reads like an option is still text in the box.
+        let mut parser = vt100::Parser::new(std::num::NonZeroU16::new(4).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        parser.process("\x1b[2;1H\x1b[1m›\x1b[22m 1. Use session directory\r\n\r\n  GPT-6 xhigh".as_bytes());
+        assert_eq!(composer(parser.screen()), Composer::Holds("1. Use session directory".into()));
+    }
+
     #[test]
     fn login_menu_blocks_but_a_cleared_menu_does_not() {
         let menu = b"\x1b[2J\x1b[1mSign in with ChatGPT\x1b[0m\r\nSign in with an API key";
@@ -388,7 +424,7 @@ mod tests {
             let hook = &local["hooks"][event][0]["hooks"][0];
             assert_eq!(hook["timeout"], crate::local_runtime::permissions::PROVIDER_SECONDS);
             assert!(hook["command"].as_str().unwrap().ends_with(" --local-owner-decision"));
-            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 600);
+            assert_eq!(default["hooks"][event][0]["hooks"][0]["timeout"], 630);
             assert!(!default["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().contains("--local-owner-decision"));
         }
         assert_eq!(local["hooks"]["Stop"][0]["hooks"][0]["timeout"], 10);
@@ -410,8 +446,9 @@ mod tests {
             assert_eq!(h["command"], format!("'/opt/raccoon' hook {event}"));
         }
         // The two that park on a person wait; the rest only report.
-        assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 600);
-        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["timeout"], 600);
+        assert_eq!(hooks["PermissionRequest"][0]["hooks"][0]["timeout"], 630);
+        assert_eq!(hooks["PreToolUse"][0]["hooks"][0]["timeout"], 630);
+        assert!(Duration::from_secs(630) > PERMISSION_WAIT, "Codex outlasts the card");
         assert_eq!(hooks["Stop"][0]["hooks"][0]["timeout"], 10);
     }
 
@@ -428,6 +465,8 @@ mod tests {
         let back = launcher.command(LaunchOptions { resume: Some("01a0-uuid"), model: "", effort: None, permission_mode: "auto" });
         assert!(back.starts_with("'/opt/codex' --no-daemon resume '01a0-uuid' "));
         assert!(back.contains(" resume '01a0-uuid'"));
+        assert!(back.contains(r#" -c 'tui.resume_cwd="current"'"#), "no working-directory question on resume: {back}");
+        assert!(!fresh.contains("resume_cwd"));
         assert!(!back.contains(" -m "));
         assert!(!back.contains("model_reasoning_effort"));
     }
@@ -466,13 +505,46 @@ mod tests {
         }
     }
 
+    /// A stand-in `codex` in `directory` that answers `--help` with `body`,
+    /// returned once it can be run.
     #[cfg(unix)]
     fn help_program(directory: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let program = directory.join("codex");
-        std::fs::write(&program, format!("#!/bin/sh\n[ \"$*\" = '--help' ] || exit 91\n{body}\n")).unwrap();
+        std::fs::write(&program, format!("#!/bin/sh\n[ \"$*\" = '--help' ] || exit {NOT_HELP}\n{body}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run_once_not_busy(&program);
         program
+    }
+
+    /// What a stand-in exits with when it is run with anything but `--help`.
+    #[cfg(unix)]
+    const NOT_HELP: i32 = 91;
+
+    /// Run the stand-in just written, without `--help`, until Linux no longer
+    /// refuses it with ETXTBSY ("Text file busy"). A test on another thread
+    /// that forks while the write above has the file open hands its child a
+    /// copy of the descriptor, which close-on-exec closes only at that child's
+    /// exec; until then the kernel will not run the file, and the probe under
+    /// test reports that Codex "could not start" (PRO-488). No lock can close
+    /// that window, since every other test in this binary forks too. One run
+    /// that starts proves every copy is closed, and nothing opens the file for
+    /// writing again, so the probes that follow start whatever else is forking.
+    #[cfg(unix)]
+    fn run_once_not_busy(program: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match std::process::Command::new(program).stdin(std::process::Stdio::null()).status() {
+                Ok(status) => {
+                    assert_eq!(status.code(), Some(NOT_HELP), "the stand-in runs its body only for --help");
+                    return;
+                }
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("run the stand-in Codex: {error}"),
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -511,19 +583,40 @@ mod tests {
     #[test]
     fn failed_or_ambiguous_capability_checks_never_enable_a_launch() {
         let directory = tempfile::tempdir().unwrap();
-        for (body, timeout, reason) in [
+        for (case, (body, timeout, reason)) in [
             ("printf '  --no-daemon\n'; exit 2", Duration::from_secs(5), "exited unsuccessfully"),
             ("printf '  --no-daemon-other\n'", Duration::from_secs(5), "Update Codex"),
             ("exec sleep 30", Duration::from_millis(50), "timed out"),
             ("sleep 2 2>/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
             ("sleep 2 >/dev/null & printf '  --no-daemon\\n'; exit 0", Duration::from_millis(50), "timed out"),
-        ] {
-            let program = help_program(directory.path(), body);
+        ].into_iter().enumerate() {
+            // Its own folder: no case runs a file an earlier one wrote or left running.
+            let folder = directory.path().join(case.to_string());
+            std::fs::create_dir(&folder).unwrap();
+            let program = help_program(&folder, body);
             let error = Launcher::inspect(program, timeout).err().expect("an unsuccessful probe must reject launch");
             assert!(error.to_string().contains(reason), "{body}: {error}");
         }
         let error = Launcher::inspect(directory.path().join("missing"), Duration::from_secs(5)).err().unwrap();
         assert!(error.to_string().contains("could not start"));
+    }
+
+    /// PRO-488 as it happened on Linux CI, made to happen every time: a
+    /// `codex` some process still has open for writing cannot be run. The
+    /// probe says it could not start and admits nothing, and the same file is
+    /// admitted once the writer is done.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_codex_still_open_for_writing_cannot_start_and_never_enables_a_launch() {
+        let directory = tempfile::tempdir().unwrap();
+        let program = help_program(directory.path(), "printf '  --no-daemon\n'");
+        let writer = std::fs::File::options().write(true).open(&program).unwrap();
+        let error = Launcher::inspect(program.clone(), Duration::from_secs(5)).err().expect("a CLI that cannot be run must reject launch");
+        assert!(error.to_string().contains("could not start"), "{error}");
+        drop(writer);
+        // A fork on another thread may have copied `writer` as well.
+        run_once_not_busy(&program);
+        assert!(Launcher::inspect(program, Duration::from_secs(5)).is_ok());
     }
 
     #[cfg(unix)]

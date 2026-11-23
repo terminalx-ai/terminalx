@@ -1,7 +1,7 @@
 //! Saved prompts and the times at which they should become ordinary sessions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,6 +19,20 @@ use crate::sink::EventSink;
 pub trait AutomationHost: Clone + Send + Sync + 'static {
     fn sink(&self) -> Arc<dyn EventSink>;
     fn sessions(&self) -> Result<crate::session::SessionManager>;
+    fn execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        self.sessions().map_or(true, |sessions| sessions.automation_execution_continues(session_id, tab_id))
+    }
+    fn with_quiescent_execution<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        self.sessions().ok()?.with_automation_quiescent(session_id, tab_id, generation, action)
+    }
+    fn with_current_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        self.sessions().ok()?.with_automation_turn(session_id, tab_id, generation, action)
+    }
+    fn deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
+        if let Ok(sessions) = self.sessions() {
+            sessions.automation_deferred_status(session_id, tab_id, active);
+        }
+    }
 }
 
 #[cfg(feature = "desktop")]
@@ -42,6 +56,16 @@ impl AutomationHost for RuntimeHost {
 }
 
 use crate::store::{automations as automation_store, index};
+
+pub(crate) mod sources;
+pub use sources::{AutomationEventSource, AutomationEventTrigger, SourceMatch};
+
+/// What a Linear issue or pull request source would wake on now (PRO-485).
+pub fn source_preview(project_path: &Path, source: &AutomationEventSource) -> Result<Vec<SourceMatch>> {
+    sources::preview(project_path, source)
+}
+
+pub mod precheck;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +114,7 @@ pub enum AutomationWorkspace {
 #[serde(rename_all = "camelCase")]
 pub struct AutomationPrecheck {
     pub command: String,
+    #[serde(default = "precheck::default_timeout_seconds")]
     pub timeout_seconds: u32,
 }
 
@@ -152,11 +177,19 @@ pub struct AutomationIssueTrigger {
     pub run_on_existing: bool,
     #[serde(default)]
     pub report: AutomationIssueReport,
+    /// The most runs the search starts in any day (PRO-490 review), as an event trigger's: an issue a run files that
+    /// matches the search wakes another, so a chain is bounded across issues. Absent reads as 48 and, on a save
+    /// from a window that does not send it, keeps the stored value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs_per_day: Option<u32>,
 }
 
 fn default_poll_interval() -> u32 {
     5
 }
+
+/// The most issue runs one poll may start; the editor offers the same.
+const MAX_RUNS_PER_TICK: u32 = 50;
 
 fn default_max_runs() -> u32 {
     3
@@ -207,6 +240,9 @@ pub struct Automation {
     pub last_outcome: Option<AutomationRunStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    /// A Linear issue or pull request source (PRO-485); never set with `issue_trigger`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<AutomationEventTrigger>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
     pub created: String,
@@ -252,6 +288,10 @@ pub struct AutomationInput {
     pub run_timeout_minutes: Option<u32>,
     #[serde(default)]
     pub issue_trigger: Option<AutomationIssueTrigger>,
+    /// Absent (a client that does not know event triggers) keeps the stored
+    /// one; `null` removes it.
+    #[serde(default, deserialize_with = "sources::present", skip_serializing_if = "Option::is_none")]
+    pub event_trigger: Option<Option<AutomationEventTrigger>>,
     #[serde(default)]
     pub pipeline: Option<crate::issue_pipeline::LaunchOptions>,
 }
@@ -316,12 +356,24 @@ pub fn definition_from_input(
         if trigger.max_runs_per_tick < 1 {
             bail!("Runs per tick must be at least one.");
         }
+        sources::validate_runs_per_day(trigger.max_runs_per_day)?;
         if input.workspace != AutomationWorkspace::NewWorktree {
             bail!("Issue automations need a new worktree per run.");
         }
     }
+    let event_trigger = sources::trigger_after_save(input.event_trigger.clone(), existing, input.issue_trigger.is_some());
+    if let Some(trigger) = event_trigger.as_ref().filter(|trigger| sources::unreadable_known(&trigger.source)) {
+        if existing.and_then(|existing| existing.event_trigger.as_ref()).is_none_or(|stored| stored.source != trigger.source) {
+            bail!("This trigger's settings cannot be read. Check each field and save again.");
+        }
+    }
+    if let Some(trigger) = event_trigger.as_ref() {
+        sources::validate(trigger, input.issue_trigger.is_some(), input.workspace)?;
+    }
     let next = if let Some(trigger) = input.issue_trigger.as_ref() {
         now + chrono::TimeDelta::minutes(i64::from(trigger.poll_interval_minutes))
+    } else if event_trigger.is_some() {
+        sources::never()
     } else {
         next_run_after(&input.schedule, now)?
     };
@@ -346,13 +398,24 @@ pub fn definition_from_input(
         keep_latest_run_visible: input.keep_latest_run_visible,
         base_ref: input.base_ref,
         schedule: input.schedule,
-        precheck: input.precheck,
+        precheck: precheck::normalized(input.precheck),
         missed_run_grace_minutes: input.missed_run_grace_minutes,
         run_timeout_minutes: input.run_timeout_minutes,
         next_run_at: next.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         last_run_at: existing.and_then(|value| value.last_run_at.clone()),
         last_outcome: existing.and_then(|value| value.last_outcome),
-        issue_trigger: input.issue_trigger,
+        // At most what the editor offers; an older, larger value is clamped.
+        issue_trigger: input.issue_trigger.map(|mut trigger| {
+            trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            if trigger.max_runs_per_day.is_none() {
+                trigger.max_runs_per_day = existing.and_then(|value| value.issue_trigger.as_ref()).and_then(|stored| stored.max_runs_per_day);
+            }
+            trigger
+        }),
+        event_trigger: event_trigger.map(|mut trigger| {
+            trigger.max_runs_per_tick = trigger.max_runs_per_tick.min(MAX_RUNS_PER_TICK);
+            trigger
+        }),
         pipeline: input.pipeline,
         created: existing
             .map(|value| value.created.clone())
@@ -370,6 +433,10 @@ pub enum AutomationTrigger {
     Scheduled,
     Manual,
     Issue,
+    LinearIssue,
+    PullRequest,
+    /// A bot's duty woken by a mention, an alert, a branch's checks, another bot or a watched change (PRO-472).
+    Event,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +532,9 @@ pub struct AutomationRun {
     pub issue: Option<index::IssueRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_message: Option<String>,
+    /// A foreground reply held until background work and any follow-up turn settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_completion: Option<DeferredCompletion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_files: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,6 +551,16 @@ pub struct AutomationRun {
     pub last_repeat_at: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeferredCompletion {
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_since: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -521,11 +601,60 @@ pub fn next_run_after(
     }
 }
 
-fn next_cron(
+/// A schedule's times in `(after, until]`, oldest first, at most `cap` of
+/// them, and whether more were left: what [`next_run_after`] gives again and
+/// again, with the expression and time zone read once (the week of duties,
+/// PRO-473).
+pub fn occurrences_between(
     schedule: &AutomationSchedule,
-    timezone: Tz,
     after: DateTime<Utc>,
-) -> Result<DateTime<Utc>> {
+    until: DateTime<Utc>,
+    cap: usize,
+) -> Result<(Vec<DateTime<Utc>>, bool)> {
+    let timezone: Tz = schedule
+        .timezone
+        .parse()
+        .with_context(|| format!("unknown timezone {}", schedule.timezone))?;
+    let dtstart = DateTime::parse_from_rfc3339(&schedule.dtstart)
+        .context("dtstart must be RFC3339")?
+        .with_timezone(&Utc);
+    let mut at = after.max(dtstart - chrono::TimeDelta::nanoseconds(1));
+    let mut found = Vec::new();
+    match (schedule.kind, schedule.preset) {
+        (ScheduleKind::Cron, _) => {
+            // A fresh `after` for each step, as `next_cron` asks: a kept iterator would also give the second of a
+            // local time the clocks repeat, which the scheduler never fires.
+            let parsed = cron_of(schedule)?;
+            while let Some(next) = parsed.after(&at.with_timezone(&timezone)).next() {
+                let next = next.with_timezone(&Utc);
+                if next > until || next <= at {
+                    break;
+                }
+                if found.len() == cap {
+                    return Ok((found, true));
+                }
+                found.push(next);
+                at = next;
+            }
+        }
+        (ScheduleKind::Preset, Some(preset)) => loop {
+            let next = next_preset(schedule, preset, timezone, dtstart, at)?;
+            if next > until || next <= at {
+                break;
+            }
+            if found.len() == cap {
+                return Ok((found, true));
+            }
+            found.push(next);
+            at = next;
+        },
+        (ScheduleKind::Preset, None) => bail!("schedule preset is required"),
+    }
+    Ok((found, false))
+}
+
+/// A cron schedule's expression, read as the scheduler reads it.
+fn cron_of(schedule: &AutomationSchedule) -> Result<cron::Schedule> {
     let expression = schedule
         .cron
         .as_deref()
@@ -536,8 +665,15 @@ fn next_cron(
         bail!("cron must have five fields");
     }
     // `cron` includes seconds; the product contract deliberately does not.
-    let parsed =
-        cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")?;
+    cron::Schedule::from_str(&format!("0 {expression}")).context("invalid cron expression")
+}
+
+fn next_cron(
+    schedule: &AutomationSchedule,
+    timezone: Tz,
+    after: DateTime<Utc>,
+) -> Result<DateTime<Utc>> {
+    let parsed = cron_of(schedule)?;
     parsed
         .after(&after.with_timezone(&timezone))
         .next()
@@ -665,6 +801,7 @@ fn new_run(
         worktree_name: None,
         issue: None,
         final_message: None,
+        deferred_completion: None,
         changed_files: None,
         usage: None,
         precheck: None,
@@ -680,9 +817,71 @@ fn emit_run(app: &impl AutomationHost, run: &AutomationRun) {
     app.sink().emit("automation_run", run);
 }
 
+/// End a run that has not started a session, with `status` and why.
+fn end_pending(app: &impl AutomationHost, automation_id: &str, run: AutomationRun, status: AutomationRunStatus, message: String) -> Result<AutomationRun> {
+    let run = automation_store::replace_run(automation_id, &run.run_id, |value| {
+        if !value.status.is_terminal() {
+            value.status = status;
+            value.ended_at = Some(index::now());
+            value.error = Some(message);
+        }
+        Ok(())
+    })?;
+    emit_run(app, &run);
+    let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+    update_summary(app, automation_id, run.status, &ended_at);
+    Ok(run)
+}
+
+/// A scheduled time that passes without a run, as one history row: the same
+/// reason again counts as a repeat of the newest row (as missed runs do).
+pub(crate) fn record_skipped(app: &impl AutomationHost, automation: &Automation, scheduled_for: DateTime<Utc>, status: AutomationRunStatus, message: &str) -> Result<()> {
+    let runs = automation_store::list_runs(&automation.id)?;
+    // A run still going stays the last outcome: a time skipped beside it does not say it was cancelled (PRO-492).
+    let going = runs.iter().any(|run| !run.status.is_terminal());
+    if let Some(previous) = runs.into_iter().next() {
+        if previous.status == status && previous.session_id.is_none() && previous.error.as_deref() == Some(message) {
+            let run = automation_store::replace_run(&automation.id, &previous.run_id, |run| {
+                run.repeat_count += 1;
+                run.last_repeat_at = Some(index::now());
+                Ok(())
+            })?;
+            emit_run(app, &run);
+            return Ok(());
+        }
+    }
+    let mut run = new_run(&automation.id, AutomationTrigger::Scheduled, Some(scheduled_for), status);
+    run.error = Some(message.into());
+    let run = automation_store::insert_run(run)?;
+    emit_run(app, &run);
+    if !going {
+        let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
+        update_summary(app, &automation.id, run.status, &ended_at);
+    }
+    Ok(())
+}
+
+/// Record a change to a run made after it ended (a duty's report, PRO-471), and say so.
+pub(crate) fn amend_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, change: impl FnOnce(&mut AutomationRun)) -> Result<AutomationRun> {
+    let run = automation_store::replace_run(automation_id, run_id, |run| {
+        change(run);
+        Ok(())
+    })?;
+    emit_run(app, &run);
+    Ok(run)
+}
+
 /// Save definitions in the process that schedules them. The canonical target
 /// and existing definition are resolved here, not trusted from a window cache.
 pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: AutomationInput) -> Result<Automation> {
+    // A bot's duty is changed on its bot's Duties tab, where giving it more needs a person (PRO-471).
+    if id.is_some_and(|id| automation_store::get(id).is_ok_and(|existing| crate::bots::duties::is_duty(&existing))) {
+        bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
+    // What only a bot has (a mention of it, another bot's message, a watch) wakes only a bot's duty (PRO-472).
+    if matches!(input.event_trigger.as_ref().and_then(Option::as_ref).map(|trigger| &trigger.source), Some(sources::AutomationEventSource::Bot(_))) {
+        bail!("This trigger wakes a bot's duty. Add it on the bot's Duties tab.");
+    }
     input.project_path = crate::store::projects::canonical(&input.project_path)?;
     if input.workspace == AutomationWorkspace::NewWorktree && !crate::git::is_repo(Path::new(&input.project_path)) {
         bail!("Folder automations must use an existing session; worktrees require a Git repository.");
@@ -702,11 +901,16 @@ pub fn save_definition(app: &impl AutomationHost, id: Option<&str>, mut input: A
     });
     let automation = if existing.is_some() { automation_store::replace(automation)? } else { automation_store::insert(automation)? };
     if reset_seen { automation_store::clear_seen(&automation.id)?; }
+    sources::saved(&automation.id, existing.as_ref().and_then(|value| value.event_trigger.as_ref()), automation.event_trigger.as_ref())?;
     emit_definitions(app);
     Ok(automation)
 }
 
 pub fn remove_definition(app: &impl AutomationHost, id: &str) -> Result<()> {
+    // A duty whose bot was deleted has no Duties tab left to be removed from (PRO-471).
+    if automation_store::get(id).is_ok_and(|automation| crate::bots::duties::is_duty(&automation) && !crate::bots::duties::orphaned(&automation)) {
+        bail!("{}", crate::bots::duties::ELSEWHERE);
+    }
     automation_store::remove(id)?;
     emit_definitions(app);
     Ok(())
@@ -833,16 +1037,67 @@ fn start_run(
     issue: Option<index::IssueRef>,
     worktree_name: Option<String>,
 ) -> Result<AutomationRun> {
+    // A bot's duty runs as its bot does now, or not at all (PRO-471).
+    let bound;
+    let automation = match crate::bots::duties::bind(automation) {
+        crate::bots::duties::Bound::Ordinary => automation,
+        crate::bots::duties::Bound::Duty(duty) => {
+            bound = *duty;
+            &bound
+        }
+        crate::bots::duties::Bound::Refused(why) => return end_pending(app, &automation.id, run, AutomationRunStatus::Cancelled, why),
+    };
+    let duty = crate::bots::duties::is_duty(automation);
     emit_run(app, &run);
     let started_at = run.started_at.clone().unwrap_or_else(index::now);
     update_summary(app, &automation.id, run.status, &started_at);
+    // The first check runs before any session exists (PRO-484).
+    let Some(prompt) = precheck::gate(app, automation, &mut run, prompt)? else {
+        return Ok(run);
+    };
+    // Paused, deleted or switched off while its check ran: it does no work.
+    if duty {
+        if let crate::bots::duties::Bound::Refused(why) = crate::bots::duties::bind(automation) {
+            return end_pending(app, &automation.id, run, AutomationRunStatus::Cancelled, why);
+        }
+    }
 
+    // A duty whose bot was paused (or Bots switched off) while its session opened: why it sent nothing, or stopped.
+    let mut held: Option<(index::SessionEntry, String, bool)> = None;
     let result = (|| -> Result<()> {
-        let available = crate::harness::offered()
-            .into_iter()
-            .any(|value| value.id == automation.harness && value.available);
+        let available = if duty {
+            crate::bots::duties::agent_ready(&automation.harness)
+        } else {
+            crate::harness::offered()
+                .into_iter()
+                .any(|value| value.id == automation.harness && value.available)
+        };
         if !available {
             bail!("The selected agent is not available.");
+        }
+        if duty {
+            let entry = crate::bots::duties::open_session(app.sink().as_ref(), automation, &run)?;
+            let tab = entry.tabs.first().context("duty session has no tab")?;
+            run = automation_store::replace_run(&automation.id, &run.run_id, |value| {
+                value.session_id = Some(entry.id.clone());
+                value.tab_id = Some(tab.id.clone());
+                Ok(())
+            })?;
+            emit_run(app, &run);
+            crate::store::environment::prepare_unattended(&entry.cwd, None)?;
+            let prompt = crate::bots::duties::prompt(automation, &run, prompt)?;
+            // Paused once more just before the send, and just after it: a pause that landed while the session
+            // opened found no turn to stop, so none starts here, or the one that just started stops (PRO-492).
+            crate::bots::duties::before_send();
+            if let Some(why) = crate::bots::duties::held(automation) {
+                held = Some((entry, why, false));
+                return Ok(());
+            }
+            app.sessions()?.send(&entry.id, &tab.id, prompt, Vec::new())?;
+            if let Some(why) = crate::bots::duties::held(automation) {
+                held = Some((entry, why, true));
+            }
+            return Ok(());
         }
         let cwd = match automation.workspace {
             AutomationWorkspace::NewWorktree => None,
@@ -911,6 +1166,17 @@ fn start_run(
         Ok(())
     })();
 
+    if let Some((entry, why, sent)) = held {
+        let session = entry.id.clone();
+        end_run(app, &automation.id, &run.run_id, Some(entry), &why, AutomationRunStatus::Cancelled);
+        // Ended first, so the stop's own ending finds it ended and changes nothing.
+        if let (true, Some(tab), Ok(manager)) = (sent, run.tab_id.clone(), app.sessions()) {
+            if let Err(error) = manager.stop(&session, &tab) {
+                log::warn!("duty {}: stop the run its bot's pause held: {error:#}", automation.id);
+            }
+        }
+        return Ok(automation_store::list_runs(&automation.id)?.into_iter().find(|value| value.run_id == run.run_id).unwrap_or(run));
+    }
     if let Err(error) = result {
         let message = format!("{error:#}");
         run = automation_store::replace_run(&automation.id, &run.run_id, |value| {
@@ -926,6 +1192,8 @@ fn start_run(
         emit_run(app, &run);
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &automation.id, run.status, &ended_at);
+        // A duty's failure is reported as its duty says, within its bot's quiet hours (PRO-492).
+        crate::bots::duties::ended(app, &run);
     }
     Ok(run)
 }
@@ -990,6 +1258,8 @@ fn dispatch_issue(
             last_run_at: Some(index::now()),
         },
     );
+    // Counted for its runs a day, with the stamp that keeps it from starting twice.
+    seen.started.push(index::now());
     automation_store::save_seen(&automation.id, seen)?;
 
     start_run(
@@ -1292,6 +1562,10 @@ fn spawn_issue_report(
     run_id: String,
     failed: bool,
 ) {
+    // Routed by the run, not the automation's trigger now: that may have changed since the run started.
+    if sources::is_linear_run(&automation_id, &run_id) {
+        return sources::spawn_report(app, automation_id, run_id, failed);
+    }
     let app = app.clone();
     let _ = std::thread::Builder::new()
         .name("automation-issue-report".into())
@@ -1304,41 +1578,108 @@ fn spawn_issue_report(
         }));
 }
 
-pub fn complete_from_hook(
+#[cfg(test)]
+fn complete_from_hook(
     app: &impl AutomationHost,
     session_id: &str,
     tab_id: &str,
     final_message: Option<String>,
 ) {
+    finish_from_hook(app, session_id, tab_id, final_message, None, None);
+}
+
+pub fn complete_from_turn(app: &impl AutomationHost, session_id: &str, tab_id: &str, final_message: Option<String>, generation: u64) {
+    finish_from_hook(app, session_id, tab_id, final_message, None, Some(generation));
+}
+
+fn finish_from_hook(
+    app: &impl AutomationHost,
+    session_id: &str,
+    tab_id: &str,
+    final_message: Option<String>,
+    expected: Option<&DeferredCompletion>,
+    generation: Option<u64>,
+) {
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
     let changed_files = changed_file_count(&entry);
+    let head = sources::left_head(&stamp.id, &stamp.run_id, Some(Path::new(&entry.cwd)));
     let mut transitioned = false;
-    let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
-        if matches!(
+    // The tab lock holds turn admission through the durable transition. A
+    // check made before taking it is not enough: another turn can open then.
+    let result = app.with_quiescent_execution(session_id, tab_id, generation, || automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+        if expected.is_none_or(|candidate| run.deferred_completion.as_ref() == Some(candidate)) && matches!(
             run.status,
             AutomationRunStatus::Pending | AutomationRunStatus::Running
         ) {
             transitioned = true;
             run.status = AutomationRunStatus::Completed;
-            run.ended_at = Some(index::now());
-            run.final_message = final_message;
+            run.ended_at = Some(expected.and_then(|candidate| candidate.quiet_since.clone()).unwrap_or_else(index::now));
+            run.final_message = final_message.clone();
+            run.deferred_completion = None;
             run.changed_files = changed_files;
+            sources::keep_left_head(run, head.as_deref());
         }
         Ok(())
-    }) else {
+    }));
+    let Some(result) = result else {
+        if expected.is_some() { return; }
+        let Some(Ok(run)) = app.with_current_turn(session_id, tab_id, generation, || automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+            if !run.status.is_terminal() {
+                run.deferred_completion = Some(DeferredCompletion { message: final_message, turn_generation: generation, quiet_since: None });
+            }
+            Ok(())
+        })) else { return };
+        if !run.status.is_terminal() {
+            app.deferred_status(session_id, tab_id, true);
+            emit_run(app, &run);
+        }
+        return;
+    };
+    let Ok(run) = result else {
         return;
     };
     emit_run(app, &run);
     if transitioned {
+        app.deferred_status(session_id, tab_id, false);
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
         update_summary(app, &stamp.id, run.status, &ended_at);
         archive_finished_run(app, &run);
+        crate::bots::duties::ended(app, &run);
         if run.issue.is_some() {
             spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, false);
         }
     }
+}
+
+/// For untracked process work, wait for a stable observation that it ended.
+/// Tracked notifications remain outstanding until the agent has handled them.
+const DEFERRED_SETTLE: chrono::TimeDelta = chrono::TimeDelta::seconds(10);
+
+fn reconcile_deferred(app: &impl AutomationHost, now: DateTime<Utc>) -> Result<()> {
+    for automation in automation_store::list()? {
+        for run in automation_store::list_runs(&automation.id)? {
+            let (Some(candidate), Some(session), Some(tab)) = (run.deferred_completion.as_ref(), run.session_id.as_deref(), run.tab_id.as_deref()) else { continue };
+            if run.status.is_terminal() { continue; }
+            if session_automation(session, tab).is_none_or(|(_, stamp)| stamp.run_id != run.run_id) { continue; }
+            let busy = app.execution_continues(session, tab);
+            let quiet = candidate.quiet_since.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc));
+            if !busy && quiet.is_some_and(|at| now.signed_duration_since(at) >= DEFERRED_SETTLE) {
+                finish_from_hook(app, session, tab, candidate.message.clone(), Some(candidate), candidate.turn_generation);
+            } else if (busy && candidate.quiet_since.is_some()) || (!busy && quiet.is_none()) {
+                let _ = automation_store::replace_run(&automation.id, &run.run_id, |current| {
+                    if !current.status.is_terminal() && current.deferred_completion.as_ref() == Some(candidate) {
+                        if let Some(deferred) = &mut current.deferred_completion {
+                            deferred.quiet_since = (!busy).then(|| now.to_rfc3339());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The sessions to archive now that `finished` has completed (#887): its own,
@@ -1383,20 +1724,49 @@ fn archive_finished_run(app: &impl AutomationHost, finished: &AutomationRun) {
 }
 
 pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Failed);
+}
+
+/// End a run that has gone on past its time (a bot's duty, PRO-471), found by
+/// its own id: its session may be gone (deleted by hand), and the run must
+/// still end, or every tick would find it going and time it out again
+/// (PRO-492). Its agent is stopped by the caller.
+pub(crate) fn time_out_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, message: &str) {
+    let entry = automation_store::list_runs(automation_id)
+        .ok()
+        .and_then(|runs| runs.into_iter().find(|run| run.run_id == run_id))
+        .and_then(|run| run.session_id)
+        .and_then(|session| index::get(&session).ok());
+    end_run(app, automation_id, run_id, entry, message, AutomationRunStatus::TimedOut);
+}
+
+pub fn cancel_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str) {
+    end_unsuccessfully(app, session_id, tab_id, message, AutomationRunStatus::Cancelled);
+}
+
+fn end_unsuccessfully(app: &impl AutomationHost, session_id: &str, tab_id: &str, message: &str, status: AutomationRunStatus) {
     let Some((entry, stamp)) = session_automation(session_id, tab_id) else {
         return;
     };
+    end_run(app, &stamp.id, &stamp.run_id, Some(entry), message, status);
+}
+
+/// End run `run_id` of `automation_id` with `status`, when it is still going. `entry` is its session, when it has one.
+pub(crate) fn end_run(app: &impl AutomationHost, automation_id: &str, run_id: &str, entry: Option<index::SessionEntry>, message: &str, status: AutomationRunStatus) {
     let message = message.to_string();
+    let head = sources::left_head(automation_id, run_id, entry.as_ref().map(|entry| Path::new(&entry.cwd)));
     let mut transitioned = false;
-    let Ok(run) = automation_store::replace_run(&stamp.id, &stamp.run_id, |run| {
+    let Ok(run) = automation_store::replace_run(automation_id, run_id, |run| {
         if matches!(
             run.status,
             AutomationRunStatus::Pending | AutomationRunStatus::Running
         ) {
             transitioned = true;
-            run.status = AutomationRunStatus::Failed;
+            run.status = status;
+            run.deferred_completion = None;
             run.ended_at = Some(index::now());
             run.error = Some(message);
+            sources::keep_left_head(run, head.as_deref());
         }
         Ok(())
     }) else {
@@ -1405,9 +1775,10 @@ pub fn fail_from_hook(app: &impl AutomationHost, session_id: &str, tab_id: &str,
     emit_run(app, &run);
     if transitioned {
         let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
-        update_summary(app, &stamp.id, run.status, &ended_at);
+        update_summary(app, automation_id, run.status, &ended_at);
+        crate::bots::duties::ended(app, &run);
         if run.issue.is_some() {
-            spawn_issue_report(app, Some(entry), stamp.id, stamp.run_id, true);
+            spawn_issue_report(app, entry, automation_id.to_string(), run_id.to_string(), true);
         }
     }
 }
@@ -1457,6 +1828,9 @@ pub struct AutomationIssueState {
     pub last_polled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    /// Something to know about the trigger that is not a failure to read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 fn public_issue_state(
@@ -1467,23 +1841,39 @@ fn public_issue_state(
         automation_id: automation_id.into(),
         last_polled_at: state.last_polled_at.clone(),
         last_poll_error: state.last_poll_error.clone(),
+        notice: None,
     }
 }
 
-fn emit_issue_state(app: &impl AutomationHost, automation_id: &str, state: &automation_store::SeenState) {
-    app.sink().emit(
-        "automation_issue_state",
-        &public_issue_state(automation_id, state),
-    );
+/// An issue search's status, with its day's hold while it lasts (PRO-490 review).
+fn issue_state_of(automation: &Automation, state: &automation_store::SeenState, now: DateTime<Utc>) -> AutomationIssueState {
+    let mut public = public_issue_state(&automation.id, state);
+    let cap = sources::runs_per_day(automation.issue_trigger.as_ref().and_then(|trigger| trigger.max_runs_per_day));
+    public.notice = state
+        .held_until
+        .as_deref()
+        .filter(|resume| DateTime::parse_from_rfc3339(resume).is_ok_and(|resume| resume > now))
+        .map(|resume| sources::day_hold_notice(resume, cap));
+    public
+}
+
+fn emit_issue_state(app: &impl AutomationHost, automation: &Automation, state: &automation_store::SeenState) {
+    app.sink().emit("automation_issue_state", &issue_state_of(automation, state, Utc::now()));
 }
 
 pub fn issue_states() -> Result<Vec<AutomationIssueState>> {
     automation_store::list()?
         .into_iter()
-        .filter(|automation| automation.issue_trigger.is_some())
+        .filter(|automation| automation.issue_trigger.is_some() || automation.event_trigger.is_some())
         .map(|automation| {
-            let state = automation_store::load_seen(&automation.id)?.unwrap_or_default();
-            Ok(public_issue_state(&automation.id, &state))
+            if automation.event_trigger.is_some() {
+                return Ok(sources::public_state(&automation));
+            }
+            // One automation's unreadable record does not take the others' states with it.
+            Ok(match automation_store::load_seen(&automation.id) {
+                Ok(state) => issue_state_of(&automation, &state.unwrap_or_default(), Utc::now()),
+                Err(error) => AutomationIssueState { automation_id: automation.id.clone(), last_polled_at: None, last_poll_error: Some(format!("{error:#}")), notice: None },
+            })
         })
         .collect()
 }
@@ -1505,11 +1895,17 @@ fn issue_poll_due(
 }
 
 fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message: &str) -> Result<()> {
+    record_source_error(app, automation, AutomationTrigger::Issue, message)
+}
+
+/// A source that could not be read, as one run row listed under `trigger`;
+/// the same error again counts as a repeat of that row.
+fn record_source_error(app: &impl AutomationHost, automation: &Automation, trigger: AutomationTrigger, message: &str) -> Result<()> {
     if let Some(previous) = automation_store::list_runs(&automation.id)?
         .into_iter()
         .next()
     {
-        if previous.trigger == AutomationTrigger::Issue
+        if previous.trigger == trigger
             && previous.status == AutomationRunStatus::SkippedUnavailable
             && previous.issue.is_none()
             && previous.error.as_deref() == Some(message)
@@ -1525,7 +1921,7 @@ fn record_poll_error(app: &impl AutomationHost, automation: &Automation, message
     }
     let mut run = new_run(
         &automation.id,
-        AutomationTrigger::Issue,
+        trigger,
         None,
         AutomationRunStatus::SkippedUnavailable,
     );
@@ -1564,7 +1960,7 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             let message = format!("{error:#}");
             state.last_poll_error = Some(message.clone());
             automation_store::save_seen(&automation.id, &state)?;
-            emit_issue_state(app, &automation.id, &state);
+            emit_issue_state(app, automation, &state);
             record_poll_error(app, automation, &message)?;
             return Ok(());
         }
@@ -1595,20 +1991,58 @@ fn evaluate_issue(app: &impl AutomationHost, automation: &Automation, now: DateT
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
         }
-        IssueSelection::Dispatch(candidates) => {
+        IssueSelection::Dispatch(mut candidates) => {
+            let cap = sources::runs_per_day(trigger.max_runs_per_day) as usize;
+            let held = within_day(&mut state, &mut candidates, cap, now);
+            if held && candidates.is_empty() {
+                state.held_until = day_resumes(&state.started, cap);
+                automation_store::save_seen(&automation.id, &state)?;
+                emit_issue_state(app, automation, &state);
+                return Ok(());
+            }
+            // An automation's first check gates the whole poll (PRO-484).
+            let Some(candidates) = precheck::gate_poll(app, automation, candidates)? else {
+                return Ok(());
+            };
             state.initialized = true;
             automation_store::save_seen(&automation.id, &state)?;
             for issue in candidates {
+                if !precheck::batch_goes_on(automation) {
+                    break;
+                }
                 let run = dispatch_issue(app, automation, &issue, &mut state)?;
                 if run.status == AutomationRunStatus::Failed && run.issue.is_some() {
                     let entry = run.session_id.as_deref().and_then(|id| index::get(id).ok());
                     spawn_issue_report(app, entry, automation.id.clone(), run.run_id.clone(), true);
                 }
             }
+            if held {
+                state.held_until = day_resumes(&state.started, cap);
+                automation_store::save_seen(&automation.id, &state)?;
+            }
         }
     }
-    emit_issue_state(app, &automation.id, &state);
+    emit_issue_state(app, automation, &state);
     Ok(())
+}
+
+/// An issue search's runs a day (PRO-490 review): `candidates` cut to the room the last day's runs leave, so what
+/// is past it stays unseen for a later poll; true when some were held.
+fn within_day<T>(state: &mut automation_store::SeenState, candidates: &mut Vec<T>, cap: usize, now: DateTime<Utc>) -> bool {
+    state.started.retain(|at| DateTime::parse_from_rfc3339(at).is_ok_and(|at| now - at.with_timezone(&Utc) < chrono::TimeDelta::days(1)));
+    let room = cap.saturating_sub(state.started.len());
+    let held = candidates.len() > room;
+    candidates.truncate(room);
+    state.held_until = None;
+    held
+}
+
+/// When an issue search that met its runs a day has room again: when the oldest run that fills it leaves the day.
+fn day_resumes(started: &[String], cap: usize) -> Option<String> {
+    let mut times: Vec<DateTime<Utc>> = started.iter().filter_map(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)).collect();
+    times.sort();
+    let oldest = times.len().checked_sub(cap).map(|index| times[index])?;
+    Some((oldest + chrono::TimeDelta::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 static EVALUATING: AtomicBool = AtomicBool::new(false);
@@ -1621,42 +2055,69 @@ impl Drop for EvaluationGuard {
     }
 }
 
-fn evaluate(app: &impl AutomationHost) -> Result<()> {
+pub(crate) fn evaluate(app: &impl AutomationHost) -> Result<()> {
     if EVALUATING.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
     let _guard = EvaluationGuard;
     let now = Utc::now();
+    // A bot's check-backs on its work items (PRO-476) keep this clock: nothing runs for them until one is due.
+    if crate::bots::enabled_cached() {
+        if let Ok(manager) = app.sessions() {
+            crate::bots::runs::check_backs_due(&manager, now);
+        }
+    }
     for automation in automation_store::list()? {
-        if automation.issue_trigger.is_some() {
-            if let Err(error) = evaluate_issue(app, &automation, now) {
-                log::warn!("issue automation {}: {error:#}", automation.id);
-            }
+        // A bot's duty wakes only while Bots is on and its bot is listed and
+        // not paused; a paused bot's due runs are skipped, not run late (PRO-471).
+        if crate::bots::duties::is_duty(&automation) && !crate::bots::duties::may_wake(app, &automation, now) {
             continue;
         }
-        let Some(action) = due_action(&automation, now)? else {
+        // One with a first check is evaluated on a thread of its own, so its
+        // check never holds up the others (PRO-484).
+        if precheck::evaluate_apart(app, &automation, now) {
             continue;
-        };
-        let next = next_run_after(&automation.schedule, now)?
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        automation_store::update(&automation.id, |value| {
-            value.next_run_at = next;
-            value.modified = index::now();
-            Ok(())
-        })?;
-        emit_definitions(app);
-        match action {
-            DueAction::Dispatch { scheduled_for } => {
-                dispatch(
-                    app,
-                    &automation.id,
-                    AutomationTrigger::Scheduled,
-                    Some(scheduled_for),
-                )?;
-            }
-            DueAction::SkipMissed { scheduled_for } => {
-                record_missed(app, &automation, scheduled_for)?
-            }
+        }
+        evaluate_automation(app, &automation, now)?;
+    }
+    Ok(())
+}
+
+fn evaluate_automation(app: &impl AutomationHost, automation: &Automation, now: DateTime<Utc>) -> Result<()> {
+    if automation.event_trigger.is_some() {
+        if let Err(error) = sources::evaluate(app, automation, now) {
+            log::warn!("event automation {}: {error:#}", automation.id);
+        }
+        return Ok(());
+    }
+    if automation.issue_trigger.is_some() {
+        if let Err(error) = evaluate_issue(app, automation, now) {
+            log::warn!("issue automation {}: {error:#}", automation.id);
+        }
+        return Ok(());
+    }
+    let Some(action) = due_action(automation, now)? else {
+        return Ok(());
+    };
+    let next = next_run_after(&automation.schedule, now)?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    automation_store::update(&automation.id, |value| {
+        value.next_run_at = next;
+        value.modified = index::now();
+        Ok(())
+    })?;
+    emit_definitions(app);
+    match action {
+        DueAction::Dispatch { scheduled_for } => {
+            dispatch(
+                app,
+                &automation.id,
+                AutomationTrigger::Scheduled,
+                Some(scheduled_for),
+            )?;
+        }
+        DueAction::SkipMissed { scheduled_for } => {
+            record_missed(app, automation, scheduled_for)?
         }
     }
     Ok(())
@@ -1676,17 +2137,27 @@ pub(crate) fn recover_open_runs_except(app: &impl AutomationHost, going_on: &std
         };
         let ended = |run: &AutomationRun| !run.status.is_terminal() && !run.session_id.as_ref().is_some_and(|session| going_on.contains(session));
         for open in runs.into_iter().filter(ended) {
+            let mut transitioned = false;
+            // The head its pull request run left, from its session's folder, written with the ending (PRO-490).
+            let folder = open.session_id.as_deref().and_then(|id| index::get(id).ok()).map(|entry| PathBuf::from(entry.cwd));
+            let head = sources::left_head(&automation.id, &open.run_id, folder.as_deref());
             let Ok(run) = automation_store::replace_run(&automation.id, &open.run_id, |run| {
+                if run.status.is_terminal() { return Ok(()); }
+                transitioned = true;
                 run.status = AutomationRunStatus::Failed;
+                run.deferred_completion = None;
                 run.ended_at = Some(index::now());
                 run.error = Some("The app closed before this automation run finished.".into());
+                sources::keep_left_head(run, head.as_deref());
                 Ok(())
             }) else {
                 continue;
             };
+            if !transitioned { continue; }
             emit_run(app, &run);
             let ended_at = run.ended_at.clone().unwrap_or_else(index::now);
             update_summary(app, &automation.id, run.status, &ended_at);
+            crate::bots::duties::ended(app, &run);
             if run.issue.is_some() {
                 let entry = run.session_id.as_deref().and_then(|id| index::get(id).ok());
                 spawn_issue_report(
@@ -1706,11 +2177,26 @@ pub(crate) fn start_recovered_scheduler(app: impl AutomationHost) {
     std::thread::Builder::new()
         .name("automation-scheduler".into())
         .spawn(move || {
+            let mut ticks = 0u8;
             loop {
-                if let Err(error) = evaluate(&app) {
-                    log::warn!("automation scheduler: {error:#}");
+                if ticks == 0 {
+                    if let Err(error) = evaluate(&app) {
+                        log::warn!("automation scheduler: {error:#}");
+                    }
+                    // Bots' GitHub and Linear channels (PRO-480): read when due, on a thread of their own.
+                    if crate::bots::enabled() {
+                        if let Ok(manager) = app.sessions() {
+                            // Slack and Telegram (PRO-481): their connectors and the pump, started once each.
+                            crate::bots::chat_apps::supervise(&manager);
+                            crate::bots::channels::tick(manager);
+                        }
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(30));
+                if let Err(error) = reconcile_deferred(&app, Utc::now()) {
+                    log::warn!("automation reconciliation: {error:#}");
+                }
+                ticks = (ticks + 1) % 6;
+                std::thread::sleep(std::time::Duration::from_secs(5));
             }
         })
         .expect("start automation scheduler");
@@ -1772,6 +2258,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            event_trigger: None,
             pipeline: None,
             created: "2026-09-01T00:00:00Z".into(),
             modified: "2026-09-01T00:00:00Z".into(),
@@ -1788,6 +2275,7 @@ mod tests {
             max_runs_per_tick,
             run_on_existing,
             report: AutomationIssueReport::default(),
+            max_runs_per_day: None,
         }
     }
 
@@ -1996,6 +2484,76 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// PRO-490 review M1: an issue search starts at most its runs a day, across issues; what is past them stays
+    /// unseen and its status says until when, in the event triggers' words.
+    #[test]
+    fn an_issue_search_starts_at_most_its_runs_a_day() {
+        let now = at("2026-11-22T12:00:00Z");
+        let mut state = automation_store::SeenState::default();
+        let ago = |minutes: i64| (now - chrono::TimeDelta::minutes(minutes)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        // Two runs today, one yesterday (out of the day).
+        state.started = vec![ago(25 * 60), ago(120), ago(30)];
+        let mut candidates = vec![1, 2, 3];
+        assert!(within_day(&mut state, &mut candidates, 3, now), "room for one of three");
+        assert_eq!((candidates, state.started.len()), (vec![1], 2));
+        // That one starts: the day is full, and it resumes when the oldest of the three leaves it.
+        state.started.push(ago(0));
+        state.held_until = day_resumes(&state.started, 3);
+        assert_eq!(state.held_until.as_deref(), Some("2026-11-23T10:00:00.000Z"));
+        let mut automation = definition_from_input(automation_input(None, true), None, now).unwrap();
+        automation.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(3);
+        let notice = issue_state_of(&automation, &state, now).notice.unwrap();
+        assert!(notice.contains("it started 3 runs in a day") && notice.contains("2026-11-23 10:00 UTC"), "{notice}");
+        assert!(issue_state_of(&automation, &state, at("2026-11-23T10:00:01Z")).notice.is_none(), "not once it has passed");
+        let mut more = vec![4];
+        assert!(within_day(&mut state, &mut more, 3, now));
+        assert!(more.is_empty());
+        // Under the cap: nothing is held, and an old hold goes.
+        let mut fewer = vec![5];
+        assert!(!within_day(&mut state, &mut fewer, 48, now));
+        assert_eq!((fewer, state.held_until), (vec![5], None));
+        // Saved before it: 48. A value outside 1 to 1000 is refused.
+        assert_eq!(automation_store::SeenState::default().started.len(), 0);
+        let saved = definition_from_input(automation_input(None, true), None, now).unwrap();
+        assert_eq!(sources::runs_per_day(saved.issue_trigger.unwrap().max_runs_per_day), 48);
+        for cap in [0, 1001] {
+            let mut input = automation_input(None, true);
+            input.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(cap);
+            assert!(definition_from_input(input, None, now).unwrap_err().to_string().contains("Runs a day must be from 1 to 1000"), "{cap}");
+        }
+    }
+
+    /// PRO-490 review: a save from a window that does not send runs a day keeps the stored value, for an issue
+    /// search and an event trigger alike; one that sends it changes it.
+    #[test]
+    fn a_save_without_runs_a_day_keeps_the_stored_value() {
+        let now = at("2026-11-22T12:00:00Z");
+        let mut input = automation_input(None, true);
+        input.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(7);
+        let stored = definition_from_input(input, None, now).unwrap();
+        let resaved = definition_from_input(automation_input(None, true), Some(&stored), now).unwrap();
+        assert_eq!(resaved.issue_trigger.unwrap().max_runs_per_day, Some(7));
+        let mut changed = automation_input(None, true);
+        changed.issue_trigger.as_mut().unwrap().max_runs_per_day = Some(9);
+        assert_eq!(definition_from_input(changed, Some(&stored), now).unwrap().issue_trigger.unwrap().max_runs_per_day, Some(9));
+
+        let event = |cap: Option<u32>| {
+            let mut value = serde_json::to_value(automation_input(None, false)).unwrap();
+            value["eventTrigger"] = serde_json::json!({"source": {"kind": "githubPullRequest", "repo": "acme/widgets", "events": ["opened"]}, "pollIntervalMinutes": 5, "maxRunsPerTick": 3});
+            if let Some(cap) = cap {
+                value["eventTrigger"]["maxRunsPerDay"] = cap.into();
+            }
+            serde_json::from_value::<AutomationInput>(value).unwrap()
+        };
+        let stored = definition_from_input(event(Some(5)), None, now).unwrap();
+        assert_eq!(definition_from_input(event(None), Some(&stored), now).unwrap().event_trigger.unwrap().max_runs_per_day, Some(5));
+        assert_eq!(definition_from_input(event(Some(6)), Some(&stored), now).unwrap().event_trigger.unwrap().max_runs_per_day, Some(6));
+        // As stored: absent is written as absent, and read as 48.
+        let fresh = definition_from_input(event(None), None, now).unwrap();
+        assert!(serde_json::to_value(&fresh).unwrap()["eventTrigger"].get("maxRunsPerDay").is_none());
+        assert_eq!(fresh.event_trigger.unwrap().runs_per_day(), 48);
+    }
+
     #[test]
     fn an_input_without_a_mode_defaults_to_bypass_for_both_triggers() {
         let now = at("2026-09-05T12:00:00Z");
@@ -2094,7 +2652,7 @@ mod tests {
     /// A host with an event sink and no session manager: ending a run needs
     /// only the first.
     #[derive(Clone)]
-    struct EndHost(Arc<crate::sink::BroadcastSink>);
+    struct EndHost(Arc<crate::sink::BroadcastSink>, Arc<AtomicBool>, Arc<Mutex<Vec<bool>>>, Arc<AtomicBool>, Arc<std::sync::atomic::AtomicU64>);
 
     impl AutomationHost for EndHost {
         fn sink(&self) -> Arc<dyn EventSink> {
@@ -2103,10 +2661,196 @@ mod tests {
         fn sessions(&self) -> Result<crate::session::SessionManager> {
             bail!("ending a run asks for no session manager")
         }
+        fn execution_continues(&self, _: &str, _: &str) -> bool {
+            self.1.load(Ordering::SeqCst)
+        }
+        fn with_quiescent_execution<T>(&self, _: &str, _: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+            (!self.1.load(Ordering::SeqCst) && !self.3.swap(false, Ordering::SeqCst) && generation.is_none_or(|value| value == self.4.load(Ordering::SeqCst))).then(action)
+        }
+        fn with_current_turn<T>(&self, _: &str, _: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+            generation.is_none_or(|value| value == self.4.load(Ordering::SeqCst)).then(action)
+        }
+        fn deferred_status(&self, _: &str, _: &str, active: bool) {
+            self.2.lock().unwrap().push(active);
+        }
     }
 
     fn end_host() -> EndHost {
-        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)))
+        EndHost(Arc::new(crate::sink::BroadcastSink::new(16)), Arc::new(AtomicBool::new(false)), Arc::default(), Arc::new(AtomicBool::new(false)), Arc::default())
+    }
+
+    /// PRO-490: the head a pull request run leaves is written with its ending,
+    /// in the same update, whether its turn ended it, it failed, or recovery
+    /// after a restart did: no poll sees it ended without its head.
+    #[test]
+    fn a_pull_request_runs_head_is_written_with_its_ending() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@example.com"]).args(args).current_dir(repo.path()).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        let head = format!("7@{}", git(&["rev-parse", "HEAD"]));
+        for ending in ["turn", "failure", "recovery"] {
+            let (run, session, tab) = running_run(&automation);
+            automation_store::replace_run(&automation.id, &run.run_id, |value| {
+                value.unknown.insert("pullRequest".into(), serde_json::json!({"number": 7}));
+                Ok(())
+            })
+            .unwrap();
+            index::update(|sessions| {
+                sessions.iter_mut().filter(|entry| entry.id == session).for_each(|entry| entry.cwd = repo.path().to_string_lossy().into_owned());
+                Ok(())
+            })
+            .unwrap();
+            match ending {
+                "turn" => complete_from_turn(&host, &session, &tab, Some("Reviewed.".into()), 0),
+                "failure" => fail_from_hook(&host, &session, &tab, "It broke."),
+                _ => recover_open_runs_except(&host, &std::collections::HashSet::new()),
+            }
+            let ended = automation_store::list_runs(&automation.id).unwrap().into_iter().find(|value| value.run_id == run.run_id).unwrap();
+            assert!(ended.status.is_terminal(), "{ending}: {ended:?}");
+            assert_eq!(ended.unknown["leftHeads"], serde_json::json!([head]), "{ending}");
+        }
+    }
+
+    #[test]
+    fn a_late_callback_cannot_finish_or_replace_a_newer_turn() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.4.store(2, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("Old reply".into()), 1);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("New interim".into()), 2);
+        complete_from_turn(&host, &session, &tab, Some("Late old reply".into()), 1);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].deferred_completion.as_ref().unwrap().message.as_deref(), Some("New interim"));
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_turn(&host, &session, &tab, Some("Final".into()), 2);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].final_message.as_deref(), Some("Final"));
+    }
+
+    #[test]
+    fn a_turn_opening_at_finalization_defers_the_reply() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.3.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Interim".into()));
+        let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(run.status, AutomationRunStatus::Running);
+        assert_eq!(run.deferred_completion.unwrap().message.as_deref(), Some("Interim"));
+        complete_from_hook(&host, &session, &tab, Some("Final".into()));
+        let run = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(run.status, AutomationRunStatus::Completed);
+        assert_eq!(run.final_message.as_deref(), Some("Final"));
+    }
+
+    #[test]
+    fn deferred_reply_is_reconciled_after_background_work_without_another_turn() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (run, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Work launched".into()));
+        let stored = || automation_store::list_runs(&automation.id).unwrap().into_iter().find(|value| value.run_id == run.run_id).unwrap();
+        assert_eq!(stored().deferred_completion.unwrap().message.as_deref(), Some("Work launched"));
+        assert_eq!(host.2.lock().unwrap().as_slice(), &[true]);
+        let now = Utc::now();
+        reconcile_deferred(&host, now).unwrap();
+        assert_eq!(stored().status, AutomationRunStatus::Running);
+        host.1.store(false, Ordering::SeqCst);
+        reconcile_deferred(&host, now).unwrap();
+        // Work can resume while the quiet interval is running.
+        host.1.store(true, Ordering::SeqCst);
+        reconcile_deferred(&host, now + chrono::TimeDelta::seconds(11)).unwrap();
+        assert!(stored().deferred_completion.unwrap().quiet_since.is_none());
+        host.1.store(false, Ordering::SeqCst);
+        reconcile_deferred(&host, now + chrono::TimeDelta::seconds(12)).unwrap();
+        reconcile_deferred(&host, now + chrono::TimeDelta::seconds(23)).unwrap();
+        let finished = stored();
+        assert_eq!(finished.status, AutomationRunStatus::Completed);
+        assert_eq!(finished.final_message.as_deref(), Some("Work launched"));
+        assert_eq!(finished.ended_at, Some((now + chrono::TimeDelta::seconds(12)).to_rfc3339()));
+        assert!(finished.deferred_completion.is_none());
+        assert_eq!(host.2.lock().unwrap().last(), Some(&false));
+    }
+
+    #[test]
+    fn deferred_reconciliation_does_not_overwrite_a_newer_reply_or_cancellation() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("First reply".into()));
+        let old = automation_store::list_runs(&automation.id).unwrap()[0].deferred_completion.clone().unwrap();
+        complete_from_hook(&host, &session, &tab, Some("Later reply".into()));
+        host.1.store(false, Ordering::SeqCst);
+        finish_from_hook(&host, &session, &tab, old.message.clone(), Some(&old), old.turn_generation);
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
+        cancel_from_hook(&host, &session, &tab, "Stopped");
+        reconcile_deferred(&host, Utc::now() + chrono::TimeDelta::minutes(1)).unwrap();
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Cancelled);
+    }
+
+    #[test]
+    fn background_work_defers_completion_until_the_followup_turn_finishes() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (run, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Pipeline running".into()));
+        let stored = || automation_store::list_runs(&automation.id).unwrap().into_iter().find(|r| r.run_id == run.run_id).unwrap();
+        assert_eq!(stored().status, AutomationRunStatus::Running);
+        assert!(stored().ended_at.is_none());
+        assert!(!archived(&session));
+        // A resumed turn is still active even when the task notification has arrived.
+        complete_from_hook(&host, &session, &tab, Some("Investigating failure".into()));
+        assert_eq!(stored().status, AutomationRunStatus::Running);
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Fixed and verified".into()));
+        assert_eq!(stored().status, AutomationRunStatus::Completed);
+        assert_eq!(stored().final_message.as_deref(), Some("Fixed and verified"));
+        assert!(stored().ended_at.is_some());
+        mark_running_from_hook(&host, &session, &tab);
+        complete_from_hook(&host, &session, &tab, Some("Later manual conversation".into()));
+        assert_eq!(stored().final_message.as_deref(), Some("Fixed and verified"));
+    }
+
+    #[test]
+    fn open_background_run_fails_on_interruption_and_recovers_after_restart() {
+        let _home = crate::store::temp_home();
+        let host = end_host();
+        let automation = archiving();
+        let (_, session, tab) = running_run(&automation);
+        host.1.store(true, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Still running".into()));
+        fail_from_hook(&host, &session, &tab, "Interrupted");
+        host.1.store(false, Ordering::SeqCst);
+        complete_from_hook(&host, &session, &tab, Some("Late reply".into()));
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Failed);
+        let (_, next, _) = running_run(&automation);
+        recover_open_runs_except(&host, &std::collections::HashSet::from([next.clone()]));
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Running);
+        recover_open_runs_except(&host, &std::collections::HashSet::new());
+        assert_eq!(automation_store::list_runs(&automation.id).unwrap()[0].status, AutomationRunStatus::Failed);
+        let (_, cancelled, cancelled_tab) = running_run(&automation);
+        cancel_from_hook(&host, &cancelled, &cancelled_tab, "Stopped by user");
+        complete_from_hook(&host, &cancelled, &cancelled_tab, Some("Late reply".into()));
+        let last = automation_store::list_runs(&automation.id).unwrap().remove(0);
+        assert_eq!(last.status, AutomationRunStatus::Cancelled);
+        assert!(last.ended_at.is_some());
     }
 
     /// An automation that archives its runs, saved in the store.

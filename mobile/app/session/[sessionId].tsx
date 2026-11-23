@@ -6,7 +6,7 @@ import * as ImagePicker from "expo-image-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowUp, CornerDownLeft, FileText, Keyboard as KeyboardIcon, Mic, Plus, TextCursorInput, ShieldAlert, ShieldCheck, Square, StickyNote, WifiOff, X } from "lucide-react-native";
+import { ArrowUp, CornerDownLeft, FileText, Keyboard as KeyboardIcon, Mic, Plus, TextCursorInput, Shield, ShieldAlert, Square, StickyNote, WifiOff, X } from "lucide-react-native";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import type { AgentEvent } from "@terminalx/portable/events";
 import { mergeEvents, type AttachmentInput, type ChatNote } from "@mobile/data/host-api";
@@ -19,6 +19,7 @@ import { hostDisplayName } from "@mobile/store/host-name";
 import { canRetry, connectionProblem, isTransportError, mayHaveArrived, problemText, screenMessage } from "@mobile/transport/connection-errors";
 import { Button, Card, EmptyState, StatusDot } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
+import { useKeyboardShown } from "@mobile/ui/keyboard";
 import { Glass } from "@mobile/ui/glass";
 import { EdgeFade } from "@mobile/ui/EdgeFade";
 import { useDictation } from "@mobile/ui/useDictation";
@@ -27,6 +28,7 @@ import { conversationKey, providerName } from "@mobile/data/conversations";
 import { agentConversations } from "@mobile/data/session-navigation";
 import { rowName } from "@mobile/data/session-list";
 import { ChatTabs, NewChatSheet, SessionHeader } from "@mobile/ui/SessionChrome";
+import { SessionNotificationsSheet, useSessionOverride } from "@mobile/ui/notifications/SessionNotifications";
 import { LinkedText } from "@mobile/ui/LinkedText";
 import { CompactingLine, PermissionCard, QuestionCard, TranscriptRow } from "@mobile/ui/transcript";
 import { SessionControls } from "@mobile/ui/SessionControls";
@@ -37,6 +39,7 @@ import { holdSend, releaseSend, showConversation, takeHeldSend, useConversationS
 import { addPasteImageListener } from "../../modules/paste-image";
 import { PromptImageContext } from "@mobile/ui/PromptImages";
 import { useHostFeatures } from "@mobile/state/host-features";
+import { BotQuestionOver } from "@mobile/ui/BotQuestionSheet";
 import { FOREGROUND as TERMINAL_FOREGROUND, TerminalScreen, type Row as ScreenRow } from "@mobile/terminal/screen";
 import { controlSequence, keySequence, pasteSequence, type TerminalKey } from "@mobile/terminal/keys";
 import { ScreenHistory } from "@mobile/terminal/history";
@@ -54,7 +57,8 @@ interface MobileAttachment extends AttachmentInput {
 interface TranscriptNotice { text: string; action: string; onPress(): void }
 
 export default function SessionScreen() {
-  const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string }>();
+  // `botId` and `item`: a bot's question to show as a sheet over this chat, its home chat (PRO-479).
+  const params = useLocalSearchParams<{ sessionId: string; tabId?: string; hostId?: string; title?: string; botId?: string; item?: string }>();
   const router = useRouter();
   const sessionId = params.sessionId;
   const app = useApp();
@@ -79,6 +83,8 @@ export default function SessionScreen() {
   // Whether this Mac takes an answer to an agent's question from a phone (#979): null until it has said.
   const answersQuestions = features ? features.questions === 1 : null;
   const [adding, setAdding] = useState(false);
+  const [notifying, setNotifying] = useState(false);
+  const override = useSessionOverride(app.activeHost?.id ?? "", sessionId);
 
   if (!app.activeHost || !tabId || (params.hostId && params.hostId !== app.activeHost.id)) return <View style={[styles.center, { backgroundColor: palette.page }]}><EmptyState title="Session unavailable" detail="Reconnect to its Mac and open this session again." /></View>;
   const key = conversationKey(app.activeHost.id, sessionId, tabId);
@@ -104,7 +110,10 @@ export default function SessionScreen() {
   };
   return <View style={[styles.page, { backgroundColor: palette.page }]}>
     <Stack.Screen options={{ title: label, headerShown: false }} />
-    <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} />
+    {params.botId && params.item && Number.isSafeInteger(Number(params.item)) ? <BotQuestionOver botId={params.botId} number={Number(params.item)} onClose={() => router.setParams({ botId: undefined, item: undefined })} /> : null}
+    <SessionHeader title={named} subtitle={[summary && summary.kind !== "quick" ? summary.project : null, machineName ?? hostDisplayName(app.activeHost)].filter(Boolean).join(" · ")} connection={state} onBack={() => router.back()} view={terminalOffered ? view : undefined} onView={setView} muted={override === "mute"} onNotifications={() => setNotifying(true)} />
+    {/* Named by the session's own title, as its notifications name it (22.07), not by the branch the header shows. */}
+    <SessionNotificationsSheet visible={notifying} hostId={hostId} sessionId={sessionId} name={summary?.title?.trim() || named} onClose={() => setNotifying(false)} />
     {summary && (summary.tabs.length > 1 || canAdd) ? <ChatTabs key={JSON.stringify([hostId, sessionId])} session={summary} selectedTabId={tabId} onSelect={select} onAdd={canAdd ? () => setAdding(true) : undefined} onClose={canClose ? close : undefined} actionsDisabled={!linked} /> : null}
     <NewChatSheet visible={adding} sessionId={sessionId} tabId={tabId} onClose={() => setAdding(false)} onStarted={(next) => { setAdding(false); select(next); }} />
     {!available ? <Text style={{ color: palette.warning, paddingHorizontal: 16 }}>This conversation is no longer available on the Mac.</Text> : null}
@@ -114,11 +123,26 @@ export default function SessionScreen() {
 
 
 /** A round button in the composer, on a quiet disc as the best chat apps draw theirs. */
-function RoundButton({ label, icon, disabled, tint, onPress }: { label: string; icon: React.ReactNode; disabled?: boolean; tint?: string; onPress(): void }) {
-  const { palette } = useTheme();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: !!disabled }} disabled={disabled} hitSlop={4} onPress={onPress} style={({ pressed }) => [styles.round, { backgroundColor: tint ?? palette.raised, opacity: disabled ? 0.4 : pressed ? 0.7 : 1 }]}>{icon}</Pressable>;
+/** A bare icon in the composer's row, as the boards draw it, with a full-size place to tap. */
+function IconButton({ label, icon, disabled, onPress }: { label: string; icon: React.ReactNode; disabled?: boolean; onPress(): void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: !!disabled }} disabled={disabled} hitSlop={8} onPress={onPress} style={({ pressed }) => [styles.icon, { opacity: disabled ? 0.4 : pressed ? 0.6 : 1 }]}>{icon}</Pressable>;
 }
 
+
+/**
+ * The composer's model, effort and permission mark are small words and an
+ * 18 pt icon, as 22.03 draws them; each is tapped through a 44 pt place.
+ * The strip they scroll in reaches past the 32 pt row (`chipStrip`) so a
+ * ScrollView, which clips touches to its frame, does not cut those places
+ * short. Side by side, the places split the gaps between them instead of
+ * overlapping: model and effort share their 5 pt gap, effort and the mark
+ * their 12 pt one, and the mark takes the room to its right.
+ */
+const CHIP_SLOP = {
+  model: { top: 13, bottom: 13, left: 8, right: 2 },
+  effort: { top: 13, bottom: 13, left: 3, right: 10 },
+  mode: { top: 13, bottom: 13, left: 2, right: 24 },
+};
 
 /** What a question's card says on a phone paired with a Mac that takes no answer from it (#979). */
 const ANSWER_ON_MAC = "Answer this question from your Mac.";
@@ -445,8 +469,6 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const imagesServed = useHostFeatures(app.api, hostId)?.promptImages === 1;
   const imageSource = useMemo(() => imagesServed ? { scope: `${hostId}:${sessionId}`, load: (url: string) => app.api.promptImage(sessionId, tabId, url) } : null, [app.api, hostId, imagesServed, sessionId, tabId]);
 
-  // The composer opens out while in use: typed in, holding a draft or attachments, a note, or dictation.
-  const [focused, setFocused] = useState(false);
   const harness = app.sessions.find((item) => item.id === sessionId)?.tabs.find((tab) => tab.id === tabId)?.harness;
   // Once the wait is a real one, the box says a message waits for the connection.
   const placeholder = state === "waiting" || state === "offline" ? "Message sends when connected" : harness ? `Message ${providerName(harness)}` : "Message this session";
@@ -456,12 +478,7 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   // takes focus only when tapped.
   useEffect(() => { Keyboard.dismiss(); }, []);
   // Over the keyboard the composer needs no room for the home indicator.
-  const [keyboardShown, setKeyboardShown] = useState(false);
-  useEffect(() => {
-    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
-    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
-    return () => { shown.remove(); hidden.remove(); };
-  }, []);
+  const keyboardShown = useKeyboardShown();
 
   // Speaking into the composer: what is said goes after what was already typed.
   const [composerHeight, setComposerHeight] = useState(0);
@@ -556,20 +573,17 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
   const sendDisabled = (!draft.trim() && !attachments.length) || sending || held;
   // The model, effort and mode stay in place while not connected, dimmed (#983).
   const dimmed = connected ? undefined : styles.dimmed;
-  const expanded = focused || !!draft || attachments.length > 0 || !sendToAgent || dictation.listening;
   // The bar is drawn in this screen, so the view starts where the screen does: no offset.
   // The view makes room for the keyboard with padding, which a floating composer ignores: the inner view is what shrinks, and the composer floats at its foot.
   return <PromptImageContext.Provider value={imageSource}><KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.flex}>{noticeLine}<TranscriptList inset={composerHeight} data={items} keyExtractor={(item) => item.key} contentContainerStyle={styles.transcriptRows} earlier={transcriptHeader} ListEmptyComponent={emptyTranscript} renderItem={({ item }) => item.kind === "turn" ? <TranscriptRow row={item.row} /> : <NoteCard note={item.note} first={item.first} />} latest={<>{transcript.compacting ? <CompactingLine /> : null}{transcript.pendingAsks.map((ask) => ask.kind === "questions"
   // Until the Mac has said what it takes, nothing can be sent; one that takes no answer shows the question to be answered there.
   ? <QuestionCard key={ask.requestId} ask={ask} stateKey={stateKey} connected={connected} answering={answeringPermission !== null || (connected && answersQuestions === null)} readOnly={answersQuestions === false ? ANSWER_ON_MAC : null} error={permissionErrors[ask.requestId]} onAnswer={(answers) => void answerQuestions(ask, answers)} />
   : <PermissionCard key={ask.requestId} ask={ask} connected={connected} answering={answeringPermission !== null} error={permissionErrors[ask.requestId]} onRespond={(optionId) => void respondPermission(ask, optionId)} />)}</>} /><SessionControls sessionId={sessionId} tabId={tabId} events={events} asks={transcript.pendingAsks.length} connected={connected} onOpenTab={(next) => router.setParams({ tabId: next, hostId })}>{(controls) => {
-    // While the agent works, an empty composer's button stops the turn, as a chat app's does.
-    const interrupting = !!controls?.busy && !draft.trim() && !attachments.length;
-    const mic = <RoundButton label="Dictate" icon={<Mic size={19} color={palette.ink} />} onPress={() => void beginDictation()} />;
-    // Send is the bright button once there is something to send; while the agent works and the box is empty, it stops the turn.
-    const action = interrupting
-      ? <Pressable accessibilityRole="button" accessibilityLabel="Interrupt" accessibilityHint="Long press to stop the session" onPress={controls!.interrupt} onLongPress={() => Alert.alert("Stop this session?", "The agent stops, and its conversation stays.", [{ text: "Cancel", style: "cancel" }, { text: "Stop", style: "destructive", onPress: controls!.stop }])} disabled={controls!.working} style={[styles.send, { backgroundColor: palette.ink, opacity: controls!.working ? 0.38 : 1 }]}><Square size={13} color={palette.page} fill={palette.page} /></Pressable>
-      : <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} onPress={() => void send()} style={[styles.send, { backgroundColor: sendDisabled ? palette.raised : palette.ink }]}><ArrowUp size={20} color={sendDisabled ? palette.faint : palette.page} strokeWidth={2.6} /></Pressable>;
+    // Send stays Send while the agent works; the turn is stopped from the status line (22.03).
+    const ready = !sendDisabled;
+    const action = <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={sendDisabled} hitSlop={6} onPress={() => void send()} style={[styles.send, { backgroundColor: ready ? palette.ink : palette.raised, borderColor: ready ? palette.ink : palette.border }]}><ArrowUp size={16} color={ready ? palette.page : palette.ink} strokeWidth={2.4} /></Pressable>;
+    // A long press on the line's Stop stops the whole session, after asking.
+    const stopSession = controls ? () => Alert.alert("Stop this session?", "The agent stops, and its conversation stays.", [{ text: "Cancel", style: "cancel" }, { text: "Stop", style: "destructive", onPress: controls.stop }]) : undefined;
     // Floating over the conversation, which fades and blurs away under it.
     return <View onLayout={({ nativeEvent }) => setComposerHeight(nativeEvent.layout.height)} style={[styles.composer, styles.dock, { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 8 }]}>
       <EdgeFade edge="bottom" height={composerHeight + 32} />
@@ -577,45 +591,39 @@ function ChatPane({ hostId, sessionId, tabId, available, connected, state, machi
       {attachments.length ? <View style={styles.attachments}>{attachments.map((attachment) => <View key={attachment.id} style={styles.attachment}>{attachment.mediaType.startsWith("image/") ? <Image source={{ uri: attachment.uri }} accessibilityLabel={attachment.name} style={styles.attachmentImage} /> : <View accessibilityLabel={attachment.name} style={[styles.attachmentImage, styles.fileAttachment, { backgroundColor: palette.raised }]}><FileText size={22} color={palette.muted} /><Text numberOfLines={1} style={[styles.fileAttachmentName, { color: palette.muted }]}>{attachment.name}</Text></View>}<Pressable accessibilityRole="button" accessibilityLabel={`Remove ${attachment.name}`} onPress={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))} style={styles.removeAttachment}><X size={13} color="#fff" /></Pressable></View>)}</View> : null}
       {attachmentError ? <Text style={[styles.attachmentError, { color: palette.danger }]}>{attachmentError}</Text> : null}
       {dictation.error ? <Text accessibilityLiveRegion="polite" style={[styles.attachmentError, { color: palette.danger }]}>{dictation.error}</Text> : null}
-      {/* What the agent is doing now, right under the latest card and over the composer (22.03). Stop is the turn's interrupt, as the composer's square button is. */}
-      <StatusLine state={status} onStop={controls ? controls.interrupt : undefined} stopping={!!controls?.working} />
+      {/* What the agent is doing now, right under the latest card and over the composer (22.03). Not connected, the line would only repeat what was true when the phone last heard: it goes, and the connection says why (22.01). */}
+      {connected ? <StatusLine state={status} onStop={controls ? controls.interrupt : undefined} onStopSession={stopSession} stopping={!!controls?.working} /> : null}
       {/* A held message is still to go, so the line says so until it does (#983); nothing else about a send is kept. */}
       {held && !sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.muted }]}>Sends when connected.</Text></View> : null}
       {sendFailure ? <View style={styles.feedbackLine}><Text accessibilityLiveRegion="polite" style={[styles.sendFeedback, { color: palette.danger }]}>{sendFailure.message}</Text>{sendFailure.resend ? <Button label="Resend" kind="secondary" disabled={sendDisabled} onPress={() => void send()} style={styles.resend} /> : null}</View> : null}
-      {/* After the best chat apps: a slim pill until it is in use, then the message on top and what to send it with beneath. */}
-      <Glass style={[styles.inputGlass, expanded ? styles.inputOpen : styles.inputPill]}>
+      {/* As 22.01 and 22.03 draw it: the message on top, and beneath it what to send it with. */}
+      <Glass style={styles.inputGlass}>
         {!sendToAgent ? <View style={styles.noteBanner}><StickyNote size={14} color={palette.warning} /><Text style={[styles.noteBannerText, { color: palette.muted }]}>Worktree note · not sent to the agent</Text><Pressable accessibilityRole="button" accessibilityLabel="Send to agent" hitSlop={10} onPress={() => { setSendToAgent(true); setSendFailure(null); }}><X size={15} color={palette.muted} /></Pressable></View> : null}
-        <View style={expanded ? styles.inputColumn : styles.inputRow}>
-          {!expanded && sendToAgent ? <RoundButton label="Add attachment" icon={<Plus size={21} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
-          <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; setFocused(true); }} onBlur={() => { composerFocused.current = false; setFocused(false); }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, expanded ? styles.composeOpen : styles.composePill, { color: palette.ink }]} />
-          {!expanded ? mic : null}
-          {!expanded ? action : null}
-          {expanded && dictation.listening ? <View style={styles.toolbar}>
-            {/* Listening, as the best chat apps show it: cancel, the voice as it is heard, stop and keep, or send. */}
-            <RoundButton label="Cancel dictation" icon={<X size={20} color={palette.ink} strokeWidth={2.2} />} onPress={cancelDictation} />
-            <Waveform levels={dictation.levels} />
-            <RoundButton label="Stop dictation" icon={<Square size={14} color={palette.ink} fill={palette.ink} />} onPress={dictation.stop} />
-            <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || held} onPress={() => void send()} style={[styles.send, { backgroundColor: draft.trim() && !held ? palette.ink : palette.raised }]}><ArrowUp size={20} color={draft.trim() && !held ? palette.page : palette.faint} strokeWidth={2.6} /></Pressable>
-          </View> : null}
-          {expanded && !dictation.listening ? <View style={styles.toolbar}>
-            {sendToAgent ? <RoundButton label="Add attachment" icon={<Plus size={21} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={styles.flex} contentContainerStyle={styles.chips}>
-              {controls ? <>
-                {/* The model and its effort in one pill, as the best chat apps show them; each opens its own picker. */}
-                <View style={[styles.modelPill, { backgroundColor: palette.raised }, dimmed]}>
-                  <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.model.label} disabled={controls.settings.model.disabled} hitSlop={6} onPress={controls.settings.model.open}><Text numberOfLines={1} style={[styles.modelText, { color: palette.ink }]}>{controls.settings.model.label}</Text></Pressable>
-                  {controls.settings.effort ? <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.effort.label} disabled={controls.settings.effort.disabled} hitSlop={6} onPress={controls.settings.effort.open}><Text numberOfLines={1} style={[styles.effortText, { color: palette.muted }]}>{controls.settings.effort.label}</Text></Pressable> : null}
-                </View>
-                {/* The permission mode as a mark alone, named for assistive technology; Bypass by its own shape, not a colour. */}
-                <Pressable accessibilityRole="button" accessibilityLabel={`Permission mode: ${controls.settings.mode.label}`} disabled={controls.settings.mode.disabled} onPress={controls.settings.mode.open} style={[styles.round, { backgroundColor: palette.raised }, dimmed]}>
-                  {controls.settings.mode.bypass ? <ShieldAlert size={19} color={palette.ink} /> : <ShieldCheck size={19} color={palette.ink} />}
-                </Pressable>
-              </> : null}
-            </ScrollView>
-            {mic}
-            {action}
-          </View> : null}
-        </View>
+        <TextInput value={draft} autoFocus={false} onFocus={() => { composerFocused.current = true; }} onBlur={() => { composerFocused.current = false; }} onChangeText={(value) => { draftEdited.current = true; setDraft(value); setHeld(false); setSendFailure(null); void AsyncStorage.setItem(cacheKey, value); }} multiline placeholder={dictation.listening ? "Listening…" : placeholder} placeholderTextColor={palette.faint} style={[styles.composeInput, { color: palette.ink }]} />
+        {dictation.listening ? <View style={styles.toolbar}>
+          {/* Listening, as the best chat apps show it: cancel, the voice as it is heard, stop and keep, or send. */}
+          <IconButton label="Cancel dictation" icon={<X size={20} color={palette.ink} strokeWidth={2.2} />} onPress={cancelDictation} />
+          <Waveform levels={dictation.levels} />
+          <IconButton label="Stop dictation" icon={<Square size={14} color={palette.ink} fill={palette.ink} />} onPress={dictation.stop} />
+          {action}
+        </View> : <View style={styles.toolbar}>
+          {sendToAgent ? <IconButton label="Add attachment" icon={<Plus size={20} color={palette.ink} strokeWidth={2} />} disabled={sending} onPress={chooseAttachment} /> : null}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled" style={[styles.flex, styles.chipStrip]} contentContainerStyle={styles.chips}>
+            {controls ? <>
+              {/* The model and its effort in one line, the model bold; each opens its own picker. */}
+              <View style={[styles.model, dimmed]}>
+                <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.model.label} disabled={controls.settings.model.disabled} hitSlop={CHIP_SLOP.model} onPress={controls.settings.model.open}><Text numberOfLines={1} style={[styles.modelText, { color: palette.ink }]}>{controls.settings.model.label}</Text></Pressable>
+                {controls.settings.effort ? <Pressable accessibilityRole="button" accessibilityLabel={controls.settings.effort.label} disabled={controls.settings.effort.disabled} hitSlop={CHIP_SLOP.effort} onPress={controls.settings.effort.open}><Text numberOfLines={1} style={[styles.effortText, { color: palette.muted }]}>{controls.settings.effort.label}</Text></Pressable> : null}
+              </View>
+              {/* The permission mode as a mark alone, named for assistive technology; Bypass by its own shape, not a colour. */}
+              <Pressable accessibilityRole="button" accessibilityLabel={`Permission mode: ${controls.settings.mode.label}`} disabled={controls.settings.mode.disabled} hitSlop={CHIP_SLOP.mode} onPress={controls.settings.mode.open} style={dimmed}>
+                {controls.settings.mode.bypass ? <ShieldAlert size={18} color={palette.muted} /> : <Shield size={18} color={palette.muted} />}
+              </Pressable>
+            </> : null}
+          </ScrollView>
+          <IconButton label="Dictate" icon={<Mic size={20} color={palette.muted} />} onPress={() => void beginDictation()} />
+          {action}
+        </View>}
       </Glass>
     </View>;
   }}</SessionControls></View></KeyboardAvoidingView></PromptImageContext.Provider>;
@@ -681,18 +689,22 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
   const [input, setInput] = useConversationState(`${stateKey}:input`, "");
   const [rows, setRows] = useState<ScreenRow[]>([]);
   const insets = useSafeAreaInsets();
-  const [keyboardShown, setKeyboardShown] = useState(false);
-  useEffect(() => {
-    const shown = Keyboard.addListener("keyboardWillShow", () => setKeyboardShown(true));
-    const hidden = Keyboard.addListener("keyboardWillHide", () => setKeyboardShown(false));
-    return () => { shown.remove(); hidden.remove(); };
-  }, []);
+  const keyboardShown = useKeyboardShown();
   const [opening, setOpening] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [control, setControl] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const screen = useRef<TerminalScreen | null>(null);
+  const request = useMemo(() => ({ api: app.api, connection: app.connection, connected, sessionId, tabId, attempt }), [app.api, app.connection, connected, sessionId, tabId, attempt]);
+  const [previousRequest, setPreviousRequest] = useState(request);
+  if (previousRequest !== request) {
+    setPreviousRequest(request);
+    if (connected) {
+      setOpening(true);
+      setProblem(null);
+    }
+  }
 
   useEffect(() => {
     if (!connected) return;
@@ -710,8 +722,6 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
     const apply = (step: (current: TerminalScreen) => void | Promise<void>) => {
       parsed = parsed.then(async () => { if (active && screen.current) await step(screen.current); }).then(draw, draw);
     };
-    setOpening(true);
-    setProblem(null);
     const ended = app.connection.onEvent((message) => {
       if (active && message.method === "terminal.closed") setProblem((message.params as { message?: string } | null)?.message ?? "The Mac ended the terminal view.");
     });
@@ -777,7 +787,7 @@ function TerminalPane({ hostId, sessionId, tabId, connected, state }: { hostId: 
         <StatusDot color={live && !refusal ? palette.success : palette.warning} />
         <Text style={[styles.terminalStatusText, { color: palette.muted }]}>{status}</Text>
       </View>
-      {problem ? <Card style={[styles.notice, styles.terminalProblem]}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn't available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
+      {problem ? <Card style={[styles.notice, styles.terminalProblem]}><Text style={[styles.noticeTitle, { color: palette.ink }]}>The terminal isn&apos;t available</Text><Text style={[styles.noticeDetail, { color: palette.muted }]}>{problem}</Text><Button label="Try again" kind="secondary" disabled={!connected} onPress={() => setAttempt((n) => n + 1)} style={styles.resend} /></Card> : null}
     </View>
     {refusal ? <Text style={[styles.terminalRefusal, { color: palette.danger }]}>{refusal}</Text> : null}
     {/* The keys a phone keyboard lacks, and the symbols a shell wants most, a thumb's reach above the keyboard. */}
@@ -839,23 +849,19 @@ const styles = StyleSheet.create({
   permissionHint: { fontSize: 12, lineHeight: 17 },
   cardTitle: { fontSize: 16, fontWeight: "700" },
   monoSmall: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },
-  composer: { paddingHorizontal: 10, paddingTop: 10, gap: 8 },
+  composer: { paddingHorizontal: 12, paddingTop: 10, gap: 8 },
   dock: { position: "absolute", left: 0, right: 0, bottom: 0 },
-  inputGlass: { paddingHorizontal: 6, gap: 2 },
-  inputPill: { borderRadius: 30, paddingVertical: 6 },
-  inputOpen: { borderRadius: 26, paddingTop: 6, paddingBottom: 6 },
-  inputRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-  inputColumn: { gap: 4 },
-  round: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
-  modelPill: { flexDirection: "row", alignItems: "center", gap: 7, height: 42, borderRadius: 21, paddingHorizontal: 16 },
-  modelText: { fontSize: 15, fontWeight: "600", letterSpacing: -0.2 },
-  effortText: { fontSize: 15, letterSpacing: -0.2 },
-  composePill: { flex: 1, minHeight: 42, maxHeight: 42, paddingTop: 11, paddingBottom: 9 },
-  composeOpen: { minHeight: 44, maxHeight: 150, paddingTop: 10, paddingBottom: 4 },
-  noteBanner: { flexDirection: "row", alignItems: "center", gap: 7, paddingHorizontal: 10, paddingTop: 8 },
+  inputGlass: { borderRadius: 22, borderCurve: "continuous", paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, gap: 12 },
+  icon: { minWidth: 28, height: 32, alignItems: "center", justifyContent: "center" },
+  model: { flexDirection: "row", alignItems: "center", gap: 5 },
+  modelText: { fontSize: 14, fontWeight: "600" },
+  effortText: { fontSize: 14 },
+  noteBanner: { flexDirection: "row", alignItems: "center", gap: 7 },
   noteBannerText: { flex: 1, fontSize: 13 },
-  toolbar: { flexDirection: "row", alignItems: "center", gap: 2 },
-  chips: { alignItems: "center", gap: 6, paddingHorizontal: 6 },
+  toolbar: { flexDirection: "row", alignItems: "center", gap: 12 },
+  // 6 pt above and below the 32 pt row, and 8 pt at each end, given back by the margins: the strip's frame is 44 pt tall, nothing moves.
+  chipStrip: { marginVertical: -6, marginHorizontal: -8 },
+  chips: { alignItems: "center", gap: 12, minHeight: 44, paddingLeft: 8, paddingRight: 24 },
   sendFeedback: { flex: 1, fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   feedbackLine: { flexDirection: "row", alignItems: "center", gap: 9 },
   resend: { minHeight: 36, paddingHorizontal: 12 },
@@ -875,8 +881,8 @@ const styles = StyleSheet.create({
   removeAttachment: { position: "absolute", right: -4, top: -4, width: 22, height: 22, borderRadius: 11, backgroundColor: "#252525dd", alignItems: "center", justifyContent: "center" },
   attachmentError: { fontSize: 13, lineHeight: 18, paddingHorizontal: 6 },
   disabled: { opacity: 0.4 },
-  composeInput: { paddingHorizontal: 10, fontSize: 17, letterSpacing: -0.2 },
-  send: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center" },
+  composeInput: { minHeight: 22, maxHeight: 150, padding: 0, fontSize: 16, lineHeight: 21 },
+  send: { width: 32, height: 32, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, alignItems: "center", justifyContent: "center" },
   detail: { fontSize: 12, marginTop: 2 },
   terminalOutput: { paddingHorizontal: 11, paddingVertical: 13 },
   terminalText: { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }), fontSize: 11, lineHeight: 16 },

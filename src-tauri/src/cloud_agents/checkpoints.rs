@@ -187,6 +187,14 @@ fn project(tab: &super::AgentTabInfo, session: Option<&super::SessionSummary>, e
     if let Some(mode) = &tab.requested_permission_mode {
         projection["requestedPermissionMode"] = json!(mode);
     }
+    // A reset rewrote the history these events are of (#1326): a reader whose
+    // copy is of another drops it before taking these. Absent before the first.
+    if let Some(history) = &tab.history {
+        projection["history"] = json!(history);
+    }
+    if let Some(reset) = &tab.reset {
+        projection["reset"] = json!(reset);
+    }
     projection
 }
 

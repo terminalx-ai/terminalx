@@ -1,3 +1,4 @@
+use crate::paths::Canonical;
 use super::*;
 
 struct Fixture { _home: tempfile::TempDir, repo: tempfile::TempDir, store: Store }
@@ -8,7 +9,7 @@ impl Fixture {
         git(repo.path(), &["init", "-q"]).unwrap();
         std::fs::create_dir(repo.path().join(".terminalx")).unwrap();
         std::fs::write(repo.path().join(".terminalx/.gitignore"), "/settings.local.json\n").unwrap();
-        let store = Store { home: home.path().canonicalize().unwrap(), managed_fixture: Some(home.path().join("system-policy-fixture.json")), saved_scripts: Some(Default::default()) };
+        let store = Store { home: home.path().canonical().unwrap(), managed_fixture: Some(home.path().join("system-policy-fixture.json")), saved_scripts: Some(Default::default()) };
         Self { _home: home, repo, store }
     }
     fn repository(&self) -> Repository { repository(self.repo.path()).unwrap() }
@@ -419,6 +420,7 @@ fn trust_given_before_scripts_were_supported_does_not_let_them_run() {
     assert!(!f.resolve().trust.unwrap().required);
 }
 
+#[cfg(unix)]
 fn lines(text: &str) -> String { text.replace('\'', "\"") }
 
 #[test]
@@ -446,6 +448,7 @@ fn each_value_lists_every_layer_that_supplies_it_highest_first_with_environment_
     assert!(wire.contains("\"layers\":[{\"layer\":\"repositoryLocal\""), "{wire}");
 }
 
+#[cfg(unix)]
 #[test]
 fn settings_files_name_each_layer_its_git_state_and_its_first_problem_without_values() {
     let f = Fixture::new();
@@ -554,4 +557,14 @@ fn the_repository_schema_says_what_the_resolver_accepts() {
     registered.sort_unstable();
     assert_eq!(keys, registered);
     assert_eq!(schema["additionalProperties"], false);
+}
+
+#[test]
+fn a_checkout_name_that_ends_in_a_space_is_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work ");
+    crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
+    let found = repository(&work).unwrap();
+    assert_eq!(found.root, work.canonical().unwrap());
+    assert_eq!(found.identity, work.join(".git").canonical().unwrap().to_string_lossy());
 }

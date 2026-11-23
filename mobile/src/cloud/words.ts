@@ -45,6 +45,25 @@ export function whoCanStart(creator: string | null): string {
 }
 
 /**
+ * The failure the service reported for a workspace that needs attention after
+ * a failed resume, with a safe fallback for codes this app does not know.
+ */
+export function attentionDetail(code: string | null | undefined): string {
+  switch (code) {
+    case "cloud_workspace_runtime_bootstrap_failed": return "The workspace’s runtime could not be set up on its machine.";
+    case "cloud_provider_credential_invalid": return "The provider credential is no longer valid. An admin can repair it.";
+    case "cloud_provider_permission_denied": return "The provider refused the action. Check its permissions.";
+    case "cloud_provider_unavailable": return "The provider did not answer.";
+    case "cloud_provider_rate_limited": return "The provider is rate limiting requests.";
+    case "cloud_provider_state_conflict": return "The provider reports the workspace's machine in a state that does not allow resuming yet.";
+    case "cloud_provider_connection_attention_required": return "The organization's provider connection needs attention. An admin can repair it.";
+    case "cloud_workspace_provisioning_timeout": return "The workspace's machine took too long to start.";
+    // A failed resume with no code, or one this app does not know: what failed is still said (#1290).
+    default: return "The last resume did not finish.";
+  }
+}
+
+/**
  * A workspace in the Cloud list, as the Sessions list says a session: what
  * it is doing in words, and its mark (working bars, a dot that needs you,
  * else the state's colour).
@@ -68,6 +87,7 @@ const CODES: Record<string, string> = {
   cloud_workspace_collaboration_forbidden: "Your role in this workspace does not allow that.",
   cloud_workspace_transcript_unreadable: "The saved conversation could not be read.",
   cloud_workspace_invalid_response: "Update the app to use this workspace.",
+  "needs-attention": "This workspace needs attention.",
   cloud_workspace_stopped: "This workspace has stopped.",
   cloud_workspace_archived: "This workspace is archived.",
   cloud_workspace_rate_limited: "Too many requests just now. Try again in a moment.",
@@ -118,6 +138,7 @@ export function codeText(code: string | null | undefined): string | null {
  * the banner says so instead of "Live".
  */
 export function connectionLine(connection: WorkspaceConnectionState, listedState: string | null, problem: CloudLinkProblem, starting = false, access: { role: CloudRole | null; checking: boolean } = { role: null, checking: false }): { tone: "live" | "idle" | "warn"; text: string; short: string } {
+  if (listedState === "attention-required") return { tone: "warn", text: "This workspace needs attention.", short: "Needs attention" };
   if (connection.state === "connected") {
     if (access.checking) return { tone: "idle", text: "Checking your access…", short: "Checking access…" };
     if (access.role === "none") return { tone: "warn", text: "No access: this workspace is not shared with you.", short: "No access" };
@@ -135,8 +156,15 @@ export function connectionLine(connection: WorkspaceConnectionState, listedState
     const offline = problem?.kind === "api" && problem.unreachable;
     return { tone: "warn", text: offline ? "Offline. Reconnecting…" : "Reconnecting…", short: offline ? "Offline" : "Reconnecting…" };
   }
-  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : ((problem?.kind === "api" ? codeText(problem.code) : null) ?? "Not connected."), short: "Not connected" };
+  if (connection.state === "stopped") return { tone: "warn", text: problem?.kind === "gave-up" ? "Could not connect to this workspace." : problem?.kind === "api" ? openRefusalText(problem.code) : "Not connected to this workspace.", short: "Not connected" };
   return { tone: "idle", text: "Connecting…", short: "Connecting…" };
+}
+
+/** Why the service would not connect this phone to a workspace (#1290): its own word, never a bare "Not connected". */
+export function openRefusalText(code: string): string {
+  const known = CODES[code];
+  if (known) return known;
+  return "The service would not connect this phone to the workspace.";
 }
 
 /** Why a workspace that was asked for cannot be shown, by what the list says of this person's access. */
@@ -195,3 +223,7 @@ export function outboxLine(entry: OutboxEntry, stopped = false, nameOf: NameOf =
   if (entry.state === "outcome-unknown") return { tone: "warn", text: "It is not known whether this arrived." };
   return { tone: "warn", text: codeText(entry.category) ?? "The workspace refused this." };
 }
+
+const ORGANIZATION_ROLES: Record<string, string> = { owner: "Owner", admin: "Admin", member: "Member" };
+/** A person's role in an organization, in words; a role this app does not know reads as Member. */
+export const organizationRoleName = (role: string): string => ORGANIZATION_ROLES[role] ?? "Member";

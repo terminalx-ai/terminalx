@@ -4,7 +4,13 @@ import type { ContinuationContext } from "@terminalx/portable/continuation";
 import { mergeAgentEvents, type AgentEvent } from "@terminalx/portable/events";
 import { isAgentEvent, isSyncCursor, type SyncCursor } from "./transcript-cache";
 import type { HostConnection } from "../transport/connection";
+import { recordStartedSessionOn } from "../notifications/store";
+import { HostRefusal } from "./host-refusal";
+import { readAnswer, readHome, readOverview, type BotAnswerResult, type BotHome, type BotsOverview } from "./bots";
 
+
+/** A computer's answer to `host.describe`. */
+export type HostDescription = { name: string | null; hasWindow: boolean | null; platform: string | null };
 export type SessionStatus = "idle" | "in_progress" | "completed" | "waiting";
 export interface SessionSummary {
   rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
@@ -25,6 +31,13 @@ export interface SessionSummary {
   lastPrompt?: string;
   lastReply?: string;
   issueRef?: string;
+  /** Pinned on the Mac (#1403): listed in the phone's Pinned section. Absent from older Macs: not pinned. */
+  pinned?: boolean;
+  /**
+   * Where the Mac's Pinned group places it, from 0, while the sidebar is in
+   * its custom (dragged) order; null or absent otherwise, and from older Macs.
+   */
+  pinnedRank?: number | null;
   tabs: {
     id: string;
     /** The tab's own title: the reader's, else the first words of its first request. */
@@ -48,7 +61,8 @@ export interface SessionSummary {
 export interface NotePromotion { tabId: string; seq: number }
 export interface ChatNote { id: string; body: string; createdAt: number; author: { userId: string; displayName?: string }; promotedTo?: NotePromotion[] }
 export type PostNoteResult = { sent: true; note: ChatNote } | { sent: false; message: string };
-export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string };
+/** `code`: the Mac's refusal code, when it refused (for the connection log). */
+export type SendResult = { sent: true; queued: boolean } | { sent: false; message: string; code?: string };
 export interface AttachmentInput { mediaType: string; data: string; name?: string }
 /**
  * What the Mac understands beyond the first protocol. `sendIds`: sends and notes take a `clientMessageId` (#675).
@@ -58,8 +72,12 @@ export interface AttachmentInput { mediaType: string; data: string; name?: strin
  * `closeTab`: `session.closeTab` closes a tab as the desktop's tab strip does.
  * `promptImages`: `session.image` hands over an image a prompt carried, from the session's attachments.
  * `questions`: `questions.respond` answers an agent's question; without it the question is shown, and answered on the Mac (#979).
+ * `bots`: the `bots.*` methods and `bot_question` notices (PRO-479). Named only while the Mac's Bots setting is on:
+ * without it, nothing of the bots shows on the phone.
+ * `pin`: `sessions.pin`, `cloud.pins` and `cloud.pin` read and set the Mac's pinned sessions and cloud projects (#1403).
+ * Without it the Pinned section still shows what the Mac pinned, with no Pin or Unpin and no cloud rows.
  */
-export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number }
+export interface HostFeatures { promptImages?: number; transcript?: number; conditionalLists?: number; sendIds?: number; sessionControls?: number; sessionCreate?: number; macSettings?: number; terminal?: number; closeTab?: number; layeredConfiguration?: number; questions?: number; prefetch?: number; prefetchOpen?: number; prefetchTargets?: number; bots?: number; pin?: number }
 /** A terminal observation: retained output first, then live output, and the pane's size when it changes; `error` when the Mac refused or ended it. */
 export interface TerminalPacket { type: string; chunk?: string; serialized?: string; cols?: number; rows?: number; message?: string }
 /** What a tab runs, and what it was asked to switch to and has not yet: the desktop's pickers read the same. */
@@ -77,14 +95,24 @@ export interface TabControls {
 }
 /** The agent and settings a new tab starts with. */
 export interface NewTabSettings { harness: string; model: string; effort?: string | null; permissionMode?: string | null }
-export type ControlResult = { done: true } | { done: false; message: string };
+export type ControlResult = { done: true } | { done: false; message: string; code?: string };
 /** "Continue in new session": the tab exists once `started`, whether or not the handoff was confirmed. */
-export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string };
+export type ContinueResult = { started: true; tabId: string; delivered: boolean; inInput: boolean; message?: string } | { started: false; message: string; code?: string };
 
 /** A project on the Mac, named by an id that is not its path. */
 export interface NewSessionProject { id: string; name: string; git: boolean; lastUsed: boolean; repositorySettings?: { filesToCopy: string[] } }
 export interface NewSessionModel { id: string; label: string; isDefault: boolean; efforts: string[]; defaultEffort?: string | null }
-export interface NewSessionAgent { id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[] }
+/** One of an agent's accounts on the Mac (#980): its id, label and agent, never a token. */
+export interface NewSessionAccount { id: string; label: string; agent: string }
+export interface NewSessionAgent {
+  id: string; name: string; available: boolean; installHint: string; effort: boolean; permissionModes: boolean; models: NewSessionModel[];
+  /** Only when the agent has more than one account on the Mac: the person chooses one. */
+  accounts?: NewSessionAccount[];
+  /** The agent's default account; with `accounts` only. */
+  defaultAccount?: string;
+  /** Project id → that project's default account; with `accounts` only. */
+  projectDefaults?: Record<string, string>;
+}
 /** What the Mac's new-session view lets a person choose. */
 export interface NewSessionOptions { projects: NewSessionProject[]; agents: NewSessionAgent[]; modes: { id: string; label: string }[]; defaultMode: string; nativeCodex: boolean }
 export interface NewSessionRequest {
@@ -94,6 +122,8 @@ export interface NewSessionRequest {
   model: string;
   effort?: string | null;
   mode?: string | null;
+  /** The agent account it starts on (#980), one the options listed. Absent: the project's default, then the agent's. */
+  account?: string | null;
   title?: string;
   text: string;
   attachments?: AttachmentInput[];
@@ -110,6 +140,7 @@ export class HostApi {
 
   private capabilities?: Promise<HostFeatures>;
   private featureListeners = new Set<() => void>();
+  private botListeners = new Set<() => void>();
   private settingsListeners = new Set<() => void>();
   private lists = new Map<string, { version: string; value: unknown }>();
   private pendingLists = new Map<string, Promise<unknown>>();
@@ -119,6 +150,7 @@ export class HostApi {
     // replaces while the phone stays connected (#730).
     connection.onEvent((event) => {
       if (event.method === "sync.capabilitiesChanged") this.featuresChanged();
+      if (event.method === "bots.changed") for (const listener of [...this.botListeners]) listener();
       if (event.method === "settings.changed") for (const listener of this.settingsListeners) listener();
     });
   }
@@ -188,22 +220,98 @@ export class HostApi {
     try { return await task; } finally { requests.delete(key); }
   }
 
+  /**
+   * The version the last `method` list read carried, so it can be kept
+   * across launches (#1283); null when there is none.
+   */
+  listVersion(method: string, params: Record<string, unknown> = {}): string | null {
+    return this.lists.get(JSON.stringify([method, params]))?.version ?? null;
+  }
+
+  /**
+   * A list kept from an earlier launch, with the version it was read at:
+   * the first read after a launch asks for it only if it changed (#1283).
+   * A list already read on this connection is not replaced.
+   */
+  rememberList(method: string, params: Record<string, unknown>, version: string, value: Record<string, unknown>): void {
+    const key = JSON.stringify([method, params]);
+    if (!this.lists.has(key)) this.lists.set(key, { version, value: { ...value, version } });
+  }
+
   async syncTranscript(sessionId: string, tabId: string, cursor?: SyncCursor): Promise<SyncPage> {
     const result = await this.connection.request<unknown>("session.sync", { sessionId, tabId, ...(cursor ? { cursor } : {}) });
     if (!result.ok) throw new Error(result.refusal.message);
-    const page = result.value as SyncPage;
-    if (page?.deleted === true) return page;
-    if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
-    if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
-    return page;
+    return checkSyncPage(result.value, sessionId, tabId, cursor);
+  }
+
+  /**
+   * Asks the Mac to send the newest part of its most recently active
+   * conversations (#1283), from `known` where the phone keeps them; or, with
+   * `enabled` false, to stop. Only to a Mac that names `prefetch`. False when
+   * it was not asked or did not start. `open` names the conversations on
+   * screen, which read for themselves, to a Mac that names `prefetchOpen`
+   * (#1337): it sends none of them, so no page is sent only to be dropped.
+   * It is named even when empty: the Mac then takes it as the whole list,
+   * not a guess from what was read a moment ago (#1381).
+   */
+  async prefetch(enabled: boolean, known: { sessionId: string; tabId: string; cursor: SyncCursor }[] = [], open: { sessionId: string; tabId: string }[] = []): Promise<boolean> {
+    const features = await this.features();
+    if (features.prefetch !== 1) return false;
+    const named = enabled ? { known, ...(features.prefetchOpen === 1 ? { open } : {}) } : {};
+    const result = await this.connection.request<{ enabled?: unknown }>("sync.prefetch", { enabled, ...named });
+    return result.ok && result.value?.enabled === true;
+  }
+
+  /**
+   * The conversations a prefetch started now would send (#1339), so the
+   * phone names its checkpoints for those, among more it keeps than it can
+   * name. Empty from a Mac that does not name `prefetchTargets`, or when the
+   * Mac could not say: the prefetch then goes ahead from the newest saved.
+   */
+  async prefetchTargets(): Promise<{ sessionId: string; tabId: string }[]> {
+    const features = await this.features();
+    if (features.prefetchTargets !== 1) return [];
+    const result = await this.connection.request<{ targets?: unknown }>("sync.prefetchTargets", {});
+    const targets = result.ok ? result.value?.targets : undefined;
+    if (!Array.isArray(targets)) return [];
+    return targets.filter((target): target is { sessionId: string; tabId: string } =>
+      typeof target?.sessionId === "string" && typeof target.tabId === "string").map(({ sessionId, tabId }) => ({ sessionId, tabId }));
+  }
+
+  /** Each conversation a prefetch sends, as the page `session.sync` would have read from `after` (#1283). */
+  onPrefetched(listener: (prefetched: Prefetched) => void): () => void {
+    return this.connection.onEvent((event) => {
+      if (event.method !== "session.prefetch") return;
+      const params = event.params as { sessionId?: unknown; tabId?: unknown; after?: unknown; page?: unknown } | null;
+      if (typeof params?.sessionId !== "string" || typeof params.tabId !== "string" || (params.after != null && !isSyncCursor(params.after))) return;
+      const after = params.after == null ? undefined : params.after as SyncCursor;
+      try {
+        const page = checkSyncPage(params.page, params.sessionId, params.tabId, after);
+        if (!page.deleted) listener({ sessionId: params.sessionId, tabId: params.tabId, after, page });
+      } catch { /* Not a page the phone can keep: the conversation reads for itself when it opens. */ }
+    });
   }
 
   /** What the computer calls itself (PRO-87). Null from a desktop that predates the question, or when it has no name to give. */
   async describe(): Promise<string | null> {
+    return (await this.describeHost())?.name ?? null;
+  }
+
+  /**
+   * What the computer says of itself: its name (PRO-87), and since PRO-359
+   * whether a TerminalX window runs there and its OS. A machine with no
+   * window is a headless server. Null when it would not answer; a field an
+   * older computer does not send is null.
+   */
+  async describeHost(): Promise<HostDescription | null> {
     const result = await this.connection.request<unknown>("host.describe");
     if (!result.ok) return null;
-    const name = (result.value as { name?: unknown } | null)?.name;
-    return typeof name === "string" ? name : null;
+    const value = result.value as { name?: unknown; hasWindow?: unknown; platform?: unknown } | null;
+    return {
+      name: typeof value?.name === "string" ? value.name : null,
+      hasWindow: typeof value?.hasWindow === "boolean" ? value.hasWindow : null,
+      platform: typeof value?.platform === "string" && /^[a-z0-9_-]{1,32}$/.test(value.platform) ? value.platform : null,
+    };
   }
 
   /** Ask the computer to drop this phone from its paired devices. Best effort: true only when it said it did. */
@@ -218,9 +326,13 @@ export class HostApi {
   }
 
   async tail(sessionId: string, tabId: string, before?: number): Promise<{ events: AgentEvent[]; hasMore: boolean }> {
-    // Load the newest turn first and page backwards. Older Macs do not bound
-    // transcript bytes, so asking for many tool-heavy turns can close the socket.
-    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit: 1 });
+    // Load the newest turns first and page backwards. Older Macs do not bound
+    // transcript bytes, so asking for many tool-heavy turns can close the
+    // socket: one turn at a time from those. A Mac that reassembles fragments
+    // holds each page to what the connection carries (#669), so it is asked
+    // for several turns a page (#1283).
+    const limit = await this.reassemblesFragments().catch(() => false) ? EARLIER_TURNS : 1;
+    const result = await this.connection.request<unknown>("session.tail", { sessionId, tabId, ...(before === undefined ? {} : { before }), limit });
     if (!result.ok) throw new Error(result.refusal.message);
     const value = result.value as { events?: unknown; hasMore?: unknown };
     if (!Array.isArray(value?.events) || !value.events.every(isAgentEvent) || typeof value.hasMore !== "boolean" || (value.hasMore && !value.events.length)) {
@@ -268,14 +380,46 @@ export class HostApi {
       ...(attachments.length ? { attachments } : {}),
       ...await this.messageId(messageId),
     });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (!result.ok) return { sent: false, message: result.refusal.message, code: result.refusal.code };
     if (result.value.status === "sent" && typeof result.value.queued === "boolean") return { sent: true, queued: result.value.queued };
     return { sent: false, message: "The host did not send this message to the agent." };
+  }
+
+  /** Waits for the connection while the phone reconnects (`RESUME_REQUEST_WAIT_MS` unless said); true once it is up (#1290). */
+  awaitConnected(milliseconds?: number): Promise<boolean> {
+    return this.connection.awaitConnected(milliseconds);
   }
 
   private async messageId(messageId: string | undefined): Promise<{ clientMessageId?: string }> {
     if (!messageId) return {};
     return (await this.features()).sendIds === 1 ? { clientMessageId: messageId } : {};
+  }
+
+  /** Whether this Mac pins and unpins from the phone, and says which cloud projects it pinned (`pin`, #1403). */
+  async pins(): Promise<boolean> {
+    return (await this.features()).pin === 1;
+  }
+
+  /** Pin or unpin a session as the Mac's sidebar does; the list moves once the Mac has confirmed it (`pin`). */
+  async setPinned(sessionId: string, pinned: boolean): Promise<ControlResult> {
+    return this.control("sessions.pin", { sessionId, pinned });
+  }
+
+  /**
+   * The cloud projects the Mac pinned, by organization, each by its
+   * repository identity (`pin`). Empty from a Mac that does not name `pin`;
+   * null when the Mac would not say, so what was shown stays.
+   */
+  async cloudPins(): Promise<Record<string, string[]> | null> {
+    if (!await this.pins()) return {};
+    const result = await this.connection.request<{ orgs?: unknown }>("cloud.pins", {});
+    if (!result.ok) return null;
+    return readCloudPins(result.value?.orgs);
+  }
+
+  /** Pin or unpin a cloud project on the Mac, as its sidebar's "Pin project" does (`pin`). */
+  async setCloudPinned(orgId: string, identity: string, pinned: boolean): Promise<ControlResult> {
+    return this.control("cloud.pin", { orgId, identity, pinned });
   }
 
   /** Whether this Mac takes the session controls; an older one offers sending and answering only. */
@@ -332,19 +476,19 @@ export class HostApi {
   /** "Resend last prompt": the prompt the agent never received, as it was sent. */
   async resendUnsent(sessionId: string, tabId: string): Promise<SendResult> {
     const result = await this.connection.request<{ queued?: unknown }>("session.resendUnsent", { sessionId, tabId });
-    if (!result.ok) return { sent: false, message: result.refusal.message };
+    if (!result.ok) return { sent: false, message: result.refusal.message, code: result.refusal.code };
     return typeof result.value?.queued === "boolean" ? { sent: true, queued: result.value.queued } : { sent: false, message: "The host did not send the prompt again." };
   }
 
   async prepareContinuation(sessionId: string, tabId: string): Promise<ContinuationContext> {
     const result = await this.connection.request<ContinuationContext>("session.prepareContinuation", { sessionId, tabId });
-    if (!result.ok) throw new Error(result.refusal.message);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
     return result.value;
   }
 
   async continueInNewTab(sessionId: string, tabId: string, tab: NewTabSettings, prompt: string): Promise<ContinueResult> {
     const result = await this.connection.request<{ tab?: { id?: unknown }; delivered?: unknown; inInput?: unknown; error?: unknown }>("session.continue", { sessionId, tabId, tab, prompt });
-    if (!result.ok) return { started: false, message: result.refusal.message };
+    if (!result.ok) return { started: false, message: result.refusal.message, code: result.refusal.code };
     const id = result.value?.tab?.id;
     if (typeof id !== "string") return { started: false, message: "The host did not open the new conversation." };
     return { started: true, tabId: id, delivered: result.value.delivered === true, inInput: result.value.inInput === true, ...(typeof result.value.error === "string" ? { message: result.value.error } : {}) };
@@ -352,7 +496,7 @@ export class HostApi {
 
   private async control(method: string, params: Record<string, unknown>): Promise<ControlResult> {
     const result = await this.connection.request<unknown>(method, params);
-    return result.ok ? { done: true } : { done: false, message: result.refusal.message };
+    return result.ok ? { done: true } : { done: false, message: result.refusal.message, code: result.refusal.code };
   }
 
   async respondPermission(sessionId: string, tabId: string, requestId: string, optionId: string): Promise<{ answered: true } | { answered: false; message: string }> {
@@ -426,6 +570,8 @@ export class HostApi {
       model: request.model,
       ...(request.effort ? { effort: request.effort } : {}),
       ...(request.mode ? { mode: request.mode } : {}),
+      // Only a chosen account is named: a Mac without accounts refuses a field it does not know.
+      ...(request.account ? { account: request.account } : {}),
       ...(request.title?.trim() ? { title: request.title.trim() } : {}),
       text: request.text,
       ...(request.attachments?.length ? { attachments: request.attachments } : {}),
@@ -434,6 +580,8 @@ export class HostApi {
     if (!result.ok) return { created: false, message: result.refusal.message };
     const value = result.value;
     if (typeof value.sessionId !== "string" || typeof value.tabId !== "string") return { created: false, message: "The Mac did not say which session it started." };
+    // A session started here is one of "Sessions I started or follow" for notifications (#990).
+    await recordStartedSessionOn(this.connection, value.sessionId).catch(() => undefined);
     const sent = value.sent as { status?: unknown; queued?: unknown } | undefined;
     return {
       created: true,
@@ -449,7 +597,7 @@ export class HostApi {
   async configuration(projectId?: string): Promise<import("../../../src/types/configuration").Configuration | null> {
     if ((await this.features()).layeredConfiguration !== 1) return null;
     const result = await this.connection.request<import("../../../src/types/configuration").Configuration>("configuration.resolve", { projectId: projectId ?? null });
-    if (!result.ok) throw new Error(result.refusal.message);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
     return result.value;
   }
 
@@ -462,6 +610,54 @@ export class HostApi {
     return result.value;
   }
 
+  /**
+   * A bot or a bot's list changed on the Mac (`bots.changed`, PRO-479): read
+   * what is on screen again. A Mac without `bots` never sends it.
+   */
+  onBotsChanged(listener: () => void): () => void {
+    this.botListeners.add(listener);
+    return () => { this.botListeners.delete(listener); };
+  }
+
+  private async bots(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if ((await this.features()).bots !== 1) throw new HostRefusal(BOTS_OFF, "bots_off");
+    const result = await this.connection.request<unknown>(method, params);
+    if (!result.ok) throw new HostRefusal(result.refusal.message, result.refusal.code);
+    return result.value;
+  }
+
+  /** The Bots tab: every bot, what needs you across them, and what each is doing. Null from a Mac without `bots`. */
+  async botsOverview(): Promise<BotsOverview | null> {
+    if ((await this.features()).bots !== 1) return null;
+    const overview = readOverview(await this.bots("bots.list"));
+    if (!overview) throw new Error("The Mac returned bots this phone cannot read.");
+    return overview;
+  }
+
+  /** A bot's home: its record, list, chats, duties and role. */
+  async botHome(botId: string): Promise<BotHome> {
+    const home = readHome(await this.bots("bots.home", { id: botId }));
+    if (!home) throw new Error("The Mac returned a bot this phone cannot read.");
+    return home;
+  }
+
+  /**
+   * Answer a bot's question as its owner, by one of its answers (`answer`, its
+   * index on the Mac) or in your own words, to the question shown (`question`,
+   * `questionKey`): the Mac records and sends it as the window does. One
+   * answered meanwhile, or asked again, comes back as the Mac's refusal.
+   */
+  async answerBot(botId: string, number: number, reply: { answer: number } | { text: string }, question: string): Promise<BotAnswerResult> {
+    const answered = readAnswer(await this.bots("bots.answer", { id: botId, number, ...reply, question }));
+    if (!answered) throw new Error("The Mac did not say how the answer went.");
+    return answered;
+  }
+
+  async pauseBot(botId: string): Promise<void> { await this.bots("bots.pause", { id: botId }); }
+  async resumeBot(botId: string): Promise<void> { await this.bots("bots.resume", { id: botId }); }
+  /** Every bot not already paused is paused now. */
+  async pauseAllBots(): Promise<void> { await this.bots("bots.pauseAll"); }
+
   async setNativeCodex(on: boolean): Promise<MacSettings> {
     const result = await this.connection.request<unknown>("mac.setSettings", { nativeCodex: on });
     if (!result.ok) throw new Error(result.refusal.message);
@@ -470,15 +666,27 @@ export class HostApi {
   }
 }
 
+/** Said when the Mac stopped naming `bots` (its Bots setting was turned off, or it is older). */
+export const BOTS_OFF = "Bots are off on this Mac. Turn them on in Settings → Experimental → Bots.";
+
 function isNewSessionOptions(value: unknown): value is NewSessionOptions {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   const strings = (item: unknown, ...keys: string[]) => !!item && typeof item === "object" && keys.every((key) => typeof (item as Record<string, unknown>)[key] === "string");
   return Array.isArray(record.projects) && record.projects.every((project) => strings(project, "id", "name") && typeof (project as NewSessionProject).git === "boolean")
     && Array.isArray(record.agents) && record.agents.every((agent) => strings(agent, "id", "name") && typeof (agent as NewSessionAgent).available === "boolean"
-      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts)))
+      && Array.isArray((agent as NewSessionAgent).models) && (agent as NewSessionAgent).models.every((model) => strings(model, "id", "label") && Array.isArray(model.efforts))
+      && accountsReadable(agent as NewSessionAgent, strings))
     && Array.isArray(record.modes) && record.modes.every((mode) => strings(mode, "id", "label"))
     && typeof record.defaultMode === "string" && typeof record.nativeCodex === "boolean";
+}
+
+/** An agent's accounts, when listed: ids, labels and agents, a default among them, and project defaults that are ids. */
+function accountsReadable(agent: NewSessionAgent, strings: (item: unknown, ...keys: string[]) => boolean): boolean {
+  if (agent.accounts === undefined) return true;
+  return Array.isArray(agent.accounts) && agent.accounts.every((account) => strings(account, "id", "label", "agent"))
+    && (agent.defaultAccount === undefined || typeof agent.defaultAccount === "string")
+    && (agent.projectDefaults === undefined || (!!agent.projectDefaults && typeof agent.projectDefaults === "object" && Object.values(agent.projectDefaults).every((id) => typeof id === "string")));
 }
 
 function isMacSettings(value: unknown): value is MacSettings {
@@ -490,6 +698,31 @@ export function mergeEvents(existing: AgentEvent[], incoming: AgentEvent[]): Age
 }
 
 export type SyncPage = { deleted: true } | { deleted?: false; events: AgentEvent[]; cursor: SyncCursor; reset: boolean; hasMore: boolean; hasEarlier: boolean };
+/** A conversation a prefetch sent (#1283): the page `session.sync` would have read from `after`. */
+export interface Prefetched { sessionId: string; tabId: string; after?: SyncCursor; page: Exclude<SyncPage, { deleted: true }> }
+/** The turns one "Load earlier" asks a Mac that bounds its pages for (#1283). */
+export const EARLIER_TURNS = 10;
+
+/** A `session.sync` page for this conversation, contiguous with `cursor`; throws on anything else. */
+export function checkSyncPage(value: unknown, sessionId: string, tabId: string, cursor?: SyncCursor): SyncPage {
+  const page = value as SyncPage;
+  if (page?.deleted === true) return page;
+  if (!page || !Array.isArray(page.events) || page.events.length > 500 || !page.events.every((e) => isAgentEvent(e) && e.sessionId === sessionId && e.tabId === tabId) || !isSyncCursor(page.cursor) || typeof page.reset !== "boolean" || typeof page.hasMore !== "boolean" || typeof page.hasEarlier !== "boolean") throw new Error("Invalid transcript sync response");
+  if (!page.reset && (!cursor || page.cursor.offset !== cursor.offset + page.events.length || (page.hasMore && !page.events.length))) throw new Error("Non-contiguous transcript sync response");
+  return page;
+}
+
+/** Only lists of names, per organization, are cloud pins; anything else of a reply is left out. */
+export function readCloudPins(value: unknown): Record<string, string[]> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const pins: Record<string, string[]> = {};
+  for (const [orgId, list] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    const names = list.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+    if (names.length) pins[orgId] = names;
+  }
+  return pins;
+}
 
 export function isSessionSummary(value: unknown): value is SessionSummary {
   if (!value || typeof value !== "object") return false;

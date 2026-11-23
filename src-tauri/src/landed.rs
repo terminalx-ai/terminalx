@@ -721,7 +721,7 @@ mod tests {
         fn new() -> Self {
             let home = crate::store::temp_home();
             let dir = tempfile::tempdir().unwrap();
-            let base = std::fs::canonicalize(dir.path()).unwrap();
+            let base = crate::paths::canonicalize(dir.path()).unwrap();
             let remote = base.join("remote.git");
             std::fs::create_dir_all(&remote).unwrap();
             sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
@@ -1229,7 +1229,7 @@ mod tests {
     fn a_project_with_no_remote_is_not_verified() {
         let _home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let project = std::fs::canonicalize(dir.path()).unwrap();
+        let project = crate::paths::canonicalize(dir.path()).unwrap();
         sh(&project, &["init", "-q", "-b", "main"]);
         sh(&project, &["config", "user.email", "t@example.com"]);
         sh(&project, &["config", "user.name", "T"]);

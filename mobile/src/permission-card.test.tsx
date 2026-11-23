@@ -8,7 +8,7 @@ import { PermissionCard, TurnCard } from "./ui/transcript";
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("./ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
-vi.mock("lucide-react-native", () => ({ Terminal: () => null }));
+vi.mock("lucide-react-native", () => ({ SquareTerminal: () => null }));
 vi.mock("react-native", () => {
   const Box = ({ children, testID }: { children?: ReactNode; testID?: string }) => <div data-testid={testID}>{children}</div>;
   const Inline = ({ children, testID }: { children?: ReactNode; testID?: string }) => <span data-testid={testID}>{children}</span>;

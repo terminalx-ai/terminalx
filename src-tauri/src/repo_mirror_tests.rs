@@ -28,8 +28,8 @@ impl Repo {
         git(&root, &["commit", "-m", "base"]).unwrap();
         git(&root, &["worktree", "add", "-b", "feature", source.to_str().unwrap()]).unwrap();
         Self {
-            root: fs::canonicalize(root).unwrap(),
-            source: fs::canonicalize(source).unwrap(),
+            root: crate::paths::canonicalize(root).unwrap(),
+            source: crate::paths::canonicalize(source).unwrap(),
             _temp: temp,
         }
     }
@@ -356,4 +356,13 @@ fn submodules_are_refused_before_creating_a_recovery_record() {
     git(&r.source, &["update-index", "--add", "--cacheinfo", &cacheinfo]).unwrap();
     assert!(start(&r.root, &r.source, true).unwrap_err().to_string().contains("submodules"));
     r.clean();
+}
+
+#[test]
+fn a_main_checkout_whose_name_ends_in_a_space_can_be_mirrored() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work ");
+    crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
+    let (root, common) = repository(&work).unwrap();
+    assert_eq!((root, common), (crate::paths::canonicalize(&work).unwrap(), crate::paths::canonicalize(work.join(".git")).unwrap()));
 }

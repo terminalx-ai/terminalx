@@ -121,22 +121,21 @@ it("keeps manual pairing single-flight and allows a fresh code after failure", a
   expect(container.querySelector("input")).toBeNull();
 });
 
-// PRO-314: the Mac holds the pairing until the person compares this fingerprint and approves it there.
-it("shows the fingerprint with Approve on your Mac while it waits, then the not-approved message", async () => {
+it("shows the fingerprint while the machine waits for approval, then the not-approved message", async () => {
   let fail!: (cause: Error) => void;
   mocks.pair.mockImplementation(() => new Promise<void>((_, reject) => { fail = reject; }));
   await act(async () => mocks.camera.onBarcodeScanned({ data: "test-offer" }));
   mocks.app.pairingProgress = { fingerprint: "CEF4\u00B72468\u00B7FE26\u00B79E4B", waitingForApproval: false };
   await render();
-  expect(container.textContent).toContain("Approve on your Mac");
+  expect(container.textContent).toContain("Approve on the machine");
   // Two lines of two groups, as the Mac shows it.
   expect(container.textContent).toContain("CEF4\u00B72468\nFE26\u00B79E4B");
-  expect(container.textContent).toContain("Connecting securely to your Mac");
+  expect(container.textContent).toContain("Connecting securely");
   expect(container.querySelector("[data-camera]")).toBeNull();
 
   mocks.app.pairingProgress = { fingerprint: "CEF4\u00B72468\u00B7FE26\u00B79E4B", waitingForApproval: true };
   await render();
-  expect(container.textContent).toContain("Check that your Mac shows CEF4 2468 FE26 9E4B, then choose Approve there. This phone waits up to 2 minutes.");
+  expect(container.textContent).toContain("Check that the machine shows CEF4 2468 FE26 9E4B, then approve in TerminalX or allow it in the server terminal. This phone waits up to 2 minutes.");
 
   // The Mac refused the pairing (pairing_refused).
   const declined = new PairingFailure("approval");
@@ -144,7 +143,7 @@ it("shows the fingerprint with Approve on your Mac while it waits, then the not-
   mocks.app.error = declined.message;
   await act(async () => fail(declined));
   await render();
-  expect(container.textContent).not.toContain("Approve on your Mac");
+  expect(container.textContent).not.toContain("Approve on the machine");
   expect(container.textContent).toContain("Pairing didn’t finish");
-  expect(container.textContent).toContain("Your Mac didn’t approve this phone, or the request timed out.");
+  expect(container.textContent).toContain("The machine didn’t approve this phone, or the request timed out.");
 });

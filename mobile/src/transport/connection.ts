@@ -1,11 +1,14 @@
 import { directEndpoints } from "./direct-endpoints";
 import { z } from "zod";
+import { accountPairedHostIds, isCurrentPairingInstance, pairingInstance, revokePairingInstance, type SupportPairing } from "../store/pairing-instance";
+import type { ReportEvent, ReportWindow } from "@terminalx/portable/supportReports";
 import type { RpcCallResult } from "@terminalx/portable/rpc";
 import { PairingGetEndpointsResultSchema, RECONNECT_DELAYS_MS, RECONNECT_TRICKLE_MS } from "../pairing/contracts";
 import { updateStoredHost, writeHostCredential, type HostCredential, type StoredHost } from "../store/hosts";
 import { hostDisplayName } from "../store/host-name";
-import { RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
-import { closeDetail } from "./connection-errors";
+import { CredentialRefusedError, RelayClient, RelayOuterError, type RelayEvent } from "./relay-client";
+import { closeDetail, ConnectionAttemptError, connectionProblem, decisiveProblem, pathProblem, type ConnectionProblem } from "./connection-errors";
+import { PHONE_CLOSE, type PhoneCloseCode } from "./phone-close";
 import { describeDevice, type DeviceDescription } from "./device-describe";
 import { loadOrCreateE2EESecretKey } from "./e2ee-keypair";
 import { applyResumeConfirmation } from "./credential-confirmation";
@@ -18,7 +21,38 @@ import type { PhoneNetwork } from "./network";
  * the person reconnects from the phone.
  */
 export type ConnectionStage = "idle" | "connecting" | "connected" | "reconnecting" | "cant-connect" | "unreachable" | "disconnected-on-mac";
+export const supportConnectionStages = ["connecting", "connected", "disconnected-on-mac", "attempt-failed", "connection-lost"] as const;
+export const supportConnectionClassifications = ["direct", "relay", "pairing-invalid", "mac-offline", "dropped", "reconnecting", "network", "too-large", "no-answer", "unknown"] as const;
+type ReportFields = {
+  kind: typeof supportConnectionStages[number];
+  classification?: typeof supportConnectionClassifications[number];
+};
+
 export interface ConnectionLogEntry { id: string; at: number; level: "info" | "success" | "warning" | "error"; message: string; detail?: string }
+
+// Typed annotations on existing connection-log entries. Ownership and report
+// fields never enter the persisted display log or outlive its in-memory entry.
+export const CONNECTION_LOG_CAPACITY = 200;
+const reportFields = new WeakMap<ConnectionLogEntry, ReportFields & SupportPairing & { owner: string }>();
+
+export function scopedConnectionSnapshot(logs: readonly ConnectionLogEntry[], owner: string, hosts: readonly StoredHost[], { from, to }: ReportWindow) {
+  const permitted = accountPairedHostIds(hosts, owner);
+  if (!permitted.size) return { events: "unavailable" as const, pairings: [] };
+  const contributors = new Map<string, SupportPairing>();
+  let retainedSince: number | undefined;
+  const events = logs.flatMap((entry) => {
+    const fields = reportFields.get(entry);
+    if (!fields || fields.owner !== owner || !permitted.has(fields.hostId) ||
+        !isCurrentPairingInstance(fields) || entry.at < from || entry.at > to) return [];
+    contributors.set(fields.hostId, { hostId: fields.hostId, instance: fields.instance });
+    // The shared log may have dropped events at the same millisecond. Only
+    // authorized events can contribute to the conservative coverage boundary.
+    retainedSince = Math.min(retainedSince ?? Infinity, entry.at + 1);
+    const event: ReportEvent = { at: entry.at, kind: fields.kind, classification: fields.classification };
+    return [event];
+  });
+  return { events, retainedSince, pairings: [...contributors.values()] };
+}
 
 const resolvedSchema = z.object({ v: z.literal(1), cellUrl: z.string().url(), assignmentEpoch: z.number().int().nonnegative(), leaseExpiresAt: z.number().int().nonnegative() }).strict();
 
@@ -83,7 +117,7 @@ export class HostConnection {
   private skipDelay: (() => void) | null = null;
   private pendingClients = new Set<RelayClient>();
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
-  private active: { host: StoredHost; credential: HostCredential } | null = null;
+  private active: { host: StoredHost; credential: HostCredential; pairing: symbol } | null = null;
   private eventListeners = new Set<(event: RelayEvent) => void>();
   private stageListeners = new Set<(stage: ConnectionStage, attempt: number) => void>();
   private logListeners = new Set<(entry: ConnectionLogEntry) => void>();
@@ -100,7 +134,7 @@ export class HostConnection {
   start(host: StoredHost, credential: HostCredential): void {
     this.stop("another connection started");
     this.flaps = 0;
-    this.active = { host, credential };
+    this.active = { host, credential, pairing: pairingInstance(host.id) };
     this.releaseHold();
     const generation = this.generation;
     void this.connectLoop(generation);
@@ -129,7 +163,7 @@ export class HostConnection {
    * the person can do that: `byPerson` is true for a tap (Reconnect, Retry,
    * choosing the computer again), false for what the app does by itself.
    */
-  restart(reason = "restarted", byPerson = false): void {
+  restart(reason = "restarted", byPerson = false, closeCode: PhoneCloseCode = PHONE_CLOSE.closed): void {
     const active = this.active;
     if (!active) return;
     if (this.heldByMac && !byPerson) return;
@@ -140,7 +174,7 @@ export class HostConnection {
     clearInterval(this.refreshTimer);
     for (const client of this.pendingClients) client.close();
     this.pendingClients.clear();
-    this.client?.close();
+    this.client?.close(closeCode);
     this.client = null;
     const generation = this.generation;
     void this.connectLoop(generation);
@@ -190,7 +224,11 @@ export class HostConnection {
       },
       () => {
         if (generation !== this.generation || this.client !== client || this.backgrounded) return;
-        this.reconnectNow("the connection from before the background did not answer");
+        // The generation is retired before the client closes (#1375): its
+        // disconnect listener would otherwise take this for a lost connection.
+        this.reconnectNow("the connection from before the background did not answer", PHONE_CLOSE.probeTimeout);
+        // A Mac that holds this phone disconnected keeps it from restarting; the dead client still goes.
+        if (this.client === client) client.close(PHONE_CLOSE.probeTimeout);
       },
     );
     return true;
@@ -245,9 +283,9 @@ export class HostConnection {
     else if (this.attempting !== this.generation) this.restart();
   }
 
-  private reconnectNow(reason: string): void {
+  private reconnectNow(reason: string, closeCode?: PhoneCloseCode): void {
     this.resumeDeadline = Date.now() + RESUME_REQUEST_WAIT_MS;
-    this.restart(reason);
+    this.restart(reason, false, closeCode);
   }
 
   /** Ends the current generation: its loop and race stop at their next check, and say why. */
@@ -270,19 +308,30 @@ export class HostConnection {
     if (show && quiet.pending) this.present(...quiet.pending);
   }
 
+  /**
+   * Waits up to `milliseconds` (as long as a request made right after a
+   * return from the background does, unless said) for a usable connection while one is being
+   * made; true once there is one. Nothing waits while no Mac is chosen, or
+   * while the Mac holds this phone disconnected: no connection is coming.
+   */
+  async awaitConnected(milliseconds: number = RESUME_REQUEST_WAIT_MS): Promise<boolean> {
+    if (this.client) return true;
+    if (!this.active || this.heldByMac || milliseconds <= 0) return false;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.connectedWaiters.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      this.connectedWaiters.add(done);
+    });
+    return this.client !== null;
+  }
+
   async request<T>(method: string, params?: unknown): Promise<RpcCallResult<T>> {
     // Just back from the background and reconnecting: wait for it rather than fail what the person just did.
-    if (!this.client && this.active && Date.now() < this.resumeDeadline) {
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer);
-          this.connectedWaiters.delete(done);
-          resolve();
-        };
-        const timer = setTimeout(done, Math.max(0, this.resumeDeadline - Date.now()));
-        this.connectedWaiters.add(done);
-      });
-    }
+    if (!this.client && Date.now() < this.resumeDeadline) await this.awaitConnected(this.resumeDeadline - Date.now());
     if (!this.client) throw new Error("Host is disconnected");
     return this.client.request<T>(method, params).then((result) => {
       if (!result.ok && !this.refusedMethods.has(method)) {
@@ -295,6 +344,11 @@ export class HostConnection {
 
   reportError(message: string, detail: unknown): void {
     this.log("error", message, safeError(detail));
+  }
+
+  /** An entry from elsewhere in the app (a failed resume, #1290), into the same log; its detail is redacted like any other. */
+  note(level: ConnectionLogEntry["level"], message: string, detail?: string): void {
+    this.log(level, message, detail ? safeError(detail) : undefined);
   }
 
   onEvent(listener: (event: RelayEvent) => void): () => void {
@@ -346,7 +400,7 @@ export class HostConnection {
           this.log("info", "Connection attempt cancelled", this.cancelReason);
           return;
         }
-        this.log("warning", "Connection attempt failed", safeError(error));
+        this.log("warning", "Connection attempt failed", safeError(error), { kind: "attempt-failed", classification: connectionProblem(error) ?? "unknown" });
         attempt++;
       } finally {
         if (this.attempting === generation) this.attempting = null;
@@ -370,7 +424,10 @@ export class HostConnection {
   private async connectOnce(generation: number): Promise<void> {
     const cancelled = () => new Error("Connection attempt cancelled");
     if (!this.active) throw cancelled();
-    const { host: storedHost, credential } = this.active;
+    const { host: storedHost, credential, pairing } = this.active;
+    // Pinned here: a refusal ends the pairing this attempt was made for, even
+    // if the person has chosen another computer or paired again meanwhile.
+    const contributing: SupportPairing = { hostId: storedHost.id, instance: pairing };
     const clientSecretKey = await loadOrCreateE2EESecretKey();
     if (generation !== this.generation || !this.active) throw cancelled();
     const clients = new Set<RelayClient>();
@@ -396,10 +453,11 @@ export class HostConnection {
         return connecting;
       });
       try { await Promise.race([connecting, abandoned]); } catch (error) {
+        this.refusedBy(contributing, error);
         client.close();
         const reason = `${redactEndpoint(endpoint)}: ${safeError(error)}`;
         if (racing()) this.log("info", "Direct path failed", reason);
-        throw new Error(reason);
+        throw new ConnectionAttemptError(reason, pathProblem(error));
       } finally {
         unwatch();
       }
@@ -408,7 +466,7 @@ export class HostConnection {
     this.log("info", "Trying connection paths", [
       ...directEndpoints(storedHost).map(redactEndpoint),
       ...(resumable.length ? [redactEndpoint(storedHost.relay!.cellUrl)] : []),
-    ].join(" · "));
+    ].join(" · "), { kind: "connecting" });
     const attempts: Promise<ConnectionCandidate>[] = directEndpoints(storedHost).map(openDirect);
     for (const resume of resumable) {
       attempts.push((async (): Promise<ConnectionCandidate> => {
@@ -424,8 +482,10 @@ export class HostConnection {
           this.pendingClients.add(client);
           this.log("info", "Opening encrypted relay", redactEndpoint(host.relay.cellUrl));
           try { await client.connect(); } catch (error) {
+            // A grace credential refused after a rotation says nothing about the pairing.
+            if (resume === credential.current) this.refusedBy(contributing, error);
             client.close();
-            throw new Error(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`);
+            throw new ConnectionAttemptError(`${redactEndpoint(host.relay.cellUrl)}: ${relayError(error)}`, pathProblem(error, resume === credential.current));
           }
           return { client, host, path: "relay", resumeVersion: resume.version };
         } catch (error) {
@@ -462,12 +522,13 @@ export class HostConnection {
         wasConnected = true;
         connectedAt = Date.now();
         this.emitStage("connected", 0);
-        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`);
+        this.log("success", "Connected", `${hostDisplayName(host)} · ${winner.path} · ${redactEndpoint(winner.path === "direct" ? host.endpoint : host.relay!.cellUrl)}`, { kind: "connected", classification: winner.path });
       } else if (state === "disconnected" && wasConnected) {
+        this.refusedBy(contributing, cause);
         clearInterval(this.refreshTimer);
         this.client = null;
         if (this.heldByMac) {
-          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`);
+          this.log("info", "Disconnected on the Mac", `${hostDisplayName(host)} · reconnect from this phone to connect again`, { kind: "disconnected-on-mac" });
           this.emitStage("disconnected-on-mac", 0);
           return;
         }
@@ -482,7 +543,7 @@ export class HostConnection {
         const delay = this.flaps ? FLAP_DELAYS_MS[Math.min(this.flaps, FLAP_DELAYS_MS.length) - 1]! : 0;
         // The close code and reason are what tell a relay rejection from the phone's own network (#670).
         const lost = `${hostDisplayName(host)} · ${winner.path} · ${cause ? safeError(cause) : "no cause"}`;
-        this.log("warning", "Connection lost", delay ? `${lost} · reconnecting in ${delay / 1_000} s` : lost);
+        this.log("warning", "Connection lost", delay ? `${lost} · reconnecting in ${delay / 1_000} s` : lost, { kind: "connection-lost", classification: connectionProblem(cause) ?? "unknown" });
         void this.connectLoop(generation, delay);
       }
     });
@@ -530,6 +591,16 @@ export class HostConnection {
     void updateStoredHost(held).catch(() => undefined);
   }
 
+  /**
+   * The relay or the pinned Mac refused this pairing's credential (#1315):
+   * the phone was revoked, so its diagnostics stop authorizing reports. A
+   * network failure, a dropped socket and a disconnect chosen on the Mac
+   * (`pairing.disconnected`) keep the pairing and are not this.
+   */
+  private refusedBy(pairing: SupportPairing, cause: unknown): void {
+    if (cause instanceof CredentialRefusedError) revokePairingInstance(pairing);
+  }
+
   /** The person reconnects: the stored hold goes, so the next launch connects by itself again. */
   private releaseHold(): void {
     if (!this.active?.host.disconnectedOnMacAt) return;
@@ -543,7 +614,7 @@ export class HostConnection {
       const response = await client.request("pairing.getEndpoints", {}, 5_000).catch((error: unknown) => {
         // A network change can leave TCP apparently open. Probe the encrypted
         // channel so a silent dead path also starts a fresh candidate race.
-        if (generation === this.generation && this.client === client) client.close();
+        if (generation === this.generation && this.client === client) client.close(PHONE_CLOSE.probeTimeout);
         throw error;
       });
       if (!response.ok) return; // Older hosts can keep using their saved endpoint.
@@ -576,8 +647,12 @@ export class HostConnection {
     for (const listener of this.stageListeners) listener(stage, attempt);
   }
 
-  private log(level: ConnectionLogEntry["level"], message: string, detail?: string): void {
+  private log(level: ConnectionLogEntry["level"], message: string, detail?: string, report?: ReportFields): void {
     const entry = { id: `${Date.now()}-${Math.random()}`, at: Date.now(), level, message, ...(detail ? { detail } : {}) };
+    const active = this.active;
+    if (report && active?.host.provenance.kind === "automatic") {
+      reportFields.set(entry, { ...report, owner: active.host.provenance.userId, hostId: active.host.id, instance: active.pairing });
+    }
     for (const listener of this.logListeners) listener(entry);
   }
 }
@@ -589,6 +664,7 @@ function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<Conne
     let failures = 0;
     let settled = false;
     const errors: string[] = [];
+    const problems: (ConnectionProblem | null)[] = [];
     for (const attempt of attempts) {
       void attempt.then((candidate) => {
         if (settled) return candidate.client.close();
@@ -596,8 +672,10 @@ function firstCandidate(attempts: Promise<ConnectionCandidate>[]): Promise<Conne
         resolve(candidate);
       }).catch((error: unknown) => {
         errors.push(safeError(error));
+        problems.push(connectionProblem(error));
         failures++;
-        if (!settled && failures === attempts.length) reject(new Error(errors.join("; ")));
+        // The joined reasons are for the log; the classification survives them (#1316).
+        if (!settled && failures === attempts.length) reject(new ConnectionAttemptError(errors.join("; "), decisiveProblem(problems)));
       });
     }
   });

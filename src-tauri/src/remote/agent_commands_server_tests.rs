@@ -76,6 +76,8 @@ impl AgentOps for Ops {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: false,
+            history: None,
+            reset: None,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {
@@ -170,7 +172,7 @@ impl Machine {
 /// A paired computer's connection: manage authority, its own device.
 async fn computer(rpc: &Arc<WorkspaceRpc>, device: &str) -> (Arc<Peer>, Notifications, Value) {
     let (peer, events) = Peer::new(device.into(), Authority::Manage);
-    let hello = call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "agent-commands/1"] })).await.unwrap();
+    let hello = call(rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "agent-commands/1", "follow-ups/1"] })).await.unwrap();
     (peer, events, hello)
 }
 
@@ -282,7 +284,7 @@ async fn a_send_repeated_after_a_dropped_connection_starts_one_turn_even_across_
     let _home = crate::store::temp_home();
     let m = machine();
     let (first, _events, hello) = computer(&m.rpc, "computer-a").await;
-    assert_eq!(hello["capabilities"], json!(["session/1", "agent-commands/1"]), "a runtime with no mailbox offers it");
+    assert_eq!(hello["capabilities"], json!(["session/1", "agent-commands/1", "follow-ups/1"]), "a runtime with no mailbox offers it");
     let send = m.params("request-send-0001", json!({ "text": "fix the login form" }));
     let reply = command(&m.rpc, &first, "session.send", send.clone()).await.unwrap();
     assert_eq!(reply, json!({ "sessionId": m.session_id, "tabId": m.tab_id, "queued": false }));
@@ -347,6 +349,42 @@ async fn a_stop_drops_the_queue_and_is_answered_once() {
     assert!(m.agents.follow_ups.list(&m.tab_id).is_empty());
     assert_eq!(command(&m.rpc, &peer, "session.stop", stop).await.unwrap(), stopped);
     assert_eq!(m.agent.seen.lock().unwrap().stops, 1);
+}
+
+/// #1328: a machine's held follow-up is edited, released and withdrawn
+/// live, once per request id; one that went already is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_follow_up_is_edited_released_and_withdrawn_live_once() {
+    let _home = crate::store::temp_home();
+    let m = machine();
+    let (peer, _events, hello) = computer(&m.rpc, "computer-a").await;
+    assert!(hello["capabilities"].as_array().unwrap().contains(&json!("follow-ups/1")));
+    m.agent.busy.store(true, Ordering::SeqCst);
+    for (request, text) in [("request-held-0001", "first"), ("request-held-0002", "second"), ("request-held-0003", "third")] {
+        command(&m.rpc, &peer, "session.send", m.params(request, json!({ "text": text }))).await.unwrap();
+    }
+    let edit = m.params("request-edit-0001", json!({ "op": "edit", "followUpId": "request-held-0002", "text": "second, edited" }));
+    assert_eq!(command(&m.rpc, &peer, "session.followUp", edit.clone()).await.unwrap()["followUpId"], "request-held-0002");
+    let withdraw = m.params("request-withdraw-0001", json!({ "op": "withdraw", "followUpId": "request-held-0001" }));
+    command(&m.rpc, &peer, "session.followUp", withdraw).await.unwrap();
+    let release = m.params("request-release-0001", json!({ "op": "release", "followUpId": "request-held-0003" }));
+    command(&m.rpc, &peer, "session.followUp", release).await.unwrap();
+    let held: Vec<String> = m.agents.follow_ups.list(&m.tab_id).into_iter().map(|follow_up| follow_up.text).collect();
+    assert_eq!(held, vec!["third", "second, edited"]);
+    // A repeat is answered from its receipt, even with the text changed since.
+    command(&m.rpc, &peer, "session.followUp", m.params("request-edit-0002", json!({ "op": "edit", "followUpId": "request-held-0002", "text": "again" }))).await.unwrap();
+    command(&m.rpc, &peer, "session.followUp", edit).await.unwrap();
+    assert_eq!(m.agents.follow_ups.list(&m.tab_id)[1].text, "again");
+    m.agent.busy.store(false, Ordering::SeqCst);
+    for _ in 0..2 {
+        m.agents.nudge_follow_ups(&m.tab_id);
+        assert_eq!(m.agents.dispatch_follow_ups(), 1);
+    }
+    assert_eq!(m.agent.sends(), vec!["third", "again"]);
+    let late = m.params("request-late-0001", json!({ "op": "withdraw", "followUpId": "request-held-0003" }));
+    assert_eq!(refusal(command(&m.rpc, &peer, "session.followUp", late).await), ("conflict".to_string(), json!("follow-up-gone")));
+    let unnamed = m.params("request-late-0002", json!({ "op": "withdraw" }));
+    assert_eq!(command(&m.rpc, &peer, "session.followUp", unnamed).await.unwrap_err().0, "invalid_params");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -440,9 +478,9 @@ async fn a_cloud_workspace_runtime_refuses_these_calls_as_method_not_found() {
     let agents = CloudAgents::open(&agents_dir(&f), Arc::new(Ops(agent.clone())), None, Some((Arc::new(Mailbox), identity)), 7).unwrap();
     f.rpc.set_agents(agents);
     let (peer, _events, hello) = computer(&f.rpc, "computer-a").await;
-    assert_eq!(hello["capabilities"], json!(["session/1"]), "a runtime with a mailbox does not grant agent-commands/1");
-    let params = json!({ "sessionId": session.id, "tabId": session.tabs[0].id, "clientRequestId": "request-cloud-0001", "text": "hi", "requestId": "r1", "optionId": "allow" });
-    for method in ["session.steer", "session.stop", "session.decide"] {
+    assert_eq!(hello["capabilities"], json!(["session/1", "follow-ups/1"]), "a runtime with a mailbox does not grant agent-commands/1; it takes follow-up changes there");
+    let params = json!({ "sessionId": session.id, "tabId": session.tabs[0].id, "clientRequestId": "request-cloud-0001", "text": "hi", "requestId": "r1", "optionId": "allow", "op": "withdraw", "followUpId": "f1" });
+    for method in ["session.steer", "session.stop", "session.decide", "session.followUp"] {
         assert_eq!(command(&f.rpc, &peer, method, params.clone()).await.unwrap_err().0, "method_not_found", "{method}");
     }
     assert!(agent.sends().is_empty());
@@ -529,6 +567,7 @@ async fn phase2_collaboration_v2_observed_disconnect_fences_direct_rpc_and_durab
     assert!(m.agent.sends().is_empty(), "durable direct work must not be reinterpreted as a mailbox lease");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn phase2_collaboration_v2_observed_disconnect_fences_queued_raw_pty_before_snapshot_refresh() {
     let _home = crate::store::temp_home();

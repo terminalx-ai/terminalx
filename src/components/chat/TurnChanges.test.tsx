@@ -15,7 +15,7 @@ it("shows the checkpoint's files even when no tool reported an edit, and persist
   expect(await screen.findByRole("button", { name: "Keep" })).toBeDefined();
   expect(screen.getByText("shell-edit.ts")).toBeDefined();
   fireEvent.click(screen.getByRole("button", { name: "Keep" }));
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Undo" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull());
   expect(api.keepTurn).toHaveBeenCalledWith("session", "tab", 7);
   expect(screen.getByRole("status").textContent).toBe("Kept");
 });
@@ -24,14 +24,14 @@ it("loads reviewed state after remounting", async () => {
   vi.mocked(api.turnCheckpoint).mockResolvedValue({ ...saved, reviewed: true } as never);
   card();
   expect(await screen.findByText("Kept")).toBeDefined();
-  expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Keep" })).toBeNull();
 });
 
 it("undoes the latest turn in one click", async () => {
   vi.mocked(api.undoTurn).mockResolvedValue({ overlap: [], token: "tree:index", undone: true });
   card();
-  fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
   expect(await screen.findByText("Undone")).toBeDefined();
   expect(api.undoTurn).toHaveBeenCalledWith("session", "tab", 7, null);
 });
@@ -40,7 +40,7 @@ it("explains overlap before confirmation and sends the preview token only on Und
   vi.mocked(api.undoTurn).mockResolvedValueOnce({ overlap: ["shell-edit.ts"], token: "current:index", undone: false })
     .mockResolvedValueOnce({ overlap: [], token: "current:index", undone: true });
   card();
-  fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText(/Other tabs or sessions worked on these files during this turn/)).toBeDefined();
   expect(within(dialog).getByText("shell-edit.ts")).toBeDefined();
@@ -53,23 +53,23 @@ it("explains overlap before confirmation and sends the preview token only on Und
 it("cancels an overlapping undo and leaves actions available", async () => {
   vi.mocked(api.undoTurn).mockResolvedValue({ overlap: ["shell-edit.ts"], token: "tree", undone: false });
   card();
-  fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
   fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }));
   expect(api.undoTurn).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("button", { name: "Undo" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Undo turn" })).toBeDefined();
 });
 
 it("keeps the actions after failure and prevents duplicate requests while busy", async () => {
   let reject!: (e: Error) => void;
   vi.mocked(api.undoTurn).mockReturnValue(new Promise((_, no) => { reject = no; }));
   card();
-  fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
   expect((screen.getByRole("button", { name: "Keep" }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  fireEvent.click(screen.getByRole("button", { name: "Undo turn" }));
   expect(api.undoTurn).toHaveBeenCalledTimes(1);
   reject(new Error("Agent is working"));
   expect((await screen.findByRole("alert")).textContent).toContain("Agent is working");
-  expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "Undo turn" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
 it("leaves legacy turns without checkpoints as file chips", async () => {
@@ -77,7 +77,7 @@ it("leaves legacy turns without checkpoints as file chips", async () => {
   render(<TurnChanges changes={[{ path: "old.ts", kind: "update", added: 1, removed: 0 }]} checkpoint={checkpoint} />);
   await waitFor(() => expect(api.turnCheckpoint).toHaveBeenCalled());
   expect(screen.getByText("old.ts")).toBeDefined();
-  expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull();
 });
 
 const backupRef = "refs/raccoon-checkpoints/session/tab-7/before-undo";
@@ -86,14 +86,14 @@ it("exposes the Undo backup and restores it in one click", async () => {
   vi.mocked(api.undoTurn).mockResolvedValue({ overlap: [], token: "tree:index", undone: true, backupRef });
   vi.mocked(api.restoreUndo).mockResolvedValue({ overlap: [], token: "restored", undone: true });
   card();
-  fireEvent.click(await screen.findByRole("button", { name: "Undo" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
   const restore = await screen.findByRole("button", { name: "Restore what Undo removed" });
   expect(restore.getAttribute("title")).toContain(backupRef);
   fireEvent.click(restore);
   expect(await screen.findByText("Restored")).toBeDefined();
   expect(api.restoreUndo).toHaveBeenCalledWith("session", "tab", 7, null);
   expect(screen.queryByRole("button", { name: "Restore what Undo removed" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull();
 });
 
 it("loads the backup on remount and requires confirmation before replacing newer edits", async () => {
@@ -129,6 +129,25 @@ it("explains an expired checkpoint without offering an unsafe restore", async ()
   card();
   expect(await screen.findByText(/checkpoint has expired/)).toBeDefined();
   expect(screen.getByText("shell-edit.ts")).toBeDefined();
-  expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Undo turn" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Keep" })).toBeNull();
+});
+
+it("reads and reviews a remote tab's turn through its runtime, not this computer (#1326)", async () => {
+  const remote = { get: vi.fn().mockResolvedValue(saved), keep: vi.fn().mockResolvedValue(undefined), undo: vi.fn().mockResolvedValue({ overlap: [], token: "", undone: true }), restore: vi.fn() };
+  render(<TurnChanges changes={[]} checkpoint={{ ...checkpoint, api: remote }} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Undo turn" }));
+  expect(await screen.findByText("Undone")).toBeDefined();
+  expect(remote.get).toHaveBeenCalledWith("session", "tab", 7);
+  expect(remote.undo).toHaveBeenCalledWith("session", "tab", 7, null);
+  expect(api.turnCheckpoint).not.toHaveBeenCalled();
+  expect(api.undoTurn).not.toHaveBeenCalled();
+});
+
+it("shows a viewer what a remote turn changed, with nothing to keep, undo or restore (#1326)", async () => {
+  const remote = { readOnly: true, get: vi.fn().mockResolvedValue({ ...saved, undone: true, reviewed: true, backupRef: "refs/backup" }), keep: vi.fn(), undo: vi.fn(), restore: vi.fn() };
+  render(<TurnChanges changes={[]} checkpoint={{ ...checkpoint, api: remote }} />);
+  expect(await screen.findByText("shell-edit.ts")).toBeDefined();
+  expect(await screen.findByText("Undone")).toBeDefined();
+  for (const name of ["Undo turn", "Keep", "Restore what Undo removed"]) expect(screen.queryByRole("button", { name })).toBeNull();
 });

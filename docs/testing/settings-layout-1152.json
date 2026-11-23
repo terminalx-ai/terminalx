@@ -1,0 +1,294 @@
+{
+  "issue": 1152,
+  "baseCommit": "efaa99191a4460e93dbf379450828038d4148ddb",
+  "featureCommit": "ebb8e60cc00427e7bb719df204c54d4c890a14da",
+  "environment": {
+    "vm": "terminalx-cua-macos",
+    "os": "macOS 26.5.2 (25F84)",
+    "node": "24.21.0",
+    "playwright": "1.63.0",
+    "browser": "headless WebKit 2359",
+    "concurrency": "One browser process and one page at a time; branch and base runs sequential. No host GUI used."
+  },
+  "method": [
+    "Built the exact base in a detached worktree using pnpm build; transferred its dist and original harness files into a separate VM directory.",
+    "Transferred the feature build and its harness files into another VM directory; both used the same installed Playwright and WebKit.",
+    "Ran node scripts/webkit/settings-navigation.mjs unchanged on each build.",
+    "Ran the identical settings-layout-probe.mjs against each build using the navigation test fixtures and viewport sizes.",
+    "Ran node scripts/webkit/settings-introductions.mjs against the feature build in the VM."
+  ],
+  "results": {
+    "navigationExitCode": {
+      "base": 1,
+      "feature": 1
+    },
+    "navigationLogsByteIdentical": true,
+    "navigationLogSha256": "c1267ebbb679035369e0b32da5bfaf8d1356e5c2742e0ef7de7952d73e1a1efb",
+    "probeExitCode": {
+      "base": 0,
+      "feature": 0
+    },
+    "probeMeasurementsDeepEqual": true,
+    "featureIntroductionsExitCode": 0
+  },
+  "sharedFailures": [
+    {
+      "check": "short project lists leave all five groups visible",
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "viewport": {
+        "width": 1280,
+        "height": 960
+      },
+      "clientHeight": 864,
+      "scrollHeight": 896,
+      "cause": "The navigation content requires 32px of vertical scrolling with the fixture\u2019s two projects and expanded project settings."
+    },
+    {
+      "check": "Agents body has no horizontal overflow",
+      "themes": [
+        "light",
+        "dark"
+      ],
+      "viewport": {
+        "width": 720,
+        "height": 720
+      },
+      "clientWidth": 452,
+      "scrollWidth": 476,
+      "setting": "agents.idleStop",
+      "cause": "The segmented Stop idle agents after control extends to x=743.546875 while the column ends at x=720. The 1 day button is the overflowing option."
+    }
+  ],
+  "conclusion": "Both reported failures reproduce with identical measurements on the exact base and feature commit. No branch regression was found in these failures; application code and feature coverage are preserved.",
+  "sharedMeasurements": [
+    {
+      "mode": "light",
+      "width": 720,
+      "navigation": {
+        "clientHeight": 624,
+        "scrollHeight": 1408,
+        "groups": [
+          {
+            "name": "Personal",
+            "top": 82,
+            "bottom": 298
+          },
+          {
+            "name": "Agents & environment",
+            "top": 314,
+            "bottom": 466
+          },
+          {
+            "name": "Projects",
+            "top": 482,
+            "bottom": 1262
+          },
+          {
+            "top": 570,
+            "bottom": 718
+          },
+          {
+            "name": "Admin",
+            "top": 1278,
+            "bottom": 1334
+          },
+          {
+            "name": "More",
+            "top": 1350,
+            "bottom": 1470
+          }
+        ]
+      },
+      "agents": {
+        "clientWidth": 452,
+        "scrollWidth": 476,
+        "left": 268,
+        "right": 720,
+        "width": 452,
+        "offenders": [
+          {
+            "tag": "DIV",
+            "setting": "agents.idleStop",
+            "text": "Never30 min1 hour2 hours4 hours8 hours1 day",
+            "left": 305,
+            "right": 743.546875,
+            "width": 438.546875
+          },
+          {
+            "tag": "BUTTON",
+            "setting": "agents.idleStop",
+            "text": "1 day",
+            "left": 679.46875,
+            "right": 741.546875,
+            "width": 62.078125
+          }
+        ]
+      },
+      "errors": []
+    },
+    {
+      "mode": "light",
+      "width": 1280,
+      "navigation": {
+        "clientHeight": 864,
+        "scrollHeight": 896,
+        "groups": [
+          {
+            "name": "Personal",
+            "top": 82,
+            "bottom": 298
+          },
+          {
+            "name": "Agents & environment",
+            "top": 314,
+            "bottom": 466
+          },
+          {
+            "name": "Projects",
+            "top": 482,
+            "bottom": 750
+          },
+          {
+            "top": 570,
+            "bottom": 718
+          },
+          {
+            "name": "Admin",
+            "top": 766,
+            "bottom": 822
+          },
+          {
+            "name": "More",
+            "top": 838,
+            "bottom": 958
+          }
+        ]
+      },
+      "agents": {
+        "clientWidth": 1012,
+        "scrollWidth": 1012,
+        "left": 268,
+        "right": 1280,
+        "width": 1012,
+        "offenders": []
+      },
+      "errors": []
+    },
+    {
+      "mode": "dark",
+      "width": 720,
+      "navigation": {
+        "clientHeight": 624,
+        "scrollHeight": 1408,
+        "groups": [
+          {
+            "name": "Personal",
+            "top": 82,
+            "bottom": 298
+          },
+          {
+            "name": "Agents & environment",
+            "top": 314,
+            "bottom": 466
+          },
+          {
+            "name": "Projects",
+            "top": 482,
+            "bottom": 1262
+          },
+          {
+            "top": 570,
+            "bottom": 718
+          },
+          {
+            "name": "Admin",
+            "top": 1278,
+            "bottom": 1334
+          },
+          {
+            "name": "More",
+            "top": 1350,
+            "bottom": 1470
+          }
+        ]
+      },
+      "agents": {
+        "clientWidth": 452,
+        "scrollWidth": 476,
+        "left": 268,
+        "right": 720,
+        "width": 452,
+        "offenders": [
+          {
+            "tag": "DIV",
+            "setting": "agents.idleStop",
+            "text": "Never30 min1 hour2 hours4 hours8 hours1 day",
+            "left": 305,
+            "right": 743.546875,
+            "width": 438.546875
+          },
+          {
+            "tag": "BUTTON",
+            "setting": "agents.idleStop",
+            "text": "1 day",
+            "left": 679.46875,
+            "right": 741.546875,
+            "width": 62.078125
+          }
+        ]
+      },
+      "errors": []
+    },
+    {
+      "mode": "dark",
+      "width": 1280,
+      "navigation": {
+        "clientHeight": 864,
+        "scrollHeight": 896,
+        "groups": [
+          {
+            "name": "Personal",
+            "top": 82,
+            "bottom": 298
+          },
+          {
+            "name": "Agents & environment",
+            "top": 314,
+            "bottom": 466
+          },
+          {
+            "name": "Projects",
+            "top": 482,
+            "bottom": 750
+          },
+          {
+            "top": 570,
+            "bottom": 718
+          },
+          {
+            "name": "Admin",
+            "top": 766,
+            "bottom": 822
+          },
+          {
+            "name": "More",
+            "top": 838,
+            "bottom": 958
+          }
+        ]
+      },
+      "agents": {
+        "clientWidth": 1012,
+        "scrollWidth": 1012,
+        "left": 268,
+        "right": 1280,
+        "width": 1012,
+        "offenders": []
+      },
+      "errors": []
+    }
+  ]
+}

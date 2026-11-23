@@ -1,4 +1,4 @@
-//! Issue writes wait here for an explicit human decision. Pending requests never
+//! Issue deletions wait here for an explicit human decision. Pending requests never
 //! focus a window. Keep expiry, backoff and the computer-use guard in native code.
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;

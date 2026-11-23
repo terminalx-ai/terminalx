@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
 import {
   CLOUD_IMAGES_NEED_CONNECTION,
@@ -7,11 +10,19 @@ import {
   CLOUD_TOO_MANY_IMAGES,
   COMMANDS_RESTRICTED_NOTE,
   CloudImageError,
+  MACHINE_FILES_OLD_RUNTIME,
+  MACHINE_TOO_MANY_FILES,
+  CLOUD_FILES_NEED_CONNECTION,
+  CLOUD_FILES_NEED_RUNNING,
+  CLOUD_FILES_OLD_RUNTIME,
   cloudComposerCommands,
   cloudComposerFiles,
+  cloudComposerPrs,
+  cloudFilesBlocked,
   cloudImagesBlocked,
   resetCloudComposer,
   uploadCloudImages,
+  uploadAgentFiles,
 } from "./cloudComposer";
 
 const approver: WorkspaceYou = { userId: "u-me", role: "driver", canApprove: true, listed: true } as WorkspaceYou;
@@ -210,5 +221,122 @@ describe("a cloud tab's images", () => {
     expect(cloudImagesBlocked(null, false)).toBe(CLOUD_IMAGES_NEED_CONNECTION);
     expect(cloudImagesBlocked(runtime({}, ["composer/1", "composer/2"]).client, false)).toBe(CLOUD_IMAGES_OLD_RUNTIME);
     expect(cloudImagesBlocked(runtime({}, ["composer/3"]).client, false)).toBeNull();
+  });
+});
+
+describe("a machine tab's files (PRO-407)", () => {
+  const where = { sessionId: "s-1", tabId: "t-1" };
+  function machine(capabilities = ["composer/3", "composer/4"], refuse?: WorkspaceRpcError) {
+    const mutate = vi.fn(async (_method: string, _params: Record<string, unknown>) => {
+      if (refuse) throw refuse;
+      return {};
+    });
+    return { mutate, client: { mutate, hasCapability: (capability: string) => capabilities.includes(capability) } as unknown as WorkspaceRpcClient };
+  }
+  /** This computer's file, read part by part: 400 KiB, so one full part of 384 KiB and a rest. */
+  const SIZE = 400 * 1024;
+  function picked() {
+    mocks.invoke.mockReset();
+    mocks.invoke.mockImplementation(async (command: string, args: { path: string; offset: number }) => {
+      if (command !== "read_attachment_part") throw new Error(command);
+      const bytes = Math.max(0, Math.min(384 * 1024, SIZE - args.offset));
+      return { data: `part@${args.offset}`, bytes, size: SIZE };
+    });
+  }
+
+  it("upload a picked file's bytes in parts, named by its last segment, never by a path of this computer", async () => {
+    picked();
+    const { mutate, client } = machine();
+    const refs = await uploadAgentFiles(client, where, [{ name: "/Users/me/private/report.pdf", path: "/Users/me/private/report.pdf", mediaType: "application/pdf" }]);
+    expect(refs).toEqual([{ id: expect.stringMatching(/^att-[0-9a-f]{32}$/), name: "report.pdf", mediaType: "application/pdf" }]);
+    expect(mocks.invoke.mock.calls).toEqual([
+      ["read_attachment_part", { path: "/Users/me/private/report.pdf", offset: 0 }],
+      ["read_attachment_part", { path: "/Users/me/private/report.pdf", offset: 393_216 }],
+    ]);
+    expect(mutate.mock.calls).toEqual([
+      ["session.attach", { ...where, attachmentId: refs[0]!.id, kind: "file", name: "report.pdf", mediaType: "application/pdf", offset: 0, data: "part@0", last: false }],
+      ["session.attach", { ...where, attachmentId: refs[0]!.id, kind: "file", name: "report.pdf", mediaType: "application/pdf", offset: 393_216, data: "part@393216", last: true }],
+    ]);
+    // Nothing the machine is told names where the file was.
+    expect(JSON.stringify(mutate.mock.calls)).not.toContain("/Users/me");
+  });
+
+  it("upload a pasted file's base64 in parts, and an empty file as one empty last part", async () => {
+    const { mutate, client } = machine();
+    const large = "QUJD".repeat(150_000);
+    const refs = await uploadAgentFiles(client, where, [{ name: "notes.txt", data: large }, { name: "empty.log", data: "" }]);
+    expect(refs.map((ref) => ref.name)).toEqual(["notes.txt", "empty.log"]);
+    const sent = mutate.mock.calls.map(([, params]) => ({ name: params.name, offset: params.offset, data: (params.data as string).length, last: params.last, mediaType: params.mediaType }));
+    expect(sent).toEqual([
+      { name: "notes.txt", offset: 0, data: 524_288, last: false, mediaType: "" },
+      { name: "notes.txt", offset: 393_216, data: 75_712, last: true, mediaType: "" },
+      { name: "empty.log", offset: 0, data: 0, last: true, mediaType: "" },
+    ]);
+  });
+
+  it("say why a file was not sent, and send nothing to a machine that takes images only or to a full message", async () => {
+    const refused = machine(undefined, new WorkspaceRpcError("invalid_params", "terminalx.json is a name TerminalX uses for session files. Rename it and attach it again", "session.attach"));
+    await expect(uploadAgentFiles(refused.client, where, [{ name: "terminalx.json", data: "e30=" }])).rejects.toThrow(
+      "terminalx.json was not sent: terminalx.json is a name TerminalX uses for session files. Rename it and attach it again.",
+    );
+    const old = machine(["composer/3"]);
+    await expect(uploadAgentFiles(old.client, where, [{ name: "a.txt", data: "YQ==" }])).rejects.toThrow(MACHINE_FILES_OLD_RUNTIME);
+    expect(old.mutate).not.toHaveBeenCalled();
+    const full = machine();
+    const nine = Array.from({ length: 9 }, (_, index) => ({ name: `${index}.txt`, data: "YQ==" }));
+    await expect(uploadAgentFiles(full.client, where, nine, 2)).rejects.toThrow(MACHINE_TOO_MANY_FILES);
+    expect(full.mutate).not.toHaveBeenCalled();
+    // A file that cannot be read here is refused in words before anything goes.
+    mocks.invoke.mockReset();
+    mocks.invoke.mockRejectedValue(new Error("report.pdf can’t be read."));
+    const unread = machine();
+    const failure = await uploadAgentFiles(unread.client, where, [{ name: "report.pdf", path: "/tmp/report.pdf" }]).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(CloudImageError);
+    expect((failure as Error).message).toBe("report.pdf was not sent: report.pdf can’t be read.");
+    expect(unread.mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("a remote tab's # list (#1329)", () => {
+  const where = (client: WorkspaceRpcClient | null) => ({ workspaceKey: "cloud:o:w", sessionId: "s-1", client });
+
+  it("is the runtime's, only while it is connected and serves composer/5 with file uploads", () => {
+    expect(cloudComposerPrs(where(null))).toBeNull();
+    expect(cloudComposerPrs(where(runtime({}, ["composer/4"]).client))).toBeNull();
+    expect(cloudComposerPrs(where(runtime({}, ["composer/5"]).client))).toBeNull();
+    const asleep = { ...runtime({}, ["composer/4", "composer/5"]).client, connection: { state: "suspended" } } as unknown as WorkspaceRpcClient;
+    expect(cloudComposerPrs(where(asleep))).toBeNull();
+    expect(cloudComposerPrs(where(runtime({}, ["composer/4", "composer/5"]).client))?.key).toBe("cloud:o:w|s-1");
+  });
+
+  it("searches the session's pull requests there and leaves out what is not one", async () => {
+    const { call, client } = runtime({ prs: [{ number: 12, title: "Fix parser" }, { number: 0 }, null, { title: "no number" }] }, ["composer/4", "composer/5"]);
+    const found = await cloudComposerPrs(where(client))!.search("12");
+    expect(call).toHaveBeenCalledWith("session.prs", { sessionId: "s-1", query: "12" });
+    expect(found.map((pr) => pr.number)).toEqual([12]);
+  });
+
+  it("picks a pull request as a Markdown file read there, its text intact", async () => {
+    const text = "# #12 Fix parser — naïve ✓\n";
+    const { call, client } = runtime({ number: 12, name: "pr-12.md", text, truncated: false }, ["composer/4", "composer/5"]);
+    const picked = await cloudComposerPrs(where(client))!.pick(12);
+    expect(call).toHaveBeenCalledWith("session.prContext", { sessionId: "s-1", number: 12 });
+    expect("file" in picked).toBe(true);
+    const file = (picked as { file: { name: string; data: string; mediaType: string } }).file;
+    expect(file.name).toBe("pr-12.md");
+    expect(file.mediaType).toBe("text/markdown");
+    expect(new TextDecoder().decode(Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0)))).toBe(text);
+    // A name the runtime should not have sent is not used.
+    const odd = runtime({ name: "../../etc/passwd", text: "x" }, ["composer/4", "composer/5"]);
+    expect(((await cloudComposerPrs(where(odd.client))!.pick(7)) as { file: { name: string } }).file.name).toBe("pr-7.md");
+  });
+});
+
+describe("a cloud tab's files (#1329)", () => {
+  it("need a connected runtime that serves composer/4", () => {
+    expect(cloudFilesBlocked(null, true)).toBe(CLOUD_FILES_NEED_RUNNING);
+    expect(cloudFilesBlocked(null, false)).toBe(CLOUD_FILES_NEED_CONNECTION);
+    expect(cloudFilesBlocked(runtime({}, ["composer/3"]).client, false)).toBe(CLOUD_FILES_OLD_RUNTIME);
+    expect(cloudFilesBlocked(runtime({}, ["composer/3", "composer/4"]).client, false)).toBeNull();
   });
 });

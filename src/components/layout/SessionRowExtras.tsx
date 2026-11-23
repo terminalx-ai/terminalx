@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import { Archive, Pencil } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -9,10 +10,9 @@ import type { StatusDescription } from "@terminalx/portable/sessionStatus";
 import { cn } from "@/lib/cn";
 import { getDraft, subscribeTabDrafts } from "@/lib/drafts";
 import { pty } from "@/lib/api";
-import { archiveSession, conversationTitle, refreshWorkspaces, useSessionStore } from "@/lib/sessions";
+import { refreshWorkspaces, useSessionStore } from "@/lib/sessions";
 import { useTerminals } from "@/lib/terminal";
 import { usePrefs } from "@/lib/prefs";
-import { isPlaceholderBranch } from "@/lib/worktreeNames";
 import type { SessionEntry } from "@/types/session";
 
 const RunningSessions = createContext<{ commands: ReadonlySet<string>; ports: ReadonlySet<string> }>({ commands: new Set(), ports: new Set() });
@@ -51,20 +51,6 @@ export function SessionRowData({ children }: { children: ReactNode }) {
     return () => { live = false; window.clearInterval(timer); };
   }, [shells, directories]);
   return <RunningSessions.Provider value={running}>{children}</RunningSessions.Provider>;
-}
-
-/** Generated branch names and main checkouts say nothing about the task. */
-export function readableBranchName(branch?: string | null): string | null {
-  if (!branch || /^(main|master|develop|trunk|HEAD)$/.test(branch) || isPlaceholderBranch(branch)) return null;
-  return branch.replace(/^[^/]+\//, "").replace(/[-_/]+/g, " ").trim() || null;
-}
-
-/** Shared checkouts keep distinct conversation names; isolated workspaces may use their branch. */
-export function sidebarConversationTitle(session: SessionEntry, branch?: string | null, sessions: readonly SessionEntry[] = []): string {
-  const tab = session.tabs.find((entry) => entry.id === session.activeTab) ?? session.tabs[0];
-  const shared = !session.worktreeName || sessions.some((peer) => peer.id !== session.id && peer.cwd.replace(/\/+$/, "") === session.cwd.replace(/\/+$/, "") && !peer.archived && !peer.worktreeRemoved);
-  if (tab?.titlePinned || session.tabs.length > 1 || session.worktreeRemoved || shared) return conversationTitle(session);
-  return readableBranchName(branch) || conversationTitle(session);
 }
 
 export function useSessionDraft(sessions: readonly SessionEntry[]): string {
@@ -121,9 +107,9 @@ export function SessionRowExtras({ sessions, selected, status, at }: { sessions:
   const activity = command && port ? "Running command and open port" : port ? "Open port" : "Running command";
   const meta = status ? rowMeta(status, { additions, deletions }) : { kind: "lines" as const };
   return <>
-    {meta.kind === "pr" ? <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{meta.number}</span>
-      : meta.kind === "time" ? (at ? <span data-row-meta="time" className="font-mono text-[11px]"><RowTime at={at} /></span> : null)
-      : <span data-row-meta="lines" className={status ? "font-mono text-[11px]" : "text-[10px]"}><DiffStats additions={additions} deletions={deletions} unpushed={0} coloured={colourLineCounts || selected} /></span>}
+    {meta.kind === "pr" ? <span data-row-meta="pr" className={cn("shrink-0 font-mono text-[12px] tabular-nums text-muted-foreground", yieldsToRowActions)}>PR #{meta.number}</span>
+      : meta.kind === "time" ? (at ? <span data-row-meta="time" className="font-mono text-[12px]"><RowTime at={at} className="text-[12px]" /></span> : null)
+      : <span data-row-meta="lines" className="font-mono text-[12px]"><DiffStats additions={additions} deletions={deletions} unpushed={0} coloured={colourLineCounts || selected} /></span>}
     {(command || port) && <span role="img" aria-label={activity} title={activity} className="size-1.5 shrink-0 rounded-full bg-add" />}
   </>;
 }
@@ -133,7 +119,7 @@ export function ArchiveRowButton({ session, title }: { session: SessionEntry; ti
   if (session.archived) return null;
   return <WithTooltip label={error ?? "Archive"} shortcut="session.archive">
     <Button variant="ghost" size="icon-xs" aria-label={`Archive ${title}`} onClick={() => {
-      void archiveSession(session.id, true).catch(() => setError("Could not archive. Try again."));
+      void archiveWithUndo(session.id).catch(() => setError("Could not archive. Try again."));
     }}><Archive /></Button>
   </WithTooltip>;
 }

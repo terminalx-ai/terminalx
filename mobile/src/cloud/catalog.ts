@@ -1,5 +1,6 @@
-import { CloudApiError, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
+import { CloudApiError, SUPPORTED_PROVIDERS, type CloudApi, type CloudOrganization, type CloudWorkspace, type CloudWorkspaceItem } from "./api";
 import { CloudPeople } from "./people";
+import { listedAsStarting, mayBeUnderWay, resumeFailure, resumeLogDetail, ResumeUnconfirmed } from "./resume";
 import { keyItemName, type SecretStorage } from "./keys";
 import type { CloudLinkOptions } from "./link";
 import type { BlobStorage } from "./transcripts";
@@ -28,7 +29,11 @@ import { CloudWorkspaceSession } from "./workspace";
  *
  * The last list read is kept on the phone, so the Cloud tab shows it at once
  * the next time while the list is read again (#988). It is only shown: what
- * it says of access opens nothing until the list was read again. Each
+ * it says of access opens nothing until the list was read again. An
+ * organization whose list was never read is kept as not read, not as empty,
+ * and a list read while the phone asked for other providers is not shown at
+ * all (PRO-456): either would put an organization with workspaces under "no
+ * workspaces". Each
  * workspace's generated title (its agent tab's, learned when it was open) is
  * kept beside the keys, since it comes from the encrypted conversation.
  */
@@ -53,6 +58,8 @@ export interface CatalogSnapshot {
   saved: boolean;
   /** Generated titles this phone learned, by `titleKey`. */
   titles: Readonly<Record<string, string>>;
+  /** The server takes this phone's request to delete an organization (read with the organizations). */
+  deletesOrganizations: boolean;
 }
 
 /** Where a workspace's generated title is found in `CatalogSnapshot.titles`. */
@@ -75,9 +82,16 @@ export interface CloudCatalogOptions {
   /** A stable, non-secret name for this phone's attachments. */
   clientInstallationId: string;
   appVersion: string;
-  link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now">>;
+  link?: Partial<Pick<CloudLinkOptions, "createSocket" | "random" | "now" | "log">>;
   now?: () => number;
+  /** The phone's connection log: a failed resume's stage and code are written there (#1290). */
+  log?: CloudLog;
 }
+
+export type CloudLog = (level: "info" | "warning" | "error", message: string, detail?: string) => void;
+
+/** What came of asking to start a workspace: started, or under way although the answer did not come. */
+export type StartOutcome = "started" | "in-progress";
 
 /** Which workspaces have data on this phone. Kept beside the keys, so that it survives exactly what they survive (a reinstall). */
 const HELD = "terminalx.cloud.held.v1";
@@ -99,12 +113,17 @@ const blobPrefixes = (orgId: string, workspaceId: string) => [`terminalx:cloud-c
 
 export class CloudCatalog {
   private organizations: CatalogOrganization[] = [];
+  /** Organizations this phone deleted: a list read that started before the deletion does not bring one back. */
+  private readonly removed = new Set<string>();
   private loading = false;
   private error: string | null = null;
   private refreshedAt: number | null = null;
   private saved = false;
+  private deletesOrganizations = false;
   private titles: Record<string, string> = {};
-  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {} };
+  /** Organizations whose workspaces came from a successful read, in this run or the saved one: what is shown for them is a list, not a guess. */
+  private everRead = new Set<string>();
+  private snapshot: CatalogSnapshot = { organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false };
   private readonly listeners = new Set<() => void>();
   private readonly sessions = new Map<string, CloudWorkspaceSession>();
   private readonly retained = new Map<string, number>();
@@ -120,6 +139,8 @@ export class CloudCatalog {
   private watchers = 0;
   /** One change to the held list at a time. */
   private heldChain: Promise<unknown> = Promise.resolve();
+  /** Resumes this phone asked for, by workspace, until the list says how they ended. */
+  private readonly resumes = new Map<string, string>();
 
   /** Names for the user ids a shared workspace reports. */
   readonly people: CloudPeople;
@@ -194,6 +215,24 @@ export class CloudCatalog {
     }));
   }
 
+  /**
+   * Delete an organization this person owns (#1292); `confirmationName` is
+   * its name as listed. On success it leaves the list at once, and the read
+   * that follows removes what the phone kept for its workspaces. A refusal,
+   * or an answer that does not confirm it, throws and changes nothing here.
+   */
+  async deleteOrganization(orgId: string, confirmationName: string): Promise<void> {
+    await this.options.api.deleteOrganization(orgId, confirmationName);
+    this.removed.add(orgId);
+    if (this.closed) return;
+    this.organizations = this.organizations.filter((entry) => entry.organization.orgId !== orgId);
+    this.publish();
+    void this.saveList();
+    // A read that started before the deletion may have listed it: let it finish, then read again.
+    if (this.flight) await this.flight;
+    await this.refresh();
+  }
+
   /** The session for a listed workspace, started on first use. */
   session(orgId: string, workspaceId: string): CloudWorkspaceSession {
     const key = sessionKey(orgId, workspaceId);
@@ -210,7 +249,7 @@ export class CloudCatalog {
         appVersion: this.options.appVersion,
         // A share revoked while this phone was connected: the list says so, and what is kept here goes.
         onRefused: () => void this.refresh(),
-        link: this.options.link,
+        link: { ...this.options.link, ...(this.options.log ? { log: this.options.log } : {}) },
       });
       this.sessions.set(key, session);
       void this.remember(orgId, workspaceId);
@@ -285,9 +324,32 @@ export class CloudCatalog {
    * What the server answers is shown at once, and the list is followed until
    * it runs; then the workspace's screen connects by itself.
    */
-  async start(orgId: string, workspaceId: string): Promise<void> {
-    const answer = await this.options.api.resume(orgId, workspaceId);
-    if (this.closed) return;
+  async start(orgId: string, workspaceId: string): Promise<StartOutcome> {
+    let answer;
+    try {
+      answer = await this.options.api.resume(orgId, workspaceId);
+    } catch (error) {
+      if (this.closed) throw error;
+      // No answer, or one that says something already runs: the list says whether it is starting (#1290).
+      const checked = mayBeUnderWay(error) ? await this.fresh(orgId).catch(() => false) : null;
+      if (checked && listedAsStarting(this.item(orgId, workspaceId))) {
+        this.options.log?.("warning", "Cloud workspace resume not confirmed, but under way", resumeLogDetail(resumeFailure(error), workspaceId));
+        const operation = this.item(orgId, workspaceId)?.latestOperation;
+        if (operation?.action === "resume" && operation.state !== "succeeded") this.resumes.set(sessionKey(orgId, workspaceId), operation.id);
+        this.sessions.get(sessionKey(orgId, workspaceId))?.listChanged();
+        this.followChanges();
+        return "in-progress";
+      }
+      this.options.log?.("error", "Cloud workspace resume failed", resumeLogDetail(resumeFailure(error), workspaceId));
+      // What the workspace is doing now is shown, whatever asking said.
+      void this.refresh();
+      // Said with whether the list was read to check (#1290): a timeout is not said to be checked when it was not.
+      if (checked !== null && error instanceof CloudApiError) throw new ResumeUnconfirmed(error, checked);
+      throw error;
+    }
+    if (this.closed) return "started";
+    // Followed until it runs: if this resume fails on the service, the log says so too.
+    this.resumes.set(sessionKey(orgId, workspaceId), answer.operation.id);
     this.organizations = this.organizations.map((entry) => entry.organization.orgId !== orgId ? entry : {
       ...entry,
       workspaces: entry.workspaces.map((item) => item.workspace.id === workspaceId ? { ...item, workspace: answer.workspace, latestOperation: answer.operation } : item),
@@ -296,6 +358,29 @@ export class CloudCatalog {
     this.sessions.get(sessionKey(orgId, workspaceId))?.listChanged();
     this.followChanges();
     void this.refresh();
+    return "started";
+  }
+
+  private item(orgId: string, workspaceId: string): CloudWorkspaceItem | null {
+    return this.organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId) ?? null;
+  }
+
+  /** A resume this phone asked for that the list now shows failed (or done) is written to the log once, then forgotten. */
+  private noteResumes(): void {
+    for (const [key, operationId] of [...this.resumes]) {
+      const [orgId, workspaceId] = key.split("\0") as [string, string];
+      const operation = this.item(orgId, workspaceId)?.latestOperation;
+      if (!operation) continue;
+      // A newer operation took its place: how this one ended is no longer listed.
+      if (operation.id !== operationId) {
+        this.resumes.delete(key);
+        continue;
+      }
+      if (operation.state === "failed") {
+        this.options.log?.("error", "Cloud workspace resume failed", resumeLogDetail({ stage: "operation", code: operation.errorCode ?? "none", status: null }, workspaceId));
+      } else if (operation.state !== "succeeded" && operation.state !== "canceled") continue;
+      this.resumes.delete(key);
+    }
   }
 
   /** Signed out: close everything and remove every key, transcript and outbox from the phone. */
@@ -305,11 +390,13 @@ export class CloudCatalog {
     this.changingTimer = null;
     for (const session of this.sessions.values()) session.close();
     this.sessions.clear();
+    this.resumes.clear();
     for (const [orgId, workspaceId] of await this.held()) await this.forget(orgId, workspaceId);
     await this.options.secrets.delete(HELD).catch(() => undefined);
     await this.options.secrets.delete(TITLES).catch(() => undefined);
     await this.options.storage.removeItem(SAVED_LIST).catch(() => undefined);
     this.organizations = [];
+    this.everRead = new Set();
     this.titles = {};
     this.saved = false;
     this.publish();
@@ -329,7 +416,7 @@ export class CloudCatalog {
     this.publish();
     let organizations: CloudOrganization[];
     try {
-      organizations = await this.options.api.organizations();
+      organizations = (await this.options.api.organizations()).filter((organization) => !this.removed.has(organization.orgId));
     } catch (error) {
       if (this.closed) return;
       this.error = error instanceof CloudApiError ? error.code : "cloud_workspace_unavailable";
@@ -345,6 +432,7 @@ export class CloudCatalog {
           const workspaces = list.workspaces.filter((item) => !item.workspace.deletedAt).sort((left, right) => (right.workspace.lastActivityAt ?? 0) - (left.workspace.lastActivityAt ?? 0));
           for (const tombstone of list.tombstones) this.deleted.add(sessionKey(organization.orgId, tombstone.id));
           for (const item of list.workspaces) if (item.workspace.deletedAt) this.deleted.add(sessionKey(organization.orgId, item.workspace.id));
+          this.everRead.add(organization.orgId);
           return { organization, workspaces, error: null, loaded: true, gone: list.tombstones.map((tombstone) => tombstone.id) };
         } catch (error) {
           // Not read: what was shown stays, and nothing is concluded from the silence.
@@ -357,8 +445,10 @@ export class CloudCatalog {
     this.error = null;
     this.loading = false;
     this.saved = false;
+    this.deletesOrganizations = this.options.api.deletesOrganizations?.() === true;
     this.refreshedAt = (this.options.now ?? Date.now)();
     this.publish();
+    this.noteResumes();
     void this.saveList();
 
     // What this phone keeps for workspaces it may no longer open goes away:
@@ -425,18 +515,28 @@ export class CloudCatalog {
     ]);
     if (this.closed) return;
     this.titles = { ...parseTitles(titles), ...this.titles };
-    const organizations = parseSavedList(list);
-    if (organizations && this.refreshedAt === null && !this.organizations.length) {
-      this.organizations = organizations;
+    const saved = parseSavedList(list);
+    if (saved && this.refreshedAt === null && !this.organizations.length) {
+      this.organizations = saved.organizations;
+      // Merged: a read in flight may already have marked an organization.
+      for (const orgId of saved.read) this.everRead.add(orgId);
       this.saved = true;
     }
     this.publish();
   }
 
-  /** The list as it was read, for the next time the tab opens. An organization whose list could not be read is kept as it was shown. */
+  /**
+   * The list as it was read, for the next time the tab opens. An organization
+   * whose list could not be read is kept as it was shown; one that was never
+   * read keeps why, so it is not taken for one with no workspaces.
+   */
   private async saveList(): Promise<void> {
-    const organizations = this.organizations.map((entry) => ({ organization: entry.organization, workspaces: entry.workspaces }));
-    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, organizations })).catch(() => undefined);
+    const organizations = this.organizations.map((entry) =>
+      this.everRead.has(entry.organization.orgId)
+        ? { organization: entry.organization, workspaces: entry.workspaces }
+        : { organization: entry.organization, workspaces: entry.workspaces, unread: entry.error ?? "cloud_workspace_unavailable" },
+    );
+    await this.options.storage.setItem(SAVED_LIST, JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations })).catch(() => undefined);
   }
 
   /** The runtime named the workspace's agent tab: that is its title, here and in the list. */
@@ -499,7 +599,7 @@ export class CloudCatalog {
   }
 
   private publish(): void {
-    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles };
+    this.snapshot = { organizations: this.organizations, loading: this.loading, error: this.error, refreshedAt: this.refreshedAt, saved: this.saved, titles: this.titles, deletesOrganizations: this.deletesOrganizations };
     for (const listener of [...this.listeners]) listener();
   }
 }
@@ -520,19 +620,27 @@ function parseTitles(raw: string | null): Record<string, string> {
   }
 }
 
-/** The list kept from before, or null when there is none this app can read. */
-function parseSavedList(raw: string | null): CatalogOrganization[] | null {
+/**
+ * The list kept from before, with the organizations it had read, or null when
+ * there is none this app can use. A list read while this app asked for other
+ * providers is none: it may lack whole providers' workspaces (PRO-456).
+ */
+function parseSavedList(raw: string | null): { organizations: CatalogOrganization[]; read: Set<string> } | null {
   try {
-    const parsed = raw ? (JSON.parse(raw) as { v?: unknown; organizations?: unknown }) : null;
-    if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.organizations)) return null;
-    const out: CatalogOrganization[] = [];
-    for (const entry of parsed.organizations as { organization?: CloudOrganization; workspaces?: CloudWorkspaceItem[] }[]) {
+    const parsed = raw ? (JSON.parse(raw) as { v?: unknown; providers?: unknown; organizations?: unknown }) : null;
+    if (!parsed || parsed.v !== 1 || parsed.providers !== SUPPORTED_PROVIDERS || !Array.isArray(parsed.organizations)) return null;
+    const organizations: CatalogOrganization[] = [];
+    const read = new Set<string>();
+    for (const entry of parsed.organizations as { organization?: CloudOrganization; workspaces?: CloudWorkspaceItem[]; unread?: unknown }[]) {
       const organization = entry?.organization;
       if (!organization || typeof organization.orgId !== "string" || typeof organization.name !== "string" || !Array.isArray(entry.workspaces)) return null;
       const workspaces = entry.workspaces.filter((item) => item?.workspace && typeof item.workspace.id === "string" && item.workspace.orgId === organization.orgId && typeof item.workspace.name === "string" && typeof item.workspace.state === "string");
-      out.push({ organization, workspaces, error: null, loaded: false });
+      // Never read: shown as not read (its code), never as an organization with no workspaces.
+      const unread = entry.unread === undefined ? null : typeof entry.unread === "string" && /^[a-z0-9_.-]{1,96}$/i.test(entry.unread) ? entry.unread : "cloud_workspace_unavailable";
+      if (unread === null) read.add(organization.orgId);
+      organizations.push({ organization, workspaces, error: unread, loaded: false });
     }
-    return out;
+    return { organizations, read };
   } catch {
     return null;
   }

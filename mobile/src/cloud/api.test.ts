@@ -1,11 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudApi, CloudApiError } from "./api";
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
+const sentHeaders: Headers[] = [];
+afterEach(() => {
+  for (const headers of sentHeaders.splice(0)) {
+    expect(headers.get("X-TerminalX-Cloud-Workspace-Contract")).toBe("providers-v1");
+    expect(headers.get("X-TerminalX-Cloud-Workspace-Providers")?.split(",")).toEqual(["described", "machine0", "box", "terminalx-cloud"]);
+  }
+});
+
 function api(answers: (call: Call) => { status?: number; body?: unknown } | Promise<never>, token: string | null = "access-token") {
   const calls: Call[] = [];
   const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+    sentHeaders.push(new Headers(init.headers));
     const call = { url, method: init.method ?? "GET", headers: init.headers as Record<string, string>, body: init.body ? JSON.parse(init.body as string) : undefined };
     calls.push(call);
     const answer = await answers(call);
@@ -30,6 +39,20 @@ describe("the phone's cloud API client", () => {
       "X-TerminalX-Cloud-Workspace-Contract": "providers-v1",
       "X-TerminalX-Cloud-Workspace-Lifecycle": "archive-v1",
     });
+  });
+
+  it("lists and resumes a provider outside the fallback list and accepts its display label when supplied", async () => {
+    const unfamiliar = workspace({ id: "ws-2", provider: "new-compute", providerDescriptor: { label: "New Compute" }, state: "suspended" });
+    const unlabelled = workspace({ id: "ws-3", provider: "another-compute", providerDescriptor: { label: 42 } });
+    const { client, calls } = api((call) => (call.url.endsWith("/resume") ? { status: 202, body: { workspace: unfamiliar.workspace, operation: { id: "op-1", state: "queued", action: "resume" } } } : { body: { workspaces: [workspace(), unfamiliar, unlabelled] } }));
+    const list = await client.workspaces("org-1");
+    expect(list.workspaces.map(({ workspace }) => [workspace.id, workspace.provider, workspace.providerDescriptor?.label])).toEqual([
+      ["ws-1", "box", undefined],
+      ["ws-2", "new-compute", "New Compute"],
+      ["ws-3", "another-compute", undefined],
+    ]);
+    expect((await client.resume("org-1", "ws-2")).workspace.provider).toBe("new-compute");
+    expect(calls[1]).toMatchObject({ method: "POST", url: "https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-2/resume", body: {} });
   });
 
   it("refuses a list that names another organization's workspace", async () => {
@@ -94,12 +117,21 @@ describe("the phone's cloud API client", () => {
     expect(calls.map((call) => (call.body as { clientCommandIds: string[] }).clientCommandIds.length)).toEqual([100, 100, 30]);
   });
 
+  it("lists and cancels commands through the same workspace contract", async () => {
+    const command = { clientCommandId: "c1", tabId: "t1", kind: "send", state: "queued", keyId: "k1", createdAt: 1, updatedAt: 1 };
+    const canceled = { ...command, state: "canceled" };
+    const { client } = api(({ method }) => ({ body: method === "GET" ? { commands: [command] } : { command: canceled } }));
+    expect(await client.commands("org-1", "ws-1", "t1")).toEqual([command]);
+    expect(await client.cancelCommand("org-1", "ws-1", "c1")).toEqual(canceled);
+  });
+
   it("reads a tab's checkpoint after a cursor, and none is not an error", async () => {
     const checkpoint = { tabId: "t1", epoch: 2, version: 5, schemaVersion: 1, keyId: "k1", sha256: "ab", iv: "iv", ciphertext: "ct" };
-    const { client, calls } = api((call) => (call.url.includes("afterEpoch") ? { body: { checkpoint: null } } : call.url.endsWith("/missing") ? { status: 404, body: { error: "cloud_workspace_transcript_checkpoint_not_found" } } : { body: { checkpoint } }));
+    const { client, calls } = api((call) => (call.url.endsWith("/transcript-checkpoints") ? { body: { checkpoints: [checkpoint] } } : call.url.includes("afterEpoch") ? { body: { checkpoint: null } } : call.url.endsWith("/missing") ? { status: 404, body: { error: "cloud_workspace_transcript_checkpoint_not_found" } } : { body: { checkpoint } }));
     expect(await client.checkpoint("org-1", "ws-1", "t1")).toEqual(checkpoint);
     expect(await client.checkpoint("org-1", "ws-1", "t1", { epoch: 2, version: 5 })).toBeNull();
     expect(await client.checkpoint("org-1", "ws-1", "missing")).toBeNull();
+    expect(await client.checkpoints("org-1", "ws-1")).toMatchObject([{ tabId: "t1", epoch: 2, version: 5 }]);
     expect(calls[1].url).toBe("https://login.terminalx.ai/v1/mobile/orgs/org-1/cloud-workspaces/ws-1/transcript-checkpoints/t1?afterEpoch=2&afterVersion=5");
   });
 
@@ -140,7 +172,8 @@ describe("the phone's cloud API client", () => {
   it("reads the server's clock from its answers, for judging expiry on a phone whose clock is off", async () => {
     const calls: unknown[] = [];
     const serverTime = Date.now() - 90_000;
-    const fetcher = vi.fn(async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentHeaders.push(new Headers(init?.headers));
       calls.push(1);
       return { ok: true, status: 200, headers: { get: (name: string) => (name.toLowerCase() === "date" ? new Date(serverTime).toUTCString() : null) }, text: async () => JSON.stringify({ workspaces: [] }) } as unknown as Response;
     });
@@ -148,6 +181,49 @@ describe("the phone's cloud API client", () => {
     expect(Math.abs(client.serverNow() - Date.now())).toBeLessThan(50);
     await client.workspaces("org-1");
     expect(Math.abs(client.serverNow() - serverTime)).toBeLessThan(1_500);
+  });
+
+  it("deletes an organization with its own name on the account route, and only a matching answer is success (#1292)", async () => {
+    const { client, calls } = api(() => ({ body: { organizationId: "org-1", deleted: true } }));
+    await client.deleteOrganization("org-1", "Test organization");
+    expect(calls).toEqual([expect.objectContaining({ method: "POST", url: "https://login.terminalx.ai/v1/desktop/orgs/org-1/delete", body: { confirmationName: "Test organization" } })]);
+    expect(calls[0].headers).toMatchObject({ authorization: "Bearer access-token" });
+    for (const body of [{}, { organizationId: "org-2", deleted: true }, { organizationId: "org-1", deleted: false }, { organizationId: "org-1" }]) {
+      await expect(api(() => ({ body })).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: expect.stringMatching(/^organization_delete_outcome_unknown$|^cloud_workspace_invalid_response$/) });
+    }
+  });
+
+  it("keeps a deletion refusal's code and only the known blockers", async () => {
+    const blocked = api(() => ({ status: 409, body: { error: "organization_delete_blocked", cleanupPath: "https://evil.invalid", blockers: [{ code: "github_disconnect_required" }, { code: "server detail" }] } }));
+    await expect(blocked.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_blocked", status: 409, blockers: ["github_disconnect_required"] });
+    const wrong = api(() => ({ status: 422, body: { error: "organization_confirmation_invalid" } }));
+    await expect(wrong.client.deleteOrganization("org-1", "x")).rejects.toMatchObject({ code: "organization_confirmation_invalid", blockers: [] });
+  });
+
+  it("reads the auth middleware's 401 unauthorized as an auth refusal, sent once (#1349)", async () => {
+    const refused = api(() => ({ status: 401, body: { error: "unauthorized" } }));
+    await expect(refused.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "invalid_access_token", status: 401 });
+    expect(refused.calls).toHaveLength(1);
+  });
+
+  it("reads any other deletion failure as an unknown outcome, as the desktop does", async () => {
+    for (const answer of [{ status: 409, body: { error: "organization_delete_unavailable" } }, { status: 409, body: { error: "account_context_changed" } }, { status: 500, body: { error: "internal" } }, { status: 403, body: { error: "unauthorized" } }]) {
+      await expect(api(() => answer).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: answer.status });
+    }
+    await expect(api(() => Promise.reject(new Error("offline"))).client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "organization_delete_outcome_unknown", status: null });
+    const signedOut = api(() => ({ body: {} }), null);
+    await expect(signedOut.client.deleteOrganization("org-1", "Test organization")).rejects.toMatchObject({ code: "account_signed_out" });
+    expect(signedOut.calls).toEqual([]);
+  });
+
+  it("offers deletion from the phone only when the server says its route takes a phone's token", async () => {
+    const older = api(() => ({ body: { organizations: [], capabilities: { flags: {} } } }));
+    expect(older.client.deletesOrganizations()).toBe(false);
+    await older.client.organizations();
+    expect(older.client.deletesOrganizations()).toBe(false);
+    const newer = api(() => ({ body: { organizations: [], capabilities: { flags: { "organizations.delete.mobile.v1": true } } } }));
+    await newer.client.organizations();
+    expect(newer.client.deletesOrganizations()).toBe(true);
   });
 
   it("reports an answer in an unknown shape as one code, whatever the call", async () => {
@@ -190,5 +266,37 @@ describe("the phone's cloud API client", () => {
     expect(await flaky.client.doNotWake()).toBe(false);
     up = true;
     expect(await flaky.client.doNotWake()).toBe(true);
+  });
+});
+
+describe("why a resume got no usable answer (#1290)", () => {
+  it("tells a timeout from a network failure, and an error body that is not the service's JSON from a code", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      // No answer in 30 s: aborted, and said as a timeout (the server may still have acted on it).
+      const fetcher = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted")))));
+      const slow = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: fetcher as never });
+      const timedOut = slow.resume("org-1", "ws-1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await timedOut).toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "timeout", unreachable: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    const offline = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => { throw new TypeError("Network request failed"); }) as never });
+    await expect(offline.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: null, reason: "network" });
+
+    const html = new CloudApi({ origin: "https://login.terminalx.ai", accessToken: async () => "token", fetch: (async () => ({ ok: false, status: 502, text: async () => "<html>Bad gateway</html>" })) as never });
+    await expect(html.resume("org-1", "ws-1")).rejects.toMatchObject({ code: "cloud_workspace_unavailable", status: 502, reason: "unreadable" });
+    const coded = api(() => ({ status: 409, body: { error: "cloud_provider_state_conflict" } }));
+    const refusal = await coded.client.resume("org-1", "ws-1").catch((error: unknown) => error);
+    expect(refusal).toBeInstanceOf(CloudApiError);
+    expect(refusal).toMatchObject({ code: "cloud_provider_state_conflict", status: 409, reason: null });
+  });
+
+  it("says an answer it cannot parse as such, not as an error with no code", async () => {
+    const { client } = api(() => ({ status: 202, body: { workspace: { id: "ws-1" }, operation: null } }));
+    const error = await client.resume("org-1", "ws-1").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(CloudApiError);
+    expect(error).toMatchObject({ code: "cloud_workspace_invalid_response" });
   });
 });

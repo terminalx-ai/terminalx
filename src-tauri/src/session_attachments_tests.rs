@@ -6,6 +6,7 @@
 //! The rig is `session_unsent_tests`' own: a real pane, a stand-in for Claude
 //! Code that echoes what is typed at it, and Claude Code's transcript written
 //! where the CLI writes it.
+use crate::paths::Canonical;
 use super::*;
 use crate::attachments::{self, FileInput};
 
@@ -24,6 +25,7 @@ impl Rig {
     }
 
     /// The `user_message`s in the tab's log, with their files.
+    #[cfg(unix)]
     fn messages(&self) -> Vec<(String, Vec<FileRef>)> {
         store::read_lines::<AgentEvent>(&store::log_path(SESSION, TAB).unwrap())
             .unwrap()
@@ -37,17 +39,25 @@ impl Rig {
 }
 
 /// The prompt as the agent gets it: what was typed, a blank line, the block.
+#[cfg(unix)]
 fn agent_text(text: &str, files: &[FileRef]) -> String {
     let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
     format!("{text}\n\nAttached files:\n{}", paths.join("\n"))
 }
 
+#[cfg(unix)]
 #[test]
 fn a_message_carries_its_files_and_the_agent_is_handed_their_paths() {
     let rig = Rig::new(claude_tab(None), LISTENS);
     let files = rig.stored();
 
-    let sent = rig.manager.send_pressed(SESSION, TAB, "Review this".into(), Vec::new(), Some(chrono::Utc::now().timestamp_millis()), files.clone()).unwrap();
+    let request_id = uuid::Uuid::new_v4();
+    let sent = rig.manager.send_pressed_with_request(SESSION, TAB, "Review this".into(), Vec::new(), Some(chrono::Utc::now().timestamp_millis()), files.clone(), Some(request_id)).unwrap();
+    let event = &sent.events[0];
+    assert_eq!(event.prompt_request_id, Some(request_id));
+    assert_eq!(serde_json::to_value(event).unwrap()["promptRequestId"], request_id.to_string());
+    let history = rig.manager.load_events(SESSION, TAB).unwrap();
+    assert_eq!(history.iter().find(|record| record.id == event.id).unwrap().prompt_request_id, Some(request_id));
 
     // The chat's message is what was typed, with its files beside it.
     let Payload::UserMessage { text, files: carried, images, .. } = &sent.events[0].payload else { panic!("{:?}", sent.events) };
@@ -82,6 +92,7 @@ fn a_message_carries_its_files_and_the_agent_is_handed_their_paths() {
     assert_eq!(rig.messages(), [("Review this".to_string(), files)]);
 }
 
+#[cfg(unix)]
 #[test]
 fn files_alone_are_sent_as_the_block_alone() {
     let rig = Rig::new(claude_tab(None), LISTENS);
@@ -113,6 +124,7 @@ fn a_file_that_is_not_this_sessions_attachment_refuses_the_send() {
     assert!(rig.manager.send_pressed(SESSION, TAB, "too many".into(), Vec::new(), None, eleven).unwrap_err().to_string().contains("At most 10"));
 }
 
+#[cfg(unix)]
 /// A prompt typed into the terminal, or one whose composer message the chat
 /// no longer has, reaches the chat only from Claude Code's transcript: the
 /// block comes off the text and the files are files again.
@@ -132,6 +144,7 @@ fn the_chat_rebuilt_from_the_transcript_shows_the_files_not_the_block() {
         files.iter().map(|file| (file.path.as_str(), file.name.as_str(), file.size)).collect::<Vec<_>>());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_prompt_sent_again_carries_its_files_again() {
     let rig = Rig::new(claude_tab(None), LISTENS);
@@ -151,7 +164,7 @@ fn attachments_go_with_their_session() {
     let rig = Rig::new(claude_tab(None), LISTENS);
     let files = rig.stored();
     let folder = store::attachments_dir(SESSION).unwrap();
-    assert!(Path::new(&files[0].path).starts_with(folder.canonicalize().unwrap()));
+    assert!(Path::new(&files[0].path).starts_with(folder.canonical().unwrap()));
     let kept = attachments::store("kept", &[pasted("stays.txt", b"x")]).unwrap();
 
     crate::session_ops::remove_session_entries(&[index::get(SESSION).unwrap()]).unwrap();

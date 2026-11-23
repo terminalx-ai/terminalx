@@ -1,9 +1,13 @@
 //! The event socket served in process, against real terminals (#716): a view
 //! or events that fall behind cost no connection, and every end is logged.
+// Most of these drive terminals with POSIX commands and run on Unix only;
+// their helpers are idle elsewhere.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use super::*;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+// A Unix socket, or on Windows a named pipe: `crate::ipc`.
+use crate::ipc::Stream as UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
@@ -91,7 +95,7 @@ struct Peer {
 
 impl Peer {
     fn connect(path: &std::path::Path, hello: Value) -> Self {
-        let mut socket = UnixStream::connect(path).unwrap();
+        let mut socket = crate::ipc::connect(path).unwrap();
         socket.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
         writeln!(socket, "{hello}").unwrap();
         let mut peer = Self { socket, buffer: Vec::new() };
@@ -226,6 +230,8 @@ fn a_view_that_acknowledges_what_it_draws_never_reaches_its_budget() {
 /// own. The desktop lets that view go and tells its window, which attaches it
 /// again from the pane's scrollback; the other pane's output keeps coming,
 /// and the connection stays up.
+/// Its terminals run POSIX shell commands.
+#[cfg(unix)]
 #[test]
 fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
     let rig = Rig::new(1024);
@@ -259,8 +265,11 @@ fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
     assert_eq!(*lagged.lock().unwrap(), [r#"{"id":"flood","token":"f"}"#], "told once, naming the view that fell behind");
     assert_eq!(rig.terminals.stats().views, 1, "the runtime let go of that view alone");
     // The runtime and the desktop each record it once, naming the connection.
-    let runtime = logged("pane \"flood\" fell behind with 2.0 MiB of its output");
+    // How much it had queued depends on how the pane's output was read: a frame is up to a whole scrollback, so a view
+    // falls behind anywhere past 2 MiB less one frame (PRO-492: a loaded runner read bigger pieces, logged "1.6 MiB").
+    let runtime = logged("pane \"flood\" fell behind with ");
     assert_eq!(runtime.len(), 1, "{runtime:?}");
+    assert!(runtime[0].1.contains(" MiB of its output"), "{runtime:?}");
     assert_eq!(runtime[0].0, log::Level::Info);
     assert!(runtime[0].1.starts_with("terminal output of window \"behind\": "), "{runtime:?}");
     let desktop = logged("the view of pane \"flood\" fell behind; it is drawn again from the pane's scrollback");
@@ -298,6 +307,8 @@ fn a_view_far_behind_is_let_go_alone_and_caught_up_from_scrollback() {
 
 /// Four replays of a full scrollback at once are 2.7 MiB as base64: more
 /// than a whole connection could hold before #716, which closed it.
+/// Its terminals run POSIX shell commands.
+#[cfg(unix)]
 #[test]
 fn four_full_scrollbacks_attached_at_once_all_arrive_on_an_open_connection() {
     let rig = Rig::new(1024);
@@ -329,6 +340,8 @@ fn four_full_scrollbacks_attached_at_once_all_arrive_on_an_open_connection() {
 /// An event over the 1 MiB a frame carries goes to no terminal-output
 /// connection, and on the event connection is logged and reported as
 /// missed: neither connection closes.
+/// Its terminals run POSIX shell commands.
+#[cfg(unix)]
 #[test]
 fn an_event_too_large_to_send_is_logged_and_reported_and_closes_nothing() {
     let rig = Rig::new(1024);
@@ -420,6 +433,8 @@ fn events_faster_than_the_connection_takes_them_are_counted_not_fatal() {
 /// A desktop from before #716 names no stream: it takes events and output on
 /// one connection, and when it cannot be told what it missed, the
 /// connection closes, as that desktop expects.
+/// Its terminals run POSIX shell commands.
+#[cfg(unix)]
 #[test]
 fn a_desktop_from_before_716_takes_both_on_one_connection_and_is_closed_not_told() {
     let rig = Rig::new(1024);

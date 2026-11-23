@@ -3,6 +3,7 @@ import type { WorkspaceYou } from "@terminalx/portable/workspace";
 import { TerminalView } from "@/components/terminal/TerminalView";
 import { Button } from "@/components/ui/button";
 import { inputErrorText, viewerText } from "@/components/cloud/CloudTerminalPane";
+import { useMachinePlace } from "@/components/cloud/workspacePlace";
 import { usePeople } from "@/lib/cloudPeople";
 import {
   agentTerminalId,
@@ -66,6 +67,7 @@ export function CloudAgentTerminal({
   const nameOf = usePeople(!!you);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const machine = useMachinePlace();
   const [waking, setWaking] = useState(false);
   /** The attach is not answered yet: null while that is not worth a line, else whether a key was dropped for it. */
   const [attaching, setAttaching] = useState<"slow" | "dropped" | null>(null);
@@ -213,7 +215,7 @@ export function CloudAgentTerminal({
       )}
       {failure && client && (
         <p className="shrink-0 border-b border-hairline px-3 py-1 text-xs text-muted-foreground" data-testid="cloud-agent-terminal-notice" role="alert">
-          {error ? `That did not work: ${inputErrorText(error, true)}` : `Input was not delivered: ${inputErrorText(failure, true)}`}
+          {error ? `That did not work: ${inputErrorText(error, true, machine?.name)}` : `Input was not delivered: ${inputErrorText(failure, true, machine?.name)}`}
         </p>
       )}
       <div className="relative min-h-0 flex-1">

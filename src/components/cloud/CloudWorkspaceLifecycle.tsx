@@ -30,6 +30,7 @@ import {
 import { errorCode } from "@/lib/cloudTerminals";
 import { cloudOrgArg } from "@/lib/cloudCatalog";
 import { cloudProviderName } from "@/lib/cloudSession";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 
 export type LifecycleAction = "stop" | "archive" | "delete";
 
@@ -82,6 +83,8 @@ export function CloudWorkspaceLifecycleDialog({
   /** Push a repository's commits from the dialog, before the action. */
   push?: typeof pushRepository;
 }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const { workspace } = item;
   const actions = actionsFor(item);
   const [action, setAction] = useState<LifecycleAction>(actions.includes(initial) ? initial : actions[0]);

@@ -7,13 +7,17 @@ const pty = vi.hoisted(() => ({
   setDocked: vi.fn(),
   detachAll: vi.fn().mockResolvedValue(undefined),
 }));
-const setups = vi.hoisted(() => ({ runs: [] as import("@/lib/workspaceSetup").WorkspaceSetup[], shown: null }));
-vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => setups, rerunSetup: vi.fn(), setupLog: vi.fn() }));
+const setups = vi.hoisted(() => ({ runs: [] as import("@/lib/workspaceSetup").WorkspaceSetup[], shown: null, times: {} as Record<string, { started?: number; finished?: number }> }));
+vi.mock("@/lib/workspaceSetup", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/workspaceSetup")>()), useWorkspaceSetups: () => setups, rerunSetup: vi.fn(), setupLog: vi.fn() }));
+const store = vi.hoisted(() => ({ sessions: [] as unknown[], projects: [] as unknown[] }));
+vi.mock("@/lib/sessions", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/sessions")>()), useSessionStore: () => store }));
+const run = vi.hoisted(() => ({ startAction: vi.fn(), runs: new Map<string, import("@/lib/actionRunner").ActionRun>() }));
+vi.mock("@/components/session/RunMenu", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/components/session/RunMenu")>()), startAction: run.startAction, useActionRuns: () => run.runs }));
 vi.mock("@/lib/api", () => ({ pty, errorMessage: (e: unknown) => String(e) }));
 const events = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, callback: (event: { payload: unknown }) => void) => { events.set(name, callback); return () => {}; }) }));
 vi.mock("./TerminalView", () => ({
-  TerminalView: ({ id, visible }: { id: string; visible: boolean }) => <div data-testid="terminal-view" data-id={id} data-visible={visible} />,
+  TerminalView: ({ id, visible, moveToTab }: { id: string; visible: boolean; moveToTab?: boolean }) => <div data-testid="terminal-view" data-id={id} data-visible={visible} data-move-to-tab={moveToTab ? "true" : undefined} />,
 }));
 
 import { TerminalDock as Dock } from "./TerminalDock";
@@ -33,22 +37,69 @@ beforeEach(() => {
   vi.clearAllMocks();
   setPrefs({ panelTerminalOpen: false });
   setups.runs = [];
+  setups.times = {};
+  store.sessions = [];
+  store.projects = [];
+  run.runs = new Map();
 });
+const tabNames = () => screen.getAllByRole("tab").map((tab) => tab.textContent);
 
 afterEach(cleanup);
 
 describe("the right panel's terminal dock", () => {
-  it("has no Setup tab without a configured run, and keeps a completed setup tab", () => {
+  it("always has Setup, Run, Terminal and Device, with where to add each script when there is none", () => {
+    render(<TerminalDock sessionId="s1" cwd="/repo" />);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
+    expect(screen.getByRole("img", { name: "Setup not run" })).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Not running" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /^Setup/ }));
+    expect(screen.getByTestId("setup-empty").textContent).toContain("Settings → Projects → Scripts");
+    fireEvent.click(screen.getByRole("tab", { name: /^Run/ }));
+    expect(screen.getByTestId("run-empty").textContent).toContain("Settings → Projects → Actions");
+    expect(pty.spawn).not.toHaveBeenCalled();
+  });
+
+  it("shows the configured setup script before it has run", () => {
+    store.sessions = [{ id: "s1", projectPath: "/repo", cwd: "/repo/.raccoon/worktrees/a", tabs: [] }];
+    store.projects = [{ path: "/repo", name: "repo", scripts: { setup: "bun install", archive: "" } }];
+    render(<TerminalDock sessionId="s1" cwd="/repo/.raccoon/worktrees/a" />);
+    fireEvent.click(screen.getByRole("tab", { name: /^Setup/ }));
+    expect(screen.getByText("After setup")).toBeTruthy();
+    expect(screen.getByTestId("setup-script").textContent).toBe("bun install");
+    expect(screen.getByRole("status").textContent).toBe("Not run in this workspace yet.");
+    expect(screen.getByRole("button", { name: "Run setup" })).toBeTruthy();
+  });
+
+  it("shows a setup run's script, outcome with duration and exit code, and keeps its output", () => {
     const view = render(<TerminalDock sessionId="s1" cwd="/repo" />);
-    expect(screen.queryByRole("tab", { name: /Setup/ })).toBeNull();
     setups.runs = [{ sessionId: "s1", paneId: "s1:workspace-setup-test", command: "bun install", status: "succeeded", exitCode: 0, error: null, hasPane: true }];
+    setups.times = { "s1:s1:workspace-setup-test": { started: 1_000, finished: 15_000 } };
     view.rerender(<TerminalDock sessionId="s1" cwd="/repo" />);
-    fireEvent.click(screen.getByRole("tab", { name: /Setup/ }));
-    expect(screen.getByRole("status").textContent).toContain("Setup succeeded");
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Setup/ }));
+    expect(screen.getByRole("img", { name: "Setup succeeded" })).toBeTruthy();
+    expect(screen.getByTestId("setup-script").textContent).toBe("bun install");
+    expect(screen.getByRole("status").textContent).toBe("✓ Last setup finished in 14s · exit 0");
+    expect(screen.getByRole("button", { name: "Rerun" })).toBeTruthy();
     expect(shown()).toEqual(["s1:workspace-setup-test"]);
     expect(pty.spawn).not.toHaveBeenCalled();
     expect(pty.kill).not.toHaveBeenCalled();
   });
+
+  it("lists the project's run actions with their state, and runs one through the Run menu's action", () => {
+    store.sessions = [{ id: "s1", projectPath: "/repo", cwd: "/repo", tabs: [] }];
+    store.projects = [{ path: "/repo", name: "repo", actions: [{ id: "dev", name: "Dev server", icon: "play", command: "bun run dev", runAfterSetup: false, concurrent: false, hidden: false }] }];
+    run.runs = new Map([["dev", { sessionId: "s1", actionId: "dev", name: "Dev server", paneId: "s1:action-dev", state: "running", exitCode: null, started: "2026-11-16T10:00:00Z", ended: null }]]);
+    render(<TerminalDock sessionId="s1" cwd="/repo" />);
+    expect(screen.getByRole("img", { name: "Running" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /^Run/ }));
+    const pane = screen.getByTestId("run-pane");
+    expect(pane.textContent).toContain("Dev server");
+    expect(pane.textContent).toContain("bun run dev");
+    fireEvent.click(screen.getByRole("button", { name: "Restart" }));
+    expect(run.startAction).toHaveBeenCalledWith({ id: "s1", cwd: "/repo" }, expect.objectContaining({ id: "dev" }), { restart: true });
+  });
+
   it("starts folded and opens a shell in the session's folder when shown", async () => {
     render(<TerminalDock sessionId="s1" cwd="/repo" />);
     expect(screen.queryByTestId("terminal-view")).toBeNull();
@@ -66,7 +117,10 @@ describe("the right panel's terminal dock", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "New terminal" })));
     const [first, second] = pty.spawn.mock.calls.map(([id]) => id as string);
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Terminal 1", "Terminal 2"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal 1", "Terminal 2", "Device"]);
+    // The shell's own header row carries Move to tab; the dock's row has no Move button.
+    expect(screen.getAllByTestId("terminal-view").every((view) => view.dataset.moveToTab === "true")).toBe(true);
+    expect(screen.queryByRole("button", { name: /Move to/ })).toBeNull();
     expect(shown()).toEqual([second]);
 
     fireEvent.click(screen.getByRole("tab", { name: "Terminal 1" }));
@@ -74,7 +128,7 @@ describe("the right panel's terminal dock", () => {
 
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Close Terminal 1" })));
     expect(pty.kill).toHaveBeenCalledWith(first);
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Terminal"]);
+    expect(tabNames()).toEqual(["Setup", "Run", "Terminal", "Device"]);
     expect(shown()).toEqual([second]);
   });
 

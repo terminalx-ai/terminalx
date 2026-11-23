@@ -3,7 +3,7 @@
   "description": "TerminalX \u2014 a desktop workbench for coding agents",
   "private": true,
   "license": "MIT",
-  "version": "0.2.32",
+  "version": "0.2.39",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=24"
@@ -31,10 +31,13 @@
     "test:webkit-settings": "node scripts/webkit/settings-navigation.mjs",
     "test:webkit-orchestration": "node scripts/webkit/orchestration.mjs",
     "test:webkit-run-sidebar": "node scripts/webkit/run-sidebar.mjs",
+    "test:webkit-machine-sidebar": "node scripts/webkit/machine-sidebar.mjs",
+    "test:webkit-machine-session": "node scripts/webkit/machine-session.mjs",
+    "test:webkit-machine-ports": "node scripts/webkit/machine-ports.mjs",
+    "test:webkit-machines-screens": "node scripts/webkit/machines-screens.mjs",
     "test:webkit-orchestrate-start": "node scripts/webkit/orchestrate-start.mjs",
     "test:webkit-readable-panels": "node scripts/webkit/readable-panels.mjs",
     "test:webkit-agent-logins": "node scripts/webkit/agent-logins.mjs",
-    "test:webkit-orchestration": "node scripts/webkit/orchestration.mjs",
     "test:webkit-run-limits": "node scripts/webkit/run-limits.mjs",
     "test:webkit-local-sharing": "node scripts/webkit/local-sharing.mjs",
     "test:webkit-app-resources": "node scripts/webkit/app-resources.mjs",
@@ -56,6 +59,10 @@
     "test:terminalx-launcher": "vitest run scripts/build-terminalx-launcher.test.mjs",
     "test:webkit-helper-titles": "node scripts/webkit/helper-titles.mjs",
     "test:webkit-automatic-session-status": "node scripts/webkit/automatic-session-status.mjs",
+    "test:webkit-session-start": "node scripts/webkit/session-start.mjs",
+    "test:webkit-session-menu": "node scripts/webkit/session-menu.mjs",
+    "test:webkit-composer-controls": "node scripts/webkit/composer-controls.mjs",
+    "test:webkit-attachment-preview": "node scripts/webkit/attachment-preview.mjs",
     "bench:orchestration": "node scripts/orchestration-bench/cli.mjs"
   },
   "dependencies": {

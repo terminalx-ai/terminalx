@@ -89,9 +89,14 @@ advertised 16-character host id. `live`, `unverifiable`, and `exited` are
 rendered as distinct reachability states. Repository names, paths, session
 lists, and terminal contents are not directory fields and are not requested.
 
-The explicit QR/code path remains available without account discovery and uses
-the same version-2 pairing-offer decoder. Explicit pairings remain on the
-device when the cloud account signs out.
+A signed-in headless server with hosting enabled appears with a server icon
+once it registers with the relay. Its Pair action opens the QR scanner. Run
+`terminalx-serve pair --phone` on the server and approve in the terminal after
+comparing fingerprints. The QR uses Relay when the server has registered and
+supports nearby pairing when a direct listener is available.
+The QR/code path also works without account discovery and uses the same
+version-2 pairing-offer decoder. Explicit pairings remain on the phone when
+its account signs out.
 
 ## Account-bound HPKE pairing
 
@@ -137,6 +142,14 @@ and falls back to relay when a relay bundle exists. Direct transport enters the
 same E2EE and RPC pipeline as relay; it is not a lower-security mode. Both
 paths terminate at the Mac's one runtime listener and one persistent host key,
 not transport-specific listeners or identities.
+
+The listener is bound where `machines.listen` says (PRO-487; docs/MACHINES.md,
+"As built (PRO-487)"): no port under "Relay only", otherwise the Tailscale,
+private or all addresses chosen. A pairing offer carries only addresses that
+are bound, so with "Relay only" a phone pairs and connects through the relay.
+A connection from a public source address is refused unless
+`machines.allowPublic` is on, and one that is already open is closed when it
+is turned off (PRO-495), whether the runtime or the window holds the port.
 
 The iOS build includes `NSLocalNetworkUsageDescription`. The app requests Local
 Network access just in time when the user pairs or connects to a LAN address,

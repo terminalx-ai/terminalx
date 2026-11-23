@@ -7,6 +7,7 @@ import { linkText } from "@/lib/issueWork";
 import { isQuickChat } from "@/lib/quickChats";
 import { setSessionWorkPrivate, unlinkSessionIssue } from "@/lib/sessions";
 import type { SessionEntry } from "@/types/session";
+import { isLocalKey } from "@/types/target";
 
 function failed(title: string) {
   return (error: unknown) => void message(errorMessage(error), { title, kind: "error" }).catch(() => undefined);
@@ -28,7 +29,7 @@ function unlinkLabel(session: SessionEntry): string {
 
 /** A session in a Git checkout on this Mac can show another branch's pull request (PRO-294). */
 function canLinkPr(session: SessionEntry): boolean {
-  return !session.id.startsWith("cloud:") && !!session.cwd && !!session.branch && !session.worktreeRemoved;
+  return isLocalKey(session.id) && !!session.cwd && !!session.branch && !session.worktreeRemoved;
 }
 
 const SHARE_HINT = "Its work status never leaves this Mac: your other machines and your team do not see it.";

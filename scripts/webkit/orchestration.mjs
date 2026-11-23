@@ -345,6 +345,40 @@ const layoutOf = (view) => view.evaluate((node) => {
   };
 });
 
+/** Where the open piece sits (PRO-383): the window's right column, from the top, its header level with the title bar. */
+const columnOf = (page) => page.evaluate(() => {
+  const panel = document.querySelector('[data-testid="piece-detail"]');
+  const bar = document.querySelector('[data-testid="session-breadcrumb"]')?.closest("header");
+  if (!panel) return null;
+  const box = panel.getBoundingClientRect();
+  return {
+    left: Math.round(box.left), width: Math.round(box.width), top: Math.round(box.top), right: Math.round(window.innerWidth - box.right),
+    header: Math.round(panel.querySelector("header").getBoundingClientRect().height), bar: bar ? Math.round(bar.getBoundingClientRect().height) : null,
+    inColumn: !!panel.closest('[data-testid="run-piece-column"]'), heading: panel.querySelector("header").textContent,
+  };
+});
+const inColumn = (column) => !!column && column.inColumn && column.width === 420 && column.top === 0 && column.right === 0 && column.header === column.bar;
+
+/** The text in these elements wraps only after a `/` or at a space, never inside a name (PRO-383). */
+const breaksMidWord = (locator) => locator.evaluateAll((items) => items.some((item) => {
+  const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+  const chars = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) for (let at = 0; at < node.length; at++) chars.push([node, at]);
+  let top = null;
+  return chars.some(([node, at], index) => {
+    const range = document.createRange();
+    range.setStart(node, at);
+    range.setEnd(node, at + 1);
+    const rect = range.getClientRects()[0];
+    if (!rect || !rect.width) return false;
+    const moved = top !== null && rect.top > top + 4;
+    top = rect.top;
+    if (!moved) return false;
+    const before = chars[index - 1] ? chars[index - 1][0].data[chars[index - 1][1]] : " ";
+    return !/[\/\s]/.test(before) && !/\s/.test(node.data[at]);
+  });
+}));
+
 const server = await serve();
 const browser = await launch();
 let failed = 0;
@@ -370,14 +404,14 @@ try {
         await strip.waitFor();
         const flagged = await strip.getByRole("status", { name: "A plan waits for your approval" }).count();
         const chatFirst = (await page.getByTestId("run-view").count()) === 0;
-        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⌘⇧O, as ⌘⇧R is Automations.
+        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⇧⌘O, as ⇧⌘R is Automations.
         const hint = await page.getByTestId("run-view-hint").textContent();
         await page.keyboard.press("Meta+Shift+O");
         const view = page.getByTestId("run-view");
         await view.getByRole("table", { name: "Plan" }).waitFor();
         const opened = (await view.count()) === 1;
         const layout = await layoutOf(view);
-        const detail = view.getByTestId("piece-detail");
+        const detail = page.getByTestId("piece-detail");
         const pick = (id) => view.locator(`[data-piece="${id}"] button`).first().click();
         await pick("session");
         const brief = await detail.textContent();
@@ -385,9 +419,25 @@ try {
         await pick("docs");
         const untrusted = await detail.textContent();
         const warned = await view.locator('[data-piece="docs"]').getByRole("note").getAttribute("aria-label");
+        await pick("session");
+        const approvalColumn = await columnOf(page);
+        const card = await view.getByRole("region", { name: "Plan summary" }).evaluate((node) => ({ height: Math.round(node.getBoundingClientRect().height), rows: node.children.length }));
+        const chips = await view.getByTestId("plan-limits").evaluate((node) => {
+          const budget = node.querySelector("button[aria-expanded]").getBoundingClientRect();
+          const workers = node.querySelector("label").getBoundingClientRect();
+          const input = node.querySelector("input");
+          return { same: Math.abs(budget.height - workers.height) < 1, narrow: workers.width < 48, arrows: getComputedStyle(input, "::-webkit-inner-spin-button").appearance !== "none" && getComputedStyle(input).appearance !== "textfield" };
+        });
+        const commandsWhole = !(await breaksMidWord(detail.getByTestId("done-checks").locator("code")));
         const checks = {
+          // PRO-383 (18.02): two rows, the budget, At once and the mode as boxed values; the panel is the right column.
+          "the plan card is two rows, about 90px tall at 1440": card.rows === 2 && (size.width < 1440 || card.height <= 100),
+          "at 1440 the plan's titles of the design's length fit one line beside the open brief": size.width < 1440 || layout.rows.slice(0, 5).every((row) => row.height <= 56),
+          "At once is a boxed value beside Budget, with no stepper arrows": chips.same && chips.narrow && !chips.arrows,
+          "the brief's done-when commands wrap only between words and after a slash": commandsWhole,
+          "the open brief is the window's full-height 420px right column where there is room, labelled brief": (size.width < 1200 ? !approvalColumn.inColumn : inColumn(approvalColumn)) && approvalColumn.heading.endsWith("brief"),
           "the session opens on its chat, and the Run tab says a plan waits": chatFirst && flagged === 1,
-          "the title bar shows ⌘⇧O run view, and ⌘⇧O opens the Run view": hint === "⌘⇧Orun view" && opened,
+          "the title bar shows ⇧⌘O run view, and ⇧⌘O opens the Run view": hint === "⇧⌘Orun view" && opened,
           // Model and effort are one pill (18.02): the tier's dot, the model, the effort.
           "each piece's model and effort is one pill, marked with its tier's dot": (await view.getByTestId("piece-model-pill").count()) === 6 && (await view.locator('[data-piece="store"] [data-testid="piece-model-pill"] .rounded-full').count()) === 1,
           "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,
@@ -457,6 +507,8 @@ try {
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
         // Lower the points, then start: the limit is saved before the start, and the start is the person's.
+        // The run's own limits open from the plan card's Budget chip (PRO-383).
+        await view.getByTestId("plan-limits").getByRole("button", { name: /^Budget: / }).click();
         const points = view.getByRole("spinbutton", { name: "Points of a window this run may use" });
         await points.fill("10");
         await points.press("Enter");
@@ -480,8 +532,13 @@ try {
         await view.getByRole("table", { name: "Pieces" }).waitFor();
         await view.locator('[data-piece="store"] button').first().click();
         const layout = await layoutOf(view);
-        const panel = view.getByTestId("piece-detail");
+        const panel = page.getByTestId("piece-detail");
         const detail = await panel.textContent();
+        const column = await columnOf(page);
+        const panelLayout = await layoutOf(panel);
+        const pathsWhole = !(await breaksMidWord(panel.getByTestId("piece-changed").locator("li > span:first-child")));
+        const pathLines = await panel.getByTestId("piece-changed").getByRole("listitem").evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)));
+        const workersLine = await view.getByTestId("run-workers").evaluate((node) => Math.round(node.getBoundingClientRect().height));
         await shot(page, "running");
         const states = layout.rows.map((row) => row.state).join();
         const gatesOf = () => panel.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join());
@@ -509,12 +566,18 @@ try {
           "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
           "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
           "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
-          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultAdded a typed settings store") && detail.includes("raccoon/store-piece · 4c1e9a7") && (await view.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultAdded a typed settings store") && detail.includes("raccoon/store-piece · 4c1e9a7") && (await page.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
           "a done piece shows every section of its worker's report, saying so where one is empty (18.01)": ["Evidencecargo t store::settings exit 0 · 14 passed", "Changedsrc-tauri/src/store/settings/mod.rs+212", "src-tauri/src/store/mod.rs+3−1", "Not doneNothing", "Could not readNothing", "UncertainWhether the Windows settings path"].every((said) => detail.includes(said)),
           "its footer offers the worker and the diff, and says what it cost and used": (await panel.getByRole("button", { name: "View diff", exact: true }).count()) === 1 && (await panel.getByTestId("piece-detail-cost").textContent()) === "$1.82 · 41k out",
           "only the done pieces' segments are coloured": (await view.getByTestId("run-pieces").locator("[data-segment]").evaluateAll((items) => items.map((item) => item.dataset.segment).join())) === "done,done,open,open,open,open",
           "Merge is shown and stays disabled until every piece is done": (await view.getByTestId("run-merge").isDisabled()) && (await view.getByTestId("run-merge").getAttribute("title")) === "Merge unlocks when every piece is done.",
-          "spend is in dollars first, the window's points under it, and the lead's model and effort beside it": (await view.getByTestId("run-spend").textContent()) === "$4.13 of $15.00" && (await view.getByTestId("run-points").textContent()).startsWith("9 of 25 points · 5h window at 41% · resets") && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
+          // PRO-383 (18.01): the subscription's points lead, the window under them, the dollars last.
+          "the budget leads with the subscription's points, then the window, then the dollars, and the lead's model and effort beside it": (await view.getByTestId("run-budget").textContent()).startsWith("Budgetsubscription 9 of 25 points") && (await view.getByTestId("run-window").textContent()).startsWith("5h window at 41% · resets") && (await view.getByTestId("run-spend").textContent()) === "$4.13 API-equivalent, not billed" && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
+          "the open piece is the window's full-height 420px right column where there is room, its header the title alone": (size.width < 1200 ? !column.inColumn : inColumn(column)) && column.heading === "2Typed store module and migration",
+          // The sample's sixth title is two lines' worth at any width the design has.
+          "at 1440 every piece title fits one line and the Lead card's workers line is one line": size.width < 1440 || (layout.rows.slice(0, 5).every((row) => row.height <= 56) && workersLine <= 18),
+          "changed files keep each name whole, each on one line where it fits": pathsWhole && (size.width < 1200 || pathLines.every((height) => height <= 20)),
+          "the panel itself does not scroll sideways or overlap": !panelLayout.scrolls && !panelLayout.overlaps,
           "no piece title is cut short": (await view.getByTestId("piece-title").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1 && !getComputedStyle(item).textOverflow.includes("ellipsis")))),
           "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
@@ -539,7 +602,7 @@ try {
         const view = page.getByTestId("run-view");
         await view.getByRole("table", { name: "Pieces" }).waitFor();
         await view.locator('[data-piece="cli"] button').first().click();
-        const detail = view.getByTestId("piece-detail");
+        const detail = page.getByTestId("piece-detail");
         const tries = detail.getByRole("list", { name: "Tries" }).getByRole("listitem");
         await tries.nth(2).waitFor();
         const layout = await layoutOf(view);
@@ -548,7 +611,13 @@ try {
         const wide = size.width >= 1200;
         const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
         const cli = await cells("cli");
+        const docsRow = view.locator('[data-piece="docs"]');
+        const blockedColumn = await columnOf(page);
         const checks = {
+          // PRO-383 (18.03): a piece held by a blocked one waits for that one alone, and says Waiting with the dashed circle.
+          "the piece held by the blocked one is Waiting and waits for it alone, never a done piece": (await docsRow.getAttribute("data-shown-state")) === "waiting" && (await cells("docs"))[2] === "Waiting" && (!wide || (await cells("docs"))[5] === "Waits for 5"),
+          "a queued piece's model has its tier's dot": (await docsRow.getByTestId("model-dot").count()) === 1,
+          "the blocked piece's panel is the right column where there is room": size.width < 1200 ? !blockedColumn.inColumn : inColumn(blockedColumn),
           "one line says which piece holds the run up, by number, and the run has not failed (18.03)": (await view.getByTestId("run-state").textContent()) === "Run" && (await view.getByTestId("run-subtitle").textContent()) === "Piece 5 is blocked. Piece 6 waits for it; nothing else is running." && (await view.getByTestId("run-needs").count()) === 0 && !(await view.textContent()).includes("cli is blocked"),
           "Stop run is offered, and Merge waits for every piece": (await view.getByRole("button", { name: "Stop run", exact: true }).count()) === 1 && (await view.getByTestId("run-merge").isDisabled()),
           "blocked is red": (await view.locator('[data-piece="cli"] [role=cell]').nth(2).locator("span").first().evaluate((node) => node.className)).includes("text-destructive"),
@@ -567,7 +636,8 @@ try {
           "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
           "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
           "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 3,
-          "the table's columns are the design's, where there is room": !wide || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
+          // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
+          "the table's columns are the design's, where there is room": size.width < 1440 || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
           "no text is smaller than 10.5px": layout.smallest >= 10.5,
           "no browser errors": errors.length === 0,
@@ -591,7 +661,7 @@ try {
         const table = view.getByRole("table", { name: "Merge" });
         await table.waitFor();
         await view.locator('[data-piece="cli"] button').first().click();
-        const detail = view.getByTestId("piece-detail");
+        const detail = page.getByTestId("piece-detail");
         const panel = detail.getByTestId("merge-panel");
         await panel.waitFor();
         const layout = await layoutOf(view);
@@ -601,11 +671,18 @@ try {
         const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
         const cli = await cells("cli");
         const said = await panel.textContent();
+        const mergeColumn = await columnOf(page);
+        const footer = await detail.locator("footer button").evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size);
+        const excerptLines = await panel.getByTestId("conflict-excerpt").locator("pre > div").evaluateAll((items) => items.every((item) => item.getBoundingClientRect().height <= 20));
         const checks = {
+          // PRO-383 (18.04): the full-height column, its three ways out on one row, each excerpt line whole.
+          "the conflict's panel is the right column where there is room, its three ways out on one row": size.width < 1200 ? !mergeColumn.inColumn : inColumn(mergeColumn) && footer === 1,
+          "each line of the conflict excerpt stays one line": excerptLines,
           "the run says how far the merge is and what stopped it": (await view.getByTestId("run-state").textContent()) === "Merging" && (await view.getByTestId("run-subtitle").textContent()) === "Merging in dependency order. 3 of 5 branches are in; piece 5 conflicts.",
           "it says where the pieces go, with what check, and that nothing is pushed": await (async () => { const strip = await view.getByTestId("merge-strip").textContent(); return strip.includes("Intosettings-typed-store") && strip.includes("Integration checkcargo t && pnpm test") && strip.includes("Nothing is pushed. No other branch is touched."); })(),
           "a row a branch, in merge order: three in, the conflict, and the piece that waits for it": rows === "store:merged,session:merged,pipeline:merged,cli:conflict,docs:waiting",
-          "the table's columns are the design's, where there is room": !wide || (await table.getByRole("columnheader").allTextContents()).join() === "Branch,State,Commit,Check after merge,Note",
+          // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
+          "the table's columns are the design's, where there is room": size.width < 1440 || (await table.getByRole("columnheader").allTextContents()).join() === "Branch,State,Commit,Check after merge,Note",
           "a merged row shows its branch, its merge commit and how its check went": await (async () => { const store = await cells("store"); return store[0].includes("piece-store → settings-typed-store") && store[1] === "Merged" && (!wide || (store[2] === "4c1e9a7" && store[3] === "passed · 2m 11s")); })(),
           "the conflict's row shows the piece's commit, that no check ran, and what it conflicts with": cli[1] === "Conflict" && (!wide || (cli[2] === "a31c55e" && cli[3] === "not run" && cli[4] === "2 files conflict with piece 3")),
           "the piece behind it says what it waits for": !wide || (await cells("docs"))[4] === "Waits for 5",
@@ -628,11 +705,18 @@ try {
         await page.close();
       }
 
-      // A session with no run (design 18.08).
+      // A session with no run (design 18.08). It looks like any other session (#1404): no Run strip and no run
+      // pill, until Go → Run View opens the page that says how to start one.
       {
         const { page, errors } = await start("none");
         const strip = page.getByTestId("run-strip");
-        await strip.getByRole("tab", { name: /^Run/ }).click();
+        const plain = (await strip.count()) === 0 && (await page.getByTestId("run-pill").count()) === 0;
+        // The keys do nothing until the session's run has been read (there is none): press until they take.
+        for (let tries = 0; tries < 40 && (await strip.count()) === 0; tries++) {
+          await page.keyboard.press("Meta+Shift+O");
+          await page.waitForTimeout(100);
+        }
+        await strip.getByRole("tab", { name: /^Run/, selected: true }).waitFor();
         const view = page.getByTestId("run-view");
         await view.getByRole("heading", { name: "This session has no run" }).waitFor();
         await page.waitForFunction(() => document.querySelector('[data-testid="run-limits"]').textContent.includes("8"));
@@ -642,12 +726,14 @@ try {
           "it says what a run is and offers both ways to start one": (await view.getByRole("button", { name: "Plan a run", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Choose file", exact: true }).count()) === 1 && (await view.getByText("terminalx runs create --from plan.json", { exact: true }).count()) === 1,
           "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass",
           "it says when to split and when not to": (await view.getByRole("list").getByRole("listitem").count()) === 4,
+          "before the Run view is opened the session has no Run strip and no run pill": plain,
+          "the title bar has no run pill with no run": (await page.getByTestId("run-pill").count()) === 0,
           "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
         };
         await view.getByRole("button", { name: "Plan a run", exact: true }).click();
         await view.waitFor({ state: "detached" });
         const calls = await page.evaluate(() => window.__RUNS__.calls);
-        checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.getByRole("tab", { name: "Lead chat" }).getAttribute("aria-selected")) === "true";
+        checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.count()) === 0;
         // The lead stores a plan: the Run tab says so without the view being open.
         await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { id: "run-2", lead: { sessionId: "local-s1" }, projectPath: "/repos/p0", goal: "A new plan", state: "awaitingApproval", budget: {}, workerMode: "bypassPermissions", created: new Date().toISOString(), modified: new Date().toISOString(), pieces: [] }; announce(); });
         await strip.getByRole("status", { name: "A plan waits for your approval" }).waitFor();
@@ -701,6 +787,7 @@ try {
         let calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
         checks["each control saves its own setting, and a limit out of range is not saved"] = JSON.stringify(calls) === JSON.stringify([{ requireApproval: false }, { pieceLimit: 12 }, { workerMode: "acceptEdits" }]) && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "12";
         // A repository answers for itself, one setting at a time, and can follow the app again.
+        await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
         await nav.getByRole("button", { name: "local-0", exact: true }).click();
         const own = settings.getByTestId("repository-orchestrator-settings");
         await own.waitFor();

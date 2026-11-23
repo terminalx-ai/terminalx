@@ -4035,6 +4035,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4066,7 +4072,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raccoon"
-version = "0.2.32"
+version = "0.2.39"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4080,6 +4086,7 @@ dependencies = [
  "crypto_box",
  "crypto_secretbox",
  "dirs",
+ "dunce",
  "env_logger",
  "flate2",
  "futures-util",
@@ -4091,6 +4098,7 @@ dependencies = [
  "icu_normalizer",
  "if-addrs",
  "ignore",
+ "indexmap 2.14.1",
  "libc",
  "log",
  "notify",
@@ -4106,8 +4114,10 @@ dependencies = [
  "objc2-user-notifications",
  "parking_lot",
  "portable-pty",
+ "qrcode",
  "rand_core 0.6.4",
  "regex",
+ "ring",
  "salsa20",
  "security-framework",
  "semver",
@@ -4136,12 +4146,14 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.13+spec-1.1.0",
  "transcribe-cpp",
  "ureq",
  "url",
  "uuid",
  "vt100",
  "which",
+ "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "zeroize",
 ]
@@ -5663,11 +5675,14 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "crypto_box",
  "futures-util",
+ "hmac 0.12.1",
  "libc",
  "raccoon",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -5957,6 +5972,7 @@ dependencies = [
  "indexmap 2.14.1",
  "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 

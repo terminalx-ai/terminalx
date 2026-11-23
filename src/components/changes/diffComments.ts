@@ -1,4 +1,4 @@
-import { Compartment, Text, type Extension, type Range } from "@codemirror/state";
+import { Compartment, Text, type EditorState, type Extension, type Range } from "@codemirror/state";
 import { Decoration, EditorView, GutterMarker, WidgetType, drawSelection, gutter, keymap } from "@codemirror/view";
 import { defaultKeymap } from "@codemirror/commands";
 import { getChunks, uncollapseUnchanged } from "@codemirror/merge";
@@ -20,16 +20,63 @@ class CommentGutter extends GutterMarker {
 function commentButton(side: LineCommentSide, line: number, add: (event: MouseEvent) => void) {
   const button = document.createElement("button");
   button.type = "button"; button.textContent = "+"; button.tabIndex = -1;
-  button.className = "cm-review-add inline-block w-5 rounded text-info hover:bg-selected select-none";
+  // Drawn on the hovered line only (PRO-392): a + on every line read as "added".
+  button.className = "cm-review-add inline-block w-5 rounded select-none";
+  button.dataset.line = String(line);
   button.setAttribute("aria-label", `Comment on ${side} line ${line}`);
   button.title = "Add comment (Shift-click for a range; ⌘/Ctrl Shift M on a focused line)";
   button.onmousedown = (event) => event.preventDefault();
   button.onclick = (event) => { button.focus({ preventScroll: true }); add(event); };
   return button;
 }
+/** "+" or "−" beside a changed line's number (PRO-392); unchanged lines have none. */
+class ChangeMarker extends GutterMarker {
+  constructor(readonly sign: "+" | "−") { super(); }
+  eq(other: ChangeMarker) { return this.sign === other.sign; }
+  toDOM() { const el = document.createElement("span"); el.textContent = this.sign; el.className = this.sign === "+" ? "cm-change-add" : "cm-change-del"; return el; }
+}
+const plus = new ChangeMarker("+"), minus = new ChangeMarker("−");
+// Keyed by side as well: a split view's two editors share one chunks array, and each side numbers its own lines.
+const changedCache = { before: new WeakMap<object, Set<number>>(), after: new WeakMap<object, Set<number>>() };
+/** The lines of this editor that a chunk changed: the original's in a split view's before side, the current's otherwise. */
+function changedLines(state: EditorState, side: LineCommentSide): Set<number> {
+  const info = getChunks(state);
+  if (!info) return new Set();
+  const cached = changedCache[side].get(info.chunks);
+  if (cached) return cached;
+  const lines = new Set<number>();
+  const doc = state.doc;
+  for (const chunk of info.chunks) {
+    const [from, to] = side === "before" && info.side === "a" ? [chunk.fromA, chunk.toA] : [chunk.fromB, chunk.toB];
+    if (to <= from) continue;
+    const first = doc.lineAt(Math.min(from, doc.length)).number, last = doc.lineAt(Math.min(Math.max(from, to - 1), doc.length)).number;
+    for (let n = first; n <= last; n++) lines.add(n);
+  }
+  changedCache[side].set(info.chunks, lines);
+  return lines;
+}
+/** The diff's gutter: line numbers, markers, and the + to comment, shown on hover only. */
+const diffGutterTheme = EditorView.theme({
+  ".cm-change-gutter .cm-gutterElement": { width: "14px", textAlign: "center", padding: "0" },
+  ".cm-change-add": { color: "var(--accent-add)" },
+  ".cm-change-del": { color: "var(--destructive)" },
+  ".cm-review-add": { opacity: "0", color: "var(--ink-muted)", lineHeight: "inherit" },
+  ".cm-review-add:hover": { backgroundColor: "var(--veil-strong)", color: "var(--foreground)" },
+  ".cm-review-add.cm-hover, .cm-review-add:focus-visible, .cm-review-gutter .cm-gutterElement:hover .cm-review-add, .cm-deletedLine:hover .cm-review-add, .cm-deletedLine:focus .cm-review-add": { opacity: "1" },
+  ".cm-deletedLine": { position: "relative" },
+  ".cm-deleted-gutter": {
+    position: "absolute", right: "100%", top: "0", display: "flex", alignItems: "center", height: "100%",
+    color: "var(--ink-faint)", fontFamily: "var(--font-mono)", userSelect: "none",
+  },
+  ".cm-deleted-gutter .cm-deleted-number": { width: "var(--cm-diff-numbers, 36px)", textAlign: "right", padding: "0 8px 0 0", boxSizing: "border-box" },
+  ".cm-deleted-gutter .cm-change-del": { width: "14px", textAlign: "center" },
+  ".cm-deleted-gutter .cm-review-add": { width: "20px" },
+});
 interface Pane { view?: EditorView; side: LineCommentSide; unified: boolean; compartment: Compartment }
 interface Config {
   path: string; base: string; originalPath?: string; before: string; after: string;
+  /** False where no comment can be made here: the gutter then draws line numbers and markers only. */
+  commentable?: boolean;
   comments(): ReviewComment[];
   start(anchor: ReviewAnchor): void;
   selection(anchor: ReviewAnchor | null): void;
@@ -39,6 +86,7 @@ interface Config {
 /** Extensions of the shared merge renderer; never constructs another editor or diff document. */
 export function diffComments(config: Config) {
   const panes: Pane[] = [];
+  const commentable = config.commentable !== false;
   const original = Text.of(normalizeReviewText(config.before).split("\n"));
   let rangeStart: { side: LineCommentSide; line: number } | undefined;
   let disposed = false, frame = 0;
@@ -102,6 +150,10 @@ export function diffComments(config: Config) {
   };
   function decorateDeleted() {
     if (disposed) return;
+    for (const pane of panes) {
+      const numbers = pane.view?.dom.querySelector<HTMLElement>(".cm-lineNumbers");
+      if (pane.unified && numbers?.offsetWidth) pane.view!.dom.style.setProperty("--cm-diff-numbers", `${numbers.offsetWidth}px`);
+    }
     const live = new Set<string>();
     const beforeComments = new Map<number, ReviewComment[]>();
     for (const c of comments()) if (c.side === "before") beforeComments.set(c.endLine, [...(beforeComments.get(c.endLine) ?? []), c]);
@@ -119,23 +171,32 @@ export function diffComments(config: Config) {
           const line = start + i;
           if (!el.dataset.reviewBeforeLine) {
             el.dataset.reviewBeforeLine = String(line);
-            el.prepend(commentButton("before", line, (event) => add(pane, "before", line, event)));
-            // One tab stop per deletion chunk; arrows navigate its original lines.
-            el.tabIndex = i === 0 ? 0 : -1;
-            el.setAttribute("aria-label", `Before line ${line}: ${original.line(line).text}`);
-            el.onkeydown = (event) => {
-              if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "m") { event.preventDefault(); config.start(anchor("before", rangeStart?.side === "before" ? rangeStart.line : line, line)); }
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                const next = lines[i + (event.key === "ArrowDown" ? 1 : -1)];
-                if (!next) return;
-                event.preventDefault();
-                if (!event.shiftKey || rangeStart?.side !== "before") rangeStart = { side: "before", line };
-                const nextLine = Number(next.dataset.reviewBeforeLine);
-                if (event.shiftKey) config.selection(anchor("before", rangeStart.line, nextLine));
-                else { rangeStart = { side: "before", line: nextLine }; config.selection(null); }
-                next.focus();
-              }
-            };
+            // The removed line's own number and "−" in the gutter's columns (PRO-392); the + to comment after them.
+            const gutterCells = document.createElement("span");
+            gutterCells.className = "cm-deleted-gutter";
+            const number = document.createElement("span"); number.className = "cm-deleted-number"; number.textContent = String(line);
+            const sign = document.createElement("span"); sign.className = "cm-change-del"; sign.textContent = "−";
+            gutterCells.append(number, sign);
+            if (commentable) gutterCells.append(commentButton("before", line, (event) => add(pane, "before", line, event)));
+            el.prepend(gutterCells);
+            if (commentable) {
+              // One tab stop per deletion chunk; arrows navigate its original lines.
+              el.tabIndex = i === 0 ? 0 : -1;
+              el.setAttribute("aria-label", `Before line ${line}: ${original.line(line).text}`);
+              el.onkeydown = (event) => {
+                if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "m") { event.preventDefault(); config.start(anchor("before", rangeStart?.side === "before" ? rangeStart.line : line, line)); }
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  const next = lines[i + (event.key === "ArrowDown" ? 1 : -1)];
+                  if (!next) return;
+                  event.preventDefault();
+                  if (!event.shiftKey || rangeStart?.side !== "before") rangeStart = { side: "before", line };
+                  const nextLine = Number(next.dataset.reviewBeforeLine);
+                  if (event.shiftKey) config.selection(anchor("before", rangeStart.line, nextLine));
+                  else { rangeStart = { side: "before", line: nextLine }; config.selection(null); }
+                  next.focus();
+                }
+              };
+            }
           }
           for (const c of (beforeComments.get(line) ?? [])) {
             live.add(c.id);
@@ -155,10 +216,31 @@ export function diffComments(config: Config) {
     const pane: Pane = { side, unified, compartment: new Compartment() };
     panes.push(pane);
     return {
-      extensions: [pane.compartment.of([]), drawSelection(),
+      extensions: [pane.compartment.of([]), drawSelection(), diffGutterTheme,
         EditorView.contentAttributes.of({ tabindex: "0", "aria-label": `${config.path} ${unified ? "unified" : side} diff` }),
-        gutter({ class: "cm-review-gutter", lineMarker: (view, line) => new CommentGutter(view.state.doc.lineAt(line.from).number, side, (number, event) => add(pane, side, number, event)) }),
-        keymap.of([{ key: "Mod-Shift-m", run: (view) => { add(pane, side, view.state.doc.lineAt(view.state.selection.main.head).number); return true; } }, ...defaultKeymap]),
+        gutter({
+          class: "cm-change-gutter",
+          lineMarker: (view, line) => changedLines(view.state, side).has(view.state.doc.lineAt(line.from).number) ? (side === "before" && !unified ? minus : plus) : null,
+          lineMarkerChange: (update) => getChunks(update.startState)?.chunks !== getChunks(update.state)?.chunks,
+        }),
+        ...(commentable ? [
+          gutter({ class: "cm-review-gutter", lineMarker: (view, line) => new CommentGutter(view.state.doc.lineAt(line.from).number, side, (number, event) => add(pane, side, number, event)) }),
+          keymap.of([{ key: "Mod-Shift-m", run: (view) => { add(pane, side, view.state.doc.lineAt(view.state.selection.main.head).number); return true; } }]),
+          // The + shows on the line under the pointer, as well as when the gutter itself is hovered.
+          EditorView.domEventHandlers({
+            mousemove: (event, view) => {
+              const block = view.lineBlockAtHeight(event.clientY - view.documentTop);
+              const number = block ? view.state.doc.lineAt(block.from).number : 0;
+              const shown = view.dom.querySelector(".cm-review-gutter .cm-review-add.cm-hover");
+              if (shown?.getAttribute("data-line") === String(number)) return false;
+              shown?.classList.remove("cm-hover");
+              view.dom.querySelector(`.cm-review-gutter .cm-review-add[data-line="${number}"]`)?.classList.add("cm-hover");
+              return false;
+            },
+            mouseleave: (_event, view) => { view.dom.querySelector(".cm-review-gutter .cm-review-add.cm-hover")?.classList.remove("cm-hover"); return false; },
+          }),
+        ] : []),
+        keymap.of(defaultKeymap),
         EditorView.updateListener.of((update) => {
           if (update.selectionSet) {
             const s = update.state.selection.main, doc = update.state.doc;

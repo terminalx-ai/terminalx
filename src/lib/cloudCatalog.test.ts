@@ -402,11 +402,13 @@ describe("merging and tombstones", () => {
       // Someone else woke it: the next list says ready.
       const later = Date.now() + 1_000;
       await ingestCloudList({ workspaces: [item("w1")] }, ORG, later, later);
-      await vi.waitFor(() => expect(attached).toHaveLength(2));
-      expect(attached[0]!.close).toHaveBeenCalledTimes(1);
-      expect(lease.current()).toBe(attached[1]);
-      expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect", "connect"]);
-      expect(attached.flatMap((connection) => connection.activate.mock.calls)).toEqual([]);
+      // #1288: the same connection opens again with connect; nothing is torn down.
+      await vi.waitFor(() => expect(attached[0]!.activate).toHaveBeenCalledWith("connect"));
+      expect(attached).toHaveLength(1);
+      expect(attached[0]!.close).not.toHaveBeenCalled();
+      expect(lease.current()).toBe(attached[0]);
+      expect(mocks.workspaceConnection.mock.calls.map((call) => call[1])).toEqual(["connect"]);
+      expect(attached.flatMap((connection) => connection.activate.mock.calls)).toEqual([["connect"]]);
       expect(mocks.api.cloudWorkspaceResume).not.toHaveBeenCalled();
       lease.release();
     } finally {
@@ -416,7 +418,7 @@ describe("merging and tombstones", () => {
 
   it("a snapshot is as old as its request: one asked for before a stop never makes a connection attach", async () => {
     const { retainCloudConnection, resetCloudConnections } = await import("./cloudConnections");
-    const attached: { emit(state: unknown): void; close: ReturnType<typeof vi.fn> }[] = [];
+    const attached: { emit(state: unknown): void; close: ReturnType<typeof vi.fn>; activate: ReturnType<typeof vi.fn> }[] = [];
     mocks.workspaceConnection.mockReset().mockImplementation(async () => {
       const listeners = new Set<(state: unknown) => void>();
       let current: unknown = { state: "connecting", attempt: 1 };
@@ -449,10 +451,11 @@ describe("merging and tombstones", () => {
       await ingestCloudList({ workspaces: [item("w1")] }, ORG, Date.now(), before + 1);
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(attached).toHaveLength(1);
+      expect(attached[0]!.activate).not.toHaveBeenCalled();
       expect(lease.state()).toEqual({ state: "suspended" });
-      // Asked for after it: this one counts.
+      // Asked for after it: this one counts, and the parked connection opens again.
       applyCloudSnapshot({ workspace: item("w1").workspace, operation: { id: "op", action: "resume", state: "succeeded" } as never }, Date.now() + 1_000);
-      await vi.waitFor(() => expect(attached).toHaveLength(2));
+      await vi.waitFor(() => expect(attached[0]!.activate).toHaveBeenCalledWith("connect"));
       lease.release();
     } finally {
       resetCloudConnections();
@@ -579,6 +582,17 @@ describe("saved cache", () => {
     expect(parsed.orgs[ORG].workspaces.map((w) => w.workspace.id)).toEqual(["w1"]);
     expect(parsed.orgs[ORG].quota).toEqual({ used: 1, limit: 2 });
     expect(JSON.stringify(written)).not.toContain("error");
+  });
+
+  it("reads a saved quota without a limit as no limit, and one it cannot read as none (PRO-371)", () => {
+    const saved = (quota: unknown) => parseCatalog({ version: 1, orgs: { [ORG]: { workspaces: [item("w1")], quota } } })!.orgs[ORG].quota;
+    // As a server since PRO-371 lists an organization with no limit: the key is left out.
+    expect(saved({ used: 60, running: { used: 60 }, total: { used: 75 } })).toEqual({ used: 60 });
+    expect(saved({ used: 60, limit: null })).toEqual({ used: 60 });
+    expect(saved({ used: 1, limit: 2 })).toEqual({ used: 1, limit: 2 });
+    expect(saved({ used: 1, limit: "2" })).toBeNull();
+    expect(saved({ limit: 2 })).toBeNull();
+    expect(saved(undefined)).toBeNull();
   });
 
   it("reads nothing it cannot trust", () => {

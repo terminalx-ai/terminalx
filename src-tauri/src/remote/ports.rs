@@ -162,10 +162,11 @@ impl Ports {
         }
     }
 
-    /// The ports applications listen on, when this system can tell, and the
-    /// caller's own open streams.
+    /// The ports applications listen on, when this system can tell, each
+    /// with the process behind it (PRO-355), and the caller's own open
+    /// streams. The runtime's own listeners are left out.
     fn list(&self, peer: &Peer) -> Value {
-        let detected = listening_ports();
+        let detected = super::port_listeners::listening(std::process::id());
         let streams: Vec<Value> = self
             .streams
             .lock()
@@ -176,7 +177,7 @@ impl Ports {
             .collect();
         json!({
             "detected": detected.is_some(),
-            "ports": detected.unwrap_or_default().into_iter().map(|port| json!({ "port": port })).collect::<Vec<_>>(),
+            "ports": detected.unwrap_or_default().into_iter().map(listed_port).collect::<Vec<_>>(),
             "streams": streams,
         })
     }
@@ -508,48 +509,12 @@ fn release(counter: &AtomicUsize, bytes: usize) -> usize {
     }
 }
 
-/// TCP ports something listens on that a loopback connection reaches, or
-/// `None` where this system gives no cheap way to tell (a port can still be
-/// opened by number).
-fn listening_ports() -> Option<Vec<u16>> {
-    let v4 = std::fs::read_to_string("/proc/net/tcp").ok()?;
-    let v6 = std::fs::read_to_string("/proc/net/tcp6").unwrap_or_default();
-    let mut ports: Vec<u16> = parse_listeners(&v4).into_iter().chain(parse_listeners(&v6)).collect();
-    ports.sort_unstable();
-    ports.dedup();
-    Some(ports)
-}
-
-/// Listening sockets in a `/proc/net/tcp` or `tcp6` table that are bound to
-/// loopback or to every address. One bound to a single other interface is
-/// not reachable over loopback and is left out.
-fn parse_listeners(table: &str) -> Vec<u16> {
-    const LISTEN: &str = "0A";
-    table
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let local = fields.nth(1)?;
-            let state = fields.nth(1)?;
-            if state != LISTEN {
-                return None;
-            }
-            let (address, port) = local.rsplit_once(':')?;
-            let reachable = match address.len() {
-                // IPv4, little-endian: 127.x.x.x or 0.0.0.0.
-                8 => address == "00000000" || address.ends_with("7F"),
-                // IPv6 in four little-endian words: ::, ::1, or the IPv4 forms mapped.
-                32 => {
-                    address == "00000000000000000000000000000000"
-                        || address == "00000000000000000000000001000000"
-                        || (address.starts_with("0000000000000000FFFF0000") && (address.ends_with("00000000") || address.ends_with("7F")))
-                }
-                _ => false,
-            };
-            reachable.then(|| u16::from_str_radix(port, 16).ok()).flatten().filter(|port| *port != 0)
-        })
-        .collect()
+/// One `ports.list` entry: `{ port, process? }`.
+fn listed_port(listener: super::port_listeners::Listener) -> Value {
+    match listener.process {
+        Some(process) => json!({ "port": listener.port, "process": process }),
+        None => json!({ "port": listener.port }),
+    }
 }
 
 /// A port can be an agent's control interface. Each physical write retains
@@ -580,21 +545,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listeners_are_read_from_the_proc_tables() {
-        let v4 = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
-                  0: 0100007F:0BB8 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 1 1 0\n\
-                  1: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 2 1 0\n\
-                  2: 0A00000A:2000 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 3 1 0\n\
-                  3: 0100007F:C350 0100007F:0BB8 01 00000000:00000000 00:00000000 00000000  1000        0 4 1 0\n";
-        // Loopback and any-address listeners; not one bound to another
-        // interface, and not an established connection.
-        assert_eq!(parse_listeners(v4), vec![3000, 8080]);
-        let v6 = "  sl  local_address                         remote_address                        st\n\
-                  0: 00000000000000000000000000000000:1389 00000000000000000000000000000000:0000 0A 0 0 0\n\
-                  1: 00000000000000000000000001000000:1F91 00000000000000000000000000000000:0000 0A 0 0 0\n\
-                  2: 000080FE00000000FF005450B6AD1DFE:0050 00000000000000000000000000000000:0000 0A 0 0 0\n";
-        assert_eq!(parse_listeners(v6), vec![5001, 8081]);
-        assert!(parse_listeners("garbage\nmore garbage").is_empty());
+    fn a_listed_port_names_its_process_only_when_known() {
+        use super::super::port_listeners::{Listener, Process};
+        let named = Listener { port: 5173, process: Some(Process { name: "vite".into(), pid: 42, cwd: Some("/repo/console".into()) }) };
+        assert_eq!(listed_port(named), json!({ "port": 5173, "process": { "name": "vite", "pid": 42, "cwd": "/repo/console" } }));
+        let no_cwd = Listener { port: 8080, process: Some(Process { name: "caddy".into(), pid: 7, cwd: None }) };
+        assert_eq!(listed_port(no_cwd), json!({ "port": 8080, "process": { "name": "caddy", "pid": 7 } }));
+        assert_eq!(listed_port(Listener { port: 3000, process: None }), json!({ "port": 3000 }));
     }
 
     #[test]

@@ -54,12 +54,15 @@ static COLLABORATION_PTY_CAPACITY: Mutex<Option<std::sync::mpsc::Sender<()>>> = 
 
 #[path = "session_follow.rs"]
 pub mod follow;
+#[path = "session_account_switch.rs"]
+pub(crate) mod account_switch;
 #[path = "session_row_status.rs"]
 pub(crate) mod row_status;
 #[path = "session_held.rs"]
 pub mod held;
 #[path = "session_reset.rs"]
 mod reset;
+pub(crate) use reset::{destination as fork_conversation_destination, fork_conversation, write_forked_conversation};
 #[path = "session_unsent.rs"]
 mod unsent;
 #[path = "session_retire.rs"]
@@ -81,6 +84,23 @@ fn computer_launch(
         return Ok((Vec::new(), host()?));
     }
     Ok((guest.env, crate::container_vm::VmLaunch { args: guest.args, note: None }))
+}
+
+/// The one appended prompt a terminal launch of `tab` gives its agent: the
+/// workspace's prompts, the desktop tools' note, a sparse checkout's folders
+/// and, in a bot's chat, the bot's rules, role and memory as they are now.
+/// Refused when what Bots adds makes it longer than one launch can carry
+/// (`AppendedPrompt::fits_for_bot`). Only that is (PRO-507): an ordinary
+/// session launches as it did before Bots, as does a bot's chat whose
+/// workspace prompts were already too long without the bot's note.
+pub(crate) fn cli_prompt(entry: &index::SessionEntry, tab: &TabEntry, workspace: Option<&str>, computer: Option<&str>) -> Result<crate::cloud_config::AppendedPrompt> {
+    let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
+    let bot = crate::bots::chat::launch_note(entry, tab);
+    let prompt = crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref(), bot.as_deref()]);
+    if bot.is_some() && !prompt.fits() && crate::cloud_config::prompt_args(&tab.harness, &[workspace, computer, sparse.as_deref()]).fits() {
+        prompt.fits_for_bot()?;
+    }
+    Ok(prompt)
 }
 
 #[derive(Clone)]
@@ -193,7 +213,7 @@ pub enum Decision {
 }
 
 pub(crate) struct DecisionSender {
-    sender: std::sync::mpsc::Sender<Decision>,
+    sender: std::sync::mpsc::Sender<QueuedDecision>,
     caller: crate::hooks::Caller,
     /// The hook that waits: `PermissionRequest` or `PreToolUse`, which a
     /// handover carries with the wait (#765).
@@ -202,8 +222,23 @@ pub(crate) struct DecisionSender {
     session_command: Option<String>,
 }
 
+struct QueuedDecision {
+    decision: Decision,
+    mobile: Option<MobileDecision>,
+}
+
+struct MobileDecision {
+    permit: crate::local_runtime::mobile::WritePermit,
+    label: String,
+    session_command: String,
+}
+
 impl DecisionSender {
     fn send(self, decision: Decision) -> std::result::Result<(), ()> {
+        self.queue(QueuedDecision { decision, mobile: None })
+    }
+
+    fn queue(self, decision: QueuedDecision) -> std::result::Result<(), ()> {
         if !self.caller.connected() { return Err(()); }
         self.sender.send(decision).map_err(|_| ())
     }
@@ -220,7 +255,7 @@ struct Waiting {
 
 /// Own the receiver so a timed-out hook stops accepting answers before it
 /// waits to reacquire the runtime lock. Only the returned decision resumes work.
-fn wait_for_decision(rx: std::sync::mpsc::Receiver<Decision>, wait: std::time::Duration) -> Option<Decision> {
+fn wait_for_decision<T>(rx: std::sync::mpsc::Receiver<T>, wait: std::time::Duration) -> Option<T> {
     rx.recv_timeout(wait).ok()
 }
 
@@ -240,6 +275,41 @@ struct CliLaunch {
     /// What starting afresh cost, when the conversation had no file to
     /// resume (#663).
     restart: Option<unsent::Restart>,
+}
+
+/// The agent account a launch resolved to (#980), from its grant.
+#[derive(Debug, Default)]
+struct AccountLaunch {
+    /// The account: `local`, a key, an added account. `None` in a cloud
+    /// workspace, where the workspace's grant decides.
+    id: Option<String>,
+    /// An added subscription's home: Claude Code's `CLAUDE_CONFIG_DIR`,
+    /// Codex's managed `CODEX_HOME`. `None` on This Mac's login or a key.
+    home: Option<PathBuf>,
+}
+
+impl AccountLaunch {
+    fn of(kind: CliKind, grant: &crate::cloud_grants::LaunchGrant) -> Self {
+        let variable = match kind {
+            CliKind::Claude => crate::agent_keys::home_variable(crate::agent_keys::Agent::Claude),
+            CliKind::Codex => crate::agent_keys::home_variable(crate::agent_keys::Agent::Codex),
+        };
+        let home = grant.after_profile.iter().find(|(name, _)| name == variable).map(|(_, value)| PathBuf::from(value));
+        Self { id: grant.account.clone(), home }
+    }
+
+    /// Record the launch under `launch` with the account it runs on: as the
+    /// agent's default when nothing chose another, so a tab with one login
+    /// is counted exactly as before.
+    fn record(&self, launch: &str, harness: &str, session_id: &str, tab_id: &str, asked: bool) {
+        let default = crate::agent_keys::Agent::of(harness)
+            .and_then(|agent| crate::agent_keys::store().and_then(|store| store.entry(agent)).ok())
+            .map(|entry| crate::agent_accounts::agent_default(&entry));
+        match &self.id {
+            Some(id) if asked || default.as_deref() != Some(id.as_str()) => crate::agent_keys::record_launch_on(launch, harness, session_id, tab_id, id),
+            _ => crate::agent_keys::record_launch(launch, harness, session_id, tab_id),
+        }
+    }
 }
 
 /// What the CLI's input box allowed, once a prompt could be typed into it.
@@ -271,11 +341,36 @@ struct InputBox {
     marks: Vec<u64>,
     /// The tab was set waiting on the reader for them.
     made_waiting: bool,
+    /// What they wait on is a question the CLI drew in place of the box, not
+    /// text in it (PRO-462).
+    choice: bool,
     /// How many times the reader has stopped the turn from the chat. A
     /// message sent before the latest stop and not yet entered is withdrawn
     /// rather than typed: once the box empties, once the CLI is ready (#746),
     /// or in place of its Enter.
     stops: u64,
+    /// A question the CLI drew in its own screen, as the chat was told of it
+    /// (PRO-460).
+    prompt: ScreenPromptState,
+}
+
+/// What the session watcher knows of a question the CLI is stopped on in its
+/// own screen (PRO-460).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ScreenPromptState {
+    /// The question the chat was last told of, if one is up.
+    shown: Option<tui::ScreenPrompt>,
+    /// The tab's status before the question set it waiting, to go back to.
+    was: Option<TabStatus>,
+    /// The CLI's input box has been seen since it started: one missing from
+    /// then on is something in its place.
+    box_seen: bool,
+    /// Watcher passes in a row the box was missing with nothing readable in
+    /// its place.
+    unread_passes: u8,
+    /// A question read while the pane was still drawing: shown if the next
+    /// pass reads it the same.
+    candidate: Option<tui::ScreenPrompt>,
 }
 
 /// How the wait for a pane's CLI to listen ended.
@@ -430,6 +525,89 @@ const COMPOSER_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(12
 /// into the terminal.
 const QUEUED_ECHO_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a queued prompt whose wait ran out is still known by its words
+/// (#1284). A CLI that takes it after all, behind a turn the tab saw end
+/// early or a queue it was slow to deliver, is answering that message.
+const LAPSED_ECHO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+/// How many lapsed queued prompts are kept to tell a late take by.
+const LAPSED_ECHOES: usize = 8;
+
+/// Queued prompts whose echo was given up on (#1284), still owed one. The
+/// chat drew each as a Queued card that only the CLI's record of it clears;
+/// were that record taken for a prompt typed into the terminal, the card
+/// would wait for good beside a second bubble of the same words. Matched
+/// only once nothing still awaited does, and only by the whole of its words:
+/// the same words typed in the terminal then end the card, which is the
+/// message they repeat.
+///
+/// Each is known only in the conversation it lapsed in (#1335): the
+/// transcript file being followed then. A `/clear`, `/resume` or a CLI
+/// started by hand moving to another conversation leaves it behind, and
+/// that conversation's prompts are its own. Nor does one outlive the same
+/// words sent again from the composer: the CLI took that message, and a
+/// later prompt with those words typed in the terminal is a third.
+#[derive(Default)]
+struct LapsedEchoes(std::collections::VecDeque<LapsedEcho>);
+
+struct LapsedEcho {
+    at: Instant,
+    /// The transcript the tab was following when its wait ran out.
+    conversation: PathBuf,
+    echo: ComposerEcho,
+}
+
+impl LapsedEchoes {
+    fn keep(&mut self, echoes: Vec<ComposerEcho>, conversation: &Path, now: Instant) {
+        for echo in echoes {
+            self.0.push_back(LapsedEcho { at: now, conversation: conversation.to_path_buf(), echo });
+        }
+        while self.0.len() > LAPSED_ECHOES {
+            self.0.pop_front();
+        }
+    }
+
+    /// Drop those past their time or from another conversation.
+    fn prune(&mut self, conversation: &Path, now: Instant) {
+        self.0.retain(|lapsed| lapsed.conversation == conversation && now.saturating_duration_since(lapsed.at) <= LAPSED_ECHO_TTL);
+    }
+
+    /// The lapsed prompt `payload` records, read from `conversation`, taken
+    /// out: the CLI has it.
+    fn take(&mut self, payload: &Payload, conversation: &Path, now: Instant) -> Option<Echoed> {
+        let Payload::UserMessage { text, .. } = payload else { return None };
+        self.prune(conversation, now);
+        let at = self.0.iter().position(|lapsed| lapsed.echo.matches(text))?;
+        let mut lapsed = self.0.remove(at).expect("the matched echo exists");
+        lapsed.echo.confirm_delivery();
+        Some(lapsed.echo.echoed())
+    }
+
+    /// `recorded` was matched to `sent`, messages the composer sent since,
+    /// each its words and how many images it had: the lapsed prompts that
+    /// say the same as one of them, or as the record, are not owed that
+    /// record, nor any later prompt with those words, and are given up. What
+    /// was sent counts as well as the record, which may hold it inside more
+    /// or changed (#1385); the record counts as well as what was sent, which
+    /// an idle CLI may have recorded as a lapsed prompt's words. Their `seq`s.
+    ///
+    /// Each may have reached the CLI after all, and its record be the next
+    /// with those words, or another's: words alone cannot tell (#1386). The
+    /// card is owed a word that its delivery was not confirmed, never a
+    /// record that may be a later prompt's.
+    fn retire(&mut self, sent: &[(&str, usize)], recorded: &str, conversation: &Path, now: Instant) -> Vec<u64> {
+        self.prune(conversation, now);
+        let mut retired = Vec::new();
+        self.0.retain(|lapsed| {
+            let said = lapsed.echo.matches(recorded) || sent.iter().any(|(text, images)| *images == lapsed.echo.image_count && same_words(text, &lapsed.echo.text));
+            if said {
+                retired.push(lapsed.echo.seq);
+            }
+            !said
+        });
+        retired
+    }
+}
+
 /// How long a CLI is given to answer a `/model` or `/effort` the app typed
 /// while it was idle. It answers within a second when it is going to.
 const SETTINGS_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
@@ -540,6 +718,14 @@ impl ComposerEcho {
         if rest == text || (self.command && text.split_whitespace().next() == Some(rest)) {
             return true;
         }
+        // A `!` command (#1294): Claude Code runs it in its shell and records
+        // the command without the `!`, as `<bash-input>`. The chat turns the
+        // `!command` the composer published into the command's block.
+        // Only a whole shell record with its input part is one (#1383): the
+        // input tags followed by the reader's words are their prompt.
+        if let (Some(sent), Some(ran)) = (text.strip_prefix('!'), shell_command(rest)) {
+            return ran.split_whitespace().eq(sent.split_whitespace());
+        }
         // The CLI may reflow a paste or enclose it (or its chunks) in these
         // tags. Compare every word: a shared prefix/suffix alone could swallow
         // a different prompt typed in the terminal.
@@ -557,6 +743,33 @@ impl ComposerEcho {
     fn expired(&self, now: Instant) -> bool {
         now.duration_since(self.sent_at) > if self.queued { QUEUED_ECHO_GRACE } else { COMPOSER_ECHO_TTL }
     }
+}
+
+/// What a composer `!command`'s echo still has to draw (#1294): the output
+/// Claude Code recorded with the command, in one record, as a record of its
+/// own. The reducer puts it under the `!command` the composer published.
+fn shell_output_of_echo(rt: &TabRuntime, payload: &Payload) -> Option<Payload> {
+    let Payload::UserMessage { text, cwd, .. } = payload else { return None };
+    if rt.harness != "claude" || !claude::transcript::shell_record(text).is_some_and(|shell| shell.input && shell.output) {
+        return None;
+    }
+    let output = text[text.find("</bash-input>")? + "</bash-input>".len()..].trim_start();
+    Some(Payload::UserMessage { author: None, text: output.to_string(), images: Vec::new(), files: Vec::new(), baseline: None, queued: false, cwd: cwd.clone() })
+}
+
+/// The command in a record of Claude Code's `!` shell passthrough (#1294),
+/// when `recorded` is one by the shared strict grammar and has an input part
+/// (#1383): `<bash-input> git status</bash-input>`, maybe with its output.
+fn shell_command(recorded: &str) -> Option<&str> {
+    claude::transcript::shell_record(recorded).filter(|shell| shell.input)?;
+    bash_input(recorded)
+}
+
+/// The text between the first input tags of a shell-shaped record. Only
+/// `shell_command` may read it, once the record is known to be one.
+fn bash_input(recorded: &str) -> Option<&str> {
+    let after = recorded.trim_start().strip_prefix("<bash-input>")?;
+    Some(&after[..after.find("</bash-input>")?])
 }
 
 /// Peel the run of `[Image #N] [Image #N+1] …` labels off the front of an
@@ -769,7 +982,7 @@ fn overtake_composer_prompts(pending: &mut std::collections::VecDeque<ComposerEc
 /// Returns the events of the reader's own queued prompts among them: typed
 /// and submitted behind a turn, and still not taken once that turn was over.
 /// Those may be sitting in the CLI's input, and the reader is owed a word.
-fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<u64> {
+fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>, turn_open: bool, now: Instant) -> Vec<ComposerEcho> {
     if turn_open {
         for prompt in pending.iter_mut() {
             prompt.sent_at = now;
@@ -777,13 +990,15 @@ fn expire_composer_echoes(pending: &mut std::collections::VecDeque<ComposerEcho>
     }
     let before = pending.len();
     let mut unsent = Vec::new();
-    pending.retain(|prompt| {
-        let expired = prompt.expired(now);
-        if expired && prompt.queued && prompt.submitted && !prompt.command {
-            unsent.push(prompt.seq);
+    let mut kept = std::collections::VecDeque::with_capacity(pending.len());
+    for prompt in pending.drain(..) {
+        if !prompt.expired(now) {
+            kept.push_back(prompt);
+        } else if prompt.queued && prompt.submitted && !prompt.command {
+            unsent.push(prompt);
         }
-        !expired
-    });
+    }
+    *pending = kept;
     if pending.len() < before {
         log::warn!("{} composer prompt(s) expired without an echo", before - pending.len());
     }
@@ -849,6 +1064,8 @@ pub struct CliTab {
     /// Prompts the composer already published, waiting for the transcript to
     /// echo them back so the reader is not shown the same message twice.
     echoed: std::collections::VecDeque<ComposerEcho>,
+    /// Queued prompts `echoed` gave up on, which the CLI may take yet (#1284).
+    lapsed: LapsedEchoes,
     /// Composer identities still awaiting acceptance from the provider's queue.
     held: Vec<u64>,
     /// The prompts the transcript has recorded, to tell one that took the
@@ -907,6 +1124,20 @@ pub struct CliTab {
     /// and it is never restarted by the app.
     pub by_hand: Option<Box<follow::ByHand>>,
 }
+
+/// How long a question drawn in the CLI's screen must have stood still
+/// before the chat is told of it (PRO-460): not a frame half drawn.
+const SCREEN_PROMPT_QUIET: Duration = Duration::from_millis(500);
+/// How long the CLI must have drawn nothing, its input box gone, before
+/// that is taken for a question that could not be read.
+const SCREEN_PROMPT_UNREAD_QUIET: Duration = Duration::from_secs(2);
+/// Between arrow keys answering such a question.
+const SCREEN_PROMPT_KEY_GAP: Duration = Duration::from_millis(120);
+/// Between the last arrow and Enter: Claude Code 2.1.328 refuses an Enter
+/// within 250 ms of an arrow as a stray key.
+const SCREEN_PROMPT_CONFIRM_GAP: Duration = Duration::from_millis(500);
+/// How long after answering the screen is looked at again.
+const SCREEN_PROMPT_SETTLE: Duration = Duration::from_millis(600);
 
 /// How soon after it was started a CLI that goes again never got going.
 const STARTUP_EXIT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -995,6 +1226,17 @@ impl FirstStarts {
 }
 
 impl CliTab {
+    /// Forget composer prompts that waited too long for their echo
+    /// (`expire_composer_echoes`), keeping the queued ones among them for a
+    /// late take (#1284). The `seq`s of those, which the reader is owed a
+    /// word about.
+    fn expire_echoes(&mut self, turn_open: bool, now: Instant) -> Vec<u64> {
+        let unsent = expire_composer_echoes(&mut self.echoed, turn_open, now);
+        let seqs = unsent.iter().map(|echo| echo.seq).collect();
+        self.lapsed.keep(unsent, &self.tail.path(), now);
+        seqs
+    }
+
     /// Whether this CLI went before it ever got going: within moments of the
     /// app starting it, and before it said it was up. What it printed then
     /// is why it went, unlike the last screen of a CLI the reader quit
@@ -1018,6 +1260,14 @@ pub enum Engine {
 pub struct TabRuntime {
     pub session_id: String,
     pub tab_id: String,
+    /// The bot this tab's session acts for (`bots::chat::acting_bot`), read
+    /// from its entry when the runtime is made: fixed for a session's life,
+    /// so a bot's gate needs no index read per tool call, and cannot lose
+    /// the bot to an index that cannot be read (PRO-478).
+    pub(crate) acting_bot: Option<String>,
+    /// The bot's built-in duty this tab runs, when it runs one (PRO-477): its
+    /// tool calls meet that built-in's allow-list first. Read with `acting_bot`.
+    pub(crate) bot_builtin: Option<crate::bots::builtins::Run>,
     pub harness: String,
     pub seq: u64,
     /// Set only while applying a source transcript record; empty means unknown.
@@ -1051,6 +1301,8 @@ pub struct TabRuntime {
     pub queued: Vec<PendingMessage>,
     pub held_queue: held::Queue,
     pub turn_open: bool,
+    turn_generation: u64,
+    automation_completions_in_flight: usize,
     /// Allowlisted labels only; never retain prompt or hook payload text.
     turn_opener: Option<(&'static str, &'static str)>,
     /// A compact boundary observed during this command, not proof a model turn ended.
@@ -1117,6 +1369,17 @@ struct CliRestart {
     _privacy: Vec<crate::data_privacy::RemoteWrite>,
 }
 
+/// Prevent handover from capturing a closed turn before its automation
+/// acknowledgment and durable completion have both been applied.
+struct AutomationCompletionGuard(Arc<Mutex<TabRuntime>>);
+
+impl Drop for AutomationCompletionGuard {
+    fn drop(&mut self) {
+        let mut rt = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        rt.automation_completions_in_flight = rt.automation_completions_in_flight.saturating_sub(1);
+    }
+}
+
 impl TabRuntime {
     /// A prompt sent now would be queued behind the open turn (and so take
     /// no baseline). A slash command's turn that saw no work is not one.
@@ -1138,6 +1401,7 @@ impl TabRuntime {
     /// last said was about a turn before this one, not this one's end.
     fn open_turn(&mut self) {
         if !self.turn_open {
+            self.turn_generation = self.turn_generation.saturating_add(1);
             self.turn_by_command = false;
             self.signed_out_in_turn = false;
             self.turn_opener = Some(("session", "prompt"));
@@ -1155,13 +1419,17 @@ impl TabRuntime {
     /// open. Its clock starts here unless a turn with work in it was already
     /// running: a prompt then is one typed into that turn.
     fn prompt_taken(&mut self, prompt: &str, source: &'static str) {
-        let command = tui::is_slash_command(prompt);
+        // A `!` command (#1294) is run by Claude Code itself, like a bare
+        // slash command: no model turn, no Stop. Its output record settles it.
+        let command = tui::is_slash_command(prompt) || (self.harness == "claude" && prompt.trim_start().starts_with('!'));
         let compact = self.harness == "claude" && prompt.split_whitespace().next() == Some("/compact");
         let ended = matches!(&self.engine, Engine::Cli(p) if p.transcript_turn.is_some_and(tui::TurnMark::ends));
         let fresh = !self.turn_open || (self.turn_by_command && !command)
             || (compact && (self.turn_by_command || ended));
+        let was_open = self.turn_open;
         self.open_turn();
         if fresh {
+            if was_open { self.turn_generation = self.turn_generation.saturating_add(1); }
             self.turn_started_at = Some(Instant::now());
             self.turn_by_command = command;
             self.compact_completed = false;
@@ -1284,6 +1552,9 @@ pub struct SessionManager {
     /// Explicit command grants for this tab's conversation. Kept across
     /// turns and CLI restarts; forgotten when the owner runtime exits.
     session_commands: Arc<Mutex<HashMap<String, std::collections::HashSet<String>>>>,
+    /// Each tab's agent process, by `key_of`, as `TabRuntime::child_pid` says,
+    /// kept apart so placing a process (PRO-468) never waits on a tab's lock.
+    children: Arc<Mutex<HashMap<String, u32>>>,
     /// One writer per pane, so two prompts sent in quick succession cannot
     /// interleave their paste and their Enter, nor overtake one another.
     writers: Arc<Mutex<HashMap<String, Arc<PaneWriter>>>>,
@@ -1300,6 +1571,12 @@ pub struct SessionManager {
     follow: Arc<follow::Following>,
     /// New tabs whose agent's first start is still told apart (PRO-291).
     first_starts: Arc<FirstStarts>,
+    /// What automatic account switching remembers between decisions (#981).
+    account_switch: Arc<Mutex<crate::agent_accounts::auto_switch::Memory>>,
+    /// Tabs whose log last told of a question in the CLI's own screen
+    /// (PRO-460), by `key_of`: kept apart from the CLI, so a stop, an exit or
+    /// a restart that drops the CLI still takes the card down.
+    screen_prompts: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Native tab-lifetime sidecar; weak runtime ownership avoids retaining tabs.
@@ -1409,6 +1686,7 @@ pub struct WaitView {
 }
 
 struct PromptText {
+    request_id: Option<uuid::Uuid>,
     collaboration: Option<CollaborationPermit>,
     /// A new desktop follow-up: decide again under the final send lock.
     /// Some(true) requests interrupt-and-send; Some(false) holds it.
@@ -1589,6 +1867,34 @@ const STOP_CONFIRM_WAIT: Duration = Duration::from_secs(recovery::CLOSE_WAIT_SEC
 /// resizes it from here.
 pub const CLI_PANE_SIZE: (u16, u16) = (120, 30);
 
+/// Where a process runs among the runtime's panes (PRO-468): a session and
+/// its tab, a session with no tab, or a TerminalX pane of no session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Placed {
+    pub session: Option<String>,
+    pub tab: Option<String>,
+}
+
+/// [`SessionManager::pending_permissions_now`]'s last read of each tab, by its key, with when it was read.
+static LAST_PENDING: Mutex<std::collections::BTreeMap<String, (std::time::Instant, Vec<PendingPermission>)>> = Mutex::new(std::collections::BTreeMap::new());
+/// How long a tab whose lock stays held (a wedged launch) keeps showing what it was last read to ask.
+const PENDING_MEMORY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A shorter [`PENDING_MEMORY`] in tests, in milliseconds.
+#[cfg(test)]
+pub(crate) static PENDING_MEMORY_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn pending_memory() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let millis = PENDING_MEMORY_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst);
+        if millis != u64::MAX {
+            return std::time::Duration::from_millis(millis);
+        }
+    }
+    PENDING_MEMORY
+}
+
 fn key_of(session_id: &str, tab_id: &str) -> String {
     format!("{session_id}/{tab_id}")
 }
@@ -1644,17 +1950,32 @@ enum Answering {
 /// Whether the provider's own sandbox could have narrowed what a command run
 /// in `cwd` reads (PRO-330). TerminalX runs a vetted read-only command itself,
 /// outside that sandbox, only when it could not. Not knowing is "it could".
-fn provider_may_restrict(kind: CliKind, session_id: &str, cwd: &Path, transcript: Option<&str>) -> bool {
+fn provider_may_restrict(kind: CliKind, session_id: &str, tab_id: &str, cwd: &Path, transcript: Option<&str>) -> bool {
     // The command's directory and the tab's launch directories: the CLI
     // loaded project settings from where it started, whatever `cd` the model
     // ran since.
     let Ok(session) = index::get(session_id) else { return true };
     let dirs = [cwd, Path::new(&session.cwd), Path::new(&session.project_path)];
     let dirs: Vec<&Path> = dirs.into_iter().filter(|dir| dir.is_absolute()).collect();
-    let sources = crate::harness::provider_sandbox::Sources::from_env(transcript);
+    // The settings of the account the tab runs on (#980), which its CLI
+    // loaded instead of This Mac's own.
+    let (claude_account, codex_account) = account_dirs(kind, session.tab(tab_id));
+    let sources = crate::harness::provider_sandbox::Sources::from_env_on(transcript, claude_account.as_deref(), codex_account);
     match kind {
         CliKind::Claude => crate::harness::provider_sandbox::claude_may_restrict(&dirs, &sources),
         CliKind::Codex => crate::harness::provider_sandbox::codex_may_restrict(&dirs, &sources),
+    }
+}
+
+/// The added account `tab` runs on (#980): Claude Code's directory, or the
+/// Codex account's managed home. Neither on This Mac's login or a key.
+fn account_dirs(kind: CliKind, tab: Option<&TabEntry>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(id) = tab.and_then(crate::session_ops::tab_running_account) else { return (None, None) };
+    let harness = match kind { CliKind::Claude => "claude", CliKind::Codex => "codex" };
+    let Some(dir) = crate::agent_accounts::directory(harness, id).ok().flatten() else { return (None, None) };
+    match kind {
+        CliKind::Claude => (Some(dir), None),
+        CliKind::Codex => (None, store::root().ok().map(|root| codex::home::account_paths(&root, id).1)),
     }
 }
 
@@ -1776,6 +2097,7 @@ impl SessionManager {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             provider_states: Arc::default(),
             session_commands: Arc::default(),
+            children: Arc::default(),
             writers: Arc::new(Mutex::new(HashMap::new())),
             starts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1787,6 +2109,8 @@ impl SessionManager {
             stopping_ptys: Arc::default(),
             follow: Arc::default(),
             first_starts: Arc::default(),
+            screen_prompts: Arc::default(),
+            account_switch: Arc::default(),
         };
         let mut watcher = manager.clone();
         // The polling copy must not keep its own lifetime alive. In particular,
@@ -1849,8 +2173,9 @@ impl SessionManager {
                 // never reset it. Left to the latch, such a turn would not
                 // close here, and skipping the rest of the pass for it would
                 // leave the tab "Working" for good with no warning either.
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(&rt_arc, rt, final_message);
+                self.after_turn_completed(&rt_arc, rt, final_message, completed);
                 continue;
             }
             self.nudge_if_due(&mut rt, now);
@@ -1875,7 +2200,7 @@ impl SessionManager {
             // A prompt queued behind a turn that is over, and still not taken.
             if !rt.turn_open {
                 let unsent = match &mut rt.engine {
-                    Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, false, now),
+                    Engine::Cli(p) => p.expire_echoes(false, now),
                     _ => Vec::new(),
                 };
                 if self.queued_prompts_unsent(&mut rt, &unsent) {
@@ -1885,6 +2210,9 @@ impl SessionManager {
             // Only a PTY-first tab has a pane; the other engines are judged
             // on their events alone, as before.
             let drawn = pane.and_then(|pane| drawn_at(&pane));
+            // A question the CLI drew in its own screen has the tab waiting
+            // on the reader, not stalled (PRO-460).
+            self.watch_screen_prompt(&mut rt, drawn.map(|drawn| now.saturating_duration_since(drawn)));
             if let Some(at) = rt.stalled_at {
                 if drawn.is_some_and(|drawn| drawn > at) {
                     rt.incidents.progress("terminal_output");
@@ -1909,6 +2237,213 @@ impl SessionManager {
                 rt.stalled_at = Some(now);
             }
         }
+    }
+
+    /// Look at what the tab's CLI has drawn for a question it is stopped on
+    /// that no hook reported (PRO-460), and tell the chat when one comes or
+    /// goes. `quiet`: how long the pane has gone without drawing.
+    ///
+    /// One it can read is shown with its choices once it has stood still:
+    /// the pane quiet for a moment, or the same question read on two passes
+    /// in a row (a CLI that keeps redrawing a timer around it). Its input box
+    /// gone for two looks in a row, with nothing readable in its place, is a
+    /// question too, one the chat can only send the reader to the terminal
+    /// for. Either has the tab waiting on the reader, and its going puts the
+    /// tab back. A question a hook asked has its own card, and is left to it.
+    /// A CLI that is no longer there to ask (stopped, exited, left the
+    /// terminal, starting again) asks nothing: a question shown is taken down.
+    fn watch_screen_prompt(&self, rt: &mut TabRuntime, quiet: Option<Duration>) {
+        let pane = match &rt.engine {
+            Engine::Cli(p) if p.harness == CliKind::Claude && p.by_hand.is_none() => Some(p.pane_id.clone()),
+            _ => None,
+        };
+        let live = pane.as_ref().is_some_and(|pane| self.terminals.is_running(pane))
+            && self.left_the_terminal(rt).is_none()
+            && matches!(&rt.engine, Engine::Cli(p) if p.ready.marked());
+        let (Some(pane), true) = (pane, live) else {
+            self.screen_prompt_is(rt, None);
+            return;
+        };
+        if !rt.pending.is_empty() {
+            return;
+        }
+        // A prompt being typed in is not something the CLI is asking.
+        let writer = self.writers.lock().unwrap().get(&pane).cloned();
+        let Ok(_typing) = writer.as_ref().map_or(Ok(None), |writer| writer.try_lock().map(Some)) else { return };
+        let Some((read, composer)) = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), claude::pty::composer(screen))) else { return };
+        let quiet = quiet.unwrap_or_default();
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        let state = &mut p.input.prompt;
+        if composer != tui::Composer::Unseen {
+            state.box_seen = true;
+        }
+        let found = match read {
+            Some(prompt) => {
+                state.unread_passes = 0;
+                let steady = quiet >= SCREEN_PROMPT_QUIET || state.candidate.as_ref() == Some(&prompt) || state.shown.as_ref() == Some(&prompt);
+                if !steady {
+                    // Still being drawn, or drawn around: looked at again on the next pass.
+                    state.candidate = Some(prompt);
+                    return;
+                }
+                Some(prompt)
+            }
+            None if composer == tui::Composer::Unseen && state.box_seen && quiet >= SCREEN_PROMPT_UNREAD_QUIET => {
+                state.unread_passes = state.unread_passes.saturating_add(1);
+                if state.unread_passes < 2 && state.shown.is_none() {
+                    return;
+                }
+                Some(tui::ScreenPrompt::unread())
+            }
+            None => {
+                state.unread_passes = 0;
+                None
+            }
+        };
+        if let Engine::Cli(p) = &mut rt.engine {
+            p.input.prompt.candidate = None;
+        }
+        self.screen_prompt_is(rt, found);
+    }
+
+    /// The question the CLI's screen shows now, if any: told to the chat when
+    /// it changed, and the tab's status kept in step with it. A tab whose CLI
+    /// has gone keeps nothing of it but the record here of what its log said.
+    fn screen_prompt_is(&self, rt: &mut TabRuntime, found: Option<tui::ScreenPrompt>) {
+        let key = rt.key();
+        let logged = self.screen_prompts.lock().unwrap().contains(&key);
+        let (shown, was, made_waiting) = match &mut rt.engine {
+            Engine::Cli(p) => {
+                let state = &mut p.input.prompt;
+                let shown = std::mem::replace(&mut state.shown, found.clone());
+                if found.is_none() {
+                    state.candidate = None;
+                    state.unread_passes = 0;
+                }
+                (shown, state.was, p.input.made_waiting)
+            }
+            _ => (None, None, false),
+        };
+        let gone = found.is_none() && (shown.is_some() || logged);
+        if shown != found || gone {
+            self.publish(rt, Payload::TerminalPrompt { prompt: found.clone() }, None);
+        }
+        {
+            let mut prompts = self.screen_prompts.lock().unwrap();
+            if found.is_some() { prompts.insert(key); } else { prompts.remove(&key); }
+        }
+        if found.is_some() {
+            // Again if something since (a Stop hook) said otherwise while it stayed up.
+            if rt.status != TabStatus::Waiting && rt.pending.is_empty() {
+                if let Engine::Cli(p) = &mut rt.engine {
+                    p.input.prompt.was = Some(rt.status);
+                }
+                self.set_status(rt, TabStatus::Waiting);
+            }
+        } else if gone {
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.input.prompt.was = None;
+            }
+            // Back to what it was, unless something else has it waiting now.
+            if rt.status == TabStatus::Waiting && rt.pending.is_empty() && rt.recovery.is_none() && !made_waiting {
+                let back = if rt.turn_open {
+                    TabStatus::InProgress
+                } else {
+                    match was {
+                        Some(TabStatus::Completed) => TabStatus::Completed,
+                        _ => TabStatus::Idle,
+                    }
+                };
+                self.set_status(rt, back);
+            }
+        }
+    }
+
+    /// Answer the question the tab's CLI drew in its own screen (PRO-460):
+    /// `choice`, by moving its pointer there with the arrow keys and pressing
+    /// Enter, or with no choice, Escape, where its hint offers that. Only
+    /// the question the chat showed (`prompt_id`), and only while the screen
+    /// still shows it: keys meant for it would answer anything else.
+    pub fn answer_terminal_prompt(&self, session_id: &str, tab_id: &str, prompt_id: &str, choice: Option<usize>) -> Result<()> {
+        let policy = collaboration_v2::current();
+        let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
+        if let Some(permit) = &policy { permit.check_approval()?; }
+        let rt_arc = self.runtime(session_id, tab_id)?;
+        let (pane, writer) = {
+            let rt = rt_arc.lock().unwrap();
+            let Engine::Cli(p) = &rt.engine else { bail!("This agent does not ask questions in its terminal.") };
+            if p.harness != CliKind::Claude {
+                bail!("This agent does not ask questions in its terminal.");
+            }
+            if self.left_the_terminal(&rt).is_some() || !self.terminals.is_running(&p.pane_id) {
+                bail!("The agent is no longer running.");
+            }
+            // A dialog a hook is waiting on is answered on its own card, so the
+            // hook's request and the terminal stay in step.
+            if !rt.pending.is_empty() {
+                bail!("The agent is asking something else first. Answer that request, then this question.");
+            }
+            (p.pane_id.clone(), self.writers.lock().unwrap().get(&p.pane_id).cloned())
+        };
+        let still_up = |what: &str| -> Result<(tui::ScreenPrompt, bool)> {
+            let read = self.terminals.screen(&pane, |screen| (claude::pty::terminal_prompt(screen), screen.application_cursor()));
+            match read {
+                Some((Some(prompt), application)) if prompt.id == prompt_id => Ok((prompt, application)),
+                Some((Some(_), _)) => bail!("The question in the agent's terminal has changed. Look at it again before {what}."),
+                _ => bail!("That question is no longer showing in the agent's terminal."),
+            }
+        };
+        {
+            // Nothing else types into the pane meanwhile.
+            let _typing = match writer.as_ref().map(|writer| writer.try_lock()) {
+                Some(Err(std::sync::TryLockError::WouldBlock)) => bail!("A message is being typed into the agent right now. Try again in a moment."),
+                Some(Err(std::sync::TryLockError::Poisoned(poisoned))) => Some(poisoned.into_inner()),
+                Some(Ok(held)) => Some(held),
+                None => None,
+            };
+            let (prompt, application) = still_up("answering")?;
+            match choice {
+                None => {
+                    if prompt.dismiss.is_none() {
+                        bail!("This question cannot be dismissed. Choose one of its options.");
+                    }
+                    // Looked at once more right before the key: an Escape that
+                    // lands after the dialog has gone stops a turn instead.
+                    still_up("answering")?;
+                    self.terminals.write(&pane, tui::ESCAPE).context("Could not reach the agent's terminal")?;
+                }
+                Some(choice) => {
+                    if choice >= prompt.options.len() {
+                        bail!("That option is not one of this question's.");
+                    }
+                    let from = prompt.selected.ok_or_else(|| anyhow!("The agent's terminal shows no option chosen. Open the terminal to answer there."))?;
+                    let key = tui::arrow(choice < from, application);
+                    let moves = choice.abs_diff(from);
+                    for _ in 0..moves {
+                        self.terminals.write(&pane, key).context("Could not reach the agent's terminal")?;
+                        std::thread::sleep(SCREEN_PROMPT_KEY_GAP);
+                    }
+                    if moves > 0 {
+                        // Claude Code refuses an Enter right after an arrow as a stray key.
+                        std::thread::sleep(SCREEN_PROMPT_CONFIRM_GAP);
+                    }
+                    // Looked at once more right before the Enter, which would
+                    // send the input box if the dialog had gone.
+                    let (moved, _) = still_up("answering")?;
+                    if moved.selected != Some(choice) {
+                        bail!("The agent's terminal did not move to that option. Open the terminal to answer there.");
+                    }
+                    self.terminals.write(&pane, tui::SUBMIT).context("Could not reach the agent's terminal")?;
+                }
+            }
+        }
+        self.observer.answered(session_id, tab_id);
+        // Take the card down as soon as the CLI has, not at the watcher's next pass.
+        std::thread::sleep(SCREEN_PROMPT_SETTLE);
+        let mut rt = rt_arc.lock().unwrap();
+        let quiet = self.terminals.quiet_for(&pane);
+        self.watch_screen_prompt(&mut rt, quiet);
+        Ok(())
     }
 
     /// Write the awaited prompt's Enter once more, if that is due.
@@ -1956,7 +2491,8 @@ impl SessionManager {
             Some(Ok(held)) => Some(held),
             None => None,
         };
-        if !rt.pending.is_empty() {
+        // Nor into a question the CLI drew itself (PRO-460), which it would answer.
+        if !rt.pending.is_empty() || matches!(&rt.engine, Engine::Cli(p) if p.input.prompt.shown.is_some()) {
             return Nudged::Asking;
         }
         let (elapsed, continuation) = match &rt.engine {
@@ -2067,6 +2603,16 @@ impl SessionManager {
         })
     }
 
+    /// A person approved or started a run from its Run view: a bot's item that asked them about it is settled
+    /// (PRO-501). Not when the start is an item's own answer, which records itself.
+    fn started_by_person(&self, params: &serde_json::Value) {
+        if params[crate::bots::runs::ANSWERING_ITEM].as_bool() != Some(true) {
+            if let Some(id) = params["id"].as_str() {
+                crate::bots::runs::started_from_run_view(self.sink.as_ref(), id);
+            }
+        }
+    }
+
     /// What the window asks of orchestration runs (`orchestration`). Approve
     /// and Edit are here and nowhere in the `terminalx` CLI: the lead runs
     /// the CLI, and a lead does not approve its own plan.
@@ -2086,7 +2632,9 @@ impl SessionManager {
             "create" => engine::shown(&engine::create(&host, &crate::orchestration::plan::parse(&params["plan"]).map_err(|error| refused(error.into()))?, string("sessionId")?, None).map_err(refused)?),
             "approve" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?
+                let approved = serde_json::to_value(engine::approve(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                approved
             }
             "start" => {
                 self.accepting_work()?;
@@ -2095,7 +2643,9 @@ impl SessionManager {
             // A person's Start run on a `planned` run (PRO-365): recorded as theirs, and the lead is told.
             "startPlanned" => {
                 self.accepting_work()?;
-                serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?
+                let started = serde_json::to_value(engine::start_planned(&host, string("id")?).map_err(refused)?)?;
+                self.started_by_person(&params);
+                started
             }
             "stop" => serde_json::to_value(engine::stop(&host, string("id")?, engine::By::Person).map_err(refused)?)?,
             // A person's Merge, Continue merge and Skip: the same pass the lead's `runs merge` makes.
@@ -2135,8 +2685,11 @@ impl SessionManager {
             }
             "finish" => {
                 self.accepting_work()?;
-                engine::shown(&engine::finish(&host, string("id")?, string("piece")?, engine::By::Person, false).map_err(refused)?.run)
+                let accept: Vec<String> = params["accept"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
+                engine::shown(&engine::finish_accepting(&host, string("id")?, string("piece")?, engine::By::Person, false, &accept).map_err(refused)?.run)
             }
+            // What Check and finish would add to a held piece's files, shown before it is pressed.
+            "finishWidens" => serde_json::to_value(engine::finish_widens(&host, string("id")?, string("piece")?).map_err(refused)?)?,
             "widen" => {
                 self.accepting_work()?;
                 let own: Vec<String> = params["own"].as_array().into_iter().flatten().filter_map(|path| path.as_str().map(str::to_owned)).collect();
@@ -2198,7 +2751,11 @@ impl SessionManager {
         let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned();
         runtime.is_some_and(|runtime| {
             let rt = runtime.lock().unwrap();
-            matches!(&rt.engine, Engine::Cli(cli) if crate::hooks::token_matches(&cli.origin.token, token))
+            match &rt.engine {
+                Engine::Cli(cli) => crate::hooks::token_matches(&cli.origin.token, token),
+                Engine::CodexStdio(engine) => crate::hooks::token_matches(&engine.hook_token, token),
+                _ => false,
+            }
         })
     }
 
@@ -2212,6 +2769,8 @@ impl SessionManager {
             let rt = Arc::new(Mutex::new(TabRuntime {
                 session_id: session_id.into(),
                 tab_id: tab_id.into(),
+                acting_bot: crate::bots::chat::acting_bot(&entry),
+                bot_builtin: crate::bots::builtins::of_session(&entry),
                 harness: tab.harness.clone(),
                 seq,
                 status: TabStatus::Idle,
@@ -2223,6 +2782,8 @@ impl SessionManager {
                 queued: Vec::new(),
                 held_queue: held::Queue::restore(&log_path)?,
                 turn_open: false,
+                turn_generation: 0,
+                automation_completions_in_flight: 0,
                 turn_opener: None,
                 compact_completed: false,
                 compact_boundary_at: None,
@@ -2261,7 +2822,15 @@ impl SessionManager {
     }
 
     /// Stamp, persist, emit. The one path every event takes.
-    fn publish(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+    fn publish(&self, rt: &mut TabRuntime, payload: Payload, subagent: Option<SubagentRef>) -> AgentEvent {
+        self.publish_event(rt, payload, subagent, None)
+    }
+
+    fn publish_prompt(&self, rt: &mut TabRuntime, payload: Payload, request_id: Option<uuid::Uuid>) -> AgentEvent {
+        self.publish_event(rt, payload, None, request_id)
+    }
+
+    fn publish_event(&self, rt: &mut TabRuntime, mut payload: Payload, subagent: Option<SubagentRef>, prompt_request_id: Option<uuid::Uuid>) -> AgentEvent {
         if matches!(&payload, Payload::Error { .. } | Payload::TurnCompleted { status: TurnStatus::Error, .. } | Payload::ApiRetry { .. } | Payload::RateLimited { .. } | Payload::PermissionDenied { .. })
             || matches!(&payload, Payload::ToolCallCompleted { result, .. } if result.is_error) {
             recovery::diagnose(&rt.diagnostics_path(), &payload);
@@ -2302,6 +2871,7 @@ impl SessionManager {
             )).then(|| ts.clone()),
             ts,
             subagent,
+            prompt_request_id,
             payload,
         };
         if ev.payload.is_persisted() {
@@ -2342,6 +2912,19 @@ impl SessionManager {
                     rt.incident(|incidents, ctx| incidents.turn_started(ctx, ev.seq, "agent"));
                 }
                 Payload::TurnCompleted { status, .. } => rt.incident(|incidents, ctx| incidents.turn_ended(ctx, ev.seq, *status)),
+                _ => {}
+            }
+        }
+        // When a bot at Full access is at work (PRO-502): a mention from the owner's account
+        // written then is not taken as the owner's, since the bot posts with their login.
+        if let Some(bot) = rt.acting_bot.as_deref() {
+            match &ev.payload {
+                Payload::UserMessage { queued: false, .. } | Payload::TurnStarted { .. } | Payload::ToolCallStarted { .. } => crate::bots::channels::working(bot, &rt.session_id, &rt.tab_id),
+                Payload::TurnCompleted { .. } if ev.subagent.is_none() => {
+                    crate::bots::channels::worked(&rt.session_id, &rt.tab_id);
+                    // A reply may be owed to Slack or Telegram (PRO-481): only noted here, for the pump.
+                    crate::bots::chat_apps::turn_ended(bot, &rt.session_id, &rt.tab_id);
+                }
                 _ => {}
             }
         }
@@ -2552,8 +3135,8 @@ impl SessionManager {
         let mut open: Vec<u64> = Vec::new();
         for event in events.iter().filter(|event| event.subagent.is_none()) {
             match &event.payload {
-                Payload::InputOccupied { prompt_seq, occupied: true } if !open.contains(prompt_seq) => open.push(*prompt_seq),
-                Payload::InputOccupied { prompt_seq, occupied: false } | Payload::PromptWithdrawn { prompt_seq, .. } => open.retain(|seq| seq != prompt_seq),
+                Payload::InputOccupied { prompt_seq, occupied: true, .. } if !open.contains(prompt_seq) => open.push(*prompt_seq),
+                Payload::InputOccupied { prompt_seq, occupied: false, .. } | Payload::PromptWithdrawn { prompt_seq, .. } => open.retain(|seq| seq != prompt_seq),
                 _ => {}
             }
         }
@@ -2562,7 +3145,7 @@ impl SessionManager {
             _ => Vec::new(),
         };
         for prompt_seq in open.into_iter().filter(|seq| !waiting.contains(seq)) {
-            events.push(self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false }, None));
+            events.push(self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false, choice: false }, None));
         }
     }
 
@@ -2628,6 +3211,28 @@ impl SessionManager {
             rt.pending.insert("ask".into(), PendingAsk { tool_use_id: "tool".into(), tool_name: "Bash".into(), input: serde_json::json!({}), suggestions: Vec::new() });
         }
         self.set_display_status(&mut rt, status);
+    }
+
+    /// An agent's question card open on a tab, as its agent's `tool` would raise one.
+    #[cfg(test)]
+    pub(crate) fn put_question_for_tests(&self, session_id: &str, tab_id: &str, tool: &str, input: serde_json::Value) {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        runtime.lock().unwrap().pending.insert(format!("question-{tab_id}"), PendingAsk { tool_use_id: "tool".into(), tool_name: tool.into(), input, suggestions: Vec::new() });
+    }
+
+    /// Hold tab `tab_id`'s lock on a thread of its own, as a slow launch does, until the sender is dropped or sent to.
+    #[cfg(test)]
+    pub(crate) fn hold_tab_for_tests(&self, session_id: &str, tab_id: &str) -> std::sync::mpsc::Sender<()> {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, is_held) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _rt = runtime.lock().unwrap();
+            held.send(()).ok();
+            released.recv().ok();
+        });
+        is_held.recv().unwrap();
+        release
     }
 
     fn running_agents(&self) -> std::collections::HashSet<String> {
@@ -2698,9 +3303,103 @@ impl SessionManager {
         self.set_status(&mut rt, status);
     }
 
+    /// Runs `f` while another thread holds the tab's lock, as a tab mid-launch or wedged would.
+    #[cfg(test)]
+    pub(crate) fn while_tab_locked_for_test<T>(&self, session_id: &str, tab_id: &str, f: impl FnOnce() -> T) -> T {
+        let runtime = self.runtime(session_id, tab_id).unwrap();
+        let (held, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
+        let holder = std::thread::spawn(move || {
+            let _rt = runtime.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = release.1.recv();
+        });
+        held.1.recv().unwrap();
+        let out = f();
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
+        out
+    }
+
     #[cfg(test)]
     pub(crate) fn status_for_test(&self, session_id: &str, tab_id: &str) -> TabStatus {
         self.runtime(session_id, tab_id).unwrap().lock().unwrap().status
+    }
+
+    /// Where process `pid` runs among this runtime's panes and agents
+    /// (PRO-468), placed as `serve_cli::consent::judge` places a runtime's
+    /// own: up its ancestry to a pane's process or a native agent's child;
+    /// else by its session's leader, which a process reparented to launchd
+    /// still keeps; else by its controlling terminal, when exactly one pane
+    /// has it. Matched in memory, with no tab's lock taken: the index is read
+    /// only to name the session of a pane that matched, and a failed read is
+    /// an error, never "no one's". A process that made itself a new session
+    /// with a terminal of its own (`script`, an existing tmux server) is no one's.
+    #[cfg(unix)]
+    pub(crate) fn session_of_process(&self, pid: i32) -> Result<Option<Placed>> {
+        #[derive(Clone)]
+        enum Root { Pane(String), Tab(String, String) }
+        let mut roots: HashMap<i32, Root> = self.terminals.panes().into_iter()
+            .filter_map(|pane| Some((pane.pid? as i32, Root::Pane(pane.id)))).collect();
+        for (key, child) in self.children.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if let Some((session, tab)) = key.split_once('/') {
+                roots.insert(*child as i32, Root::Tab(session.to_owned(), tab.to_owned()));
+            }
+        }
+        use crate::serve_cli::consent;
+        let up = |start: i32| {
+            let mut current = start;
+            for _ in 0..4096 {
+                if let Some(found) = roots.get(&current) {
+                    return Some(found.clone());
+                }
+                match consent::parent_of(current) {
+                    Some(parent) if parent > 1 && parent != current => current = parent,
+                    _ => return None,
+                }
+            }
+            None
+        };
+        let found = up(pid)
+            .or_else(|| consent::session_of(pid).filter(|leader| *leader != pid && *leader > 1).and_then(up))
+            .or_else(|| {
+                let tty = consent::controlling_terminal(pid)?;
+                let mut sharing = roots.iter().filter(|(root, _)| consent::controlling_terminal(**root) == Some(tty));
+                // Several panes on one terminal say nothing about which: not placed by it.
+                match (sharing.next(), sharing.next()) {
+                    (Some((_, found)), None) => Some(found.clone()),
+                    _ => None,
+                }
+            });
+        Ok(match found {
+            None => None,
+            Some(Root::Tab(session, tab)) => Some(Placed { session: Some(session), tab: Some(tab) }),
+            Some(Root::Pane(pane)) => Some(Self::place_pane(&pane)?),
+        })
+    }
+
+    /// The session and tab pane `pane` belongs to: a tab's own, or another
+    /// terminal of its session (`<session>:…`, a workspace setup's included),
+    /// in a session with tabs or none. A pane of no session (an agent's
+    /// setup) is still a TerminalX pane: placed, in no session.
+    #[cfg(unix)]
+    fn place_pane(pane: &str) -> Result<Placed> {
+        let sessions = index::load().with_context(|| format!("read the sessions to place a process in pane {pane}"))?;
+        Ok(sessions.iter().find_map(|session| {
+            if let Some(tab) = session.tabs.iter().find(|tab| tab.pane_id() == pane) {
+                return Some(Placed { session: Some(session.id.clone()), tab: Some(tab.id.clone()) });
+            }
+            pane.starts_with(&format!("{}:", session.id))
+                .then(|| Placed { session: Some(session.id.clone()), tab: session.tabs.first().map(|tab| tab.id.clone()) })
+        }).unwrap_or(Placed { session: None, tab: None }))
+    }
+
+    /// Keep [`Self::children`] as `rt.child_pid` says: called wherever it changes.
+    fn note_child(&self, rt: &TabRuntime) {
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        match rt.child_pid {
+            Some(pid) => children.insert(rt.key(), pid),
+            None => children.remove(&rt.key()),
+        };
     }
 
     pub fn is_running(&self, session_id: &str, tab_id: &str) -> bool {
@@ -2885,28 +3584,84 @@ impl SessionManager {
     }
 
     pub fn pending_permissions(&self) -> Vec<PendingPermission> {
-        let runtimes: Vec<_> = self.tabs.lock().unwrap().values().cloned().collect();
+        self.pending_permissions_as(true)
+    }
+
+    /// [`Self::pending_permissions`] without waiting: a tab whose lock is held (a launch in progress, which can take
+    /// seconds) gives what the last such read found on it (up to a minute old), so a read of what waits on the owner
+    /// never waits behind it, and a question there does not drop out for one read.
+    pub fn pending_permissions_now(&self) -> Vec<PendingPermission> {
+        self.pending_permissions_as(false)
+    }
+
+    fn pending_permissions_as(&self, wait: bool) -> Vec<PendingPermission> {
+        let runtimes: Vec<(String, Arc<Mutex<TabRuntime>>)> = self.tabs.lock().unwrap().iter().map(|(key, runtime)| (key.clone(), runtime.clone())).collect();
         let mut out = Vec::new();
-        for runtime in runtimes {
-            let runtime = runtime.lock().unwrap();
-            for (request_id, pending) in &runtime.pending {
-                let mut options = vec!["allow".to_string(), "deny".to_string()];
-                options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
-                if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
-                    options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
+        // Read without waiting: what each tab holds now, `None` for a tab whose lock is held. The memory of earlier
+        // reads is taken only after, briefly, and never by a read that waits (PRO-498 review).
+        let mut read: Vec<(String, Option<Vec<PendingPermission>>)> = Vec::new();
+        for (key, runtime) in runtimes {
+            let runtime = if wait {
+                runtime.lock().unwrap()
+            } else {
+                match runtime.try_lock() {
+                    Ok(runtime) => runtime,
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        read.push((key, None));
+                        continue;
+                    }
                 }
-                out.push(PendingPermission {
-                    session_id: runtime.session_id.clone(),
-                    tab_id: runtime.tab_id.clone(),
-                    request_id: request_id.clone(),
-                    tool_name: pending.tool_name.clone(),
-                    input: pending.input.clone(),
-                    options,
-                });
+            };
+            let found = Self::pending_of(&runtime);
+            if wait {
+                out.extend(found);
+            } else {
+                read.push((key, Some(found)));
+            }
+        }
+        if !wait {
+            // A tab whose lock is held gives what the last such read found on it, at most `PENDING_MEMORY` old, so a
+            // question does not drop out of Needs you for one read and come back, nor linger once answered meanwhile.
+            let now = std::time::Instant::now();
+            let mut last = LAST_PENDING.lock().unwrap_or_else(|error| error.into_inner());
+            last.retain(|key, (at, _)| now.duration_since(*at) <= pending_memory() && read.iter().any(|(live, _)| live == key));
+            for (key, found) in read {
+                match found {
+                    Some(found) => {
+                        if found.is_empty() {
+                            last.remove(&key);
+                        } else {
+                            last.insert(key, (now, found.clone()));
+                        }
+                        out.extend(found);
+                    }
+                    None => out.extend(last.get(&key).map(|(_, found)| found.clone()).unwrap_or_default()),
+                }
             }
         }
         out.sort_by(|a, b| a.request_id.cmp(&b.request_id));
         out
+    }
+
+    fn pending_of(runtime: &TabRuntime) -> Vec<PendingPermission> {
+        let mut found = Vec::new();
+        for (request_id, pending) in &runtime.pending {
+            let mut options = vec!["allow".to_string(), "deny".to_string()];
+            options.extend((0..pending.suggestions.len()).map(|index| format!("suggest:{index}")));
+            if matches!(&runtime.engine, Engine::Cli(p) if p.decisions.get(request_id).is_some_and(|d| d.session_command.is_some())) {
+                options.insert(1, crate::harness::read_only::SESSION_OPTION.to_string());
+            }
+            found.push(PendingPermission {
+                session_id: runtime.session_id.clone(),
+                tab_id: runtime.tab_id.clone(),
+                request_id: request_id.clone(),
+                tool_name: pending.tool_name.clone(),
+                input: pending.input.clone(),
+                options,
+            });
+        }
+        found
     }
 
     /// The startup observer must never wait behind a child launch holding a
@@ -2971,6 +3726,7 @@ impl SessionManager {
         *sink.child.lock().unwrap() = Some(Arc::downgrade(&child));
         rt.environment = environment.stamp;
         rt.child_pid = Some(child.pid);
+        self.note_child(rt);
         self.with_provider_state(rt, |state| {
             state.binding = None;
             for context in state.operations.values().chain(state.settings.values()) { context.withdraw(); }
@@ -3014,14 +3770,28 @@ impl SessionManager {
         pressed_at: Option<i64>,
         files: Vec<FileRef>,
     ) -> Result<SendOutcome> {
+        self.send_pressed_with_request(session_id, tab_id, text, images, pressed_at, files, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pressed_with_request(
+        &self,
+        session_id: &str,
+        tab_id: &str,
+        text: String,
+        images: Vec<ImageInput>,
+        pressed_at: Option<i64>,
+        files: Vec<FileRef>,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<SendOutcome> {
         let host = crate::issue_pipeline::host::LocalHost::new(self.sink.clone(), self.clone());
         crate::issue_pipeline::engine::retry_interrupted_resolver(&host, session_id, tab_id, || {
-            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files)
+            self.send_pressed_inner(session_id, tab_id, text, images, pressed_at, files, request_id)
         })
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>) -> Result<SendOutcome> {
+    fn send_pressed_inner(&self, session_id: &str, tab_id: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<FileRef>, request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let files = crate::attachments::admit_refs(session_id, &files, images.len())?;
         if !files.is_empty() && tui::is_slash_command(&text) {
             bail!("A command cannot carry attached files.");
@@ -3035,13 +3805,13 @@ impl SessionManager {
             share.host_takeover(tab_id, chrono::Utc::now().timestamp_millis());
             self.sink.emit("session_share_changed", &serde_json::json!({ "sessionId": session_id, "state": share.snapshot(chrono::Utc::now().timestamp_millis(), true) }));
             let host = share.host.clone();
-            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
+            let outcome = self.send_admitted(&admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(host), shared_connection: None }, images, None, crate::recovery_log::Origin::ShareHost);
             drop(sharing);
             outcome
         } else {
             drop(sharing);
             let origin = if pressed_at.is_some() { crate::recovery_log::Origin::Composer } else { crate::recovery_log::Origin::Programmatic };
-            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin)
+            self.send_display_admitted(&admission, session_id, tab_id, text.clone(), text, images, files, origin, request_id)
         };
         drop(admission);
         self.forget_baseline(session_id, tab_id);
@@ -3118,7 +3888,7 @@ impl SessionManager {
     /// handoff that is neither confirmed nor visibly in the input is an error.
     pub fn send_confirmed(&self, session_id: &str, tab_id: &str, text: String) -> Result<SendOutcome> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = self.send_impl(session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
+        let outcome = self.send_impl(session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: None, shared_connection: None }, Vec::new(), Some(tx))?;
         self.confirm_continuation(session_id, tab_id, outcome, &rx)
     }
 
@@ -3138,7 +3908,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: Some(permit.clone()), shared_connection: None, author: None, agent, display }, Vec::new(), Some(tx), crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
         let outcome = outcome?;
@@ -3270,9 +4040,9 @@ impl SessionManager {
     /// representation to the transcript.
     #[allow(clippy::too_many_arguments)]
     fn send_display_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted,
-        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin,
+        session_id: &str, tab_id: &str, text: String, display_text: String, images: Vec<ImageInput>, files: Vec<FileRef>, origin: crate::recovery_log::Origin, request_id: Option<uuid::Uuid>,
     ) -> Result<SendOutcome> {
-        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
+        let outcome = self.send_admitted(admission, session_id, tab_id, PromptText { request_id, collaboration: collaboration_v2::current(), files, hold_if_busy: None, mobile: None, agent: text, display: display_text, author: None, shared_connection: None }, images, None, origin);
         // The app declining to type into the tab's terminal is no error of
         // the agent's: nothing is raised in the tab, and the reason is said.
         if outcome.as_ref().is_err_and(|error| error.is::<follow::Refusal>()) {
@@ -3312,7 +4082,7 @@ impl SessionManager {
             let _admitted = permit.enter()?;
             let _privacy = permit.grant.privacy.scope()?;
             permit.check_mode(session_id, tab_id)?;
-            self.send_admitted(&admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
+            self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile:Some(permit.clone()),
                 shared_connection:None,author:None,agent:text,display }, images, None, crate::recovery_log::Origin::Phone)
         })();
         self.forget_baseline(session_id, tab_id);
@@ -3322,7 +4092,14 @@ impl SessionManager {
     /// Caller acquires checkout admission before sharing/attachment authority.
     pub(crate) fn send_shared_admitted(&self, admission: &crate::issue_pipeline::admission::Admitted, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person, connection: crate::local_sharing::WritePermit) -> Result<SendOutcome> {
         let _privacy = connection.privacy.scope()?;
-        self.send_admitted(admission, session_id, tab_id, PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+        self.send_admitted(admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: Some(connection) }, Vec::new(), None, crate::recovery_log::Origin::Share)
+    }
+
+    /// A message one bot sends another (PRO-475): its agent gets `text`, and the transcript names `author`, the
+    /// sending bot, so the message is never shown as the owner's words. A stopped tab starts, as any send starts it.
+    pub(crate) fn send_from_bot(&self, session_id: &str, tab_id: &str, text: String, author: crate::local_sharing::Person) -> Result<SendOutcome> {
+        let admission = crate::issue_pipeline::admission::lock_for(session_id, tab_id);
+        self.send_admitted(&admission, session_id, tab_id, PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: text.clone(), display: text, author: Some(author), shared_connection: None }, Vec::new(), None, crate::recovery_log::Origin::Programmatic)
     }
 
     #[cfg(test)]
@@ -3488,7 +4265,7 @@ impl SessionManager {
                 text: prompt.agent.clone(),
                 images: wire_images,
             };
-            let ev = self.publish(
+            let ev = self.publish_prompt(
                 &mut rt,
                 Payload::UserMessage { author: prompt.author.clone(),
                     text: prompt.display,
@@ -3498,7 +4275,7 @@ impl SessionManager {
                     queued: true,
                     cwd: Some(entry.cwd.clone()),
                 },
-                None,
+                prompt.request_id,
             );
             let privacy = crate::data_privacy::remote_ticket();
             let binding = self.provider_binding(&rt).context("provider association missing before queue")?;
@@ -3514,14 +4291,14 @@ impl SessionManager {
         if rt.child.is_none() {
             match HarnessId::parse(&tab.harness) {
                 HarnessId::Claude | HarnessId::Codex => bail!("that agent runs its own CLI"),
-                HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &tab, &entry.cwd, &binary)?,
-                HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &tab, &entry.cwd)?,
+                HarnessId::Acp(binary) => self.start_acp(&mut rt, &rt_arc, &entry, &tab, &entry.cwd, &binary)?,
+                HarnessId::OpenCode => self.start_opencode(&mut rt, &rt_arc, &entry, &tab, &entry.cwd)?,
                 HarnessId::Other(name) => bail!("The {name} agent is not wired up yet."),
             }
         }
 
         let baseline = rt.baseline_for(&entry.cwd);
-        let events = vec![self.publish(
+        let events = vec![self.publish_prompt(
             &mut rt,
             Payload::UserMessage { author: prompt.author.clone(),
                 text: prompt.display,
@@ -3531,7 +4308,7 @@ impl SessionManager {
                 queued: false,
                 cwd: Some(entry.cwd.clone()),
             },
-            None,
+            prompt.request_id,
         )];
 
         let acp_delivery = acp::Delivery { seq: events[0].seq, privacy: crate::data_privacy::remote_ticket(),
@@ -3568,7 +4345,7 @@ impl SessionManager {
                 } else {
                     o.start(prompt.agent.clone(), wire_images)
                 };
-                self.apply_actions(&mut rt, actions);
+                self.apply_actions_with_mobile(&mut rt, actions, prompt.mobile.as_ref());
             }
             Engine::CodexStdio(_) | Engine::Cli(_) | Engine::None => bail!("no engine"),
         }
@@ -3626,8 +4403,10 @@ impl SessionManager {
         Ok(privacy)
     }
 
-    fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
+    fn start_acp(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, cwd: &str, binary: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        // A bot's work runs only where its rules and access reach (PRO-468).
+        crate::bots::chat::refuse_unheld_launch(entry, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("ACP launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -3641,8 +4420,10 @@ impl SessionManager {
         Ok(())
     }
 
-    fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, tab: &TabEntry, cwd: &str) -> Result<()> {
+    fn start_opencode(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry, cwd: &str) -> Result<()> {
         if crate::computer_targets::chosen(tab)?.is_some() { bail!("This agent does not support the selected desktop attachment; clear it explicitly before starting"); }
+        // A bot's work runs only where its rules and access reach (PRO-468).
+        crate::bots::chat::refuse_unheld_launch(entry, &tab.harness)?;
         let launch_permits = Self::pending_configuration_permits(rt)?;
         let _launch_policy = launch_permits.iter().map(|permit| permit.collaboration.try_enter_admission()
             .context("OpenCode launch Configure policy is changing")).collect::<Result<Vec<_>>>()?;
@@ -3892,6 +4673,11 @@ impl SessionManager {
     }
 
     fn apply_actions(&self, rt: &mut TabRuntime, actions: Vec<Action>) {
+        self.apply_actions_with_mobile(rt, actions, None);
+    }
+
+    fn apply_actions_with_mobile(&self, rt: &mut TabRuntime, actions: Vec<Action>,
+        mobile: Option<&crate::local_runtime::mobile::WritePermit>) {
         for a in actions {
             if self.carried_opencode(rt) && matches!(&a, Action::Http { .. } | Action::Write(_) | Action::AcpPrompt(_) | Action::AcpMode { .. }) {
                 // Only the exact original ProviderAction may reach NativeHttp.
@@ -3949,6 +4735,7 @@ impl SessionManager {
                     let manager = self.clone();
                     let me = rt.me.clone();
                     let privacy = crate::data_privacy::remote_ticket();
+                    let mobile = mobile.cloned();
                     let child = rt.child.clone();
                     std::thread::spawn(move || {
                         #[cfg(test)] {
@@ -3960,18 +4747,38 @@ impl SessionManager {
                         let current = |rt: &TabRuntime| !rt.stopping
                             && child.as_ref().zip(rt.child.as_ref()).is_some_and(|(sent, live)| Arc::ptr_eq(sent, live))
                             && matches!(&rt.engine, Engine::OpenCode(o) if o.generation() == generation);
-                        {
+                        let withdraw = |unconfirmed| {
                             let mut rt = runtime.lock().unwrap();
                             if !current(&rt) { return; }
-                            if admitted.is_err() {
-                                let actions = if let Engine::OpenCode(o) = &mut rt.engine { o.withdraw_prompt(&tag) } else { Vec::new() };
-                                manager.apply_actions(&mut rt, actions);
-                                return;
-                            }
+                            let Engine::OpenCode(engine) = &mut rt.engine else { return; };
+                            let actions = engine.withdraw_http(&tag, unconfirmed);
+                            manager.apply_actions(&mut rt, actions);
+                        };
+                        if admitted.is_err() || mobile.as_ref().is_some_and(|permit| !permit.valid()) {
+                            withdraw(false);
+                            return;
                         }
-                        // The original ticket and turn generation survive the whole
-                        // request, fallback opening, and subsequent physical prompt.
-                        let line = opencode::perform(&tag, &method, &url, body);
+                        if !current(&runtime.lock().unwrap()) { return; }
+                        let line = if let Some(permit) = &mobile {
+                            use opencode::{PhysicalOutcome, WriteAdmission};
+                            match opencode::perform_mobile(&tag, &method, &url, body.as_ref(),
+                                || current(&runtime.lock().unwrap()), |write| {
+                                    let Ok(_mobile) = permit.enter() else { return WriteAdmission::Refused; };
+                                    let rt = runtime.lock().unwrap();
+                                    if !current(&rt) { return WriteAdmission::Refused; }
+                                    let _ = write();
+                                    WriteAdmission::Admitted
+                                }) {
+                                PhysicalOutcome::Response { status, body } =>
+                                    serde_json::json!({"raccoon_http":{"tag":tag,"status":status,"body":body}}).to_string(),
+                                outcome => {
+                                    withdraw(outcome == PhysicalOutcome::Unknown);
+                                    return;
+                                }
+                            }
+                        } else {
+                            opencode::perform(&tag, &method, &url, body)
+                        };
                         let mut rt = runtime.lock().unwrap();
                         if !current(&rt) { return; }
                         let (actions, answer) = if let Engine::OpenCode(o) = &mut rt.engine {
@@ -3981,7 +4788,9 @@ impl SessionManager {
                         rt.last_activity = Instant::now();
                         rt.incidents.progress("agent_output");
                         manager.stall_disproved(&mut rt);
-                        manager.apply_actions(&mut rt, actions);
+                        // Session opening can schedule a fallback or the
+                        // original prompt. Neither may shed its sender.
+                        manager.apply_actions_with_mobile(&mut rt, actions, mobile.as_ref());
                         if let Some((request, allow)) = answer {
                             manager.permission_delivered(&mut rt, &request, allow);
                             let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
@@ -4285,7 +5094,9 @@ impl SessionManager {
 
     /// Kill the agent but keep resume state, so the next prompt resumes.
     pub fn stop(&self, session_id: &str, tab_id: &str) -> Result<()> {
-        self.stop_with(session_id, tab_id, false)
+        self.stop_with(session_id, tab_id, false)?;
+        self.observer.automation_cancelled(session_id, tab_id, "The automation agent was stopped.");
+        Ok(())
     }
 
     /// Stop a tab's agent, and whatever it left running, if nothing is using
@@ -4317,6 +5128,7 @@ impl SessionManager {
             log::warn!("note in {session_id}:{tab_id} before stopping its agent: {error:#}");
         }
         self.stop_with(session_id, tab_id, true)?;
+        self.observer.automation_execution_lost(session_id, tab_id, "The agent stopped before the automation run completed.");
         // Kept with the tab, so a runtime started since knows it too.
         if let Err(error) = index::set_parked(session_id, tab_id, true) {
             log::warn!("mark {session_id}:{tab_id} as stopped for sitting idle: {error:#}");
@@ -4357,6 +5169,63 @@ impl SessionManager {
             return Some(what);
         }
         crate::idle_agents::left_running(leader?)
+    }
+
+    /// A new turn may already have started by the time the previous turn's
+    /// completion is delivered. Background work can also wake a later turn.
+    pub(crate) fn automation_execution_continues(&self, session_id: &str, tab_id: &str) -> bool {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return true };
+        let watch = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return true; }
+            rt.background.clone()
+        };
+        if watch.is_some_and(|watch| watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_some()) { return true; }
+        self.background_work(session_id, tab_id).is_some()
+    }
+
+    fn automation_runtime_busy(rt: &TabRuntime) -> bool {
+        rt.turn_open || rt.stopping || !rt.pending.is_empty() || !rt.queued.is_empty()
+            || rt.held_queue.keeps_runtime_busy() || rt.status == TabStatus::Waiting
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))
+    }
+
+    /// Serialize the durable completion transition with turn admission. The
+    /// potentially slow process/transcript scan is outside the tab lock, then
+    /// the live state is checked again while that lock is held.
+    pub(crate) fn with_automation_quiescent<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let observed = {
+            let rt = runtime.lock().unwrap();
+            if Self::automation_runtime_busy(&rt) { return None; }
+            rt.seq
+        };
+        if self.automation_execution_continues(session_id, tab_id) { return None; }
+        let rt = runtime.lock().unwrap();
+        if Self::automation_runtime_busy(&rt) || rt.seq != observed || generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    pub(crate) fn with_automation_turn<T>(&self, session_id: &str, tab_id: &str, generation: Option<u64>, action: impl FnOnce() -> T) -> Option<T> {
+        let runtime = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned()?;
+        let rt = runtime.lock().unwrap();
+        if generation.is_some_and(|value| value != rt.turn_generation) { return None; }
+        Some(action())
+    }
+
+    /// A deferred automation still owns work while its CLI waits at a prompt.
+    /// Keep this status persisted so all windows and the idle reaper agree.
+    pub(crate) fn automation_deferred_status(&self, session_id: &str, tab_id: &str, active: bool) {
+        let Some(runtime) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() else { return };
+        let mut rt = runtime.lock().unwrap();
+        if rt.turn_open || rt.stopping || !rt.pending.is_empty() || rt.recovery.is_some() { return; }
+        if !active && (!rt.queued.is_empty() || rt.held_queue.keeps_runtime_busy()
+            || matches!(&rt.engine, Engine::Cli(cli) if cli.awaiting_delivery.is_some() || cli.resend_after_abort.is_some() || cli.echoed.iter().any(|echo| echo.queued))) { return; }
+        if active && rt.status == TabStatus::Completed {
+            self.set_display_status(&mut rt, TabStatus::InProgress);
+        } else if !active && rt.status == TabStatus::InProgress {
+            self.set_display_status(&mut rt, TabStatus::Completed);
+        }
     }
 
     /// Every running agent that has nothing to do, with how long it has had
@@ -4507,6 +5376,7 @@ impl SessionManager {
             crate::cloud_grants::forget_launch(&key);
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             rt.engine = Engine::None;
             self.retire_provider(&rt);
             // A headless engine's process is gone too (`let_go_of_cli` has
@@ -4603,6 +5473,8 @@ impl SessionManager {
             .map_err(anyhow::Error::msg)?;
         self.tabs.lock().unwrap().retain(|_, tab| tab.lock().unwrap().session_id != session_id);
         self.session_commands.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{session_id}/")));
+        // A bot's chat is deleted like any other session (PRO-521): a hand-off it was working on fails, and its sender is told.
+        crate::bots::handoffs::chat_deleted(self, &entry);
         Ok(())
     }
 
@@ -4687,6 +5559,16 @@ impl SessionManager {
     }
 
     pub fn respond_permission(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, None)
+    }
+
+    pub(crate) fn respond_permission_from_phone(&self, session_id: &str, tab_id: &str, request_id: &str,
+        option_id: &str, permit: &crate::local_runtime::mobile::WritePermit) -> Result<()> {
+        self.respond_permission_with(session_id, tab_id, request_id, option_id, Some(permit))
+    }
+
+    fn respond_permission_with(&self, session_id: &str, tab_id: &str, request_id: &str, option_id: &str,
+        mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
@@ -4710,7 +5592,7 @@ impl SessionManager {
             let binding = self.provider_binding(&rt).context("OpenCode approval association missing")?;
             let provider_request = request_id.strip_prefix("oc:").context("OpenCode ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             self.answer_opencode_carried(&mut rt, request_id, option_id, context)?;
             return Ok(());
@@ -4722,7 +5604,7 @@ impl SessionManager {
             // ask registry; the original ID is preserved, never guessed by tag.
             let provider_request = request_id.strip_prefix("acp:").context("ACP ask identity invalid")?.to_string();
             let context = OperationContext::new(SenderAuthority::capture(policy.clone(), RequiredAction::Approve,
-                crate::data_privacy::remote_ticket(), None, None), RequiredAction::Approve, binding,
+                crate::data_privacy::remote_ticket(), mobile.cloned(), None), RequiredAction::Approve, binding,
                 Correlation::Approval { ask_id: request_id.into(), provider_request, attempt: uuid::Uuid::new_v4().to_string() });
             let Engine::Acp(a) = &mut rt.engine else { unreachable!() };
             let envelope = a.answer_carried(request_id, option_id, context)?;
@@ -4748,10 +5630,17 @@ impl SessionManager {
                 };
                 let allow = !matches!(decision, Decision::Deny);
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that request"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision, mobile: Some(MobileDecision {
+                        permit: permit.clone(), label, session_command,
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
+                    return Ok(());
+                }
                 tx.send(decision).map_err(|_| anyhow!("the agent stopped waiting for that request"))?;
                 (allow, label)
             }
             Engine::Acp(a) => {
+                anyhow::ensure!(mobile.is_none() || a.writing.is_none(), "The agent is still receiving input. Retry the approval shortly.");
                 let allow = a.answer_choice(request_id, option_id).ok_or_else(|| anyhow!("that option has no unambiguous outcome"))?;
                 let actions = a.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
                 self.apply_actions(&mut rt, actions);
@@ -4760,13 +5649,13 @@ impl SessionManager {
             Engine::OpenCode(o) => {
                 anyhow::ensure!(!o.answer_pending(request_id), "An answer to this request is still being delivered; try again when it settles");
                 let actions = o.answer(request_id, option_id).ok_or_else(|| anyhow!("that request is no longer open"))?;
-                self.apply_actions(&mut rt, actions);
+                self.apply_actions_with_mobile(&mut rt, actions, mobile);
                 // The card remains open until the HTTP response confirms delivery.
                 return Ok(());
             }
             Engine::CodexStdio(engine) => {
                 let actions = engine.answer(request_id, option_id)?;
-                self.apply_codex_actions(&mut rt, actions)?;
+                self.apply_codex_actions_with_approval(&mut rt, actions, mobile)?;
                 // Enqueueing is not delivery. A revoked unsent reply is retryable.
                 return Ok(());
             }
@@ -4795,22 +5684,35 @@ impl SessionManager {
 
     /// Answer an AskUserQuestion: the answers ride inside an allow.
     pub fn answer_questions(&self, session_id: &str, tab_id: &str, request_id: &str, answers: HashMap<String, String>) -> Result<()> {
+        self.answer_questions_with_mobile(session_id, tab_id, request_id, answers, None)
+    }
+
+    pub(crate) fn answer_questions_with_mobile(&self, session_id: &str, tab_id: &str, request_id: &str,
+        answers: HashMap<String, String>, mobile: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_approval()?; }
         let rt_arc = self.runtime(session_id, tab_id)?;
         let mut rt = rt_arc.lock().unwrap();
-        let ask = rt.pending.remove(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let ask = rt.pending.get(request_id).ok_or_else(|| anyhow!("that question is no longer open"))?;
+        let tool_use_id = ask.tool_use_id.clone();
         let mut input = ask.input.clone();
         input["answers"] = serde_json::to_value(&answers)?;
         match &mut rt.engine {
             Engine::Cli(p) if p.harness == CliKind::Claude => {
                 let tx = p.decisions.remove(request_id).ok_or_else(|| anyhow!("the agent stopped waiting for that question"))?;
+                if let Some(permit) = mobile {
+                    tx.queue(QueuedDecision { decision: Decision::Answers(input), mobile: Some(MobileDecision {
+                        permit: permit.clone(), label: "Answered".into(), session_command: String::new(),
+                    }) }).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
+                    return Ok(());
+                }
                 tx.send(Decision::Answers(input)).map_err(|_| anyhow!("the agent stopped waiting for that question"))?;
             }
             _ => bail!("that agent does not ask questions this way"),
         }
-        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(ask.tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
+        rt.pending.remove(request_id);
+        self.publish(&mut rt, Payload::PermissionDecided { request_id: request_id.into(), tool_use_id: Some(tool_use_id), allowed: true, label: "Answered".into(), automatic: false }, None);
         drop(rt);
         self.observer.answered(session_id, tab_id);
         Ok(())
@@ -4914,6 +5816,19 @@ impl SessionManager {
     /// is running changed, and the session itself — which the sidebar, the
     /// header, the dashboard and a paired device all draw from — whenever
     /// anything did, a request that is still waiting included.
+    /// Bring the tab's mode, and one waiting for the next launch, within
+    /// the limit of the bot `entry` works for, if it works for one.
+    pub(crate) fn hold_to_bot(&self, rt: &mut TabRuntime, entry: &index::SessionEntry) -> Result<()> {
+        let Some(limit) = entry.tab(&rt.tab_id).and_then(|tab| crate::bots::chat::tab_limit(entry, tab)) else { return Ok(()) };
+        self.update_settings(rt, |s| {
+            s.permission_mode = limit.clamp(&s.permission_mode);
+            if let Some(mode) = s.requested_permission_mode.as_mut() {
+                *mode = limit.clamp(mode);
+            }
+        })?;
+        Ok(())
+    }
+
     fn update_settings(&self, rt: &mut TabRuntime, mut change: impl FnMut(&mut Settings)) -> Result<(Settings, Settings)> {
         rt.last_settings_report = None;
         // Tried on a copy first: most of what a provider reports changes
@@ -5024,10 +5939,13 @@ impl SessionManager {
                 // A mode a share refuses is held back rather than stored:
                 // `judge_reported_mode` says what becomes of it.
                 let mut held = None;
+                // So may one wider than the bot it works for allows (PRO-468),
+                // as when a plan is approved into another mode in the terminal.
+                let bot_limit = index::get(&rt.session_id).ok().and_then(|entry| crate::bots::chat::tab_limit(&entry, entry.tab(&rt.tab_id)?));
                 let result = self.update_settings(rt, |s| {
                     held = None;
                     let mode = stance.mode(&s.permission_mode);
-                    if mode != s.permission_mode && !settings::allowed_while_shared(&mode) {
+                    if mode != s.permission_mode && (!settings::allowed_while_shared(&mode) || bot_limit.as_ref().is_some_and(|limit| !limit.allows(&mode))) {
                         held = Some(mode);
                     } else {
                         s.reported_mode(&mode);
@@ -5082,21 +6000,24 @@ impl SessionManager {
         // A CLI started by hand is not the app's to restart, and takes no
         // guest's prompt (`send_impl`): its mode is simply what it says.
         let by_hand = matches!(&rt.engine, Engine::Cli(p) if p.by_hand.is_some());
-        if by_hand || !sharing.sessions.contains_key(&rt.session_id) {
+        let entry = index::get(&rt.session_id).ok();
+        let bot_refusal = entry.as_ref().and_then(|entry| crate::bots::chat::refuses_mode(entry, entry.tab(&rt.tab_id), &mode));
+        let shared = sharing.sessions.contains_key(&rt.session_id) && !settings::allowed_while_shared(&mode);
+        if by_hand || (!shared && bot_refusal.is_none()) {
             if let Err(error) = self.update_settings(&mut rt, |s| s.reported_mode(&mode)) {
                 log::warn!("mode reported by {}/{}: {error:#}", rt.session_id, rt.tab_id);
             }
             return false;
         }
         let agent = agent_name(&rt.harness);
-        let kept = index::get(&rt.session_id).ok().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| tab.permission_mode.clone())).unwrap_or_default();
+        let kept = entry.as_ref().and_then(|entry| entry.tab(&rt.tab_id).map(|tab| tab.permission_mode.clone())).unwrap_or_default();
         let (reported, kept) = (settings::mode_label(&mode), settings::mode_label(&kept));
-        log::warn!("{}/{} reported {mode} while shared: restarting it in {kept}", rt.session_id, rt.tab_id);
-        self.publish(
-            &mut rt,
-            Payload::Status { text: format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}.") },
-            None,
-        );
+        log::warn!("{}/{} reported {mode}, which it may not be in: restarting it in {kept}", rt.session_id, rt.tab_id);
+        let text = match &bot_refusal {
+            Some(why) if !shared => format!("{agent} was switched to {reported} in the terminal. {why} So {agent} was restarted in {kept}."),
+            _ => format!("{agent} was switched to {reported} in the terminal. A shared session cannot be in {reported}, so {agent} was restarted in {kept}. Stop sharing this session before switching to {reported}."),
+        };
+        self.publish(&mut rt, Payload::Status { text }, None);
         // Whatever it was doing, it was doing in a mode the share forbids.
         self.close_open_turn(&mut rt, TurnStatus::Aborted, None);
         let current_tail = match &rt.engine { Engine::Cli(p) => p.tail.clone(), _ => return false };
@@ -5119,6 +6040,12 @@ impl SessionManager {
     /// the host's chosen modes; cloud v2 checks independent configuration
     /// authority and admits Everyone input separately for each owned launch.
     pub fn add_tab(&self, session_id: &str, tab: &crate::session_ops::NewTab) -> Result<index::TabEntry> {
+        self.add_tab_on(session_id, tab, None)
+    }
+
+    /// [`Self::add_tab`] on agent account `account` (#980); without one, on
+    /// the account its agent's other tabs in the session asked for.
+    pub fn add_tab_on(&self, session_id: &str, tab: &crate::session_ops::NewTab, account: Option<&str>) -> Result<index::TabEntry> {
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_configuration()?; }
@@ -5126,7 +6053,7 @@ impl SessionManager {
         if sharing.sessions.contains_key(session_id) && !settings::allowed_while_shared(&index::permission_mode_or_default(tab.permission_mode.as_deref())) {
             bail!("New tabs in a shared session must use a permission mode other than Bypass.");
         }
-        let added = crate::session_ops::add_tab_entry(session_id, tab).map_err(|error| anyhow!(error))?;
+        let added = crate::session_ops::add_tab_entry_on(session_id, tab, account).map_err(|error| anyhow!(error))?;
         self.first_starts.added(key_of(session_id, &added.id), Instant::now());
         Ok(added)
     }
@@ -5136,7 +6063,64 @@ impl SessionManager {
     /// a menu — so the change means replacing the process: now, or once the
     /// turn it would interrupt is over. Until that restart the tab is in the
     /// mode it was in, and is shown in it (`harness::settings`).
+    /// Restart a tab's agent on agent account `account` (#980) and resume
+    /// its conversation: "Switch account" on a tab, "Continue with …" at a
+    /// usage limit. Claude Code's accounts share `projects`, and Codex's
+    /// share `sessions`, so the conversation is found on the new one. A tab
+    /// whose agent is not running only records the account, which its next
+    /// start uses. Refused while a turn runs: it would be cut off.
+    ///
+    /// `true` when a running agent was restarted (or, native Codex, stopped
+    /// to resume on its next prompt); `false` when only the account was
+    /// recorded.
+    pub fn switch_account(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
+        let restarted = self.switch_account_on(session_id, tab_id, account)?;
+        // The person's own move: automatic switching leaves it there until
+        // that account is full (#981).
+        self.account_moved_by_hand(session_id, tab_id, account);
+        Ok(restarted)
+    }
+
+    /// [`Self::switch_account`]'s restart and resume, which automatic
+    /// switching (#981) makes too.
+    fn switch_account_on(&self, session_id: &str, tab_id: &str, account: &str) -> Result<bool> {
+        let account = crate::session_ops::requested_account(Some(account)).map_err(|error| anyhow!(error))?.context("Choose an account to switch to.")?;
+        let entry = index::get(session_id)?;
+        let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("tab {tab_id} not found"))?;
+        let agent = crate::agent_keys::Agent::of(&tab.harness).ok_or_else(|| anyhow!("This agent has no accounts to switch between."))?;
+        let accounts = crate::agent_keys::store()?.entry(agent)?;
+        anyhow::ensure!(crate::agent_accounts::exists(&accounts, &account), "That account is not one of {}'s on this Mac.", agent.label());
+        if let Some(rt_arc) = self.tabs.lock().unwrap().get(&key_of(session_id, tab_id)).cloned() {
+            let rt = rt_arc.lock().unwrap();
+            if let Some(refusal) = Self::by_hand_refusal(&rt, "its account") { bail!(refusal); }
+            anyhow::ensure!(!rt.turn_open, "Wait for the turn to end, or stop it, before switching accounts.");
+        }
+        self.mobile.invalidate_tab(session_id, tab_id);
+        index::update_tab(session_id, tab_id, |t| {
+            crate::session_ops::set_tab_account(t, Some(&account));
+            Ok(())
+        })?;
+        if !self.is_running(session_id, tab_id) {
+            return Ok(false);
+        }
+        let cli = matches!(&self.runtime(session_id, tab_id)?.lock().unwrap().engine, Engine::Cli(_));
+        if cli {
+            // In the same pane, resuming the conversation, as a settings
+            // restart does: the new launch reads the account from the tab.
+            self.restart_for_settings(session_id, tab_id)?;
+        } else {
+            // Native Codex resumes its thread with the next prompt it is sent.
+            self.stop(session_id, tab_id)?;
+        }
+        Ok(true)
+    }
+
     pub fn set_permission_mode(&self, session_id: &str, tab_id: &str, mode: &str) -> Result<()> {
+        // No mode wider than a bot's access, from the picker, the CLI or a phone (PRO-468).
+        let entry = index::get(session_id)?;
+        if let Some(refusal) = crate::bots::chat::refuses_mode(&entry, entry.tab(tab_id), mode) {
+            bail!(refusal);
+        }
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { permit.check_configuration()?; }
@@ -5164,6 +6148,15 @@ impl SessionManager {
             if carried { s.retain_provider_request("mode", policy.as_ref(), original_privacy.clone()); }
         })?;
         Self::remember_configuration(&mut rt, &after, "mode", policy.as_ref());
+        // A mode set now is the tab's own: a bot's resume no longer gives it an earlier one (PRO-468).
+        if entry.tab(tab_id).is_some_and(|tab| tab.unknown.contains_key(crate::bots::chat::HELD_FROM_KEY)) {
+            if let Err(error) = index::update_tab(session_id, tab_id, |tab| {
+                tab.unknown.remove(crate::bots::chat::HELD_FROM_KEY);
+                Ok(())
+            }) {
+                log::warn!("forget the mode {session_id}/{tab_id} had before its bot's limit: {error:#}");
+            }
+        }
         if self.carried_opencode(&rt) {
             let context = self.capture_acp_setting(&mut rt, &after, "mode", policy.as_ref())?;
             self.stage_opencode_setting(&mut rt, context);
@@ -5264,6 +6257,7 @@ impl SessionManager {
             crate::cloud_grants::forget_launch(&rt.key());
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             rt.engine = Engine::None;
             self.retire_provider(&rt);
         }
@@ -5551,6 +6545,9 @@ impl SessionManager {
         if tab.permission_mode == follow::MODE_SET_IN_TERMINAL {
             self.update_settings(rt, |s| s.permission_mode = follow::MODE_WHEN_RESUMED.into())?;
         }
+        // A session that works for a bot launches in no wider a mode than
+        // the bot's access allows now, whatever the tab was left in (PRO-468).
+        self.hold_to_bot(rt, entry)?;
         let tab = &index::get(&rt.session_id)?.tab(&rt.tab_id).cloned().unwrap_or_else(|| tab.clone());
         // A model, effort or mode that was waiting for the process to be
         // replaced rides with this launch, and is what the tab runs from
@@ -5603,13 +6600,24 @@ impl SessionManager {
         // On a Mac, the API key saved for the agent in Settings, if it uses
         // one (`agent_keys`, PRO-306): a tab set to use a key this runtime
         // does not have is not started on another login.
-        let grant = crate::agent_keys::launch_grant(&tab.harness, Path::new(&entry.cwd))?;
+        // On the agent account the tab asked for, or its project's default,
+        // or its agent's (#980): an added subscription's directory is the
+        // agent's CLAUDE_CONFIG_DIR or CODEX_HOME. With This Mac's login
+        // alone the grant is the one above, word for word.
+        let asked = crate::session_ops::tab_account(tab).map(str::to_owned);
+        // Another account when automatic switching finds this one full (#981).
+        let (asked, moved) = self.launch_account(&rt.session_id, &rt.tab_id, &tab.harness, crate::session_ops::project_key(entry), &entry.title, asked);
+        if let Some(text) = moved {
+            self.publish(rt, Payload::Status { text }, None);
+        }
+        let grant = crate::agent_keys::launch_grant_on(&tab.harness, Path::new(&entry.cwd), crate::agent_keys::Choice { account: asked.as_deref(), project: crate::session_ops::project_key(entry) })?;
         if let Some(text) = grant.route.as_ref().and_then(|route| route.notice.clone()) {
             self.publish(rt, Payload::Status { text }, None);
         }
+        let on = AccountLaunch::of(kind, &grant);
         let launch = match kind {
-            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref())?,
-            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant)?,
+            CliKind::Claude => self.claude_launch(rt, entry, tab, &exe, grant.route.as_ref(), &on)?,
+            CliKind::Codex => self.codex_launch(rt, entry, tab, &exe, &mut env, &grant, &on)?,
         };
         // The reader has been told about a substitution already.
         let launched_for = launched_for.map(|asked| Settings { model: launch.model.clone().unwrap_or(asked.model), ..asked });
@@ -5631,7 +6639,10 @@ impl SessionManager {
         // The agent credentials read above; names to unset are dropped after
         // the login shell's profile has run.
         crate::cloud_grants::record_launch(&pane, &grant);
-        crate::agent_keys::record_launch(&pane, &tab.harness, &rt.session_id, &rt.tab_id);
+        on.record(&pane, &tab.harness, &rt.session_id, &rt.tab_id, asked.is_some());
+        // Set again after the login shell's profile, which could export its
+        // own: an added account's directory (`cloud_grants::env_prefix`).
+        let after_profile = grant.after_profile.clone();
         let mut unset = Vec::new();
         for (name, value) in grant.env {
             match value {
@@ -5640,12 +6651,19 @@ impl SessionManager {
             }
         }
         // One appended prompt for everything the agent is told: the
-        // workspace's prompts, the Local VM's note, and which folders a
-        // sparse checkout has (`sparse_checkout.rs`). A second
-        // `--append-system-prompt` or `developer_instructions` would replace the first.
-        let sparse = crate::sparse_checkout::agent_note(Path::new(&entry.cwd));
-        let prompt = crate::cloud_config::prompt_args(&tab.harness, &[config.prompt.as_deref(), computer.note, sparse.as_deref()]);
-        let spawned = crate::cloud_grants::unset_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt), &unset);
+        // workspace's prompts, the Local VM's note, which folders a sparse
+        // checkout has (`sparse_checkout.rs`), and a bot's role and memory
+        // (`bots::chat`). A second `--append-system-prompt` or
+        // `developer_instructions` would replace the first.
+        // The text itself travels in a variable the shell expands as one
+        // word, never on its command line, and the agent is not left with it.
+        crate::bots::chat::look_before_launch(self.sink().as_ref(), entry);
+        let prompt = cli_prompt(entry, tab, config.prompt.as_deref(), computer.note)?;
+        if let Some(value) = prompt.value {
+            env.push((crate::cloud_config::APPENDED_PROMPT_ENV.to_string(), value));
+            unset.push(crate::cloud_config::APPENDED_PROMPT_ENV.to_string());
+        }
+        let spawned = crate::cloud_grants::env_prefix(&format!("{}{}{}{}", launch.command, config.args, computer.args, prompt.args), &unset, &after_profile);
         let usage_account = (kind == CliKind::Claude).then(crate::status::usage::claude_account_identity).flatten();
         let tail = Arc::new(launch.tail);
         // Kept up with the file this tab's tail follows, wherever it moves,
@@ -5655,7 +6673,15 @@ impl SessionManager {
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(&entry.cwd)?);
         let spec = pty::PaneSpec { cwd: &entry.cwd, cols: CLI_PANE_SIZE.0, rows: CLI_PANE_SIZE.1, command: Some(&spawned), env: &env };
-        self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI")?;
+        #[cfg(test)]
+        let refused = crate::bots::items::FAIL_LAUNCHES_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let refused = false;
+        let started = if refused { Err(anyhow!("the agent's CLI could not start (a test refused it)")) } else { self.terminals.spawn(self.sink.clone(), &pane, spec).context("start the agent's CLI").map(|_| ()) };
+        // The agent is running, or never will: in a bot's home chat that started, the owner's waiting messages are
+        // sent now as messages (`bots::chat::launched`); after a failed launch they keep waiting.
+        crate::bots::chat::launched(self, entry, &tab.id, started.is_ok());
+        started?;
         let generation = self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         rt.engine = Engine::Cli(CliTab {
             usage_account,
@@ -5675,6 +6701,7 @@ impl SessionManager {
             recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
+            lapsed: Default::default(),
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,
@@ -5705,6 +6732,12 @@ impl SessionManager {
         // Stop path still owns this process.
         let committed = (|| -> Result<()> {
             if launching != waited { self.update_settings(rt, |s| s.launched())?; }
+            if let Some(account) = &on.id {
+                index::update_tab(&rt.session_id, &rt.tab_id, |t| {
+                    crate::session_ops::set_launched_account(t, account);
+                    Ok(())
+                })?;
+            }
             if let Some(id) = launch.minted {
                 index::update_tab(&rt.session_id, &rt.tab_id, |t| {
                     t.provider_session_id = Some(id.clone());
@@ -5732,8 +6765,11 @@ impl SessionManager {
     /// conversation with no file is refused ("No conversation found") and
     /// the CLI exits on the spot, so one that never started — or whose file
     /// has gone — is started again under the same id (#663).
-    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>) -> Result<CliLaunch> {
-        let projects = crate::agent_data::claude_projects_root().ok_or_else(|| anyhow!("no home directory"))?;
+    fn claude_launch(&self, rt: &TabRuntime, entry: &index::SessionEntry, tab: &TabEntry, exe: &Path, route: Option<&crate::cloud_grants::RouteLaunch>, on: &AccountLaunch) -> Result<CliLaunch> {
+        // An added account's `projects` is a link to the person's own, so a
+        // conversation resumes on whichever account the tab runs on; it is
+        // followed from where this CLI writes.
+        let projects = crate::agent_data::claude_projects_root_in(on.home.as_deref()).ok_or_else(|| anyhow!("no home directory"))?;
         let provider_id = tab.provider_session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Where the conversation's file is, not where a conversation started
         // in this folder would be: a resumed one is still written where it
@@ -5768,6 +6804,8 @@ impl SessionManager {
         if crate::orchestration::guard::limited(entry) {
             crate::orchestration::guard::claude_settings(&mut settings);
         }
+        // A session acting for a bot runs no skill's inline command, which no hook would see (PRO-494).
+        crate::bots::access::claude_settings(rt.acting_bot.as_deref(), &mut settings);
         // A route that names its model runs on it: the endpoint may serve no
         // model of the tab's name.
         let route_model = route.and_then(|route| route.model.clone());
@@ -5787,7 +6825,12 @@ impl SessionManager {
         // machine, the trust dialog for a folder it has not seen — would take
         // the first prompt instead of the composer. The reader adopted this
         // checkout when they made the session.
-        if let Err(e) = claude::trust::prepare(&entry.cwd) {
+        // In the account's own `.claude.json` when the tab runs on one.
+        let trusted = match on.home.as_deref() {
+            Some(dir) => claude::trust::prepare_in(dir, &entry.cwd),
+            None => claude::trust::prepare(&entry.cwd),
+        };
+        if let Err(e) = trusted {
             log::warn!("prepare the Claude Code config for {}: {e:#}", entry.cwd);
         }
         let derived = claude::transcript::transcript_in(&projects, &entry.cwd, &provider_id);
@@ -5797,7 +6840,7 @@ impl SessionManager {
         // allowed: which of the two a `/clear` opens its new file in is the
         // CLI's business.
         let transcript_root = derived.parent().context("the transcript path has no directory")?.to_path_buf();
-        let mut conversation = crate::hooks::ConversationFile::new(projects, format!("{provider_id}.jsonl"));
+        let mut conversation = crate::hooks::ConversationFile::new(projects.clone(), format!("{provider_id}.jsonl"));
         if path != derived {
             conversation.adopt(&path);
         }
@@ -5805,7 +6848,7 @@ impl SessionManager {
         // into its new file when the first turn lands. The app already has all
         // of it, and the copy keeps each record's original uuid, so those are
         // the ones to drop.
-        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids(&entry.cwd, parent)).unwrap_or_default();
+        let carried = fork_from.as_deref().and_then(|parent| claude::transcript::record_uuids_in(&projects, &entry.cwd, parent)).unwrap_or_default();
         Ok(CliLaunch {
             command,
             model: route_model.filter(|model| *model != tab.model),
@@ -5821,6 +6864,7 @@ impl SessionManager {
     /// after it, so a new tab has nothing to follow until its `SessionStart`
     /// hook says which file it opened. A tab that already holds an id follows
     /// that rollout from wherever it stands.
+    #[allow(clippy::too_many_arguments)]
     fn codex_launch(
         &self,
         rt: &mut TabRuntime,
@@ -5829,6 +6873,7 @@ impl SessionManager {
         exe: &Path,
         env: &mut Vec<(String, String)>,
         grant: &crate::cloud_grants::LaunchGrant,
+        on: &AccountLaunch,
     ) -> Result<CliLaunch> {
         let launcher = codex::pty::Launcher::resolve()?;
         let route = grant.route.as_ref();
@@ -5852,8 +6897,17 @@ impl SessionManager {
             (None, None) => tab.model.clone(),
         };
 
-        let codex::home::Prepared { home, hooks_live } = codex::home::prepare(&entry.cwd, exe, grant.codex_auth.clone()).context("prepare the Codex home")?;
-        env.push(("CODEX_HOME".to_string(), home.to_string_lossy().into_owned()));
+        // An added account's managed home, which its grant names as
+        // CODEX_HOME: built again here for whether its hooks are live.
+        // Otherwise the default managed home, as before accounts.
+        let codex::home::Prepared { home, hooks_live } = match (&on.id, &on.home) {
+            (Some(id), Some(_)) => codex::home::prepare_account(&entry.cwd, exe, &store::root()?, id).context("prepare the account's Codex home")?,
+            _ => {
+                let prepared = codex::home::prepare(&entry.cwd, exe, grant.codex_auth.clone()).context("prepare the Codex home")?;
+                env.push(("CODEX_HOME".to_string(), prepared.home.to_string_lossy().into_owned()));
+                prepared
+            }
+        };
         if !hooks_live {
             // The hooks are what say a turn began, needs a decision, or ended.
             // Without them the chat is only the rollout, which never says the
@@ -6180,7 +7234,7 @@ impl SessionManager {
         }
         let turn_open = rt.turn_open;
         let unsent = match &mut rt.engine {
-            Engine::Cli(p) => expire_composer_echoes(&mut p.echoed, turn_open, Instant::now()),
+            Engine::Cli(p) => p.expire_echoes(turn_open, Instant::now()),
             _ => Vec::new(),
         };
         self.queued_prompts_unsent(&mut rt, &unsent);
@@ -6262,8 +7316,16 @@ impl SessionManager {
             // others, reached the agent inside the prompt recorded here, which
             // the chat shows for it; so does one an idle CLI recorded changed
             // (#722).
+            let mut unconfirmed: Vec<u64> = Vec::new();
             let echoed = match &mut rt.engine {
                 Engine::Cli(p) => {
+                    // What each awaited prompt said, to know a lapsed one by
+                    // once a record is matched to it (#1385).
+                    let awaited: Vec<(u64, String, usize)> = if matches!(payload, Payload::UserMessage { .. }) && !p.lapsed.0.is_empty() {
+                        p.echoed.iter().map(|echo| (echo.seq, echo.text.clone(), echo.image_count)).collect()
+                    } else {
+                        Vec::new()
+                    };
                     let echoed: Vec<Echoed> = if p.harness == CliKind::Codex {
                         consume_codex_queue_echo(&mut p.echoed, &payload)
                     } else if let Some(echo) = consume_composer_echo(&mut p.echoed, &payload) {
@@ -6271,6 +7333,19 @@ impl SessionManager {
                     } else {
                         let joined = consume_composer_echoes_within(&mut p.echoed, &payload);
                         if joined.is_empty() { consume_awaited_echo_changed(&mut p.echoed, p.awaiting_delivery, &payload).into_iter().collect() } else { joined }
+                    };
+                    // A queued prompt taken after its wait ran out (#1284),
+                    // in the conversation it was sent to (#1335). Words the
+                    // composer sent again were taken as that message: the
+                    // lapsed one is not owed them any more.
+                    let conversation = p.tail.path();
+                    let echoed = if echoed.is_empty() {
+                        p.lapsed.take(&payload, &conversation, Instant::now()).into_iter().collect()
+                    } else {
+                        let sent: Vec<(&str, usize)> = awaited.iter().filter(|(seq, ..)| echoed.iter().any(|echo| echo.seq == *seq)).map(|(_, text, images)| (text.as_str(), *images)).collect();
+                        let recorded = match &payload { Payload::UserMessage { text, .. } => text.as_str(), _ => "" };
+                        unconfirmed = p.lapsed.retire(&sent, recorded, &conversation, Instant::now());
+                        echoed
                     };
                     if !echoed.is_empty() {
                         forget_taken(p);
@@ -6282,6 +7357,11 @@ impl SessionManager {
                 }
                 _ => Vec::new(),
             };
+            // A lapsed card the same words sent again took the place of
+            // (#1386): whether the CLI took it too is not known.
+            for seq in unconfirmed {
+                self.publish(&mut rt, Payload::PromptWithdrawn { prompt_seq: seq, unconfirmed: true }, None);
+            }
             if let (Some((dropped, said)), Some((lineage, text))) = (&replaced, &prompt) {
                 // The same words as the dropped prompt, and no message sent
                 // from the chat says them: sent again from the input box the
@@ -6357,6 +7437,13 @@ impl SessionManager {
                         self.publish(&mut rt, Payload::PromptAbsorbed { prompt_seq: echo.seq }, None);
                     }
                 }
+                // A `!` command recorded with its output in the same record
+                // (#1294): the echo was the command, and the output is still
+                // to be drawn, under the `!command` the composer published.
+                if let Some(output) = shell_output_of_echo(&rt, &payload) {
+                    self.shell_settled(&mut rt);
+                    self.apply(&mut rt, output, None);
+                }
                 continue;
             }
             if let (Payload::AssistantText { text, .. }, Engine::Cli(p)) = (&payload, &mut rt.engine) {
@@ -6370,12 +7457,32 @@ impl SessionManager {
             }
             // Model/tool work is not a bare command, even after compaction.
             if matches!(payload, Payload::AssistantText { .. } | Payload::Reasoning { .. } | Payload::ToolCallStarted { .. }) {
+                // The agent took up a `!` command's output after all (#1294):
+                // its turn is the agent's now, and ends as any other does,
+                // not at the output that settled the command.
+                if rt.turn_by_command {
+                    if let Engine::Cli(p) = &mut rt.engine {
+                        p.transcript_turn = None;
+                    }
+                }
                 rt.turn_by_command = false;
             }
             if let Payload::UserMessage { text, .. } = &payload {
                 if rt.repeats_completed_compact(text) {
                     self.apply(&mut rt, payload, None);
                     continue;
+                }
+                // Claude Code's record of a `!` command (#1294) is no prompt:
+                // it opens no turn, and its output ends the one a `!command`
+                // from the composer opened.
+                if rt.harness == "claude" {
+                    if let Some(shell) = claude::transcript::shell_record(text) {
+                        if shell.output {
+                            self.shell_settled(&mut rt);
+                        }
+                        self.apply(&mut rt, payload, None);
+                        continue;
+                    }
                 }
                 self.delivery_confirmed(&mut rt);
                 // A prompt typed into the terminal with no hook ahead of it
@@ -6444,9 +7551,10 @@ impl SessionManager {
                 drop(application);
                 self.observer.automation_failed(&session, &tab, "The automation turn was interrupted.");
             } else {
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
                 drop(application);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             self.judge_reported_mode(rt_arc, tail);
             return;
@@ -6517,6 +7625,18 @@ impl SessionManager {
         let Engine::Cli(p) = &mut rt.engine else { return };
         p.turn_tail.anticipate(want);
         self.apply(&mut rt, Payload::AssistantText { block: None, text: want.to_string() }, None);
+    }
+
+    /// A `!` command's output came (#1294). The turn a `!command` from the
+    /// composer opened ends with it, once the tab has been quiet for a moment
+    /// (`watch_tabs`): Claude Code runs no model turn and no `Stop` for it.
+    /// A turn the agent was already working on is left to end on its own.
+    fn shell_settled(&self, rt: &mut TabRuntime) {
+        if rt.turn_open && rt.turn_by_command {
+            if let Engine::Cli(p) = &mut rt.engine {
+                p.transcript_turn = Some(tui::TurnMark::Ended);
+            }
+        }
     }
 
     /// Publish the turn's boundary, once. Both guards matter: `turn_open` stops
@@ -6627,7 +7747,7 @@ impl SessionManager {
         let queued = rt.turn_open && !rt.turn_by_command;
         let baseline = if queued { None } else { rt.baseline_for(cwd) };
         let (message, mut echo) = cli_composer_message(prompt, images, baseline, queued, cwd);
-        let ev = self.publish(rt, message, None);
+        let ev = self.publish_prompt(rt, message, prompt.request_id);
         echo.continuation = receipt.is_some();
         echo.receipt = receipt;
         echo.seq = ev.seq;
@@ -6640,7 +7760,7 @@ impl SessionManager {
     fn await_composer_echo(&self, rt: &mut TabRuntime, echo: ComposerEcho, agent_text: &str) {
         let (queued, seq) = (echo.queued, echo.seq);
         if let Engine::Cli(p) = &mut rt.engine {
-            expire_composer_echoes(&mut p.echoed, queued, Instant::now());
+            p.expire_echoes(queued, Instant::now());
             p.echoed.push_back(echo);
             if queued {
                 forget_taken(p);
@@ -6665,7 +7785,8 @@ impl SessionManager {
             if let Engine::Cli(p) = &mut rt.engine {
                 p.input.marks.push(seq);
             }
-            self.publish(rt, Payload::InputOccupied { prompt_seq: seq, occupied: true }, None);
+            let choice = matches!(&rt.engine, Engine::Cli(p) if p.input.choice);
+            self.publish(rt, Payload::InputOccupied { prompt_seq: seq, occupied: true, choice }, None);
             self.wait_on_reader_for_input(rt);
         }
     }
@@ -7125,16 +8246,23 @@ impl SessionManager {
                 tui::Composer::Empty => break InputWait::Type(if held_since.is_some() { "cleared" } else { "empty" }),
                 tui::Composer::Unseen if held_since.is_none() => break InputWait::Type("unseen"),
                 tui::Composer::Unseen => {}
-                tui::Composer::Holds(held_text) => {
+                screen @ (tui::Composer::Holds(_) | tui::Composer::Choice) => {
+                    let choice = matches!(screen, tui::Composer::Choice);
                     let since = *held_since.get_or_insert_with(Instant::now);
-                    if !waiting && since.elapsed() >= tui::INPUT_SETTLE {
+                    if waiting {
+                        self.input_reason(&mut rt_arc.lock().unwrap(), choice);
+                    } else if since.elapsed() >= tui::INPUT_SETTLE {
                         // How much, never what: the diagnostics hold no prompt text.
-                        stage("input_occupied", serde_json::json!({ "chars": held_text.chars().count() }));
+                        let chars = match &screen {
+                            tui::Composer::Holds(held_text) => held_text.chars().count(),
+                            _ => 0,
+                        };
+                        stage("input_occupied", serde_json::json!({ "chars": chars, "choice": choice }));
                         if seq.is_none() {
                             break InputWait::Refused;
                         }
                         waiting = true;
-                        self.input_waits(&mut rt_arc.lock().unwrap(), seq);
+                        self.input_waits(&mut rt_arc.lock().unwrap(), seq, choice);
                     }
                 }
             }
@@ -7171,9 +8299,10 @@ impl SessionManager {
     /// told so of the message published under `seq`, and of every message
     /// sent and not yet typed behind it. A message sent to an idle CLI has
     /// the tab waiting on the reader meanwhile, not working.
-    fn input_waits(&self, rt: &mut TabRuntime, seq: Option<u64>) {
+    fn input_waits(&self, rt: &mut TabRuntime, seq: Option<u64>, choice: bool) {
         let Engine::Cli(p) = &mut rt.engine else { return };
         p.input.waiting = true;
+        p.input.choice = choice;
         let untyped = p.echoed.iter().filter(|echo| !echo.submitted && !echo.command).map(|echo| echo.seq);
         let mut fresh: Vec<u64> = Vec::new();
         for seq in seq.into_iter().chain(untyped) {
@@ -7183,9 +8312,24 @@ impl SessionManager {
         }
         p.input.marks.extend(&fresh);
         for prompt_seq in fresh {
-            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true }, None);
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true, choice }, None);
         }
         self.wait_on_reader_for_input(rt);
+    }
+
+    /// What the waiting messages wait on changed while they wait: the reader
+    /// answered the CLI's question and text is left in the box, or the other
+    /// way round. The chat is told again, so it says what is in the way.
+    fn input_reason(&self, rt: &mut TabRuntime, choice: bool) {
+        let Engine::Cli(p) = &mut rt.engine else { return };
+        if p.input.choice == choice {
+            return;
+        }
+        p.input.choice = choice;
+        let marks = p.input.marks.clone();
+        for prompt_seq in marks {
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: true, choice }, None);
+        }
     }
 
     /// The tab waits on the reader while the message it was to start on is
@@ -7204,10 +8348,11 @@ impl SessionManager {
     fn input_free(&self, rt: &mut TabRuntime, withdrawn: Option<u64>) {
         let Engine::Cli(p) = &mut rt.engine else { return };
         p.input.waiting = false;
+        p.input.choice = false;
         let marks = std::mem::take(&mut p.input.marks);
         let made_waiting = std::mem::take(&mut p.input.made_waiting);
         for prompt_seq in marks.into_iter().filter(|seq| Some(*seq) != withdrawn) {
-            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false }, None);
+            self.publish(rt, Payload::InputOccupied { prompt_seq, occupied: false, choice: false }, None);
         }
         if made_waiting && rt.status == TabStatus::Waiting && rt.recovery.is_none() && rt.pending.is_empty() {
             self.set_status(rt, if rt.turn_open { TabStatus::InProgress } else { TabStatus::Idle });
@@ -7343,7 +8488,7 @@ impl SessionManager {
                 // narrowed what this one reads. Otherwise it is refused, never handed to the agent's
                 // shell: nobody is there to be asked.
                 let transcript = frame.payload["transcript_path"].as_str();
-                let call = crate::orchestration::guard::held(call, store::settings::load().agents.read_only_commands, |cwd| provider_may_restrict(kind, &frame.session, cwd, transcript));
+                let call = crate::orchestration::guard::held(call, store::settings::load().agents.read_only_commands, |cwd| provider_may_restrict(kind, &frame.session, &frame.tab, cwd, transcript));
                 match call {
                     crate::orchestration::guard::VerifierCall::Refuse(reason) => {
                         log::info!("run verifier {}/{}: {reason}", frame.session, frame.tab);
@@ -7356,6 +8501,36 @@ impl SessionManager {
                         return self.run_discovery(&rt_arc, &frame, kind, &frame.payload["tool_input"], approved, Answering::Verifier);
                     }
                     crate::orchestration::guard::VerifierCall::Leave => unreachable!("left alone above"),
+                }
+            }
+            // A session acting for a bot (PRO-478: its chats and what they started) is held to
+            // the bot's access as it is now, on top of the mode `bots::chat` holds it to: the
+            // frame showed this launch's token, so its session is its own.
+            // A built-in duty's run (PRO-477) meets its allow-list first.
+            let (acting_bot, builtin) = {
+                let rt = rt_arc.lock().unwrap();
+                (rt.acting_bot.clone(), rt.bot_builtin.clone())
+            };
+            match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
+                crate::bots::access::Gate::Leave => {}
+                crate::bots::access::Gate::Refuse(reason) => {
+                    log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
+                    return HookReply { output: Some(crate::orchestration::guard::refusal_output(&reason)), refused: None };
+                }
+                // Claude: the gate does not wait here, where Claude gives a hook 10 s. It answers
+                // "ask", so Claude raises its own permission request, whose hook carries the card
+                // (and the gate's reason, see `PermissionRequest` below) for as long as any card;
+                // a lapsed card there leaves the question to Claude's prompt, never to its mode.
+                // Codex parks on this hook as it does in Ask every time, and a reply with no
+                // output (a lapsed card, a tab that moved on), which Codex reads as "go ahead",
+                // is a refusal here.
+                crate::bots::access::Gate::Ask(reason) => {
+                    log::info!("bot session {}/{} asks: {reason}", frame.session, frame.tab);
+                    let output = match kind {
+                        CliKind::Claude => crate::bots::access::claude_ask(&reason),
+                        CliKind::Codex => crate::bots::access::codex_answer(self.ask_permission_because(&rt_arc, &frame, kind, Some(reason)).output),
+                    };
+                    return HookReply { output: Some(output), refused: None };
                 }
             }
         }
@@ -7478,7 +8653,23 @@ impl SessionManager {
                     }
                 }
             }
-            "PermissionRequest" => return self.ask_permission(&rt_arc, &frame, kind),
+            "PermissionRequest" => {
+                // A bot's gate (PRO-478): what it refuses is refused here too, saying why, and
+                // what it asks about is asked on a card that says why.
+                let (acting_bot, builtin) = {
+                    let rt = rt_arc.lock().unwrap();
+                    (rt.acting_bot.clone(), rt.bot_builtin.clone())
+                };
+                let because = match crate::bots::builtins::session_gate(builtin.as_ref(), acting_bot.as_deref(), &frame.payload) {
+                    crate::bots::access::Gate::Refuse(reason) => {
+                        log::info!("bot session {}/{}: {reason}", frame.session, frame.tab);
+                        return HookReply { output: Some(crate::bots::access::permission_refusal(&reason)), refused: None };
+                    }
+                    crate::bots::access::Gate::Ask(reason) => Some(reason),
+                    crate::bots::access::Gate::Leave => None,
+                };
+                return self.ask_permission_because(&rt_arc, &frame, kind, because);
+            }
             // Codex asks twice about one escalating command: once here for
             // every tool, and again as a `PermissionRequest` when the sandbox
             // stops it. The reader answers once.
@@ -7586,8 +8777,9 @@ impl SessionManager {
                 if !mine(&rt) { return HookReply::default(); }
                 rt.last_activity = Instant::now();
                 if rt.turn_open {
+                    let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                     self.close_open_turn(&mut rt, TurnStatus::Ok, final_text.clone());
-                    self.after_turn_completed(&rt_arc, rt, final_text);
+                    self.after_turn_completed(&rt_arc, rt, final_text, completed);
                     return HookReply::default();
                 }
             }
@@ -7626,6 +8818,8 @@ impl SessionManager {
                         &frame.tab,
                         "The agent session ended before the automation turn completed.",
                     );
+                } else {
+                    self.observer.automation_execution_lost(&frame.session, &frame.tab, "The agent session ended before the automation run completed.");
                 }
             }
             _ => {}
@@ -7637,11 +8831,18 @@ impl SessionManager {
     /// Finish a Stop hook or a watcher-closed turn. Release the tab lock
     /// before notifying automation or scheduling a settings restart that may
     /// re-enter the tab.
-    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>) {
+    fn after_turn_completed(&self, rt_arc: &Arc<Mutex<TabRuntime>>, mut rt: MutexGuard<'_, TabRuntime>, final_message: Option<String>, completed: (u64, Option<Instant>, chrono::DateTime<chrono::Utc>)) {
         let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+        let (generation, started_at, finished) = completed;
         let tail = match &rt.engine { Engine::Cli(p) => Some(p.tail.clone()), _ => None };
+        let started = started_at.and_then(|at| chrono::TimeDelta::from_std(at.elapsed()).ok()).map(|elapsed| chrono::Utc::now() - elapsed);
+        let watch = rt.background.clone();
+        rt.automation_completions_in_flight += 1;
+        let completion = AutomationCompletionGuard(rt_arc.clone());
         drop(rt);
-        self.observer.automation_completed(&session, &tab, final_message);
+        if let Some(watch) = watch { watch.lock().unwrap().automation_turn_completed(started, finished, final_message.as_deref()); }
+        self.observer.automation_completed(&session, &tab, final_message, generation);
+        drop(completion);
         self.restart_if_due(rt_arc, &session, &tab, tail.as_deref());
     }
 
@@ -7692,6 +8893,12 @@ impl SessionManager {
     /// answered. The hook thread parks here, which is exactly what holds the
     /// CLI's tool call up until the reader decides.
     fn ask_permission(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind) -> HookReply {
+        self.ask_permission_because(rt_arc, frame, kind, None)
+    }
+
+    /// [`Self::ask_permission`], with `because` as why the card is up when the
+    /// app itself is the one asking (a bot's outward call, PRO-478).
+    fn ask_permission_because(&self, rt_arc: &Arc<Mutex<TabRuntime>>, frame: &HookFrame, kind: CliKind, because: Option<String>) -> HookReply {
         let local_owner = crate::local_runtime::permissions::enabled();
         let _waiter = if local_owner {
             match crate::local_runtime::permissions::Permit::acquire() {
@@ -7739,7 +8946,7 @@ impl SessionManager {
                         return reply_for(kind, gate, Decision::Execute(updated));
                     }
                 }
-                let unconfined = || cwd.is_some_and(|cwd| !provider_may_restrict(kind, &rt.session_id, Path::new(cwd), frame.payload["transcript_path"].as_str()));
+                let unconfined = || cwd.is_some_and(|cwd| !provider_may_restrict(kind, &rt.session_id, &rt.tab_id, Path::new(cwd), frame.payload["transcript_path"].as_str()));
                 match (store::settings::load().agents.read_only_commands && unconfined())
                     .then(|| crate::harness::read_only::approved(&tool_name, &input, cwd)).flatten() {
                     Some(approved) => (None, Some(approved)),
@@ -7752,7 +8959,7 @@ impl SessionManager {
             return self.run_discovery(rt_arc, frame, kind, &input, approved, Answering::Permission);
         }
 
-        let (tx, rx) = std::sync::mpsc::channel::<Decision>();
+        let (tx, rx) = std::sync::mpsc::channel::<QueuedDecision>();
         {
             let mut rt = rt_arc.lock().unwrap();
             let Engine::Cli(p) = &rt.engine else { return HookReply::default() };
@@ -7795,7 +9002,9 @@ impl SessionManager {
                         .map(String::from),
                     // Codex's sandbox asking to be left is said as that (PRO-160);
                     // no session allowance is offered at that gate.
-                    reason: if kind == CliKind::Codex && gate != "PermissionRequest" && verified_cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
+                    reason: if let Some(because) = because {
+                        Some(because)
+                    } else if kind == CliKind::Codex && gate != "PermissionRequest" && verified_cwd.is_none() && crate::harness::read_only::command(&tool_name, &input).is_some() {
                         Some(match cwd {
                             Some(scope) => format!("Session allowances are limited to {scope}. Commands executing in another directory are blocked and need a separate one-time approval."),
                             None => "Codex did not report a verifiable execution directory. Approval applies only to this invocation.".into(),
@@ -7910,7 +9119,7 @@ impl SessionManager {
     /// say it as that hook prints it, once `mine` finds the tab still has the
     /// CLI that asked. A frame handed over by the runtime this one replaced
     /// waits here too, for the card it asked for there (#765).
-    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<Decision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
+    fn await_decision(&self, rt_arc: &Arc<Mutex<TabRuntime>>, waiting: Waiting, rx: std::sync::mpsc::Receiver<QueuedDecision>, mine: impl Fn(&TabRuntime) -> bool) -> HookReply {
         let Waiting { kind, gate, request_id, local_owner } = waiting;
         let gate = gate.as_str();
         let wait = match kind {
@@ -7922,16 +9131,61 @@ impl SessionManager {
         let answer = if local_owner {
             crate::local_runtime::permissions::wait(rx, crate::local_runtime::permissions::WAIT, crate::hooks::caller_connected)
         } else { wait_for_decision(rx, wait) };
+        #[cfg_attr(not(unix), allow(clippy::drop_non_drop))]
         drop(parked);
         let mut rt = rt_arc.lock().unwrap();
         if !mine(&rt) {
+            if answer.is_some_and(|queued| queued.mobile.is_some()) { return reply_for(kind, gate, Decision::Deny); }
             return HookReply::default();
         }
         if let Engine::Cli(p) = &mut rt.engine {
             p.decisions.remove(&request_id);
         }
         match answer {
-            Some(decision) => {
+            Some(QueuedDecision { decision, mobile: Some(mobile) }) => {
+                let Engine::Cli(cli) = &rt.engine else { return reply_for(kind, gate, Decision::Deny); };
+                let (generation, token) = (cli.generation, cli.origin.token.clone());
+                drop(rt);
+                let denied = reply_for(kind, gate, Decision::Deny);
+                let allow = !matches!(decision, Decision::Deny);
+                let reply = reply_for(kind, gate, decision);
+                let manager = self.clone();
+                let runtime = rt_arc.clone();
+                let MobileDecision { permit, label, session_command } = mobile;
+                let deliver = move |write: &mut dyn FnMut(bool) -> bool| {
+                    // Take the phone grant before the tab lock, as at admission. Keep
+                    // both until the bounded write settles so cancellation and
+                    // revocation cannot pass the last check before delivery.
+                    let grant = permit.enter().ok();
+                    let mut rt = runtime.lock().unwrap();
+                    if !matches!(&rt.engine, Engine::Cli(cli) if cli.generation == generation && cli.origin.token == token)
+                        || !rt.pending.contains_key(&request_id) {
+                        drop(rt);
+                        drop(grant);
+                        write(false);
+                        return;
+                    }
+                    let delivered = write(grant.is_some()) && grant.is_some();
+                    let ask = rt.pending.remove(&request_id).expect("checked under tab lock");
+                    if delivered && !session_command.is_empty() {
+                        manager.session_commands.lock().unwrap().entry(rt.key()).or_default().insert(session_command);
+                    }
+                    manager.publish(&mut rt, Payload::PermissionDecided {
+                        request_id, tool_use_id: Some(ask.tool_use_id), allowed: delivered && allow,
+                        label: if delivered { label } else { "Cancelled".into() }, automatic: !delivered,
+                    }, None);
+                    if !delivered { return; }
+                    if rt.pending.is_empty() {
+                        manager.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
+                        manager.set_status(&mut rt, TabStatus::InProgress);
+                    }
+                    let (session, tab) = (rt.session_id.clone(), rt.tab_id.clone());
+                    drop(rt);
+                    manager.observer.answered(&session, &tab);
+                };
+                if crate::hooks::guard_mobile_reply(denied.clone(), deliver) { reply } else { denied }
+            }
+            Some(QueuedDecision { decision, mobile: None }) => {
                 if rt.pending.is_empty() {
                     self.record_activity(&rt, TabStatus::InProgress, store::activity::Source::Live);
                     self.set_status(&mut rt, TabStatus::InProgress);
@@ -8000,7 +9254,7 @@ impl SessionManager {
         Ok(HandoffInfo { command, provider_session_id: tab.provider_session_id.clone(), harness: tab.harness.clone() })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn on_line(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str) { self.on_line_from(rt_arc, line, None); }
 
     fn on_line_from(&self, rt_arc: &Arc<Mutex<TabRuntime>>, line: &str, epoch: Option<&std::sync::atomic::AtomicU64>) {
@@ -8072,6 +9326,7 @@ impl SessionManager {
                 rt.signed_out_in_turn |= kind == RecoveryKind::SignedOut && rt.turn_open;
                 self.needs_recovery(rt, kind, crate::recovery_log::source_of(&payload));
             }
+            self.account_switch_observe(rt, &payload);
         }
         match &payload {
             Payload::TurnStarted { provider_session_id: Some(pid), .. } => {
@@ -8144,6 +9399,10 @@ impl SessionManager {
         let sign_in_refused = main && matches!(&payload, Payload::TurnCompleted { auth_failed: true, .. });
         let worked = main && matches!(&payload, Payload::TurnCompleted { status: TurnStatus::Ok, auth_failed: false, .. });
         self.publish(rt, payload, subagent);
+        if main && is_boundary {
+            // Whether it moves to another account before its next prompt (#981).
+            self.account_switch_after_turn(rt);
+        }
         if sign_in_refused {
             // A reply drawn after the refusal may have taken the recovery back.
             if rt.recovery != Some(RecoveryKind::SignedOut) {
@@ -8284,6 +9543,7 @@ impl SessionManager {
         self.withdraw_acp_input(&mut rt);
         rt.child = None;
         rt.child_pid = None;
+        self.note_child(&rt);
         rt.engine = Engine::None;
         self.retire_provider(&rt);
         self.settle_settings_without_process(&mut rt);
@@ -8341,7 +9601,8 @@ mod watch_tests;
 #[path = "session_mobile_admission_tests.rs"]
 mod mobile_admission_tests;
 
-#[cfg(test)]
+// Their agents are stand-in `#!/bin/sh` CLIs.
+#[cfg(all(test, unix))]
 #[path = "session_mobile_controls_tests.rs"]
 mod mobile_controls_tests;
 
@@ -8364,6 +9625,10 @@ mod send_tests;
 #[cfg(all(test, unix))]
 #[path = "session_agent_key_tests.rs"]
 mod agent_key_tests;
+
+#[cfg(all(test, unix))]
+#[path = "account_launch_tests.rs"]
+mod account_launch_tests;
 
 #[cfg(test)]
 static BEFORE_OPENCODE_HTTP: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
@@ -8395,9 +9660,9 @@ mod tests {
         })).unwrap();
         assert!(env.is_empty());
         assert!(computer.args.contains("cua-driver") && !computer.args.contains("--append-system-prompt"));
-        let prompt = crate::cloud_config::prompt_args("claude", &[Some("workspace"), computer.note]);
-        assert_eq!(prompt.matches("--append-system-prompt").count(), 1);
-        assert!(prompt.contains("workspace") && prompt.contains("host.docker.internal"));
+        let prompt = crate::cloud_config::prompt_argv("claude", &[Some("workspace"), computer.note]);
+        assert_eq!(prompt.iter().filter(|word| *word == "--append-system-prompt").count(), 1);
+        assert!(prompt[1].contains("workspace") && prompt[1].contains("host.docker.internal"));
     }
 
     #[test]
@@ -8487,7 +9752,7 @@ mod tests {
 
     #[test]
     fn codex_image_prompts_project_once_and_repeated_submissions_stay_distinct() {
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "describe this".into(), display: "describe this".into() };
         let image = ImageRef { url: "attachments/session/proof.png".into(), media_type: Some("image/png".into()), name: Some("proof.png".into()) };
         let mut pending = std::collections::VecDeque::new();
         let mut projected = Vec::new();
@@ -8507,7 +9772,7 @@ mod tests {
 
     #[test]
     fn revert_context_reaches_the_agent_without_becoming_the_users_visible_message() {
-        let mut prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
+        let mut prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "Continue".into(), display: "Continue".into() };
         prompt.append_agent_context("The user reverted a.txt from turn 1.");
         let (message, echo) = cli_composer_message(&prompt, vec![], None, false, "/workspace");
         assert!(prompt.agent.ends_with("The user reverted a.txt from turn 1."));
@@ -8523,6 +9788,46 @@ mod tests {
         assert!(!ComposerEcho::new("compare".into(), 2).matches("[Image #1] compare"));
         assert!(!ComposerEcho::new("compare".into(), 1).matches("[Image #1] [Image #2] compare"));
         assert!(ComposerEcho::new(String::new(), 1).matches("[Image #1]"));
+    }
+
+    /// A `!command` sent from the composer comes back as the CLI's record of
+    /// the command it ran (#1294), not as a second message.
+    #[test]
+    fn composer_echo_matches_a_shell_passthrough_command() {
+        let echo = ComposerEcho::new("!git status".into(), 0);
+        assert!(echo.matches("<bash-input> git status</bash-input>"));
+        assert!(echo.matches("<bash-input>git  status</bash-input>\n<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>"));
+        assert!(!echo.matches("<bash-input> git log</bash-input>"));
+        assert!(!echo.matches("<bash-stdout>git status</bash-stdout>"));
+        assert!(!ComposerEcho::new("git status".into(), 0).matches("<bash-input> git status</bash-input>"));
+        assert_eq!(bash_input("<bash-input>ls</bash-input>"), Some("ls"));
+        assert_eq!(bash_input("<bash-input>ls"), None);
+    }
+
+    /// #1383. Input tags around the command, then anything that is not the
+    /// rest of a shell record, are a prompt of the reader's: no `!command`
+    /// echo, though the tags hold its words.
+    #[test]
+    fn composer_echo_matches_only_a_whole_shell_record() {
+        let echo = ComposerEcho::new("!pwd".into(), 0);
+        for prompt in [
+            "<bash-input>pwd</bash-input> please explain",
+            "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+            "<bash-input>pwd</bash-input><bash-input>ls</bash-input>",
+            "<bash-input>pwd</bash-input><bash-exit-code>0</bash-exit-code><bash-exit-code>1</bash-exit-code>",
+            "<bash-input>pwd</bash-input><bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+            "<bash-input>pwd</bash-stdout>",
+        ] {
+            assert!(!echo.matches(prompt), "{prompt}");
+            assert_eq!(shell_command(prompt), None, "{prompt}");
+        }
+        for record in [
+            "<bash-input>pwd</bash-input>",
+            "<bash-input> pwd</bash-input>\n<bash-stdout>/tmp</bash-stdout><bash-stderr></bash-stderr>",
+            "<bash-input>pwd</bash-input><bash-stderr>denied</bash-stderr>",
+        ] {
+            assert!(echo.matches(record), "{record}");
+        }
     }
 
     /// Claude Code writes the pasted-image labels straight into the prompt
@@ -9186,6 +10491,7 @@ impl SessionManager {
             child.close_stdin();
             rt.child = None;
             rt.child_pid = None;
+            self.note_child(&rt);
             self.with_provider_state(&rt, |state| {
                 state.binding = None;
                 for original in state.operations.values() { original.withdraw(); }
@@ -9339,8 +10645,8 @@ impl SessionManager {
                     let entry = index::get(&rt.session_id)?;
                     let tab = entry.tab(&rt.tab_id).context("ACP queue tab missing")?;
                     match HarnessId::parse(&tab.harness) {
-                        HarnessId::Acp(binary) => self.start_acp(&mut rt, runtime, tab, &entry.cwd, &binary),
-                        HarnessId::OpenCode => self.start_opencode(&mut rt, runtime, tab, &entry.cwd),
+                        HarnessId::Acp(binary) => self.start_acp(&mut rt, runtime, &entry, tab, &entry.cwd, &binary),
+                        HarnessId::OpenCode => self.start_opencode(&mut rt, runtime, &entry, tab, &entry.cwd),
                         _ => bail!("carried queue engine replaced"),
                     }
                 })();
@@ -9430,6 +10736,7 @@ while True:
         fn stderr_line(&self, _: String) {}
         fn exited(&self, _: u32, _: Option<i32>) {}
     }
+    #[cfg_attr(not(unix), allow(dead_code))]
     struct Rig {
         manager: SessionManager,
         rt: Arc<Mutex<TabRuntime>>,
@@ -9446,6 +10753,7 @@ while True:
             std::thread::sleep(Duration::from_millis(2));
         }
     }
+    #[cfg_attr(not(unix), allow(dead_code))]
     impl Rig {
         fn new() -> Self {
             let home = store::temp_home();
@@ -9470,7 +10778,7 @@ while True:
             rig
         }
         fn spawn(manager: &SessionManager, path: &Path) -> (Arc<LiveChild>, mpsc::Receiver<String>) {
-            let program = crate::binpath::resolve("python3").expect("real ACP fixture requires python3");
+            let program = crate::binpath::python3_path().expect("real ACP fixture requires python3");
             let args = vec!["-u".into(), "-c".into(), AGENT.into(), path.to_string_lossy().into_owned()];
             let (tx, rx) = mpsc::channel();
             let child = manager.host.spawn(&uuid::Uuid::new_v4().to_string(), SpawnSpec { program: &program, args: &args,
@@ -9545,6 +10853,7 @@ while True:
     }
     impl Drop for Rig { fn drop(&mut self) { self.manager.host.kill_all(); } }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_whole_batch_deferred_and_duplicate_opening() {
         let rig = Rig::new();
@@ -9565,6 +10874,7 @@ while True:
         assert_eq!(rig.requests().iter().filter(|v| v["method"] == "session/prompt").count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_exact_model_and_mode_ack_do_not_settle_newer_intent() {
         let rig = Rig::new(); rig.ready();
@@ -9598,6 +10908,7 @@ while True:
             "provider-confirmed no-wire mode must not enqueue another RPC");
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_attempt_new_deny_retires_old_allow_on_real_writer() {
         let rig = Rig::new(); rig.ready();
@@ -9622,6 +10933,7 @@ while True:
         assert_eq!(answers[0]["result"]["outcome"]["optionId"], "deny");
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_opaque_ids_publish_option_kind_after_real_delivery() {
         for (choice, kind, allowed) in [("opaque-allow-42", "reject_once", false), ("opaque-42", "allow_once", true),
@@ -9654,6 +10966,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_approval_unknown_mapping_refuses_without_wire_or_decision() {
         for options in [json!([{"optionId":"opaque-allow","kind":"future_kind"}]),
@@ -9681,6 +10994,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_actual_partial_frame_wouldblock_revoke_stop_and_replacement() {
         for change in ["revision", "stop", "replacement"] {
@@ -9735,6 +11049,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_queue_restore_missing_remote_and_explicit_local_under_other_tls() {
         let rig = Rig::new(); rig.ready();
@@ -9781,6 +11096,7 @@ while True:
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provider_integration_d_revoked_opening_keeps_queued_local_successor_independent() {
         let rig = Rig::new();
@@ -9835,9 +11151,12 @@ while True:
 
 #[cfg(test)]
 mod provider_integration_d_stream_lifecycle {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use provider_authority::{Attempt, Correlation, OperationContext, ProviderBinding, RequiredAction, SenderAuthority, StreamOutcome};
 
+    #[cfg(unix)]
     /// Real Host/pipe, SAME operation reservation across byte-by-byte writes.
     /// The manager partial-frame test separately forces actual WouldBlock.
     #[test]
@@ -9850,9 +11169,9 @@ mod provider_integration_d_stream_lifecycle {
         }
         let host = Host::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let program = crate::binpath::resolve("python3").unwrap();
+        let program = crate::binpath::python3_path().unwrap();
         let args = vec!["-u".into(), "-c".into(), "import sys; print(sys.stdin.readline().strip(), flush=True)".into()];
-        let child = host.spawn("provider-integration-d-stream", SpawnSpec { program:&program,args:&args,cwd:Path::new("/tmp"),env:&[],unset:&[] }, Arc::new(Lines(tx))).unwrap();
+        let child = host.spawn("provider-integration-d-stream", SpawnSpec { program:&program,args:&args,cwd:&std::env::temp_dir(),env:&[],unset:&[] }, Arc::new(Lines(tx))).unwrap();
         let binding = ProviderBinding::owned("stream", "tab", &child);
         let context = OperationContext::new(SenderAuthority::capture(None, RequiredAction::Drive, None, None, None), RequiredAction::Drive,
             binding.clone(), Correlation::Prompt { seq:1,request:"exact".into() });

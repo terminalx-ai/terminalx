@@ -6,18 +6,18 @@ import type { CloudOrganization, CloudWorkspaceItem } from "@mobile/cloud/api";
 import { workspaceTitle } from "@mobile/cloud/catalog";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { cloudSections, emptyOrganizationsLabel } from "@mobile/cloud/list";
-import { codeText, listStatus, roleLabel } from "@mobile/cloud/words";
-import { shortTime } from "@mobile/data/session-list";
+import { codeText } from "@mobile/cloud/words";
+import { workspaceProject } from "@mobile/cloud/pins";
 import { useApp } from "@mobile/state/AppProvider";
-import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { useMacPins } from "@mobile/state/mac-pins";
+import { Button, EmptyState } from "@mobile/ui/primitives";
+import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
 import { LargeTitle } from "@mobile/ui/glass";
-import { StateMark } from "@mobile/ui/MacIcon";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
 import { useTabBarInset } from "@mobile/ui/tab-bar-inset";
 import { useTheme } from "@mobile/ui/theme";
 
-const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 /** Rows drawn while the first list is read, with none kept from before. */
 const PLACEHOLDER_ROWS = 3;
 
@@ -41,6 +41,8 @@ export default function CloudScreen() {
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
   const [emptyOpen, setEmptyOpen] = useState(false);
+  // Pinned on the connected Mac (#1403): a long press pins a workspace's project there, as its sidebar does.
+  const macPins = useMacPins();
   // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
   const pull = usePullRefresh(() => catalog?.refresh());
 
@@ -67,6 +69,7 @@ export default function CloudScreen() {
 
   // Nothing read yet and nothing kept: rows stand in for the list, under the title, until it comes.
   const firstLoad = !snapshot.refreshedAt && !snapshot.saved && !snapshot.organizations.length && !snapshot.error;
+  const pinActions = (item: CloudWorkspaceItem) => macPins.cloudActions(item.workspace.orgId, workspaceProject(item.workspace), workspaceTitle(snapshot, item.workspace));
   const open = (item: CloudWorkspaceItem) => router.push({ pathname: "/cloud/[workspaceId]", params: { workspaceId: item.workspace.id, orgId: item.workspace.orgId, title: workspaceTitle(snapshot, item.workspace) } });
 
   // The list scrolls under its own top bar, never over the status bar (#984).
@@ -76,40 +79,12 @@ export default function CloudScreen() {
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={paddingTop} />}
     ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)} />{snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
     renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text accessibilityRole="header" numberOfLines={1} style={[styles.sectionTitle, { color: palette.muted }]}>{section.title}</Text>{section.error ? <Text style={[styles.notice, { color: palette.warning }]}>{codeText(section.error)}</Text> : null}</View>}
-    renderItem={({ item, index, section }) => <WorkspaceRow item={item} title={workspaceTitle(snapshot, item.workspace)} first={index === 0} last={index === section.data.length - 1} onPress={() => open(item)} />}
+    renderItem={({ item, index, section }) => <CloudWorkspaceRow item={item} title={workspaceTitle(snapshot, item.workspace)} first={index === 0} last={index === section.data.length - 1} onPress={() => open(item)} actions={pinActions(item)} />}
     ListEmptyComponent={firstLoad ? <Placeholders />
       : snapshot.error && !snapshot.organizations.length ? undefined
       : empty.length ? <Text style={[styles.empty, { color: palette.muted }]}>No cloud workspaces you can see.</Text>
       : <EmptyState title="No organizations" detail="Cloud workspaces of your organizations appear here." />}
     ListFooterComponent={empty.length ? <EmptyOrganizations organizations={empty} open={emptyOpen} onToggle={() => setEmptyOpen((value) => !value)} /> : undefined} /><TopBar title="Cloud" shown={top.shown} /></View>;
-}
-
-/**
- * A workspace as the Sessions list lists a session: its mark, its title, what
- * it is doing and when, then where it works. An organization's rows share one
- * card, as in the design: the first and last round it off.
- */
-function WorkspaceRow({ item, title, first, last, onPress }: { item: CloudWorkspaceItem; title: string; first: boolean; last: boolean; onPress(): void }) {
-  const { palette } = useTheme();
-  const { workspace } = item;
-  const status = listStatus(workspace);
-  const role = roleLabel(workspace.you?.role);
-  const repository = workspace.repositories?.find((entry) => entry.primary)?.fullName ?? workspace.repositories?.[0]?.fullName ?? null;
-  const branch = workspace.launch?.workBranch ?? null;
-  const where = [repository, branch].filter(Boolean).join(" · ");
-  const when = workspace.lastActivityAt ? shortTime(workspace.lastActivityAt) : "";
-  // What is said aloud also names the role (a manager's is assumed) and who else it is shared with.
-  const facts = [status.words, role === "Manager" ? null : role, workspace.sharedWith ? `Shared with ${workspace.sharedWith}` : null].filter(Boolean);
-  const dot = status.mark === "attention" ? palette.danger : status.mark === "running" ? palette.success : status.mark === "changing" ? palette.info : palette.faint;
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${title}, ${facts.join(", ")}`} onPress={onPress} style={({ pressed }) => [styles.row, styles.cardRow, { backgroundColor: pressed ? palette.raised : palette.card, borderColor: palette.border }, first ? styles.cardTop : { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }, last && styles.cardBottom]}>
-    <View style={styles.mark}>{status.mark === "needs" || status.mark === "working" ? <StateMark state={status.mark} info={palette.info} warning={palette.warning} /> : <StatusDot color={dot} />}</View>
-    <View style={styles.body}>
-      <Text numberOfLines={1} style={[styles.title, { color: palette.ink }]}>{title}</Text>
-      <Text numberOfLines={1} style={[styles.status, { color: status.mark === "needs" ? palette.warning : status.mark === "attention" ? palette.danger : palette.muted }]}>{status.words}{when ? <Text style={{ color: palette.faint, fontWeight: "400" }}>{` · ${when}`}</Text> : null}</Text>
-      {where ? <Text numberOfLines={1} style={[styles.where, { color: palette.faint }]}>{where}</Text> : null}
-    </View>
-    <View style={styles.chevron}><ChevronRight size={16} color={palette.faint} /></View>
-  </Pressable>;
 }
 
 /** The organizations with no workspaces, as one row at the end that opens to their names. */
@@ -119,7 +94,7 @@ function EmptyOrganizations({ organizations, open, onToggle }: { organizations: 
   return <View style={[styles.folded, { backgroundColor: palette.card, borderColor: palette.border }]}>
     <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ expanded: open }} onPress={onToggle} style={({ pressed }) => [styles.foldedRow, pressed && { backgroundColor: palette.raised }]}>
       <Text numberOfLines={1} style={[styles.foldedText, { color: palette.muted }]}>{label}</Text>
-      {open ? <ChevronDown size={16} color={palette.faint} /> : <ChevronRight size={16} color={palette.faint} />}
+      {open ? <ChevronDown size={18} color={palette.faint} /> : <ChevronRight size={18} color={palette.faint} />}
     </Pressable>
     {open ? organizations.map((organization) => <Text key={organization.orgId} numberOfLines={1} style={[styles.emptyName, { color: palette.muted, borderTopColor: palette.border }]}>{organization.name}</Text>) : null}
   </View>;
@@ -130,12 +105,11 @@ function Placeholders() {
   const { palette } = useTheme();
   return <View accessibilityLabel="Loading cloud workspaces" accessibilityRole="progressbar" testID="cloud-placeholders">
     <View style={[styles.barHeading, { backgroundColor: palette.raised }]} />
-    <View style={[styles.folded, styles.placeholderCard, { backgroundColor: palette.card, borderColor: palette.border }]}>{Array.from({ length: PLACEHOLDER_ROWS }, (_, index) => <View key={index} style={[styles.row, index > 0 && { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
-      <View style={styles.mark}><StatusDot color={palette.raised} /></View>
+    <View style={[styles.folded, styles.placeholderCard, { backgroundColor: palette.card, borderColor: palette.border }]}>{Array.from({ length: PLACEHOLDER_ROWS }, (_, index) => <View key={index} style={[styles.row, styles.placeholderRow, index > 0 && { borderTopColor: palette.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
+      <View style={[styles.barMark, { backgroundColor: palette.raised }]} />
       <View style={styles.body}>
-        <View style={[styles.barTitle, { backgroundColor: palette.raised, width: `${72 - index * 12}%` }]} />
-        <View style={[styles.barLine, { backgroundColor: palette.raised }]} />
-        <View style={[styles.barLine, { backgroundColor: palette.raised, width: "54%" }]} />
+        <View style={[styles.bar, { backgroundColor: palette.raised, width: `${[70, 55, 64][index % 3]}%` }]} />
+        <View style={[styles.bar, styles.barLine, { backgroundColor: palette.raised }]} />
       </View>
     </View>)}</View>
   </View>;
@@ -145,27 +119,22 @@ const styles = StyleSheet.create({
   page: { flex: 1, paddingHorizontal: 24, justifyContent: "center", gap: 12 },
   screen: { flex: 1 },
   content: { paddingHorizontal: 16, paddingTop: 6 },
-  sectionHeader: { marginTop: 20, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
-  sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.7, textTransform: "uppercase" },
+  sectionHeader: { marginTop: 18, marginBottom: 8, paddingHorizontal: 4, gap: 3 },
+  sectionTitle: { fontSize: 12, fontWeight: "600", letterSpacing: 0.84, textTransform: "uppercase" },
   signInError: { fontSize: 14, lineHeight: 19, textAlign: "center" },
   notice: { fontSize: 13, lineHeight: 18, paddingHorizontal: 4 },
   empty: { fontSize: 15, paddingHorizontal: 4, paddingVertical: 14 },
-  row: { minHeight: 68, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", gap: 12, alignItems: "flex-start" },
-  cardRow: { borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth },
-  cardTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
-  cardBottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
-  chevron: { height: 22, justifyContent: "center" },
-  mark: { width: 16, height: 22, alignItems: "center", justifyContent: "center" },
-  body: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: 17, lineHeight: 22, letterSpacing: -0.3, fontWeight: "600" },
-  status: { fontSize: 14, lineHeight: 19, fontWeight: "600" },
-  where: { fontFamily: MONO, fontSize: 12, lineHeight: 17 },
-  folded: { marginTop: 20, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", gap: 12, alignItems: "flex-start" },
+  body: { flex: 1, minWidth: 0 },
+  folded: { marginTop: 14, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   placeholderCard: { marginTop: 0 },
+  placeholderRow: { alignItems: "center" },
   foldedRow: { minHeight: 48, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", gap: 8, borderRadius: 10 },
   foldedText: { flex: 1, fontSize: 15 },
   emptyName: { fontSize: 15, lineHeight: 20, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth },
   barHeading: { height: 10, width: "22%", borderRadius: 4, marginTop: 24, marginBottom: 12, marginHorizontal: 4 },
-  barTitle: { height: 15, borderRadius: 5, marginTop: 3, marginBottom: 4 },
-  barLine: { height: 11, width: "40%", borderRadius: 4, marginTop: 3 },
+  // Placeholder rows as 22.06 draws them: a round mark, the title, and a fainter line under it.
+  barMark: { width: 18, height: 18, borderRadius: 9 },
+  bar: { height: 12, borderRadius: 6, marginTop: 2 },
+  barLine: { width: "38%", marginTop: 8, opacity: 0.6 },
 });

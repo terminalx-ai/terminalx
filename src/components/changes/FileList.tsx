@@ -6,16 +6,12 @@ import { cn } from "@/lib/cn";
 import { dirName, fileName } from "@/lib/paths";
 import type { ChangedFile } from "@/types/session";
 
-/**
- * A file's status, as a word for its title and a dot on its icon. Modified, by
- * far the most common, wears no dot: the dot marks the exceptions (new, gone,
- * moved), and a deleted file's name is struck through as the chat shows it.
- */
-const STATUS: Record<ChangedFile["status"], { word: string; dot: string | null }> = {
-  added: { word: "Added", dot: "bg-add" },
-  modified: { word: "Modified", dot: null },
-  deleted: { word: "Deleted", dot: "bg-destructive" },
-  renamed: { word: "Renamed", dot: "bg-info" },
+/** A file's status as a coloured letter (M, A, D, R) and the word its title and screen readers use. */
+export const STATUS_LETTER: Record<ChangedFile["status"], { letter: string; tone: string; word: string }> = {
+  added: { letter: "A", tone: "text-add", word: "Added" },
+  modified: { letter: "M", tone: "text-warning", word: "Modified" },
+  deleted: { letter: "D", tone: "text-destructive", word: "Deleted" },
+  renamed: { letter: "R", tone: "text-info", word: "Renamed" },
 };
 
 /** Rows of changed files: name first (it wins the truncation), directory after. */
@@ -25,6 +21,7 @@ export function FileList({
   onSelect,
   empty,
   trailing,
+  leading,
   base,
   folders = false,
   expandAll = false,
@@ -35,6 +32,8 @@ export function FileList({
   onSelect: (path: string) => void;
   empty: string;
   trailing?: (f: ChangedFile) => React.ReactNode;
+  /** Ahead of the row's button: the Viewed box. */
+  leading?: (f: ChangedFile) => React.ReactNode;
   folders?: boolean;
   expandAll?: boolean;
 }) {
@@ -46,22 +45,21 @@ export function FileList({
   }, [review?.comments, base, files]);
   if (!files.length) return <div className="px-3 py-4 text-xs text-muted-foreground">{empty}</div>;
   const row = (f: ChangedFile) => {
-    const status = STATUS[f.status];
-    return <div key={f.path} className={cn("group flex min-w-0 items-center rounded-md", selected === f.path ? "bg-selected" : "hover:bg-selected/50")}>
+    const status = STATUS_LETTER[f.status];
+    return <div key={f.path} className={cn("group flex h-8 min-w-0 items-center rounded-md", leading && "pl-2", selected === f.path ? "bg-selected" : "hover:bg-selected/50")}>
+      {leading?.(f)}
       <button type="button" title={`${status.word} · ${f.path}`} onClick={() => onSelect(f.path)}
-        className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
-        <span className="relative flex shrink-0" data-status={f.status}>
-          <FileTypeIcon name={fileName(f.path)} isDir={false} size={14} />
-          {status.dot && <span aria-hidden className={cn("absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full ring-2 ring-background", status.dot)} />}
-          <span className="sr-only">{status.word}</span>
+        className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+        <span className={cn("w-3 shrink-0 font-mono text-[11px]", status.tone)} data-status={f.status}>
+          <span aria-hidden>{status.letter}</span><span className="sr-only">{status.word}</span>
         </span>
-        <span className={cn("min-w-0 truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{!folders && dirName(f.path)}</span>
-        <span className="shrink-0 font-mono text-[11px] tabular-nums">
-          {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{" "}
+        <span className={cn("min-w-0 shrink truncate font-mono", f.status === "deleted" && "text-muted-foreground line-through")}>{fileName(f.path)}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">{!folders && dirName(f.path)}</span>
+        {!!counts.get(f.path) && <span className="shrink-0 text-[11px] text-info">{counts.get(f.path)} {counts.get(f.path) === 1 ? "comment" : "comments"}</span>}
+        <span className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums">
+          {f.additions > 0 && <span className="text-add">+{f.additions}</span>}{f.additions > 0 && f.deletions > 0 && " "}
           {f.deletions > 0 && <span className="text-destructive">−{f.deletions}</span>}
         </span>
-        {!!counts.get(f.path) && <span className="shrink-0 text-[11px] text-info">{counts.get(f.path)} {counts.get(f.path) === 1 ? "comment" : "comments"}</span>}
       </button>
       {trailing?.(f)}
     </div>;

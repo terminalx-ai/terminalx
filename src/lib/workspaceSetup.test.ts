@@ -53,3 +53,30 @@ it("does not resurrect a deleted session from an old refresh response", async ()
   await act(async () => { reply([run]); await refreshing; });
   expect(result.current.runs).toEqual([]);
 });
+
+it("times a setup it saw start, and not one first listed while running", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    vi.setSystemTime(1_000_000);
+    mocks.invoke.mockResolvedValue([run]);
+    const store = await import("./workspaceSetup");
+    const { result } = renderHook(() => store.useWorkspaceSetups());
+    await waitFor(() => expect(result.current.runs).toEqual([run]));
+    // Listed already running: when it started is not known here.
+    expect(store.setupDuration(run, result.current.times)).toBeNull();
+
+    const next = { ...run, paneId: "s1:workspace-setup-2", status: "pending" as const };
+    act(() => mocks.listeners.get("workspace_setup_changed")!({ payload: next }));
+    vi.setSystemTime(1_014_000);
+    act(() => mocks.listeners.get("workspace_setup_changed")!({ payload: { ...next, status: "running" } }));
+    act(() => mocks.listeners.get("workspace_setup_changed")!({ payload: { ...next, status: "succeeded", exitCode: 0 } }));
+    vi.setSystemTime(1_100_000);
+    const done = result.current.runs[0];
+    expect(store.setupDuration(done, result.current.times)).toBe(14_000);
+    expect(store.formatSetupDuration(14_000)).toBe("14s");
+    expect(store.formatSetupDuration(125_000)).toBe("2m 05s");
+    expect(store.formatSetupDuration(3_780_000)).toBe("1h 03m");
+  } finally {
+    vi.useRealTimers();
+  }
+});

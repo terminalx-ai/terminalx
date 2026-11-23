@@ -1,4 +1,5 @@
 //! Desktop writes and explicit native consent. CLI/phone expose only reads.
+use crate::paths::Canonical;
 use crate::store::configuration::{self, Layer, Resolution, Store};
 use serde_json::Value;
 
@@ -23,12 +24,20 @@ pub async fn settings_files_list(project_path: Option<String>) -> CmdResult<Vec<
 /// names a program.
 const EDITORS: [(&str, &str); 3] = [("cursor", "Cursor"), ("vscode", "Visual Studio Code"), ("zed", "Zed")];
 
+/// The program behind an editor id of [`EDITORS`]; `None` is the file's default app.
+pub(crate) fn editor_program(editor: Option<&str>) -> Result<Option<&'static str>, String> {
+    match editor {
+        None => Ok(None),
+        Some(id) => EDITORS.iter().find(|(known, _)| *known == id).map(|(_, program)| Some(*program)).ok_or_else(|| format!("Unknown editor: {}", id.chars().take(40).collect::<String>())),
+    }
+}
+
 /// A path Settings may open: an existing settings file of a layer the app reads (the user file, the
 /// managed policy, or a repository's `.terminalx/settings.json` / `settings.local.json`).
 fn settings_file(path: &std::path::Path, user: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
     let path = crate::files::existing_local_path(path)?;
     anyhow::ensure!(path.is_file(), "{} is not a settings file", path.display());
-    let canonical = |known: &std::path::Path| known.canonicalize().ok();
+    let canonical = |known: &std::path::Path| known.canonical().ok();
     let known = user.and_then(canonical).is_some_and(|user| user == path)
         || crate::store::managed_configuration::path().and_then(canonical).is_some_and(|managed| managed == path)
         || (path.parent().and_then(|dir| dir.file_name()).is_some_and(|dir| dir == ".terminalx")
@@ -40,10 +49,7 @@ fn settings_file(path: &std::path::Path, user: Option<&std::path::Path>) -> anyh
 /// Open a settings file in its default app, or in one of `EDITORS` by id.
 #[tauri::command]
 pub async fn open_settings_file(app: tauri::AppHandle, path: String, editor: Option<String>) -> CmdResult<()> {
-    let program = match editor.as_deref() {
-        None => None,
-        Some(id) => Some(EDITORS.iter().find(|(known, _)| *known == id).map(|(_, program)| *program).ok_or_else(|| format!("Unknown editor: {}", id.chars().take(40).collect::<String>()))?),
-    };
+    let program = editor_program(editor.as_deref())?;
     let path = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
         let user = crate::store::settings::file::status().ok().map(|status| std::path::PathBuf::from(status.path()));
         settings_file(std::path::Path::new(&path), user.as_deref())

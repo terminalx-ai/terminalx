@@ -11,27 +11,26 @@ use super::model::{AccountPairingEnvelope, PairingOffer};
 
 pub const HPKE_ALGORITHM: &str = "HPKE-Base-X25519-HKDF-SHA256-ChaCha20Poly1305";
 
-/// The pairing link. `name` is this computer's name, for the phone to show
-/// instead of "Paired Mac" (PRO-87). It rides beside the offer as its own
-/// query parameter, not inside it: phones parse the offer strictly, so a new
-/// field there would make every phone build before this one refuse to pair,
-/// while an extra parameter is simply not read by them. It is a label only;
-/// nothing identifies or authenticates by it.
-pub fn encode_pairing_offer(offer: &PairingOffer, name: Option<&str>) -> Result<String> {
-    let payload = serde_json::to_vec(offer)?;
-    let mut link = format!("terminalx://pair?code={}", general_purpose::URL_SAFE_NO_PAD.encode(payload));
-    if let Some(name) = name.filter(|name| !name.is_empty()) {
-        link.push_str("&name=");
-        link.extend(url::form_urlencoded::byte_serialize(name.as_bytes()));
-    }
-    Ok(link)
-}
+pub use crate::phone::encode_pairing_offer;
 
 pub fn seal_account_offer(
     grant_public_key: &str,
     associated_data: &str,
     binding_generation: u64,
     offer: &PairingOffer,
+) -> Result<AccountPairingEnvelope> {
+    seal_account_bytes(grant_public_key, associated_data, binding_generation, &serde_json::to_vec(offer)?)
+}
+
+/// Seal `plaintext` for an account pairing grant exactly as a phone's offer
+/// is sealed: HPKE base mode to the grant's one-request key, with the grant's
+/// associated data as AAD. A `runtime` grant's plaintext is the machine
+/// code's JSON (PRO-349).
+pub fn seal_account_bytes(
+    grant_public_key: &str,
+    associated_data: &str,
+    binding_generation: u64,
+    plaintext: &[u8],
 ) -> Result<AccountPairingEnvelope> {
     type Kem = X25519HkdfSha256;
     let public_bytes = decode_base64url(grant_public_key, 32)?;
@@ -43,9 +42,8 @@ pub fn seal_account_offer(
     let aad = general_purpose::URL_SAFE_NO_PAD
         .decode(associated_data)
         .context("decode account pairing associated data")?;
-    let plaintext = serde_json::to_vec(offer)?;
     let ciphertext = context
-        .seal(&plaintext, &aad)
+        .seal(plaintext, &aad)
         .map_err(|_| anyhow!("could not seal account pairing envelope"))?;
     Ok(AccountPairingEnvelope {
         binding_generation,

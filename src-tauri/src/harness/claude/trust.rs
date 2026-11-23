@@ -105,6 +105,13 @@ pub fn prepare(cwd: &str) -> Result<()> {
     prepare_at(&path, &backups, cwd)
 }
 
+/// [`prepare`] in an agent account's directory (#980), the
+/// `CLAUDE_CONFIG_DIR` its tabs run with: trust goes in that account's own
+/// `.claude.json`, and the person's is not touched.
+pub fn prepare_in(config_dir: &Path, cwd: &str) -> Result<()> {
+    prepare_at(&config_dir.join(".claude.json"), &config_dir.join("backups"), cwd)
+}
+
 fn prepare_at(path: &Path, backups: &Path, cwd: &str) -> Result<()> {
     let _held = PREPARE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let config: Value = match std::fs::read_to_string(path) {
@@ -142,6 +149,28 @@ mod tests {
         prepare("/test/worktree").unwrap();
         let written: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(written, ready("/test/worktree"));
+    }
+
+    #[test]
+    fn an_accounts_trust_goes_in_its_own_config_and_not_the_persons() {
+        let _home = crate::store::temp_home();
+        let (person, _) = config_paths().unwrap();
+        let account = tempfile::tempdir().unwrap();
+        // The account's file already holds the MCP servers mirrored into it.
+        std::fs::write(account.path().join(".claude.json"), r#"{"mcpServers":{"docs":{"command":"docs-mcp"}}}"#).unwrap();
+
+        prepare_in(account.path(), "/test/worktree").unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(account.path().join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(written["projects"]["/test/worktree"]["hasTrustDialogAccepted"], true);
+        assert_eq!(written["hasCompletedOnboarding"], true);
+        assert_eq!(written["mcpServers"]["docs"]["command"], "docs-mcp", "the rest of the account's file is kept");
+        assert!(!person.exists(), "the person's own config is not touched");
+
+        // A fresh account directory gets a config of its own.
+        let fresh = tempfile::tempdir().unwrap();
+        prepare_in(fresh.path(), "/test/other").unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(fresh.path().join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(written, ready("/test/other"));
     }
 
     fn ready(cwd: &str) -> Value {

@@ -14,6 +14,36 @@ pub struct Reviewer {
     pub kind: String,
     pub state: String,
     pub requested: bool,
+    /// The account's display name, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// When its latest review was submitted, or for a pending request when it was requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+/// How a merged pull request merged, for the panel's merged card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Merged {
+    pub at: Option<String>,
+    pub by: Option<String>,
+    pub commit: Option<String>,
+    /// The merge commit has two parents: it merged with a merge commit, not squash or rebase.
+    pub merge_commit: bool,
+    /// GitHub no longer has the head branch.
+    pub branch_deleted: bool,
+}
+
+/// The repository's merge methods for this viewer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeMethods {
+    /// MERGE | SQUASH | REBASE
+    pub default: Option<String>,
+    pub merge: bool,
+    pub squash: bool,
+    pub rebase: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +73,14 @@ pub struct Conversation {
     pub reviewers: Vec<Reviewer>,
     pub unresolved_threads: usize,
     pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub base: String,
+    #[serde(default)]
+    pub commits: Option<u64>,
+    #[serde(default)]
+    pub merged: Option<Merged>,
+    #[serde(default)]
+    pub merge_methods: Option<MergeMethods>,
 }
 
 /// Mutation and reconciliation are one request. A completed mutation stays
@@ -83,10 +121,41 @@ impl Target {
         }
         Ok(Self { host: parts[0].into(), owner: parts[1].into(), name: parts[2].into(), number: parts[4].into(), url })
     }
+
+    pub(crate) fn repository_url(&self) -> String {
+        format!("https://{}/{}/{}", self.host, self.owner, self.name)
+    }
+
+    pub(crate) fn require_exact_cli_host(&self) -> Result<()> {
+        // gh's PR URL parser drops ports and strips a leading www.
+        if self.host.contains(':') || self.host.starts_with("www.") {
+            bail!("GitHub CLI cannot target this pull request hostname exactly.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verified_pr_id<'a>(&self, pr: &'a Value) -> Result<&'a str> {
+        if pr["url"].as_str().and_then(|url| crate::pr_associations::identity(url).ok()).as_deref() != Some(&self.url) {
+            bail!("GitHub returned a different pull request.");
+        }
+        pr["id"].as_str().filter(|id| !id.is_empty()).context("GitHub omitted the pull request ID.")
+    }
+
+    pub(crate) fn graphql<E: From<anyhow::Error>>(
+        &self, query: &str, fields: &[String], mut run: impl FnMut(&[&str]) -> std::result::Result<String, E>,
+    ) -> std::result::Result<Value, E> {
+        let query = format!("query={query}");
+        let mut args = vec!["api", "graphql", "--hostname", &self.host, "-f", &query];
+        for field in fields {
+            args.extend(["-f", field]);
+        }
+        response(&run(&args)?).map_err(E::from)
+    }
 }
 
 fn string(v: &Value, key: &str) -> String { v[key].as_str().unwrap_or_default().into() }
 fn optional(v: &Value, key: &str) -> Option<String> { v[key].as_str().map(str::to_string) }
+fn display_name(actor: &Value) -> Option<String> { actor["name"].as_str().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string) }
 
 fn response(raw: &str) -> Result<Value> {
     let value: Value = serde_json::from_str(raw)?;
@@ -154,10 +223,22 @@ fn parse(value: &Value) -> Result<Conversation> {
         let state = string(review, "state");
         if login.is_empty() || state == "PENDING" || login.eq_ignore_ascii_case(&string(&pr["author"], "login")) { continue; }
         let kind = if review["author"]["__typename"] == "Bot" || login.ends_with("[bot]") { "bot" } else { "user" };
-        let reviewer = reviewers.entry(login.to_lowercase()).or_insert(Reviewer { login, kind: kind.into(), state: "COMMENTED".into(), requested: false });
+        let reviewer = reviewers.entry(login.to_lowercase()).or_insert(Reviewer { login, kind: kind.into(), state: "COMMENTED".into(), requested: false, name: None, at: None });
+        if reviewer.name.is_none() { reviewer.name = display_name(&review["author"]); }
         // A comment after an approval/change request does not revoke that decision.
         if state != "COMMENTED" || !matches!(reviewer.state.as_str(), "APPROVED" | "CHANGES_REQUESTED") {
             reviewer.state = state;
+            reviewer.at = optional(review, "submittedAt").or(reviewer.at.take());
+        }
+    }
+    // When each open request was made: the latest request event for that reviewer.
+    let mut requested_at: BTreeMap<String, String> = BTreeMap::new();
+    for event in pr["timelineItems"]["nodes"].as_array().into_iter().flatten().filter(|node| node["__typename"] == "ReviewRequestedEvent") {
+        let who = &event["requestedReviewer"];
+        let login = if who["__typename"] == "Team" { format!("{}/{}", string(&who["organization"], "login"), string(who, "slug")) } else { string(who, "login") };
+        if let (false, Some(at)) = (login.is_empty(), optional(event, "createdAt")) {
+            let entry = requested_at.entry(login.to_lowercase()).or_default();
+            if *entry < at { *entry = at; }
         }
     }
     for request in pr["reviewRequests"]["nodes"].as_array().context("GitHub omitted review requests")? {
@@ -165,7 +246,9 @@ fn parse(value: &Value) -> Result<Conversation> {
         let team = who["__typename"] == "Team";
         let login = if team { format!("{}/{}", string(&who["organization"], "login"), string(who, "slug")) } else { string(who, "login") };
         if login.is_empty() { continue; }
-        reviewers.insert(login.to_lowercase(), Reviewer { login, kind: if team { "team" } else if who["__typename"] == "Bot" { "bot" } else { "user" }.into(), state: "PENDING".into(), requested: true });
+        let name = display_name(who).or_else(|| reviewers.get(&login.to_lowercase()).and_then(|known| known.name.clone()));
+        let at = requested_at.get(&login.to_lowercase()).cloned();
+        reviewers.insert(login.to_lowercase(), Reviewer { login, kind: if team { "team" } else if who["__typename"] == "Bot" { "bot" } else { "user" }.into(), state: "PENDING".into(), requested: true, name, at });
     }
     let unresolved_threads = pr["reviewThreads"]["nodes"].as_array().context("GitHub omitted review threads")?.iter()
         .filter(|thread| thread["isResolved"] == false).filter_map(|thread| thread["id"].as_str()).collect::<BTreeSet<_>>().len();
@@ -188,9 +271,20 @@ fn parse(value: &Value) -> Result<Conversation> {
             after: if kind == "commit" { optional(commit, "oid") } else { optional(&node["afterCommit"], "oid") },
         })
     }).collect();
+    let repository = &value["data"]["repository"];
+    let merged = (pr["state"] == "MERGED").then(|| Merged {
+        at: optional(pr, "mergedAt"), by: optional(&pr["mergedBy"], "login"), commit: optional(&pr["mergeCommit"], "oid"),
+        merge_commit: pr["mergeCommit"]["parents"]["totalCount"].as_u64().is_some_and(|parents| parents > 1),
+        branch_deleted: pr.get("headRef").is_some_and(Value::is_null),
+    });
+    let merge_methods = repository["squashMergeAllowed"].is_boolean().then(|| MergeMethods {
+        default: optional(repository, "viewerDefaultMergeMethod"),
+        merge: repository["mergeCommitAllowed"] == true, squash: repository["squashMergeAllowed"] == true, rebase: repository["rebaseMergeAllowed"] == true,
+    });
     Ok(Conversation { url: string(pr, "url"), title: string(pr, "title"), body: string(pr, "body"), state: string(pr, "state"),
         author: string(&pr["author"], "login"), viewer: string(&value["data"]["viewer"], "login"),
-        can_edit: pr["viewerCanUpdate"] == true, reviewers: reviewers.into_values().collect(), unresolved_threads, activity })
+        can_edit: pr["viewerCanUpdate"] == true, reviewers: reviewers.into_values().collect(), unresolved_threads, activity,
+        base: string(pr, "baseRefName"), commits: pr["commits"]["totalCount"].as_u64(), merged, merge_methods })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -206,15 +300,24 @@ pub fn act_with(target: &Target, action: Action, mut run: impl FnMut(&[&str]) ->
     let _request = crate::github_process::scope();
     match action {
         Action::Edit { title, body, expected_title, expected_body } => {
+            target.require_exact_cli_host()?;
             let title = title.trim();
             if title.is_empty() || title.len() > 1024 || body.len() > 65536 { bail!("Enter a title and a description of at most 64 KB."); }
-            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "title,body"])?)?;
+            let current: Value = serde_json::from_str(&run(&["pr", "view", &target.url, "--json", "id,url,title,body"])?)?;
+            let id = target.verified_pr_id(&current)?;
             if current["title"].as_str() != Some(&expected_title) || current["body"].as_str() != Some(&expected_body) {
                 bail!("The title or description changed on GitHub. Copy your draft, cancel, then edit the latest version.");
             }
-            run(&["pr", "edit", &target.url, "--title", title, "--body", &body])?;
+            let edited = target.graphql(
+                "mutation($id: ID!, $title: String!, $body: String!) { updatePullRequest(input: {pullRequestId: $id, title: $title, body: $body}) { pullRequest { id } } }",
+                &[format!("id={id}"), format!("title={title}"), format!("body={body}")], &mut run,
+            )?;
+            if edited["data"]["updatePullRequest"]["pullRequest"]["id"].as_str() != Some(id) {
+                bail!("GitHub did not confirm the edit to this pull request.");
+            }
         }
         Action::Approve { viewer } => {
+            target.require_exact_cli_host()?;
             // Recheck the acting account immediately before writing: a local
             // gh token can also be an App token, or have changed since reading.
             let account: Value = serde_json::from_str(&run(&["api", "--hostname", &target.host, "user"])?)?;
@@ -283,6 +386,47 @@ mod tests {
         assert_eq!(conversation.viewer, conversation.author);
         assert!(!conversation.title.is_empty());
         assert_eq!(conversation.unresolved_threads, 0);
+    }
+
+    #[test]
+    fn reviewer_names_times_merge_details_and_methods() {
+        let mut value = fixture();
+        value["data"]["repository"]["viewerDefaultMergeMethod"] = json!("SQUASH");
+        value["data"]["repository"]["mergeCommitAllowed"] = json!(false);
+        value["data"]["repository"]["squashMergeAllowed"] = json!(true);
+        value["data"]["repository"]["rebaseMergeAllowed"] = json!(true);
+        let pr = &mut value["data"]["repository"]["pullRequest"];
+        pr["state"] = json!("MERGED");
+        pr["baseRefName"] = json!("main");
+        pr["mergedAt"] = json!("2026-11-16T10:00:00Z");
+        pr["mergedBy"] = json!({"login":"ada"});
+        pr["mergeCommit"] = json!({"oid":"a91c3e0ffff","parents":{"totalCount":1}});
+        pr["headRef"] = Value::Null;
+        pr["commits"] = json!({"totalCount":4});
+        pr["reviews"]["nodes"] = json!([
+            {"state":"COMMENTED","submittedAt":"2026-11-16T08:00:00Z","author":{"login":"Ada","name":"Ada Lovelace"}},
+            {"state":"APPROVED","submittedAt":"2026-11-16T09:00:00Z","author":{"login":"Ada","name":"Ada Lovelace"}},
+            {"state":"COMMENTED","submittedAt":"2026-11-16T09:30:00Z","author":{"login":"Ada","name":"Ada Lovelace"}}
+        ]);
+        pr["reviewRequests"]["nodes"] = json!([{"requestedReviewer":{"__typename":"User","login":"Ben","name":" "}}]);
+        pr["timelineItems"]["nodes"].as_array_mut().unwrap().extend([
+            json!({"__typename":"ReviewRequestedEvent","id":"rr1","createdAt":"2026-11-15T10:00:00Z","requestedReviewer":{"__typename":"User","login":"ben"}}),
+            json!({"__typename":"ReviewRequestedEvent","id":"rr2","createdAt":"2026-11-15T16:00:00Z","requestedReviewer":{"__typename":"User","login":"Ben"}}),
+        ]);
+        let result = parse(&value).unwrap();
+        let ada = result.reviewers.iter().find(|r| r.login == "Ada").unwrap();
+        assert_eq!((ada.state.as_str(), ada.name.as_deref(), ada.at.as_deref()), ("APPROVED", Some("Ada Lovelace"), Some("2026-11-16T09:00:00Z")));
+        let ben = result.reviewers.iter().find(|r| r.login == "Ben").unwrap();
+        assert_eq!((ben.name.as_deref(), ben.at.as_deref()), (None, Some("2026-11-15T16:00:00Z")));
+        // Request events are only the request's time, never activity.
+        assert_eq!(result.activity.len(), 11);
+        assert_eq!(result.merged, Some(Merged { at: Some("2026-11-16T10:00:00Z".into()), by: Some("ada".into()), commit: Some("a91c3e0ffff".into()), merge_commit: false, branch_deleted: true }));
+        assert_eq!(result.merge_methods, Some(MergeMethods { default: Some("SQUASH".into()), merge: false, squash: true, rebase: true }));
+        assert_eq!((result.base.as_str(), result.commits), ("main", Some(4)));
+        // An older recording without these fields: nothing is made up.
+        let old = parse(&fixture()).unwrap();
+        assert!(old.merge_methods.is_none());
+        assert!(old.reviewers.iter().all(|r| r.at.is_none()));
     }
 
     #[test]
@@ -388,7 +532,8 @@ mod tests {
         let mut calls = Vec::new();
         let mut run = |args: &[&str]| {
             calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
-            Ok(if args.starts_with(&["pr", "view"]) { json!({"title":"Before","body":"Original"}).to_string() }
+            Ok(if args.starts_with(&["pr", "view"]) { json!({"id":"PR_fixture","url":target.url,"title":"Before","body":"Original"}).to_string() }
+                else if args.iter().any(|arg| arg.contains("updatePullRequest(input:")) { json!({"data":{"updatePullRequest":{"pullRequest":{"id":"PR_fixture"}}}}).to_string() }
                 else if args.last() == Some(&"user") { json!({"type":"User","login":"ada"}).to_string() }
                 else { String::new() })
         };
@@ -396,8 +541,10 @@ mod tests {
         act_with(&target, Action::Approve { viewer: "ada".into() }, &mut run).unwrap();
         act_with(&target, Action::Request { login: "ada".into(), team: false }, &mut run).unwrap();
         act_with(&target, Action::Remove { login: "OWNER/core".into(), team: true }, &mut run).unwrap();
-        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "title,body"]);
-        assert_eq!(calls[1], ["pr", "edit", &target.url, "--title", "A title", "--body", "$(secret)\n`literal`"]);
+        assert_eq!(calls[0], ["pr", "view", &target.url, "--json", "id,url,title,body"]);
+        assert_eq!(calls[1][..4], ["api", "graphql", "--hostname", "git.example.com"]);
+        assert!(calls[1][5].contains("pullRequestId: $id"));
+        assert_eq!(calls[1][6..], ["-f", "id=PR_fixture", "-f", "title=A title", "-f", "body=$(secret)\n`literal`"]);
         assert_eq!(calls[2], ["api", "--hostname", "git.example.com", "user"]);
         assert_eq!(calls[3], ["pr", "review", &target.url, "--approve"]);
         assert_eq!(calls[4], ["api", "--hostname", "git.example.com", "--method", "POST", "repos/owner/repo/pulls/42/requested_reviewers", "-f", "reviewers[]=ada"]);
@@ -428,15 +575,31 @@ mod tests {
 
     #[test]
     fn editing_refuses_a_concurrent_change_without_writing() {
-        for current in [json!({"title":"Changed","body":"Original"}), json!({"title":"Before","body":"Changed"}), json!({})] {
+        let target = target();
+        for current in [
+            json!({"id":"PR_fixture","url":target.url,"title":"Changed","body":"Original"}),
+            json!({"id":"PR_fixture","url":target.url,"title":"Before","body":"Changed"}),
+            json!({"id":"PR_fixture","url":target.url}),
+        ] {
             let mut calls = 0;
-            let error = act_with(&target(), Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |args| {
                 calls += 1;
                 assert!(args.starts_with(&["pr", "view"]));
                 Ok(current.to_string())
             }).unwrap_err();
             assert!(error.to_string().contains("changed on GitHub"));
             assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn editing_refuses_hosts_github_cli_would_rewrite() {
+        for host in ["github.example.test:8443", "www.github.example.test"] {
+            let target = Target::new(&format!("https://{host}/acme/widgets/pull/799")).unwrap();
+            let error = act_with(&target, Action::Edit { title: "New".into(), body: "Draft".into(), expected_title: "Before".into(), expected_body: "Original".into() }, |_| {
+                panic!("an inexact host must be rejected before running gh");
+            }).unwrap_err();
+            assert!(error.to_string().contains("hostname exactly"));
         }
     }
 

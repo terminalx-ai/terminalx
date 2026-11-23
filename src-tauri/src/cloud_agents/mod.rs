@@ -108,6 +108,41 @@ pub struct AgentTabInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_last_message_at: Option<String>,
     pub session_has_messages: bool,
+    /// Which history the tab's events are (#1326): a reset rewrites it and
+    /// names a new one, and a reader drops what it kept of the old one before
+    /// reading on. Absent until the tab's first reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<String>,
+    /// What the tab's last reset did, for the notice over its chat and its one Undo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset: Option<ResetNotice>,
+}
+
+/// The last reset of a tab (#1326), as a local tab's notice says it:
+/// "Reset to turn 2 · 3 files restored", with Undo while it can be undone.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetNotice {
+    /// The turn the chat was reset to; absent after an Undo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    /// How many files the reset put back, when it put any back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_restored: Option<u64>,
+    /// The conversation before the reset is kept: `session.reset` with no `endSeq` brings it back.
+    pub undoable: bool,
+}
+
+impl ResetNotice {
+    /// From the fields a reset saves on its tab (`session_reset.rs`); none before the first reset.
+    pub fn of(tab: &index::TabEntry) -> Option<Self> {
+        tab.unknown.get("resetLogId")?;
+        Some(Self {
+            turn: tab.unknown.get("resetTurn").and_then(serde_json::Value::as_u64),
+            files_restored: tab.unknown.get("resetFilesRestored").and_then(serde_json::Value::as_u64),
+            undoable: tab.unknown.get("resetBackupId").and_then(serde_json::Value::as_str).is_some(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -117,6 +152,16 @@ pub struct FollowUpView {
     pub text: String,
     /// Who sent it; empty for one queued before sharing existed.
     pub actor_id: String,
+    /// How many images it carries (#1328); absent when none.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub images: usize,
+    /// The names of its other files (#1328); absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// Why a permission decision could not be delivered.
@@ -148,6 +193,16 @@ pub trait AgentOps: Send + Sync {
             return self.send(session_id, tab_id, text);
         }
         anyhow::bail!("this runtime cannot send images to an agent")
+    }
+    /// A message with images and files already stored in the session's
+    /// attachments folder (PRO-407), handed to the agent as a local tab's
+    /// are (`SessionManager::send_pressed`). An agent host that cannot take
+    /// files says so.
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        if files.is_empty() {
+            return self.send_with_images(session_id, tab_id, text, images);
+        }
+        anyhow::bail!("this runtime cannot send files to an agent")
     }
     fn stop(&self, session_id: &str, tab_id: &str) -> Result<()>;
     /// Escape for the tab's running turn (#427): the turn is interrupted, the
@@ -312,6 +367,8 @@ impl AgentOps for ManagerOps {
                     session_created: Some(entry.created.clone()),
                     session_last_message_at: entry.unknown.get("lastMessageAt").and_then(|value| value.as_str()).map(str::to_owned),
                     session_has_messages: entry.unknown.get("hasMessages").and_then(|value| value.as_bool()).unwrap_or(false),
+                    history: tab.unknown.get("resetLogId").and_then(|value| value.as_str()).map(str::to_owned),
+                    reset: ResetNotice::of(tab),
                 });
             }
         }
@@ -345,6 +402,10 @@ impl AgentOps for ManagerOps {
 
     fn send_with_images(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>) -> Result<()> {
         self.manager.send(session_id, tab_id, text.to_string(), images).map(|_| ())
+    }
+
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> Result<()> {
+        self.manager.send_pressed(session_id, tab_id, text.to_string(), images, None, files).map(|_| ())
     }
 
     fn interrupt(&self, session_id: &str, tab_id: &str) -> Result<bool> {
@@ -728,7 +789,13 @@ impl CloudAgents {
                 .follow_ups
                 .list(&tab.tab_id)
                 .into_iter()
-                .map(|follow_up| FollowUpView { client_command_id: follow_up.client_command_id, text: follow_up.text, actor_id: follow_up.actor_id })
+                .map(|follow_up| FollowUpView {
+                    images: follow_up.images.len(),
+                    files: follow_up.files.iter().map(|file| file.name.clone()).collect(),
+                    client_command_id: follow_up.client_command_id,
+                    text: follow_up.text,
+                    actor_id: follow_up.actor_id,
+                })
                 .collect();
             if let Some(collab) = self.collab.get() {
                 // Busy as the mailbox and the workspace RPC judge a lease.
@@ -767,15 +834,15 @@ impl CloudAgents {
         Ok(key_id)
     }
 
-    /// One part of an image `owner` attaches to a message they are about to
-    /// send (`session.attach`). Uploads nobody sent within a day are dropped
+    /// One part of an image or, with `file`, another file (PRO-407) `owner`
+    /// attaches to a message they are about to send (`session.attach`). Uploads nobody sent within a day are dropped
     /// first, except those a queued message still waits for.
     #[allow(clippy::too_many_arguments)]
-    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, last: bool) -> Result<u64, attachments::AttachError> {
+    pub fn attach_part(&self, owner: &str, id: &str, offset: u64, bytes: &[u8], media_type: &str, name: Option<&str>, file: bool, last: bool) -> Result<u64, attachments::AttachError> {
         if offset == 0 {
             self.prune_attachments();
         }
-        self.attachments.write_part(owner, id, offset, bytes, media_type, name, last, now_ms())
+        self.attachments.write_part(owner, id, offset, bytes, media_type, name, file, last, now_ms())
     }
 
     /// Drop uploads nobody sent within a day, except those a queued message
@@ -829,7 +896,7 @@ impl CloudAgents {
                     let permit = self.collab.get().map(|collab| collab::v2::Permit::new(collab.clone(), &follow_up.actor_id, follow_up.policy_stamp.clone(), collab::v2::Action::Drive));
                     match self.attachments.load(&follow_up.actor_id, &follow_up.images) {
                         Ok(images) => {
-                            let send = || self.ops.send_with_images(&follow_up.session_id, &tab_id, &follow_up.text, images);
+                            let send = || self.ops.send_attached(&follow_up.session_id, &tab_id, &follow_up.text, images, follow_up.files.clone());
                             let result = match permit { Some(permit) => permit.with(send), None => send() };
                             if let Err(error) = result {
                                 log::warn!("send follow-up {}: {error:#}", follow_up.client_command_id);

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Check, ChevronRight, CircleCheck, MessageSquarePlus, Reply } from "@/icons";
 import { Markdown } from "@/components/chat/Markdown";
 import { useSessionStore } from "@/lib/sessions";
 import {
@@ -90,8 +91,9 @@ export function ReviewThreadCard({ thread, prUrl, tabId, disabled, onResolve, on
   const [ownBody, setOwnBody] = useState("");
   const body = draft ?? ownBody;
   const setBody = onDraftChange ?? setOwnBody;
-  const [replyOpen, setReplyOpen] = useState(Boolean(body));
   const [repliesOpen, setRepliesOpen] = useState(false);
+  // A resolved thread is one row until it is opened (PRO-392, design 05.13).
+  const [opened, setOpened] = useState(false);
   const [error, setError] = useState<{ message: string; reply: boolean } | null>(null);
   useEffect(() => { setError((error) => error?.reply ? error : null); }, [refreshed]);
   const [sentTo, setSentTo] = useState<string | null>(null);
@@ -99,44 +101,63 @@ export function ReviewThreadCard({ thread, prUrl, tabId, disabled, onResolve, on
     if (readOnly || disabled) return;
     setError(null);
     try {
-      if (reply) { if (await onReply(body)) { setBody(""); setReplyOpen(false); } }
+      if (reply) { if (await onReply(body)) setBody(""); }
       else await onResolve();
     } catch (error) { setError({ reply, message: `${errorMessage(error)}${reply ? " Refresh threads before retrying to check whether the reply was posted." : ""}` }); }
   };
   const [first, ...replies] = thread.comments;
   const name = githubAuthorName(first);
+  const canToggle = !readOnly && (thread.isResolved ? thread.viewerCanUnresolve : thread.viewerCanResolve);
+  const collapsed = thread.isResolved && !opened;
+  const repliesLabel = `${replies.length} ${replies.length === 1 ? "reply" : "replies"}`;
   const comment = (c: ReviewThread["comments"][number]) => <div key={c.id} className="min-w-0">
     {c !== first && <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2 text-[11px]"><span className="font-medium text-foreground">{githubAuthorName(c)}</span><time className="text-faint" dateTime={c.createdAt}>{new Date(c.createdAt).toLocaleString()}</time></div>}
     {reviewBody(c.body, thread).map((part, index) => part.kind === "markdown"
-      ? <Markdown key={index} text={part.text} className="text-xs" remoteImages={false} webLinksOnly />
+      ? <Markdown key={index} text={part.text} className="review-prose" remoteImages={false} webLinksOnly />
       : <Suggestion key={index} before={part.before} text={part.text} />)}
   </div>;
   return <article tabIndex={-1} data-review-thread={thread.id} aria-label={`Review thread ${githubReviewLocation(thread)}`}
-    className="min-w-0 rounded-md border border-hairline bg-card p-2 text-xs font-sans whitespace-normal select-text [overflow-wrap:anywhere] outline-none focus-visible:ring-1 focus-visible:ring-ring">
-    <div className="mb-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-      <span aria-hidden className="flex size-5 shrink-0 items-center justify-center rounded-full bg-veil-strong text-[9px] font-semibold text-muted-foreground">{threadInitials(name)}</span>
-      <span className="min-w-0 font-medium text-foreground">{name}</span>
-      <span className="min-w-0 text-[11px] text-faint">on GitHub · {githubThreadLines(thread)}</span>
-      {thread.isOutdated && <span className="rounded bg-warning/10 px-1 text-[10px] text-warning">Outdated</span>}
-      {thread.isResolved && <span className="rounded bg-add/10 px-1 text-[10px] text-add">Resolved</span>}
-      {!readOnly && (thread.isResolved ? thread.viewerCanUnresolve : thread.viewerCanResolve) && <Button className="ml-auto" size="xs" variant={thread.isResolved ? "ghost" : "secondary"} disabled={disabled} onClick={() => void submit(false)}>{thread.isResolved ? "Unresolve" : "Resolve"}</Button>}
+    className="min-w-0 rounded-lg border border-hairline bg-card text-xs font-sans whitespace-normal select-text [overflow-wrap:anywhere] outline-none focus-visible:ring-1 focus-visible:ring-ring">
+    <div className="flex h-9 min-w-0 items-center gap-2 px-3">
+      <span aria-hidden className="flex size-5 shrink-0 items-center justify-center rounded-full bg-info/15 text-[9px] font-semibold text-info">{threadInitials(name)}</span>
+      <span className="min-w-0 shrink-0 font-medium text-foreground">{name}</span>
+      <span className="min-w-0 truncate text-faint">on GitHub · {githubThreadLines(thread)}</span>
+      <span className="ml-auto flex shrink-0 items-center gap-2">
+        {thread.isOutdated && <span className="rounded bg-warning/15 px-1.5 text-[11px] text-warning">Outdated</span>}
+        {thread.isResolved && <span className="flex h-5 items-center gap-1 rounded bg-add/15 px-1.5 text-[11px] text-add"><CircleCheck aria-hidden className="size-3" />Resolved</span>}
+        {thread.isResolved && canToggle && <button type="button" disabled={disabled} onClick={() => void submit(false)} className="flex items-center text-muted-foreground hover:text-foreground disabled:opacity-50">Unresolve<ChevronRight aria-hidden className="size-3 text-faint" /></button>}
+      </span>
     </div>
-    {first && comment(first)}
-    {replies.length > 0 && <button type="button" aria-expanded={repliesOpen} onClick={() => setRepliesOpen(!repliesOpen)} className="mt-1 text-[11px] text-muted-foreground hover:text-foreground">
-      {repliesOpen ? "Hide replies" : `${replies.length} ${replies.length === 1 ? "reply" : "replies"}`}
-    </button>}
-    {repliesOpen && <div className="mt-1 space-y-2 border-l-2 border-hairline pl-2">{replies.map(comment)}</div>}
-    {!readOnly && <div className="mt-2 flex flex-wrap items-center gap-1">
-      {thread.viewerCanReply && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => setReplyOpen(!replyOpen)}>Reply</Button>}
-      {tabId && <Button size="xs" variant="ghost" onClick={() => { addThreadsToChat(tabId, [thread], prUrl); setSentTo(tabId); }}>Send to agent</Button>}
-      {tabId && sentTo === tabId && <span role="status" className="text-muted-foreground">Added to chat draft</span>}
+    {collapsed ? <button type="button" aria-expanded={false} aria-label={`Show resolved thread · ${repliesLabel}`} onClick={() => setOpened(true)} className="-mt-1 block w-full truncate px-3 pb-2.5 text-left text-[12.5px] text-faint hover:text-muted-foreground">
+      {plainText(first?.body ?? "")}{replies.length > 0 && ` · ${repliesLabel}`}
+    </button> : <div className="px-3 pb-2.5">
+      {first && comment(first)}
+      {replies.length > 0 && <button type="button" aria-expanded={repliesOpen} onClick={() => setRepliesOpen(!repliesOpen)} className="mt-1 text-[11px] text-muted-foreground hover:text-foreground">
+        {repliesOpen ? "Hide replies" : repliesLabel}
+      </button>}
+      {repliesOpen && <div className="mt-1 space-y-2 border-l-2 border-hairline pl-2">{replies.map(comment)}</div>}
+      {thread.isResolved && <button type="button" onClick={() => setOpened(false)} className="mt-1 block text-[11px] text-faint hover:text-foreground">Collapse</button>}
+      {!readOnly && <form className="mt-2 rounded-lg border border-hairline bg-background" onSubmit={(event) => { event.preventDefault(); void submit(true); }}>
+        {thread.viewerCanReply && <textarea aria-label="Reply to review thread" value={body} onChange={(event) => setBody(event.target.value)} disabled={disabled} placeholder="Reply on GitHub…"
+          className="block min-h-[52px] w-full resize-y bg-transparent px-3 py-2.5 text-[13px] text-foreground outline-none placeholder:text-faint" />}
+        <div className="flex flex-wrap items-center gap-2 px-2.5 pb-2.5 pt-1">
+          {tabId && <span className="min-w-0 flex-1 text-[11.5px] text-faint">Send to agent adds the comment, the code{replies.length ? ` and ${replies.length === 1 ? "the reply" : replies.length === 2 ? "both replies" : `all ${replies.length} replies`}` : ""} to the chat as one message.</span>}
+          {tabId && sentTo === tabId && <span role="status" className="text-muted-foreground">Added to chat draft</span>}
+          <span className="ml-auto flex shrink-0 gap-1.5">
+            {!thread.isResolved && canToggle && <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => void submit(false)}><Check />Resolve</Button>}
+            {thread.viewerCanReply && <Button type="submit" size="sm" variant="outline" disabled={disabled || !body.trim()}><Reply />Reply</Button>}
+            {tabId && <Button type="button" size="sm" onClick={() => { addThreadsToChat(tabId, [thread], prUrl); setSentTo(tabId); }}><MessageSquarePlus />Send to agent</Button>}
+          </span>
+        </div>
+      </form>}
     </div>}
-    {!readOnly && replyOpen && <form className="mt-2 space-y-2" onSubmit={(event) => { event.preventDefault(); void submit(true); }}>
-      <textarea aria-label="Reply to review thread" value={body} onChange={(event) => setBody(event.target.value)} disabled={disabled} placeholder="Reply on GitHub…" className="min-h-20 w-full rounded border border-hairline bg-background p-2" />
-      <Button type="submit" size="xs" disabled={disabled || !body.trim()}>Post reply</Button>
-    </form>}
-    {error && <p role="alert" className="mt-2 text-destructive">{error.message}</p>}
+    {error && <p role="alert" className="px-3 pb-2 text-destructive">{error.message}</p>}
   </article>;
+}
+
+/** A comment's Markdown as one line of plain words, for a collapsed thread's quote. */
+function plainText(markdown: string): string {
+  return markdown.replace(/```[\s\S]*?```/g, " ").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[`*_>#~]/g, "").replace(/\s+/g, " ").trim();
 }
 
 function Suggestion({ before, text }: { before: string | null; text: string }) {

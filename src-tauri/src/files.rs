@@ -4,6 +4,7 @@
 //! when asked; searches are fuzzy over the relative path with a bias toward
 //! filename matches. Capped so a monorepo can't pin a core.
 
+use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -171,6 +172,17 @@ pub fn search(root: &Path, query: &str, limit: usize, include_ignored: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_text_refuses_an_existing_file_and_keeps_its_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes/new.md");
+        create_text(&path, "").unwrap();
+        std::fs::write(&path, "written by someone else").unwrap();
+        let error = create_text(&path, "").unwrap_err();
+        assert!(error.to_string().contains("already exists"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "written by someone else");
+    }
 
     #[test]
     fn indexes_and_matches_names_first() {
@@ -425,7 +437,7 @@ pub fn export_file(to: &Path, from: Option<&Path>, content: Option<&str>) -> Res
     match (from, content) {
         (Some(from), None) => {
             anyhow::ensure!(std::fs::metadata(from)?.is_file(), "{} is not a file", from.display());
-            if let (Ok(a), Ok(b)) = (from.canonicalize(), to.canonicalize()) {
+            if let (Ok(a), Ok(b)) = (from.canonical(), to.canonical()) {
                 // Copying a file onto itself would truncate it first.
                 if a == b {
                     return Ok(std::fs::metadata(from)?.len());
@@ -450,6 +462,23 @@ pub fn write_text(path: &Path, content: &str) -> Result<u64> {
     Ok(mtime_ms(&std::fs::metadata(path)?))
 }
 
+/// Write a file that must not exist yet. The create is exclusive, so a file
+/// another writer made in the meantime is refused, never emptied or replaced.
+pub fn create_text(path: &Path, content: &str) -> Result<u64> {
+    use std::io::Write;
+    anyhow::ensure!(crate::media_types::media_type(path).is_none(), "Media files are read-only in the file pane");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!("A file with that name already exists."),
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(content.as_bytes())?;
+    Ok(mtime_ms(&file.metadata()?))
+}
+
 pub fn stat_mtime(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| mtime_ms(&m))
 }
@@ -468,7 +497,7 @@ pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo
         anyhow::bail!("Destination {} is not a regular file or folder", path.display());
     };
 
-    let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let canonical_base = base.canonical().unwrap_or_else(|_| base.to_path_buf());
     let (root, rel) = if let Ok(relative) = path.strip_prefix(&canonical_base) {
         (canonical_base, relative.to_path_buf())
     } else if path.parent().is_none() {
@@ -509,7 +538,7 @@ pub fn inspect_local_path(base: &Path, requested: &Path) -> Result<LocalPathInfo
 /// exists and is a regular file or folder. It never accepts a program name.
 pub fn existing_local_path(candidate: &Path) -> Result<PathBuf> {
     let path = candidate
-        .canonicalize()
+        .canonical()
         .map_err(|error| anyhow::anyhow!("Destination {} is unavailable: {error}", candidate.display()))?;
     let metadata = path.metadata()?;
     anyhow::ensure!(metadata.is_file() || metadata.is_dir(), "Destination {} is not a regular file or folder", path.display());
@@ -844,13 +873,13 @@ pub fn replace_text(
         return Ok(ReplaceReport { files: 0, replacements: 0 });
     }
     let rw = Rewriter::new(query, Some(replacement), regex, case_sensitive, whole_word)?;
-    let root = root.canonicalize()?;
+    let root = root.canonical()?;
     let jobs: Vec<(PathBuf, Option<Vec<u32>>)> = match targets {
         Some(targets) => targets
             .into_iter()
             .map(|t| {
                 let abs = root.join(&t.path);
-                let real = abs.canonicalize().map_err(|e| anyhow::anyhow!("{}: {e}", t.path))?;
+                let real = abs.canonical().map_err(|e| anyhow::anyhow!("{}: {e}", t.path))?;
                 if !real.starts_with(&root) {
                     anyhow::bail!("{} is outside the project", t.path);
                 }
@@ -900,6 +929,7 @@ fn rewrite_text(rw: &Rewriter, text: &str, lines: Option<&[u32]>) -> (String, us
 
 #[cfg(test)]
 mod tree_tests {
+    use crate::paths::Canonical;
     use super::*;
 
     /// The All files filter sees what the tree shows: hidden files and
@@ -988,16 +1018,16 @@ mod tree_tests {
 
         let inside = inspect_local_path(workspace.path(), Path::new("src/main.rs")).unwrap();
         assert_eq!(inside.kind, LocalPathKind::File);
-        assert_eq!(inside.root, workspace.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(inside.root, workspace.path().canonical().unwrap().to_string_lossy());
         assert_eq!(inside.rel, "src/main.rs");
         assert!(inside.text);
 
         let external = inspect_local_path(workspace.path(), &outside.path().join("report.pdf")).unwrap();
-        assert_eq!(external.root, outside.path().canonicalize().unwrap().to_string_lossy());
+        assert_eq!(external.root, outside.path().canonical().unwrap().to_string_lossy());
         assert_eq!(external.rel, "report.pdf");
         assert!(!external.text);
         assert_eq!(inspect_local_path(workspace.path(), outside.path()).unwrap().kind, LocalPathKind::Directory);
-        let filesystem_root = workspace.path().canonicalize().unwrap().ancestors().last().unwrap().to_path_buf();
+        let filesystem_root = workspace.path().canonical().unwrap().ancestors().last().unwrap().to_path_buf();
         let root_folder = inspect_local_path(workspace.path(), &filesystem_root).unwrap();
         assert_eq!(root_folder.kind, LocalPathKind::Directory);
         assert_eq!(root_folder.path, filesystem_root.to_string_lossy());
@@ -1012,7 +1042,7 @@ mod tree_tests {
         assert!(!inspect_local_path(workspace.path(), Path::new("invalid.txt")).unwrap().text);
         std::fs::write(workspace.path().join("incomplete.txt"), [b'a', 0xc3]).unwrap();
         assert!(!inspect_local_path(workspace.path(), Path::new("incomplete.txt")).unwrap().text);
-        assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonicalize().unwrap().join("src/main.rs"));
+        assert_eq!(existing_local_path(&workspace.path().join("src/main.rs")).unwrap(), workspace.path().canonical().unwrap().join("src/main.rs"));
         assert!(existing_local_path(&workspace.path().join("not-there")).is_err());
     }
 

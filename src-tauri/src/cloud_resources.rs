@@ -9,38 +9,141 @@
 //!
 //! `{"v":1,"memory":{"totalBytes","availableBytes"}|null,
 //!   "storage":{"totalBytes","availableBytes","totalInodes","availableInodes"}|null,
-//!   "observedAt":<ms>}`
+//!   "cpu":{"cores","usage"}|null, "observedAt":<ms>}`
 //!
 //! Memory is what the runtime may actually use: where a cgroup limit is
 //! tighter than the machine (a container), the limit and what is left under
 //! it, not the host's numbers.
 //!
-//! `memory` is null where the kernel has no `/proc/meminfo` (not Linux), and
-//! `storage` where the filesystem cannot be asked.
+//! `memory` is null where it cannot be read (Linux reads `/proc/meminfo`, a
+//! Mac `vm_stat`), and `storage` where the filesystem cannot be asked.
+//!
+//! `cpu` (PRO-350, a machine's page) is the logical cores the runtime may use
+//! and how busy all of the computer's cores were, 0 to 1, since the previous
+//! call in this process: null on the first, which has nothing to compare
+//! with. The previous reading is the only state kept.
 
 use std::path::Path;
 
 use serde_json::{json, Value};
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const MEMINFO: &str = "/proc/meminfo";
 const SELF_CGROUP: &str = "/proc/self/cgroup";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// The machine's memory and the disk that holds `root`, now.
 pub fn observe(root: &Path) -> Value {
-    let host = std::fs::read_to_string(MEMINFO).ok().and_then(|text| memory(&text));
-    let memory = within_limit(host, cgroup_limit());
+    let memory = within_limit(host_memory(), cgroup_limit());
     json!({
         "v": 1,
         "memory": memory.map(|(total, available)| json!({ "totalBytes": total, "availableBytes": available })),
         "storage": storage(root),
+        "cpu": cpu(),
         "observedAt": crate::cloud_agents::now_ms(),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn host_memory() -> Option<(u64, u64)> {
+    crate::status::resources::host_memory()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_memory() -> Option<(u64, u64)> {
+    std::fs::read_to_string(MEMINFO).ok().and_then(|text| memory(&text))
+}
+
+/// Busy and total processor time, in the kernel's ticks, summed over every core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ticks {
+    busy: u64,
+    total: u64,
+}
+
+/// The processor now: the cores the runtime may use, and how busy they were
+/// since the previous call.
+fn cpu() -> Value {
+    static PREVIOUS: std::sync::Mutex<Option<Ticks>> = std::sync::Mutex::new(None);
+    let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+    let now = ticks();
+    let usage = {
+        let mut previous = PREVIOUS.lock().unwrap_or_else(|e| e.into_inner());
+        let usage = match (*previous, now) {
+            (Some(before), Some(now)) => usage(before, now),
+            _ => None,
+        };
+        if now.is_some() {
+            *previous = now;
+        }
+        usage
+    };
+    json!({ "cores": cores, "usage": usage })
+}
+
+/// How busy the cores were between two readings, 0 to 1; none when no time passed.
+fn usage(before: Ticks, now: Ticks) -> Option<f64> {
+    let total = now.total.checked_sub(before.total)?;
+    let busy = now.busy.checked_sub(before.busy)?;
+    (total > 0).then(|| ((busy as f64) / (total as f64)).clamp(0.0, 1.0))
+}
+
+#[cfg(target_os = "linux")]
+fn ticks() -> Option<Ticks> {
+    std::fs::read_to_string("/proc/stat").ok().and_then(|text| stat_ticks(&text))
+}
+
+/// The `cpu` line of `/proc/stat`: user, nice, system, idle, iowait, irq,
+/// softirq, steal (guest time is already in user). Idle and iowait are not busy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn stat_ticks(stat: &str) -> Option<Ticks> {
+    let line = stat.lines().find(|line| line.split_whitespace().next() == Some("cpu"))?;
+    let fields: Vec<u64> = line.split_whitespace().skip(1).take(8).map(|field| field.parse().ok()).collect::<Option<_>>()?;
+    if fields.len() < 4 {
+        return None;
+    }
+    let total: u64 = fields.iter().sum();
+    let idle = fields[3] + fields.get(4).copied().unwrap_or(0);
+    Some(Ticks { busy: total.saturating_sub(idle), total })
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    /// In libSystem; `libc` does not declare it.
+    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+}
+
+#[cfg(target_os = "macos")]
+fn ticks() -> Option<Ticks> {
+    let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info>::uninit();
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // SAFETY: `info` has room for `count` integers of `HOST_CPU_LOAD_INFO`,
+    // and is read only after the call reports success. The host port is
+    // given back afterwards.
+    #[allow(deprecated)]
+    let info = unsafe {
+        let host = libc::mach_host_self();
+        let status = libc::host_statistics(host, libc::HOST_CPU_LOAD_INFO, info.as_mut_ptr().cast(), &mut count);
+        mach_port_deallocate(libc::mach_task_self(), host);
+        if status != libc::KERN_SUCCESS {
+            return None;
+        }
+        info.assume_init()
+    };
+    let ticks = info.cpu_ticks.map(u64::from);
+    let total: u64 = ticks.iter().sum();
+    Some(Ticks { busy: total.saturating_sub(ticks[libc::CPU_STATE_IDLE as usize]), total })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn ticks() -> Option<Ticks> {
+    None
 }
 
 /// `(MemTotal, MemAvailable)` in bytes from `/proc/meminfo`. A kernel too
 /// old to report `MemAvailable` (before 3.14) gives nothing rather than a
 /// guess.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn memory(meminfo: &str) -> Option<(u64, u64)> {
     let kib = |name: &str| {
         meminfo.lines().find_map(|line| {
@@ -172,15 +275,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phase2_desktop_contract_resources_keep_bytes_ms_and_cpu_unavailable() {
+    fn phase2_desktop_contract_resources_keep_bytes_ms_and_cpu_readings() {
         let dir = tempfile::tempdir().unwrap();
         let value = observe(dir.path());
         assert_eq!(value["v"], 1);
         assert!(value["observedAt"].as_i64().unwrap() > 1_000_000_000_000);
-        assert!(value.get("cpu").is_none(), "v1 does not negotiate CPU telemetry");
+        assert!(value["cpu"]["cores"].as_u64().unwrap() >= 1);
         assert_eq!(memory("MemTotal: 42 kB\nMemAvailable: 20 kB\n"), Some((42 * 1024, 20 * 1024)));
         assert_eq!(observe(&dir.path().join("absent"))["storage"], Value::Null);
         assert_eq!(within_limit(None, None), None);
+    }
+
+    #[test]
+    fn processor_use_is_the_busy_share_of_the_time_between_two_readings() {
+        let first = stat_ticks("cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 1 2 3 4\n").unwrap();
+        assert_eq!(first, Ticks { busy: 150, total: 1000 });
+        let second = stat_ticks("cpu  200 0 100 1100 100 0 0 0 0 0\n").unwrap();
+        // 150 busy of 500 ticks: idle and iowait are not busy.
+        assert_eq!(usage(first, second), Some(0.3));
+        // No time passed, or the counters went back (a new boot): no figure, not a guess.
+        assert_eq!(usage(second, second), None);
+        assert_eq!(usage(second, first), None);
+        assert_eq!(stat_ticks("intr 1 2 3\n"), None);
+    }
+
+    #[test]
+    fn the_processor_reading_names_its_cores_and_a_use_between_zero_and_one() {
+        // The previous reading is process-wide, so whether a call is the
+        // first is not known here; `usage` itself is tested above.
+        let reading = cpu();
+        assert!(reading["cores"].as_u64().unwrap() >= 1);
+        for reading in [reading, cpu()] {
+            if let Some(usage) = reading["usage"].as_f64() {
+                assert!((0.0..=1.0).contains(&usage));
+            }
+        }
     }
 
     #[test]

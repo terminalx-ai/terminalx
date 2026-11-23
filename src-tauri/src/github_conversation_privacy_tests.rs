@@ -16,7 +16,7 @@ fn privacy_conversation_entrypoints_keep_one_authority() {
             .args(["--exact", "github_process::tests::conversation::conversation_privacy_child", "--nocapture"])
             .env("TERMINALX_TEST_CONVERSATION_PRIVACY", kind)
             .env_remove("TERMINALX_TEST_MANAGED_PRIVACY")
-            .env("TERMINALX_HOME", root.path().canonicalize().unwrap()).output().unwrap();
+            .env("TERMINALX_HOME", root.path().canonical().unwrap()).output().unwrap();
         assert!(output.status.success(), "{kind}\n{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         print!("{}", String::from_utf8_lossy(&output.stdout));
     }
@@ -40,11 +40,14 @@ fi
 case "$*" in
  'repo view '*) printf '{"url":"https://github.com/acme/widgets"}\n' ;;
  *'assignableUsers('*) printf '{"data":{"repository":{"assignableUsers":{"nodes":[{"login":"ada"}]}}}}\n' ;;
+ *'updatePullRequest(input:'*)
+   printf 'mutation\n' >> "$TERMINALX_HOME/mutations"
+   printf '{"data":{"updatePullRequest":{"pullRequest":{"id":"PR_fixture"}}}}\n' ;;
  'api graphql '*)
    case " $* " in *' timeline=next '*) exec /bin/cat "$TERMINALX_HOME/page2" ;; *) exec /bin/cat "$TERMINALX_HOME/page1" ;; esac ;;
- 'pr view '*) printf '{"title":"Title","body":"Body"}\n' ;;
+ 'pr view '*) printf '{"id":"PR_fixture","url":"https://github.com/acme/widgets/pull/799","title":"Title","body":"Body"}\n' ;;
  'api --hostname github.com user') printf '{"type":"User","login":"reviewer"}\n' ;;
- 'pr edit '*|'pr review '*|*'requested_reviewers'*) printf 'mutation\n' >> "$TERMINALX_HOME/mutations" ;;
+ 'pr review '*|*'requested_reviewers'*) printf 'mutation\n' >> "$TERMINALX_HOME/mutations" ;;
  *) printf 'Unexpected gh call: %s\n' "$*" >&2; exit 9 ;;
 esac
 "#).unwrap();

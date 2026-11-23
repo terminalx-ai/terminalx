@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SESSION_STATUSES, sessionStatus, statusText, type SessionStatusInput, type StatusTab } from "@terminalx/portable/sessionStatus";
 import type { SessionSummary } from "./host-api";
-import { branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime } from "./session-list";
+import { agoTime, branchChats, chatRows, filterCounts, listSections, projectGroups, QUICK_CHATS, rowStatus, shortTime, spokenTime, withPinnedCloud, type CloudPinRow, type ListRow, type RowSection } from "./session-list";
+import { bucketSessions } from "@terminalx/portable/dashboard";
 
 const session = (id: string, fields: Partial<SessionSummary> = {}): SessionSummary => ({
   id, title: `Chat ${id}`, project: "terminalx", worktree: `branch-${id}`, modified: "2026-11-07T10:00:00Z",
@@ -57,6 +58,8 @@ describe("a row's status", () => {
     expect(row.status.words).toBe("Needs your answer");
     expect(row.needsYou).toBe(true);
     expect(row.tabs.map((tab) => tab.status.words)).toEqual(["No changes", "Working", "Needs your answer"]);
+    // A tab whose turn finished shows Done's tick; the session's own row still reads the branch (22.04).
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["done", "working", "answer"]);
     // A tap opens the tab that is waiting.
     expect(row.tabId).toBe("mixed-t2");
     const working = one(reported("w", [{ status: "idle" }, { status: "waiting", activity: "needs_permission" }, { status: "in_progress" }]));
@@ -68,6 +71,12 @@ describe("a row's status", () => {
     expect([row.status.words, row.status.mark, row.needsYou, row.tabId]).toEqual(["Needs you", "answer", true, "b"]);
   });
 
+  it("keeps an idle tab's mark idle, and a finished one-tab session's row on the branch's word", () => {
+    const row = one(reported("two", [{ status: "idle" }, { status: "completed" }]));
+    expect(row.tabs.map((tab) => tab.status.mark)).toEqual(["idle", "done"]);
+    expect(one(reported("n", [{ status: "completed" }])).status.mark).toBe("idle");
+  });
+
   it("never shows the linked issue's state", () => {
     const row = one(reported("i", [{ status: "idle" }], {}, { issueRef: "PRO-986" }));
     expect(JSON.stringify([row.title, row.status.words, row.branch])).not.toMatch(/Backlog|PRO-986/);
@@ -75,6 +84,20 @@ describe("a row's status", () => {
 });
 
 describe("the session list", () => {
+  it("agrees with the desktop board on outstanding background work as it clears", () => {
+    const active = reported("active", [{ status: "in_progress" }]);
+    const background = reported("background", [{ status: "completed", activity: "background" }]);
+    const compare = (items: SessionSummary[]) => {
+      const rows = chatRows(items);
+      const desktop = items.map((item) => ({ ...item, projectPath: "/project", cwd: "/project", archived: false }));
+      const working = bucketSessions(desktop).working.map((item) => item.id).sort();
+      expect(filterCounts(rows).working).toBe(working.length);
+      expect(listSections(rows, "working").flatMap((section) => section.data.map((row) => row.session.id)).sort()).toEqual(working);
+      return working;
+    };
+    expect(compare([active, background])).toEqual(["active", "background"]);
+    expect(compare([active, reported("background", [{ status: "completed" }])])).toEqual(["active"]);
+  });
   it("puts sessions that wait on the person first, then by last activity", () => {
     const rows = chatRows([
       session("old", { modified: "2026-11-01T10:00:00Z" }),
@@ -163,6 +186,81 @@ describe("the list's sections and filters", () => {
   });
 });
 
+describe("sessions pinned on the Mac (#1403)", () => {
+  const sessions = [
+    reported("asks", [{ status: "waiting", activity: "needs_answer" }], {}, { project: "beta", pinned: true, modified: "2026-11-07T09:58:00Z" }),
+    reported("works", [{ status: "in_progress" }], {}, { project: "alpha", pinned: true, modified: "2026-11-07T10:00:00Z" }),
+    reported("old", [{ status: "idle" }], {}, { project: "beta", pinned: true, modified: "2026-11-06T10:00:00Z" }),
+    reported("loose", [{ status: "idle" }], {}, { project: "alpha", modified: "2026-11-07T09:00:00Z" }),
+    reported("other", [{ status: "idle" }], {}, { project: "beta", modified: "2026-11-07T08:00:00Z" }),
+  ];
+  const shape = (sections: RowSection<ListRow>[]) => sections.map((section) => [section.title, section.data.map((row) => row.key)]);
+  const all = shape(listSections(chatRows(sessions), "all"));
+
+  it("lists Needs you, then Pinned, newest first, then the projects, with no session twice", () => {
+    expect(all).toEqual([
+      ["Needs you", ["asks"]],
+      ["Pinned", ["works", "old"]],
+      ["alpha", ["loose"]],
+      ["beta", ["other"]],
+    ]);
+    const keys = all.flatMap(([, keys]) => keys as string[]);
+    expect(new Set(keys).size).toBe(keys.length);
+    // The pinned session waiting on the person keeps its pin, in Needs you.
+    expect(one(sessions[0]).pinned).toBe(true);
+  });
+
+  it("lists the list as before for a Mac that sends no pins", () => {
+    const older = sessions.map(({ pinned: _pinned, ...rest }) => rest);
+    expect(chatRows(older).every((row) => !row.pinned && row.pinnedRank === null)).toBe(true);
+    expect(shape(listSections(chatRows(older), "all"))).toEqual([
+      ["Needs you", ["asks"]],
+      ["alpha", ["works", "loose"]],
+      ["beta", ["other", "old"]],
+    ]);
+  });
+
+  it("orders Pinned as the Mac's custom order places it", () => {
+    const ranked = [
+      ...sessions.slice(0, 3).map((value, index) => ({ ...value, pinnedRank: [2, 1, 0][index] })),
+      // A rank on a session that is not pinned means nothing.
+      { ...sessions[3], pinnedRank: 5 },
+      sessions[4],
+    ];
+    expect(shape(listSections(chatRows(ranked), "all"))[1]).toEqual(["Pinned", ["old", "works"]]);
+    expect(chatRows(ranked).find((row) => row.key === "loose")?.pinnedRank).toBeNull();
+  });
+
+  it("keeps pinned sessions in their projects under Working and in a search", () => {
+    expect(shape(listSections(chatRows(sessions), "working"))).toEqual([["alpha", ["works"]]]);
+    expect(shape(listSections(chatRows(sessions, "chat"), "all", true))).toEqual([
+      ["Needs you", ["asks"]],
+      ["alpha", ["works", "loose"]],
+      ["beta", ["other", "old"]],
+    ]);
+  });
+
+  const cloud = (id: string, time: number): CloudPinRow => ({
+    kind: "cloud", key: `cloud:org-1:${id}`, orgId: "org-1", identity: "github.com/acme/web", title: id, time,
+    item: { workspace: { id, orgId: "org-1", name: id, state: "running" } } as CloudPinRow["item"],
+  });
+
+  it("adds the pinned cloud workspaces to Pinned, by activity, or after the Mac's own in its custom order", () => {
+    const works = Date.parse("2026-11-07T10:00:00Z");
+    const sections = listSections(chatRows(sessions), "all");
+    const withCloud = withPinnedCloud(sections, [cloud("early", works - 1), cloud("late", works + 1)], "all");
+    expect(shape(withCloud)[1]).toEqual(["Pinned", ["cloud:org-1:late", "works", "cloud:org-1:early", "old"]]);
+    const ranked = listSections(chatRows(sessions.map((value, index) => index < 3 ? { ...value, pinnedRank: index } : value)), "all");
+    expect(shape(withPinnedCloud(ranked, [cloud("late", works + 1)], "all"))[1]).toEqual(["Pinned", ["works", "old", "cloud:org-1:late"]]);
+    // Nothing of the Mac's own pinned: the section is made for the cloud ones, after Needs you.
+    const unpinned = listSections(chatRows(sessions.map((value) => ({ ...value, pinned: false }))), "all");
+    expect(shape(withPinnedCloud(unpinned, [cloud("late", 0)], "all")).map(([title]) => title)).toEqual(["Needs you", "Pinned", "alpha", "beta"]);
+    // Only All, out of a search, has a Pinned section.
+    expect(withPinnedCloud(unpinned, [cloud("late", 0)], "working")).toBe(unpinned);
+    expect(withPinnedCloud(unpinned, [cloud("late", 0)], "all", true)).toBe(unpinned);
+  });
+});
+
 describe("the sessions by project", () => {
   it("lists the most recently active project first, quick chats last", () => {
     const groups = projectGroups(chatRows([
@@ -183,6 +281,17 @@ describe("when, as a chat list says it", () => {
     expect(shortTime(now - 3 * 3_600_000, now)).toBe("3h");
     expect(shortTime(now - 3 * 86_400_000, now)).toMatch(/^\p{L}+/u);
     expect(shortTime(0, now)).toBe("");
+  });
+
+  it("says days as days ago where there is room, as the Cloud list does (22.06)", () => {
+    const now = Date.UTC(2026, 10, 16, 10, 25);
+    expect(agoTime(now - 6 * 60_000, now)).toBe("6m");
+    expect(agoTime(now - 5 * 3_600_000, now)).toBe("5h");
+    expect(agoTime(now - 30 * 3_600_000, now)).toBe("1 day ago");
+    expect(agoTime(now - 2 * 86_400_000, now)).toBe("2 days ago");
+    expect(agoTime(now - 3 * 86_400_000 - 60_000, now)).toBe("3 days ago");
+    expect(agoTime(now - 8 * 86_400_000, now)).toBe(shortTime(now - 8 * 86_400_000, now));
+    expect(agoTime(0, now)).toBe("");
   });
 
   it("says the time in words for VoiceOver", () => {

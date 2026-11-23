@@ -2,7 +2,9 @@
 // PRO-306: Settings → Agents in the desktop's WebKit engine, in the states
 // the design screens show: an API key saved (10.19), removed (10.20), and
 // imported from the login shell into Codex (10.21), plus the offer before
-// an import, a key the provider refused and Codex's custom provider. Each
+// an import, a key the provider refused and Codex's custom provider; and
+// (#980) Add account with only This Mac's login, then several accounts and
+// Remove naming the tabs that run on one. Each
 // state must fit the Settings column with nothing overlapping, and a
 // picture of each is written to $AGENT_LOGIN_SHOTS (default /tmp).
 import { launch, open, report, serve } from "./harness.mjs";
@@ -28,6 +30,26 @@ const backend = `(() => {
     },
     offers: { codex: { variable: "OPENAI_API_KEY", file: "~/.zshrc" } },
     tabs: { claude: [{ sessionId: "s1", tabId: "t1", current: true }, { sessionId: "s2", tabId: "t2", current: true }], codex: [] },
+    // #980: added accounts, as the core keeps them (none at first), and the default chosen among them.
+    accounts: { claude: [], codex: [] },
+    defaults: {},
+  };
+  // The list as agent_accounts::view answers it: This Mac's login, the saved key while there is one, then the added accounts.
+  const accounts = (harness) => {
+    const login = state.logins[harness];
+    const exists = (id) => id === "local" || (id === "api-key" && !!login.saved) || state.accounts[harness].some((account) => account.id === id);
+    const chosen = exists(state.defaults[harness]) ? state.defaults[harness] : login.mode === "api_key" && login.saved ? "api-key" : "local";
+    const base = { agent: harness, email: null, plan: null, organization: null, local: false, missing: false, addedAt: null };
+    return {
+      agent: harness,
+      defaultAccount: chosen,
+      projectDefaults: {},
+      accounts: [
+        { ...base, id: "local", kind: "subscription", label: "This Mac's login", local: true, isDefault: chosen === "local" },
+        ...(login.saved ? [{ ...base, id: "api-key", kind: "apiKey", label: "API key", isDefault: chosen === "api-key", addedAt: login.saved.savedAt }] : []),
+        ...state.accounts[harness].map((account) => ({ ...base, ...account, isDefault: chosen === account.id })),
+      ],
+    };
   };
   const masked = (harness) => harness === "claude" ? "sk-ant-api03-" + "•".repeat(24) + "4f2a" : "sk-proj-" + "•".repeat(24) + "9Qx1";
   const stale = (harness) => { state.tabs[harness] = state.tabs[harness].map((tab) => ({ ...tab, current: false })); };
@@ -35,16 +57,26 @@ const backend = `(() => {
   answers.list_harnesses = ${JSON.stringify(harnesses)};
   answers.check_agent_readiness = ({ harness }) => harness === "opencode" ? { state: "missing", checkedAt: now(), version: null } : ready(harness);
   answers.agent_setup_running = null;
+  // PRO-377: the latest releases, for "· up to date" beside the version.
+  answers.agent_latest_version = ({ harness }) => harness === "claude" ? "2.3.41" : harness === "codex" ? "0.167.0" : null;
   answers.agent_login_status = ({ harness }) => state.logins[harness];
   answers.agent_login_shell_offer = ({ harness }) => state.offers[harness] ?? null;
   answers.agent_login_save_key = log("save", ({ harness }) => { state.logins[harness] = { ...state.logins[harness], mode: "api_key", saved: { masked: masked(harness), savedAt: now() }, verified: undefined }; stale(harness); return state.logins[harness]; });
   answers.agent_login_verify = log("verify", ({ harness }) => { const verified = { ...state.verify, checkedAt: now() }; state.logins[harness] = { ...state.logins[harness], verified }; return verified; });
   answers.agent_login_remove_key = log("remove", ({ harness }) => { state.logins[harness] = { ...state.logins[harness], mode: "subscription", saved: undefined, verified: undefined }; return state.logins[harness]; });
-  answers.agent_login_set_mode = log("mode", ({ harness, mode }) => { state.logins[harness] = { ...state.logins[harness], mode }; return state.logins[harness]; });
+  answers.agent_login_set_mode = log("mode", ({ harness, mode }) => { state.logins[harness] = { ...state.logins[harness], mode }; delete state.defaults[harness]; return state.logins[harness]; });
   answers.agent_login_import_shell = log("import", ({ harness }) => { state.logins[harness] = { ...state.logins[harness], mode: "api_key", saved: { masked: masked(harness), savedAt: now(), fromShell: { file: state.offers[harness].file } } }; state.offers[harness] = null; stale(harness); return state.logins[harness]; });
   answers.agent_login_dismiss_shell = log("dismiss", ({ harness }) => { state.offers[harness] = null; return null; });
   answers.agent_login_set_base_url = log("baseUrl", ({ harness, baseUrl }) => { state.logins[harness] = { ...state.logins[harness], baseUrl: baseUrl ? baseUrl.replace(/\\/$/, "") : undefined }; return state.logins[harness]; });
   answers.agent_login_tabs = ({ harness }) => state.tabs[harness];
+  answers.agent_accounts_list = ({ harness }) => accounts(harness);
+  answers.agent_accounts_readiness = ({ accountId }) => accountId.startsWith("1f") ? { ...ready("claude"), account: "ada@work.example", plan: "team" } : { state: "signed_out", checkedAt: now(), version: "2.3.41" };
+  answers.agent_accounts_remove = log("removeAccount", ({ harness, accountId, confirmed }) => {
+    const runningTabs = state.tabs[harness].filter((tab) => tab.account === accountId);
+    if (runningTabs.length && !confirmed) return { removed: false, runningTabs, accounts: accounts(harness) };
+    state.accounts[harness] = state.accounts[harness].filter((account) => account.id !== accountId);
+    return { removed: true, runningTabs, accounts: accounts(harness) };
+  });
 })();`;
 
 /** Whether the Agents panel and the toasts fit, with no two buttons on top of each other. */
@@ -95,6 +127,7 @@ try {
   await check("Claude Code signed in", ({ text }) => ({
     "the sign-in choice names the variable": /Claude subscriptionclaude \/loginAPI keyANTHROPIC_API_KEY/.test(text),
     "the Login row says which login": text.includes("LoginClaude Max · ada@example.com") && text.includes("OrganizationAcme"),
+    "the version is up to date": text.includes("Version2.3.41 · up to date"),
   }));
 
   // 10.19: a key saved, verified, and the running tabs counted.
@@ -109,6 +142,7 @@ try {
     "the key is masked, with Saved and Remove": text.includes("sk-ant-api03-••••••••••••••••••••••••4f2a") && text.includes("Saved") && text.includes("Remove"),
     "the Keychain line": text.includes("Kept in the Keychain. TerminalX passes it to Claude Code when a tab starts, in place of ANTHROPIC_API_KEY."),
     "the Login row says API key, the variable and Keychain": text.includes("LoginAPI key · ANTHROPIC_API_KEY · Keychain"),
+    "the Organization row stays with a key (PRO-377)": text.includes("OrganizationAcme"),
   }));
   failed += report("saved toast", {
     "says new tabs use it and how many keep their login": /New Claude Code tabs use it\. 2 running tabs keep their current login until you restart them\./.test(await saved.textContent()),
@@ -126,7 +160,12 @@ try {
     "signed in with the account": text.includes("Signed in") && text.includes("LoginClaude Max · ada@example.com"),
     "no key field is left": !text.includes("Anthropic API key"),
   }));
-  failed += report("removed toast", { "says where the key went and which login new tabs use": /Deleted from the Keychain\. New tabs sign in with Claude Max \(ada@example\.com\)\./.test(await removed.textContent()) });
+  failed += report("removed toast", {
+    "says where the key went and which login new tabs use": /Deleted from the Keychain\. New tabs sign in with Claude Max \(ada@example\.com\)\./.test(await removed.textContent()),
+    // #1130: the two tabs still on the key are named, with what they cost and what removal leaves undone.
+    "says the running tabs keep their login and may still be billed to it, and that the key is not revoked (#1130)": (await removed.textContent()).endsWith("New tabs sign in with Claude Max (ada@example.com). 2 running tabs keep their current login until you restart them. Usage in these tabs may still be billed to their current login. This does not revoke the key with your provider."),
+    "has no restart offer (PRO-377)": (await removed.getByRole("button", { name: /Restart/ }).count()) === 0,
+  });
   await removed.getByRole("button", { name: "Dismiss" }).click();
 
   // A key the provider refuses.
@@ -159,6 +198,8 @@ try {
     "the From your shell note names the file": text.includes("From your shellFound in your login shell (~/.zshrc). A copy is now in the Keychain, so it works without that file."),
     "the key is masked with Remove": text.includes("sk-proj-••••••••••••••••••••••••9Qx1") && text.includes("Remove"),
     "the Config and Executable rows": text.includes("Config~/.codex/config.toml") && text.includes("Executable/opt/homebrew/bin/codex"),
+    "no second Keychain note under the imported key (PRO-377)": !text.includes("Kept in the Keychain"),
+    "the version names the newer release": text.includes("Version0.166.0 · 0.167.0 available"),
   }));
   failed += report("imported toast", { "says Codex uses it and the user can switch back": /Codex uses it in new tabs\. Switch back to ChatGPT any time\./.test(await imported.textContent()) });
   await imported.getByRole("button", { name: "Dismiss" }).click();
@@ -170,6 +211,50 @@ try {
   await page.getByRole("button", { name: /Custom provider\s*https:\/\/llm\.example\.com\/v1/ }).waitFor();
   await shoot("codex-custom-provider");
   await check("Codex custom provider", ({ text }) => ({ "the address is shown": text.includes("https://llm.example.com/v1") && text.includes("Use OpenAI") }));
+
+  // #980, This Mac's login only: the panel as before, with Add account below it.
+  await page.getByRole("tab", { name: /Claude Code/ }).click();
+  await page.getByRole("button", { name: "Add account" }).waitFor();
+  await check("Claude Code with This Mac's login only (#980)", ({ text }) => ({
+    "no account list": !text.includes("Claude Code accounts") && !text.includes("Make default"),
+    "Add account is offered": text.includes("Add account"),
+  }));
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByRole("region", { name: "Add a Claude Code account" }).waitFor();
+  await shoot("accounts-add");
+  await check("Add a Claude Code account (#980)", ({ text }) => ({
+    "says why a Console sign-in is not offered": text.includes("A Claude Console sign-in without an API key cannot be a second account"),
+    "says MCP OAuth sign-ins do not follow": text.includes("not their OAuth sign-ins"),
+  }));
+  await page.getByRole("region", { name: "Add a Claude Code account" }).getByRole("button", { name: "Cancel", exact: true }).click();
+
+  // Several accounts, one of them with running tabs.
+  await page.evaluate(() => {
+    const state = window.__AGENT_LOGINS__;
+    state.accounts.claude = [
+      { id: "1f0c9a7e3b2d4c5a", kind: "subscription", label: "ada@work.example · team", email: "ada@work.example", plan: "team", organization: "Acme Corporation Worldwide", addedAt: "2026-11-15T09:00:00Z" },
+      { id: "7a6b5c4d3e2f1a0b", kind: "subscription", label: "A long label someone gave their side project account", email: "ada@side.example", plan: "pro", addedAt: "2026-11-15T09:10:00Z" },
+    ];
+    state.tabs.claude = [{ sessionId: "s1", tabId: "t1", current: true, account: "1f0c9a7e3b2d4c5a" }, { sessionId: "s2", tabId: "t2", current: true, account: "local" }];
+  });
+  await page.getByRole("button", { name: "Re-check" }).click();
+  const list = page.getByRole("list", { name: "Claude Code accounts" });
+  await list.getByText("ada@work.example · Team · Acme Corporation Worldwide · Signed in").waitFor();
+  await shoot("accounts-several");
+  const againButtons = await list.getByRole("button", { name: /^Sign in again/ }).count();
+  await check("Claude Code with several accounts (#980)", ({ text }) => ({
+    "each account with its kind, default and state": text.includes("This Mac's loginSubscription") && text.includes("API keyAPI keyDefault") && text.includes("Sign in required"),
+    "only added subscriptions sign in again": againButtons === 2,
+  }));
+  await list.getByRole("button", { name: "Remove ada@work.example · team" }).click();
+  await list.getByRole("group", { name: "Remove ada@work.example · team?" }).waitFor();
+  await shoot("accounts-remove");
+  const removedEarly = await page.evaluate(() => window.__AGENT_LOGINS__.calls.includes("removeAccount"));
+  await check("Remove names the running tabs first (#980)", ({ text }) => ({
+    "the tab is counted": text.includes("1 running tab uses it"),
+    "nothing removed before confirming": !removedEarly,
+  }));
+  await list.getByRole("button", { name: "Keep it" }).click();
 
   // Another agent: install and sign in, as before.
   await page.getByRole("tab", { name: /OpenCode/ }).click();

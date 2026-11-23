@@ -99,7 +99,7 @@ impl Cli {
 impl Rig {
     fn compose_confirmed(&self, text: &str) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, Vec::new(), self._dir.path().to_str().unwrap(), Some(tx));
         rx
     }
@@ -131,7 +131,7 @@ impl Rig {
     /// The composer's half of a send: everything `send` does short of
     /// starting the CLI and typing. Says whether the prompt was queued.
     fn compose(&self, text: &str, images: usize) -> bool {
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: text.into(), display: text.into() };
         let images = (0..images).map(|i| ImageRef { url: format!("attachments/s/{i}.png"), media_type: Some("image/png".into()), name: None }).collect();
         let cwd = self._dir.path().to_string_lossy().into_owned();
         let queued = self.manager.record_composer_prompt(&mut self.rt.lock().unwrap(), &prompt, images, &cwd, None).1;
@@ -513,8 +513,9 @@ fn a_prompt_acknowledged_in_time_is_never_flagged() {
 
 /// A follow-up sent while a turn runs is the CLI's to hold. If the turn ends
 /// and the CLI still has not taken it, it may be sitting in the CLI's input:
-/// the reader is told, and the words typed into the terminal afterwards are
-/// a message of their own rather than that one's echo.
+/// the reader is told. When the CLI does take it, however late, its record
+/// is that message (#1284): the Queued card becomes the turn's prompt, never
+/// a card left waiting beside a second bubble of the same words.
 #[test]
 fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
     for kind in BOTH {
@@ -537,8 +538,298 @@ fn a_queued_prompt_the_cli_never_takes_is_flagged_once_its_turn_is_over() {
         assert_eq!(rig.told(), ["user: start", "queued: and then this", "reply: one", "end"], "{kind:?}: nothing sent again");
 
         rig.cli_takes("and then this");
+        rig.cli_replies("two");
         assert_eq!(rig.banner(), None, "{kind:?}");
-        assert_eq!(rig.told().last().unwrap(), "user: and then this", "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: and then this", "reply: one", "end", "reply: two", "end"], "{kind:?}: one message, and its reply");
+        assert_eq!(rig.taken_as_prompts(), ["and then this"], "{kind:?}: the card is the next turn's prompt");
+    }
+}
+
+/// #1284, on a native Codex tab: a follow-up queued behind a turn whose wait
+/// ran out — the tab saw the turn end, and the CLI went on holding the
+/// message — and that Codex then takes and answers, one turn after another.
+/// The chat had kept the Queued card, drawn a second bubble of the same
+/// words as a prompt typed into the terminal, and lost track of the turns
+/// after it. Taken late, it is still the reader's message: the card clears
+/// into the turn that answers it, and every reply after it is drawn.
+#[test]
+fn a_queued_codex_follow_up_taken_after_its_wait_ran_out_is_one_message_and_every_reply_is_drawn() {
+    let rig = Rig::of(CliKind::Codex, "");
+    rig.compose("start", 0);
+    rig.cli_takes("start");
+    assert!(rig.compose("check the tests", 0));
+    rig.enter_written();
+    rig.cli_replies("one");
+    rig.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+    rig.tick();
+    rig.tick();
+    let queued = rig.queued_seq("check the tests");
+
+    rig.cli_takes("check the tests");
+    rig.cli_replies("the tests pass");
+    assert!(!rig.compose("check the tests", 0), "the CLI is idle: sent again, it starts a turn");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+    assert!(!rig.compose("thanks", 0));
+    rig.cli_takes("thanks");
+    rig.cli_replies("welcome");
+
+    assert_eq!(rig.banner(), None);
+    assert_eq!(rig.told(), [
+        "user: start", "queued: check the tests", "reply: one", "end",
+        "reply: the tests pass", "end",
+        "user: check the tests", "reply: still passing", "end",
+        "user: thanks", "reply: welcome", "end",
+    ]);
+    assert!(rig.events().iter().any(|e| matches!(e.payload, Payload::TurnStarted { prompt_seq: Some(seq), .. } if seq == queued)), "the card is cleared into the turn that answers it");
+    // The lapsed message is matched once: the same words sent again are a
+    // message of their own.
+    assert_eq!(rig.taken_as_prompts(), ["check the tests"]);
+}
+
+impl Rig {
+    /// A follow-up queued behind a turn that ends without the CLI taking
+    /// it, left waiting until its wait runs out (#1284). Its `seq`.
+    fn queue_and_lapse(&self, text: &str) -> u64 {
+        self.compose("start", 0);
+        self.cli_takes("start");
+        assert!(self.compose(text, 0));
+        self.enter_written();
+        self.cli_replies("one");
+        self.advance(QUEUED_ECHO_GRACE + Duration::from_secs(60));
+        self.tick();
+        self.tick();
+        assert_eq!(self.banner(), Some(RecoveryKind::DeliveryUnconfirmed));
+        self.queued_seq(text)
+    }
+
+    /// The `seq` of the message each turn was started for, in order.
+    fn turn_prompt_seqs(&self) -> Vec<u64> {
+        self.events().iter().filter_map(|e| match e.payload { Payload::TurnStarted { prompt_seq, .. } => prompt_seq, _ => None }).collect()
+    }
+}
+
+/// #1335: a queued prompt lapses, the CLI had discarded it, and the reader
+/// sends the same words again from the composer. The CLI takes that one;
+/// the lapsed card is not owed those words any more. The same words typed
+/// into the terminal after are a message of their own, never the old
+/// card's.
+#[test]
+fn words_sent_again_from_the_composer_retire_the_lapsed_prompt_they_repeat() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}: the CLI is idle: sent again, it starts a turn");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told(), [
+            "user: start", "queued: check the tests", "reply: one", "end",
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}: the prompt typed in the terminal is drawn as its own message");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: no turn is the lapsed card's");
+    }
+}
+
+/// #1335: a queued prompt lapses, and the conversation changes under the
+/// tab — a `/clear` opens a new transcript, which the hooks name. A prompt
+/// there with the lapsed one's words belongs to the new conversation.
+#[test]
+fn a_lapsed_prompt_is_not_matched_in_the_conversation_after_a_reset() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        let cleared = rig.transcript.with_file_name("after-clear.jsonl");
+        std::fs::write(&cleared, "").unwrap();
+        rig.tail.retarget(&cleared);
+        rig.hook("UserPromptSubmit", json!({ "prompt": "check the tests" }));
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&cleared).unwrap().write_all(rig.cli().prompt("check the tests").as_bytes()).unwrap();
+        }
+        rig.manager.pump(&rig.rt, &rig.tail);
+
+        assert_eq!(rig.told()[4..], ["user: check the tests"], "{kind:?}: a message of the new conversation");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: no turn is the lapsed card's");
+    }
+}
+
+/// #1335, beside the two above: with nothing sent again and the
+/// conversation unchanged, a late take is still the lapsed message (#1284).
+#[test]
+fn a_lapsed_prompt_taken_late_in_its_own_conversation_is_still_that_message() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        assert_eq!(rig.told(), ["user: start", "queued: check the tests", "reply: one", "end", "reply: they pass", "end"], "{kind:?}");
+        assert!(rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: the card is cleared into the turn that answers it");
+    }
+}
+
+impl Rig {
+    /// The `seq`s of the messages the chat was told were withdrawn with
+    /// their delivery unconfirmed.
+    fn unconfirmed_seqs(&self) -> Vec<u64> {
+        self.events().iter().filter_map(|e| match e.payload { Payload::PromptWithdrawn { prompt_seq, unconfirmed: true } => Some(prompt_seq), _ => None }).collect()
+    }
+}
+
+/// #1385: the same words sent again reach the CLI inside a longer prompt,
+/// or changed by an idle CLI. That record is the new message's, so the
+/// lapsed one with those words is retired all the same: the same words
+/// typed into the terminal after are a message of their own, never the old
+/// card's.
+#[test]
+fn words_sent_again_and_recorded_joined_or_changed_retire_the_lapsed_prompt() {
+    for recorded in ["check the tests and then run lint", "check all of the tests"] {
+        let kind = CliKind::Claude;
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}: the CLI is idle: sent again, it starts a turn");
+        rig.enter_written();
+        rig.append(&rig.cli().prompt(recorded));
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], [
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}, {recorded}: the prompt typed in the terminal is drawn as its own message");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}, {recorded}: no turn is the lapsed card's");
+    }
+}
+
+/// #1385 review: the resend said more than the lapsed prompt, and an idle
+/// CLI recorded it as the lapsed prompt's words. The record was the new
+/// message's, so the lapsed one is retired by the record as before: the
+/// same words typed into the terminal after are a message of their own.
+#[test]
+fn a_resend_recorded_as_the_lapsed_prompts_words_retires_it() {
+    let rig = Rig::of(CliKind::Claude, "");
+    let lapsed = rig.queue_and_lapse("check the tests");
+
+    assert!(!rig.compose("check the tests please", 0));
+    rig.enter_written();
+    rig.append(&rig.cli().prompt("check the tests"));
+    rig.cli_replies("they pass");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+
+    assert_eq!(rig.told()[4..], [
+        "user: check the tests please", "reply: they pass", "end",
+        "user: check the tests", "reply: still passing", "end",
+    ], "the prompt typed in the terminal is drawn as its own message");
+    assert!(!rig.turn_prompt_seqs().contains(&lapsed), "no turn is the lapsed card's");
+}
+
+/// #1385 on Codex, which delivers prompts queued together as one record:
+/// the same words sent again go in such a batch, and retire the lapsed
+/// prompt they repeat as surely as a record of their own would.
+#[test]
+fn words_sent_again_and_delivered_in_a_codex_batch_retire_the_lapsed_prompt() {
+    let rig = Rig::of(CliKind::Codex, "");
+    let lapsed = rig.queue_and_lapse("check the tests");
+
+    assert!(!rig.compose("look around", 0));
+    rig.cli_takes("look around");
+    assert!(rig.compose("check the tests", 0));
+    rig.enter_written();
+    assert!(rig.compose("and run lint", 0));
+    rig.enter_written();
+    rig.append(&rig.cli().steer("check the tests\nand run lint"));
+    rig.cli_replies("they pass");
+    rig.cli_takes("check the tests");
+    rig.cli_replies("still passing");
+
+    assert_eq!(rig.told().iter().filter(|line| *line == "user: check the tests").count(), 1, "the prompt typed in the terminal is drawn as its own message");
+    assert!(!rig.turn_prompt_seqs().contains(&lapsed), "no turn is the lapsed card's");
+}
+
+/// #1386: a queued prompt lapses, the reader sends the same words again,
+/// and two records with those words follow: the CLI may have taken the
+/// lapsed one after all, before or after the new one, or the second may be
+/// typed in the terminal. Words cannot tell which. Each record is drawn as
+/// what the agent received; the new message is matched to one; the lapsed
+/// card is told its delivery was not confirmed, neither left Queued nor
+/// handed a record that may be another prompt's.
+#[test]
+fn a_lapsed_prompt_and_the_same_words_sent_again_leave_the_lapsed_delivery_unconfirmed() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.cli_takes("check the tests");
+        assert_eq!(rig.unconfirmed_seqs(), [lapsed], "{kind:?}: the card says its delivery was not confirmed");
+        rig.cli_replies("they pass");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], [
+            "user: check the tests", "reply: they pass", "end",
+            "user: check the tests", "reply: still passing", "end",
+        ], "{kind:?}: both records are drawn");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}: neither is certified as the lapsed card's");
+        assert_eq!(rig.unconfirmed_seqs(), [lapsed], "{kind:?}: said once");
+        assert_eq!(rig.banner(), None, "{kind:?}");
+    }
+}
+
+/// #1386, the other order: the CLI takes the lapsed prompt before the same
+/// words are sent again. Its record is that message, and the words sent
+/// after are a message of their own, with nothing left unconfirmed.
+#[test]
+fn a_lapsed_prompt_taken_before_the_same_words_are_sent_again_is_that_message() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+        rig.cli_takes("check the tests");
+        rig.cli_replies("they pass");
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.cli_takes("check the tests");
+        rig.cli_replies("still passing");
+
+        assert_eq!(rig.told()[4..], ["reply: they pass", "end", "user: check the tests", "reply: still passing", "end"], "{kind:?}");
+        assert_eq!(rig.turn_prompt_seqs().iter().filter(|seq| **seq == lapsed).count(), 1, "{kind:?}: the card is cleared into the turn that answers it");
+        assert!(rig.unconfirmed_seqs().is_empty(), "{kind:?}");
+    }
+}
+
+/// #1386 across a reset: the same words sent again in the conversation a
+/// `/clear` opened say nothing of the lapsed card, which belongs to the one
+/// before.
+#[test]
+fn the_same_words_sent_again_after_a_reset_leave_the_lapsed_card_alone() {
+    for kind in BOTH {
+        let rig = Rig::of(kind, "");
+        let lapsed = rig.queue_and_lapse("check the tests");
+
+        let cleared = rig.transcript.with_file_name("after-clear.jsonl");
+        std::fs::write(&cleared, "").unwrap();
+        rig.tail.retarget(&cleared);
+        assert!(!rig.compose("check the tests", 0), "{kind:?}");
+        rig.enter_written();
+        rig.hook("UserPromptSubmit", json!({ "prompt": "check the tests" }));
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&cleared).unwrap().write_all(rig.cli().prompt("check the tests").as_bytes()).unwrap();
+        }
+        rig.manager.pump(&rig.rt, &rig.tail);
+
+        assert_eq!(rig.told()[4..], ["user: check the tests"], "{kind:?}: one message, of the new conversation");
+        assert!(!rig.turn_prompt_seqs().contains(&lapsed), "{kind:?}");
+        assert!(rig.unconfirmed_seqs().is_empty(), "{kind:?}: the new conversation says nothing of the old card");
     }
 }
 
@@ -562,12 +853,14 @@ fn a_queued_prompt_the_cli_takes_is_never_flagged() {
 impl Rig {
     /// Run `script` in the tab's pane, in place of the CLI, once it has
     /// said `CLI-IS-UP`.
+    #[cfg(unix)]
     fn run_in_pane(&self, script: &str) {
         self.run_in_pane_sized(script, 80, 24);
     }
 
     /// [`Self::run_in_pane`], in a terminal `cols` by `rows`: the size a
     /// recording of a real CLI's screen was made at.
+    #[cfg(unix)]
     fn run_in_pane_sized(&self, script: &str, cols: u16, rows: u16) {
         let path = self._dir.path().join("cli.sh");
         std::fs::write(&path, script).unwrap();
@@ -579,6 +872,7 @@ impl Rig {
     }
 
     /// Wait until the chat has been told `said`, as [`Self::said`] puts it.
+    #[cfg(unix)]
     fn chat_says(&self, said: &str) {
         let deadline = Instant::now() + Duration::from_secs(120);
         while !self.said().iter().any(|line| line == said) {
@@ -588,11 +882,13 @@ impl Rig {
     }
 
     /// Whether the pane has printed `needle`, by now.
+    #[cfg(unix)]
     fn pane_has_said(&self, needle: &str) -> bool {
         String::from_utf8_lossy(&self.manager.terminals.read_output(&self.pane).unwrap_or_default()).contains(needle)
     }
 
     /// Wait until the pane has printed one of `needles`, and say which.
+    #[cfg(unix)]
     fn pane_says(&self, needles: &[&str]) -> String {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
@@ -607,6 +903,7 @@ impl Rig {
 
     /// Type the newest composer prompt into the pane as `send` would, its
     /// CLI having said it is up.
+    #[cfg(unix)]
     fn type_composed(&self, text: &str) -> u64 {
         let (ready, seq, stops) = {
             let rt = self.rt.lock().unwrap();
@@ -619,6 +916,7 @@ impl Rig {
     }
 
     /// Wait for the writer to let go of the pane: the typing is over.
+    #[cfg(unix)]
     fn typed(&self) {
         let writer = self.manager.writers.lock().unwrap().get(&self.pane).unwrap().clone();
         drop(writer.lock().unwrap());
@@ -930,7 +1228,7 @@ fn an_image_and_files_with_no_text_are_one_message_with_its_files() {
         let rig = Rig::of(kind, "");
         let files = vec![FileRef { path: "/h/attachments/s/k3f9qa/notes.md".into(), name: "notes.md".into(), media_type: None, size: None }];
         let agent = crate::attachments::with_block("", &files);
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: files.clone(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: agent.clone(), display: String::new() };
         let image = vec![ImageRef { url: "attachments/s/0.png".into(), media_type: Some("image/png".into()), name: None }];
         let cwd = rig._dir.path().to_string_lossy().into_owned();
         assert!(!rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, image, &cwd, None).1);
@@ -1596,10 +1894,10 @@ fn a_prompt_queued_long_before_its_turn_was_stopped_is_still_expected() {
 
 /// A CLI that keeps what was queued in its own input when its turn is
 /// stopped (as Claude Code did before it sent it): the reader is told the
-/// message was not sent, and the same words typed into the terminal later
-/// are a message of their own, not that one's echo.
+/// message was not sent. When it is sent from there after all, it is that
+/// message (#1284), not a second one beside a card that never clears.
 #[test]
-fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_swallows_nothing() {
+fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_still_that_message_when_sent() {
     for kind in BOTH {
         let rig = Rig::of(kind, "");
         rig.compose("start", 0);
@@ -1620,7 +1918,8 @@ fn a_queued_prompt_the_cli_kept_back_when_its_turn_was_stopped_is_flagged_and_sw
         rig.cli_takes("continue");
         rig.cli_replies("continuing");
         assert_eq!(rig.banner(), None, "{kind:?}");
-        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "user: continue", "reply: continuing", "end"], "{kind:?}");
+        assert_eq!(rig.told(), ["user: start", "queued: continue", "end", "reply: continuing", "end"], "{kind:?}");
+        assert_eq!(rig.taken_as_prompts(), ["continue"], "{kind:?}");
     }
 }
 
@@ -2378,7 +2677,7 @@ fn failed_restart_wait_blocks_only_its_unchanged_claim() {
         }
         if replaced { assert_eq!(rig.events(), before); }
         if !replaced {
-            let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
+            let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, agent: "must not start".into(), display: "must not start".into(), author: None, shared_connection: None };
             let error = rig.manager.send_impl(SESSION, TAB, prompt, vec![], None).expect_err("failed shutdown refuses new work");
             assert!(error.to_string().contains("Stop has not confirmed local process exit"), "unexpected internal refusal: {error:#}");
             assert_eq!(rig.rt.lock().unwrap().recovery, Some(RecoveryKind::Disconnected));
@@ -2401,6 +2700,7 @@ const DROPPED: &str = "so I want you to understand this scenario and create a pr
 const QUEUED: &str = "and same is happening when I am clicking any of the old sessions related that toolquant.";
 
 /// A message sent while the first waits on the input box.
+#[cfg(unix)]
 const LATER: &str = "and run the linter after that";
 
 /// A prompt as Claude Code 2.1.316 records it: chained to the record before
@@ -2440,7 +2740,7 @@ impl Rig {
                 Payload::PromptChanged { prompt_seq, text: received } => Some(format!("changed: {} -> {received}", text(*prompt_seq))),
                 Payload::PromptAbsorbed { prompt_seq } => Some(format!("taken: {}", text(*prompt_seq))),
                 Payload::TurnStarted { prompt_seq: Some(seq), .. } => Some(format!("turn for: {}", text(*seq))),
-                Payload::InputOccupied { prompt_seq, occupied } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
+                Payload::InputOccupied { prompt_seq, occupied, .. } => Some(format!("{} {}", if *occupied { "waiting:" } else { "typed:" }, text(*prompt_seq))),
                 Payload::PromptJoined { prompt_seq, into_seq } => Some(format!("joined: {} -> {}", text(*prompt_seq), text(*into_seq))),
                 Payload::PromptWithdrawn { prompt_seq, .. } => Some(format!("withdrawn: {}", text(*prompt_seq))),
                 Payload::AssistantText { text, .. } => Some(format!("reply: {text}")),
@@ -2554,6 +2854,68 @@ sleep 600
     );
 }
 
+/// PRO-462, against a real pane drawing what Codex 0.169.0 drew: resumed in
+/// a folder other than the one its session last recorded, it asks at
+/// start-up which working directory to use, a list of choices drawn where
+/// its input box goes. The message that resumed the tab is not typed into
+/// that question, where its Enter would pick the selected option, and the
+/// chat says the agent is asking something rather than that its box has text
+/// in it. Once the question is answered in the terminal, the message goes in
+/// without anything more from the reader.
+#[cfg(unix)]
+#[test]
+fn a_message_held_up_by_codexs_own_question_says_so_and_goes_in_once_it_is_answered() {
+    let rig = Rig::of(CliKind::Codex, "");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/codex/fixtures");
+    let answered = rig._dir.path().join("answered");
+    rig.run_in_pane_sized(
+        &format!(
+            r#"stty raw -echo
+printf '\033]0;CLI-IS-UP\007'
+cat '{question}'
+printf '\033]0;ASKED\007'
+stty min 0 time 1
+while :; do
+  early=$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')
+  if [ -n "$early" ]; then printf '\033]0;TYPED-INTO-QUESTION\007'; sleep 600; fi
+  if [ -e '{answered}' ]; then break; fi
+done
+printf '\033[2J\033[H'
+cat '{idle}'
+printf '\033]0;ANSWERED\007'
+stty min 1 time 0
+got=''
+while :; do
+  got="$got$(dd bs=65536 count=1 2>/dev/null | od -An -c | tr -d ' \n')"
+  case "$got" in *'[201~'*'\r'*) break ;; esac
+done
+printf '\033]0;PROMPT-SUBMITTED\007'
+sleep 600
+"#,
+            question = fixtures.join("resume_cwd_question.bin").display(),
+            idle = fixtures.join("composer_idle.bin").display(),
+            answered = answered.display(),
+        ),
+        300,
+        40,
+    );
+    rig.pane_says(&["ASKED"]);
+    assert!(!rig.compose("hello", 0), "sent while idle");
+    let seq = rig.type_composed("hello");
+    rig.chat_says("waiting: hello");
+    let choices = |events: Vec<AgentEvent>| events.into_iter().filter_map(|e| match e.payload {
+        Payload::InputOccupied { prompt_seq, occupied: true, choice } if prompt_seq == seq => Some(choice),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(choices(rig.events()), [true], "said to wait on a question, not on text in the box");
+    assert!(!rig.pane_has_said("TYPED-INTO-QUESTION"), "nothing is typed into the question");
+
+    std::fs::write(&answered, b"").unwrap();
+    assert_eq!(rig.pane_says(&["PROMPT-SUBMITTED", "TYPED-INTO-QUESTION"]), "PROMPT-SUBMITTED", "the message goes in once the question is answered");
+    rig.typed();
+    rig.chat_says("typed: hello");
+}
+
 /// Test 2 of #722: a transcript with two prompts that follow the same
 /// record. Claude Code dropped the first before answering it and took the
 /// second in its place: the first is marked replaced, never answered, and
@@ -2661,6 +3023,7 @@ fn a_replaced_prompt_is_not_replaced_again_by_a_later_rewind() {
 /// never empties unless the test says so: it says `TYPED` if anything but
 /// the lone Escape of a stop is written into it (a slash command is typed as
 /// keys, a prompt pasted), and draws the box empty once `emptied` exists.
+#[cfg(unix)]
 fn box_held_script(emptied: &Path) -> String {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/claude/fixtures");
     format!(
@@ -2793,14 +3156,14 @@ fn a_wait_on_the_input_box_nobody_is_waiting_on_is_ended_on_load() {
     {
         let mut rt = rig.rt.lock().unwrap();
         for prompt_seq in &seqs {
-            rig.manager.publish(&mut rt, Payload::InputOccupied { prompt_seq: *prompt_seq, occupied: true }, None);
+            rig.manager.publish(&mut rt, Payload::InputOccupied { prompt_seq: *prompt_seq, occupied: true, choice: false }, None);
         }
         // The second is still waiting, as far as the runtime knows.
         if let Engine::Cli(p) = &mut rt.engine {
             p.input.marks.push(seqs[1]);
         }
     }
-    let ended = |events: &[AgentEvent]| events.iter().filter_map(|e| match e.payload { Payload::InputOccupied { prompt_seq, occupied: false } => Some(prompt_seq), _ => None }).collect::<Vec<_>>();
+    let ended = |events: &[AgentEvent]| events.iter().filter_map(|e| match e.payload { Payload::InputOccupied { prompt_seq, occupied: false, .. } => Some(prompt_seq), _ => None }).collect::<Vec<_>>();
     let loaded = rig.manager.load_events(SESSION, TAB).unwrap();
     assert_eq!(ended(&loaded), [seqs[0]]);
     assert_eq!(ended(&rig.events()), [seqs[0]], "the end is in the log, for a reload");
@@ -2908,6 +3271,7 @@ fn handover_busy_prompt_can_settle_and_the_same_tab_is_carried() {
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_pty_final_writer_fences_policy_modes_and_ownership_after_dispatch() {
     use crate::remote::collab::{Collaboration, v2::{Action, Snapshot, Permit}};
@@ -2991,6 +3355,7 @@ fn phase2_collaboration_v2_handover_retains_required_provenance_and_refuses_unst
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_at_pty_writer() {
     use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
@@ -3021,6 +3386,7 @@ fn phase2_collaboration_v2_native_config_command_rechecks_independent_approval_a
 }
 
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_pty_capacity_wait_releases_runtime_and_rechecks_mode_before_more_bytes() {
     use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
@@ -3103,6 +3469,7 @@ fn phase2_collaboration_v2_legacy_submit_retries_a_full_pty_buffer() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_async_submit_retries_and_rechecks_after_backpressure() {
     use crate::remote::collab::v2::{Action, Snapshot, Permit};

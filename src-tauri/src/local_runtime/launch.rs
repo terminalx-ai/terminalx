@@ -3,7 +3,9 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,7 +16,39 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::client::Client;
+use crate::serve_cli::consent::WINDOW_PUBLIC_KEY_ENV;
 
+/// A process id as the platform has it.
+#[cfg(unix)]
+pub(crate) type Pid = libc::pid_t;
+#[cfg(windows)]
+pub(crate) type Pid = u32;
+
+/// The runtime's executable in an installed version's directory.
+#[cfg(unix)]
+const EXECUTABLE: &str = "terminalx-serve";
+#[cfg(windows)]
+const EXECUTABLE: &str = "terminalx-serve.exe";
+
+/// Whether a file name is `expected`: exactly on Unix, ignoring case on
+/// Windows, whose file names do.
+fn same_name(name: &std::ffi::OsStr, expected: &str) -> bool {
+    #[cfg(windows)]
+    {
+        name.eq_ignore_ascii_case(expected)
+    }
+    #[cfg(not(windows))]
+    {
+        name == expected
+    }
+}
+
+#[cfg(windows)]
+fn private_dir(path: &Path) -> Result<()> {
+    crate::private_fs::create_dir(path, "runtime installation directory")
+}
+
+#[cfg(unix)]
 fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
@@ -42,7 +76,12 @@ pub(crate) fn digest(file: &mut File) -> Result<String> {
 }
 
 fn open_binary(path: &Path) -> Result<File> {
+    #[cfg(windows)]
+    if crate::win::fs::is_reparse_point(path)? { bail!("runtime executable is not a regular file"); }
+    #[cfg(unix)]
     let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)?;
+    #[cfg(windows)]
+    let file = OpenOptions::new().read(true).open(path)?;
     if !file.metadata()?.is_file() { bail!("runtime executable is not a regular file"); }
     Ok(file)
 }
@@ -57,13 +96,20 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
     private_dir(&home.join("runtime"))?;
     let directory = home.join("runtime").join(&hash);
     private_dir(&directory)?;
-    let target = directory.join("terminalx-serve");
+    let target = directory.join(EXECUTABLE);
     if target.symlink_metadata().is_ok() {
         let mut existing = open_binary(&target)?;
-        let meta = existing.metadata()?;
-        // SAFETY: geteuid has no preconditions.
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.mode() & 0o100 == 0
-            || digest(&mut existing)? != hash {
+        #[cfg(unix)]
+        let foreign = {
+            let meta = existing.metadata()?;
+            // SAFETY: geteuid has no preconditions.
+            meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 || meta.mode() & 0o100 == 0
+        };
+        // Only this user can write it: what `0o700` and no group or other
+        // write bit are on Unix.
+        #[cfg(windows)]
+        let foreign = crate::win::security::verify_private(&target).is_err();
+        if foreign || digest(&mut existing)? != hash {
             bail!("installed runtime does not match its immutable version");
         }
         return Ok(target);
@@ -73,10 +119,21 @@ pub fn install(source: &Path, home: &Path) -> Result<PathBuf> {
     staged.flush()?;
     staged.as_file_mut().seek(SeekFrom::Start(0))?;
     if digest(staged.as_file_mut())? != hash { bail!("bundled runtime changed while it was installed"); }
+    #[cfg(unix)]
     staged.as_file().set_permissions(std::fs::Permissions::from_mode(0o700))?;
     staged.as_file().sync_all()?;
     match staged.persist_noclobber(&target) {
-        Ok(_) => { File::open(&directory)?.sync_all()?; }
+        Ok(_) => {
+            // A directory cannot be opened to sync on Windows; NTFS journals the rename.
+            #[cfg(unix)]
+            File::open(&directory)?.sync_all()?;
+            #[cfg(windows)]
+            {
+                let mut permissions = std::fs::metadata(&target)?.permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&target, permissions)?;
+            }
+        }
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             if digest(&mut open_binary(&target)?)? != hash { bail!("another install wrote an unexpected runtime"); }
         }
@@ -114,6 +171,23 @@ pub fn connect_desktop(source: &Path, home: &Path, application: &str, log: Optio
 
 /// Hold the home's launch lock, which serializes launchers, not runtimes:
 /// the runtime owns its separate lock. Released when the file is dropped.
+#[cfg(windows)]
+fn launch_lock(home: &Path, deadline: Instant) -> Result<File> {
+    let path = home.join("run").join("local-launch.lock");
+    let launch = crate::private_fs::create_file(&path, false)?;
+    drop(crate::private_fs::open_file(&path, "local launch lock")?);
+    loop {
+        match launch.try_lock() {
+            Ok(()) => return Ok(launch),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        if Instant::now() >= deadline { bail!("another desktop is starting the local runtime"); }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
 fn launch_lock(home: &Path, deadline: Instant) -> Result<File> {
     use std::os::fd::AsRawFd;
     let launch = OpenOptions::new().read(true).write(true).create(true).truncate(false)
@@ -132,18 +206,30 @@ fn launch_lock(home: &Path, deadline: Instant) -> Result<File> {
 }
 
 fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Path>) -> Result<Arc<Client>> {
-    let home = std::fs::canonicalize(home)?;
+    let home = crate::paths::canonicalize(home)?;
     private_dir(&home.join("run"))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let _launch = launch_lock(&home, deadline)?;
     // A live but incompatible owner is an error, never permission to start a
     // competing process or terminate the running owner's work.
-    if std::os::unix::net::UnixStream::connect(home.join("run/hooks.sock")).is_ok() {
+    if crate::ipc::connect(&crate::ipc::published(&home)).is_ok() {
         return Client::connect(&home);
     }
     let executable = installed(source, &home)?;
     let mut command = Command::new(executable);
+    command.env_remove(WINDOW_PUBLIC_KEY_ENV);
     if let Some(application) = application {
+        // A launch a relaunch waits for always pins the key it provisioned
+        // (PRO-489). Any other launch that cannot read Keychain still starts
+        // a runtime, unpinned: the window needs one to work at all, and the
+        // first command that needs the window's proof repairs it
+        // (`window_consent`).
+        #[cfg(all(feature = "desktop", any(target_os = "macos", windows)))]
+        match crate::serve_cli::consent::launch_public_key() {
+            Ok(Some(key)) => { command.env(WINDOW_PUBLIC_KEY_ENV, key); }
+            Ok(None) => {}
+            Err(error) => log::warn!("could not provision window pairing consent: {error:#}"),
+        }
         command.env("TERMINALX_LOCAL_DESKTOP","1").env("TERMINALX_LOCAL_APPLICATION",application);
     } else {
         command.env_remove("TERMINALX_LOCAL_DESKTOP").env_remove("TERMINALX_LOCAL_APPLICATION");
@@ -165,6 +251,7 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
     }
     // SAFETY: setsid is async-signal-safe and this hook only creates an OS
     // session. No allocator, lock or inherited window pipe is used after fork.
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 { return Err(std::io::Error::last_os_error()); }
@@ -175,11 +262,34 @@ fn launch(source: &Path, home: &Path, application: Option<&str>, log: Option<&Pa
     // and not an earlier runtime's.
     let since = log.and_then(|log| std::fs::metadata(log).ok()).map_or(0, |metadata| metadata.len());
     let started = Instant::now();
-    let child = match command.spawn() {
+    #[cfg(unix)]
+    let spawned = command.spawn();
+    #[cfg(windows)]
+    let spawned = spawn_detached(&mut command);
+    let child = match spawned {
         Ok(child) => child,
         Err(error) => return Err(StartFailed::new(None, Duration::ZERO, Some(format!("start local runtime: {error}")), log.map(Path::to_path_buf)).into()),
     };
     attachment(child, &home, deadline, started, log.map(|log| (log, since)))
+}
+
+/// Start the runtime as setsid does on Unix: with no console, in a process
+/// group of its own, and out of any job the desktop is in (a terminal or a
+/// dev runner may kill its job's processes when it closes), so the runtime
+/// outlives the window. A job that allows no breakaway keeps it.
+#[cfg(windows)]
+fn spawn_detached(command: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+    match command.spawn() {
+        // ERROR_ACCESS_DENIED: the job forbids breaking away.
+        Err(error) if error.raw_os_error() == Some(5) => {
+            command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+            command.spawn()
+        }
+        spawned => spawned,
+    }
 }
 
 /// Wait for runtime `child`, started at `started`, to take connections in
@@ -237,11 +347,17 @@ pub struct StartFailed {
 
 impl StartFailed {
     fn new(status: Option<std::process::ExitStatus>, ran: Duration, error: Option<String>, log: Option<PathBuf>) -> Self {
+        #[cfg(unix)]
         use std::os::unix::process::ExitStatusExt;
+        #[cfg(unix)]
+        let signal = status.and_then(|status| status.signal());
+        // Windows ends a process with a code, never a signal.
+        #[cfg(windows)]
+        let signal = None;
         Self {
             process: PROCESS.into(),
             code: status.and_then(|status| status.code()),
-            signal: status.and_then(|status| status.signal()),
+            signal,
             ran_ms: ran.as_millis().try_into().unwrap_or(u64::MAX),
             error, log,
             at: chrono::Utc::now().timestamp_millis(),
@@ -313,14 +429,32 @@ pub fn kill_owner(home: &Path) -> Result<bool> {
 
 /// [`kill_owner`], of process `expected` only when it is given: a runtime
 /// that started in its place in the meantime is left alone.
-fn kill_holder(home: &Path, expected: Option<libc::pid_t>) -> Result<bool> {
-    let home = std::fs::canonicalize(home)?;
+fn kill_holder(home: &Path, expected: Option<Pid>) -> Result<bool> {
+    let home = crate::paths::canonicalize(home)?;
     let _launch = launch_lock(&home, Instant::now() + Duration::from_secs(30))?;
-    let socket = home.join("run/hooks.sock");
+    let socket = crate::ipc::published(&home);
     let Some(pid) = listener(&socket) else { return Ok(false) };
     if expected.is_some_and(|expected| expected != pid) { return Ok(false); }
-    owned_runtime(&home, pid)?;
+    let image = owned_runtime(&home, pid)?;
     log::warn!("stopping the local runtime (pid {pid}) without asking it");
+    #[cfg(windows)]
+    {
+        // No signal asks a detached process to stop: it is terminated, after
+        // its executable and user were checked, and then what it started
+        // (its terminals and agents), each listed now with its image and
+        // start time and terminated only while it is still that process.
+        let descendants: Vec<(Pid, PathBuf, u64)> = crate::win::process::descendants(pid).unwrap_or_default()
+            .into_iter().filter_map(|(entry, started)| Some((entry.pid, crate::win::process::image_path(entry.pid).ok()?, started))).collect();
+        crate::win::process::terminate_verified(pid, &image, Duration::from_secs(5))?;
+        if !exited(pid, &socket, Duration::from_secs(5)) { bail!("The local runtime (pid {pid}) did not exit."); }
+        for (child, image, started) in descendants {
+            let _ = crate::win::process::terminate_if(child, &image, started, Duration::from_millis(500));
+        }
+        Ok(true)
+    }
+    #[cfg(unix)]
+    {
+    let _ = image;
     let children = children(pid);
     // The runtime leads its own group (it calls setsid), which holds every
     // helper it started without a terminal of its own.
@@ -347,16 +481,22 @@ fn kill_holder(home: &Path, expected: Option<libc::pid_t>) -> Result<bool> {
     // SAFETY: as above.
     for child in &children { unsafe { libc::kill(-child, libc::SIGKILL) }; }
     Ok(true)
+    }
 }
 
 /// Check that `pid` runs a runtime installed in `home`, and so is one to stop.
-fn owned_runtime(home: &Path, pid: libc::pid_t) -> Result<()> {
+fn owned_runtime(home: &Path, pid: Pid) -> Result<PathBuf> {
     let executable = executable(pid).context("identify the process holding the runtime socket")?;
-    if executable.parent().and_then(Path::parent) != Some(home.join("runtime").as_path())
-        || executable.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
+    #[cfg(windows)]
+    let executable = crate::paths::canonicalize(&executable).unwrap_or(executable);
+    let installed = home.join("runtime");
+    #[cfg(windows)]
+    let installed = crate::paths::canonicalize(&installed).unwrap_or(installed);
+    if executable.parent().and_then(Path::parent) != Some(installed.as_path())
+        || !executable.file_name().is_some_and(|name| same_name(name, EXECUTABLE)) {
         bail!("The process holding the runtime socket ({}) is not a TerminalX runtime of this home; it was left running.", executable.display());
     }
-    Ok(())
+    Ok(executable)
 }
 
 /// How long a runtime that has stopped its work may take to exit.
@@ -395,10 +535,10 @@ pub fn retire(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fall
 }
 
 fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: Fallback<'_>, exit_after_stop: Duration) -> Result<()> {
-    let home = std::fs::canonicalize(home)?;
-    let socket = home.join("run/hooks.sock");
+    let home = crate::paths::canonicalize(home)?;
+    let socket = crate::ipc::published(&home);
     let Some(pid) = listener(&socket) else { return Ok(()) };
-    owned_runtime(&home, pid).map_err(|error| error.context(LeftRunning("The process holding the runtime socket was left running.")))?;
+    owned_runtime(&home, pid).map(drop).map_err(|error| error.context(LeftRunning("The process holding the runtime socket was left running.")))?;
     log::info!("stopping the local runtime (pid {pid}) so the one bundled with this app takes its place");
     match stop_all() {
         // It agreed: one that lingers is stopped without asking.
@@ -428,7 +568,7 @@ fn retire_within(home: &Path, stop_all: impl FnOnce() -> Result<()>, fallback: F
 /// answers on `home`'s socket (#765): the same process, under another epoch.
 pub fn taken_over(home: &Path, epoch: &str, within: Duration) -> Result<()> {
     let deadline = Instant::now() + within;
-    let socket = home.join("run/hooks.sock");
+    let socket = crate::ipc::published(home);
     let pid = listener(&socket);
     loop {
         match Client::connect(home) {
@@ -457,11 +597,14 @@ pub fn refused(error: &anyhow::Error, code: &str) -> bool {
 
 /// Whether the runtime has gone: its pid no longer exists, or nothing
 /// listens on its socket any more (it may be exiting, or not yet reaped).
-fn exited(pid: libc::pid_t, socket: &Path, within: Duration) -> bool {
+fn exited(pid: Pid, socket: &Path, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     loop {
+        #[cfg(unix)]
         // SAFETY: signal zero only checks that the process exists.
         let gone = unsafe { libc::kill(pid, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        #[cfg(windows)]
+        let gone = !crate::win::process::is_running(pid);
         if gone || listener(socket).is_none_or(|holder| holder != pid) { return true; }
         if Instant::now() >= deadline { return false; }
         std::thread::sleep(Duration::from_millis(50));
@@ -469,6 +612,14 @@ fn exited(pid: libc::pid_t, socket: &Path, within: Duration) -> bool {
 }
 
 /// The process listening on `socket`, as the kernel records it.
+#[cfg(windows)]
+fn listener(socket: &Path) -> Option<Pid> {
+    use std::os::windows::io::AsRawHandle;
+    let stream = crate::ipc::connect(socket).ok()?;
+    crate::win::process::pipe_server_pid(stream.as_raw_handle() as _).ok()
+}
+
+#[cfg(unix)]
 fn listener(socket: &Path) -> Option<libc::pid_t> {
     use std::os::fd::AsRawFd;
     let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
@@ -497,7 +648,11 @@ fn listener(socket: &Path) -> Option<libc::pid_t> {
 }
 
 /// The executable a process is running.
-pub(crate) fn executable(pid: libc::pid_t) -> Result<PathBuf> {
+pub(crate) fn executable(pid: Pid) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        Ok(crate::win::process::image_path(pid)?)
+    }
     #[cfg(target_os = "macos")]
     {
         let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
@@ -507,14 +662,15 @@ pub(crate) fn executable(pid: libc::pid_t) -> Result<PathBuf> {
         path.truncate(length as usize);
         Ok(PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(path)))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         Ok(std::fs::read_link(format!("/proc/{pid}/exe"))?)
     }
 }
 
 /// The processes `pid` started that are still its children.
-pub(crate) fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
+#[cfg(unix)]
+pub(crate) fn children(pid: Pid) -> Vec<Pid> {
     #[cfg(target_os = "macos")]
     {
         let mut pids = vec![0 as libc::pid_t; 4096];
@@ -524,7 +680,7 @@ pub(crate) fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
         pids.retain(|child| *child > 0);
         pids
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
         entries.flatten().filter_map(|entry| {
@@ -538,9 +694,10 @@ pub(crate) fn children(pid: libc::pid_t) -> Vec<libc::pid_t> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn installed_versions_survive_bundle_replacement_and_reject_tampering() {
         let fixture = tempfile::tempdir().unwrap();
@@ -562,6 +719,7 @@ mod tests {
         assert!(install(&source, &home).is_err());
     }
 
+    #[cfg(unix)]
     /// PRO-287: a runtime that exits while starting is reported with its
     /// exit code, how long it ran, and the error it logged in this start,
     /// not an earlier one's.
@@ -592,6 +750,7 @@ mod tests {
         if cfg!(target_os = "macos") { assert!(failed.os.as_deref().is_some_and(|os| os.starts_with("macOS ")), "{:?}", failed.os); }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_runtime_ended_by_a_signal_while_starting_says_which() {
         let fixture = tempfile::tempdir().unwrap();
@@ -617,6 +776,7 @@ mod tests {
         assert_eq!(error_line(""), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn installer_refuses_symlinks_and_shared_directories() {
         let fixture = tempfile::tempdir().unwrap();
@@ -637,8 +797,10 @@ mod tests {
         assert!(install(&source, &home).is_err());
     }
 
+    #[cfg(unix)]
     const OWNER_HOME: &str = "TERMINALX_TEST_UNRESPONSIVE_OWNER_HOME";
 
+    #[cfg(unix)]
     /// A runtime that holds its socket and never answers, as one wedged
     /// behind a lock does, with a terminal of its own in its own session.
     #[test]
@@ -661,6 +823,7 @@ mod tests {
         let _ = terminal.wait();
     }
 
+    #[cfg(unix)]
     /// Spawn `command`, retrying while Linux refuses it with ETXTBSY ("Text
     /// file busy"), as Go's os/exec does. The fixtures exec a copy of this test
     /// binary they just wrote; another test that forks while that copy's write
@@ -686,6 +849,7 @@ mod tests {
     /// This test binary, installed as the launcher installs a runtime, so it is
     /// one of `home`'s: written under a temporary name and closed before it is
     /// renamed into place, so nothing ever runs a copy still being written.
+    #[cfg(unix)]
     fn installed_copy(home: &Path) -> PathBuf {
         let directory = home.join("runtime/fixture");
         std::fs::create_dir_all(&directory).unwrap();
@@ -696,6 +860,7 @@ mod tests {
         installed
     }
 
+    #[cfg(unix)]
     /// Start `executable` as the wedged owner of a fresh home, and wait until
     /// it holds the socket. Returns the home, the owner and its terminal's pid.
     fn wedged_owner(fixture: &Path, executable: impl Fn(&Path) -> PathBuf) -> (PathBuf, std::process::Child, libc::pid_t) {
@@ -717,14 +882,16 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        (std::fs::canonicalize(home).unwrap(), owner, terminal)
+        (crate::paths::canonicalize(home).unwrap(), owner, terminal)
     }
 
-    fn running(pid: libc::pid_t) -> bool {
+    #[cfg(unix)]
+    pub(crate) fn running(pid: libc::pid_t) -> bool {
         // SAFETY: signal zero only checks that the process exists.
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unresponsive_owner_is_stopped_with_the_terminals_it_started() {
         let fixture = tempfile::tempdir().unwrap();
@@ -739,17 +906,20 @@ mod tests {
         assert!(!kill_owner(&home).unwrap(), "nothing is left to stop");
     }
 
-    fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
+    #[cfg(unix)]
+    pub(crate) fn installed_owner(fixture: &Path) -> (PathBuf, std::process::Child, libc::pid_t) {
         wedged_owner(fixture, installed_copy)
     }
 
-    fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
+    #[cfg(unix)]
+    pub(crate) fn reap(mut owner: std::process::Child, terminal: libc::pid_t) {
         let _ = owner.kill();
         let _ = owner.wait();
         // SAFETY: the fixture's own terminal session.
         unsafe { libc::kill(-terminal, libc::SIGKILL) };
     }
 
+    #[cfg(unix)]
     /// #730: a runtime that stops its work and exits when asked is not
     /// stopped any other way.
     #[test]
@@ -771,6 +941,7 @@ mod tests {
         reap(owner.into_inner().unwrap(), terminal);
     }
 
+    #[cfg(unix)]
     /// #730: a runtime that agreed to stop and does not exit, or did not stop
     /// when Restart now asked, or agreed and could not finish, is stopped
     /// without asking, with its terminals.
@@ -791,6 +962,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// #730: the desktop's stop is pinned to the runtime it saw. One replaced
     /// in the meantime refuses it, and is not stopped any other way either.
     #[test]
@@ -830,6 +1002,7 @@ mod tests {
         assert!(retire_within(&home, || panic!("nothing to ask"), Fallback::Forced, Duration::ZERO).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_socket_held_by_anything_but_this_homes_runtime_is_left_alone() {
         let fixture = tempfile::tempdir().unwrap();

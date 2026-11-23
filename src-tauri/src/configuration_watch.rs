@@ -1,5 +1,6 @@
 //! View-scoped, nonrecursive watches; replacing a file or creating a missing
 //! .terminalx directory must not detach the Settings view from future changes.
+use crate::paths::Canonical;
 use std::{collections::BTreeSet, path::PathBuf, sync::mpsc, time::Duration};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use tauri::Manager;
@@ -56,7 +57,7 @@ fn start(paths: Vec<PathBuf>, changed: impl Fn() -> bool + Send + 'static) -> an
 #[tauri::command]
 pub async fn configuration_watch(webview: tauri::Webview, project_path: Option<String>, on_change: tauri::ipc::Channel<()>) -> Result<tauri::ResourceId, String> {
     let resource = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
-        let home = crate::store::root()?.canonicalize()?;
+        let home = crate::store::root()?.canonical()?;
         let mut paths = vec![home.join("settings.json"), home.join("repository-trust.json"), home.join("environment.json")];
         if let Some(path) = crate::store::managed_configuration::path() { paths.push(path.into()); }
         if let Some(project) = project_path {
@@ -70,11 +71,12 @@ pub async fn configuration_watch(webview: tauri::Webview, project_path: Option<S
 
 #[cfg(test)]
 mod tests {
+    use crate::paths::Canonical;
     use super::*;
     #[test]
     fn watch_survives_missing_directory_and_atomic_replacements() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().canonicalize().unwrap().join(".terminalx");
+        let directory = root.path().canonical().unwrap().join(".terminalx");
         let file = directory.join("settings.json");
         let (send, receive) = mpsc::channel();
         let watch = start(vec![file.clone()], move || send.send(()).is_ok()).unwrap();

@@ -421,8 +421,8 @@ fn shells() -> Vec<(PathBuf, Shell, bool)> {
     let mut versions = Vec::new();
     for bash in ["/bin/bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"] {
         let path = PathBuf::from(bash);
-        let Ok(canonical) = std::fs::canonicalize(&path) else { continue };
-        if shells.iter().any(|(shell, _, _)| std::fs::canonicalize(shell).ok().as_ref() == Some(&canonical)) {
+        let Ok(canonical) = crate::paths::canonicalize(&path) else { continue };
+        if shells.iter().any(|(shell, _, _)| crate::paths::canonicalize(shell).ok().as_ref() == Some(&canonical)) {
             continue;
         }
         let version = Command::new(&path)

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// WebKit layout check for the rows of refused commands above a cloud
-// transcript (the acceptance pass's "Not sent" rows): with three long
-// refusals, at 1280 and 900 px wide, the rows stay inside the session pane,
-// their words wrap instead of running off its edge, they take a bounded
-// height, and they read as their own bar above the transcript.
+// WebKit layout check for messages a cloud workspace did not deliver (the
+// acceptance pass's "Not sent" refusals), drawn since #1291 as the Queued
+// cards a local session draws, at the end of the transcript: with three long
+// refusals, at 1280 and 900 px wide, each is a card in the transcript's
+// column, its reason wraps instead of running off the pane, and no bar above
+// the transcript repeats them.
 //
 //   pnpm build && npx playwright install webkit && node scripts/webkit/cloud-outbox.mjs [screenshot-dir]
 import { launch, open, openCloudSession, report, serve } from "./harness.mjs";
@@ -21,36 +22,40 @@ const server = await serve();
 const browser = await launch();
 let failed = 0;
 for (const width of [1280, 900]) {
-  const name = `refused commands at ${width} px`;
+  const name = `refused messages at ${width} px`;
   const page = await open(browser, server.url, { cloud: true, localProjects: 0, session: { role: "driver", lines: 25, outbox } }, { width, height: 760 });
   // The session is reached through the command palette (the sidebar lists no cloud sessions since #484).
   await openCloudSession(page, await page.evaluate(() => window.__PW_RUNTIME__.sessionTitle));
   await page.getByText("chunk 25 of 25", { exact: true }).waitFor();
-  await page.locator('[data-testid="cloud-agent-outbox"]').waitFor();
+  await page.locator('[data-testid="cloud-pending-messages"]').waitFor();
   await page.waitForTimeout(400);
   const layout = await page.evaluate(() => {
-    const list = document.querySelector('[data-testid="cloud-agent-outbox"]');
-    const pane = list.parentElement.getBoundingClientRect();
-    const box = list.getBoundingClientRect();
-    const scroller = document.querySelector("[data-chat-scroller]").getBoundingClientRect();
-    const rows = [...list.querySelectorAll('[data-testid="cloud-agent-command"]')];
-    const parts = rows.flatMap((row) => [...row.children]);
-    const background = getComputedStyle(list).backgroundColor;
+    const scroller = document.querySelector("[data-chat-scroller]");
+    const pane = scroller.getBoundingClientRect();
+    const list = document.querySelector('[data-testid="cloud-pending-messages"]');
+    const cards = [...list.querySelectorAll('[data-testid="queued-message"]')];
+    const lines = cards.map((card) => card.querySelector('[data-testid="queued-status"]'));
+    const parts = cards.flatMap((card) => [...card.querySelectorAll("span, p, button")]);
+    const lastTurn = [...scroller.querySelectorAll(".transcript-turn")].at(-1);
     return {
       pane: { left: Math.round(pane.left), right: Math.round(pane.right) },
-      list: { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height), right: Math.round(box.right), scrollWidth: list.scrollWidth, clientWidth: list.clientWidth },
-      scrollerTop: Math.round(scroller.top),
-      rows: rows.length,
+      cards: cards.length,
+      failed: cards.filter((card) => card.dataset.phase === "failed").length,
+      inScroller: scroller.contains(list),
+      afterLastTurn: !lastTurn || lastTurn.getBoundingClientRect().bottom <= list.getBoundingClientRect().top + 1,
+      lines: lines.map((line) => line?.textContent?.slice(0, 40) ?? null),
+      wrapped: lines.some((line) => line && line.getBoundingClientRect().height > 24),
       overflowing: parts.filter((part) => part.getBoundingClientRect().right > pane.right + 1).map((part) => part.textContent.slice(0, 40)),
-      background,
+      bar: !!document.querySelector('[data-testid="cloud-agent-outbox"]'),
     };
   });
   failed += report(name, {
-    "all three refusals are listed": layout.rows === 3,
-    "no part of a row runs past the session pane": layout.overflowing.length === 0 && layout.list.scrollWidth <= layout.list.clientWidth + 1,
-    "the rows end above the transcript": layout.list.bottom <= layout.scrollerTop + 1,
-    "they take at most a quarter of the window": layout.list.height <= 760 / 4,
-    "they sit on their own background": layout.background !== "rgba(0, 0, 0, 0)" && layout.background !== "transparent",
+    "all three refusals are cards": layout.cards === 3 && layout.failed === 3,
+    "each says why under it": layout.lines.every((line) => line?.startsWith("Not sent")),
+    "the cards are in the transcript, after its last turn": layout.inScroller && layout.afterLastTurn,
+    "no part of a card runs past the transcript": layout.overflowing.length === 0,
+    "a long reason wraps": layout.wrapped,
+    "no bar above the transcript repeats them": !layout.bar,
   }, layout);
   if (shots) await page.screenshot({ path: `${shots}/outbox-${width}.png` });
   await page.close();

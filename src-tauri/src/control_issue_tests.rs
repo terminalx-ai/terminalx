@@ -179,7 +179,7 @@ fn session_parent_child() {
 }
 
 #[test]
-fn local_issue_creation_dispatches_without_a_desktop() {
+fn local_issue_operations_dispatch_without_a_desktop() {
     run_child("issue_creation_child");
 }
 
@@ -228,11 +228,17 @@ esac
     // Real dispatch must reach the existing configuration checks, even with
     // no desktop attached. This used to answer desktop_unavailable instead.
     for (provider, code) in [("github", "not_found"), ("linear", "not_signed_in")] {
-        assert_eq!(service.execute("issues.create", request(provider), "missing-config").unwrap_err().code, code);
+        for action in ["create", "view", "comment", "status", "assign", "label"] {
+            let mut params = request(provider);
+            if action != "create" {
+                params["issue"] = json!(if provider == "linear" { "PRO-42" } else { "12" });
+            }
+            assert_eq!(service.execute(&format!("issues.{action}"), params, "missing-config").unwrap_err().code, code, "{provider} {action}");
+        }
     }
-    // Only creation moves out of window dispatch.
-    for command in ["issues.comment", "issues.status", "issues.assign", "issues.label"] {
-        assert_eq!(service.execute(command, json!({}), "still-window-owned").unwrap_err().code, "desktop_unavailable");
+    // Every non-deletion action reaches validation without a window.
+    for command in ["issues.view", "issues.comment", "issues.status", "issues.assign", "issues.label"] {
+        assert_eq!(service.execute(command, json!({}), "no-window-needed").unwrap_err().code, "invalid_arguments");
     }
 
     assert!(Command::new("git").args(["remote", "add", "origin", "https://github.com/acme/widgets.git"]).current_dir(repo.path()).status().unwrap().success());

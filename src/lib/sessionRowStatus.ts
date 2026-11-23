@@ -2,6 +2,7 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { SESSION_STATUSES, combinedSessionStatus, sessionStatus, type SessionStatusInput, type StatusDescription } from "@terminalx/portable/sessionStatus";
 import { api } from "./api";
 import type { SessionEntry } from "@/types/session";
+import { isLocalKey } from "@/types/target";
 
 export type StatusSession = SessionStatusInput & Pick<SessionEntry, "id" | "rowStatus">;
 
@@ -40,7 +41,8 @@ async function refresh() {
 
 /** Keep the runtime's status of these rows read while they are drawn. */
 function useVisibleRows(sessions: readonly StatusSession[]) {
-  const key = JSON.stringify(sessions.filter((s) => !s.id.startsWith("cloud:")).map((s) => s.id).sort());
+  // Only this Mac's runtime knows its rows: a cloud or machine session carries its own `rowStatus`.
+  const key = JSON.stringify(sessions.filter((s) => isLocalKey(s.id)).map((s) => s.id).sort());
   useEffect(() => {
     const ids: string[] = JSON.parse(key);
     for (const id of ids) visible.set(id, (visible.get(id) ?? 0) + 1);
@@ -88,4 +90,14 @@ export function useSessionRowStatuses(sessions: readonly StatusSession[]): Recor
     }
     return byId;
   }, [selected]);
+}
+
+/** Live local facts for consumers that need to classify sessions, not just display a status label. */
+export function useSessionRowFacts(sessions: readonly StatusSession[]): Record<string, SessionStatusInput> {
+  useVisibleRows(sessions);
+  const ids = JSON.stringify(sessions.filter((session) => isLocalKey(session.id)).map((session) => session.id).sort());
+  const selected = useSyncExternalStore(subscribe, () => JSON.stringify(Object.fromEntries(
+    (JSON.parse(ids) as string[]).filter((id) => snapshot[id]).map((id) => [id, snapshot[id]]),
+  )));
+  return useMemo(() => JSON.parse(selected) as Record<string, SessionStatusInput>, [selected]);
 }

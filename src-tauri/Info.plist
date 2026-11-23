@@ -9,5 +9,9 @@
   <string>TerminalX listens while you dictate a prompt. Audio stays on this Mac.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>TerminalX turns your dictation into text for the composer.</string>
+  <!-- An operating computer connects to a paired machine's address on this
+       network (docs/MACHINES.md, PRO-345). macOS asks the first time. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>TerminalX connects to the computers you paired with on this network, so you can operate them from here.</string>
 </dict>
 </plist>

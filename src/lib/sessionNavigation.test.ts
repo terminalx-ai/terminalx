@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { MachineConnectionsState } from "@/lib/machineConnections";
+import { pairedMachine } from "@/components/machines/machineFixtures.test-utils";
 import { adjacentSession, nextAttentionSession } from "./sessionNavigation";
+
+// Stepping reads the real stores; only the native side and the paired machines are stood in for.
+const machines = vi.hoisted(() => ({ state: { ready: false, error: null, machines: [], states: {}, attachErrors: {}, connections: {} } as MachineConnectionsState }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []), Channel: class {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@/lib/machineConnections", () => ({ getMachineConnections: () => machines.state, subscribeMachineConnections: () => () => {} }));
 
 describe("next and previous session", () => {
   const sessions = [
@@ -52,4 +60,40 @@ it("follows custom local order in both directions while retaining recency when o
   expect(adjacentSession(sessions, "b", -1, order)).toBe("c");
   expect(adjacentSession(sessions, "a", 1, order)).toBe("new");
   expect(adjacentSession(sessions, "a", 1, { ...order, custom: false })).toBe("b");
+});
+
+describe("sessions on paired machines (PRO-346)", () => {
+  const MINI = pairedMachine({ name: "Mac mini" });
+  const key = (id: string) => `machine:${MINI.machineId}:P1:${id}`;
+  const runtimeSession = (id: string, status: "waiting" | "idle", lastMessageAt: string) => ({
+    id, projectId: "P1", projectPath: "/x", cwd: "/x", title: id, created: "2026-11-01T00:00:00Z", modified: "2026-11-01T00:00:00Z", lastMessageAt, archived: false, pinned: false,
+    tabs: [{ id: `${id}-tab`, harness: "claude", model: "", permissionMode: "default", status, created: "x", modified: "x" }],
+  });
+
+  async function boot(paired: boolean) {
+    vi.resetModules();
+    localStorage.clear();
+    localStorage.setItem("terminalx.machineCatalog.v1", JSON.stringify({ [MINI.machineId]: {
+      projects: [{ projectId: "P1", name: "terminalx", path: "/x", kind: "git", defaultBranch: "main", archived: false }],
+      sessions: [runtimeSession("waits", "waiting", "2026-11-03T00:00:00Z"), runtimeSession("idle", "idle", "2026-11-02T00:00:00Z")],
+      unread: [], syncedAt: 1,
+    } }));
+    machines.state = { ready: true, error: null, machines: paired ? [MINI] : [], states: {}, attachErrors: {}, connections: {} };
+    return { navigation: await import("./sessionNavigation"), sessions: await import("./sessions") };
+  }
+
+  it("steps to a machine session that needs the reader, and opens it in its machine's view", async () => {
+    const { navigation, sessions } = await boot(true);
+    navigation.stepAttentionSession();
+    expect(sessions.getSessionStore().selectedSessionId).toBe(key("waits"));
+    navigation.stepVisibleSession(1);
+    expect(sessions.getSessionStore().selectedSessionId).toBe(key("idle"));
+  });
+
+  it("steps to none while no machine is paired", async () => {
+    const { navigation, sessions } = await boot(false);
+    navigation.stepAttentionSession();
+    navigation.stepVisibleSession(1);
+    expect(sessions.getSessionStore().selectedSessionId).toBeNull();
+  });
 });

@@ -41,19 +41,6 @@ use crate::events::{Payload, ToolResult, ToolType, TurnStatus, Usage};
 use crate::harness::settings::{Setting, Signal, Stance};
 use crate::harness::tui::TurnMark;
 
-/// Where a session's transcript actually is.
-///
-/// The folder is named for the directory the conversation was *started* in,
-/// and the CLI goes on appending to that file when the conversation is
-/// resumed from somewhere else: a workspace that was renamed, a path reached
-/// through a symlink. So a file that exists under the session's id wins over
-/// the path derived from where the checkout is now (#250). With no file
-/// anywhere — a conversation that has yet to be written — it is the derived
-/// path.
-pub fn locate(cwd: &str, session_id: &str) -> Option<PathBuf> {
-    Some(locate_in(&projects_root()?, cwd, session_id))
-}
-
 /// The title the CLI gave the conversation from what it is about (an
 /// `ai-title` record, which it writes again as the talk moves on): the last
 /// one in the file's final stretch, where a recent one always is.
@@ -89,7 +76,18 @@ fn tail_text(path: &Path, limit: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// [`locate`] within a given projects folder.
+/// Where a session's transcript actually is.
+///
+/// The folder is named for the directory the conversation was *started* in,
+/// and the CLI goes on appending to that file when the conversation is
+/// resumed from somewhere else: a workspace that was renamed, a path reached
+/// through a symlink. So a file that exists under the session's id wins over
+/// the path derived from where the checkout is now (#250). With no file
+/// anywhere — a conversation that has yet to be written — it is the derived
+/// path.
+///
+/// Within `projects`: the folder of the agent account a tab runs on, or
+/// the person's own (`agent_data::locate_claude`, #980).
 pub fn locate_in(projects: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let derived = transcript_in(projects, cwd, session_id);
     // An id is a file name here, never a path.
@@ -167,8 +165,10 @@ pub fn projects_root_from(config_dir: Option<&str>, home: Option<&Path>) -> Opti
 
 /// Every record uuid in a session's transcript. A fork copies those records
 /// into its own file, so this is what the copy will look like.
-pub fn record_uuids(cwd: &str, session_id: &str) -> Option<HashSet<String>> {
-    let path = locate(cwd, session_id)?;
+///
+/// Under `projects`: the transcript root of the account a tab runs on (#980).
+pub fn record_uuids_in(projects: &Path, cwd: &str, session_id: &str) -> Option<HashSet<String>> {
+    let path = locate_in(projects, cwd, session_id);
     let text = std::fs::read_to_string(path).ok()?;
     Some(uuids_in(&text))
 }
@@ -180,12 +180,35 @@ fn uuids_in(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Longest folder name the CLI writes whole; a longer one is cut here.
+const ENCODED_LIMIT: usize = 200;
+
 /// The folder name the CLI gives a working directory under `~/.claude/projects`.
-/// Every character outside `[A-Za-z0-9-]` becomes `-`, which is why a
-/// dot-folder yields a double dash. The encoding loses information: two
-/// different paths can share a name.
+/// Every UTF-16 unit outside `[A-Za-z0-9]` becomes `-`, which is why a
+/// dot-folder yields a double dash (and a character outside the BMP two). A
+/// name longer than 200 is cut there and given `-` and a base-36 hash of the
+/// whole path, as the CLI does: a deep Windows path is often that long. The
+/// encoding loses information: two different paths can share a name.
 pub fn encoded_cwd(cwd: &str) -> String {
-    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+    let name: String = cwd.encode_utf16().map(|unit| match char::from_u32(u32::from(unit)) {
+        Some(c) if c.is_ascii_alphanumeric() => c,
+        _ => '-',
+    }).collect();
+    if name.len() <= ENCODED_LIMIT {
+        return name;
+    }
+    // The CLI's string hash: `hash * 31 + unit` over UTF-16 units, in 32 bits.
+    let hash = cwd.encode_utf16().fold(0i32, |hash, unit| hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(i32::from(unit)));
+    let mut magnitude = hash.unsigned_abs();
+    let mut digits = Vec::new();
+    loop {
+        digits.push(char::from_digit(magnitude % 36, 36).unwrap_or('0'));
+        magnitude /= 36;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    format!("{}-{}", &name[..ENCODED_LIMIT], digits.iter().rev().collect::<String>())
 }
 
 /// Where the CLI files the transcript of a session started in `cwd`.
@@ -209,6 +232,68 @@ fn text_of(content: &Value) -> String {
 /// user]`; it is a turn boundary, not something the reader said.
 fn interruption(text: &str) -> bool {
     text.starts_with("[Request interrupted by user")
+}
+
+/// What a record of Claude Code's `!` shell passthrough holds (#1294): the
+/// command (`<bash-input>`), what it printed (`<bash-stdout>`,
+/// `<bash-stderr>`, `<bash-exit-code>`), or both in one record. Neither is a
+/// prompt: the CLI runs the command itself and starts no model turn for it.
+/// `None` for anything else, a message that only mentions the tags among
+/// other words included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellRecord {
+    pub input: bool,
+    pub output: bool,
+}
+
+/// The record is a shell record only when it is nothing else: the grammar of
+/// `shellRecord` in packages/portable/src/harnessText.ts, which draws the
+/// chat's shell block, so a prompt the chat shows as a prompt is one here too
+/// (#1346). Both read `shellRecordCases.json`.
+///
+/// Parts come in the CLI's order, each at most once, with only whitespace
+/// between them. Output that itself holds its closing tag is kept whole, as
+/// stdout and stderr end at the last closing tag of their kind. A linear scan:
+/// output can be megabytes.
+pub fn shell_record(text: &str) -> Option<ShellRecord> {
+    if !text.contains("<bash-") {
+        return None;
+    }
+    let mut at = skip_space(text, 0);
+    let mut found = [false; 4];
+    for (part, (tag, last)) in [("input", false), ("stdout", true), ("stderr", true), ("exit-code", false)].into_iter().enumerate() {
+        let open = format!("<bash-{tag}>");
+        if !text[at..].starts_with(&open) {
+            continue;
+        }
+        let close = format!("</bash-{tag}>");
+        let from = at + open.len();
+        let end = if last { text.rfind(&close).filter(|&end| end >= from)? } else { from + text[from..].find(&close)? };
+        if tag == "exit-code" && !exit_code(&text[from..end]) {
+            return None;
+        }
+        found[part] = true;
+        at = skip_space(text, end + close.len());
+    }
+    let [input, stdout, stderr, exit] = found;
+    (at == text.len() && found.contains(&true)).then_some(ShellRecord { input, output: stdout || stderr || exit })
+}
+
+/// `/^-?\d+$/` after JavaScript's `trim`, as the chat reads an exit code.
+fn exit_code(text: &str) -> bool {
+    let digits = text.trim_matches(js_space);
+    let digits = digits.strip_prefix('-').unwrap_or(digits);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn skip_space(text: &str, from: usize) -> usize {
+    text.len() - text[from..].trim_start_matches(js_space).len()
+}
+
+/// JavaScript's `\s`, which the chat's parser skips: Rust's `char::is_whitespace`
+/// differs at U+0085 and U+FEFF.
+fn js_space(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 /// What a local slash command prints (`/model`'s "Set model to …") and the
@@ -400,6 +485,8 @@ pub fn decode_marked(line: &str, skip: &HashSet<String>, out: &mut Vec<Payload>)
             let before = out.len();
             decode_user(&v, out);
             return match out.get(before)? {
+                // A `!` command (#1294) opens no turn: no model turn follows it.
+                Payload::UserMessage { text, .. } if shell_record(text).is_some() => None,
                 Payload::UserMessage { .. } => Some(TurnMark::Opened),
                 Payload::TurnCompleted { .. } => Some(TurnMark::Ended),
                 _ => None,
@@ -659,6 +746,17 @@ fn decode_assistant(v: &Value, out: &mut Vec<Payload>) {
 mod tests {
     use super::*;
 
+    /// Values from the CLI's own encoder, run on the same paths.
+    #[test]
+    fn a_folder_name_is_the_one_the_cli_gives_including_a_long_one() {
+        assert_eq!(encoded_cwd("/Users/a/my.app"), "-Users-a-my-app");
+        assert_eq!(encoded_cwd("/home/a/\u{1F600}x"), "-home-a---x");
+        let long = format!("C:\\work\\{}app", "deeply-nested-folder\\".repeat(10));
+        let encoded = encoded_cwd(&long);
+        assert_eq!(encoded.len(), 207);
+        assert!(encoded.ends_with("-dee-9ryhmj"), "{encoded}");
+    }
+
     #[test]
     fn the_conversations_title_and_opening_prompt_are_read_from_its_file() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness/claude/fixtures/manual_compact.jsonl");
@@ -882,6 +980,61 @@ mod tests {
 
     fn said(payloads: &[Payload]) -> Vec<String> {
         payloads.iter().filter_map(|p| match p { Payload::TurnStarted { started_by: Some(by), prompt_seq: None, .. } => Some(by.clone()), _ => None }).collect()
+    }
+
+    /// #1294. Claude Code's records of a `!` command are drawn (the chat makes
+    /// one shell block of them) and open no turn; a prompt that only mentions
+    /// the tags is the reader's prompt as ever.
+    #[test]
+    fn a_shell_command_is_drawn_and_opens_no_turn() {
+        let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
+        for content in ["<bash-input> git status</bash-input>", "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>", "<bash-input>ls</bash-input>\n<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"] {
+            let mut out = Vec::new();
+            assert_eq!(decode_marked(&record(content), &HashSet::new(), &mut out), None, "{content}");
+            assert!(matches!(&out[..], [Payload::UserMessage { text, .. }] if text == content), "{content}");
+        }
+        assert_eq!(turn_mark(&record("why does <bash-input>ls</bash-input> show up?")), Some(TurnMark::Opened));
+        assert_eq!(shell_record("<bash-input>ls</bash-input>"), Some(ShellRecord { input: true, output: false }));
+        assert_eq!(shell_record("<bash-stdout></bash-stdout><bash-stderr>x</bash-stderr>"), Some(ShellRecord { input: false, output: true }));
+        assert_eq!(shell_record("<bash-input>ls</bash-input> please"), None);
+    }
+
+    /// #1346. The chat draws a shell block for exactly the records that open
+    /// no turn here: both read the portable parser's cases.
+    #[test]
+    fn shell_records_agree_with_every_portable_case() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!("../../../../packages/portable/src/shellRecordCases.json")).unwrap();
+        assert!(cases.len() > 20);
+        for case in cases {
+            let record = &case["record"];
+            let expected = (!record.is_null()).then(|| ShellRecord {
+                input: !record["command"].is_null(),
+                output: ["stdout", "stderr", "exitCode"].iter().any(|part| !record[*part].is_null()),
+            });
+            assert_eq!(shell_record(case["text"].as_str().unwrap()), expected, "{}", case["name"]);
+        }
+    }
+
+    /// #1346. A prompt shaped like a shell record but holding the reader's
+    /// words is the reader's prompt: it opens a turn.
+    #[test]
+    fn a_prompt_shaped_like_a_shell_record_opens_a_turn() {
+        let record = |content: &str| serde_json::json!({ "type": "user", "uuid": "u", "message": { "role": "user", "content": content } }).to_string();
+        for content in [
+            "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+            "<bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+            "<bash-input>ls</bash-stdout>",
+        ] {
+            assert_eq!(turn_mark(&record(content)), Some(TurnMark::Opened), "{content}");
+        }
+    }
+
+    #[test]
+    fn a_huge_shell_shaped_record_is_read_in_linear_time() {
+        let started = std::time::Instant::now();
+        assert_eq!(shell_record(&format!("<bash-stdout>{}x", "</bash-stdout>".repeat(200_000))), None);
+        assert_eq!(shell_record(&format!("<bash-input>{}", "</bash-input><bash-stdout>".repeat(100_000))), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// #540. A scheduled turn is written as a meta prompt, which was dropped

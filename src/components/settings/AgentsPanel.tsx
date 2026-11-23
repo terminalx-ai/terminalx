@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Check, ChevronRight, CircleAlert, CircleCheck, ExternalLink, Eye, EyeOff, KeyRound, Loader2, RefreshCw, ServerCog, SquareTerminal, Terminal, Trash2 } from "@/icons";
 import { AgentMark } from "@/components/AgentMark";
 import { AgentSetup } from "@/components/session/AgentSetup";
 import { Button } from "@/components/ui/button";
 import { useAgentReadiness, type AgentReadiness } from "@/lib/agentReadiness";
+import { compareAgentVersions } from "@/lib/agentVersion";
 import { setupActive, useAgentSetupFlow, type AgentSetupFlow } from "@/lib/agentSetupFlow";
 import {
   agentLogins, keepLine, KEY_PAGES, showAgentLoginNotice, tabsKeepingOlderLogin, takesApiKey, useAgentLogin,
   type AgentLoginStatus, type ShellKeyOffer,
 } from "@/lib/agentLogins";
+import { LOCAL_ACCOUNT, SAVED_KEY_ACCOUNT, takesAccounts } from "@/lib/agentAccounts";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { refreshHarnesses } from "@/lib/sessions";
 import type { HarnessInfo } from "@/types/session";
+import { addedAccounts, AgentAccountsSection, useAgentAccountsView } from "./AgentAccounts";
+import { AgentConfigFileRow, AgentExecutableRow, shortPath } from "./AgentExecutable";
+import { OpenCodeAgent } from "./OpenCodeAgent";
+import { RegisteredSetting } from "./settingsRegistry";
 
 const BADGES: Record<AgentReadiness["state"], string> = {
   missing: "Not installed",
@@ -65,10 +72,6 @@ function relative(at: string, now: number): string {
   return `at ${new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
-function shortPath(path: string | undefined): string | undefined {
-  const home = path?.match(/^\/Users\/[^/]+|^\/home\/[^/]+/)?.[0];
-  return home && path ? `~${path.slice(home.length)}` : path;
-}
 
 function hostOf(url: string): string {
   try { return new URL(url).host; } catch { return url; }
@@ -98,7 +101,7 @@ export function AgentsPanel({ harnesses, checkRun, busy, onRecheck }: {
           readiness={readiness[harness.id]} login={logins[harness.id] ?? null} onSelect={() => setSelected(harness.id)} />)}
       </div>
       <div className="ml-auto shrink-0 pb-1 pl-3">
-        <Button size="xs" variant="ghost" disabled={busy} onClick={onRecheck}>
+        <Button size="xs" variant="ghost" className="text-xs" disabled={busy} onClick={onRecheck}>
           {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />} Re-check
         </Button>
       </div>
@@ -146,6 +149,7 @@ function AgentTab({ harness, readiness, onLogin }: {
   const value = readiness?.value ?? null;
   const checking = readiness?.checking ?? true;
   const recheck = () => { void refreshHarnesses().then(() => readiness?.refresh()).catch(() => readiness?.refresh()); };
+  if (harness.id === "opencode") return <OpenCodeAgent harness={harness} readiness={value} checking={checking} recheck={recheck} />;
   if (takesApiKey(harness.id)) return <KeyedAgent harness={harness} readiness={value} checking={checking} refresh={readiness?.refresh} recheck={recheck} onLogin={onLogin} />;
   return <div>
     <StatusLine dot={value?.state === "ready" ? "ok" : checking ? "busy" : "off"} onRefresh={recheck} refreshing={checking}>
@@ -157,6 +161,22 @@ function AgentTab({ harness, readiness, onLogin }: {
       ["Executable", harness.path ? <Mono>{shortPath(harness.path)}</Mono> : null],
     ]} />
     {value?.state !== "ready" && <div className="mt-3"><AgentSetup harness={harness} value={value} checking={checking} onRefresh={recheck} headless /></div>}
+    <AgentFiles harness={harness} onChanged={recheck} />
+  </div>;
+}
+
+/** What each agent's own settings file is called on its row (10.01, 10.02). */
+const CONFIG_TITLES: Record<string, string> = { claude: "Claude settings file", codex: "Codex config", cursor: "Cursor settings file" };
+
+/** The program an agent runs as and its own settings file (PRO-157). A change re-checks the agent. */
+function AgentFiles({ harness, onChanged }: { harness: HarnessInfo; onChanged: () => void }) {
+  return <div className="mt-2" data-testid="agent-files">
+    <RegisteredSetting setting="agents.executable" instance={harness.id}>
+      <div><AgentExecutableRow harness={harness.id} agentName={harness.name} onChanged={onChanged} /></div>
+    </RegisteredSetting>
+    <RegisteredSetting setting="agents.settingsFile" instance={harness.id}>
+      <div><AgentConfigFileRow harness={harness.id} title={CONFIG_TITLES[harness.id] ?? `${harness.name} settings file`} last /></div>
+    </RegisteredSetting>
   </div>;
 }
 
@@ -173,6 +193,8 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
   const status = login.status;
   const flow = useAgentSetupFlow(harness.id);
   const [choice, setChoice] = useState<"subscription" | "api_key" | null>(null);
+  // #980: read again at every sign-in change, which can move the default account.
+  const accounts = useAgentAccountsView(takesAccounts(harness.id) ? harness.id : null, status);
   const [offer, setOffer] = useState<ShellKeyOffer | null>(null);
   const [busy, setBusy] = useState<"save" | "remove" | "import" | "mode" | "verify" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -192,7 +214,10 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     agentLogins.shellOffer(harness.id).then((found) => live && setOffer(found)).catch(() => live && setOffer(null));
     return () => { live = false; };
   }, [harness.id, askShell]);
-  const chosen = choice ?? (status?.mode === "api_key" && saved ? "api_key" : "subscription");
+  // An added account as the default (#980): neither This Mac's login nor the saved key is what new tabs use.
+  const defaultAccount = accounts.view?.defaultAccount;
+  const addedDefault = !!defaultAccount && defaultAccount !== LOCAL_ACCOUNT && defaultAccount !== SAVED_KEY_ACCOUNT && addedAccounts(accounts.view).some((account) => account.id === defaultAccount);
+  const chosen = choice ?? (addedDefault ? null : status?.mode === "api_key" && saved ? "api_key" : "subscription");
   const usingKey = status?.mode === "api_key" && !!saved;
   const subscription = SUBSCRIPTION[harness.id];
 
@@ -242,17 +267,20 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     if (!next) return;
     login.take(next);
     setChoice(null);
-    const [after, stale] = await Promise.all([refresh?.() as Promise<AgentReadiness | null> | undefined, tabsKeepingOlderLogin(harness.id)]);
+    const after = await (refresh?.() as Promise<AgentReadiness | null> | undefined);
     const name = subscriptionName(harness.id, after ?? null);
     const signedIn = after?.state === "ready";
+    const stale = await tabsKeepingOlderLogin(harness.id);
     showAgentLoginNotice({
-      harness: harness.id, kind: "removed", stale,
+      // Explain retained logins without offering to restart tabs after removal.
+      harness: harness.id, kind: "removed", stale: [],
       title: signedIn ? `API key removed · ${harness.name} uses ${subscription.again} again` : `API key removed · ${harness.name} needs a sign-in`,
-      body: [
-        signedIn
-          ? `Deleted from the Keychain. New tabs sign in with ${[name, after?.account].filter(Boolean).length === 2 ? `${name} (${after?.account})` : name ?? subscription.again}.`
-          : `Deleted from the Keychain. Sign in to ${harness.name} below to start new tabs.`,
+      body: [signedIn
+        ? `Deleted from the Keychain. New tabs sign in with ${[name, after?.account].filter(Boolean).length === 2 ? `${name} (${after?.account})` : name ?? subscription.again}.`
+        : `Deleted from the Keychain. Sign in to ${harness.name} below to start new tabs.`,
         keepLine(stale.length),
+        stale.length ? "Usage in these tabs may still be billed to their current login." : "",
+        "This does not revoke the key with your provider.",
       ].filter(Boolean).join(" "),
     });
   };
@@ -270,20 +298,21 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
 
   const keyField = <KeyField harness={harness} status={status} busy={busy} onSave={saveKey} onRemove={() => void removeKey()} />;
   const shellNote = saved?.fromShell ? <ShellNote>
-    Found in your login shell{saved.fromShell.file ? <> (<span className="font-mono text-[11px]">{saved.fromShell.file}</span>)</> : null}. A copy is now in the Keychain, so it works without {saved.fromShell.file ? "that file" : "it"}.
+    Found in your login shell{saved.fromShell.file ? <> (<span className="font-mono text-[12px]">{saved.fromShell.file}</span>)</> : null}. A copy is now in the Keychain, so it works without {saved.fromShell.file ? "that file" : "it"}.
   </ShellNote> : null;
-  const offerNote = offer && !saved ? <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px] text-faint">
+  const offerNote = offer && !saved ? <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-faint">
     <ShellBadge />
-    <span className="min-w-0">Found <span className="font-mono text-[11px]">{offer.variable}</span> in your login shell{offer.file ? <> (<span className="font-mono text-[11px]">{offer.file}</span>)</> : null}. Copy it to the Keychain so new tabs use it without that file?</span>
+    <span className="min-w-0">Found <span className="font-mono text-[12px]">{offer.variable}</span> in your login shell{offer.file ? <> (<span className="font-mono text-[12px]">{offer.file}</span>)</> : null}. Copy it to the Keychain so new tabs use it without that file?</span>
     <span className="flex gap-1.5">
-      <Button size="xs" variant="outline" className="shrink-0 whitespace-nowrap" disabled={!!busy} onClick={() => void importKey()}>
+      <Button size="xs" variant="outline" className="shrink-0 whitespace-nowrap text-xs" disabled={!!busy} onClick={() => void importKey()}>
         {busy === "import" ? <Loader2 className="animate-spin" /> : null} Import to the Keychain
       </Button>
-      <Button size="xs" variant="ghost" className="shrink-0 whitespace-nowrap" disabled={!!busy} onClick={() => void dismissOffer()}>Don&apos;t import</Button>
+      <Button size="xs" variant="ghost" className="shrink-0 whitespace-nowrap text-xs" disabled={!!busy} onClick={() => void dismissOffer()}>Don&apos;t import</Button>
     </span>
   </div> : null;
 
   const own = ownLogin(readiness);
+  const latest = useLatestVersion(harness.id, readiness?.version ?? null);
   const statusLine = usingKey ? <KeyStatus status={status!} verifying={busy === "verify"} now={now} />
     : flow && setupActive(flow) ? runBadge(flow) : checking ? "Checking…" : BADGES[own?.state ?? "unknown"];
   const dot = usingKey
@@ -311,7 +340,7 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
             <GetKey harness={harness.id} label="Get a key" />
           </div>
           {keyField}
-          <p className="mt-1 text-[11.5px] text-faint">Kept in the Keychain. TerminalX passes it to {harness.name} when a tab starts, in place of {status?.variable ?? "ANTHROPIC_API_KEY"}.</p>
+          {!saved?.fromShell && <p className="mt-1 text-[12px] text-faint">Kept in the Keychain. TerminalX passes it to {harness.name} when a tab starts, in place of {status?.variable ?? "ANTHROPIC_API_KEY"}.</p>}
           {shellNote}
         </div>}
       </>}
@@ -319,14 +348,36 @@ function KeyedAgent({ harness, readiness, checking, refresh, recheck, onLogin }:
     {(error || login.error) && <p role="alert" className="mt-2 text-xs text-destructive">{error ?? login.error}</p>}
     <StatusLine dot={dot} onRefresh={() => { recheck(); if (usingKey) void verify(); }} refreshing={checking || busy === "verify"}>{statusLine}</StatusLine>
     <Details rows={[
-      ["Version", readiness?.version ?? null],
+      ["Version", readiness?.version ? <VersionLine version={readiness.version} latest={latest} /> : null],
       ...(harness.id === "codex" ? [] : [["Login", loginRow] as [string, ReactNode]]),
-      ...(harness.id === "claude" && !usingKey && own?.organization ? [["Organization", own.organization] as [string, ReactNode]] : []),
+      ...(harness.id === "claude" && own?.organization ? [["Organization", own.organization] as [string, ReactNode]] : []),
       ...(harness.id === "codex" && status?.config ? [["Config", <Mono key="config">{status.config}</Mono>] as [string, ReactNode]] : []),
       ["Executable", harness.path ? <Mono>{shortPath(harness.path)}</Mono> : null],
     ]} />
     {needsSetup && <div className="mt-3"><AgentSetup harness={harness} value={own} checking={checking} onRefresh={recheck} headless /></div>}
+    {takesAccounts(harness.id) && <AgentAccountsSection harness={harness.id} agentName={harness.name} accounts={accounts} localReadiness={own} login={status}
+      onChanged={() => { void login.refresh(); void refresh?.(); }} />}
+    <AgentFiles harness={harness} onChanged={recheck} />
   </div>;
+}
+
+/** The latest release of an agent's CLI, asked once the installed version is known (PRO-377). */
+function useLatestVersion(harness: string, version: string | null): string | null {
+  const [latest, setLatest] = useState<string | null>(null);
+  useEffect(() => {
+    if (!version) return;
+    let live = true;
+    invoke<string | null>("agent_latest_version", { harness }).then((found) => live && setLatest(found ?? null)).catch(() => live && setLatest(null));
+    return () => { live = false; };
+  }, [harness, version]);
+  return latest;
+}
+
+/** Show the version alone when release precedence is unknown. */
+function VersionLine({ version, latest }: { version: string; latest: string | null }) {
+  const comparison = latest === null ? null : compareAgentVersions(latest, version);
+  const note = comparison === null ? null : comparison > 0 ? `${latest} available` : "up to date";
+  return <>{version}{note && <span className="text-faint"> · {note}</span>}</>;
 }
 
 function KeyStatus({ status, verifying, now }: { status: AgentLoginStatus; verifying: boolean; now: number }) {
@@ -385,7 +436,7 @@ function ChoiceCard({ selected, icon, title, hint, disabled, onSelect }: { selec
     <div>
       <span className={cn("inline-flex [&_svg]:size-[18px]", selected ? "text-foreground" : "text-muted-foreground")}>{icon}</span>
       <div className="mt-1 text-[12.5px] font-medium">{title}</div>
-      <div className="text-[11px] text-faint">{hint}</div>
+      <div className="text-[12px] text-faint">{hint}</div>
     </div>
   </button>;
 }
@@ -395,7 +446,8 @@ function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, b
   harness: HarnessInfo;
   status: AgentLoginStatus | null;
   readiness: AgentReadiness | null;
-  chosen: "subscription" | "api_key";
+  /** `null`: an added account is the default (#980). */
+  chosen: "subscription" | "api_key" | null;
   /** New tabs use the saved key: the only login a custom provider applies to. */
   usingKey: boolean;
   onChoose: (mode: "subscription" | "api_key") => void;
@@ -426,7 +478,8 @@ function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, b
     {chosen === "api_key" && <div className="border-b border-hairline bg-accent/[.03] px-3.5 pb-3 pt-0.5">
       <div className="ml-[26px] grid gap-1.5">
         {keyArea}
-        <p className="text-[11.5px] text-faint">Kept in the Keychain. TerminalX passes it to Codex when a tab starts, in place of {status?.variable ?? "OPENAI_API_KEY"}.</p>
+        {/* An imported key has its shell note above, which says this already (PRO-377). */}
+        {!status?.saved?.fromShell && <p className="text-[12px] text-faint">Kept in the Keychain. TerminalX passes it to Codex when a tab starts, in place of {status?.variable ?? "OPENAI_API_KEY"}.</p>}
       </div>
     </div>}
     <button type="button" aria-expanded={custom} onClick={() => setCustom(!custom)}
@@ -446,8 +499,8 @@ function CodexChoice({ harness, status, readiness, chosen, usingKey, onChoose, b
           {status?.baseUrl && <Button size="sm" variant="ghost" className="shrink-0 whitespace-nowrap text-muted-foreground" disabled={!!busy} onClick={() => void onBaseUrl(null)}>Use OpenAI</Button>}
         </div>
         {chosen === "api_key"
-          ? <p className="text-[11.5px] text-faint">Codex sends the API key above to this address instead of OpenAI&apos;s, as it would with OPENAI_BASE_URL.</p>
-          : <p role="note" className="text-[11.5px] text-warning">A custom provider is used only with an API key: ChatGPT always signs in at OpenAI. Choose API key above to set one.</p>}
+          ? <p className="text-[12px] text-faint">Codex sends the API key above to this address instead of OpenAI&apos;s, as it would with OPENAI_BASE_URL.</p>
+          : <p role="note" className="text-[12px] text-warning">A custom provider is used only with an API key: ChatGPT always signs in at OpenAI. Choose API key above to set one.</p>}
       </div>
     </div>}
   </div>;
@@ -468,13 +521,13 @@ function GetKey({ harness, label }: { harness: string; label: string }) {
 }
 
 function ShellBadge() {
-  return <span className="inline-flex h-[18px] shrink-0 items-center gap-1 whitespace-nowrap rounded bg-info/12 px-1.5 text-[10.5px] font-medium text-info">
+  return <span className="inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap rounded bg-info/12 px-1.5 text-[12px] font-medium text-info">
     <Terminal aria-hidden className="size-[11px]" />From your shell
   </span>;
 }
 
 function ShellNote({ children }: { children: ReactNode }) {
-  return <div className="mt-1.5 flex items-center gap-2 text-[11.5px] text-faint"><ShellBadge /><span className="min-w-0">{children}</span></div>;
+  return <div className="mt-1.5 flex items-center gap-2 text-[12px] text-faint"><ShellBadge /><span className="min-w-0">{children}</span></div>;
 }
 
 function StatusLine({ dot, children, onRefresh, refreshing }: { dot: "ok" | "bad" | "busy" | "off"; children: ReactNode; onRefresh: () => void; refreshing: boolean }) {
@@ -482,7 +535,7 @@ function StatusLine({ dot, children, onRefresh, refreshing }: { dot: "ok" | "bad
     <span aria-hidden className={cn("size-2 shrink-0 rounded-full", dot === "ok" ? "bg-add" : dot === "bad" ? "bg-warning" : dot === "busy" ? "bg-faint animate-pulse" : "bg-faint")} />
     <span role="status" className="min-w-0">{children}</span>
     <span className="ml-auto shrink-0">
-      <Button size="xs" variant="ghost" disabled={refreshing} onClick={onRefresh}>{refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />} Refresh</Button>
+      <Button size="xs" variant="ghost" className="text-xs" disabled={refreshing} onClick={onRefresh}>{refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />} Refresh</Button>
     </span>
   </div>;
 }

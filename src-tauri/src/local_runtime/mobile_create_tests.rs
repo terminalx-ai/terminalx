@@ -1,8 +1,12 @@
-//! A paired phone starting sessions and changing this Mac's settings. Each
+//! A paired phone starting sessions, changing this Mac's settings and pinning
+//! sessions and cloud projects (#1403). Each
 //! case runs in a child of its own: stand-in agent CLIs go first on the
 //! lookup path, which a process fixes once.
+#[cfg(unix)]
 use super::*;
+#[cfg(unix)]
 use crate::{harness::host::Host, pty, session::SessionManager, sink, store};
+#[cfg(unix)]
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -10,7 +14,7 @@ const CASE: &str = "TERMINALX_TEST_PHONE_CREATE_CASE";
 
 #[test]
 fn a_phone_starts_sessions_and_changes_settings_as_the_desktop_does() {
-    for case in ["create", "settings", "refused"] {
+    for case in ["create", "settings", "refused", "pins"] {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("child.log")).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -31,6 +35,7 @@ fn a_phone_starts_sessions_and_changes_settings_as_the_desktop_does() {
     }
 }
 
+#[cfg(unix)]
 fn git(dir: &std::path::Path, args: &[&str]) {
     let status = std::process::Command::new("git").args(args).current_dir(dir)
         .env("GIT_AUTHOR_NAME", "Fixture").env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
@@ -39,6 +44,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn phone_create_child() {
     use std::os::unix::fs::PermissionsExt;
@@ -126,6 +132,18 @@ fn phone_create_child() {
             assert_eq!(tab_of(&asks).1.transport, store::index::AgentTransport::Pty);
             let claude = call("phone", "create", json!({"quick":true,"agent":"claude","prompt":"Hi"})).unwrap();
             assert_eq!(tab_of(&claude).1.transport, store::index::AgentTransport::Pty);
+
+            // The account the phone chose (#980) is the one the first tab asks for,
+            // in a quick chat and in a project; none chosen names none, as before accounts.
+            assert_eq!(features()["sessionAccounts"], 1);
+            let work = "0123456789abcdef";
+            let on_work = call("phone", "create", json!({"quick":true,"agent":"claude","account":work,"prompt":"Hi"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&on_work).1), Some(work));
+            let project_on_work = call("phone", "create", json!({"projectId":store::projects::public_id(&repo.path),"agent":"claude","account":work,"prompt":"Look around"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&project_on_work).1), Some(work));
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&claude).1), None);
+            let blank = call("phone", "create", json!({"quick":true,"agent":"claude","account":"","prompt":"Hi"})).unwrap();
+            assert_eq!(crate::session_ops::tab_account(&tab_of(&blank).1), None);
         }
         "settings" => {
             // A desktop-only switch the phone neither shows nor changes (PRO-273).
@@ -157,6 +175,7 @@ fn phone_create_child() {
             assert!(refused(json!({"quick":true,"projectId":store::projects::public_id(&repo.path),"agent":"claude","prompt":"Hi"})).contains("Choose a project or a quick chat"));
             assert!(refused(json!({"quick":true,"agent":"nobody","prompt":"Hi"})).contains("not an agent this Mac offers"));
             assert!(refused(json!({"quick":true,"agent":"claude","mode":"yolo","prompt":"Hi"})).contains("Unknown permission mode"));
+            assert!(refused(json!({"quick":true,"agent":"claude","account":"../../elsewhere","prompt":"Hi"})).contains("not an agent account id"));
             // An archived project is not offered, so it cannot be named.
             let archived = store::projects::update(&folder.path, store::projects::ProjectPatch { archived: Some(true), ..Default::default() }).unwrap();
             assert!(archived.archived);
@@ -168,6 +187,48 @@ fn phone_create_child() {
             assert!(call("phone", "setSettings", json!({"nativeCodex":true})).is_err());
             assert_eq!(store::index::load().unwrap().len(), before);
             assert!(!store::settings::load().experimental.native_codex);
+        }
+        "pins" => {
+            // Pinned from the phone as from the sidebar: the windows and other phones hear of it at once.
+            let session: store::index::SessionEntry = serde_json::from_value(json!({
+                "id":"pin-me", "projectPath":repo.path, "cwd":repo.path, "title":"Pin me", "created":"2026-01-01", "modified":"2026-01-01"
+            })).unwrap();
+            store::index::save(&[session]).unwrap();
+            assert_eq!(features()["pin"], 1);
+            let updated = |events: &mut tokio::sync::broadcast::Receiver<sink::Published>| std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|published| &*published.event == "session_updated")
+                .map(|published| serde_json::from_str::<Value>(&published.payload).unwrap())
+                .last();
+            assert_eq!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":true})).unwrap(), json!({"sessionId":"pin-me","pinned":true}));
+            assert!(store::index::get("pin-me").unwrap().pinned);
+            assert_eq!(updated(&mut events).unwrap()["pinned"], true);
+            // A phone that may only watch pins nothing.
+            let read_only = |result: Result<Value>| result.unwrap_err().to_string();
+            assert!(read_only(call("tablet", "pin", json!({"sessionId":"pin-me","pinned":false}))).contains("read-only"));
+            assert!(store::index::get("pin-me").unwrap().pinned);
+            assert!(updated(&mut events).is_none());
+            assert_eq!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":false})).unwrap()["pinned"], false);
+            assert!(!store::index::get("pin-me").unwrap().pinned);
+            // A session that has gone, said in words the phone shows.
+            assert!(call("phone", "pin", json!({"sessionId":"gone","pinned":true})).unwrap_err().to_string().contains("no longer on this Mac"));
+            assert!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":"yes"})).is_err());
+
+            // A cloud project, kept where the sidebar reads it.
+            let pins = call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":true})).unwrap();
+            assert_eq!(pins, json!({"orgs":{"org-1":["github.com/acme/web"]}}));
+            assert_eq!(store::cloud_pins::load().unwrap().orgs["org-1"], ["github.com/acme/web"]);
+            let announced = std::iter::from_fn(|| events.try_recv().ok()).find(|published| &*published.event == store::cloud_pins::CHANGED).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&announced.payload).unwrap()["orgs"]["org-1"], json!(["github.com/acme/web"]));
+            assert!(read_only(call("tablet", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":false}))).contains("read-only"));
+            assert!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"","pinned":true})).is_err());
+            assert_eq!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":false})).unwrap(), json!({"orgs":{}}));
+
+            // A revoked phone pins nothing.
+            manager.mobile.revoke_device(&owner, "driver").unwrap();
+            assert!(call("phone", "pin", json!({"sessionId":"pin-me","pinned":true})).is_err());
+            assert!(call("phone", "cloudPin", json!({"orgId":"org-1","identity":"github.com/acme/web","pinned":true})).is_err());
+            assert!(!store::index::get("pin-me").unwrap().pinned);
+            assert!(store::cloud_pins::load().unwrap().orgs.is_empty());
         }
         _ => unreachable!(),
     }

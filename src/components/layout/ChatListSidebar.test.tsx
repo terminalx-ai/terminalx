@@ -13,10 +13,10 @@ vi.mock("@/components/account/AccountSidebarEntry", () => ({ AccountSidebarEntry
 vi.mock("@/lib/automations", () => ({ useAutomationStore: () => ({ automations: [] }) }));
 
 const { ProjectRail } = await import("./ProjectRail");
-const { chatPreview } = await import("./ChatListSidebar");
 const store = await import("@/lib/sessions");
 const prefs = await import("@/lib/prefs");
 const selection = await import("@/lib/rowSelection");
+const botStore = await import("@/lib/bots");
 
 const chatsPath = "/store/Chats";
 const projects: Project[] = [{ path: "/repos/web", name: "web", kind: "git", color: "blue" }];
@@ -53,7 +53,7 @@ beforeEach(async () => {
 });
 afterEach(cleanup);
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 
 async function boot(list: SessionEntry[]) {
   sessions = list;
@@ -64,10 +64,11 @@ async function boot(list: SessionEntry[]) {
 }
 
 const rows = () => within(screen.getByTestId("conversation-list")).getAllByRole("listitem");
-const titleOf = (row: HTMLElement) => row.querySelector("[data-row-sessions] > button")?.getAttribute("aria-label");
+const titleOf = (row: HTMLElement) => row.querySelector("[data-row-sessions] [data-row-title]")?.textContent;
+const rowTitles = () => [...screen.getByTestId("conversation-list").querySelectorAll("[data-row-title]")].map((title) => title.textContent);
 
-describe("the chat list", () => {
-  it("lists every conversation in one list, pinned first then newest, whatever project it is in", async () => {
+describe("one list of sessions (View → Group by Sections)", () => {
+  it("lists every conversation in one list of one-line rows, pinned ones in the Pinned group, then newest, whatever project it is in", async () => {
     await boot([
       session("chat", chatsPath, at(3)),
       session("work", "/repos/web", at(2), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }),
@@ -75,40 +76,32 @@ describe("the chat list", () => {
       session("gone", chatsPath, at(4), { archived: true }),
     ]);
     mount();
-    expect(rows().map(titleOf)).toEqual(["Talk old", "Talk chat", "fix login"]);
-    // No project level: the project view is one click away.
+    // A row is named by its session's title, never its branch (PRO-384).
+    expect(rows().map(titleOf).filter(Boolean)).toEqual(["Talk old", "Talk chat", "Talk work"]);
+    expect(within(screen.getByTestId("pinned-group")).getByRole("button", { name: "Pinned 1" })).toBeTruthy();
+    // No project level, and no second line or bot face: the same compact rows as the project layout.
     expect(screen.queryByRole("group", { name: "web" })).toBeNull();
+    expect(screen.queryByTestId("chat-preview")).toBeNull();
+    expect(screen.queryByTestId("chat-mark")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "View" }));
-    expect(screen.getByRole("menuitemradio", { name: "One list of chats" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("menuitemradio", { name: "Sections" }).getAttribute("aria-checked")).toBe("true");
   });
 
-  it("names the project and branch under each chat, says what a chat in no project last said, and marks the unread and waiting ones", async () => {
-    summaries = {
-      said: { lastReply: "Done: the tests pass\nand the build is green." },
-      asks: { waitingOn: "Allow rm -rf dist?" },
-      alone: { waitingOn: "Which file?" },
-    };
+  it("puts where a session works in its tooltip, and marks the unread and waiting ones", async () => {
     await boot([
       session("asks", "/repos/web", at(4), { worktreeName: "fix-login", cwd: "/repos/web/.raccoon/worktrees/fix-login", branch: "raccoon/fix-login" }, "waiting"),
       session("said", chatsPath, at(3), {}, "completed"),
-      session("alone", chatsPath, at(2), {}, "waiting"),
       session("quiet", "/repos/web", at(1), { branch: "main" }),
     ]);
     mount();
-    // The summaries arrive after the first paint.
-    await act(async () => {});
-    const [asks, said, alone, quiet] = rows();
-    expect(within(asks!).getByTestId("chat-preview").textContent).toBe("web · raccoon/fix-login");
+    const [asks, said, quiet] = rows();
     // A mark, not a label: its name is the label.
-    expect(within(asks!).getByRole("img", { name: "Needs you" })).toBeTruthy();
-    // What it waits on is still there, on hover.
-    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("fix login\nweb · raccoon/fix-login\nAllow rm -rf dist?");
-    expect(within(said!).getByTestId("chat-preview").textContent).toBe("Done: the tests pass and the build is green.");
+    expect(within(asks!).getByRole("button", { description: /^Needs you/ })).toBeTruthy();
+    expect(asks!.querySelector("[title]")?.getAttribute("title")).toBe("web · raccoon/fix-login · Talk asks");
     expect(within(said!).getByRole("img", { name: "Unread" })).toBeTruthy();
-    expect(within(alone!).getByTestId("chat-preview").textContent).toBe("Which file?");
-    expect(within(quiet!).getByTestId("chat-preview").textContent).toBe("web · main");
-    // Only its status mark: nothing unread, nothing waiting.
-    expect(within(quiet!).getAllByRole("img").map((img) => img.getAttribute("aria-label"))).toEqual(["No changes"]);
+    expect(said!.querySelector("[title]")?.getAttribute("title")).toBe("Talk said");
+    // Nothing unread, nothing waiting.
+    expect(within(quiet!).queryAllByRole("img")).toEqual([]);
   });
 
   it("opens a chat on click, and switches back to the project view from the View menu", async () => {
@@ -117,67 +110,12 @@ describe("the chat list", () => {
     fireEvent.click(within(rows()[0]!).getByRole("button", { name: "Talk one" }));
     expect(store.getSessionStore().selectedSessionId).toBe("one");
     fireEvent.click(screen.getByRole("button", { name: "View" }));
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Group by project" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Project" }));
     expect(prefs.getPrefs().sidebarLayout).toBe("simple");
     fireEvent.click(screen.getByRole("button", { name: "View" }));
-    expect(screen.getByRole("menuitemradio", { name: "Group by project" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("menuitemradio", { name: "Project" }).getAttribute("aria-checked")).toBe("true");
   });
 });
-
-describe("chatPreview", () => {
-  const chat = session("x", chatsPath, at(1));
-  it("names the place first; a chat in none says what the agent waits on, then the last thing said", () => {
-    expect(chatPreview(chat, { sessionId: "x", tabId: "t", lastPrompt: "hi", lastReply: "hello", waitingOn: "ok?", updatedAt: "" }, { name: "web", branch: "main" })).toEqual({ text: "web · main", tone: "place" });
-    expect(chatPreview(chat, { sessionId: "x", tabId: "t", lastPrompt: "hi", lastReply: "hello", waitingOn: "ok?", updatedAt: "" }, null)).toEqual({ text: "ok?", tone: "waiting" });
-    expect(chatPreview(chat, { sessionId: "x", tabId: "t", lastPrompt: "hi", lastReply: null, waitingOn: null, updatedAt: "" }, null)).toEqual({ text: "hi", tone: "said" });
-    expect(chatPreview(chat, undefined, { name: "web", branch: null })).toEqual({ text: "web", tone: "place" });
-    expect(chatPreview(chat, undefined, null)).toEqual({ text: "New chat", tone: "place" });
-  });
-
-  it("says what a helper tab is doing while one works, then goes back to the place (PRO-331)", () => {
-    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, "Review 2 of 3 running")).toEqual({ text: "Review 2 of 3 running", tone: "helper" });
-    expect(chatPreview(chat, undefined, { name: "web", branch: "main" }, null)).toEqual({ text: "web · main", tone: "place" });
-  });
-});
-
-describe("a project's mark", () => {
-  it("shows the project's initial on a colour of its own, the same colour every time, and the chosen colour when there is one", async () => {
-    const { projectHue } = await import("./ChatListSidebar");
-    const { PROJECT_COLORS } = await import("./PixelMascot");
-    expect(projectHue({ name: "web", color: null })).toBe(projectHue({ name: "web", color: null }));
-    expect(projectHue({ name: "web", color: null })).not.toBe("var(--ink-muted)");
-    expect(projectHue({ name: "web", color: "pink" })).toBe(PROJECT_COLORS.find((c) => c.id === "pink")!.css);
-    await boot([session("one", "/repos/web", at(1)), session("two", chatsPath, at(2), {}, "in_progress")]);
-    mount();
-    const [chat, work] = rows();
-    // Only a busy bot's face moves.
-    expect(within(chat!).getByTestId("bot-face").querySelector("animate")).toBeTruthy();
-    expect(within(work!).getByTestId("bot-face").querySelector("animate")).toBeNull();
-    // Each chat has a face of its own; a project chat's is in the project's colour.
-    expect(within(work!).getByTestId("bot-face").getAttribute("data-seed")).toBe("one");
-    expect(within(work!).getByTestId("bot-face").querySelector("path")?.getAttribute("fill")).toBe(projectHue({ name: "web", color: "blue" }));
-    expect(within(chat!).getByTestId("bot-face").getAttribute("data-seed")).toBe("two");
-  });
-});
-
-describe("a bot's face", () => {
-  it("is the same for the same seed, differs between seeds, and is a closed blob with two eyes", async () => {
-    const { faceOf, botColor } = await import("./BotFace");
-    expect(faceOf("one")).toEqual(faceOf("one"));
-    expect(faceOf("one").path).not.toBe(faceOf("two").path);
-    expect(faceOf("one").path).toMatch(/^M [\d.]+ [\d.]+( Q [\d.]+ [\d.]+ [\d.]+ [\d.]+){5,8} Z$/);
-    expect(faceOf("one").eyes).toHaveLength(2);
-    // The shapes it morphs through share the first one's structure and come back round to it.
-    const commands = (path: string) => path.replace(/[\d.]+/g, "n");
-    expect(faceOf("one").morph.length).toBeGreaterThan(2);
-    expect(new Set(faceOf("one").morph.map(commands)).size).toBe(1);
-    expect(faceOf("one").morph[0]).toBe(faceOf("one").path);
-    expect(faceOf("one").morph.at(-1)).toBe(faceOf("one").path);
-    expect(faceOf("one").morph[1]).not.toBe(faceOf("one").path);
-    expect(botColor("one")).toBe(botColor("one"));
-  });
-});
-
 
 it("offers conversation-preserving cleanup in the list view and marks kept history", async () => {
   await boot([
@@ -186,14 +124,14 @@ it("offers conversation-preserving cleanup in the list view and marks kept histo
   ]);
   mount();
   // Set apart from the live chats under its fold (#696).
-  expect(screen.queryByRole("button", { name: "Talk kept" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Talk kept/ })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Removed workspaces (1)" }));
-  const kept = screen.getByRole("button", { name: "Talk kept" });
+  const kept = screen.getByRole("button", { name: "Talk kept (workspace removed)" });
   expect(within(kept).getByText("removed")).toBeTruthy();
   expect(kept.closest("div[title]")?.getAttribute("title")).toContain("/repos/web/.raccoon/worktrees/old · workspace removed · resumes in /repos/web");
-  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
-  expect(await screen.findByRole("menuitem", { name: "Remove workspace, keep conversations…" })).toBeTruthy();
-  expect(screen.getByRole("menuitem", { name: "Delete…" })).toBeTruthy();
+  fireEvent.pointerDown(screen.getByRole("button", { name: "Menu for Talk live" }), { button: 0, ctrlKey: false, pointerType: "mouse" });
+  expect(await screen.findByRole("menuitem", { name: /^Remove workspace…/ })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Delete session…" })).toBeTruthy();
 });
 
 describe("renaming a chat in the list", () => {
@@ -214,7 +152,7 @@ describe("renaming a chat in the list", () => {
 
     fireEvent.contextMenu(row);
     const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Rename…", "Set status", "Move to section", "Mark as unreadR", "Pin", "Reveal in Finder", "Copy path", "Copy branch name", "Copy link", "Select", "Archive", "Link to issue…", "Link pull request…", "Delete…"]);
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual(["Mark as unreadR", "PinP", "Set status", "Move to section", "Open in", "Rename…", "Copy link", "Share session…", "Issue and pull request", "Archive", "Delete session…"]);
     fireEvent.click(within(menu).getByRole("menuitem", { name: /Rename/ }));
     expect(opened).toBe("a");
   });
@@ -226,7 +164,7 @@ describe("renaming a chat in the list", () => {
     );
     await boot([session("a", "/repos/web", at(1), { branch: "dc/payments" })]);
     mount();
-    expect(screen.getByTestId("chat-preview").textContent).toBe("web · Payments");
+    expect(rows()[0]!.querySelector("[title]")?.getAttribute("title")).toBe("web · Payments · Talk a");
   });
 });
 
@@ -236,8 +174,7 @@ describe("the archive in the chat list (#718)", () => {
     selection.clearPicked();
   });
 
-  it("lists the archived chats at the end under Show archived, with their previews, and Unarchive puts one back", async () => {
-    summaries = { old: { lastReply: "Shipped in 0.2.20." } };
+  it("lists the archived chats at the end under Show archived, and Unarchive puts one back", async () => {
     await boot([session("live", chatsPath, at(3)), session("old", chatsPath, at(5), { archived: true }), session("older", "/repos/web", at(1), { archived: true })]);
     mount();
     expect(rows().map(titleOf)).toEqual(["Talk live"]);
@@ -247,14 +184,13 @@ describe("the archive in the chat list (#718)", () => {
     const fold = screen.getByTestId("archived-sessions");
     expect(within(fold).getByRole("button", { name: "Archived (2)" }).getAttribute("aria-expanded")).toBe("true");
     // Newest first, after the live ones, however new.
-    expect(screen.getAllByRole("button", { name: /^Talk/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["Talk live", "Talk old", "Talk older"]);
-    expect(await within(fold).findByText("Shipped in 0.2.20.")).toBeTruthy();
-    expect(within(fold).getByText("web")).toBeTruthy();
+    expect(rowTitles()).toEqual(["Talk live", "Talk old", "Talk older"]);
+    expect(within(fold).getAllByTitle("web · Talk older")).toHaveLength(1);
 
     await act(async () => { fireEvent.click(within(fold).getByRole("button", { name: "Unarchive Talk old" })); });
     expect(mocks.invoke.mock.calls.filter(([command]) => command === "set_session_archived").map(([, args]) => args)).toEqual([{ sessionId: "old", archived: false }]);
     expect(within(screen.getByTestId("archived-sessions")).getByRole("button", { name: "Archived (1)" })).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: /^Talk/ }).map((row) => row.getAttribute("aria-label"))).toEqual(["Talk old", "Talk live", "Talk older"]);
+    expect(rowTitles()).toEqual(["Talk old", "Talk live", "Talk older"]);
   });
 
   it("picks chats for the bulk bar as the project view does", async () => {
@@ -271,13 +207,35 @@ describe("the archive in the chat list (#718)", () => {
 });
 
 
+describe("a bot's chats (PRO-468)", () => {
+  afterEach(() => botStore.resetBotsForTests());
+
+  it("are under their bot, not in the list or the status layout, while the bot is listed", async () => {
+    const bot = { id: "b1", slug: "atlas", name: "Atlas", roleTitle: "CTO", roleTemplateId: "cto", harness: "claude", model: "", access: "full", runsOn: "thisMac", reportsTo: "owner", worksIn: ["personal"], created: at(1), modified: at(1) };
+    const listing = { revision: 1, bots: [bot], unreadable: 0 };
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: unknown) => (command === "bot_list" ? listing : answer(command, args)));
+    await boot([session("plain", chatsPath, at(2)), session("home", chatsPath, at(3), { bot: { id: "b1", home: true } }), session("orphan", chatsPath, at(1), { bot: { id: "gone" } })]);
+    await act(async () => botStore.bootBots());
+    for (const layout of ["list", "status"] as const) {
+      prefs.setPrefs({ sidebarLayout: layout });
+      mount();
+      const titles = [...document.querySelectorAll("[data-row-title]")].map((title) => title.textContent);
+      expect(titles, layout).toContain("Talk plain");
+      expect(titles, "a chat whose bot is gone stays where it can be found").toContain("Talk orphan");
+      expect(titles, layout).not.toContain("Talk home");
+      cleanup();
+    }
+  });
+});
+
 describe("status grouping and view controls (PRO-164)", () => {
   it("groups each session independently, updates counts and remembers collapsed headers", async () => {
     await boot([session("one", "/repos/web", at(1), { manualStatus: "in_review" }), session("two", "/repos/web", at(2), { manualStatus: "in_review" }), session("three", chatsPath, at(3))]);
     mount();
-    expect(screen.getByRole("button", { name: "Talk one", description: "Status: In review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Talk one", description: /Status: In review$/ })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
-    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Group by status" }));
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Status" }));
     const header = screen.getByRole("button", { name: "In review 2" });
     expect(screen.getByRole("button", { name: "Backlog 1" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Done/ })).toBeNull();
@@ -333,7 +291,7 @@ describe("status grouping and view controls (PRO-164)", () => {
     act(() => store.selectSession(null));
     mount();
     fireEvent.keyDown(screen.getByRole("button", { name: "View" }), { key: "ArrowDown" });
-    const trigger = await screen.findByRole("menuitem", { name: "Filter by project" });
+    const trigger = await screen.findByRole("menuitem", { name: /^Filter by project/ });
     fireEvent.keyDown(trigger, { key: "ArrowRight" });
     const search = await screen.findByRole("textbox", { name: "Search projects" });
     await waitFor(() => expect(document.activeElement).toBe(search));
@@ -361,5 +319,49 @@ describe("status grouping and view controls (PRO-164)", () => {
     fireEvent.keyDown(document.activeElement!, { key: "Enter" });
     expect(prefs.getPrefs().sidebarProject).toBe("/repos/web");
     expect(screen.queryByRole("button", { name: "Talk other" })).toBeNull();
+  });
+});
+
+describe("the Machines section (PRO-345)", () => {
+  const machines = async (paired: boolean) => {
+    const experimental = await import("@/lib/experimentalSettings");
+    const connections = await import("@/lib/machineConnections");
+    const { pairedMachine } = await import("@/components/machines/machineFixtures.test-utils");
+    experimental.resetExperimentalSettingsForTests();
+    connections.resetMachineConnectionsForTests();
+    const answer = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args?: never) => {
+      if (command === "machines_list") return !paired ? [] : [pairedMachine({ machineId: "m1", name: "Mac mini" }), pairedMachine({ machineId: "m2", name: "dev-server", os: { family: "linux", version: null } })];
+      if (command === "machines_connections") return !paired ? [] : [{ machineId: "m1", state: { state: "direct", route: { kind: "lan", endpoint: "ws://192.168.1.20:6768/machine/1" }, since: 1, rttMs: 3 } }, { machineId: "m2", state: { state: "offline", lastSeenAt: null, retryInMs: 10_000 } }];
+      return answer(command, args);
+    });
+    await connections.refreshPairedMachines();
+    return connections;
+  };
+  afterEach(async () => {
+    (await import("@/lib/experimentalSettings")).resetExperimentalSettingsForTests();
+    (await import("@/lib/machineConnections")).resetMachineConnectionsForTests();
+    store.selectCloudWorkspace(null);
+  });
+
+  it("lists each paired machine with its state in place of the Development section, and opens its view", async () => {
+    await machines(true);
+    await boot([session("one", "/repos/web", new Date().toISOString())]);
+    mount();
+    const section = await screen.findByTestId("machines-section");
+    expect(screen.queryByTestId("dev-runtime-section")).toBeNull();
+    const mini = within(section).getByRole("region", { name: "Mac mini" });
+    expect(within(mini).getByTestId("machine-state-label").textContent).toBe("Direct");
+    expect(within(within(section).getByRole("region", { name: "dev-server" })).getByTestId("machine-state-label").textContent).toBe("Offline");
+    fireEvent.click(within(mini).getByRole("button"));
+    expect(store.getSessionStore().selectedCloudWorkspace).toBe("machine:m1");
+  });
+
+  it("shows nothing with no machine paired (PRO-360)", async () => {
+    await machines(false);
+    await boot([session("one", "/repos/web", new Date().toISOString())]);
+    mount();
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("machines_list"));
+    expect(screen.queryByTestId("machines-section")).toBeNull();
   });
 });

@@ -26,7 +26,7 @@ fn git(cwd: &Path, args: &[&str]) {
 fn fixture() -> Fixture {
     let home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let seed = base.join("seed");
     std::fs::create_dir(&seed).unwrap();
     git(&seed, &["init", "-q", "-b", "main"]);
@@ -225,6 +225,29 @@ async fn a_sessions_worktree_is_read_and_removed_by_its_session_and_the_main_dir
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workspace_rpc_refuses_removal_when_the_repository_requires_an_archive_script() {
+    let f = fixture();
+    let manager = peer(&f.rpc, Authority::Manage, &["workspace/1"]).await;
+    let session = session(&f, "done", Some("done-one"));
+    let checked = call(&f.rpc, &manager, "workspace.disposition", json!({ "sessionId": session.id, "fetch": true })).await.unwrap();
+    assert_eq!(checked["disposition"]["landed"]["safe"], true, "{checked}");
+
+    let project = crate::store::projects::add(f.root.to_str().unwrap()).unwrap();
+    let scripts = crate::store::projects::RepositoryScripts { archive: "exit 0".into(), ..Default::default() };
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch { scripts: Some(scripts), ..Default::default() }).unwrap();
+
+    for (method, params) in [
+        ("workspace.disposition", json!({ "sessionId": session.id })),
+        ("workspace.remove", json!({ "clientRequestId": "request-0001", "sessionId": session.id, "expectedSessions": [session.id] })),
+    ] {
+        let response = f.rpc.handle(&manager, &json!({ "id": "archive-script", "method": method, "params": params })).await;
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(response["error"]["message"].as_str().unwrap().contains("archive script"), "{response}");
+    }
+    assert!(Path::new(&session.cwd).exists() && crate::store::index::get(&session.id).is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_removal_tells_its_caller_how_far_it_is_and_nobody_else() {
     let f = fixture();
     let (manager, mut heard) = Peer::new("device-a".into(), Authority::Manage);
@@ -371,6 +394,7 @@ async fn the_runtime_removes_a_merged_worktree_with_its_branches_keeps_an_unsafe
     assert!(Path::new(&done.cwd).exists());
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
     for method in ["workspace.remove", "workspace.sweepMerged"] {
@@ -383,7 +407,7 @@ async fn remote_workspace_cleanup_retains_unconfirmed_ownership_and_retries() {
         companion.id = "cleanup-companion".into();
         for tab in &mut companion.tabs { tab.id = format!("companion-{}", tab.id); }
         crate::store::index::update(|entries| { entries.insert(0, companion.clone()); Ok(()) }).unwrap();
-        let manager = peer(&f.rpc, Authority::Manage, &crate::remote::protocol::CAPABILITIES).await;
+        let manager = peer(&f.rpc, Authority::Manage, crate::remote::protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":done.id,"clientRequestId":"cleanup-open"})).await.unwrap();
         let companion_opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":companion.id,"clientRequestId":"companion-open"})).await.unwrap();
         let companion_id = companion_opened["ptyId"].as_str().unwrap();

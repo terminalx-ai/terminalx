@@ -41,6 +41,70 @@ pub(crate) fn claude_projects_root() -> Option<PathBuf> {
     }
 }
 
+/// Where a Claude Code tab's transcripts are written (#980): `projects` in
+/// the account directory it runs on (`CLAUDE_CONFIG_DIR`), or
+/// [`claude_projects_root`] on This Mac's login. An account's `projects` is
+/// a link to the person's own, so both name the same files. The person's
+/// folder is made when it is missing, so the link always leads somewhere
+/// the CLI can write.
+pub(crate) fn claude_projects_root_in(account_dir: Option<&Path>) -> Option<PathBuf> {
+    let person = claude_projects_root();
+    match account_dir {
+        None => person,
+        Some(dir) => {
+            let projects = dir.join("projects");
+            if std::fs::symlink_metadata(&projects).is_ok_and(|meta| meta.file_type().is_symlink()) && !projects.exists() {
+                if let Ok(target) = std::fs::read_link(&projects) {
+                    if let Err(error) = std::fs::create_dir_all(if target.is_absolute() { target } else { dir.join(target) }) {
+                        log::warn!("make the shared Claude Code projects folder: {error}");
+                    }
+                }
+            }
+            Some(projects)
+        }
+    }
+}
+
+/// [`claude_projects_root_in`] for `tab` (#980): the directory of the added
+/// account it runs on, if it does.
+pub(crate) fn claude_projects_root_of(tab: &crate::store::index::TabEntry) -> Option<PathBuf> {
+    let dir = crate::session_ops::tab_running_account(tab).and_then(|id| crate::agent_accounts::directory("claude", id).ok().flatten());
+    claude_projects_root_in(dir.as_deref())
+}
+
+/// Where conversation `id` of Claude Code `tab` in `cwd` is (#980): under
+/// the account it runs on, else under the person's own folder, where every
+/// account's shared `projects` link leads. `None` with no home at all.
+pub(crate) fn locate_claude(tab: &crate::store::index::TabEntry, cwd: &str, id: &str) -> Option<PathBuf> {
+    let person = claude_projects_root();
+    let own = claude_projects_root_of(tab).filter(|root| Some(root) != person.as_ref());
+    let found = own.iter().chain(person.iter()).map(|root| crate::harness::claude::transcript::locate_in(root, cwd, id)).find(|path| path.is_file());
+    found.or_else(|| person.or(own).map(|root| crate::harness::claude::transcript::locate_in(&root, cwd, id)))
+}
+
+/// The Codex home of the added account `tab` runs on (#980), whose
+/// `sessions` is shared with the default managed home, or `None`.
+pub(crate) fn codex_account_home_of(tab: &crate::store::index::TabEntry) -> Option<PathBuf> {
+    let id = crate::session_ops::tab_running_account(tab)?;
+    crate::agent_accounts::directory("codex", id).ok().flatten()?;
+    let root = crate::store::root().ok()?;
+    Some(crate::harness::codex::home::account_paths(&root, id).1)
+}
+
+/// Added Claude Code accounts whose `projects` is a folder of their own
+/// rather than the link to the person's: what the CLI wrote there is the
+/// deleted sessions' too. A link is never followed out of the account.
+pub(crate) fn claude_account_projects_roots() -> Vec<PathBuf> {
+    let Ok(root) = crate::store::root() else { return Vec::new() };
+    let accounts = root.join(crate::agent_accounts::DIRECTORY).join("claude");
+    let Ok(entries) = std::fs::read_dir(&accounts) else { return Vec::new() };
+    entries.flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(crate::agent_accounts::valid_id))
+        .map(|entry| entry.path().join("projects"))
+        .filter(|projects| std::fs::symlink_metadata(projects).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink()))
+        .collect()
+}
+
 /// Raccoon's managed Codex home, without creating it.
 pub(crate) fn codex_managed_root() -> Option<PathBuf> {
     crate::store::root().ok().map(|root| root.join("codex"))
@@ -64,8 +128,8 @@ pub(crate) fn real_child_dir(root: &Path, name: &str) -> Option<PathBuf> {
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return None;
     }
-    let resolved = std::fs::canonicalize(&path).ok()?;
-    (resolved.parent() == Some(root)).then_some(resolved)
+    let resolved = crate::paths::canonicalize(&path).ok()?;
+    resolved.parent().is_some_and(|parent| crate::paths::same(parent, root)).then_some(resolved)
 }
 
 /// Both CLIs name conversations with UUIDs. Anything else is not used to
@@ -179,7 +243,7 @@ pub(crate) fn remove_dir_counted(path: &Path) -> u64 {
 /// Remove what Claude Code kept for the deleted sessions under `root`
 /// (`~/.claude/projects`). Returns the bytes freed.
 pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
-    let Ok(root) = std::fs::canonicalize(root) else { return 0 };
+    let Ok(root) = crate::paths::canonicalize(root) else { return 0 };
     let has_transcript = |session: &SessionEntry, id: &str| {
         conversation_id(id).is_some()
             && session_dirs(session).iter().any(|dir| {
@@ -222,7 +286,7 @@ pub(crate) fn remove_claude_data(root: &Path, doomed: &[SessionEntry], remaining
 /// Remove the deleted sessions' Codex rollouts from the managed home.
 /// Returns the bytes freed.
 pub(crate) fn remove_codex_data(home: &Path, doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
-    let Ok(sessions) = std::fs::canonicalize(home.join("sessions")) else { return 0 };
+    let Ok(sessions) = crate::paths::canonicalize(home.join("sessions")) else { return 0 };
     // Codex forks are new threads over a copied log, so none waits on a parent's file.
     let kept_ids = needed_conversation_ids(remaining, "codex", &|_, _| true);
     let mut freed = 0;
@@ -250,7 +314,7 @@ pub(crate) fn referenced_conversations(sessions: &[SessionEntry]) -> HashSet<&st
 /// Whether a rollout's year, month and day folders are real ones inside the
 /// managed home's `sessions` (given resolved), not links leading out of it.
 pub(crate) fn rollout_inside(sessions: &Path, rollout: &Path) -> bool {
-    rollout.parent().and_then(|day| std::fs::canonicalize(day).ok()).is_some_and(|day| day.starts_with(sessions))
+    rollout.parent().and_then(|day| crate::paths::canonicalize(day).ok()).is_some_and(|day| day.starts_with(sessions))
 }
 
 /// Remove the agent CLIs' data for sessions that were just deleted.
@@ -258,6 +322,10 @@ pub(crate) fn rollout_inside(sessions: &Path, rollout: &Path) -> bool {
 pub(crate) fn remove_for_deleted_sessions(doomed: &[SessionEntry], remaining: &[SessionEntry]) -> u64 {
     let mut freed = 0;
     if let Some(root) = claude_projects_root() {
+        freed += remove_claude_data(&root, doomed, remaining);
+    }
+    // An account whose `projects` is not the shared link kept its own (#980).
+    for root in claude_account_projects_roots() {
         freed += remove_claude_data(&root, doomed, remaining);
     }
     if let Some(home) = codex_managed_root() {
@@ -341,11 +409,11 @@ mod tests {
             let root = dir.path().join("home/.claude/projects");
             std::fs::create_dir_all(&root).unwrap();
             std::fs::create_dir_all(dir.path().join("project")).unwrap();
-            Self { _home: home, root: std::fs::canonicalize(root).unwrap(), dir }
+            Self { _home: home, root: crate::paths::canonicalize(root).unwrap(), dir }
         }
 
         fn project(&self) -> PathBuf {
-            std::fs::canonicalize(self.dir.path().join("project")).unwrap()
+            crate::paths::canonicalize(self.dir.path().join("project")).unwrap()
         }
 
         fn worktree(&self, name: &str) -> PathBuf {

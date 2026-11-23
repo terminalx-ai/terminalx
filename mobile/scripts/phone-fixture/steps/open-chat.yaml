@@ -1,0 +1,8 @@
+# Opens the "Review and merge" session's first chat from the Sessions tab.
+appId: com.terminalx.phone.fixture
+---
+- tapOn:
+    id: sessions-tab
+- tapOn: "Review and merge,.*"
+- tapOn: "Chief of staff,.*"
+- waitForAnimationToEnd

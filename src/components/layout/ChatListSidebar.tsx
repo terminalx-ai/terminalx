@@ -1,93 +1,55 @@
-import { ArchiveRowButton, DraftPreview, SessionRowExtras, sidebarConversationTitle, useSessionDraft } from "./SessionRowExtras";
-import { ManualStatusIcon } from "@/components/session/ManualStatus";
-import { manualStatusLabel } from "@terminalx/portable/manualStatus";
-import { useId, useMemo, useState } from "react";
-import { keepFocusForNameField } from "@/lib/cloudSidebarSections";
+import { useMemo, useState } from "react";
+import { BotsSidebarSection } from "@/components/bots/BotsSidebarSection";
 import { LocalSidebarSections } from "./LocalSidebarSections";
 import { groupLocalSessions, useLocalSections } from "@/lib/localSections";
-import { Ellipsis, GitBranch, Pin, Settings, SquarePen } from "@/icons";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Settings, SquarePen } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { UpdateButton } from "./UpdateNotice";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { AsyncContextMenu, AsyncDropdownMenu, ContextMenuTrigger, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/menu";
-import { RowActions, actionRow, yieldsToRowActions } from "@/components/layout/RowActions";
 import { AccountSidebarEntry } from "@/components/account/AccountSidebarEntry";
-import { SidebarTitlebar } from "./SidebarTitlebar";
-import { AgentMark } from "@/components/AgentMark";
-import { SessionStatusMark } from "@/components/ui/SessionStatus";
-import { cn } from "@/lib/cn";
-import { isUnread } from "@/lib/dashboard";
+import { SidebarTitlebar, ViewMenu } from "./SidebarTitlebar";
 import { errorMessage } from "@/lib/api";
 import { usePrefs } from "@/lib/prefs";
-import { useReducedMotion } from "@/lib/reducedMotion";
-import { addProject, conversationTitle, selectSession, startChat, startSessionIn, useSessionStore } from "@/lib/sessions";
-import { helperActivity, legacyReviewerSessions, useIssuePipelines } from "@/lib/issuePipeline";
-import { useSessionSummaries, type Summaries } from "@/lib/summaries";
-import { openRenameSession } from "@/lib/dialogs";
-import { relativeTime } from "@/lib/time";
-import type { Project } from "@/types/session";
-import { sessionStatus, type SessionEntry } from "@/types/session";
-import { AppDestinations, ProjectGlyph, type RailProps } from "./ProjectRail";
-import { colorCss } from "./PixelMascot";
-import { projectHueByName } from "@terminalx/portable/botFace";
-import { BotFace } from "./BotFace";
-import { ArchivedSessions, FilteredEmpty, RemovedWorkspaces, ConversationMenuItems, RowContextMenu, rowMenuKeys, UnarchiveButton, archivedConversations, conversationAgent, conversationLink, mixesAgents, orderConversations } from "./SessionSidebar";
+import { conversationTitle, startChat, useSessionStore } from "@/lib/sessions";
+import { legacyReviewerSessions, useIssuePipelines } from "@/lib/issuePipeline";
+import type { SessionEntry } from "@/types/session";
+import { AppDestinations, type RailProps } from "./ProjectRail";
+import { ArchivedSessions, ConversationRow, FilteredEmpty, ListHeading, PinnedGroup, RemovedWorkspaces, archivedConversations, conversationLink, locationOf, orderConversations } from "./SessionSidebar";
 import { SidebarBulkBar } from "./SidebarBulkBar";
-import { ROW_ATTRIBUTE, isPicked, pickOnClick, usePickedSessions } from "@/lib/rowSelection";
 import { useSidebarFilter } from "@/lib/sidebarFilter";
-import { DevelopmentSection } from "@/components/cloud/DevRuntime";
+import { MachinesSection } from "@/components/machines/MachinesSection";
 import { CloudOrganizations } from "./CloudOrganizations";
-
-import { conversationTime } from "@/lib/messageActivity";
-
 import { useSidebarOrder } from "@/lib/sidebarOrder";
-import { SortableStatusGroups, SidebarDragScope, SidebarSortList, SidebarOrderError, useSidebarSortable } from "./SidebarSort";
+import { SortableStatusGroups, SidebarDragScope, SidebarSortList, SidebarOrderError } from "./SidebarSort";
+import { listedUnderBot } from "@/lib/botChats";
+import { useBotStore } from "@/lib/bots";
 
 const canon = (path: string) => path.replace(/\/+$/, "");
 
 /**
- * What a chat's row says under its name: the project and branch it works in.
- * A chat in no project yet says what it is waiting on, else the last thing
- * said in it. One line; the row truncates it.
+ * The session list without projects: grouped by status (02.13), or the reader's sections then one list (View →
+ * Group by Sections). Rows are the same compact one-line rows as the project layout's: status mark, title, then
+ * PR, line counts or age.
  */
-export function chatPreview(
-  session: SessionEntry,
-  summary: ReturnType<Summaries["get"]>,
-  place: { name: string; branch: string | null } | null,
-  /** What a pipeline's helper tab is doing; it takes the line while it works. */
-  helper?: string | null,
-): { text: string; tone: "waiting" | "said" | "place" | "helper" } {
-  if (helper) return { text: helper, tone: "helper" };
-  if (place) return { text: place.branch ? `${place.name} · ${place.branch}` : place.name, tone: "place" };
-  if (summary?.waitingOn) return { text: summary.waitingOn, tone: "waiting" };
-  const said = summary?.lastReply ?? summary?.lastPrompt;
-  if (said) return { text: said.replace(/\s+/g, " ").trim(), tone: "said" };
-  return { text: sessionStatus(session) === "in_progress" ? "Working…" : "New chat", tone: "place" };
-}
-
-/**
- * The sidebar as a messaging app draws it: every conversation in one list,
- * pinned first, then the newest, each with who it is (its project's mark),
- * what was last said in it, when, and a dot while it has something unread
- * or waits on you. Projects are not a level here; they are one click away
- * as the project view.
- */
-export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
+export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearch, onOpenHome, onNewSession, onOpenIssues, onOpenAgents, onOpenAutomations }: RailProps) {
   const store = useSessionStore();
   const order = useSidebarOrder();
   const { sidebarLayout, sidebarSort } = usePrefs();
+  const byStatus = sidebarLayout === "status";
   const [error, setError] = useState<string | null>(null);
   const chatsPath = store.chatsPath ? canon(store.chatsPath) : null;
-  const projects = store.projects.filter((project) => !project.archived && canon(project.path) !== chatsPath).sort((a, b) => a.name.localeCompare(b.name));
   const filter = useSidebarFilter();
   // Archived conversations never pass a filter, so Show archived shows nothing more while one is on.
   const showArchived = store.showArchived && filter.filter === "all";
-  // Unread or Needs you: only the conversations that pass, and the open one.
   // One row per session: a pipeline's reviewer that was opened as a session of its own folds under its author's (PRO-331).
   const pipelines = useIssuePipelines();
   const folded = useMemo(() => legacyReviewerSessions(pipelines, store.sessions), [pipelines, store.sessions]);
-  const rows = useMemo(() => (folded.size ? store.sessions.filter((session) => !folded.has(session.id)) : store.sessions), [folded, store.sessions]);
+  // A bot's chats are listed under their bot (PRO-468), in this layout as in the projects one.
+  const { bots } = useBotStore();
+  const rows = useMemo(
+    () => (folded.size || bots.length ? store.sessions.filter((session) => !folded.has(session.id) && !listedUnderBot(session, bots)) : store.sessions),
+    [folded, bots, store.sessions],
+  );
   const selectedRow = store.selectedSessionId ? (folded.get(store.selectedSessionId) ?? store.selectedSessionId) : null;
   const conversations = useMemo(
     () => orderConversations(filter.active ? rows.filter((session) => filter.shows(session.id)) : rows, selectedRow, showArchived, sidebarSort, order),
@@ -95,8 +57,10 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   );
   // Show archived (#718): the archived ones, under a fold of their own at the end.
   const archived = useMemo(() => (showArchived ? archivedConversations(rows.filter((session) => filter.shows(session.id)), sidebarSort, order) : []), [showArchived, rows, filter, sidebarSort, order]);
-  const listed = useMemo(() => [...conversations, ...archived], [conversations, archived]);
-  const showAgents = useMemo(() => mixesAgents(listed), [listed]);
+  // Grouped by sections, pinned sessions leave their section for the Pinned group (02.19); by status, they keep their status.
+  const pinned = byStatus ? [] : conversations.filter((session) => session.pinned);
+  const pinnedIds = new Set(pinned.map((session) => session.id));
+  const listed = [...conversations.filter((session) => !pinnedIds.has(session.id)), ...archived];
   // A removed workspace's conversations are kept, but set apart from the live ones under a fold (#696).
   const { sections: localSections } = useLocalSections();
   const sectioned = groupLocalSessions(listed, localSections);
@@ -105,47 +69,51 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
   const ungroupedConversations = conversations.filter((session) => ungrouped.has(session.id));
   const live = ungroupedConversations.filter((session) => !session.worktreeRemoved);
   const removed = ungroupedConversations.filter((session) => session.worktreeRemoved);
-  const chatRow = (session: SessionEntry, inArchive = false) => (
-    <ChatRow
-      key={session.id}
-      session={session}
-      selected={selectedRow === session.id}
-      link={conversationLink(session, store.projects, chatsPath, store.workspaces)}
-      summaries={summaries}
-      showAgent={showAgents}
-      inArchive={inArchive}
-    />
-  );
-  const summaries = useSessionSummaries(listed, true);
+  const row = (session: SessionEntry, inArchive = false, inPinned = false) => {
+    const link = conversationLink(session, store.projects, chatsPath, store.workspaces);
+    return (
+      <ConversationRow
+        key={session.id}
+        session={session}
+        selected={selectedRow === session.id}
+        branch={link?.branch ?? null}
+        locationLabel={link ? locationOf(link) : undefined}
+        linkTo={null}
+        inArchive={inArchive}
+        inPinned={inPinned}
+      />
+    );
+  };
 
   const run = (action: () => Promise<unknown>) => () => {
     action().then(() => setError(null), (cause) => setError(errorMessage(cause)));
   };
   const newChat = run(() => startChat());
-  const addAndStart = run(async () => {
-    const dir = await openDialog({ directory: true, multiple: false, title: "Add a project" });
-    if (typeof dir === "string") startSessionIn((await addProject(dir)).path, null);
-  });
+  const hasSections = localSections.length > 0;
 
   return (
     <div className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-r border-hairline" data-testid="sidebar-rail">
-      <SidebarTitlebar onHide={onHide} onSearch={onSearch} onNewChat={newChat} onAddProject={addAndStart} projects={projects} />
+      <SidebarTitlebar onHide={onHide} />
 
       <div className="shrink-0 px-2">
-        <AppDestinations onOpenHome={onOpenHome} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
+        <AppDestinations onOpenHome={onOpenHome} onNewSession={onNewSession} onSearch={onSearch} onOpenIssues={onOpenIssues} onOpenAgents={onOpenAgents} onOpenAutomations={onOpenAutomations} />
       </div>
 
       {error && <div className="mx-2 mt-1 shrink-0 rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">{error}</div>}
 
       <SidebarOrderError />
-      <nav className="mt-2 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin border-t border-hairline px-2 py-1" aria-label="Conversations" data-testid="conversation-list">
+      <nav className="mt-3 min-h-0 flex-1 basis-0 overflow-y-auto overscroll-contain scrollbar-thin px-2 pb-2" aria-label="Conversations" data-testid="conversation-list">
+        {/* Bots (PRO-467) sit above the project lists, only while their experimental switch is on. */}
+        <BotsSidebarSection />
+        <ListHeading label="Sessions" note={byStatus ? "by status" : hasSections ? "sections" : undefined} actions={<ViewMenu />} />
         {/* One drag scope: sessions move between the sections and the main list (PRO-174). */}
         <SidebarDragScope>
-        <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={sidebarLayout === "status"} renderSession={(session) => chatRow(session)} />
+        <PinnedGroup sessions={pinned} selectedId={selectedRow} showArchived={showArchived}>{(session) => row(session, false, true)}</PinnedGroup>
+        <LocalSidebarSections groups={sectioned.sections} filtered={filter.active} groupByStatus={byStatus} renderSession={(session) => row(session)} />
         {conversations.length === 0 && archived.length === 0 && filter.active ? (
           // Nothing local passed; the organizations below may still hold something that did.
           filter.count === 0 ? <FilteredEmpty text={filter.empty} /> : null
-        ) : conversations.length === 0 && archived.length === 0 && localSections.length === 0 ? (
+        ) : conversations.length === 0 && archived.length === 0 && !hasSections ? (
           <button
             type="button"
             onClick={newChat}
@@ -155,27 +123,30 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
             Start a chat.
           </button>
         ) : (
-          <ul className="flex flex-col gap-px">
-            {sidebarLayout === "status" ? <SortableStatusGroups sessions={ungroupedConversations}>{(session) => chatRow(session)}</SortableStatusGroups> : <SidebarSortList items={live.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{live.map((session) => chatRow(session))}</SidebarSortList>}
-            {sidebarLayout !== "status" && removed.length > 0 && (
-              <RemovedWorkspaces
-                id="chats"
-                count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
-                opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
-              >
-                <SidebarSortList items={removed.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{removed.map((session) => chatRow(session))}</SidebarSortList>
-              </RemovedWorkspaces>
-            )}
-            {ungroupedArchived.length > 0 && (
-              <ArchivedSessions id="list" count={ungroupedArchived.length} opened={ungroupedArchived.some((session) => session.id === store.selectedSessionId)}>
-                {sidebarLayout === "status" ? <SortableStatusGroups sessions={ungroupedArchived} scope="local:archived">{(session) => chatRow(session, true)}</SortableStatusGroups> : <SidebarSortList items={ungroupedArchived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{ungroupedArchived.map((session) => chatRow(session, true))}</SidebarSortList>}
-              </ArchivedSessions>
-            )}
-          </ul>
+          <>
+            {hasSections && (byStatus ? ungroupedConversations : live).length > 0 && <ListHeading label="Other sessions" className="mt-3" />}
+            <ul className="flex flex-col" aria-label="Sessions">
+              {byStatus ? <SortableStatusGroups sessions={ungroupedConversations} onAdd={onNewSession}>{(session) => row(session)}</SortableStatusGroups> : <SidebarSortList items={live.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{live.map((session) => row(session))}</SidebarSortList>}
+              {!byStatus && removed.length > 0 && (
+                <RemovedWorkspaces
+                  id="chats"
+                  count={new Set(removed.map((session) => session.removedWorkspace?.path ?? session.id)).size}
+                  opened={filter.active || removed.some((session) => session.id === store.selectedSessionId)}
+                >
+                  <SidebarSortList items={removed.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{removed.map((session) => row(session))}</SidebarSortList>
+                </RemovedWorkspaces>
+              )}
+              {ungroupedArchived.length > 0 && (
+                <ArchivedSessions id="list" count={ungroupedArchived.length} opened={ungroupedArchived.some((session) => session.id === store.selectedSessionId)}>
+                  {byStatus ? <SortableStatusGroups sessions={ungroupedArchived} scope="local:archived">{(session) => row(session, true)}</SortableStatusGroups> : <SidebarSortList items={ungroupedArchived.map((s) => ({ id: s.id, name: conversationTitle(s) }))}>{ungroupedArchived.map((session) => row(session, true))}</SidebarSortList>}
+                </ArchivedSessions>
+              )}
+            </ul>
+          </>
         )}
         </SidebarDragScope>
+        <MachinesSection />
         <CloudOrganizations onOpenOrganizations={() => onOpenSettings("organizations")} />
-        <DevelopmentSection />
       </nav>
 
       <SidebarBulkBar sessions={store.sessions} />
@@ -193,145 +164,5 @@ export function ChatListSidebar({ onHide, onOpenSettings, onOpenAccount, onSearc
         </WithTooltip>
       </div>
     </div>
-  );
-}
-
-/** A chat as a messaging app lists it: its mark, its name, what was last said, when, and a dot while it wants a look. */
-function ChatRow({
-  session,
-  selected,
-  link,
-  summaries,
-  showAgent,
-  inArchive = false,
-}: {
-  session: SessionEntry;
-  selected: boolean;
-  link: ReturnType<typeof conversationLink>;
-  summaries: Summaries;
-  showAgent: boolean;
-  /** Drawn under the Archived fold, which says it already. */
-  inArchive?: boolean;
-}) {
-  const sort = useSidebarSortable(session.id);
-  const { sessions } = useSessionStore();
-  const title = sidebarConversationTitle(session, link?.branch, sessions);
-  const draft = useSessionDraft([session]);
-  const ids = [session.id];
-  const pickedNow = usePickedSessions();
-  const picking = pickedNow.length > 0;
-  const picked = isPicked(ids, pickedNow);
-  const statusDescriptionId = useId();
-  const status = sessionStatus(session);
-  const reduced = useReducedMotion();
-  const summary = summaries.get(session.id);
-  // A branch goes by the label the reader gave it, as on the project list.
-  const branchName = link?.branch ? (link.project?.branchLabels?.[link.branch] ?? link.branch) : null;
-  const helper = helperActivity(useIssuePipelines(), session.id);
-  const preview = chatPreview(session, summary, link ? { name: link.name, branch: branchName } : null, helper);
-  const rename = () => openRenameSession(session.id);
-  // The last thing said stays within reach, on hover.
-  const said = (summary?.waitingOn ?? summary?.lastReply ?? summary?.lastPrompt)?.replace(/\s+/g, " ").trim();
-  const agent = showAgent ? conversationAgent(session) : null;
-  return (
-    <li ref={sort.ref} style={sort.style}>
-      <AsyncDropdownMenu>
-        <AsyncContextMenu>
-        <ContextMenuTrigger asChild>
-        <div
-          className={cn(actionRow, "relative flex items-center gap-3 rounded-lg py-1.5 pl-2 pr-1", selected ? "bg-selected text-foreground" : "hover:bg-selected/50", picked && "bg-info/12 ring-1 ring-inset ring-info/45")}
-          {...{ [ROW_ATTRIBUTE]: session.id }}
-          title={[title, session.worktreeRemoved ? `${session.removedWorkspace?.path ?? session.cwd} · workspace removed · resumes in ${session.cwd}` : null, preview.text, said && said !== preview.text ? said : null].filter(Boolean).join("\n")}
-        >
-          {sort.handle}
-          <button
-            type="button"
-            onClick={(event) => {
-              if (pickOnClick(event, ids)) return;
-              selectSession(session.id);
-            }}
-            onDoubleClick={picking ? undefined : rename}
-            aria-current={selected ? "true" : undefined}
-            aria-pressed={picking ? picked : undefined}
-            aria-label={title}
-            aria-describedby={statusDescriptionId}
-            className="flex min-w-0 flex-1 items-center gap-3 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            <ChatMark session={session} project={link?.project ?? null} agent={agent} live={status === "in_progress" && !reduced} />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="flex items-center gap-1.5">
-                <span title={manualStatusLabel(session.manualStatus)}><ManualStatusIcon status={session.manualStatus} /><span id={statusDescriptionId} hidden>Status: {manualStatusLabel(session.manualStatus)}</span></span>
-                {session.pinned && <Pin className="size-3 shrink-0 text-faint" />}
-                <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{title}</span>
-                {session.worktreeRemoved && <span className="shrink-0 text-[10px] text-faint">removed</span>}
-                {session.archived && !inArchive && <span className="shrink-0 text-[10px] text-faint">archived</span>}
-                <SessionRowExtras sessions={[session]} selected={selected} />
-                <span className={cn("shrink-0 text-[10px] tabular-nums text-faint", yieldsToRowActions)}>{relativeTime(conversationTime(session))}</span>
-              </span>
-              <span className="flex min-w-0 items-center gap-2">
-                {draft ? <DraftPreview text={draft} /> : (
-                  <span className={cn("flex min-w-0 flex-1 items-center gap-1 truncate text-[12px]", preview.tone === "waiting" ? "text-warning" : preview.tone === "helper" ? "text-info" : "text-faint")} data-testid="chat-preview">
-                    {preview.tone === "place" && link?.branch && <GitBranch className="size-3 shrink-0" />}
-                    <span className="truncate">{preview.text}</span>
-                  </span>
-                )}
-                {/* Status is shared across views; unread remains a separate reading indicator. */}
-                <SessionStatusMark session={session} className={yieldsToRowActions} />
-                {isUnread(session) && <span role="img" aria-label="Unread" className="size-1.5 shrink-0 rounded-full bg-info" />}
-              </span>
-            </span>
-          </button>
-          <RowActions>
-            <ArchiveRowButton session={session} title={title} />
-            {session.archived && <UnarchiveButton session={session} title={title} />}
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-xs" aria-label={`Menu for ${title}`}>
-                <Ellipsis />
-              </Button>
-            </DropdownMenuTrigger>
-          </RowActions>
-        </div>
-        </ContextMenuTrigger>
-        <RowContextMenu session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
-        </AsyncContextMenu>
-        <DropdownMenuContent align="end" className="w-56" onKeyDown={rowMenuKeys} onCloseAutoFocus={keepFocusForNameField}>
-          <ConversationMenuItems session={session} branch={link?.branch ?? session.branch ?? null} rename={rename} />
-        </DropdownMenuContent>
-      </AsyncDropdownMenu>
-    </li>
-  );
-}
-
-/**
- * A project's colour for its mark: the one chosen for it, else one picked by
- * its name, so two projects are unlikely to share one and each keeps its own
- * between launches.
- */
-export function projectHue(project: Pick<Project, "name" | "color">): string {
-  if (project.color && project.color !== "slate") return colorCss(project.color);
-  return projectHueByName(project.name);
-}
-
-/**
- * The mark at a row's start: the chat's own bot face, in its project's colour
- * when it has one. A project with a logo keeps the logo. The agent, when
- * agents differ, sits in the corner.
- */
-function ChatMark({ session, project, agent, live }: { session: SessionEntry; project: Project | null; agent: string | null; live: boolean }) {
-  return (
-    <span className="relative flex size-9 shrink-0 items-center justify-center" data-testid="chat-mark">
-      {project?.logo ? (
-        <span className="flex size-9 items-center justify-center rounded-full bg-veil-raised">
-          <ProjectGlyph project={project} size={20} />
-        </span>
-      ) : (
-        <BotFace seed={session.id} color={project ? projectHue(project) : null} size={36} live={live} />
-      )}
-      {agent && (
-        <span className="absolute -bottom-0.5 -right-0.5 flex size-4 items-center justify-center rounded-full bg-background">
-          <AgentMark id={agent} className="size-3 text-faint" />
-        </span>
-      )}
-    </span>
   );
 }

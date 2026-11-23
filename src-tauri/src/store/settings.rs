@@ -89,6 +89,16 @@ pub struct MachinesSettings {
     /// "Let other computers operate this Mac": off until the person turns it
     /// on. Off, the runtime opens no listener and registers nothing.
     pub allow_operating: bool,
+    /// Where TCP 6768 listens while something hosts (PRO-487,
+    /// `crate::listen`): the runtime's listener and the window's phone
+    /// listener both follow it. Absent until the person chooses: an install
+    /// that listened before the setting existed keeps every interface.
+    #[serde(deserialize_with = "crate::listen::lenient", skip_serializing_if = "Option::is_none")]
+    pub listen: Option<crate::listen::Listen>,
+    /// Whether callers from public addresses are answered. Absent until the
+    /// person answers; until then they are refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_public: Option<bool>,
 }
 
 /// Paired phones and this Mac (docs/PAIRING-APPROVAL.md).
@@ -526,6 +536,11 @@ pub struct AgentSettings {
     /// for that alone.
     #[serde(deserialize_with = "idle_stop_minutes")]
     pub idle_stop_minutes: u32,
+    /// The CLI each agent runs as, by harness id, when the person chose one
+    /// in Settings → Agents (PRO-157). An agent with no entry is looked up on
+    /// the PATH (`binpath`). Each path was checked with `--version` when it
+    /// was chosen; one that is gone since is not stood in for.
+    pub executables: std::collections::BTreeMap<String, String>,
 }
 
 /// The idle limits the settings control offers; 0 is "never".
@@ -543,7 +558,7 @@ fn idle_stop_minutes<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true }
+        Self { idle_stop_minutes: DEFAULT_IDLE_STOP_MINUTES, read_only_commands: true, executables: Default::default() }
     }
 }
 
@@ -613,10 +628,15 @@ pub struct ExperimentalSettings {
     /// gets the Local VM's tools while it runs, as before, and a choice kept
     /// from while it was on is not read. `terminalx vm` works either way.
     pub local_vm_tasks: bool,
-    /// Machines (PRO-338): Settings → Machines, to let other computers
-    /// operate this one and to pair with one by code (PRO-342), until
-    /// PRO-349 builds the Machines page.
-    pub machines: bool,
+    /// Offer OpenCode again (PRO-157): in Settings → Agents with its
+    /// providers and models, in the agent pickers and in the model picker.
+    /// Off, it stays hidden as `harness::HIDDEN_HARNESSES` has it, and a tab
+    /// already on it still runs.
+    pub opencode: bool,
+    /// Bots (PRO-459): AI employees with standing roles. Off, the app shows
+    /// nothing of them, its bot commands refuse, and `terminalx bots` says
+    /// the feature is off.
+    pub bots: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -807,6 +827,11 @@ pub(super) fn file_path() -> Result<PathBuf> {
     Ok(super::root()?.join("settings.json"))
 }
 
+/// How many times this process wrote the settings (PRO-468: cached readings).
+pub(crate) fn writes() -> u64 {
+    file::WRITES.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub fn load() -> Settings {
     let mut settings = file::load();
     settings.loaded_configuration = Some((settings.branch_prefix.clone(), settings.worktree_dir.clone()));
@@ -859,7 +884,10 @@ mod tests {
         assert!(!legacy.experimental.native_codex);
         let on: Settings = serde_json::from_value(serde_json::json!({"experimental":{"nativeCodex":true}})).unwrap();
         assert!(on.experimental.native_codex);
-        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"machines":false}));
+        assert_eq!(serde_json::to_value(&on).unwrap()["experimental"], serde_json::json!({"nativeCodex":true,"sessionCost":false,"orchestratorRuns":false,"localVmTasks":false,"opencode":false,"bots":false}));
+        assert!(!legacy.experimental.bots);
+        let bots: Settings = serde_json::from_value(serde_json::json!({"experimental":{"bots":true}})).unwrap();
+        assert!(bots.experimental.bots && !bots.experimental.orchestrator_runs && !bots.experimental.native_codex);
         assert!(!legacy.experimental.session_cost);
         let cost: Settings = serde_json::from_value(serde_json::json!({"experimental":{"sessionCost":true}})).unwrap();
         assert!(cost.experimental.session_cost && !cost.experimental.native_codex);
@@ -872,9 +900,10 @@ mod tests {
         assert!(!legacy.experimental.local_vm_tasks);
         let vms: Settings = serde_json::from_value(serde_json::json!({"experimental":{"localVmTasks":true}})).unwrap();
         assert!(vms.experimental.local_vm_tasks && !vms.experimental.orchestrator_runs);
-        assert!(!legacy.experimental.machines, "Machines are off until turned on");
-        let machines: Settings = serde_json::from_value(serde_json::json!({"experimental":{"machines":true}})).unwrap();
-        assert!(machines.experimental.machines && !machines.experimental.local_vm_tasks);
+        // Machines left Experimental (PRO-360): a settings file that still has the switch reads, and drops it on save.
+        let machines: Settings = serde_json::from_value(serde_json::json!({"experimental":{"machines":true,"localVmTasks":true}})).unwrap();
+        assert!(machines.experimental.local_vm_tasks);
+        assert!(serde_json::to_value(&machines).unwrap()["experimental"].get("machines").is_none());
     }
 
     #[test]

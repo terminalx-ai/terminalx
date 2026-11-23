@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StoredHost } from "../store/hosts";
-import { RelayOuterError } from "./relay-client";
+import { endPairingInstance, isCurrentPairingInstance, pairingInstance } from "../store/pairing-instance";
+import { CredentialRefusedError, RelayOuterError } from "./relay-client";
 
 // `reachable` connect at once, `refused` are turned away with a relay close
 // code, `opening` open their socket and then wait in the handshake.
-const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false, requests: [] as { method: string; params?: unknown }[], describe: "refuse" as "refuse" | "fail" }));
+const mocks = vi.hoisted(() => ({ clients: [] as any[], reachable: new Set<string>(), refused: new Map<string, number | Error>(), opening: new Set<string>(), endpoints: [] as string[], writes: vi.fn(), hang: false, requests: [] as { method: string; params?: unknown }[], describe: "refuse" as "refuse" | "fail" }));
 vi.mock("../store/hosts", () => ({ updateStoredHost: mocks.writes, writeHostCredential: vi.fn() }));
 vi.mock("./e2ee-keypair", () => ({ loadOrCreateE2EESecretKey: async () => new Uint8Array(32) }));
 vi.mock("./credential-rotation", () => ({ rotateCredentialIfNeeded: async (args: unknown) => args }));
@@ -19,12 +20,14 @@ vi.mock("./relay-client", async (importOriginal) => {
     connect() {
       const path = this.options.endpoint ?? "relay";
       if (mocks.reachable.has(path)) { this.state = "connected"; return Promise.resolve(); }
-      const refusal = mocks.refused.get(path);
-      if (refusal) { this.state = "disconnected"; return Promise.reject(new original.RelayOuterError(refusal)); }
+      // A relay credential can be refused on its own (`relay:<token>`), as a grace credential is after a rotation.
+      const refusal = mocks.refused.get(this.options.endpoint ?? `relay:${this.options.credential}`) ?? mocks.refused.get(path);
+      if (refusal) { this.state = "disconnected"; return Promise.reject(typeof refusal === "number" ? new original.RelayOuterError(refusal) : refusal); }
       if (mocks.opening.has(path)) this.setState("handshaking");
       return new Promise<void>((resolve, reject) => { this.reject = reject; this.finish = () => { this.setState("connected"); resolve(); }; });
     }
-    close() { this.setState("disconnected"); this.reject?.(new Error("Connection refused")); }
+    closedWith?: number;
+    close(code?: number) { this.closedWith ??= code; this.setState("disconnected"); this.reject?.(new Error("Connection refused")); }
     /** The socket closed under a connected client, with what ended it. */
     drop(cause: Error) { this.setState("disconnected", cause); }
     setState(state: string, cause?: Error) { this.state = state; for (const listener of this.listeners) listener(state, cause); }
@@ -42,7 +45,7 @@ vi.mock("./relay-client", async (importOriginal) => {
       return mocks.hang ? Promise.reject(new Error("Request timed out")) : Promise.resolve({ ok: true, value: { v: 1, relay: null, directEndpoints: mocks.endpoints } }); }
   } };
 });
-import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS } from "./connection";
+import { DIRECT_GRACE_MS, FLAP_DELAYS_MS, FLAP_WINDOW_MS, HostConnection, RESUME_QUIET_MS, RESUME_REQUEST_WAIT_MS, scopedConnectionSnapshot, type ConnectionLogEntry } from "./connection";
 
 const lan = "ws://192.168.1.2:6768";
 const vpn = "ws://100.93.49.78:6768";
@@ -56,6 +59,37 @@ beforeEach(() => {
   vi.useFakeTimers(); mocks.clients = []; mocks.reachable.clear(); mocks.refused.clear(); mocks.opening.clear(); mocks.endpoints = [vpn, lan, bonjour]; mocks.hang = false; mocks.requests = []; mocks.describe = "refuse"; mocks.writes.mockReset().mockResolvedValue(undefined); connection = new HostConnection();
 });
 afterEach(() => { connection.stop(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("derives coverage only from events of current, scoped pairings", async () => {
+  const owned: StoredHost = { ...host, hostName: "ghp_FIXTURE_HOST_LABEL", provenance: { kind: "automatic", userId: "first" } };
+  const other: StoredHost = { ...host, id: "other", provenance: { kind: "automatic", userId: "second" } };
+  const logs: ConnectionLogEntry[] = [];
+  connection.onLog((entry) => logs.push(entry));
+  mocks.reachable.add(lan);
+  const window = { from: 1000, to: 10000 };
+  vi.setSystemTime(2000);
+  connection.start(other, credential);
+  await flush();
+  vi.setSystemTime(3000);
+  connection.start(owned, credential);
+  await flush();
+
+  const first = scopedConnectionSnapshot(logs, "first", [owned, other], window);
+  expect(first.events).toEqual([
+    { at: 3000, kind: "connecting", classification: undefined },
+    { at: 3000, kind: "connected", classification: "direct" },
+  ]);
+  expect(first.retainedSince).toBe(3001);
+  expect(first.pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+  expect(scopedConnectionSnapshot(logs.slice(0, 2), "first", [owned], window)).toEqual({
+    events: [], retainedSince: undefined, pairings: [],
+  });
+  expect(scopedConnectionSnapshot(logs, "first", [], window).events).toBe("unavailable");
+  const reopenedLog = JSON.parse(JSON.stringify(logs)) as ConnectionLogEntry[];
+  expect(scopedConnectionSnapshot(reopenedLog, "first", [owned], window).events).toEqual([]);
+  endPairingInstance(owned.id);
+  expect(scopedConnectionSnapshot(logs, "first", [owned], window).events).toEqual([]);
+});
 
 describe("host path recovery", () => {
   it("connects over LAN when the paired tailnet endpoint hangs, and closes losers", async () => {
@@ -130,6 +164,8 @@ describe("host path recovery", () => {
     mocks.reachable.clear(); mocks.hang = true;
     await vi.advanceTimersByTimeAsync(30_000); await flush();
     expect(first.state).toBe("disconnected");
+    // So the Mac records a probe that went unanswered, not a phone that left (#1282).
+    expect(first.closedWith).toBe(4001);
     expect(mocks.clients.length).toBeGreaterThan(3);
   });
 });
@@ -168,6 +204,47 @@ describe("background and foreground", () => {
     const writes = mocks.writes.mock.calls.length;
     await vi.advanceTimersByTimeAsync(30_000); await flush();
     expect(mocks.writes.mock.calls.length).toBeGreaterThan(writes);
+  });
+
+  it("closes a connection that does not answer on return as a probe timeout, and makes another", async () => {
+    await up();
+    const before = live()[0];
+    connection.background();
+    mocks.hang = true;
+    expect(connection.foreground()).toBe(true);
+    await flush();
+    expect(before.state).toBe("disconnected");
+    // The Mac records an unanswered probe, not a phone that left (#1282).
+    expect(before.closedWith).toBe(4001);
+    expect(mocks.clients.length).toBeGreaterThan(1);
+  });
+
+  it("retires the old generation before closing a probe that failed, so only the quiet reconnect runs (#1375)", async () => {
+    await up();
+    const logs: ConnectionLogEntry[] = [];
+    connection.onLog((entry) => logs.push(entry));
+    const seen = watch();
+    const before = live()[0];
+    const sockets = mocks.clients.length;
+    connection.background();
+    // Back within the flap window: an ordinary loss here would count as a flap and wait before reconnecting.
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Only the connection from before the background is dead; the next one answers.
+    before.request = () => Promise.reject(new Error("Request timed out"));
+    expect(connection.foreground()).toBe(true);
+    await flush();
+    expect(before.closedWith).toBe(4001);
+    // A deliberate close is not a lost connection: no warning, no flap.
+    expect(logs.filter((entry) => entry.message === "Connection lost")).toEqual([]);
+    // One race from the restart, at once, and none from the old generation's disconnect listener.
+    const race = mocks.clients.slice(sockets);
+    expect(race.map((client) => client.options.endpoint ?? "relay")).toEqual(mocks.clients.slice(0, sockets).map((client) => client.options.endpoint ?? "relay"));
+    expect(live()).toHaveLength(1);
+    expect(live()[0]).not.toBe(before);
+    // The reconnect stayed quiet: nothing but the connected stage that was already showing.
+    expect(seen.stages.filter((stage) => stage !== "connected")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[FLAP_DELAYS_MS.length - 1]); await flush();
+    expect(mocks.clients.slice(sockets)).toHaveLength(race.length);
   });
 
   it("tries nothing from the background, and reconnects once, unseen, on return", async () => {
@@ -459,6 +536,41 @@ describe("a lost connection", () => {
     expect(mocks.clients).toHaveLength(sockets);
   });
 
+  it("lets a resume wait for a reconnect under way, and says at once when no connection is coming (#1290)", async () => {
+    mocks.reachable.add(lan); connection.start(host, credential); await flush();
+    expect(await connection.awaitConnected(0)).toBe(true);
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    // Reconnecting: the wait ends as soon as the connection is back, well before its limit.
+    const waited = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    let done: boolean | null = null;
+    void waited.then((value) => (done = value));
+    await flush();
+    expect(done).toBeNull();
+    mocks.reachable.add(lan);
+    connection.retryNow(); await flush();
+    expect(await waited).toBe(true);
+    // Still reconnecting when the limit passes: false, and the caller says so instead of sending.
+    mocks.reachable.clear();
+    await vi.advanceTimersByTimeAsync(FLAP_WINDOW_MS);
+    live()[0].drop(new RelayOuterError(4408, "", false)); await flush();
+    await failAttempt();
+    const late = connection.awaitConnected(RESUME_REQUEST_WAIT_MS);
+    await vi.advanceTimersByTimeAsync(RESUME_REQUEST_WAIT_MS);
+    expect(await late).toBe(false);
+    // No Mac chosen: nothing to wait for.
+    connection.stop();
+    expect(await connection.awaitConnected(RESUME_REQUEST_WAIT_MS)).toBe(false);
+  });
+
+  it("writes an entry from elsewhere in the app to the log, redacted like its own (#1290)", () => {
+    const logs: any[] = []; connection.onLog((entry) => logs.push(entry));
+    connection.note("warning", "Session resume not confirmed", `Continue here · step send · code no-answer · ${"a".repeat(40)}`);
+    expect(logs).toEqual([expect.objectContaining({ level: "warning", message: "Session resume not confirmed", detail: "Continue here · step send · code no-answer · [redacted]" })]);
+  });
+
   it("does not reconnect from the background on retryNow", async () => {
     mocks.reachable.add(lan); connection.start(host, credential); await flush();
     connection.background();
@@ -530,5 +642,110 @@ describe("the Mac's paired-device controls", () => {
     old.notify({ method: "pairing.disconnected" }); await flush();
     expect(connection.disconnectedOnMac()).toBe(false);
     expect(stages.at(-1)).toBe("connected");
+  });
+});
+
+// #1315: the relay or the pinned Mac refusing the credential revokes the
+// pairing's report authorization; nothing else that ends a connection does.
+describe("a refused credential", () => {
+  const owned: StoredHost = { ...host, id: "owned", provenance: { kind: "automatic", userId: "first" },
+    relay: { v: 1, directorUrl: "https://relay.example", cellUrl: "https://relay.example", assignmentEpoch: 1, relayHostId: "1234567890123456", e2eeFraming: 2 } };
+  const expiresAt = Date.now() + 1_000_000;
+  const relayCredential = { ...credential, current: { token: "current", hash: "hash", version: 2, expiresAt }, grace: { token: "grace", hash: "hash", version: 1, expiresAt } };
+  const window = { from: 0, to: Number.MAX_SAFE_INTEGER };
+  const live = () => mocks.clients.filter((client) => client.state === "connected");
+  let logs: ConnectionLogEntry[];
+  const reported = () => scopedConnectionSnapshot(logs, "first", [owned], window);
+  beforeEach(() => {
+    logs = []; connection.onLog((entry) => logs.push(entry));
+    endPairingInstance(owned.id);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("director offline"); }));
+  });
+
+  it("revokes the pairing when the relay refuses the current credential while connecting", async () => {
+    mocks.refused.set("relay:current", new CredentialRefusedError());
+    connection.start(owned, relayCredential); await flush();
+    const ended = pairingInstance(owned.id);
+    expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+    // Retries of the refused pairing stay unauthorized; the instance made since is not ended by them.
+    await vi.advanceTimersByTimeAsync(60_000); await flush();
+    expect(reported().events).toEqual([]);
+    expect(isCurrentPairingInstance({ hostId: owned.id, instance: ended })).toBe(true);
+  });
+
+  it("revokes the pairing when a live connection is closed with the credential refused", async () => {
+    mocks.reachable.add(lan); connection.start(owned, relayCredential); await flush();
+    expect(reported().events).not.toEqual([]);
+    live()[0].drop(new CredentialRefusedError("Access removed")); await flush();
+    expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+  });
+
+  it("keeps the pairing through a network failure, another relay refusal, a refused grace credential and a disconnect on the Mac", async () => {
+    mocks.refused.set("relay:grace", new CredentialRefusedError()); mocks.refused.set("relay:current", 4404);
+    mocks.reachable.add(lan); connection.start(owned, relayCredential); await flush();
+    live()[0].drop(new RelayOuterError(1006)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[0]); await flush();
+    // A 4401 from an unverified direct peer is not the pinned Mac's refusal.
+    live()[0].drop(new RelayOuterError(4401)); await vi.advanceTimersByTimeAsync(FLAP_DELAYS_MS[1]); await flush();
+    live()[0].notify({ method: "pairing.disconnected", params: { reason: "disconnected-on-mac" } });
+    live()[0].drop(new RelayOuterError(1000)); await flush();
+    expect(connection.disconnectedOnMac()).toBe(true);
+    const snapshot = reported();
+    expect(snapshot.pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+    expect((snapshot.events as { kind: string }[]).map(({ kind }) => kind)).toEqual(expect.arrayContaining(["connected", "connection-lost", "disconnected-on-mac"]));
+  });
+
+  describe("when every connection path fails (#1316)", () => {
+    const networkDown = () => new Error("WebSocket connection failed (network unavailable or connection refused)");
+    const failures = () => (reported().events as { kind: string; classification?: string }[]).filter(({ kind }) => kind === "attempt-failed");
+    const failedDetails = () => logs.filter((entry) => entry.message === "Connection attempt failed").map((entry) => entry.detail ?? "");
+
+    it("reports the Mac offline when the relay says so and the LAN addresses never answer", async () => {
+      mocks.refused.set("relay", 4404);
+      connection.start(owned, relayCredential); await flush();
+      await vi.advanceTimersByTimeAsync(DIRECT_GRACE_MS); await flush();
+      expect(failures()).toEqual([{ at: expect.any(Number), kind: "attempt-failed", classification: "mac-offline" }]);
+      expect(failedDetails()[0]).toContain("relay_outer_4404");
+    });
+
+    it("reports a network failure when no path's socket opens", async () => {
+      mocks.refused.set("relay", 1006);
+      for (const endpoint of [vpn, lan, bonjour]) mocks.refused.set(endpoint, networkDown());
+      connection.start(owned, relayCredential); await flush();
+      expect(failures()).toEqual([{ at: expect.any(Number), kind: "attempt-failed", classification: "network" }]);
+    });
+
+    it("does not read a refused grace credential or a stranger's 4401 as the pairing refused", async () => {
+      mocks.refused.set("relay:current", 4404); mocks.refused.set("relay:grace", new CredentialRefusedError());
+      mocks.refused.set(vpn, new RelayOuterError(4401)); mocks.refused.set(lan, networkDown()); mocks.refused.set(bonjour, networkDown());
+      connection.start(owned, relayCredential); await flush();
+      expect(failures().map(({ classification }) => classification)).toEqual(["mac-offline"]);
+      expect(reported().pairings.map(({ hostId }) => hostId)).toEqual([owned.id]);
+    });
+
+    it("ends the pairing on a refused current credential, and exports nothing for it", async () => {
+      // `pairing-invalid` is what the attempt is classified as (connection-errors.test.ts); the
+      // report never carries it, because the refusal ends the pairing it would be filed under.
+      mocks.refused.set("relay:current", new CredentialRefusedError()); mocks.refused.set("relay:grace", 4404);
+      for (const endpoint of [vpn, lan, bonjour]) mocks.refused.set(endpoint, networkDown());
+      const instance = pairingInstance(owned.id);
+      connection.start(owned, relayCredential); await flush();
+      expect(isCurrentPairingInstance({ hostId: owned.id, instance })).toBe(false);
+      expect(failedDetails()).toHaveLength(1);
+      expect(failedDetails()[0]).not.toMatch(/current|grace|device-secret/);
+      expect(reported()).toEqual({ events: [], retainedSince: undefined, pairings: [] });
+    });
+  });
+
+  it("does not end a pairing made again after the refused attempt began", async () => {
+    let refuse!: (error: Error) => void;
+    mocks.reachable.clear();
+    connection.start(owned, relayCredential); await flush();
+    const pending = mocks.clients.find((client) => client.options.credential === "current");
+    refuse = pending.reject;
+    // Paired again meanwhile: savePairedHost ends the old instance, and the new connection takes a fresh one.
+    endPairingInstance(owned.id);
+    const fresh = pairingInstance(owned.id);
+    refuse(new CredentialRefusedError()); await flush();
+    expect(isCurrentPairingInstance({ hostId: owned.id, instance: fresh })).toBe(true);
   });
 });

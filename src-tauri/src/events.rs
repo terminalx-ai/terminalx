@@ -25,6 +25,9 @@ pub struct AgentEvent {
     /// may be an import time, so consumers must not use it as a message time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ts: Option<String>,
+    /// Request identity for a desktop Create prompt, persisted for history reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_request_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentRef>,
     pub payload: Payload,
@@ -191,6 +194,13 @@ pub struct Usage {
     /// says: what a family alias actually ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The reasoning effort the turn's requests ran at, when the agent's
+    /// records say (Claude Code per request, Codex per turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// Whether the turn ran in the agent's fast mode, when its records say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -397,6 +407,11 @@ pub enum Payload {
     InputOccupied {
         prompt_seq: u64,
         occupied: bool,
+        /// What holds it up is not text in the box but a question the agent
+        /// drew in its place, a list of choices to answer in the terminal
+        /// (PRO-462).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        choice: bool,
     },
     /// The agent dropped the turn of the `user_message` at `prompt_seq`
     /// before answering it, and took another prompt in its place (#722):
@@ -527,6 +542,12 @@ pub enum Payload {
     },
 
     Recovery { kind: Option<crate::recovery::RecoveryKind> },
+
+    /// The agent's CLI is stopped on a question it drew in its own terminal,
+    /// one no hook reports (PRO-460); `None` once it is gone. A prompt with
+    /// no options is one that could not be read: the chat sends the reader
+    /// to the terminal for it.
+    TerminalPrompt { prompt: Option<crate::harness::tui::ScreenPrompt> },
 
     /// The tab's terminal changed hands (#437): the events from here to the
     /// next one of these belong to another of the tab's conversations.

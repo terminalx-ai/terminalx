@@ -3,7 +3,8 @@ import { Check, X } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/controls";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { approveMachine, bootMachineHost, declineMachine, setMachinesKeepAwake, useMachineHost } from "@/lib/machines";
+import { approveMachine, bootMachineHost, clearMachineHostError, setMachineHostError, declineMachine, refreshMachineHost, setMachinesKeepAwake, useMachineHost } from "@/lib/machines";
+import { MachineHostError } from "./MachineHostError";
 import type { PendingComputer } from "@/types/machines";
 import { FingerprintBox, PlatformIcon, sectionLabel } from "./machineText";
 
@@ -89,7 +90,16 @@ export function MachineApprovalDialog({ request }: { request: PendingComputer })
               onCheckedChange={(enabled) => void setMachinesKeepAwake(enabled)}
             />
           </label>
-          {host.error && <p role="alert" className="text-[12.5px] text-destructive">{host.error}</p>}
+          {host.error && (
+            <MachineHostError
+              error={host.error}
+              onRestarted={() => {
+                clearMachineHostError();
+                void refreshMachineHost();
+              }}
+              onFailed={setMachineHostError}
+            />
+          )}
         </div>
         <footer className="flex flex-wrap items-center gap-2 border-t border-hairline px-6 py-3.5">
           <span className="mr-auto text-[12.5px] text-muted-foreground">You can revoke it later in Settings → Machines.</span>

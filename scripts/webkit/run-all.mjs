@@ -21,19 +21,32 @@ import { parseArgs } from "node:util";
 
 /** The checks CI requires, in the order they were added. */
 const checks = [
-  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "orchestration", "run-limits", "run-sidebar",
-  "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "working-marks",
+  "cloud-automations",
+  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "settings-introductions", "orchestration", "run-limits", "run-sidebar",
+  "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "sidebar-quick-chats", "working-marks",
   "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "workspace-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
   "dialog-lists",
   "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
-  "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar",
-  "machine-name", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
+  "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
+  "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
   "repository-scripts", "pr-conversation", "automatic-session-status", "runtime-start-failed", "session-cost",
   "helper-titles", "error-toast", "notifications-off", "pair-phone", "file-tree-filter", "quick-open", "tab-errors",
   "review-threads", "run-menu", "worktree-copy-step", "projects-settings", "branch-toasts", "composer-attachments",
-  "organization-roster", "permission-details", "chat-tables",
+  "organization-roster", "permission-details", "chat-tables", "command-palette", "machine-sidebar", "machine-session", "machine-ports",
+  "sidebar-design", "chat-transcript", "changes-design", "sidebar-menus", "machines-screens", "review-tab", "checks-panel", "turn-details", "settings-design",
+  "project-settings", "pr-panel-design", "settings-pro-377", "cloud-setup", "held-followups", "first-run", "confirm-dialogs",
+  "attachment-preview", "session-start", "composer-controls", "session-menu", "chat-scrollbar", "settings-stats",
+  "automation-sources",
+  "bots-screens", "bot-role-memory",
+  "bot-chat", "bot-settings",
+  "bot-items",
+  "bot-duties",
+  "bot-handoffs",
+  "bot-calendar",
+  "bot-runs",
+  "bot-suggestions",
 ];
 
 // Some checks start a Vite dev server instead of serving dist/. Vite's

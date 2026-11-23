@@ -8,6 +8,7 @@ import { dirName, fileName } from "@/lib/paths";
 import type { ChangedFile, UnfinishedMerge } from "@/types/session";
 import { mergeInto, mergeName, resolveMergePrompt } from "./conflictPrompts";
 import { useAgentTab } from "./useAgentTab";
+import { STATUS_LETTER as LETTER } from "./FileList";
 
 export { mergeName } from "./conflictPrompts";
 
@@ -42,13 +43,6 @@ function some(paths: string[]): string {
   return paths.length > 3 ? `${shown} and ${paths.length - 3} more` : shown;
 }
 
-const LETTER: Record<ChangedFile["status"], { letter: string; tone: string; word: string }> = {
-  added: { letter: "A", tone: "text-add", word: "Added" },
-  modified: { letter: "M", tone: "text-warning", word: "Modified" },
-  deleted: { letter: "D", tone: "text-destructive", word: "Deleted" },
-  renamed: { letter: "R", tone: "text-info", word: "Renamed" },
-};
-
 function Heading({ children }: { children: React.ReactNode }) {
   return <h3 className="px-3 pb-1 pt-3 text-[11px] font-medium uppercase tracking-[.08em] text-faint">{children}</h3>;
 }
@@ -60,7 +54,7 @@ function Row({ badge, path, title, trailing, onOpen, current = false }: { badge:
   const inner = <>
     {badge}
     <span className="min-w-0 shrink truncate font-mono text-[12.5px]">{fileName(path)}</span>
-    <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-faint">{dirName(path)}</span>
+    <span className="min-w-0 flex-1 truncate font-mono text-xs text-faint">{dirName(path)}</span>
     <span className="ml-auto shrink-0 whitespace-nowrap">{trailing}</span>
   </>;
   const className = "flex h-8 w-full min-w-0 items-center gap-2 px-3 text-left";
@@ -89,13 +83,11 @@ function FileRows({ files, onOpenFile }: { files: ChangedFile[]; onOpenFile?: (f
  * it brought in, and Ask the agent to resolve, Commit merge or Abort merge.
  * Both act on exactly the merge that was read; one that moved on since is refused.
  */
-export function MergeInProgress({ source, merge, files, allChanges, sessionId, onChanged, onOpenConflict, onOpenFile, openPath = null }: {
+export function MergeInProgress({ source, merge, files, sessionId, onChanged, onOpenConflict, onOpenFile, openPath = null }: {
   source: GitSource;
   merge: UnfinishedMerge;
   /** The uncommitted files, as Git reports them against HEAD. */
   files: ChangedFile[];
-  /** The scope shown counts the merge's files as this branch's own work. */
-  allChanges: boolean;
   /** The session whose agent tab is asked to resolve; none for a checkout without one. */
   sessionId?: string;
   /** The checkout changed: read it again. */
@@ -157,7 +149,6 @@ export function MergeInProgress({ source, merge, files, allChanges, sessionId, o
       <p className="text-xs text-muted-foreground">{conflicts > 0
         ? resolvesHere ? "Resolve the conflicts and stage them to commit the merge, or ask the agent to do it." : "Resolve the conflicts and stage them to commit the merge."
         : "Every conflict is resolved. Commit the merge to finish it."}</p>
-      {allChanges && <p className="text-xs text-muted-foreground">Until it is committed, this counts what the merge brings in as the branch's own work. Uncommitted changes tells them apart.</p>}
       {error && <div role="alert" className="rounded bg-destructive/10 px-2 py-1 text-destructive">{error}</div>}
       {sent && <div role="status" className="rounded bg-well px-2 py-1 text-muted-foreground">{sent}</div>}
       {(canAct || (resolvesHere && conflicts > 0)) && <div className="mt-1 flex flex-wrap gap-2">

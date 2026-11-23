@@ -50,7 +50,11 @@ struct KeyFile {
 /// The Keychain service of a desktop-launched runtime, from the variables the
 /// app's launcher sets (`local_runtime/launch.rs`). `None` elsewhere.
 fn desktop_service(desktop: Option<&str>, application: Option<&str>) -> Option<String> {
-    if !cfg!(target_os = "macos") || desktop != Some("1") {
+    desktop_service_for(cfg!(target_os = "macos"), desktop, application)
+}
+
+fn desktop_service_for(macos: bool, desktop: Option<&str>, application: Option<&str>) -> Option<String> {
+    if !macos || desktop != Some("1") {
         return None;
     }
     let application = application?;
@@ -60,13 +64,18 @@ fn desktop_service(desktop: Option<&str>, application: Option<&str>) -> Option<S
     valid.then(|| format!("{application}.machine-host"))
 }
 
+/// [`desktop_service`] for this runtime.
+fn runtime_service() -> Option<String> {
+    desktop_service(
+        std::env::var("TERMINALX_LOCAL_DESKTOP").ok().as_deref(),
+        std::env::var("TERMINALX_LOCAL_APPLICATION").ok().as_deref(),
+    )
+}
+
 impl KeyStore {
     /// The store this runtime uses, under `data_dir`.
     pub(crate) fn for_runtime(data_dir: &Path) -> Self {
-        let service = desktop_service(
-            std::env::var("TERMINALX_LOCAL_DESKTOP").ok().as_deref(),
-            std::env::var("TERMINALX_LOCAL_APPLICATION").ok().as_deref(),
-        );
+        let service = runtime_service();
         let location = match service {
             Some(service) => Location::Keychain { service },
             None => Location::File { path: data_dir.join(super::DIR).join(FILE) },
@@ -77,6 +86,12 @@ impl KeyStore {
     #[cfg(test)]
     pub(crate) fn at(location: Location, secrets: Arc<dyn SecretStore>) -> Self {
         Self { location, secrets }
+    }
+
+    #[cfg(all(test, feature = "desktop", target_os = "macos"))]
+    pub(super) fn with_secrets_for_test(mut self, secrets: Arc<dyn SecretStore>) -> Self {
+        self.secrets = secrets;
+        self
     }
 
     /// Whether the window owns the key and must hand it over.

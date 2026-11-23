@@ -88,6 +88,29 @@ for (const width of [200, 268, 420]) {
     const listBox = rect(await list.boundingBox());
     const orgA = page.locator('[data-testid="cloud-org-list"][data-org="org-a"]');
 
+    // The quota belongs to the fold's description and is reachable without a nested tab stop.
+    const fold = orgA.getByRole("button", { name: "Share Lab", exact: true });
+    await fold.focus();
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+    // WebKit shows the tooltip for focus() too. Tabbing back before that one has closed can leave it
+    // closed (about 1 run in 25 on a loaded machine); no person tabs away and back within a frame.
+    await page.getByRole("tooltip").waitFor({ state: "hidden" });
+    await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+    await page.getByRole("tooltip").waitFor();
+    const keyboardFocused = await fold.evaluate((el) => document.activeElement === el);
+    const quotaTooltip = await page.getByRole("tooltip").textContent();
+    await page.keyboard.press("Escape");
+    await page.getByRole("tooltip").waitFor({ state: "hidden" });
+    const quotaDescription = await fold.evaluate((el) => document.getElementById(el.getAttribute("aria-describedby"))?.textContent);
+    await page.keyboard.press("Enter");
+    const keyboardCollapsed = await fold.getAttribute("aria-expanded") === "false";
+    await page.keyboard.press("Space");
+    failed += report(`cloud quota keyboard (${name})`, {
+      "Tab reaches the organization fold and reveals usage": keyboardFocused && quotaTooltip === "1 of 2 cloud workspaces running",
+      "usage remains described after Escape": quotaDescription === "1 of 2 cloud workspaces running",
+      "Enter and Space still toggle the fold": keyboardCollapsed && await fold.getAttribute("aria-expanded") === "true",
+    });
+
     // The titlebar: every button inside the sidebar, the View menu's last among the left ones.
     const titlebar = await page.getByTestId("sidebar-titlebar").getByRole("button").evaluateAll((buttons) =>
       buttons.map((button) => {
@@ -100,7 +123,7 @@ for (const width of [200, 268, 420]) {
     const orgB = page.locator('[data-testid="cloud-org-list"][data-org="org-b"]');
     const orgBHeader = orgB.locator("section > div").first();
     await orgB.locator("#list-org\\:org-b").hover();
-    const orgBName = orgB.locator("#list-org\\:org-b > span");
+    const orgBName = orgB.locator("#list-org\\:org-b > [data-list-name]");
     const orgBMenu = rect(await orgB.getByRole("button", { name: "Menu for Second Laboratory of Very Long Names", exact: true }).boundingBox());
     const orgBAdd = rect(await orgB.getByRole("button", { name: /^Add project to / }).boundingBox());
     const orgBNameBox = rect(await orgBName.boundingBox());
@@ -142,7 +165,7 @@ for (const width of [200, 268, 420]) {
       "nothing in the list is wider than it": overflowing.length === 0,
       "every titlebar button is inside the sidebar": titlebar.every((button) => button.left >= box.left - SLACK && button.right <= box.right + SLACK),
       "a long organization name truncates where it does not fit": orgBTruncated || width > 268,
-      "a long organization name ends before its chip and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
+      "a long organization name ends before its note and buttons": !!orgBNameBox && !!orgBQuota && orgBNameBox.right <= orgBQuota.left + SLACK,
       "the organization's + and menu are inside the sidebar": inside(orgBAdd, box) && inside(orgBMenu, box),
       "sections come first, then the projects in none": JSON.stringify(order) === JSON.stringify(["section:My workspaces", "section:Shared with me", "section:Active", "section:Parked until the quarterly release review is done"]),
       "a long section name truncates where it does not fit": truncated || width > 268,
@@ -220,7 +243,12 @@ for (const width of [200, 268, 420]) {
     if (width === 268) {
       await page.getByRole("button", { name: /^Search/ }).click();
       await page.getByLabel("Command palette search").fill("accone");
-      await page.locator('[role="option"][id^="cloud-project:"]').nth(1).waitFor();
+      // The palette defers its query: cloud rows already exist before typing.
+      // Wait for all three expected results before taking the assertion snapshot.
+      await page.waitForFunction(() => {
+        const rows = [...document.querySelectorAll('[role="option"][id^="cloud-project:"], [role="option"][id^="project:"]')].map((row) => row.textContent ?? "");
+        return ["Share Lab cloud · no repository", "Second Laboratory of Very Long Names cloud · no repository", "Local · /Users/alice/code/accone"].every((label) => rows.some((row) => row.startsWith("accone") && row.endsWith(label)));
+      });
       const projectRows = await page.locator('[role="option"][id^="cloud-project:"], [role="option"][id^="project:"]').allTextContents();
       failed += report(`search (${name})`, {
         "lists both organizations' accone and the local one, each labelled": ["Share Lab cloud · no repository", "Second Laboratory of Very Long Names cloud · no repository", "Local · /Users/alice/code/accone"].every((label) => projectRows.some((row) => row.startsWith("accone") && row.endsWith(label))),

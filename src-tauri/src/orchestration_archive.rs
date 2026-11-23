@@ -43,7 +43,7 @@ pub(crate) fn preserve_try(
     // OS lock, so every remaining probe ref is stale when the next owner enters.
     let common = git::run(checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     let probe_lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
-        .open(Path::new(common.trim()).join("terminalx-archive-probe.lock"))?;
+        .open(Path::new(crate::git::path_line(&common)).join("terminalx-archive-probe.lock"))?;
     probe_lock.lock()?;
     clear_probe_refs(checkout)?;
     let head = head(checkout)?;
@@ -428,9 +428,7 @@ if scanner.findings:
     print(json.dumps(scanner.findings), file=sys.stderr)
     sys.exit(1)
 "#;
-    let mut command = std::process::Command::new(
-        crate::binpath::resolve("python3").unwrap_or_else(|| "python3".into()),
-    );
+    let mut command = crate::binpath::python3();
     // Finder's PATH may locate Python but omit tools its credential loader
     // invokes, such as Homebrew's gh. Use the same login PATH as other children.
     command.env("PATH", crate::binpath::login_path());

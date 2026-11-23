@@ -100,7 +100,6 @@ impl Host for SessionManager {
     fn pid(&self, pane: &str) -> Option<u32> { self.terminals().pid(pane) }
 }
 
-#[cfg(unix)]
 impl Host for crate::local_runtime::terminals::Terminals {
     fn spawn(&self, pane: &str, cwd: &str, command: &str, title: &str) -> Result<()> {
         crate::local_runtime::terminals::Terminals::spawn(self, pane, cwd, 120, 30, Some(command), Some(title))
@@ -159,7 +158,7 @@ fn pane_id(session: &str, action: &str) -> Result<String> {
 }
 
 /// The session and action id an action tab's pane id names.
-fn parse_pane(pane: &str) -> Option<(&str, String)> {
+pub fn parse_pane(pane: &str) -> Option<(&str, String)> {
     let (session, rest) = pane.split_once(':')?;
     let (_, hex) = rest.strip_prefix(PANE_PREFIX)?.split_once('-')?;
     if hex.is_empty() || hex.len() % 2 != 0 { return None }
@@ -173,6 +172,61 @@ fn parse_pane(pane: &str) -> Option<(&str, String)> {
 /// tab's program exits with the command's own status. `env` adds what a
 /// setup script is given (workspace path, repository root, branch, session)
 /// on top of the tab's own environment layers and port block.
+#[cfg(windows)]
+fn command_line(command: &str, env: &[(String, String)]) -> String {
+    // The tab's shell is PowerShell, cmd or a POSIX shell; an action's
+    // command is a POSIX script on every platform, so it runs in Git's sh,
+    // started from whichever the tab has. Values are only ever quoted text.
+    let shell = crate::pty::shell();
+    let name = Path::new(&shell).file_stem().map(|stem| stem.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if matches!(name.as_str(), "bash" | "sh" | "zsh") {
+        let assignments: Vec<String> = env.iter().map(|(name, value)| quote(&format!("{name}={value}"))).collect();
+        return format!("env {} {} -c {}", assignments.join(" "), quote(&shell), quote(command));
+    }
+    // Windows PowerShell does not escape quotes inside a native program's
+    // arguments, so the command never is one: it travels in the environment,
+    // and `--%` hands sh its fixed arguments untouched.
+    let script = match crate::binpath::posix_sh() {
+        Some(sh) => {
+            let mut lines: Vec<String> = env.iter().chain(std::iter::once(&(ACTION_SCRIPT.to_string(), command.to_string())))
+                .map(|(name, value)| format!("[Environment]::SetEnvironmentVariable({}, {})", powershell_quote(name), powershell_quote(value)))
+                .collect();
+            lines.push(format!("& {} --% -c \"eval \\\"${ACTION_SCRIPT}\\\"\"", powershell_quote(&sh.to_string_lossy())));
+            lines.push("exit $LASTEXITCODE".into());
+            lines.join("\n")
+        }
+        None => format!("Write-Error {}\nexit 127", powershell_quote(crate::binpath::POSIX_SH_MISSING)),
+    };
+    if name == "cmd" {
+        // cmd expands %VAR% even inside quotes: the script goes to
+        // PowerShell as Base64, so cmd never parses a byte of it.
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>());
+        return format!("powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded}");
+    }
+    script
+}
+
+/// The variable an action's command reaches Git's sh in on Windows.
+#[cfg(windows)]
+const ACTION_SCRIPT: &str = "TERMINALX_ACTION_SCRIPT";
+
+/// Single-quoted for PowerShell: nothing inside is expanded or run. Its
+/// typographic single quotes are quotes too, and are doubled like `'`.
+#[cfg(windows)]
+fn powershell_quote(text: &str) -> String {
+    let mut out = String::from("'");
+    for ch in text.chars() {
+        if matches!(ch, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+#[cfg(unix)]
 fn command_line(command: &str, env: &[(String, String)]) -> String {
     let shell = crate::pty::shell();
     let posix = ["zsh", "bash", "fish", "sh", "dash", "ksh"].iter().any(|name| Path::new(&shell).file_name().is_some_and(|file| file == *name));
@@ -208,7 +262,7 @@ pub fn states(host: &dyn Host, session: &str) -> Result<Vec<ActionRun>> {
 }
 
 fn project_actions(project: &str) -> Result<Vec<RepositoryActionEntry>> {
-    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = |path: &Path| crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let (projects, _) = store::projects::list()?;
     let project = projects.into_iter().find(|p| canonical(Path::new(&p.path)) == canonical(Path::new(project)))
         .context("This session's project is not saved in TerminalX")?;

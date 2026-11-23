@@ -1,5 +1,7 @@
 import { forgetConversationState, sendHeldMessages } from "./conversation-state";
-import { cacheEpoch, clearTranscriptCaches, readSaved, writeSaved } from "../data/transcript-cache";
+import { cacheEpoch, clearTranscriptCaches, readSaved, reclaimOrphanChunks, writeSaved } from "../data/transcript-cache";
+import { keepPrefetched, startPrefetch, stopPrefetch } from "../data/prefetch";
+import { usePrefetchSetting } from "../data/prefetch-setting";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { AppState, Linking } from "react-native";
@@ -14,10 +16,10 @@ import type { AccountHost } from "../pairing/account-client";
 import { pairingStep } from "../pairing/errors";
 import { pairFromOffer, recoverPendingPairing, type PairingProgress } from "../pairing/pair";
 import { extractPairingNameFromUrl, parsePairingCodeOrThrow } from "../pairing/parse";
-import { readHostCredential, readHosts, removeHost, setHostNames, type StoredHost } from "../store/hosts";
+import { readHostCredential, readHosts, removeHost, setHostKind, setHostNames, type StoredHost } from "../store/hosts";
 import { readAccountMachinePrefs, setAccountMachineHidden, setAccountMachineName, takeAccountMachinePrefs, type AccountMachinePrefs } from "../store/account-machines";
 import { cleanHostName, FALLBACK_HOST_LABEL } from "../store/host-name";
-import { HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
+import { CONNECTION_LOG_CAPACITY, HostConnection, type ConnectionLogEntry, type ConnectionStage } from "../transport/connection";
 import { isTransportError } from "../transport/connection-errors";
 import { phoneNetwork } from "../transport/network";
 import { useWaited } from "./connection-view";
@@ -141,11 +143,17 @@ export function AppProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
-  /** The list shown, and kept for the next open of the app (#983). */
+  /**
+   * The list shown, and kept for the next open of the app (#983), with the
+   * version the Mac gave it: the first read after a launch is then answered
+   * with "not modified" when nothing changed (#1283).
+   */
   const showSessions = useCallback((host: string, values: SessionSummary[], epoch: number) => {
     setSessions(values);
     void writeSaved(host, "summaries", values, epoch);
-  }, []);
+    const version = api.listVersion("sessions.summaries");
+    void writeSaved(host, "summariesVersion", version ? { version, count: values.length } : null, epoch);
+  }, [api]);
 
   /** A stored host changed (a name): the list, and the active host when it is that one, follow. */
   const adoptHost = useCallback((next: StoredHost | null) => {
@@ -167,8 +175,15 @@ export function AppProvider({ children }: PropsWithChildren) {
   const refreshHostName = useCallback(async () => {
     const host = activeHostRef.current;
     if (!host) return;
-    const name = cleanHostName(await api.describe().catch(() => null));
-    if (!name || activeHostRef.current?.id !== host.id || name === host.hostName) return;
+    const described = await api.describeHost().catch(() => null);
+    // PRO-359: whether a window runs there marks a headless server. A computer too old to say leaves it as it was.
+    if (described?.hasWindow != null && activeHostRef.current?.id === host.id && (host.headless !== !described.hasWindow || (described.platform ?? undefined) !== host.platform)) {
+      const kept = await setHostKind(host.id, { headless: !described.hasWindow, platform: described.platform });
+      if (kept && activeHostRef.current?.id === host.id) adoptHost(kept);
+    }
+    const name = cleanHostName(described?.name ?? null);
+    const current = activeHostRef.current;
+    if (!name || current?.id !== host.id || name === current.hostName) return;
     adoptHost(await setHostNames(host.id, { hostName: name }));
   }, [adoptHost, api]);
 
@@ -261,8 +276,11 @@ export function AppProvider({ children }: PropsWithChildren) {
       }
       // What this Mac's list held last time shows at once, until the Mac answers (#983).
       const saved = await readSaved(host.id, "summaries", isSummaryList);
+      const savedVersion = await readSaved(host.id, "summariesVersion", isSavedVersion);
       if (signal?.aborted || generation !== selectionGeneration.current) return false;
       api.resetConnection(true);
+      // Only the list it was read with: a version saved beside another list would keep that list.
+      if (saved && savedVersion && savedVersion.count === saved.length) api.rememberList("sessions.summaries", {}, savedVersion.version, { sessions: saved });
       activeHostRef.current = host;
       setActiveHost(host);
       setSessions(saved ?? []);
@@ -300,7 +318,7 @@ export function AppProvider({ children }: PropsWithChildren) {
         // Finished in the background: a connection failure here is retried at the next open, not reported.
         .catch((cause: unknown) => { if (!startup.signal.aborted && !isTransportError(cause)) setError(readableError(cause)); });
       if (rawLogs) {
-        try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-200)); } catch { /* Ignore a corrupt redacted log. */ }
+        try { setLogs((JSON.parse(rawLogs) as ConnectionLogEntry[]).slice(-CONNECTION_LOG_CAPACITY)); } catch { /* Ignore a corrupt redacted log. */ }
       }
       const initialUrl = await Linking.getInitialURL();
       if (startup.signal.aborted) return;
@@ -343,7 +361,7 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     const log = connection.onLog((entry) => {
       setLogs((existing) => {
-        const next = [...existing, entry].slice(-200);
+        const next = [...existing, entry].slice(-CONNECTION_LOG_CAPACITY);
         void AsyncStorage.setItem(LOG_KEY, JSON.stringify(next));
         return next;
       });
@@ -382,6 +400,36 @@ export function AppProvider({ children }: PropsWithChildren) {
     });
     return () => subscription.remove();
   }, [connection, connectionStage, refreshCloudSession, session]);
+
+  // "Send recent sessions ahead of time" (#1283): asked of each connection
+  // while the app is on screen, and stopped when it goes to the background.
+  const [prefetchOn] = usePrefetchSetting();
+  const [foreground, setForeground] = useState(AppState.currentState !== "background");
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "background") setForeground(false);
+      else if (state === "active") setForeground(true);
+    });
+    return () => subscription.remove();
+  }, []);
+  // Chunks a save cut short left behind go on every connect, whatever the prefetch setting (#1340).
+  useEffect(() => {
+    if (connectionStage !== "connected" || !activeHostId) return;
+    void reclaimOrphanChunks(activeHostId).catch(() => undefined);
+  }, [activeHostId, connectionEpoch, connectionStage]);
+  useEffect(() => {
+    if (!prefetchOn || !foreground || connectionStage !== "connected" || !activeHostId) return;
+    const host = activeHostId;
+    const detach = api.onPrefetched((prefetched) => { if (activeHostRef.current?.id === host) void keepPrefetched(host, prefetched); });
+    let started = false;
+    let current = true;
+    void startPrefetch(api, host).then((value) => { started = value; if (!current && value) void stopPrefetch(api); }).catch(() => undefined);
+    return () => {
+      current = false;
+      detach();
+      if (started) void stopPrefetch(api);
+    };
+  }, [activeHostId, api, connectionEpoch, connectionStage, foreground, prefetchOn]);
 
   // Changing networks races the paths again, rather than waiting for a dead one to time out (#666).
   useEffect(() => NetInfo.addEventListener((state) => {
@@ -548,3 +596,7 @@ const UNREACHABLE = "Couldn’t reach your Mac. Check that it is awake and Termi
 const readableError = (value: unknown) => isTransportError(value) ? UNREACHABLE : value instanceof Error ? value.message.replace(/[A-Za-z0-9_-]{32,}/g, "[redacted]") : "Something went wrong";
 
 const isSummaryList = (value: unknown): value is SessionSummary[] => Array.isArray(value) && value.every(isSessionSummary);
+const isSavedVersion = (value: unknown): value is { version: string; count: number } => {
+  const saved = value as { version?: unknown; count?: unknown } | null;
+  return typeof saved?.version === "string" && saved.version.length <= 128 && Number.isSafeInteger(saved.count);
+};

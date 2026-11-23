@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Loader2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage, type AgentLogin, type AgentLoginProvider, type CloudProviderSummary, type CloudWorkspaceQuote } from "@/lib/api";
-import { createErrorMessage, createWorkspace, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
-import { creatableProviders, pausedProviders } from "@/lib/hiddenProviders";
+import { createErrorMessage, createWorkspace, listedNames, failureMessage, isClientError, launchInput, preflightCreate, repositoriesInput, CreateRefused, type CreateForm, type PendingCreate } from "@/lib/cloudCreate";
+import { cloudProviderIsPlatform, cloudProviderOffered } from "@/lib/cloudProviders";
+import { creatableProviders, noProviderRefusal, pausedProviders } from "@/lib/hiddenProviders";
 import { formatMicros } from "@/lib/organizationCompute";
 import { organizationGithubApp } from "@/lib/organizationGithubApp";
 import { openAgentLogins, openOrganizationSettings } from "@/lib/settingsLinks";
@@ -42,10 +43,6 @@ function usableAgents(logins: readonly AgentLogin[]): AgentLoginProvider[] {
   return LOGIN_AGENTS.filter((agent) => agentLoginUsable(logins.find((login) => login.provider === agent.id))).map((agent) => agent.id);
 }
 
-/** "Codex", "Codex and Cursor", "Claude Code, Codex and Cursor". */
-function listed(names: readonly string[]): string {
-  return names.length < 2 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-}
 
 type Prepared = { form: CreateForm; pending: PendingCreate; quote: CloudWorkspaceQuote };
 
@@ -65,6 +62,13 @@ function failureText(failure: unknown): string {
 
 /** The compute step's label while its provider is connected but new machines are paused (PRO-112). */
 const COMPUTE_PAUSED = "Compute provider connected, new machines paused";
+/**
+ * The compute step's labels where the organization's compute is a provider
+ * TerminalX itself provides (PRO-452): nobody connected anything, so the step
+ * does not speak of a connection.
+ */
+const COMPUTE_PROVIDED = "Compute provided by TerminalX";
+const COMPUTE_PROVIDED_PAUSED = "Compute provided by TerminalX, new machines paused";
 
 /**
  * The steps from a selected organization to a working first workspace
@@ -94,6 +98,8 @@ export function OrganizationSetupSteps({
   onRecord: (record: OrganizationSetupRecord) => void;
 }) {
   const [facts, setFacts] = useState<SetupFacts>({ activeOrganizationId: organizationId, compute: null, paused: null, logins: null, repository: null, workspaces: null });
+  // The organization's providers as last read, to tell a provider TerminalX provides from one it connects (PRO-452).
+  const [listed, setListed] = useState<readonly CloudProviderSummary[] | null>(null);
   const [checking, setChecking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -157,10 +163,11 @@ export function OrganizationSetupSteps({
       workspaces: list,
     };
     setFacts(next);
+    setListed(summaries);
     setChecking(false);
     const reconciled = reconcileSetup(current.current, next);
     if (reconciled !== current.current) store(reconciled);
-    return { providers, paused, github };
+    return { summaries, providers, paused, github };
   }, [organizationId, store]);
 
   useEffect(() => {
@@ -197,7 +204,8 @@ export function OrganizationSetupSteps({
       if (unsettledRequest(current.current)) throw new Error(UNSETTLED);
       const provider = found?.providers?.[0];
       const repository = found?.github?.[0];
-      if (!provider || !repository?.cloneUrl) throw new CreateRefused(provider ? "cloud_workspace_repository_credential_required" : "cloud_provider_connection_required");
+      if (!provider) throw found?.summaries ? noProviderRefusal(found.summaries) : new CreateRefused("cloud_provider_connection_required");
+      if (!repository?.cloneUrl) throw new CreateRefused("cloud_workspace_repository_credential_required");
       const form: CreateForm = {
         name: "Setup check",
         provider: provider.id,
@@ -275,7 +283,7 @@ export function OrganizationSetupSteps({
   const missingLogins = missing.length > 0 && record.logins === "later" && (step === "done" || reached("logins")) && (
     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" data-testid="organization-setup-missing-logins">
       <span>
-        No agent login yet for {listed(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
+        No agent login yet for {listedNames(missing)} in {organizationName}: {missing.length === 1 ? "its agent" : "their agents"} can't run in its cloud workspaces until one
         is connected.
       </span>
       <Button size="xs" variant="outline" onClick={() => openAgentLogins(organizationId)}>
@@ -289,6 +297,21 @@ export function OrganizationSetupSteps({
   const unsettled = unsettledRequest(record);
   // The compute step waits on allowing new machines rather than on a connection (PRO-112).
   const paused = step === "compute" ? (facts.paused ?? []) : [];
+  // PRO-452: a provider TerminalX itself provides is never connected. Where
+  // it is all the compute there is to use, the step says who provides it; one
+  // that needs attention has nothing here to connect or repair. An
+  // organization's own providers read exactly as before.
+  const usable = listed ? creatableProviders([...listed]) : [];
+  const offered = listed ? listed.filter(cloudProviderOffered) : [];
+  const unavailable = step === "compute" && !paused.length ? offered.filter((provider) => cloudProviderIsPlatform(provider) && provider.availability === "attention-required") : [];
+  const connectable = offered.some((provider) => !cloudProviderIsPlatform(provider));
+  const computeLabel = paused.length
+    ? paused.every(cloudProviderIsPlatform)
+      ? COMPUTE_PROVIDED_PAUSED
+      : COMPUTE_PAUSED
+    : (usable.length > 0 && usable.every(cloudProviderIsPlatform)) || (unavailable.length > 0 && !connectable)
+      ? COMPUTE_PROVIDED
+      : STEP_LABELS.compute;
 
   if (step === "done") {
     return (
@@ -313,18 +336,25 @@ export function OrganizationSetupSteps({
         {SHOWN.filter((name) => name !== "agent" || record.agent === "required").map((name) => (
           <li key={name} className={reached(name) ? "text-muted-foreground" : name === step ? "text-foreground" : "text-faint"} aria-current={name === step ? "step" : undefined}>
             <span className="inline-flex w-4 justify-center">{reached(name) ? <Check className="size-3" aria-label="done" /> : name === step ? "→" : "·"}</span>{" "}
-            {name === "compute" && paused.length ? COMPUTE_PAUSED : STEP_LABELS[name]}
+            {name === "compute" ? computeLabel : STEP_LABELS[name]}
           </li>
         ))}
       </ol>
 
       {/* The provider controls are drawn above these steps, in the same setup section; a change made there is read here. */}
-      {step === "compute" && !paused.length && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider above.</p>}
+      {step === "compute" && !paused.length && !unavailable.length && <p className="mt-2 text-xs text-muted-foreground">Connect a compute provider above.</p>}
+      {unavailable.length > 0 && (
+        <p className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-compute-unavailable">
+          {listedNames(unavailable.map((provider) => provider.displayName))} can't be used by {organizationName} right now. TerminalX provides{" "}
+          {unavailable.length === 1 ? "it" : "them"}, so there is nothing to connect or repair here.{" "}
+          {connectable ? "Check again later, or connect another compute provider above." : "Check again later, or contact TerminalX support."}
+        </p>
+      )}
       {step === "compute" && paused.length > 0 && (
         <div className="mt-2 text-xs text-muted-foreground" data-testid="organization-setup-compute-paused">
           <p>
-            New machines are paused for {organizationName} on {listed(paused.map((provider) => provider.displayName))}. The connection is done; setup goes on once
-            new machines are allowed.
+            New machines are paused for {organizationName} on {listedNames(paused.map((provider) => provider.displayName))}.{" "}
+            {paused.every(cloudProviderIsPlatform) ? "Nothing needs connecting" : "The connection is done"}; setup goes on once new machines are allowed.
           </p>
           {paused.some((provider) => provider.canManage) ? (
             <div className="mt-2 flex flex-wrap items-center gap-2">

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { RuntimeStartFailedDialog } from "@/components/RuntimeStartFailedDialog";
-import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
-import { bootLocalRuntime, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
+import { MachineHostError } from "@/components/machines/MachineHostError";
+import { errorMessage, type LocalRuntimeOutdated, type LocalRuntimeUnproven, type LocalRuntimeRestart, type LocalRuntimeRestartRefused, type LocalRuntimeWorkItem } from "@/lib/api";
+import { bootLocalRuntime, proveLocalRuntimeWindow, reconnectLocalRuntime, replaceLocalRuntime, restartLocalRuntime, useLocalRuntime } from "@/lib/localRuntime";
 
 /** A short gap says nothing: most reconnect before anyone would notice. */
 export const QUIET_MS = 3_000;
@@ -53,6 +54,10 @@ export function LocalRuntimeNotice() {
     const { epoch } = state;
     return <SwitchFailedNotice key={epoch} epoch={epoch} outdated={state.outdated} onHide={() => setHidden(epoch)} />;
   }
+  if (state?.state === "connected" && state.unproven && hidden !== state.epoch) {
+    const { epoch } = state;
+    return <UnprovenNotice key={epoch} unproven={state.unproven} onHide={() => setHidden(epoch)} />;
+  }
   if (state?.state === "unresponsive") {
     // Reconnecting would reach the same wedged process; only a restart
     // recovers. Only the runtime this window found not responding: another
@@ -78,6 +83,60 @@ export function LocalRuntimeNotice() {
         <p className="mt-1 text-muted-foreground">{reconnecting ? "Agents and terminal commands keep running." : state.message}</p>
       </div>
       {!reconnecting && <Button variant="outline" size="sm" disabled={busy} onClick={() => void retry()}>{busy ? "Reconnecting…" : "Try again"}</Button>}
+    </aside>
+  );
+}
+
+/** While Bots is on, a runtime whose window's key is pinned takes for its window only a registrant that proves it
+ * with the window's Keychain key (PRO-489). This app could not, so the runtime shows what runs but takes no session
+ * or terminal change from it: it says so, and why, and Try again registers again with the proof once Keychain is
+ * unlocked. Nothing is restarted and nothing that was refused is sent again. A runtime started without the key
+ * (Keychain could not be read at its launch) holds bots by where a command comes from alone: that is said too, with
+ * the way to restart it with the key, and can be hidden. One that pinned another key than this window's Keychain holds
+ * now (it was replaced since) cannot be repaired by Try again: Restart runtime is offered in its place (PRO-507). */
+export function UnprovenNotice({ unproven, onHide }: { unproven: LocalRuntimeUnproven; onHide: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const prove = async () => {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await proveLocalRuntimeWindow();
+    } catch (error) {
+      setFailure(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!unproven.pinned) {
+    return (
+      <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unpinned">
+        <div className="min-w-0 flex-1 text-xs">
+          <div className="font-medium">Bots are held less strictly on this runtime</div>
+          <p className="mt-1 text-muted-foreground">{unproven.why}</p>
+          <p className="mt-1 text-muted-foreground">To have it check this window's proof, unlock your login Keychain, then in Settings → Machines choose Create pairing code: TerminalX restarts its runtime with the key, or offers Restart runtime there.</p>
+        </div>
+        <Button variant="ghost" size="sm" className="shrink-0" onClick={onHide}>Hide</Button>
+      </aside>
+    );
+  }
+  return (
+    <aside aria-label="Local runtime window" role="status" aria-live="polite" className="fixed bottom-3 left-1/2 z-50 flex w-[min(36rem,calc(100%-2rem))] -translate-x-1/2 items-center gap-3 rounded-lg border border-hairline bg-background p-3 shadow-lg" data-testid="local-runtime-unproven">
+      <div className="min-w-0 flex-1 text-xs">
+        <div className="font-medium">This window can't change sessions or terminals</div>
+        <p className="mt-1 text-muted-foreground">
+          {unproven.restart
+            ? "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and the key in Keychain was replaced after this runtime started, so only a restart lets it check this window's. Agents and terminals keep running until then."
+            : "While Bots is on, the TerminalX runtime takes changes only from a window that proves it is TerminalX with its key in Keychain, and this one couldn't. Unlock your login Keychain and allow TerminalX access if asked, then choose Try again. Agents and terminals keep running."}
+        </p>
+        <p className="mt-1 text-muted-foreground" data-testid="local-runtime-unproven-services">
+          Until then, terminalx commands that need this window (browser, computer, cloud, share and machine) fail too.
+        </p>
+        <p className="mt-1 text-muted-foreground" data-testid="local-runtime-unproven-why">{unproven.why}</p>
+        {unproven.restart && <MachineHostError error={unproven.restart} onRestarted={() => {}} className="mt-1.5" />}
+        {failure && <p role="alert" className="mt-1 text-destructive">{failure}</p>}
+      </div>
+      {!unproven.restart && <Button variant="outline" size="sm" className="shrink-0" disabled={busy} onClick={() => void prove()}>{busy ? "Trying…" : "Try again"}</Button>}
     </aside>
   );
 }

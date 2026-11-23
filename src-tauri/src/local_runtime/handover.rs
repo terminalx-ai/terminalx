@@ -95,6 +95,10 @@ pub struct Record {
     /// way is counted once, for its whole time.
     #[serde(default)]
     pub activity: Vec<crate::store::activity::CarriedTab>,
+    /// The window's process (pid, start time) this runtime knew (PRO-468):
+    /// its frames held across the exec are answered as the window's.
+    #[serde(default)]
+    pub window: Option<(i32, u64)>,
 }
 
 /// The launch's hook and control sockets.
@@ -262,6 +266,16 @@ pub(crate) fn plan(lifetime: &super::Lifetime, params: &Value) -> Result<Value, 
     let mut unadoptable = runtime.manager.unadoptable();
     unadoptable.extend(local_vm_asks());
     Ok(json!({ "format": FORMAT, "unadoptable": unadoptable }))
+}
+
+/// What `runtime.handover.plan` names now, without a binary to check:
+/// `machine/3`'s blockers (PRO-354). Empty in a process that cannot be
+/// handed over.
+pub(crate) fn unadoptable() -> Vec<Value> {
+    let Some(runtime) = RUNTIME.get() else { return Vec::new() };
+    let mut unadoptable = runtime.manager.unadoptable();
+    unadoptable.extend(local_vm_asks());
+    unadoptable.iter().filter_map(|work| serde_json::to_value(work).ok()).collect()
 }
 
 fn pinned(lifetime: &super::Lifetime, params: &Value) -> Result<(), ControlError> {
@@ -458,7 +472,8 @@ impl Record {
         // Read with every tab held: no transition is recorded meanwhile.
         let activity = crate::store::activity::carried();
         let record = Self { format: FORMAT, from: env!("CARGO_PKG_VERSION").into(), pid: std::process::id(), owner, control, frames, decisions,
-            panes, retained: terminals.retained, groups: terminals.groups, #[cfg(target_os = "linux")] supervised, tabs, activity };
+            panes, retained: terminals.retained, groups: terminals.groups, #[cfg(target_os = "linux")] supervised, tabs, activity,
+            window: crate::local_runtime::window::known_window() };
         Ok((record, kept))
     }
 }
@@ -578,7 +593,7 @@ pub(crate) struct Verified {
 /// record format; and of this version or a newer one.
 pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     use std::os::unix::fs::MetadataExt;
-    let runtimes = std::fs::canonicalize(home.join("runtime")).context("find this home's installed runtimes")?;
+    let runtimes = crate::paths::canonicalize(home.join("runtime")).context("find this home's installed runtimes")?;
     if binary.file_name() != Some(std::ffi::OsStr::new("terminalx-serve")) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
@@ -591,7 +606,7 @@ pub(crate) fn verify(home: &Path, binary: &Path) -> Result<Verified> {
     }
     let digest = directory.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
     let path = runtimes.join(&digest).join("terminalx-serve");
-    if std::fs::canonicalize(binary).ok().as_ref() != Some(&path) {
+    if crate::paths::canonicalize(binary).ok().as_ref() != Some(&path) {
         bail!("{} is not a runtime installed in this home", binary.display());
     }
     let identity = checked(&path, &digest)?;
@@ -813,6 +828,32 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let error = read(&path).err().expect("an unknown format is refused");
         assert!(format!("{error:#}").contains("format 999"), "{error:#}");
+    }
+
+    /// PRO-489: the window's process the runtime knew goes over in the
+    /// record and comes back as written, for `Registry::handed_over`.
+    #[test]
+    fn the_window_the_runtime_knew_goes_over_in_the_record() {
+        use std::os::fd::IntoRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("handover.json");
+        let descriptor = || std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let (owner, own) = (descriptor(), descriptor());
+        let record = |window: Value| -> Record {
+            serde_json::from_value(json!({ "format": FORMAT, "from": env!("CARGO_PKG_VERSION"), "pid": std::process::id(), "owner": owner,
+                "control": { "socket": "/nowhere", "token": "t", "own": own, "published": null }, "window": window })).unwrap()
+        };
+        write(&path, &record(json!([4242, 99]))).unwrap();
+        let adopted = read(&path).unwrap();
+        assert_eq!(adopted.record.window, Some((4242, 99)));
+        // A record from a build before PRO-468 names no window.
+        let (owner, own) = (descriptor(), descriptor());
+        let mut older = serde_json::to_value(serde_json::from_value::<Record>(json!({ "format": FORMAT, "from": "0.2.30", "pid": std::process::id(), "owner": owner,
+            "control": { "socket": "/nowhere", "token": "t", "own": own, "published": null } })).unwrap()).unwrap();
+        older.as_object_mut().unwrap().remove("window");
+        std::fs::write(&path, older.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        assert_eq!(read(&path).unwrap().record.window, None);
     }
 
     #[test]

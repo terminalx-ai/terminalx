@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { useRuntimeModels } from "@/lib/cloudModels";
 import type { RuntimeSession, WorkspaceConnectionState, WorkspaceYou } from "@terminalx/portable/workspace";
 import { collabGranted } from "@terminalx/portable/workspaceCollab";
@@ -18,6 +19,7 @@ import {
   type CloudLease,
 } from "@/lib/cloudConnections";
 import {
+  closeCloudAgentTab,
   flushCloudAgentCache,
   loadCloudAgents,
   markCloudAgentsOffline,
@@ -31,7 +33,7 @@ import {
 } from "@/lib/cloudAgents";
 import { lastKnownWorkspace, refreshCloudCatalog, repositoryOf, useCloudCatalog } from "@/lib/cloudCatalog";
 import { phaseOf, settled } from "@/lib/cloudCreate";
-import { deletion, isOpen, machineRunning, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
+import { deletion, isOpen, machineRunning, machineStarting, stopping, useCloudWorkspaceDeleted } from "@/lib/cloudLifecycle";
 import {
   accessLoss,
   accessLostReason,
@@ -49,23 +51,23 @@ import {
   type SessionLock,
 } from "@/lib/cloudCollab";
 import { cloudAgentLabel, cloudTabTitle } from "@/lib/cloudRowState";
-import { createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
+import { closeCloudTerminal, createCloudTerminal, detachCloudTerminals, followCloudTerminals, quietCloudTerminals, sessionTerminals, syncCloudTerminals, useCloudTerminals, type CloudTerminal } from "@/lib/cloudTerminals";
 import { cloudGitSource, desktopGitIdentity, type GitSource } from "@/lib/gitSource";
 import { cloudWorkspaceHost } from "@/lib/cloudWorkspaceHost";
 import type { RemovableWorkspace } from "@/lib/workspaceRemoval";
 import { agentPtyServed, clearCloudWake, cloudAsleep, cloudSessionBackend, type SessionBackend } from "@/lib/sessionBackend";
-import { selectSessionTab } from "@/lib/terminal";
+import { selectSessionTab, type SelectedSessionTab } from "@/lib/terminal";
+import { cloudProviderLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 import { useTheme } from "@/lib/theme";
 import { cloudFileSource, registerFileSource, type CloudFileSource } from "@/lib/workspaceFiles";
 import { cloudWorkspaceKey, cloudWorkspaceRoot, parseCloudWorkspaceKey, type RemotePath } from "@/types/target";
 import type { SessionEntry, TabEntry } from "@/types/session";
+import type { MachineConnectionState, PairedMachine } from "@/types/machines";
 
-const PROVIDER_NAMES: Record<string, string> = { box: "Boat", machine0: "Machine0", hetzner: "Hetzner", "local-docker": "Local Docker" };
-
-/** A cloud provider's display name. */
+/** A cloud provider's display name, from its descriptor (PRO-415). */
 export function cloudProviderName(provider: string | null | undefined): string {
   if (!provider) return "Development runtime";
-  return PROVIDER_NAMES[provider] ?? provider;
+  return cloudProviderLabel(provider);
 }
 
 export type ConnectionChip = { label: string; tone: "live" | "pending" | "offline" };
@@ -96,6 +98,8 @@ export const IN_PROGRESS_LABELS = [CONNECTING_LABEL, RECONNECTING_LABEL, STOPPIN
 
 /** While waking, the chip only moves forward: Resuming…, then Connecting…, then Live. */
 export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
+/** While the machine comes up (provisioned, or resumed elsewhere), likewise: Starting…, then Connecting…, then Live (#1288). */
+export const START_STEPS = [STARTING_LABEL, CONNECTING_LABEL] as const;
 
 /**
  * The connection chip: a short label, and whether it is live, on its way, or
@@ -115,6 +119,13 @@ export const WAKE_STEPS = [RESUMING_LABEL, CONNECTING_LABEL] as const;
  * or "Live" for a machine on its way down. A window attaching again after
  * its workspace came back (`reattaching`) reads "Reconnecting…" until the
  * transport is really up.
+ *
+ * Both coming-up sequences only move forward: `wakeFloor` is the step this
+ * view already showed (1 once it read "Connecting…"), so a dial the relay
+ * turns away while the runtime boots never takes the chip back to
+ * "Resuming…" or "Starting…". "Reconnecting…" is only for a connection that
+ * was up and was lost (the transport's own `reconnecting`), or one attached
+ * again after its workspace came back.
  */
 export function cloudConnectionChip(
   state: WorkspaceConnectionState,
@@ -128,6 +139,10 @@ export function cloudConnectionChip(
     // Waking: never back from Connecting to Starting while the runtime retries.
     const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" || state.state === "reconnecting" ? 1 : 0);
     return { label: WAKE_STEPS[step], tone: "pending" };
+  }
+  if (options.starting && !options.reattaching && (state.state === "opening" || state.state === "waitingForRuntime" || state.state === "connecting")) {
+    const step = Math.max(options.wakeFloor ?? 0, state.state === "connecting" ? 1 : 0);
+    return { label: START_STEPS[step], tone: "pending" };
   }
   // Stopped by the list, and nothing resumes it: Stopped, whatever the transport is still doing
   // (reading connected from before the stop, or trying again until it finds out). Nothing is starting.
@@ -154,6 +169,25 @@ export function cloudConnectionChip(
       if (workspaceState === "suspended") return { label: "Stopped", tone: "offline" };
       if (workspaceState === "archived") return { label: "Archived", tone: "offline" };
       return { label: "Not connected", tone: "offline" };
+  }
+}
+
+/** The chip's label as the status line under a queued message reads it (#1291). */
+export function cloudWorkspaceStatus(chip: ConnectionChip): WorkspaceStatus {
+  switch (chip.label) {
+    case STARTING_LABEL:
+      return "starting";
+    case RESUMING_LABEL:
+      return "resuming";
+    case CONNECTING_LABEL:
+    case RECONNECTING_LABEL:
+      return "connecting";
+    case "Live":
+      return "live";
+    case "Stopped":
+      return "stopped";
+    default:
+      return null;
   }
 }
 
@@ -209,7 +243,26 @@ export interface CloudSessionModel {
    * once the runtime is back. Without it a stopped workspace stays stopped.
    */
   openTerminal(options?: { wake?: boolean }): Promise<void>;
-  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<void>;
+  /** Adds an agent tab and selects it; resolves to its id where the runtime names it. */
+  addAgentTab(params: { agent: string; model?: string; effort?: string | null; mode?: string }): Promise<string | void>;
+  /**
+   * Close a tab on the runtime (#1325): an agent tab's process is stopped and
+   * the tab dropped from the session; a terminal's shell is ended. It is the
+   * runtime's, so it closes for everyone in the workspace.
+   */
+  closeTab(tab: SelectedSessionTab): Promise<void>;
+  /**
+   * Why this person may not close the session's tabs, or null when they may.
+   * Closing an agent tab or ending a shell is a manager's (docs/CLOUD-SHARING.md):
+   * a driver may type and approve, and the runtime refuses them a close.
+   */
+  closeBlockedReason: string | null;
+  /**
+   * The runtime has listed this session's agent tabs and its shells since it
+   * connected, so a tab that is in neither list is closed: what this viewer's
+   * layout says of it can go (#1325). False while either list may be partial.
+   */
+  tabsListed: boolean;
   /** The runtime supports adding tabs to an existing session (`session/2`). */
   canAddTabs: boolean;
   /** Agents the runtime has (`agents/1`), else the two every runtime ships. */
@@ -228,12 +281,35 @@ export interface CloudSessionModel {
    */
   removableWorkspace: RemovableWorkspace | undefined;
   /**
+   * A session on a paired machine (PRO-347) rather than in a cloud workspace:
+   * where it runs and how that machine is reached. Everything that belongs to
+   * an organization (sharing, presence, leases, wake and sleep, price, the
+   * mirror) is absent for it; `orgId` is empty and `collab` never live.
+   */
+  machine?: MachineSessionPlace;
+  /**
    * PRO-28: the Ports panel's inputs. `offered` is false for anyone who may
    * not use previews (not a manager, nor a driver who may approve) and for a
    * locked session: the panel and every entry to it are then left out.
    */
   ports: { offered: boolean; state: WorkspaceConnectionState; connectionId: string | null };
   error: string | null;
+}
+
+/** Where a machine session runs (docs/MACHINES.md decision 1). */
+export interface MachineSessionPlace {
+  machineId: string;
+  projectId: string;
+  /** The paired machine's record; null once it is no longer paired. */
+  record: PairedMachine | null;
+  name: string;
+  /** Git for the session's checkout, independent of the side panel's repository picker. */
+  checkoutGitSource: GitSource | undefined;
+  checkoutRepository: string | null;
+  /** How the machine is reached now (21.09): direct, relay, reconnecting, offline… */
+  state: MachineConnectionState;
+  /** The session checkout's Git, independent of the repository selected in Changes. */
+  branchGit?: { source: GitSource; remote: string | null; baseRef: string | null };
 }
 
 const NOT_CONNECTED: WorkspaceConnectionState = { state: "idle" };
@@ -244,6 +320,8 @@ const DEFAULT_AGENTS = [
 /** How long until the list is read again while a lock pane shows: 5 s, then up to 30 s. */
 export const ACCESS_POLL_MS = [5_000, 10_000, 20_000, 30_000] as const;
 const NO_TABS: TabEntry[] = [];
+/** Why a driver or a viewer has no close on a cloud session's tabs. */
+export const CLOSE_NEEDS_MANAGER = "Closing tabs and terminals needs a workspace admin.";
 const NO_TERMINALS: CloudTerminal[] = [];
 
 function statusShown(tab: CloudAgentTab, asleep: boolean): TabEntry["status"] {
@@ -253,7 +331,8 @@ function statusShown(tab: CloudAgentTab, asleep: boolean): TabEntry["status"] {
   return status;
 }
 
-function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
+/** A runtime's agent tab as SessionView reads a tab (a cloud workspace's, or a machine's). */
+export function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
   const { info } = tab;
   return {
     id: tab.tabId,
@@ -271,6 +350,13 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
     modified: info.modified,
     // A stopped workspace is read only from what was saved; nothing more is on its way.
     loadingHistory: !tab.historyRead && !asleep,
+    // Whether the history is in at all, asleep or not: a Queued card's delivery is judged only against it (#1341).
+    historyRead: tab.historyRead,
+    // The last reset (#1326), as a local tab keeps it: the notice over the chat, and Undo while the runtime can.
+    ...(info.history ? { resetLogId: info.history } : {}),
+    ...(info.reset?.undoable && info.history ? { resetBackupId: info.history } : {}),
+    ...(info.reset?.turn != null ? { resetTurn: info.reset.turn } : {}),
+    ...(info.reset?.filesRestored != null ? { resetFilesRestored: info.reset.filesRestored } : {}),
   };
 }
 
@@ -282,6 +368,8 @@ function tabEntry(tab: CloudAgentTab, asleep: boolean): TabEntry {
  * once.
  */
 export function useCloudSession(key: string): CloudSessionModel | null {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const parsed = parseCloudWorkspaceKey(key);
   const orgId = parsed?.orgId ?? "";
   const workspaceId = parsed?.workspaceId ?? "";
@@ -293,6 +381,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const item: CloudWorkspaceListItem | null = catalog.orgs[orgId]?.workspaces.find((candidate) => candidate.workspace.id === workspaceId) ?? null;
   const orgName = status.organizations?.find((org) => org.id === orgId)?.name ?? (status.identity?.organizationId === orgId ? status.identity.organization : null) ?? "Organization";
   const workspaceState = item?.workspace.state ?? null;
+  const mailboxKinds = item?.workspace.agentCommandKinds ?? null;
   // #502: deleted, from here or elsewhere (a tombstone): nothing is left to connect to or wait for.
   const deletedHere = useCloudWorkspaceDeleted(orgId, workspaceId);
   // Deleted here while the list still shows it mid-delete counts too.
@@ -424,11 +513,12 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   // view's connection afresh. Only ever a `connect`.
   const listRunning = !!item && machineRunning(item);
   const listStopping = !!item && stopping(item);
+  const listStarting = !!item && machineStarting(item);
   const listAt = catalog.orgs[orgId]?.requestedAt ?? null;
   useEffect(() => {
     if (!parsed || !item) return;
-    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, at: listAt ?? 0 });
-  }, [orgId, workspaceId, !!item, listRunning, listAt, lease]);
+    noteCloudWorkspaceListed({ orgId, workspaceId }, { running: listRunning, starting: listStarting, at: listAt ?? 0 });
+  }, [orgId, workspaceId, !!item, listRunning, listStarting, listAt, lease]);
   // The transport says stopped while the list says running: one of them is
   // stale. Read the list again; a list asked for after the transport stopped
   // decides (the manager then attaches again, with backoff).
@@ -496,7 +586,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
   const mode = useRef(resolvedMode);
   mode.current = resolvedMode;
   const terminalBase = useCallback(() => createTerminal(mode.current), []);
-  const allTerminals = useCloudTerminals(workspaceKey).terminals;
+  const terminalStore = useCloudTerminals(workspaceKey);
+  const allTerminals = terminalStore.terminals;
   const terminals = useMemo(() => sessionTerminals(allTerminals, runtimeSessionId), [allTerminals, runtimeSessionId]);
   useEffect(() => {
     // Without access there is no terminal to list: what this window held was dropped with it, and is not read back.
@@ -581,17 +672,20 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     if (asleep) quietCloudTerminals(workspaceKey);
   }, [asleep, workspaceKey]);
   // The header chip: Live only while the transport is up, never for a stopped workspace, and monotonic while this desktop wakes it.
-  const wakeFloor = useRef(0);
-  if (!managed.woke || state.state === "connected") wakeFloor.current = 0;
   // Starting only while the list says the machine is coming up (a launch, a resume); else this window is just attaching.
+  const starting = workspaceStarting(item);
+  const wakeFloor = useRef(0);
+  if (!(managed.woke || starting) || state.state === "connected") wakeFloor.current = 0;
   const chip = cloudConnectionChip(state, workspaceState, {
     woke: managed.woke,
     wakeFloor: wakeFloor.current,
-    starting: workspaceStarting(item),
+    starting,
     stopping: listStopping,
     reattaching: managed.reattaching,
   });
-  if (managed.woke && chip.label === WAKE_STEPS[1]) wakeFloor.current = 1;
+  if ((managed.woke || starting) && chip.label === CONNECTING_LABEL) wakeFloor.current = 1;
+  // #1291: the same state, for the line under a queued message.
+  const workspaceStatus = cloudWorkspaceStatus(chip);
   // Woken and back: the list still says stopped until it is read again.
   const wokeLive = managed.woke && state.state === "connected";
   useEffect(() => {
@@ -632,6 +726,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         authority,
         outbox: agents.outbox,
         followUps,
+        mailboxKinds,
+        workspaceStatus,
         wake,
         you,
         collabClient: collabLive ? client : null,
@@ -642,7 +738,7 @@ export function useCloudSession(key: string): CloudSessionModel | null {
         agentProcess,
         signIn,
       }),
-    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
+    [key, workspaceKey, scope, runtimeSessionId, state, client, workspaceState, authority, agents.outbox, followUps, mailboxKinds, workspaceStatus, wake, you, collabLive, settingsNotice, connects, agentPty, terminalBase, agentProcess, signIn],
   );
 
   const ownTabs = useMemo(() => {
@@ -780,6 +876,22 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [backend.readOnlyReason, client, connected, runtimeSessionId, scope, key],
   );
 
+  const closeBlockedReason = backend.readOnlyReason ?? (manage ? null : CLOSE_NEEDS_MANAGER);
+  const closeTab = useCallback(
+    async (tab: SelectedSessionTab) => {
+      if (closeBlockedReason) throw new Error(closeBlockedReason);
+      if (tab.kind === "terminal") return closeCloudTerminal(workspaceKey, connected ? client : null, tab.id);
+      if (tab.kind !== "agent") return;
+      if (!client || !connected) throw new Error("Agent tabs close once the workspace is connected.");
+      await closeCloudAgentTab(scope, tab.id, client);
+      await syncLiveTabs(scope, client).catch(() => undefined);
+    },
+    [closeBlockedReason, client, connected, scope, workspaceKey],
+  );
+  // Every tab of the session the runtime holds is known here: its live list of agent tabs, and its shells.
+  // The cache being loaded is not enough (#1379): it may be empty or unreadable, and then no tab is "not live".
+  const tabsListed = connected && !locked && agents.liveListed && !!terminalStore.listed && ownTabs.every((tab) => tab.source === "live");
+
   const recheckAccess = useCallback(() => {
     // An older server's list says nothing about roles: only connecting again can tell.
     if (!listedRole) {
@@ -813,6 +925,9 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     terminals: locked ? NO_TERMINALS : terminals,
     openTerminal,
     addAgentTab,
+    closeTab,
+    closeBlockedReason,
+    tabsListed,
     // session.addTab is a manager's (the runtime refuses anyone else).
     canAddTabs: manage && !!client?.hasCapability("session/2"),
     agents: agentList,

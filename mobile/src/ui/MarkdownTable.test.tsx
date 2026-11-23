@@ -3,10 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Markdown } from "./Markdown";
+import * as Clipboard from "expo-clipboard";
 import { growColumns, scrollEdges } from "./MarkdownTable";
 
 vi.mock("react-native", () => vi.importActual("react-native-web"));
-vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
+vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn(async () => true) }));
+vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }) }));
 vi.mock("./theme", () => ({ useTheme: () => ({ palette: {
   ink: "#222222", muted: "#777777", accent: "#a96f27", raised: "#eeeeee", border: "#cccccc", card: "#ffffff", page: "#fafafa",
 } }) }));
@@ -115,4 +117,19 @@ it("opens the table full screen with every cell, and closes it again", async () 
   // jsdom has no AnimationEvent, so React listens under the prefixed name there.
   for (const name of ["animationend", "webkitAnimationEnd"]) await act(async () => { animated().dispatchEvent(new Event(name, { bubbles: true })); });
   expect(document.querySelector('[aria-label="Expanded table"]')).toBeNull();
+});
+
+it("copies the table as the agent wrote it from the full-screen bar (22.03)", async () => {
+  await render(`Where each ticket stands:\n\n${SIX_COLUMNS}\n\nThat is all.`);
+  await act(async () => { (container.querySelector('[aria-label="Expand table"]') as HTMLElement).click(); });
+  await act(async () => { (document.querySelector('[aria-label="Copy table"]') as HTMLElement).click(); });
+  expect(Clipboard.setStringAsync).toHaveBeenCalledWith(SIX_COLUMNS);
+});
+
+it("sets the first column in bold, as the header row is", async () => {
+  await render(SIX_COLUMNS);
+  const weight = (text: string) => getComputedStyle([...scroller().querySelectorAll("div")].filter((node) => node.textContent === text).at(-1)!).fontWeight;
+  expect(weight("Task")).toBe("600");
+  expect(weight("Ship sync")).toBe("600");
+  expect(weight("Alice")).not.toBe("600");
 });

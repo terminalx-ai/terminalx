@@ -90,6 +90,8 @@ try {
       const agentMenu = page.getByTestId("agent-menu");
       await agentMenu.focus();
       await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: /^Agent/ }).focus();
+      await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitem", { name: "Codex", exact: true }).focus();
       await page.keyboard.press("Enter");
       await agentMenu.focus();
@@ -102,6 +104,8 @@ try {
       await page.keyboard.press("Enter");
       await agentMenu.focus();
       await page.keyboard.press("Enter");
+      await page.getByRole("menuitem", { name: /^Effort/ }).focus();
+      await page.keyboard.press("ArrowRight");
       await page.getByRole("menuitemradio", { name: "High", exact: true }).focus();
       await page.keyboard.press("Enter");
       assert.equal(await page.getByTestId("agent-effort").textContent(), "High");
@@ -356,7 +360,7 @@ try {
       // A dialog opened from a menu must hand the page back when it closes.
       const released = await page.evaluate(() => getComputedStyle(document.body).pointerEvents !== "none");
       failed += report(`${mode}, ${provider}, ${width}px`, {
-        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 15 && dialogLayout.switches["Agents comment and change status without asking"] === "false",
+        "the project's pipeline settings open from its menu, fit the window and save each change": dialogLayout.inWindow && dialogLayout.inside && !dialogLayout.scrollsSideways && dialogLayout.controls === 14,
         // Saved, and shown as saved: the switch that was turned on is on, and the default it overrides is held off.
         "the switch that was turned on reads on, and the default it overrides is held": dialogLayout.switches["A person does the merge"] === "true" && dialogLayout.defaults["Merge automatically by default"] === "Off disabled",
         "conflicts are still resolved for sessions from issues": dialogLayout.defaults["Resolve conflicts automatically by default"] === "From issues",

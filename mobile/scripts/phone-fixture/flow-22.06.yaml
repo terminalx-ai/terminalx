@@ -1,0 +1,27 @@
+# 22.06 Cloud: the list while it is read, the list, and a stopped workspace with and without a saved conversation.
+appId: com.terminalx.phone.fixture
+name: Cloud (22.06)
+---
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureCloud: loading }
+- tapOn: "Cloud"
+- assertVisible: "Loading cloud workspaces"
+- takeScreenshot: 22.06-1-loading
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected }
+- tapOn: "Cloud"
+- assertVisible: "Checkout redesign,.*fixture-compute"
+- assertVisible: "5 organizations with no workspaces.*"
+- takeScreenshot: 22.06-2-cloud-list
+- tapOn: "Warm-up run, (?!five issues).*"
+- assertVisible: "What's the latest status?"
+- waitForAnimationToEnd
+- takeScreenshot: 22.06-3-stopped-with-a-conversation
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /cloud, openWorkspace: ws-warm-up-five }
+- assertVisible: "No conversation yet"
+- waitForAnimationToEnd
+- takeScreenshot: 22.06-4-stopped-nothing-saved

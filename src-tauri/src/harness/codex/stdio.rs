@@ -3,6 +3,7 @@
 //! only add optional fields to the stable v2 surface used here (checked through
 //! 0.166.0). The session manager fences every action by the exact child launch
 //! and is the only final writer.
+use crate::paths::Canonical;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -63,6 +64,9 @@ const SUMMARY_BREAK: &str = "\n\n";
 
 pub struct Stdio {
     pub(crate) actual_stance: Option<crate::harness::settings::Stance>,
+    /// The secret this launch's app server was given (`RACCOON_HOOK_TOKEN`),
+    /// which proves a `terminalx` call comes from this tab. Empty before launch.
+    pub(crate) hook_token: String,
     pub launch: Arc<()>,
     pub thread: Option<String>,
     pub exited: bool,
@@ -131,10 +135,10 @@ fn reported_stance(result: &Value, cwd: &str) -> Option<crate::harness::settings
             if object.get(key).is_some_and(|value| !value.is_boolean()) { return None; }
         }
         if let Some(roots) = object.get("writableRoots") {
-            let cwd = std::path::Path::new(cwd).canonicalize().ok()?;
+            let cwd = std::path::Path::new(cwd).canonical().ok()?;
             for root in roots.as_array()? {
                 let root = std::path::Path::new(root.as_str()?);
-                if !root.is_absolute() || !root.canonicalize().ok()?.starts_with(&cwd) { return None; }
+                if !root.is_absolute() || !root.canonical().ok()?.starts_with(&cwd) { return None; }
             }
         }
         match kind { "readOnly" => "read-only", "workspaceWrite" => "workspace-write", "dangerFullAccess" => "danger-full-access", _ => return None }
@@ -160,7 +164,7 @@ impl Stdio {
     }
 
     pub(crate) fn new(cwd: String, model: String, effort: Option<String>, mode: String, resume: Option<String>) -> Self {
-        Self { actual_stance: None, launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
+        Self { actual_stance: None, hook_token: String::new(), launch: Arc::new(()), thread: None, exited: false, blocked: false, ready: false, lifecycle_lost: false,
             usage: Default::default(), usage_model: None, prompt_model: None,
             turn: None, manual_compact: false, next_id: 0, pending: HashMap::new(), asks: HashMap::new(), turn_epoch: 0, answers: HashMap::new(),
             streams: Vec::new(), committed: HashSet::new(), cwd, model, effort, mode, first: None, resume, awaiting: false, failed: false, routed: false }

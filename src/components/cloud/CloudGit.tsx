@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/controls";
 import { cloudGitSource, desktopGitIdentity } from "@/lib/gitSource";
 import { repositoryLabel } from "@/lib/cloudLifecycle";
+import { useMachinePlace } from "./workspacePlace";
 
 type Panel = "repo" | "pr";
 
@@ -40,6 +41,7 @@ export function CloudGitView({
   active: boolean;
 }) {
   const connected = state.state === "connected";
+  const machine = useMachinePlace();
   const authority = useRef<"manage" | "participate">("participate");
   if (connected) authority.current = state.authority;
   const manage = authority.current === "manage";
@@ -133,12 +135,12 @@ export function CloudGitView({
             />
           )}
         </div>
-        {!connected && <p className="px-3 py-1 text-xs text-muted-foreground">Git appears once the workspace is connected.</p>}
+        {!connected && <p className="px-3 py-1 text-xs text-muted-foreground">Git appears once {machine ? machine.name : "the workspace"} is connected.</p>}
         {error && <p role="alert" className="px-3 py-1 text-xs text-destructive">{error}</p>}
-        {connected && repositories?.length === 0 && <p className="px-3 py-3 text-xs text-muted-foreground">This workspace has no Git repository.</p>}
+        {connected && repositories?.length === 0 && <p className="px-3 py-3 text-xs text-muted-foreground">{machine ? machine.name : "This workspace"} has no Git repository.</p>}
         {connected && repositories && repositories.length > 1 && !selected && (
           <p className="px-3 py-3 text-xs text-muted-foreground" data-testid="cloud-git-choose">
-            This workspace has {repositories.length} repositories. Choose one to review, commit or publish; nothing is done in all of them at once.
+            {machine ? machine.name : "This workspace"} has {repositories.length} repositories. Choose one to review, commit or publish; nothing is done in all of them at once.
           </p>
         )}
         {source && (
@@ -242,6 +244,7 @@ function describeFacts(facts: RepositoryFacts): string[] {
  * open pull requests per repository, running agent turns and terminals.
  */
 export function UnpublishedWork({ client, active, generation, tick }: { client: WorkspaceRpcClient; active: boolean; generation: string | null; tick: number }) {
+  const machine = useMachinePlace();
   const [facts, setFacts] = useState<DispositionFacts | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,9 +276,9 @@ export function UnpublishedWork({ client, active, generation, tick }: { client: 
           {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
         </Button>
       </div>
-      {!generation && <p className="text-muted-foreground">Offline: what is unpublished cannot be checked until the workspace is connected.</p>}
+      {!generation && <p className="text-muted-foreground">Offline: what is unpublished cannot be checked until {machine ? machine.name : "the workspace"} is connected.</p>}
       {error && <p className="text-destructive">{error}</p>}
-      {generation && facts === null && <p className="text-muted-foreground">This workspace's runtime does not report unpublished work.</p>}
+      {generation && facts === null && <p className="text-muted-foreground">{machine ? `The TerminalX on ${machine.name} does not report unpublished work.` : "This workspace's runtime does not report unpublished work."}</p>}
       {facts && atRisk.length === 0 && facts.repositories.length > 0 && <p className="text-muted-foreground">Everything is committed and pushed.</p>}
       {atRisk.map((repo) => (
         <div key={repo.path} className="rounded-md bg-warning/10 px-2 py-1.5" data-testid="cloud-unpublished-repo">

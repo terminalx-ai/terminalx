@@ -135,9 +135,12 @@ Every stream belongs to one connection and ends with it.
 | Desktop quits or disconnects | The connection closes; the runtime ends its streams. |
 
 The desktop closes its local listeners in every one of these cases, and
-also when the active organization changes. They are not kept for a
-connection that might return. Nothing is stored on the server, so there is
-no route table to clean up.
+also when the active organization changes. A cloud workspace's forwards are
+not kept for a connection that might return: they are dropped, and come back
+only when the person forwards them again. (A paired machine's forwards wait
+and return with its link, PRO-355, docs/MACHINES.md; a cloud workspace's
+never do.) Nothing is stored on the server, so there is no route table to
+clean up.
 
 ## The protocol: `ports/1`
 
@@ -146,7 +149,7 @@ not grant it.
 
 | Method | |
 | --- | --- |
-| `ports.list` | `{}` → `{ detected, ports: [{ port }], streams: [{ streamId, port }] }`. Listening ports are read from `/proc/net/tcp` and `tcp6` (loopback and any-address listeners). `detected: false` where that is not available; a port can still be opened by number. `streams` are the caller's own. |
+| `ports.list` | `{}` → `{ detected, ports: [{ port, process? }], streams: [{ streamId, port }] }`. Loopback and any-address TCP listeners: on Linux from `/proc/net/tcp` and `tcp6`, on macOS through libproc (PRO-355). `process` is `{ name, pid, cwd? }` when the listener's process is known (additive: an older runtime sends none); the runtime's own listeners are left out. `detected: false` where listing is not available; a port can still be opened by number. `streams` are the caller's own. |
 | `ports.open` | `{ port }` → `{ streamId, port, window, maxWriteBytes }`, or `port_unreachable`. |
 | `ports.write` | `{ streamId, data }` (base64, at most `maxWriteBytes`) → `{}`, or `backpressure`. |
 | `ports.ack` | `{ streamId, bytes }` → `{}`. |
@@ -203,14 +206,38 @@ The API and the relay need no change for private previews.
 
 One `PortForwarder` per workspace connection. Commands:
 `cloud_port_forward(connectionId, port, localPort?, exact?)`,
-`cloud_port_unforward`, `cloud_port_forwards`.
+`cloud_port_unforward`, `cloud_port_forwards` (each forward with `state`,
+`open` or `waiting`, and `auto`), `cloud_port_settings` and
+`cloud_port_set_settings(connectionId, enabled?, auto?)`. Every change of a
+connection's forwards or switches is sent as the event
+`cloud_port_forwards_changed` (`{ connectionId, forwards, settings, opened }`).
 
-- It binds `127.0.0.1` only, **without address reuse**. With `SO_REUSEADDR`
-  (which a plain listener sets) macOS lets a loopback bind succeed while
-  another program listens on the wildcard address of the same port, and the
-  new socket takes that program's loopback traffic. Before using a named
-  port it also checks that nothing listens on it on the IPv4 wildcard, IPv6
-  loopback or the IPv6 wildcard.
+- Two switches per connection apply to cloud previews as to a paired
+  machine's (PRO-355): **Forwarding** (`enabled`, on by default) closes every
+  listener when off and keeps the forwards as `waiting`; on opens them again
+  on the same local ports when free. While it is off a new forward is refused
+  (`cloud_port_forwarding_off`). **Forward new ports automatically** (`auto`,
+  off by default) reads `ports.list` every 2 s while connected (request ids
+  under `ports-`) and forwards each port that starts listening after it was
+  turned on, outside 32768–60999, on the same local port when free (a random
+  one for a port below 1024), at most 16 at once per connection; ports
+  already listening when it was turned on are left to the person, and so is
+  a port the person unforwarded, for as long as they keep listening. A port
+  that a later list no longer has is forgotten, so a server that stops and
+  starts again is auto-forwarded; a list answered `detected: false` changes
+  nothing. Auto-forward sends only `ports.list` and so
+  never wakes a stopped workspace.
+
+- It binds `127.0.0.1` only, with `SO_REUSEADDR`, so a forward whose
+  connections this side closed (Forwarding off, a machine's link dropping)
+  can return on its own port while that port sits in TIME_WAIT (PRO-355).
+  `SO_REUSEADDR` also lets a loopback bind succeed on macOS while another
+  program listens on the wildcard address of the same port, and the new
+  socket would take that program's loopback traffic; so before using a named
+  port it checks, with probes that set `SO_REUSEADDR` too, that nothing
+  listens on it on the IPv4 wildcard, IPv6 loopback or the IPv6 wildcard. A
+  listener of ours in TIME_WAIT does not count; a listening program does
+  (measured on macOS 26). A program on `127.0.0.1` itself refuses the bind.
 - The local port is a random free one. A caller may name one (`localPort`);
   when any program has it, a random one is used and the answer says
   `reassigned`, or with `exact` the forward is refused (`cloud_port_in_use`).
@@ -229,7 +256,10 @@ One `PortForwarder` per workspace connection. Commands:
   connection that is not live answers `cloud_port_not_connected`.
 - Listeners and streams close when the connection stops being live for any
   reason, when it is detached, when the account changes and when the active
-  organization changes. Nothing reopens by itself.
+  organization changes (for auto-forward, the organization it was turned on
+  under). A cloud workspace's forwards never reopen by themselves: a dropped
+  connection drops them, whatever the switches say; the switches themselves
+  are kept while the connection is held and forgotten when it is detached.
 - A refusal by the runtime is a short plain-text page in the forwarder's own
   words, sent with `nosniff`; the runtime's text and codes are not echoed.
 - Stopping a forward closes the connections it was carrying.

@@ -57,3 +57,24 @@ pnpm --dir mobile typecheck
 The provider tests cover healthy host reselection without transport restart or
 session loss. The component tests cover both account states and failed selection;
 their mocked router assertions are not a substitute for the native flow.
+
+## Real-account Cloud provider verification (#1173)
+
+To repeat the check, install the candidate with the simulator command above and
+sign in to an account with a running workspace on a provider outside
+`machine0,box,terminalx-cloud`. In Cloud, find the workspace under its
+organization, tap its row, and wait for the Live status. Check that the agent
+tabs match the workspace's session on desktop. If a tab has an existing
+conversation, open it and verify that the transcript loads.
+
+Passed on November 17, 2026, on an iPhone 17 Pro Max simulator running iOS 26.5.
+The standalone production app (`com.terminalx.next.mobile`) ran the JavaScript
+bundle from `7372b5358c` with the simulator app's original Keychain identity and
+real account sign-in. That commit contains the runtime changes for #1173.
+
+- The Cloud list showed “Check the latest commits of this” as Running under
+  **Agent37 Demo**, with provider ID `agent37`.
+- A Maestro run on the signed-in app found the organization and provider row,
+  tapped the row, and asserted the workspace's Live status.
+- The screen showed three agent tabs, matching the desktop session. Selecting
+  the named session tab displayed its existing conversation.

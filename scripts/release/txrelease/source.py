@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from .config import Release, ReleaseError
@@ -9,7 +10,8 @@ from .proc import Runner, now, read_record, require, write_json
 
 # The serve integration tests a release runs (the CI headless-serve job runs a subset of these).
 SERVE_TESTS = ['owner_pretool', 'local_platform', 'local_lifetime', 'local_sharing_owner', 'local_mobile',
-               'local_legacy', 'local_handover', 'local_issue_start', 'agent_setup', 'session_parent']
+               'local_legacy', 'local_handover', 'local_issue_start', 'agent_setup', 'session_parent',
+               'headless_pair', 'headless_update']
 
 
 def check_steps(release: Release) -> list[tuple[str, list[str], Path]]:
@@ -42,35 +44,76 @@ def head(runner: Runner, root: Path) -> str:
     return runner.out('git', 'rev-parse', 'HEAD', cwd=root)
 
 
-def require_clean_main(runner: Runner, root: Path) -> None:
+def release_branch(version: str) -> str:
+    """The branch a release is cut to (docs/RELEASING.md, Cut a version)."""
+    return f'release/{version}'
+
+
+def require_release_checkout(runner: Runner, root: Path, version: str) -> str:
+    """A clean checkout on release/<version> (or, as before release branches, on main). Returns the branch."""
     branch = runner.out('git', 'branch', '--show-current', cwd=root)
-    require(branch == 'main', f'releases are built from main; this checkout is on {branch or "a detached HEAD"}')
+    allowed = (release_branch(version), 'main')
+    require(branch in allowed, f'releases are built from {allowed[0]} (cut it with the cut step) or main; '
+                               f'this checkout is on {branch or "a detached HEAD"}')
     require(not runner.out('git', 'status', '--porcelain', cwd=root), 'the working tree has uncommitted changes; commit or remove them first')
+    return branch
+
+
+def cut(root: Path, runner: Runner, version: str, worktree: Path | None = None) -> dict:
+    """Create release/<version> from the current origin/main in a worktree of its own, so the main
+    checkout stays free and later merges to main cannot reach the release."""
+    require(re.fullmatch(r'\d+\.\d+\.\d+', version), f'"{version}" is not a version like 1.2.3')
+    branch = release_branch(version)
+    runner.run(['git', 'fetch', '--quiet', 'origin', 'main'], cwd=root)
+    exists = runner.run(['git', 'rev-parse', '-q', '--verify', f'refs/heads/{branch}'], cwd=root, check=False)
+    require(exists.code, f'{branch} already exists here; release from its worktree or delete the branch first')
+    remote = runner.run(['git', 'ls-remote', '--exit-code', '--heads', 'origin', branch], cwd=root, check=False)
+    require(remote.code, f'{branch} already exists on origin')
+    base = runner.out('git', 'rev-parse', 'origin/main', cwd=root)
+    path = worktree or root / '.raccoon' / 'worktrees' / f'release-{version}'
+    require(not path.exists(), f'{path} already exists')
+    runner.run(['git', 'worktree', 'add', '--quiet', '--no-track', '-b', branch, path, base], cwd=root)
+    return {'version': version, 'branch': branch, 'baseMainCommit': base, 'worktree': str(path), 'cutAt': now()}
 
 
 def prepare(release: Release, runner: Runner) -> dict:
-    """Pin the release: main, clean, containing all of origin/main, with a changelog section."""
+    """Pin the release: a clean release/<version> branch cut from main (or main itself, containing
+    all of origin/main), with a changelog section."""
     root = release.root
-    require_clean_main(runner, root)
+    branch = require_release_checkout(runner, root, release.version)
     runner.run(['git', 'fetch', '--quiet', 'origin', 'main'], cwd=root)
-    base = runner.out('git', 'rev-parse', 'origin/main', cwd=root)
-    contains = runner.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], cwd=root, check=False)
-    require(contains.code == 0, f'HEAD does not contain origin/main ({base[:8]}); pull main and validate again')
+    if branch == 'main':
+        base = runner.out('git', 'rev-parse', 'origin/main', cwd=root)
+        contains = runner.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], cwd=root, check=False)
+        require(contains.code == 0, f'HEAD does not contain origin/main ({base[:8]}); pull main and validate again')
+    else:
+        # Main may move on after the cut; the release is what was cut plus the branch's own commits.
+        found = runner.run(['git', 'merge-base', 'HEAD', 'origin/main'], cwd=root, check=False)
+        require(found.code == 0 and found.output, f'{branch} shares no history with origin/main; cut it from main')
+        base = found.output
     changelog = (root / 'CHANGELOG.md').read_text()
     require(f'\n## {release.version}\n' in changelog, f'CHANGELOG.md has no "## {release.version}" section')
-    context = {'version': release.version, 'baseMainCommit': base, 'sourceCommit': head(runner, root), 'preparedAt': now()}
+    context = {'version': release.version, 'branch': branch, 'baseMainCommit': base, 'sourceCommit': head(runner, root),
+               'preparedAt': now()}
     write_json(release.record('release-context.json'), context)
+    return context
+
+
+def pinned_context(release: Release, runner: Runner) -> dict:
+    """prepare's record; refuses if the checkout has moved, changed or switched branch since."""
+    context = read_record(release.record('release-context.json'), 'prepare')
+    require(context['version'] == release.version, f'release-context.json is for {context["version"]}, not {release.version}')
+    branch = require_release_checkout(runner, release.root, release.version)
+    pinned = context.get('branch', 'main')
+    require(branch == pinned, f'prepare pinned {pinned}, but this checkout is on {branch}')
+    current = head(runner, release.root)
+    require(current == context['sourceCommit'], f'HEAD moved from {context["sourceCommit"][:8]} to {current[:8]}; run prepare and the checks again')
     return context
 
 
 def pinned_source(release: Release, runner: Runner) -> str:
     """The commit prepare pinned; refuses if the checkout has moved or changed since."""
-    context = read_record(release.record('release-context.json'), 'prepare')
-    require(context['version'] == release.version, f'release-context.json is for {context["version"]}, not {release.version}')
-    require_clean_main(runner, release.root)
-    current = head(runner, release.root)
-    require(current == context['sourceCommit'], f'HEAD moved from {context["sourceCommit"][:8]} to {current[:8]}; run prepare and the checks again')
-    return current
+    return pinned_context(release, runner)['sourceCommit']
 
 
 def check(release: Release, runner: Runner, env=os.environ) -> dict:

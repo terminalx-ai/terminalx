@@ -93,6 +93,9 @@ const { NewSessionView } = await import("@/components/session/NewSessionView");
 const { clearNewSessionPreset, selectSession, upsertSession } = await import("@/lib/sessions");
 const { refreshModels } = await import("@/lib/models");
 const { IssuesView } = await import("./IssuesView");
+const { forgetAgentAccounts } = await import("@/lib/useSessionAgent");
+/** The Mac's account index (#980) as `agent_accounts_list` answers it; undefined: no index, as before accounts. */
+const accountIndex: { view: unknown } = { view: undefined };
 const { noteSessionStarted } = await import("@/lib/notify");
 
 const issues = [
@@ -193,6 +196,7 @@ function mockBackend() {
         tabs: [{ id: "tab-1", ...(req.tab as object) }],
       };
     }
+    if (command === "agent_accounts_list") return accountIndex.view;
     return undefined;
   });
 }
@@ -412,13 +416,21 @@ async function pickModel(name: string) {
   await closeMenus();
 }
 
+/** Opens the row's submenu (Agent, Model, Effort) and returns it. */
+async function rowMenu(row: RegExp) {
+  const top = await openAgentMenu();
+  fireEvent.keyDown(within(top).getByRole("menuitem", { name: row }), { key: "ArrowRight" });
+  await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true }).length).toBe(2));
+  return screen.getAllByRole("menu", { hidden: true }).at(-1)!;
+}
+
 async function pickEffort(name: string) {
-  fireEvent.click(within(await openAgentMenu()).getByRole("menuitemradio", { name }));
+  fireEvent.click(within(await rowMenu(/^Effort/)).getByRole("menuitemradio", { name, hidden: true }));
   await closeMenus();
 }
 
 async function pickAgent(name: string) {
-  fireEvent.click(within(await openAgentMenu()).getByRole("menuitem", { name: new RegExp(`^${name}`) }));
+  fireEvent.click(within(await rowMenu(/^Agent/)).getByRole("menuitem", { name: new RegExp(`^${name}`), hidden: true }));
   await closeMenus();
 }
 
@@ -815,7 +827,9 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     view.unmount();
     render(<NewSessionView />);
     const agent = screen.getByTestId("agent-menu");
-    await waitFor(() => expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium, Ask every time"));
+    // The new-session box says the model and the permission mode on two chips.
+    await waitFor(() => expect(agent.getAttribute("aria-label")).toBe("GPT-6 Astra Medium"));
+    expect(screen.getByTestId("agent-mode").getAttribute("aria-label")).toBe("Permissions: Ask every time");
     expect(agent.getAttribute("title")).toMatch(/^Codex · /);
   });
 
@@ -843,7 +857,7 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     await pickEffort("Extra high");
     await pickModel("GPT-5.6 Sol");
     expect(shownEffort()).toBe("High");
-    expect(within(await openAgentMenu()).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Medium", "High"]);
+    expect(within(await rowMenu(/^Effort/)).getAllByRole("menuitemradio", { hidden: true }).map((item) => item.textContent)).toEqual(["Medium", "High"]);
     await closeMenus();
     expect((await startIssue()).tab).toMatchObject({ model: "gpt-5.6-sol", effort: "high" });
   });
@@ -882,7 +896,8 @@ describe.each(["github", "linear"] as const)("%s issue agent choices", (provider
     await waitFor(() => expect(document.activeElement).toBe(button));
     expect(shownModel()).toBe("GPT-6 Astra");
     fireEvent.keyDown(button, { key: " " });
-    const extraHigh = await screen.findByRole("menuitemradio", { name: "Extra high" });
+    fireEvent.keyDown(within(await screen.findByRole("menu")).getByRole("menuitem", { name: /^Effort/ }), { key: "ArrowRight" });
+    const extraHigh = await screen.findByRole("menuitemradio", { name: "Extra high", hidden: true });
     extraHigh.focus();
     fireEvent.keyDown(extraHigh, { key: "Enter" });
     await waitFor(() => expect(document.activeElement).toBe(button));
@@ -1405,5 +1420,41 @@ describe("Orchestrate on an issue (PRO-337)", () => {
     expect(orchestrated.prompt).toBe(`${issuePrompt(issue)}\n\n${BRIEF}\n\n${PLAN_A_RUN_PROMPT}`);
     expect(invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
     expect([plain.runShown, orchestrated.runShown]).toEqual(["false", "true"]);
+  });
+});
+
+// #980: an issue's session starts on the project's default account, or the one picked.
+describe("agent accounts on an issue start", () => {
+  const WORK = "0123456789abcdef";
+  const account = (id: string, label: string) => ({ id, agent: "claude", kind: "subscription", label, email: null, plan: null, organization: null, local: id === "local", isDefault: id === "local", missing: false, addedAt: null });
+  afterEach(() => { accountIndex.view = undefined; forgetAgentAccounts(); });
+  const startIssue = async () => {
+    render(<IssuesView />);
+    fireEvent.click(await screen.findByText("Fix login timeout"));
+    await screen.findByText("First issue body.");
+    return async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+      await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "create_session")).toBe(true));
+      return (invoke.mock.calls.find(([command]) => command === "create_session") as [string, { req: Record<string, unknown> }])[1].req;
+    };
+  };
+
+  it("names no account with only This Mac's login", async () => {
+    forgetAgentAccounts();
+    accountIndex.view = { agent: "claude", accounts: [account("local", "This Mac's login")], defaultAccount: "local", projectDefaults: {} };
+    const start = await startIssue();
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === "agent_accounts_list")).toBe(true));
+    expect(screen.queryByTestId("agent-account")).toBeNull();
+    expect(await start()).not.toHaveProperty("account");
+  });
+
+  it("preselects the project's default account and starts the issue's session on it", async () => {
+    forgetAgentAccounts();
+    accountIndex.view = { agent: "claude", accounts: [account("local", "This Mac's login"), account(WORK, "work@example.com · Max")], defaultAccount: "local", projectDefaults: { "/repo": WORK } };
+    const start = await startIssue();
+    await waitFor(() => expect(screen.getByTestId("agent-account").textContent).toBe("work@example.com · Max"));
+    const req = await start();
+    expect(req).toMatchObject({ title: "#11 Fix login timeout", account: WORK });
+    expect(req.tab).not.toHaveProperty("account");
   });
 });

@@ -28,6 +28,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use super::machine::WorktreeRegistration;
 use super::protocol::{valid_client_request_id, RpcError};
 
 /// Raw bytes per read or write part. Base64 in the JSON answer, sealed and
@@ -66,13 +67,10 @@ struct Upload {
 
 pub struct WorkspaceFiles {
     root: PathBuf,
-    /// Further folders a path may name absolutely: a machine project's own
-    /// worktrees that live outside its folder, when Settings puts worktrees
-    /// in an absolute directory (`machine/1`, docs/MACHINES.md). Canonical,
-    /// one worktree each, never the directory that holds them, so another
-    /// project's worktree beside it stays out of reach. Empty for a cloud
-    /// workspace, whose worktrees are inside it.
-    worktrees: RwLock<Vec<PathBuf>>,
+    machine_project: bool,
+    /// A machine project's linked checkouts. An external path is authorized
+    /// only while its Git registration still points to that checkout.
+    worktrees: RwLock<Vec<WorktreeRegistration>>,
     /// Staged uploads live here, outside the workspace, so a half-sent file
     /// is never seen by the tree, Git or an agent.
     staging: PathBuf,
@@ -91,7 +89,13 @@ impl WorkspaceFiles {
     /// `root` is canonical.
     pub fn new(root: PathBuf) -> Self {
         let staging = std::env::temp_dir().join(format!("terminalx-uploads-{}", uuid::Uuid::new_v4().simple()));
-        Self { root, worktrees: RwLock::new(Vec::new()), staging, uploads: Mutex::new(HashMap::new()), searches: Mutex::new(HashMap::new()) }
+        Self { root, machine_project: false, worktrees: RwLock::new(Vec::new()), staging, uploads: Mutex::new(HashMap::new()), searches: Mutex::new(HashMap::new()) }
+    }
+
+    pub(super) fn for_machine_project(root: PathBuf) -> Self {
+        let mut files = Self::new(root);
+        files.machine_project = true;
+        files
     }
 
     /// The folder every relative path is resolved in.
@@ -99,10 +103,15 @@ impl WorkspaceFiles {
         &self.root
     }
 
-    /// The worktrees outside the folder that absolute paths may name; each
-    /// canonical. Replaces the previous set.
-    pub fn set_worktrees(&self, worktrees: Vec<PathBuf>) {
+    pub(super) fn set_worktrees(&self, worktrees: Vec<WorktreeRegistration>) {
         *self.worktrees.write().unwrap() = worktrees;
+    }
+
+    pub fn containing_worktree(&self, path: &Path) -> Option<PathBuf> {
+        self.worktrees.read().unwrap().iter()
+            .filter(|worktree| path.starts_with(&worktree.path) && worktree.is_current())
+            .max_by_key(|worktree| worktree.path.as_os_str().len())
+            .map(|worktree| worktree.path.clone())
     }
 
     /// The folder `path` is inside: the root, or one of the outside
@@ -111,7 +120,7 @@ impl WorkspaceFiles {
         if path.starts_with(&self.root) {
             return Some(self.root.clone());
         }
-        self.worktrees.read().unwrap().iter().find(|worktree| path.starts_with(worktree)).cloned()
+        self.containing_worktree(path)
     }
 
     /// Whether `path` (canonical) is inside the root or an outside worktree.
@@ -120,7 +129,26 @@ impl WorkspaceFiles {
     }
 
     fn is_base(&self, path: &Path) -> bool {
-        path == self.root || self.worktrees.read().unwrap().iter().any(|worktree| worktree == path)
+        path == self.root || self.containing_worktree(path).as_deref() == Some(path)
+    }
+
+    /// Recursive removal and directory renames can take a checkout with
+    /// them. Discover current roots so newly registered checkouts are also
+    /// protected, even when the lookup cache predates their registration.
+    fn protect_directory(&self, path: &Path) -> Result<(), RpcError> {
+        if !self.machine_project {
+            return Ok(());
+        }
+        let project_roots = super::machine::registered()?.into_iter().map(|project| {
+            crate::paths::canonicalize(&project.path).unwrap_or_else(|_| PathBuf::from(project.path))
+        });
+        let contains_checkout = std::iter::once(self.root.clone())
+            .chain(project_roots.filter(|root| root != &self.root))
+            .any(|root| root.starts_with(path) || super::machine::registered_worktree_paths(&root).any(|worktree| worktree.starts_with(path)));
+        if contains_checkout {
+            return Err(RpcError::new("path_forbidden", "the directory contains a protected project or worktree"));
+        }
+        Ok(())
     }
 
     // ---- paths -----------------------------------------------------------
@@ -137,7 +165,9 @@ impl WorkspaceFiles {
             match component {
                 Component::Normal(part) => clean.push(part),
                 Component::CurDir => {}
-                Component::RootDir if index == 0 => {
+                // On Windows an absolute path is a drive (`C:`) and then its root.
+                Component::Prefix(_) if index == 0 && Path::new(relative).is_absolute() => clean.push(component),
+                Component::RootDir if index == 0 || (index == 1 && matches!(clean.components().next(), Some(Component::Prefix(_)))) => {
                     absolute = true;
                     clean.push(Component::RootDir);
                 }
@@ -157,7 +187,7 @@ impl WorkspaceFiles {
     /// An existing path, resolved through symlinks, still inside the workspace.
     pub fn existing_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
         let path = self.lexical(relative)?;
-        let resolved = std::fs::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
+        let resolved = crate::paths::canonicalize(&path).map_err(|_| RpcError::not_found("no such path"))?;
         if self.base(&resolved).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
@@ -168,15 +198,19 @@ impl WorkspaceFiles {
     /// resolve inside the workspace.
     fn entry_path(&self, relative: &str) -> Result<PathBuf, RpcError> {
         let path = self.lexical(relative)?;
-        if self.is_base(&path) {
+        if path == self.root {
             return Err(RpcError::new("path_forbidden", "the workspace root cannot be replaced"));
         }
         let parent = path.parent().ok_or_else(|| RpcError::new("path_forbidden", "invalid path"))?;
-        let parent = std::fs::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
+        let parent = crate::paths::canonicalize(parent).map_err(|_| RpcError::not_found("the parent directory does not exist"))?;
         if self.base(&parent).is_none() {
             return Err(RpcError::new("path_forbidden", "the path resolves outside the workspace"));
         }
-        Ok(parent.join(path.file_name().expect("a normal component")))
+        let entry = parent.join(path.file_name().expect("a normal component"));
+        if self.is_base(&entry) {
+            return Err(RpcError::new("path_forbidden", "the workspace root cannot be replaced"));
+        }
+        Ok(entry)
     }
 
     /// A path to write through: a symlink there must point inside the workspace.
@@ -191,7 +225,13 @@ impl WorkspaceFiles {
     /// How a client names `path`: relative to the root, or, in an outside
     /// worktree, absolute.
     pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root).unwrap_or(path).to_string_lossy().into_owned()
+        match path.strip_prefix(&self.root) {
+            // Workspace paths go to a client with `/` whatever this computer
+            // spells them with: it may be another system.
+            Ok(inside) => inside.components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            // An outside worktree by its absolute path, as this computer names it.
+            Err(_) => path.to_string_lossy().into_owned(),
+        }
     }
 
     /// Whether a changed path may be named to a client: none of its existing
@@ -205,7 +245,7 @@ impl WorkspaceFiles {
             let Component::Normal(part) = component else { return false };
             at.push(part);
             match std::fs::symlink_metadata(&at) {
-                Ok(meta) if meta.file_type().is_symlink() => match std::fs::canonicalize(&at) {
+                Ok(meta) if meta.file_type().is_symlink() => match crate::paths::canonicalize(&at) {
                     Ok(target) if self.base(&target).is_some() => {}
                     // Dangling or outside: the link itself may be named, nothing under it.
                     _ => return at == path,
@@ -243,7 +283,7 @@ impl WorkspaceFiles {
             let path = if base.is_empty() { name.clone() } else { format!("{base}/{name}") };
             let Ok(own) = entry.metadata() else { continue };
             let mut described = if own.file_type().is_symlink() {
-                let mut link = match std::fs::canonicalize(entry.path()).ok().filter(|target| self.base(target).is_some()) {
+                let mut link = match crate::paths::canonicalize(entry.path()).ok().filter(|target| self.base(target).is_some()) {
                     Some(target) => match std::fs::metadata(&target) {
                         Ok(meta) => stat_json(&name, &meta),
                         Err(_) => continue,
@@ -485,8 +525,9 @@ impl WorkspaceFiles {
     pub fn rename(&self, params: &Value) -> Result<Value, RpcError> {
         let from = self.entry_path(required_str(params, "from")?)?;
         let to = self.entry_path(required_str(params, "to")?)?;
-        if std::fs::symlink_metadata(&from).is_err() {
-            return Err(RpcError::not_found("no such path"));
+        let meta = std::fs::symlink_metadata(&from).map_err(|_| RpcError::not_found("no such path"))?;
+        if meta.is_dir() {
+            self.protect_directory(&from)?;
         }
         if std::fs::symlink_metadata(&to).is_ok() {
             return Err(RpcError::new("conflict", "the destination exists"));
@@ -501,6 +542,7 @@ impl WorkspaceFiles {
         let path = self.entry_path(relative)?;
         let meta = std::fs::symlink_metadata(&path).map_err(|_| RpcError::not_found("no such path"))?;
         if meta.is_dir() {
+            self.protect_directory(&path)?;
             if params.get("recursive").and_then(Value::as_bool) == Some(true) {
                 std::fs::remove_dir_all(&path)
             } else {

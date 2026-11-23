@@ -49,3 +49,18 @@ mobile/scripts/__pycache__/
 # rustc links it in a scratch dir beside it, which stays behind when the build is
 # killed mid-link and then reads as uncommitted work
 /src-tauri/binaries/rustc*/
+
+# AI assistant files (root only: templates/agent-starter ships its own)
+/CLAUDE.md
+/CLAUDE.local.md
+/AGENTS.md
+/GEMINI.md
+/.claude/
+/.cursor/
+/.cursorrules
+/.windsurfrules
+/.aider*
+/.codex/
+/.superset/
+/.mcp.json
+/.github/copilot-instructions.md

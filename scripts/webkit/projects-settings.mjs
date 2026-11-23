@@ -46,13 +46,14 @@ try {
       await page.getByRole("button", { name: "Settings", exact: true }).click();
       const settings = page.getByRole("main", { name: "Settings", exact: true });
       const nav = settings.getByRole("navigation", { name: "Settings sections" });
+      await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
       const group = nav.getByRole("group", { name: "Projects", exact: true });
       await group.waitFor();
       const groupButtons = await group.getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.hasAttribute("title") ? "project" : button.textContent));
       // A search for the former Preview URLs page opens the project's General page at that section.
       await page.getByRole("combobox", { name: "Search settings" }).fill("preview urls");
       await page.getByRole("option", { name: /^Preview URLs/ }).click();
-      const projectNav = settings.getByRole("navigation", { name: "Project settings", exact: true });
+      const projectNav = nav.getByRole("group", { name: /settings$/ });
       await projectNav.waitFor();
       const generalCurrent = await projectNav.getByRole("button", { name: "General", exact: true }).getAttribute("aria-current") === "page";
       const navEntries = await projectNav.getByRole("button").allTextContents();
@@ -80,7 +81,7 @@ try {
           return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1);
         }).map((node) => node.textContent);
         const why = column.querySelector('[aria-label="Why each pattern matched nothing"]');
-        const reasons = why ? [...why.querySelectorAll("li")].map((item) => item.textContent) : [];
+        const reasons = why?.textContent ?? "";
         // Legible in both themes: the status line's colour differs from the panel behind it.
         const status = [...column.querySelectorAll('[role="status"]')].find((node) => node.textContent === "No ignored files match these patterns");
         // Paint every background from the page down to the status line, as the browser composites them, then its text.
@@ -111,7 +112,7 @@ try {
           rootButtons: buttons("repositories.rootPath"),
           folderButtons: buttons("repositories.workspacesPath"),
           folderLabel: row("repositories.workspacesPath")?.querySelector("h4")?.textContent,
-          previewUrlsShown: visible(row("repositories.previewUrls")) && /App/.test(row("repositories.previewUrls").textContent) && /Storybook/.test(row("repositories.previewUrls").textContent),
+          previewUrlsShown: visible(row("repositories.previewUrls")) && JSON.stringify([...row("repositories.previewUrls").querySelectorAll("input")].map((input) => input.value)) === JSON.stringify(["App", "http://localhost:$PORT", "Storybook", "http://localhost:$PORT_1"]),
           filesShown: visible(row("repositories.filesToCopy")?.querySelector("textarea")),
           refreshHidden: ![...column.querySelectorAll("button")].some((button) => button.textContent === "Refresh preview"),
           reasons,
@@ -127,16 +128,16 @@ try {
       failed += report(`${width}px ${mode}`, {
         "the group is Projects, led by Project templates": JSON.stringify(groupButtons) === JSON.stringify(["Project templates", "project"]),
         "Preview URLs opens on General": generalCurrent,
-        "Files to copy and Preview URLs have no nav entries": JSON.stringify(navEntries) === JSON.stringify(["General", "Scripts", "Actions", "Environment"]),
+        "Files to copy and Preview URLs have no nav entries": JSON.stringify(navEntries) === JSON.stringify(["General", "Scripts", "Actions", "Environment", "Settings files"]),
         "paths, Preview URLs, then Files to copy, none overlapping": measured.rowsInOrder && measured.overlaps === 0,
-        "Root path has Reveal and Copy": JSON.stringify(measured.rootButtons) === JSON.stringify(["Reveal", "Copy"]),
-        "Worktree folder is read-only, with Reveal and Copy": measured.folderLabel === "Worktree folder" && JSON.stringify(measured.folderButtons) === JSON.stringify(["Reveal", "Copy"]),
+        // Design 11.02: each path is a folder and its path, with a menu (Show in Finder, Copy path), not Reveal / Copy buttons.
+        "Root path is a folder path with a menu": JSON.stringify(measured.rootButtons) === JSON.stringify(["/repos/p0"]),
+        "Worktree folder is read-only, a folder path with a menu": measured.folderLabel === "Worktree folder" && JSON.stringify(measured.folderButtons) === JSON.stringify(["/repos/p0/.raccoon/worktrees"]),
         "Preview URLs section lists the project's URLs": measured.previewUrlsShown,
         "Files to copy section shows its editor": measured.filesShown,
-        "empty match says why for each pattern": JSON.stringify(measured.reasons) === JSON.stringify([
-          ".env.production.env.production doesn't exist yet.",
-          "config/secrets/*.jsonconfig/secrets/example.json is tracked by git, so every worktree already has it.",
-        ]),
+        // Design 11.12: the reasons as prose in one box.
+        "empty match says why for each pattern": measured.reasons.includes(".env.production: .env.production doesn't exist yet.")
+          && measured.reasons.includes("config/secrets/*.json: config/secrets/example.json is tracked by git, so every worktree already has it."),
         "Check again checks again, with no second refresh button": measured.refreshHidden,
         "the empty-match line is legible": measured.contrast >= 4.5,
         "nothing leaves the column or scrolls sideways": measured.outside.length === 0 && !measured.overflow,

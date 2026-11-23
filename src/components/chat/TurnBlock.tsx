@@ -1,20 +1,25 @@
+import type { TurnCheckpointApi } from "@/lib/turnCheckpoints";
 import { PrivacyImage } from "@/components/ui/privacy-image";
-import { TurnDetailsPopover } from "./UsagePopovers";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { TurnDetailsPopover, turnStats, type TurnFallback } from "./UsagePopovers";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
-import { Brain, Check, ChevronRight, CircleAlert, Clock, Copy, Image as ImageIcon, Keyboard, Pencil, RefreshCw, Send, Shrink, Users, X } from "@/icons";
+import { ArrowLeftRight, Bookmark, Brain, Check, ChevronRight, CircleAlert, CircleX, Clock, Copy, Ellipsis, FileText, FolderGit2, GitFork, Image as ImageIcon, Keyboard, Loader2, Navigation, Pencil, RefreshCw, RotateCcw, Send, Shrink, Square, Unmute, Users, X } from "@/icons";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
+import { canReadAloud, readAloud, stopReading, useReadingAloud } from "@/lib/readAloud";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import { formatDuration } from "@/lib/time";
 import { compactionStatus, type Delivery, type Turn, type WorkItem } from "@/lib/transcript";
 import type { StreamBlock } from "@/lib/agentEvents";
-import { HoverTime, MessageTime } from "./MessageTime";
+import { MessageTime } from "./MessageTime";
+import { dividerLabel } from "@/lib/turnDivider";
 import { messageTime } from "@terminalx/portable/transcript";
 import { Markdown } from "./Markdown";
 import { LinkedText } from "./LinkedText";
-import { STEP_CHIP, ToolCallRow, ToolGroupRow } from "./ToolCallRow";
+import { iconFor, ToolCallRow, ToolGroupRow } from "./ToolCallRow";
+import { ShellBlock } from "./ShellBlock";
 import { usePrefs } from "@/lib/prefs";
 import { turnFileChanges } from "@/lib/turnChanges";
 import { TurnChanges } from "./TurnChanges";
@@ -30,11 +35,12 @@ import { openImageViewer, type ViewerImage } from "@/lib/imageViewer";
  * One exchange: the prompt, the work under it, the answer, and a footer.
  *
  * Once the agent has answered, the work folds behind one header line that
- * says how it went ("Worked for 14s · 2 tool calls"). The footer is a single
- * quiet row: when the answer came, how long it took when no header said so,
- * and a copy button that shows on hover. Times stay in the transcript but
- * out of the reading: the answer's in the footer, the reader's own under
- * their bubble on hover.
+ * says what it did ("> 6 tool calls · 2 files edited", then the kinds of
+ * tools). Opened, it lists the work in the order the agent did it, its own
+ * words between the steps included. The footer is a single quiet row: how
+ * long the turn took and when it ended, its cache hit and output speed, a
+ * copy of the answer and a second opinion. A failed turn ends in one error
+ * card, with Retry. The reader's own time sits inside their bubble.
  */
 export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
   // What is opened or folded in it outlives the turn being drawn (#727).
@@ -48,7 +54,10 @@ export const TurnBlock = memo(function TurnBlock(props: TurnProps) {
 interface TurnProps {
   turn: Turn;
   sessionId: string;
+  tabId?: string;
   checkpointTabId?: string;
+  /** Where the turn card reads its checkpoint: the runtime's for a remote tab (#1326); this computer's when absent. */
+  checkpoints?: TurnCheckpointApi;
   cwd?: string;
   stream: StreamBlock[];
   working: boolean;
@@ -58,15 +67,41 @@ interface TurnProps {
   /** Send a message the agent dropped unanswered again, as a new message (#722); absent where that cannot be done. */
   onSendAgain?: (seq: number) => void;
   onSecondOpinion?: (turn: Turn) => void;
-  /** The time line above the turn when it opens a new sitting ("Yesterday, 5:21 PM"); see \`turnDivider\`. */
-  divider?: string | null;
+  /** Who a second opinion asks: "Codex" in "Second opinion from Codex". */
+  secondOpinionAgent?: string;
+  /** Fork the conversation as it stood at this turn's end (PRO-379); absent where that cannot be done. */
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  /** Keep this turn's prompt as a snippet; absent where there is nowhere to keep it. */
+  onSaveSnippet?: (text: string) => void;
+  /** What the turn details say for settings a turn's own record lacks. */
+  turnFallback?: TurnFallback;
   onReset?: (endSeq: number) => void;
+  /** The agent's name, for what a message taken mid-turn says ("Codex reads it at its next tool call"). */
+  agent?: { id: string; name: string };
+  /** When the agent started working on the running turn (ms): the working line counts up from it. */
+  workingSince?: number;
+  /** Send a failed turn's prompt again, as a new message; absent where that cannot be done. */
+  onRetry?: (seq: number) => void;
+  /** Take a failed turn's prompt to a new chat. */
+  onRetryInNewChat?: (turn: Turn) => void;
+  /**
+   * Why an action this session cannot take here is off (#1289): shown as a
+   * disabled control with that reason where the action would be, instead of
+   * leaving it out. Each is ignored while its handler is given.
+   */
+  forkUnavailable?: string;
+  resetUnavailable?: string;
+  secondOpinionUnavailable?: string;
+  retryInNewChatUnavailable?: string;
 }
 
 function TurnBody({
+  agent,
   turn,
   sessionId,
+  tabId,
   checkpointTabId,
+  checkpoints,
   cwd,
   stream,
   working,
@@ -74,28 +109,40 @@ function TurnBody({
   onSendQueuedNow,
   onSendAgain,
   onSecondOpinion,
-  divider,
+  secondOpinionAgent,
+  onFork,
+  onSaveSnippet,
+  turnFallback,
   onReset,
+  workingSince,
+  onRetry,
+  onRetryInNewChat,
+  forkUnavailable,
+  resetUnavailable,
+  secondOpinionUnavailable,
+  retryInNewChatUnavailable,
 }: TurnProps) {
   const prefs = usePrefs();
   const [expanded, setExpanded] = useDisclosure("fold");
-  const failureSection = useSearchSection("failure");
   const hasAnswer = turn.work.some((w) => w.kind === "text");
-  const toolItems = turn.work.filter((w) => w.kind === "tool" || w.kind === "tool_group" || w.kind === "reasoning" || w.kind === "subagent");
-  const foldable = prefs.foldToolCalls && !turn.live && toolItems.length > 0 && (hasAnswer || turn.completed);
-  const failed = turn.completed && turn.completed.status !== "ok";
+  const toolItems = turn.work.filter((w) => !outsideFold(w));
+  const foldable = prefs.foldToolCalls && !turn.live && toolItems.some(inFoldSummary) && (hasAnswer || turn.completed);
   const streamText = stream.filter((s) => s.kind === "text" && s.text);
   const streamThinking = stream.filter((s) => s.kind === "thinking" && s.text && !s.done);
   const linkContext = useMemo(() => cwd ? { sessionId, cwd } : undefined, [cwd, sessionId]);
   const changes = useMemo(() => (prefs.turnChanges && turn.completed ? turnFileChanges(turn) : []), [prefs.turnChanges, turn]);
   const outcome = turnOutcome(turn);
-  // The header leads with how the turn went when that says something: how long it took, or that it stopped or failed.
-  const lead = outcome && (outcome.tone !== "ok" || outcome.duration) ? outcome : null;
+  // A failed turn says why once (one card), not as an error row and again as the turn's failure.
+  const failure = useMemo(() => failureOf(turn), [turn]);
+  const work = failure ? turn.work.filter((w) => !failure.merged.has(w.key)) : turn.work;
+  // Opened, the fold holds everything up to the last step, in the order it happened: the agent's words before and
+  // between its steps stay where it said them. What it said after its last step is the answer, under the fold.
+  const lastStep = work.reduce((last, w, i) => (outsideFold(w) ? last : i), -1);
+  const row = (w: WorkItem) => <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} agent={agent} />;
 
   return (
     // A block formatting context: a last row's margin stays inside, so the turn's measured height is all the room it takes (#727).
     <div className="transcript-turn group/turn flow-root pb-8" data-turn={turn.key}>
-      {divider && <TurnDivider label={divider} />}
       {turn.prompt && <ReaderMessage message={turn.prompt} cwd={cwd} linkContext={linkContext} className="mb-4" onSendAgain={onSendAgain} />}
 
       {foldable ? (
@@ -104,26 +151,27 @@ function TurnBody({
             type="button"
             onClick={() => setExpanded((e) => !e)}
             aria-expanded={expanded}
-            className="flex max-w-full items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-[13px] hover:bg-veil-raised"
+            className="flex max-w-full items-center gap-1.5 rounded-md -mx-1.5 px-1.5 py-1 text-[13px] text-muted-foreground hover:bg-veil-raised"
+            data-testid="turn-fold"
           >
-            {lead && lead.tone !== "ok" && <OutcomeIcon tone={lead.tone} />}
-            <span className={cn("shrink-0", lead?.tone === "failed" ? "text-destructive" : "text-muted-foreground")}>{lead ? lead.label : summarize(turn)}</span>
-            {/* The space before the dot is for the text (a screen reader, a copy); the flex gap draws the room. */}
-            {lead && <span className="min-w-0 truncate text-faint">{` · ${summarize(turn)}`}</span>}
             <ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", expanded && "rotate-90")} />
+            <span className="min-w-0 truncate">{summarize(turn)}</span>
+            <ToolKinds items={toolItems} />
           </button>
-          {expanded && (
-            <div className="ml-1 mt-1 border-l border-hairline pl-3.5">
-              {turn.work.map((w) => (outsideFold(w) ? null : <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />))}
-            </div>
+          {expanded ? (
+            <>
+              <div className="ml-1 mt-1 border-l border-hairline pl-3.5" data-testid="turn-fold-body">
+                {work.slice(0, lastStep + 1).map(row)}
+              </div>
+              {work.slice(lastStep + 1).map(row)}
+            </>
+          ) : (
+            work.filter(outsideFold).map(row)
           )}
-          {turn.work.map((w) => (outsideFold(w) ? <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} /> : null))}
         </div>
       ) : (
         <div className="mb-3 space-y-0.5">
-          {turn.work.map((w) => (
-            <WorkRow key={w.key} item={w} cwd={cwd} linkContext={linkContext} onSendQueuedNow={onSendQueuedNow} onSendAgain={onSendAgain} />
-          ))}
+          {work.map(row)}
         </div>
       )}
 
@@ -134,9 +182,10 @@ function TurnBody({
         </div>
       ))}
       {streamingTool && (
-        <div className="mb-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-[13px] text-muted-foreground">
-          <span className="text-shimmer">{streamingTool.toolName ?? "Calling a tool"}</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-faint"><LinkedText text={previewFromPartialJson(streamingTool.partialJson)} context={linkContext} /></span>
+        <div className="mb-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-[13px]">
+          <Loader2 className="size-4 shrink-0 animate-spin text-warning" />
+          <span className="shrink-0 text-warning">{streamingTool.toolName ?? "Calling a tool"}</span>
+          <span className="min-w-0 truncate font-mono text-[12px] text-muted-foreground"><LinkedText text={previewFromPartialJson(streamingTool.partialJson)} context={linkContext} /></span>
         </div>
       )}
       {streamText.map((s) => (
@@ -144,28 +193,102 @@ function TurnBody({
       ))}
 
       {working && !streamText.length && !streamThinking.length && !streamingTool && (
-        <div className="mb-3 flex items-center gap-2 -mx-1.5 px-1.5 text-[13px]">
-          <span className="relative flex size-3.5 items-center justify-center">
-            <span className="absolute size-3.5 rounded-full bg-accent/30 animate-ping" />
-            <span className="size-2 rounded-full bg-accent" />
-          </span>
-          <span className="text-shimmer">Working</span>
+        <div role="status" className="mb-3 flex items-center gap-2 -mx-1.5 px-1.5 text-[13px] text-warning" data-testid="working-line">
+          <Loader2 className="size-4 shrink-0 animate-spin" />
+          <span>Working<Elapsed since={workingSince} /></span>
         </div>
       )}
 
-      {failed && turn.finalText && (
-        <div className="mb-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
-          <CircleAlert className="mt-0.5 size-4 shrink-0" />
-          <div className="min-w-0 select-text">
-            <div {...failureSection} className="whitespace-pre-wrap"><LinkedText text={turn.finalText} context={linkContext} citations /></div>
-            {turn.detail && <AgentSaid text={turn.detail} searchPart="failure-detail" />}
-          </div>
+      {failure && <FailureCard turn={turn} failure={failure} linkContext={linkContext} onRetry={onRetry} onRetryInNewChat={onRetryInNewChat} retryInNewChatUnavailable={retryInNewChatUnavailable} />}
+
+      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq, api: checkpoints } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
+
+      {(turn.completed || !turn.live) && <TurnFooter turn={turn} sessionId={sessionId} tabId={tabId} outcome={outcome} fallback={turnFallback} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} secondOpinionAgent={secondOpinionAgent} onReset={onReset} onFork={onFork} onSaveSnippet={onSaveSnippet}
+        unavailable={{ fork: forkUnavailable, reset: resetUnavailable, secondOpinion: turn.completed && !turn.live ? secondOpinionUnavailable : undefined }} />}
+    </div>
+  );
+}
+
+/** "· 18s" after Working, counting up each second from when the agent started. */
+function Elapsed({ since }: { since?: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (since == null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [since]);
+  if (since == null || !Number.isFinite(since)) return null;
+  return <span className="tabular-nums">{` · ${formatDuration(Math.max(0, now - since))}`}</span>;
+}
+
+/** The kinds of tools a folded turn used, as small icons after its summary, in the order first used. */
+function ToolKinds({ items }: { items: WorkItem[] }) {
+  const kinds: string[] = [];
+  for (const w of items) {
+    const kind = w.kind === "tool" ? w.call.toolType : w.kind === "tool_group" ? w.calls[0]?.toolType : w.kind === "subagent" ? "subagent_spawn" : null;
+    if (kind && !kinds.includes(kind)) kinds.push(kind);
+  }
+  if (!kinds.length) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-faint" aria-hidden data-testid="tool-kinds">
+      {kinds.slice(0, 6).map((kind) => {
+        const Icon = iconFor(kind);
+        return <Icon key={kind} className="size-3.5" />;
+      })}
+    </span>
+  );
+}
+
+/** A failed turn's one error: its words, the error rows that said the same and fold into it, and when it ended. */
+type Failure = { text: string; detail?: string; merged: Set<string>; seq?: number };
+
+function failureOf(turn: Turn): Failure | null {
+  if (!turn.completed || turn.completed.status === "ok") return null;
+  const errors = turn.work.filter((w): w is Extract<WorkItem, { kind: "error" }> => w.kind === "error");
+  const text = turn.finalText ?? errors.at(-1)?.text;
+  if (!text?.trim()) return null;
+  const same = errors.filter((e) => e.text.trim() === text.trim());
+  return { text, detail: turn.detail ?? same.at(-1)?.detail, merged: new Set(same.map((e) => e.key)), seq: same.at(-1)?.seq ?? turn.completed.seq };
+}
+
+/**
+ * A failed turn's error, once: what went wrong and when, then Retry (the same prompt, sent again) and Retry in a new
+ * chat. Its time in view, in the tab in front, is told to the tab's recovery incidents (#815), as the error row was.
+ */
+function FailureCard({ turn, failure, linkContext, onRetry, onRetryInNewChat, retryInNewChatUnavailable }: { turn: Turn; failure: Failure; linkContext?: { sessionId: string; cwd: string }; onRetry?: (seq: number) => void; onRetryInNewChat?: (turn: Turn) => void; retryInNewChatUnavailable?: string }) {
+  const section = useSearchSection("failure");
+  const reporter = useRecoveryReporter();
+  const ref = useRef<HTMLDivElement>(null);
+  const inView = useInView(ref, !!reporter?.active);
+  useExposure({ reporter, surface: "error_row", present: true, reason: classifyRecovery(failure.text), eventSeq: failure.seq, inView });
+  const time = messageTime(turn.completed?.ts);
+  const seq = turn.prompt?.seq;
+  const retry = onRetry && seq != null && !turn.prompt?.withdrawn ? () => onRetry(seq) : undefined;
+  const fresh = onRetryInNewChat && turn.prompt ? () => onRetryInNewChat(turn) : undefined;
+  // Not offered here: the control stays, off, with why (#1289).
+  const freshOff = !fresh && turn.prompt ? (retryInNewChatUnavailable ?? null) : null;
+  return (
+    <div ref={ref} role="alert" className="mb-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-[13px]" data-testid="turn-failure">
+      <div className="flex items-start gap-2">
+        <CircleX className="mt-0.5 size-4 shrink-0 text-destructive" />
+        <div className="min-w-0 flex-1 select-text text-foreground">
+          <div {...section} className="whitespace-pre-wrap font-medium"><LinkedText text={failure.text} context={linkContext} citations /></div>
+          {failure.detail && <AgentSaid text={failure.detail} searchPart="failure-detail" />}
+        </div>
+        {time && <time dateTime={time.iso} title={time.full} className="shrink-0 text-xs tabular-nums text-faint">{time.short}</time>}
+      </div>
+      {(retry || fresh || freshOff) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 pl-6">
+          {retry && <Button size="xs" variant="secondary" onClick={retry}><RotateCcw /> Retry</Button>}
+          {fresh && <Button size="xs" variant="outline" onClick={fresh}>Retry in a new chat</Button>}
+          {freshOff && (
+            // A disabled button takes no hover, so the reason is on a wrapper that does.
+            <span title={freshOff} data-testid="retry-in-new-chat-unavailable">
+              <Button size="xs" variant="outline" disabled aria-label={`Retry in a new chat: ${freshOff}`}>Retry in a new chat</Button>
+            </span>
+          )}
         </div>
       )}
-
-      {prefs.turnChanges && turn.completed && <TurnChanges key={`${sessionId}:${checkpointTabId ?? ""}:${turn.checkpointSeq ?? turn.seq}`} changes={changes} cwd={cwd} linkContext={linkContext} checkpoint={checkpointTabId ? { sessionId, tabId: checkpointTabId, seq: turn.checkpointSeq ?? turn.seq } : undefined} range={turn.prompt?.baseline && turn.completed.head ? { base: turn.prompt.baseline, head: turn.completed.head } : null} />}
-
-      {(turn.completed || !turn.live) && <TurnFooter turn={turn} outcome={foldable ? null : outcome} onSecondOpinion={turn.completed && !turn.live ? onSecondOpinion : undefined} onReset={onReset} />}
     </div>
   );
 }
@@ -184,9 +307,14 @@ function AgentSaid({ text, searchPart }: { text: string; searchPart: string }) {
   );
 }
 
-/** What a folded turn still shows: the answer, and the reader's own words (#551). */
+/** The steps a fold is for: a turn with none of these has nothing to fold. */
+function inFoldSummary(item: WorkItem): boolean {
+  return item.kind === "tool" || item.kind === "tool_group" || item.kind === "reasoning" || item.kind === "subagent";
+}
+
+/** What a folded turn still shows: the answer, and the reader's own words (#551) and `!` commands (#1294). */
 function outsideFold(item: WorkItem): boolean {
-  return item.kind === "text" || item.kind === "message" || item.kind === "queued" || item.kind === "media";
+  return item.kind === "text" || item.kind === "message" || item.kind === "queued" || item.kind === "media" || item.kind === "shell";
 }
 
 type Outcome = { tone: "ok" | "stopped" | "failed"; word: string; label: string; duration: string | null };
@@ -209,51 +337,127 @@ function OutcomeIcon({ tone }: { tone: Outcome["tone"] }) {
 }
 
 /**
- * A settled turn's one footer row: when the answer came, how the turn went
- * when no header said so, and a copy of the answer on hover.
+ * A settled turn's one footer row: how long it took and when it ended (which opens the turn's details), its cache hit
+ * and output speed (PRO-378), a copy of the answer, read aloud on hover, a "…" menu with what can be done from this
+ * turn (PRO-379), and a second opinion.
  */
-function TurnFooter({ turn, outcome, onSecondOpinion, onReset }: { turn: Turn; outcome: Outcome | null; onSecondOpinion?: (turn: Turn) => void; onReset?: (endSeq: number) => void }) {
+function TurnFooter({ turn, sessionId, tabId, outcome, fallback, onSecondOpinion, secondOpinionAgent, onReset, onFork, onSaveSnippet, unavailable }: {
+  turn: Turn;
+  sessionId: string;
+  tabId?: string;
+  outcome: Outcome | null;
+  fallback?: TurnFallback;
+  onSecondOpinion?: (turn: Turn) => void;
+  secondOpinionAgent?: string;
+  onReset?: (endSeq: number) => void;
+  onFork?: (endSeq: number, into: "tab" | "session") => void;
+  onSaveSnippet?: (text: string) => void;
+  /** Why each action this session cannot take is off, shown as a disabled item with that reason (#1289). */
+  unavailable?: { fork?: string; reset?: string; secondOpinion?: string };
+}) {
   const answer = turn.work.flatMap((w) => (w.kind === "text" && w.text.trim() ? [w] : []));
   const ts = answer.at(-1)?.messageTs;
   const text = answer.map((w) => w.text).join("\n\n");
   const [copied, setCopied] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const speechKey = JSON.stringify([sessionId, tabId ?? null, turn.key]);
+  const reading = useReadingAloud(speechKey);
   useEffect(() => {
     if (!copied) return;
     const id = window.setTimeout(() => setCopied(false), 1500);
     return () => window.clearTimeout(id);
   }, [copied]);
-  const quiet = outcome?.tone === "ok";
+  const settled = !!turn.completed && !turn.live;
+  const endSeq = turn.completed?.status === "ok" ? turn.completed.seq : undefined;
+  const prompt = turn.prompt?.text.trim();
+  const fork = endSeq != null ? onFork : undefined;
+  const reset = endSeq != null ? onReset : undefined;
+  const snippet = prompt ? onSaveSnippet : undefined;
+  // Off with a reason only where the action would have been offered.
+  const forkOff = !fork && endSeq != null ? unavailable?.fork : undefined;
+  const resetOff = !reset && endSeq != null ? unavailable?.reset : undefined;
+  const opinionOff = !onSecondOpinion ? unavailable?.secondOpinion : undefined;
+  const branching = !!(fork || reset || forkOff || resetOff);
+  const hasMenu = !!(branching || text || snippet || onSecondOpinion || opinionOff);
+  const ended = messageTime(turn.completed?.ts ?? ts);
+  const stats = turnStats(turn);
   if (!messageTime(ts) && !outcome && !text && !turn.completed && !onSecondOpinion && !onReset) return null;
+  const quiet = outcome?.tone === "ok";
+  const label = [outcome ? (quiet ? outcome.duration?.replace(/^for /, "") ?? outcome.word : outcome.label) : null, ended ? ended.short : null].filter(Boolean).join(" · ");
+  const icon = "-my-1 flex size-6 items-center justify-center rounded-md text-faint hover:bg-veil-raised hover:text-foreground focus-visible:outline";
+  const hover = "opacity-0 transition-opacity focus-visible:opacity-100 group-hover/turn:opacity-100";
   return (
-    <div className="flex min-h-7 flex-wrap items-center gap-x-1.5 text-xs text-faint" data-testid="turn-footer">
-      <MessageTime ts={ts} inline />
-      {onReset && turn.completed?.status === "ok" && turn.completed.seq != null && (
-        <button type="button" onClick={() => onReset(turn.completed!.seq!)} className="rounded px-1.5 py-1 hover:bg-veil-raised focus-visible:outline">Reset to here</button>
+    <div className="flex min-h-7 flex-wrap items-center gap-x-2 text-xs text-faint" data-testid="turn-footer">
+      {settled ? (
+        <TurnDetailsPopover turn={turn} fallback={fallback} label={label}>
+          {outcome && !quiet && <OutcomeIcon tone={outcome.tone} />}
+          <span className={cn("tabular-nums", outcome?.tone === "failed" && "text-destructive")}>{label}</span>
+        </TurnDetailsPopover>
+      ) : (
+        <MessageTime ts={ts} inline />
       )}
-      {turn.completed && !turn.live && <TurnDetailsPopover turn={turn}>
-        {outcome ? <>
-          {!quiet && <OutcomeIcon tone={outcome.tone} />}
-          <span className={cn(outcome.tone === "failed" && "text-destructive")}>{outcome.word}</span>
-          {outcome.duration && <span className="-ml-1">{outcome.duration}</span>}
-        </> : <span>Details</span>}
-      </TurnDetailsPopover>}
+      {stats.cacheHit != null && <span className="tabular-nums" title="Share of this turn's input read from the prompt cache">cache hit {stats.cacheHit}%</span>}
+      {stats.tokensPerSecond != null && <span className="tabular-nums" title="Average output rate over the whole turn, tool calls included">{stats.tokensPerSecond} tok/s</span>}
       {text && (
-          <button
-            type="button"
-            aria-label="Copy answer"
-            title={copied ? "Copied" : "Copy answer"}
-            onClick={() => void copyText(text).then(() => setCopied(true))}
-            className="-my-1 flex size-6 items-center justify-center rounded-md text-faint opacity-0 transition-opacity hover:bg-veil-raised hover:text-foreground focus-visible:opacity-100 group-hover/turn:opacity-100"
-          >
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-          </button>
+        <button type="button" aria-label="Copy answer" title={copied ? "Copied" : "Copy answer"} onClick={() => void copyText(text).then(() => setCopied(true))} className={icon}>
+          {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        </button>
+      )}
+      {text && canReadAloud() && (
+        <button type="button" aria-label={reading ? "Stop reading aloud" : "Read aloud"} title={reading ? "Stop reading aloud" : "Read aloud"} aria-pressed={reading}
+          onClick={() => (reading ? stopReading() : readAloud(speechKey, text))} className={cn(icon, !reading && hover, reading && "text-foreground")}>
+          {reading ? <Square className="size-3" /> : <Unmute className="size-3.5" />}
+        </button>
+      )}
+      {settled && hasMenu && (
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <button type="button" aria-label="Turn actions" title="Turn actions" className={cn(icon, !menuOpen && hover, "data-[state=open]:bg-veil-strong data-[state=open]:text-foreground")}>
+              <Ellipsis className="size-3.5" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-80">
+            {fork && <>
+              <TurnMenuItem icon={<GitFork />} label="Fork to new tab" hint="Same worktree · knows the chat up to here" onSelect={() => fork(endSeq!, "tab")} />
+              <TurnMenuItem icon={<FolderGit2 />} label="Fork to new session" hint="New worktree with this turn's files" onSelect={() => fork(endSeq!, "session")} />
+            </>}
+            {forkOff && <TurnMenuItem icon={<GitFork />} label="Fork" hint={forkOff} disabled />}
+            {(reset || resetOff) && <>
+              {(fork || forkOff) && <DropdownMenuSeparator />}
+              {reset
+                ? <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint="Removes later turns; can reset files too" onSelect={() => reset(endSeq!)} />
+                : <TurnMenuItem icon={<RotateCcw />} label="Reset chat to here…" hint={resetOff} disabled />}
+            </>}
+            {branching && (text || snippet || onSecondOpinion || opinionOff) && <DropdownMenuSeparator />}
+            {text && <TurnMenuItem icon={<FileText />} label="Copy answer as Markdown" onSelect={() => void copyText(text).then(() => setCopied(true))} />}
+            {snippet && <TurnMenuItem icon={<Bookmark />} label="Save the prompt as a snippet…" onSelect={() => snippet(prompt!)} />}
+            {onSecondOpinion && <TurnMenuItem icon={<ArrowLeftRight />} label={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : "Second opinion"}
+              hint={`Opens ${secondOpinionAgent ? `a ${secondOpinionAgent}` : "another agent's"} tab with this turn's diff`} onSelect={() => onSecondOpinion(turn)} />}
+            {opinionOff && <TurnMenuItem icon={<ArrowLeftRight />} label="Second opinion" hint={opinionOff} disabled />}
+          </DropdownMenuContent>
+        </DropdownMenu>
       )}
       {onSecondOpinion && (
-        <button type="button" onClick={() => onSecondOpinion(turn)} className="rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+        <button type="button" onClick={() => onSecondOpinion(turn)} title={secondOpinionAgent ? `Second opinion from ${secondOpinionAgent}` : undefined}
+          className="-mx-0.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground hover:bg-veil-raised hover:text-foreground">
+          <ArrowLeftRight className="size-3.5" />
           Second opinion
         </button>
       )}
     </div>
+  );
+}
+
+/** A turn action; `disabled`, its hint says why it cannot be taken here. */
+function TurnMenuItem({ icon, label, hint, onSelect, disabled = false }: { icon: ReactNode; label: string; hint?: string; onSelect?: () => void; disabled?: boolean }) {
+  return (
+    <DropdownMenuItem onSelect={onSelect} disabled={disabled} className={cn(hint && "items-start whitespace-normal")}>
+      <span className={cn(hint && "mt-0.5")}>{icon}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block">{label}</span>
+        {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
+      </span>
+    </DropdownMenuItem>
   );
 }
 
@@ -286,39 +490,35 @@ export function previewFromPartialJson(partial: string): string {
   return "";
 }
 
-function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void }) {
+function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain, agent }: { item: WorkItem; cwd?: string; linkContext?: { sessionId: string; cwd: string }; onSendQueuedNow?: (seq: number) => void; onSendAgain?: (seq: number) => void; agent?: { id: string; name: string } }) {
   const section = useSearchSection(item.kind === "queued" ? `message:${item.seq}` : item.key);
   switch (item.kind) {
     case "text":
       return <div className="mb-3"><div {...section}><Markdown text={item.text} linkContext={linkContext} /></div>{linkContext && <MentionedMedia text={item.text} linkContext={linkContext} />}</div>;
     case "reasoning":
-      return <ReasoningRow name={item.key} text={item.text} linkContext={linkContext} />;
+      return <ReasoningRow name={item.key} text={item.text} durationMs={item.durationMs} linkContext={linkContext} />;
     case "tool":
       return <ToolCallRow call={item.call} cwd={cwd} linkContext={linkContext} />;
     case "tool_group":
       return <ToolGroupRow name={item.name} calls={item.calls} cwd={cwd} linkContext={linkContext} />;
     case "message":
-      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} />;
+      // Taken while the agent worked (#551): steering, said above the bubble (PRO-380, 03.12).
+      return <ReaderMessage message={item} cwd={cwd} linkContext={linkContext} className="my-3" onSendAgain={onSendAgain} steered={steeringNote(agent)} />;
     case "queued":
       return (
-        <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message">
-          <div className="flex flex-wrap items-center gap-2">
-            <Clock className="size-3.5 shrink-0" />
-            {!item.withdrawn && <span className="text-xs">Queued</span>}
-            {item.author && <span className="min-w-0 wrap-anywhere" data-user-id={item.author.userId}>{item.author.displayName}:</span>}
-            {onSendQueuedNow && !item.inputOccupied && !item.withdrawn && (
-              <WithTooltip label="Interrupt the agent and send this now">
-                <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={() => onSendQueuedNow(item.seq)}>
-                  <Send /> Send now
-                </Button>
-              </WithTooltip>
-            )}
-          </div>
-          {item.files?.length ? <div className="mt-1.5"><MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /></div> : null}
-          <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={item.text} context={linkContext} /></span><MessageTime ts={item.messageTs} /></div>
-          {item.inputOccupied && <InputOccupiedNote />}
+        <QueuedCard
+          label={item.withdrawn ? null : "Queued"}
+          author={item.author}
+          text={item.text}
+          section={section}
+          linkContext={linkContext}
+          time={<MessageTime ts={item.messageTs} />}
+          files={item.files?.length ? <MessageFiles files={item.files} sessionId={linkContext?.sessionId} sentAt={item.messageTs} cwd={cwd} open={!!linkContext} /> : null}
+          onSendNow={onSendQueuedNow && !item.inputOccupied && !item.withdrawn ? () => onSendQueuedNow(item.seq) : undefined}
+        >
+          {item.inputOccupied && <InputOccupiedNote choice={item.inputChoice} />}
           {item.withdrawn && <WithdrawnNote unconfirmed={item.unconfirmed} seq={item.seq} onSendAgain={onSendAgain} />}
-        </div>
+        </QueuedCard>
       );
     case "status":
       return (
@@ -346,6 +546,8 @@ function WorkRow({ item, cwd, linkContext, onSendQueuedNow, onSendAgain }: { ite
           {item.done && <Check className="size-3.5 text-faint" />}
         </div>
       );
+    case "shell":
+      return <ShellBlock item={item} linkContext={linkContext} />;
     case "media":
       return linkContext ? <div className="mb-3"><ChatMedia paths={item.paths} context={linkContext} /></div> : null;
     case "decision":
@@ -387,14 +589,68 @@ function InitiatingPrompt({ name, text, linkContext }: { name: string; text: str
 }
 
 /**
- * Why a message has not been typed yet (#722): the agent's input box holds something else, and typing would send
- * the two as one prompt. It goes in once the box is empty.
+ * A message the agent has not taken yet: queued behind the running turn in a
+ * local session, or on its way to a cloud workspace (#1291). One card for
+ * both; what is under it (`children`) says why it waits.
  */
-function InputOccupiedNote() {
+export function QueuedCard({
+  label,
+  author,
+  text,
+  section,
+  linkContext,
+  time,
+  files,
+  onSendNow,
+  children,
+  ...data
+}: {
+  /** "Queued", or what else it is ("Steer"); null for none (a message withdrawn). */
+  label: string | null;
+  author?: { userId: string; displayName: string } | null;
+  text: string;
+  section?: ReturnType<typeof useSearchSection>;
+  linkContext?: { sessionId: string; cwd: string };
+  time?: ReactNode;
+  files?: ReactNode;
+  /** Interrupt the agent's turn so this goes now; absent where it cannot. */
+  onSendNow?: () => void;
+  children?: ReactNode;
+  [key: `data-${string}`]: string | undefined;
+}) {
+  return (
+    <div className="my-3 rounded-lg border border-dashed border-hairline-strong px-3 py-2 text-[13px] text-muted-foreground" data-testid="queued-message" {...data}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Clock className="size-3.5 shrink-0" />
+        {label && <span className="text-xs">{label}</span>}
+        {author && <span className="min-w-0 wrap-anywhere" data-user-id={author.userId}>{author.displayName}:</span>}
+        {onSendNow && (
+          <WithTooltip label="Interrupt the agent and send this now">
+            <Button size="xs" variant="outline" className="ml-auto shrink-0" onClick={onSendNow}>
+              <Send /> Send now
+            </Button>
+          </WithTooltip>
+        )}
+      </div>
+      {files ? <div className="mt-1.5">{files}</div> : null}
+      <div className="mt-1 min-w-0 whitespace-pre-wrap wrap-anywhere select-text"><span {...section}><LinkedText text={text} context={linkContext} /></span>{time}</div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Why a message has not been typed yet (#722): the agent's input box holds something else, and typing would send
+ * the two as one prompt. It goes in once the box is empty. With `choice`, the box is not there at all: the agent
+ * drew a question of its own in its place (PRO-462), and typing would answer that instead.
+ */
+function InputOccupiedNote({ choice }: { choice?: boolean }) {
   return (
     <p className="mt-2 flex items-start gap-1.5 text-xs text-warning" data-testid="input-occupied">
       <Keyboard className="mt-0.5 size-3.5 shrink-0" />
-      <span>Waiting: the agent&apos;s input box already has text in it. Send or clear that text in the terminal, and this message goes in after it.</span>
+      <span>{choice
+        ? "Waiting: the agent is asking a question in its terminal. Answer it there, and this message goes in after."
+        : "Waiting: the agent's input box already has text in it. Send or clear that text in the terminal, and this message goes in after it."}</span>
     </p>
   );
 }
@@ -425,14 +681,14 @@ function MentionedMedia({ text, linkContext }: { text: string; linkContext: { se
  * in the chat at once, said to be sending, and is replaced by the message the
  * runtime records. Not a turn yet: nothing is measured or folded here.
  */
-export function SendingMessage({ message, cwd }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string }[] }; cwd?: string }) {
+export function SendingMessage({ message, cwd, failed = false }: { message: { text: string; images: { url: string; name?: string }[]; files?: { name: string; size?: number }[] }; cwd?: string; failed?: boolean }) {
   const layout = usePrefs().transcriptLayout;
   return (
-    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy>
+    <div className="transcript-turn flow-root" data-testid="sending-message" aria-busy={!failed}>
       <ReaderMessage message={message} cwd={cwd} className="mb-1 opacity-70" />
-      <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
+      {!failed && <div role="status" className={cn("mb-4 flex px-1 text-[11px] text-muted-foreground", layout === "chat" && "justify-end")}>
         Sending…
-      </div>
+      </div>}
     </div>
   );
 }
@@ -475,8 +731,11 @@ function ReaderMessage({
   linkContext,
   className,
   onSendAgain,
+  steered,
 }: {
-  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string }[] } & Delivery;
+  /** Said above a message the agent took mid-turn; the bubble is edged in blue and keeps its time inside. */
+  steered?: string;
+  message: { seq?: number; messageTs?: string; author?: { userId: string; displayName: string }; text: string; images?: { url: string; name?: string }[]; files?: readonly { name: string; path?: string; size?: number }[] } & Delivery;
   cwd?: string;
   linkContext?: { sessionId: string; cwd: string };
   className: string;
@@ -485,11 +744,18 @@ function ReaderMessage({
   const layout = usePrefs().transcriptLayout;
   const section = useSearchSection(`message:${message.seq}`);
   return (
-    <div className={cn(className, "group/msg relative flex", layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+    <div className={cn(className, "group/msg relative flex", steered ? cn("flex-col", layout === "chat" ? "items-end" : "items-stretch") : layout === "chat" ? "justify-end" : "justify-stretch")} data-testid="reader-message">
+      {steered && (
+        <p className="mb-1 flex items-center justify-end gap-1.5 text-[11px] text-info" data-testid="steered-note">
+          <Navigation aria-hidden className="size-[11px] shrink-0" />
+          {steered}
+        </p>
+      )}
       <div
         className={cn(
-          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl bg-card px-4 py-3 text-[14px] leading-relaxed",
-          layout === "chat" ? "max-w-[85%]" : "w-full",
+          "min-w-0 select-text whitespace-pre-wrap wrap-anywhere rounded-xl border bg-card px-4 pt-3 pb-2 text-[14px] leading-relaxed",
+          layout === "chat" ? "max-w-[min(85%,560px)]" : "w-full",
+          steered ? "border-info/40" : "border-hairline",
         )}
       >
         {message.images?.length ? (
@@ -540,7 +806,7 @@ function ReaderMessage({
             <div className="mt-1.5 border-l border-hairline pl-2 whitespace-pre-wrap wrap-anywhere select-text"><LinkedText text={message.sent} context={linkContext} /></div>
           </details>
         )}
-        {message.inputOccupied && <InputOccupiedNote />}
+        {message.inputOccupied && <InputOccupiedNote choice={message.inputChoice} />}
         {message.withdrawn && <WithdrawnNote unconfirmed={message.unconfirmed} seq={message.seq} onSendAgain={onSendAgain} />}
         {message.replaced && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-warning" data-testid="prompt-replaced">
@@ -553,10 +819,32 @@ function ReaderMessage({
             )}
           </div>
         )}
+        <BubbleTime ts={message.messageTs} />
       </div>
-      <HoverTime ts={message.messageTs} />
     </div>
   );
+}
+
+/** The reader's message time, in the bubble's bottom-right corner: the time today, with the day before that. */
+function BubbleTime({ ts }: { ts?: string }) {
+  const time = messageTime(ts);
+  if (!time) return null;
+  const at = new Date(time.iso);
+  const now = new Date();
+  const today = at.getFullYear() === now.getFullYear() && at.getMonth() === now.getMonth() && at.getDate() === now.getDate();
+  return (
+    <div className="mt-1 flex justify-end whitespace-normal">
+      <time dateTime={time.iso} title={time.full} aria-label={`Message time: ${time.full}`} className="text-xs leading-4 tabular-nums text-faint" data-testid="message-time">
+        {today ? time.short : dividerLabel(at, now)}
+      </time>
+    </div>
+  );
+}
+
+/** What a message the agent took mid-turn says above it: Codex reads one at its next tool call. */
+export function steeringNote(agent?: { id: string; name: string }): string {
+  if (agent?.id === "codex") return `Sent mid-turn · ${agent.name} reads it at its next tool call`;
+  return agent ? `Sent mid-turn · ${agent.name} read it while it worked` : "Sent mid-turn";
 }
 
 /**
@@ -569,36 +857,32 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
   // The existing Chat indicator owns animation; do not add a second spinner.
   const status = compactionStatus(item);
   if (status === null) return null;
-  const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}k`;
-  const label = (
-    <>
-      {status}{item.preTokens != null ? ` from ${count(item.preTokens)}` : ""}
-      {item.postTokens != null ? ` to ${count(item.postTokens)} tokens` : ""}
-    </>
-  );
-  if (!item.summary) {
-    return (
-      <div className="my-1 flex items-center gap-2 -mx-1.5 px-1.5 py-1 text-xs text-faint">
-        <Shrink className="size-3.5" />
-        {label}
-      </div>
-    );
-  }
+  const count = (value: number) => value < 1000 ? String(value) : `${Math.round(value / 1000)}K`;
+  const tokens = item.preTokens != null && item.postTokens != null
+    ? ` · ${count(item.preTokens)} → ${count(item.postTokens)} tokens`
+    : item.preTokens != null ? ` · from ${count(item.preTokens)} tokens` : item.postTokens != null ? ` · ${count(item.postTokens)} tokens` : "";
+  const label = <>{status === "Context compacted" ? "Chat compacted" : status}{tokens}</>;
+  // A divider across the column: what came before it is the agent's summary now, not its memory of each message.
   return (
-    <div className="my-1">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-md -mx-1.5 px-1.5 py-1 text-left text-xs text-faint hover:bg-veil-raised"
-      >
-        <Shrink className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1">{label}</span>
-        <span className="shrink-0">{open ? "Hide summary" : "Show summary"}</span>
-        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
-      </button>
-      {open && (
-        <div data-testid="compaction-summary" className="mb-2 ml-4.5 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
+    <div className="my-3">
+      <div className="flex items-center gap-3 text-xs text-faint" data-testid="compaction-row">
+        <span aria-hidden className="h-px flex-1 bg-hairline" />
+        {item.summary ? (
+          <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-0.5 hover:bg-veil-raised hover:text-muted-foreground">
+            <Shrink className="size-3.5 shrink-0" />
+            <span>{label}</span>
+            <span>· {open ? "Hide summary" : "Show summary"}</span>
+          </button>
+        ) : (
+          <span className="flex shrink-0 items-center gap-1.5">
+            <Shrink className="size-3.5 shrink-0" />
+            <span>{label}</span>
+          </span>
+        )}
+        <span aria-hidden className="h-px flex-1 bg-hairline" />
+      </div>
+      {open && item.summary && (
+        <div data-testid="compaction-summary" className="mt-2 mb-2 max-h-72 overflow-auto scrollbar-thin border-l border-hairline pl-3 text-xs leading-relaxed whitespace-pre-wrap text-faint select-text">
           <LinkedText text={item.summary} context={linkContext} />
         </div>
       )}
@@ -606,24 +890,25 @@ function CompactionRow({ item, linkContext }: { item: Extract<WorkItem, { kind: 
   );
 }
 
-function ReasoningRow({ name, text, linkContext }: { name: string; text: string; linkContext?: { sessionId: string; cwd: string } }) {
+function ReasoningRow({ name, text, durationMs, linkContext }: { name: string; text: string; durationMs?: number; linkContext?: { sessionId: string; cwd: string } }) {
   const [open, setOpen] = useDisclosure(name);
   const section = useSearchSection(name);
   const first = text.split("\n").find((l) => l.trim()) ?? "";
+  const label = durationMs != null && durationMs >= 1000 ? `Thought for ${formatDuration(durationMs)}` : "Thought";
   return (
     <div>
       <div
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2.5 rounded-md -mx-1.5 px-1.5 py-1.5 text-left text-[13.5px] hover:bg-veil-raised"
+        className="flex w-full cursor-pointer items-center gap-2 rounded-md -mx-1.5 px-1.5 py-1.5 text-left text-[13.5px] hover:bg-veil-raised"
       >
-        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning" : "Expand reasoning"}><Brain className="size-4 shrink-0 text-thinking" /></button>
-        <span className="shrink-0 text-foreground/90">Thinking</span>
-        <span className="flex min-w-0 flex-1">
-          {!open && first && <span className={cn(STEP_CHIP, "font-sans text-[12.5px]")}><LinkedText text={first} context={linkContext} /></span>}
-        </span>
-        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-label={open ? "Collapse reasoning details" : "Expand reasoning details"}><ChevronRight className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} /></button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); setOpen((o) => !o); }} aria-expanded={open} aria-label={open ? "Collapse reasoning" : "Expand reasoning"} className="flex shrink-0 items-center gap-2 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring/40">
+          <Brain className="size-4 shrink-0 text-thinking" />
+          <span className="shrink-0 text-thinking">{label}</span>
+        </button>
+        {!open && first && <span className="min-w-0 truncate text-[13px] italic text-muted-foreground"><LinkedText text={first} context={linkContext} /></span>}
+        <ChevronRight aria-hidden className={cn("size-3.5 shrink-0 text-faint transition-transform", open && "rotate-90")} />
       </div>
-      {open && <div {...section} className="ml-4.5 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
+      {open && <div {...section} className="ml-6 mb-2 whitespace-pre-wrap text-[13px] italic text-thinking/90 select-text"><LinkedText text={text} context={linkContext} /></div>}
     </div>
   );
 }
@@ -648,15 +933,4 @@ export function toAssetUrl(p: string): string {
   } catch {
     return p;
   }
-}
-
-/** The time above a turn that opens a new sitting: a hairline each side, the day and time between. */
-function TurnDivider({ label }: { label: string }) {
-  return (
-    <div role="separator" aria-label={label} className="mb-6 flex items-center gap-3 text-[11px] text-faint" data-testid="turn-divider">
-      <span className="h-px flex-1 bg-hairline" />
-      <span className="shrink-0">{label}</span>
-      <span className="h-px flex-1 bg-hairline" />
-    </div>
-  );
 }

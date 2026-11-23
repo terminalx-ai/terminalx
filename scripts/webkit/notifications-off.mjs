@@ -40,7 +40,8 @@ async function placed(page, selector, others) {
     const visible = (s) => find(s).filter((el) => el.getBoundingClientRect().width > 0 && el.checkVisibility({ opacityProperty: true, visibilityProperty: true }));
     const el = visible(selector)[0];
     const r = el.getBoundingClientRect();
-    const points = [0.1, 0.5, 0.9].flatMap((x) => [0.15, 0.5, 0.85].map((y) => [r.left + r.width * x, r.top + r.height * y]));
+    // Its top edge too: a row pushed up under the tab strip used to pass on the points 15% down (#1447).
+    const points = [0.1, 0.5, 0.9].flatMap((x) => [[r.left + r.width * x, r.top + 2], ...[0.15, 0.5, 0.85].map((y) => [r.left + r.width * x, r.top + r.height * y])]);
     const apart = (b) => b.bottom <= r.top + 1 || b.top >= r.bottom - 1 || b.right <= r.left + 1 || b.left >= r.right - 1;
     const overlaps = Object.entries(others).flatMap(([name, s]) => visible(s).filter((other) => other !== el && !el.contains(other) && !other.contains(el) && !apart(other.getBoundingClientRect())).map(() => name));
     const buttons = [...el.querySelectorAll("button")].map((b) => b.getBoundingClientRect());
@@ -81,6 +82,12 @@ try {
       await painted(page);
       assert.match(await card.innerText(), /Notifications are off for TerminalX/);
       assert.match(await card.innerText(), /“Chat 0” needs your approval, but macOS blocks TerminalX banners and the dock badge\./);
+      // The bell-off icon is amber, as screen 17.12 draws it (PRO-400 kept the screen's colour over its table's).
+      const bell = await card.locator("[data-notifications-off-icon]").evaluate((icon) => {
+        const colour = (value) => { const probe = document.createElement("i"); probe.style.color = value; document.body.append(probe); const drawn = getComputedStyle(probe).color; probe.remove(); return drawn; };
+        return { drawn: getComputedStyle(icon).color, muted: colour("var(--muted-foreground)"), warning: colour("var(--warning)") };
+      });
+      assert.ok(bell.drawn === bell.warning && bell.drawn !== bell.muted, `bell-off icon is amber ${where}: ${JSON.stringify(bell)}`);
       const others = {
         composer: "[data-composer-box]",
         "send button": '[data-composer-box] button[aria-label="Send"]',
@@ -131,7 +138,7 @@ try {
       await painted(page);
       const text = await mic.innerText();
       assert.match(text, /Microphone access is off for TerminalX/);
-      assert.match(text, /Dictation needs it\. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ⌘⇧D again\./);
+      assert.match(text, /Dictation needs it\. Turn TerminalX on in System Settings › Privacy & Security › Microphone, then press ⇧⌘D again\./);
       const row = await placed(page, "[data-dictation-error]", { composer: "[data-composer-box]" });
       assert.ok(row.contained && row.onTop && row.buttonsInside && row.textFits && row.overlaps.length === 0 && !row.overflow, `microphone row ${where}: ${JSON.stringify(row)}`);
       await mic.getByRole("button", { name: "Open System Settings" }).click();

@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
 import {
   Activity,
-  BarChart3,
   Bot,
   CalendarDays,
-  ChevronDown,
   CircleDollarSign,
   Clock3,
   Database,
@@ -13,17 +11,25 @@ import {
   RefreshCw,
   Sparkles,
 } from "@/icons";
-import { AgentMark } from "@/components/AgentMark";
+import { AgentMark, agentName } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/menu";
+import { RegisteredSetting } from "@/components/settings/settingsRegistry";
+import { SettingsHeaderActions } from "@/components/settings/settingsHeaderActions";
 import { WithTooltip } from "@/components/ui/tooltip";
 import type { AppStats, ProviderUsage, StatsUsageSnapshot } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatAgentTime, formatCost, formatTokens, heatmapDays } from "@/lib/stats";
 import { statsUsageStore } from "@/lib/statsUsageStore";
+import { useStatus } from "@/lib/status";
+import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
+import { accountUsageNotice, usageByAgent, windowIsStale, type AccountUsage } from "@/lib/accountUsage";
 
 const LEVELS = ["bg-veil-raised", "bg-muted-foreground/25", "bg-muted-foreground/45", "bg-muted-foreground/70", "bg-foreground/85"];
 
+/**
+ * Settings → Stats & usage (PRO-463, design 09.44): the activity totals, each account's usage limits and the
+ * local usage analytics. Settings draws the page's title and description; Refresh sits beside them.
+ */
 export function StatsUsageView() {
   const { snapshot, activity: currentActivity, refreshing: loading, error, activityError, initialized } = useSyncExternalStore(
     statsUsageStore.subscribe, statsUsageStore.getSnapshot,
@@ -37,52 +43,94 @@ export function StatsUsageView() {
   useEffect(() => { void load(); }, [load]);
 
   return (
-    <div className="@container min-h-0 flex-1 overflow-y-auto scrollbar-thin">
-      <div className="mx-auto w-full max-w-[1240px] px-5 pb-8 pt-1 @min-[1000px]:px-8">
-        <header className="flex items-start gap-3 border-b border-hairline pb-5">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold tracking-tight">Stats &amp; Usage</h1>
-            <p className="mt-1 text-[13px] text-muted-foreground">
-              TerminalX activity plus local Claude and Codex token analytics. Cloud histories are not scanned here.
-            </p>
-          </div>
-          <span role="status" aria-live="polite" className="ml-auto self-center text-xs text-muted-foreground">
-            {loading ? "Refreshing…" : ""}
-          </span>
-          <WithTooltip label="Refresh local analytics">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Refresh local analytics"
-              disabled={loading}
-              onClick={() => void load()}
-            >
-              <RefreshCw className={cn(loading && "animate-spin")} />
-            </Button>
-          </WithTooltip>
-        </header>
+    <div className="@container">
+      <SettingsHeaderActions>
+        <span role="status" aria-live="polite" className="self-center text-xs text-muted-foreground empty:hidden">
+          {loading ? "Refreshing…" : ""}
+        </span>
+        <WithTooltip label="Refresh local analytics">
+          <Button variant="outline" size="sm" aria-label="Refresh local analytics" disabled={loading} onClick={() => void load()}>
+            <RefreshCw className={cn(loading && "animate-spin")} /> Refresh
+          </Button>
+        </WithTooltip>
+      </SettingsHeaderActions>
 
-        {(error || activityNotice) && (
-          <div role="alert" className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error && <p>Could not refresh local usage: {error}</p>}
-            {activityNotice && <p>{activityNotice}</p>}
-            {retryable && <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>}
-          </div>
-        )}
-        {(activity || snapshot) && (
-          <section className="mt-6 rounded-2xl bg-well/35 p-4 hairline @min-[760px]:p-5">
-            {activity && <>
-              {(activityError || (error && !currentActivity)) && <p className="mb-3 text-xs text-muted-foreground">Saved activity — could not refresh; values may be out of date.</p>}
-              <ActivityContents activity={activity} />
-            </>}
-            {snapshot && error && <p className="mt-4 text-xs text-muted-foreground">Saved usage — could not refresh; values may be out of date.</p>}
-            {snapshot && loading && <p className="mt-4 text-xs text-muted-foreground">Saved usage — refresh in progress; values may be out of date.</p>}
-            {snapshot && <StatsContents snapshot={snapshot} />}
-          </section>
-        )}
-        {!snapshot && initialized && loading ? <LoadingState /> : null}
-      </div>
+      {(error || activityNotice) && (
+        <div role="alert" className="mb-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          {error && <p>Could not refresh local usage: {error}</p>}
+          {activityNotice && <p>{activityNotice}</p>}
+          {retryable && <Button variant="outline" size="sm" className="mt-3" onClick={() => void load()} disabled={loading}>Retry</Button>}
+        </div>
+      )}
+      <RegisteredSetting setting="stats.activity">
+        <section aria-label="Activity" className="outline-none">
+          {activity && <>
+            {(activityError || (error && !currentActivity)) && <p className="mb-3 text-xs text-muted-foreground">Saved activity — could not refresh; values may be out of date.</p>}
+            <ActivityContents activity={activity} />
+          </>}
+        </section>
+      </RegisteredSetting>
+      <RegisteredSetting setting="stats.accountLimits">
+        <div className="outline-none"><AccountsUsage /></div>
+      </RegisteredSetting>
+      <RegisteredSetting setting="stats.analytics">
+        <section aria-label="Usage analytics" className="outline-none">
+          {snapshot && error && <p className="mt-6 text-xs text-muted-foreground">Saved usage — could not refresh; values may be out of date.</p>}
+          {snapshot && loading && <p className="mt-6 text-xs text-muted-foreground">Saved usage — refresh in progress; values may be out of date.</p>}
+          {snapshot && <StatsContents snapshot={snapshot} />}
+          {!snapshot && initialized && loading ? <LoadingState /> : null}
+        </section>
+      </RegisteredSetting>
     </div>
+  );
+}
+
+/** Each subscription account's windows under its label (#980); nothing with one account per agent. */
+function AccountsUsage() {
+  const { usage } = useStatus();
+  const groups = usageByAgent(usage);
+  const now = useCountdownNow(groups.flatMap((group) => group.accounts.flatMap((account) => account.windows.flatMap((window) => [window.resetsAt, window.updatedAt + 30 * 60_000]))));
+  if (!groups.length) return null;
+  return (
+    <section className="mt-7" aria-labelledby="account-usage-heading">
+      <h2 id="account-usage-heading" className="text-sm font-semibold">Usage limits by account</h2>
+      <p className="mt-0.5 text-xs text-muted-foreground">Each signed-in account&apos;s current windows, read with that account&apos;s own login.</p>
+      {groups.map((group) => (
+        <div key={group.agent} className="mt-4">
+          <h3 className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <AgentMark id={group.agent} className="size-3.5" decorative /> {agentName(group.agent)}
+          </h3>
+          <div className="mt-2 grid gap-3 @min-[760px]:grid-cols-2">
+            {group.accounts.map((account) => <AccountCard key={account.accountId} account={account} now={now} />)}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function AccountCard({ account, now }: { account: AccountUsage; now: number }) {
+  const notice = accountUsageNotice(account);
+  return (
+    <article className="min-w-0 rounded-xl bg-background/30 p-4 hairline" aria-label={account.label}>
+      <h4 className="truncate text-sm font-semibold" title={account.label}>{account.label}</h4>
+      {notice && <p className="mt-2 text-xs text-muted-foreground">{notice}</p>}
+      {account.windows.map((window) => {
+        const stale = windowIsStale(window, now);
+        return (
+          <div key={window.key} className="mt-3 text-xs">
+            <div className="flex justify-between gap-3">
+              <span>{window.label}</span>
+              <span className="tabular-nums">{Math.round(window.usedPercent)}% used{stale ? " · Last known" : ""}</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-veil-raised">
+              <div className="h-full rounded-full bg-foreground/75" style={{ width: `${Math.min(100, Math.max(0, window.usedPercent))}%` }} />
+            </div>
+            {window.resetsAt != null && <p className="mt-0.5 text-[11px] text-faint">{window.resetsAt <= now ? "Window expired; awaiting update" : `Resets ${formatResetCountdown(window.resetsAt, now, "")}`}</p>}
+          </div>
+        );
+      })}
+    </article>
   );
 }
 
@@ -101,7 +149,7 @@ function LoadingState() {
 function ActivityContents({ activity }: { activity: AppStats }) {
   return (
     <>
-        <div className="grid gap-3 @min-[620px]:grid-cols-3">
+        <div className="grid gap-3 @min-[520px]:grid-cols-3">
           <MetricCard icon={<Bot />} value={activity.agentsSpawned.toLocaleString()} label="Agents spawned" />
           <MetricCard icon={<Clock3 />} value={formatAgentTime(activity.agentTimeMs)} label="Time agents worked" />
           <MetricCard icon={<GitPullRequest />} value={activity.prsCreated.toLocaleString()} label="PRs created" />
@@ -129,24 +177,15 @@ function StatsContents({ snapshot }: { snapshot: StatsUsageSnapshot }) {
 
   return (
     <>
-        <div className="mb-3 mt-7 flex items-center gap-3">
-          <h2 className="text-sm font-semibold">Usage Analytics</h2>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="ml-auto min-w-32 justify-between">
-                <BarChart3 /> Overview <ChevronDown className="ml-2" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem>✓ Overview</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        <div className="mb-3 mt-7 flex flex-wrap items-baseline gap-x-2">
+          <h2 className="text-sm font-semibold">Usage analytics</h2>
+          <span className="text-xs text-muted-foreground">local Claude and Codex histories</span>
         </div>
 
         <section className="rounded-xl bg-background/35 p-4 hairline @min-[760px]:p-5" aria-labelledby="usage-overview-heading">
           <div className="flex items-start gap-3">
             <div>
-              <h3 id="usage-overview-heading" className="text-sm font-semibold">Usage Overview</h3>
+              <h3 id="usage-overview-heading" className="text-sm font-semibold">Usage overview</h3>
               <p className="mt-0.5 text-xs text-muted-foreground">Latest 30 local calendar dates as of the saved refresh · Known TerminalX projects and worktrees, including non-Git folders · Last successful refresh {formatTimestamp(snapshot.updatedAt)}</p>
             </div>
           </div>

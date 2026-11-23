@@ -7,6 +7,7 @@
 //! The status bar asks again at the user's automatic interval; the gates here
 //! decide whether an ask becomes a provider request.
 
+use crate::paths::Canonical;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +16,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod accounts;
 mod claude_oauth;
 
 pub const EVENT: &str = "status_usage";
@@ -97,6 +99,20 @@ pub struct UsageSnapshot {
     pub windows: Vec<UsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex: Option<CodexUsage>,
+    /// Each account of an agent that has more than one, under its label
+    /// (#980). `windows` above stays This Mac's login's, which is listed here
+    /// too. Empty, and not sent, with This Mac's login alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<AccountUsage>,
+}
+
+/// One account's usage with the agent it belongs to: `local` and `api-key`
+/// are ids every agent has. Sent flat, as the core's contract plus `agent`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountUsage {
+    pub agent: String,
+    #[serde(flatten)]
+    pub usage: crate::agent_accounts::AgentAccountUsage,
 }
 
 impl UsageSnapshot {
@@ -302,6 +318,8 @@ struct Inner {
     codex_usage: Option<CodexUsage>,
     codex_reset_credit_id: Option<String>,
     codex_reset_in_flight: bool,
+    /// Every added account's own usage (#980).
+    accounts: accounts::Accounts,
 }
 
 pub struct UsageStore {
@@ -867,7 +885,7 @@ pub fn claude_account_identity() -> Option<String> {
         Some(dir) => std::path::PathBuf::from(dir).join(".claude.json"),
         None => dirs::home_dir()?.join(".claude.json"),
     };
-    let path = path.canonicalize().ok()?;
+    let path = path.canonical().ok()?;
     let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
     let account = config.pointer("/oauthAccount/accountUuid")?.as_str()?;
     if account.is_empty() { return None; }
@@ -1005,8 +1023,91 @@ impl UsageStore {
         apply_claude_live(&mut self.inner.lock().unwrap(), payload, now)
     }
 
+    /// Poll `agent`'s accounts `ids` every minute (#981): automatic switching
+    /// watches them, near their threshold. `local` is This Mac's login.
+    pub fn set_hot(&self, agent: &'static str, ids: HashSet<String>) {
+        self.inner.lock().unwrap().accounts.set_hot(agent, ids);
+    }
+
+    /// The cadence `agent`'s own login (`local`) is polled at: every minute
+    /// while automatic switching watches it.
+    fn local_cadence(&self, agent: &str, cadence: Option<i64>) -> Option<i64> {
+        let hot = self.inner.lock().unwrap().accounts.is_hot(agent, crate::agent_accounts::LOCAL);
+        if hot { Some(cadence.unwrap_or(i64::MAX).min(accounts::HOT_REFRESH_MS + REFRESH_SLACK_MS)) } else { cadence }
+    }
+
+    /// Each account's usage as a snapshot would give it, without counting a
+    /// snapshot or dropping a window (#981): what automatic switching reads.
+    /// Empty for an agent with only This Mac's login.
+    pub fn accounts_now(&self) -> Vec<AccountUsage> {
+        self.sync_listed();
+        let now = now_ms();
+        let inner = self.inner.lock().unwrap();
+        let windows: Vec<UsageWindow> = inner.windows.values().map(|window| {
+            let mut window = window.clone();
+            window.stale = now.saturating_sub(window.updated_at) >= STALE_MS || expired(&window, now);
+            window
+        }).collect();
+        inner.accounts.usage(|agent| {
+            let error = if agent == "claude" { inner.claude.error.clone() } else { inner.codex.error.clone() };
+            (windows.iter().filter(|window| window.agent == agent).cloned().collect(), error)
+        }, now)
+    }
+
     pub fn snapshot(&self, running_agents: &HashSet<String>) -> UsageSnapshot {
+        // A label changed or an account removed in Settings shows at once.
+        self.sync_listed();
         self.snapshot_at(running_agents, now_ms())
+    }
+
+    /// Take the index's account list for each agent. A list that cannot be
+    /// read keeps the last one.
+    fn sync_listed(&self) {
+        for agent in ["claude", "codex"] {
+            match accounts::listed(agent) {
+                Ok(listed) => self.inner.lock().unwrap().accounts.set_listed(agent, listed),
+                Err(error) => log::debug!("{agent} accounts not listed for usage: {error:#}"),
+            }
+        }
+    }
+
+    /// Poll `agent`'s added accounts that are due, each with its own
+    /// credential, all at once, and put each answer in its own place.
+    fn refresh_accounts(&self, agent: &'static str, manual: bool, cadence: Option<i64>) {
+        let listed = accounts::listed(agent);
+        if let Err(error) = &listed {
+            log::debug!("{agent} accounts not listed for usage: {error:#}");
+        }
+        self.refresh_accounts_with(agent, listed.ok(), &accounts::running(agent), manual, cadence, &accounts::Live, now_ms);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_accounts_with(
+        &self,
+        agent: &'static str,
+        listed: Option<Vec<accounts::Listed>>,
+        running: &HashSet<String>,
+        manual: bool,
+        cadence: Option<i64>,
+        reader: &dyn accounts::Reader,
+        clock: impl Fn() -> i64,
+    ) {
+        let jobs = {
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(listed) = listed {
+                inner.accounts.set_listed(agent, listed);
+            }
+            inner.accounts.begin(agent, running, clock(), manual, cadence)
+        };
+        if jobs.is_empty() {
+            return;
+        }
+        let answers = accounts::run(&jobs, reader);
+        let completed_at = clock();
+        let mut inner = self.inner.lock().unwrap();
+        for (job, answer) in jobs.iter().zip(answers) {
+            inner.accounts.finish(job, answer, completed_at);
+        }
     }
 
     /// The windows as a snapshot would give them, without counting a
@@ -1032,12 +1133,17 @@ impl UsageStore {
             window
         }).collect();
         windows.sort_by(|a, b| b.used_percent.total_cmp(&a.used_percent).then_with(|| a.agent.cmp(&b.agent)).then_with(|| a.key.cmp(&b.key)));
+        let accounts = inner.accounts.usage(|agent| {
+            let error = if agent == "claude" { inner.claude.error.clone() } else { inner.codex.error.clone() };
+            (windows.iter().filter(|window| window.agent == agent).cloned().collect(), error)
+        }, now);
         inner.revision += 1;
         UsageSnapshot {
             revision: inner.revision,
             runtime: Some(self.runtime.clone()),
             claude_account: inner.claude_account.clone(),
             windows,
+            accounts,
             codex: inner.codex_usage.clone(),
             claude: ClaudeRefresh {
                 retry_at: inner.claude.retry_at.filter(|at| *at > now),
@@ -1062,6 +1168,14 @@ impl UsageStore {
     /// while failures and Retry-After still gate every request. `cadence` is
     /// the automatic refresh interval, `None` when that timer is off.
     pub fn refresh_claude(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
+        let local = self.refresh_local_claude(manual, self.local_cadence("claude", cadence));
+        // Added accounts after `local`, whose answer and failure stay its own.
+        self.refresh_accounts("claude", manual, cadence);
+        local
+    }
+
+    /// This Mac's login: the top-level windows.
+    fn refresh_local_claude(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
         let now = now_ms();
         let account = claude_account_identity();
         let generation = {
@@ -1086,11 +1200,15 @@ impl UsageStore {
     /// snapshot intact.
     pub fn refresh_codex(&self, manual: bool, cadence: Option<i64>) -> Result<()> {
         let now = now_ms();
-        if !begin_codex_refresh(&mut self.inner.lock().unwrap(), now, manual, cadence) {
-            return Ok(());
-        }
-        let answer = read_codex();
-        finish_codex_refresh(&mut self.inner.lock().unwrap(), answer, now)
+        let local_cadence = self.local_cadence("codex", cadence);
+        let local = if begin_codex_refresh(&mut self.inner.lock().unwrap(), now, manual, local_cadence) {
+            let answer = read_codex();
+            finish_codex_refresh(&mut self.inner.lock().unwrap(), answer, now)
+        } else {
+            Ok(())
+        };
+        self.refresh_accounts("codex", manual, cadence);
+        local
     }
 
     /// Redeem the next available Codex reset credit through the same local

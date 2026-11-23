@@ -25,7 +25,7 @@ vi.mock("@/components/chat/Dictation", () => ({
   useDictationShortcuts: vi.fn(),
 }));
 vi.mock("@/lib/hotkeys", () => ({ keycaps: () => [], useHotkey: vi.fn(), useShortcut: vi.fn(), useShortcutKeys: () => [], useShortcutKeycaps: () => () => [] }));
-const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[] }));
+const listed = vi.hoisted(() => ({ models: [] as import("@/lib/api").ModelInfo[], loaded: false }));
 vi.mock("@/lib/models", async (original) => ({
   // The pure helpers stay real; only the list and its loading are stubbed.
   ...(await original<typeof import("@/lib/models")>()),
@@ -34,6 +34,7 @@ vi.mock("@/lib/models", async (original) => ({
   refreshModels: vi.fn(),
   upgradeHint: () => null,
   useModels: () => listed.models,
+  useModelsLoaded: () => listed.loaded,
 }));
 vi.mock("@/lib/dialogs", () => ({ chooseMode: vi.fn() }));
 
@@ -90,6 +91,37 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
+
+/** Open a row's submenu (Agent, Model, Effort) in the open model picker and return it. */
+async function openRow(name: RegExp): Promise<HTMLElement> {
+  const top = (await screen.findAllByRole("menu", { hidden: true }))[0]!;
+  fireEvent.keyDown(within(top).getByRole("menuitem", { name, hidden: true }), { key: "ArrowRight" });
+  return waitFor(() => {
+    const menus = screen.getAllByRole("menu", { hidden: true });
+    if (menus.length < 2) throw new Error(`the ${name} submenu is not open`);
+    return menus.at(-1)!;
+  });
+}
+
+/** Close an open submenu, back to the picker. */
+async function closeRow(sub: HTMLElement) {
+  fireEvent.keyDown(sub, { key: "ArrowLeft" });
+  await waitFor(() => expect(screen.getAllByRole("menu", { hidden: true })).toHaveLength(1));
+}
+
+/** The open picker's choices, the Model submenu's and then the Effort submenu's, as `[text, ticked, disabled]`. */
+async function pickerChoices(): Promise<{ text: string; ticked: boolean; disabled: boolean }[]> {
+  const rows: { text: string; ticked: boolean; disabled: boolean }[] = [];
+  const top = (await screen.findAllByRole("menu", { hidden: true }))[0]!;
+  for (const name of [/^Model/, /^Effort/]) {
+    if (!within(top).queryByRole("menuitem", { name, hidden: true })) continue;
+    const sub = await openRow(name);
+    rows.push(...within(sub).queryAllByRole("menuitemradio", { hidden: true }).map((item) => ({ text: item.textContent ?? "", ticked: item.getAttribute("aria-checked") === "true", disabled: item.getAttribute("aria-disabled") === "true" })));
+    await closeRow(sub);
+  }
+  return rows;
+}
+const choiceTexts = async () => (await pickerChoices()).map((row) => row.text);
 
 it("shows setup progress while still letting the agent take a prompt", async () => {
   const onSend = vi.fn();
@@ -270,6 +302,37 @@ describe("composer attachments", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "inspect_attachments")).toHaveLength(1);
   });
 
+  it("PRO-407: a machine tab takes any file, sends it with the message, and leaves a dropped folder out with a word", async () => {
+    nativeFiles((path) => (path.endsWith(".png") ? { mediaType: "image/png", data: "YWJj", name: "shot.png" } : null));
+    let drop: (event: { payload: { type: string; paths: string[] } }) => Promise<void> = async () => undefined;
+    let listening = 0;
+    dragDropListener.mockImplementation(async (listener: typeof drop) => {
+      drop = listener;
+      listening += 1;
+      return vi.fn();
+    });
+    const onSend = vi.fn();
+    function Machine() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={tab} remote attachFiles busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    }
+    const { container } = render(<Machine />);
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(listening).toBeGreaterThan(0));
+    await act(async () => drop({ payload: { type: "over", paths: [] } }));
+    expect(screen.getByText("Drop files to attach")).toBeTruthy();
+    await act(async () => drop({ payload: { type: "drop", paths: ["/Users/me/notes.txt", "/Users/me/project"] } }));
+    expect(await screen.findByTitle("notes.txt")).toBeTruthy();
+    // A folder's path here names nothing on the machine: never mentioned, and said.
+    expect(box.value).toBe("");
+    expect(screen.getByTestId("attach-notice").textContent).toBe("project was not attached: only files can be sent to an agent on another computer, not folders.");
+    // The picker offers every file, not only images.
+    expect(container.querySelector<HTMLInputElement>('input[type="file"]')!.accept).toBe("");
+    fireEvent.change(box, { target: { value: "Read this" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send" })));
+    expect(onSend).toHaveBeenCalledWith("Read this", [], false, [expect.objectContaining({ name: "notes.txt", path: "/Users/me/notes.txt" })]);
+  });
+
   it("hands over the very same image when a failed send is tried again", async () => {
     const sent: unknown[] = [];
     const onSend = vi.fn(async (_text: string, images: unknown[]) => {
@@ -308,24 +371,28 @@ describe("composer pickers", () => {
   // hidden: an open modal menu hides the rest of the page from the accessibility tree.
   const picker = (name: RegExp) => screen.getByRole("button", { name, hidden: true });
 
-  it("offers handoff as a new tab and warns about the cache before a mid-chat setting change", async () => {
+  it("offers handoff as a new tab under Agent, with no standing warning about the cache", async () => {
     const run = vi.fn();
     const onSetModel = vi.fn();
     const props = { tab, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel, onSetEffort: vi.fn(), onSetMode: vi.fn() };
     const { rerender } = render(<Composer {...props} hasConversation agentHandoff={{ id: "claude", name: "Claude Code", run }} />);
     mouseClick(screen.getByTestId("model-picker"));
-    const handoff = await screen.findByRole("menuitem", { name: /Hand off to Claude Code/ });
+    const top = await screen.findByRole("menu");
+    // Agent, Model and Effort are rows that each open a submenu.
+    expect(within(top).getByTestId("model-picker-agent").textContent).toBe("AgentCodex");
+    expect(top.textContent).not.toContain("prompt cache");
+    expect(screen.queryByRole("note")).toBeNull();
+    const agents = await openRow(/^Agent/);
+    const handoff = within(agents).getByRole("menuitem", { name: /Hand off to Claude Code/, hidden: true });
     expect(handoff.textContent).toContain("Opens in a new tab");
-    expect(screen.getByRole("note").textContent).toContain("rebuild the prompt cache");
-    expect(onSetModel).not.toHaveBeenCalled();
     fireEvent.click(handoff);
     expect(run).toHaveBeenCalledTimes(1);
     expect(onSetModel).not.toHaveBeenCalled();
     rerender(<Composer {...props} />);
     mouseClick(screen.getByTestId("model-picker"));
     await screen.findByRole("menu");
-    expect(screen.queryByRole("menuitem", { name: /Hand off/ })).toBeNull();
-    expect(screen.queryByRole("note")).toBeNull();
+    await openRow(/^Agent/);
+    expect(screen.queryByRole("menuitem", { name: /Hand off/, hidden: true })).toBeNull();
   });
 
   it("the model picker opens on a real mouse click and closes on a second one", async () => {
@@ -345,7 +412,7 @@ describe("composer pickers", () => {
 
   it("open on an accessibility press (a click with no pointerdown)", async () => {
     render(<TestComposer onSend={vi.fn()} />);
-    for (const name of [/Default/, /More options/]) {
+    for (const name of [/Default/, /^Permission mode/]) {
       accessibilityPress(picker(name));
       await screen.findByRole("menu");
       fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
@@ -394,28 +461,31 @@ describe("a Claude alias in the model picker (#256)", () => {
   it("offers a cloud tab the aliases only, and keeps a pinned version it is already on", async () => {
     const view = show({ modelsAreLocal: false });
     mouseClick(screen.getByTitle("Model: Opus (latest)"));
-    let menu = await screen.findByRole("menu");
+    await screen.findByRole("menu");
     // The desktop's pinned versions may not exist on the workspace's CLI.
-    expect(menu.textContent).not.toContain("Pinned version");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+    const sub = await openRow(/^Model/);
+    expect(sub.textContent).not.toContain("Pinned version");
+    await closeRow(sub);
+    expect(await choiceTexts()).toEqual(["Opuslatest", "low", "high"]);
     view.unmount();
     show({ modelsAreLocal: false, tab: { ...onOpus, model: "claude-opus-5" } });
     mouseClick(screen.getByTitle("Model: Opus 5"));
-    menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
-    expect(within(menu).getByRole("menuitemradio", { name: "Opus 5" }).getAttribute("aria-disabled")).toBe("true");
+    const choices = await pickerChoices();
+    expect(choices.map((row) => row.text)).toEqual(["Opuslatest", "Opus 5", "low", "high"]);
+    expect(choices.find((row) => row.text === "Opus 5")?.disabled).toBe(true);
   });
 
   it("offers the alias and, apart, the versions that can be pinned", async () => {
     const onSetModel = vi.fn();
     show({ onSetModel });
     mouseClick(screen.getByTitle("Model: Opus (latest, running Opus 5.5)"));
-    const menu = await screen.findByRole("menu");
+    expect(await choiceTexts()).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
+    const menu = await openRow(/^Model/);
     expect(menu.textContent).toContain("Pinned version");
-    const items = within(menu).getAllByRole("menuitemradio").map((item) => item.textContent);
-    expect(items).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "low", "high"]);
-    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5" }));
+    // Before the first turn a pick applies at once.
+    fireEvent.click(within(menu).getByRole("menuitemradio", { name: "Opus 5", hidden: true }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
   });
 
   it("offers the VM's pinned versions and resolved alias, then aliases only when disconnected", async () => {
@@ -427,15 +497,16 @@ describe("a Claude alias in the model picker (#256)", () => {
     show({ modelsAreLocal: false, modelClient: client, onSetModel });
     const button = await screen.findByTitle("Model: Opus (latest, running Opus 4.6)");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
+    await screen.findByRole("menu");
+    const menu = await openRow(/^Model/);
     expect(within(menu).getByText("latest · Opus 4.6")).toBeTruthy();
-    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5" })).toBeNull();
-    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6" }));
+    expect(within(menu).queryByRole("menuitemradio", { name: "Opus 5.5", hidden: true })).toBeNull();
+    mouseClick(within(menu).getByRole("menuitemradio", { name: "Opus 4.6", hidden: true }));
     expect(onSetModel).toHaveBeenCalledWith("claude-opus-4-6");
+    await waitFor(() => expect(screen.queryByRole("menu", { hidden: true })).toBeNull());
     act(() => runtime.emit({ state: "suspended" }));
     mouseClick(screen.getByTitle("Model: Opus (latest)"));
-    const offline = await screen.findByRole("menu");
-    expect(within(offline).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest", "low", "high"]);
+    expect(await choiceTexts()).toEqual(["Opuslatest", "low", "high"]);
   });
 
   it("reads a stored pinned id the list no longer carries", async () => {
@@ -445,9 +516,9 @@ describe("a Claude alias in the model picker (#256)", () => {
     expect(button.textContent).toBe("Opus 4.8");
     // and it keeps the effort menu of its family and its own ticked row.
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "Opus 4.8", "low", "high"]);
-    expect(within(menu).getByRole("menuitemradio", { name: "Opus 4.8" }).getAttribute("aria-checked")).toBe("true");
+    const choices = await pickerChoices();
+    expect(choices.map((row) => row.text)).toEqual(["Opuslatest · Opus 5.5", "Opus 5.5", "Opus 5", "Opus 4.8", "low", "high"]);
+    expect(choices.find((row) => row.text === "Opus 4.8")?.ticked).toBe(true);
   });
 });
 
@@ -457,6 +528,7 @@ describe("the pickers show what the agent is running (#404)", () => {
   const show = (shown: TabEntry, props: Partial<Parameters<typeof Composer>[0]> = {}) =>
     render(<Composer tab={shown} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
   const ticked = (menu: HTMLElement) => within(menu).getAllByRole("menuitemradio").filter((item) => item.getAttribute("aria-checked") === "true").map((item) => item.textContent);
+  const tickedChoices = async () => (await pickerChoices()).filter((row) => row.ticked).map((row) => row.text);
   const pending = () => screen.queryByTestId("composer-settings-pending")?.textContent ?? null;
 
   beforeEach(() => {
@@ -470,7 +542,7 @@ describe("the pickers show what the agent is running (#404)", () => {
     show(onSol);
     expect(pending()).toBeNull();
     mouseClick(screen.getByTitle("Model: GPT-5.6 Sol · low"));
-    expect(ticked(await screen.findByRole("menu"))).toEqual(["GPT-5.6 Sol", "low"]);
+    expect(await tickedChoices()).toEqual(["GPT-5.6 Sol", "low"]);
   });
 
   it("keeps showing the running model and effort while a change waits for the turn", async () => {
@@ -480,9 +552,9 @@ describe("the pickers show what the agent is running (#404)", () => {
     expect(button.textContent).toBe("GPT-5.6 Sollow");
     expect(pending()).toBe("Switching to GPT-6 Astra · High after this turn");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(ticked(menu)).toEqual(["GPT-5.6 Sol", "low"]);
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astraswitching…", "low", "highswitching…"]);
+    const choices = await pickerChoices();
+    expect(choices.filter((row) => row.ticked).map((row) => row.text)).toEqual(["GPT-5.6 Sol", "low"]);
+    expect(choices.map((row) => row.text)).toEqual(["GPT-5.6 Sol", "GPT-6 Astraswitching…", "low", "highswitching…"]);
   });
 
   it("says a change to an idle agent is on its way, for either setting alone", () => {
@@ -509,10 +581,10 @@ describe("the pickers show what the agent is running (#404)", () => {
     const button = screen.getByTitle("Model: GPT-9 Nova · ultra");
     expect(button.textContent).toBe("GPT-9 Novaultra");
     mouseClick(button);
-    const menu = await screen.findByRole("menu");
-    expect(ticked(menu)).toEqual(["GPT-9 Nova", "ultra"]);
+    const choices = await pickerChoices();
+    expect(choices.filter((row) => row.ticked).map((row) => row.text)).toEqual(["GPT-9 Nova", "ultra"]);
     // What can be chosen instead is still offered.
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "GPT-9 Nova", "low", "high", "ultra"]);
+    expect(choices.map((row) => row.text)).toEqual(["GPT-5.6 Sol", "GPT-6 Astra", "GPT-9 Nova", "low", "high", "ultra"]);
   });
 
   it("names a requested model it has no entry for by its id", () => {
@@ -566,7 +638,7 @@ describe("the pickers show what the agent is running (#404)", () => {
     mouseClick(button);
     const menu = await screen.findByRole("menu");
     expect(menu.textContent).not.toContain("Effort");
-    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.textContent)).toEqual(["Auto", "GPT-5"]);
+    expect(await choiceTexts()).toEqual(["Auto", "GPT-5"]);
   });
 });
 
@@ -647,13 +719,13 @@ describe("composer history (PRO-85)", () => {
   // The draft lives outside the composer, as a tab's does, so it outlasts a remount.
   const drafts = new Map<string, string>();
 
-  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold" }) {
+  function HistoryComposer({ history = SENT, cwd, onSend = vi.fn(), id = "tab-history", followUps, held = null }: { history?: string[]; cwd?: string; onSend?: (text: string) => Promise<void> | void; id?: string; followUps?: "now" | "hold"; held?: string | null }) {
     const [draft, setDraft] = useState(drafts.get(id) ?? "");
     const change = (text: string) => {
       drafts.set(id, text);
       setDraft(text);
     };
-    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+    return <Composer tab={{ ...tab, id }} followUps={followUps} cwd={cwd} busy={!!followUps} draft={draft} onDraftChange={change} onSend={onSend} history={history} heldReason={held} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
   }
 
   const field = () => document.querySelector("textarea") as HTMLTextAreaElement;
@@ -797,6 +869,27 @@ describe("composer history (PRO-85)", () => {
     await waitFor(() => expect(field().value).toBe("work in progress"));
     press("ArrowUp");
     expect(field().value).toBe("third message");
+  });
+
+  // PRO-352 (21.09): while a machine is away, what is typed stays, and nothing goes until the person sends it once it is back.
+  it("keeps a prompt typed while its machine is away, and sends it only when the person does after it is back", async () => {
+    const onSend = vi.fn();
+    const view = render(<HistoryComposer onSend={onSend} held="Can't send until Mac mini is back" />);
+    expect(field().disabled).toBe(false);
+    expect(field().placeholder).toBe("Can't send until Mac mini is back");
+    type("check the relay e2e again");
+    press("Enter");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+
+    // Back: nothing was queued, and the prompt goes when the person sends it.
+    view.rerender(<HistoryComposer onSend={onSend} />);
+    expect(onSend).not.toHaveBeenCalled();
+    expect(field().value).toBe("check the relay e2e again");
+    press("Enter");
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("check the relay e2e again", []));
   });
 
   it("clears the composer after an ordinary send, and Shift+Return still does not send", async () => {
@@ -952,6 +1045,24 @@ describe("composer history (PRO-85)", () => {
     expect(selected()).toContain("b.ts");
   });
 
+  it("offers saved snippets under / by name, and choosing one puts its text in (PRO-379)", async () => {
+    act(() => setPrefs({ promptSnippets: [{ id: "a", name: "review-pr", text: "Review the open PR.\nList risks." }] }));
+    try {
+      const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: null };
+      function CloudComposer() {
+        const [draft, setDraft] = useState("");
+        return <Composer tab={tab} commands={{ key: "cloud|snippets", known: () => null, load: async () => list }} busy={false} draft={draft} onDraftChange={setDraft} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />;
+      }
+      render(<CloudComposer />);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "/", selectionStart: 1 } });
+      await waitFor(() => expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual(["/review-prReview the open PR.Snippet", "/compactShorten"]));
+      fireEvent.change(box, { target: { value: "/rev", selectionStart: 4 } });
+      fireEvent.mouseDown(await screen.findByRole("option", { name: /review-pr/ }));
+      await waitFor(() => expect(box.value).toBe("Review the open PR.\nList risks."));
+    } finally { act(() => setPrefs({ promptSnippets: [] })); }
+  });
+
   it("lists a cloud tab's commands from its source instead of the local CLI, and says why some are missing", async () => {
     const list = { commands: [{ name: "compact", description: "Shorten", source: "builtin" as const }], note: "Other commands need someone who can approve permissions." };
     const load = vi.fn(async () => list);
@@ -986,8 +1097,7 @@ describe("composer history (PRO-85)", () => {
     const view = render(<CloudComposer connected />);
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
     // The button opens the list on the shallowest files, as a bare `@` does locally.
-    fireEvent.keyDown(screen.getByRole("button", { name: "More options" }), { key: "Enter" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: /Mention a file/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
     expect((await screen.findByRole("option")).textContent).toContain("README.md");
     fireEvent.change(box, { target: { value: "read @log", selectionStart: 9 } });
     await waitFor(() => expect(screen.getByRole("option").textContent).toContain("src/auth/login.rs"));
@@ -997,6 +1107,7 @@ describe("composer history (PRO-85)", () => {
     expect(invoke).not.toHaveBeenCalledWith("search_files", expect.anything());
     // Not connected: no list and no button, and nothing is asked.
     view.rerender(<CloudComposer connected={false} />);
+    expect(screen.queryByRole("button", { name: "Mention a file" })).toBeNull();
     search.mockClear();
     fireEvent.change(box, { target: { value: "read @", selectionStart: 6 } });
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -1057,9 +1168,9 @@ describe("composer history (PRO-85)", () => {
     expect(field().value).toBe("earlier");
   });
 
-  it("the model and options menus take the arrows while open", async () => {
+  it("the model and permission menus take the arrows while open", async () => {
     render(<HistoryComposer />);
-    for (const name of [/Default/, /More options/]) {
+    for (const name of [/Default/, /^Permission mode/]) {
       mouseClick(screen.getByRole("button", { name, hidden: true }));
       await screen.findByRole("menu");
       expect(press("ArrowUp")).toBe(false);
@@ -1169,13 +1280,55 @@ describe("autocorrect in the composer (#525)", () => {
 // #637: hold the delivery promise independently of any agent response.
 // #727: the message leaves the composer as Send is pressed; the chat draws it as sending.
 describe("pending send acknowledgment", () => {
-  it.each(["/goal Reduce p95 latency below 120 ms", "/goal", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
+  it.each(["/goal Reduce p95 latency below 120 ms", "/goal pause", "/goal resume", "/goal clear"])("passes %s through to Codex unchanged", async (command) => {
     const onSend = vi.fn();
     render(<TestComposer onSend={onSend} />);
     const field = screen.getByRole("textbox");
     fireEvent.change(field, { target: { value: command } });
     fireEvent.keyDown(field, { key: "Enter" });
     await waitFor(() => expect(onSend).toHaveBeenCalledExactlyOnceWith(command, []));
+  });
+
+  // PRO-380 (03.20): a bare /goal says nothing to set; it stays, with the composer edged red and a hint under it.
+  it.each(["/goal", "/goal   "])("keeps %j in a Codex composer and says what is missing", async (command) => {
+    const onSend = vi.fn();
+    render(<TestComposer onSend={onSend} />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: command } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect((await screen.findByRole("alert")).textContent).toBe("Type a goal after /goal, like “/goal ship saved views with tests”");
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.value).toBe(command);
+    expect(onSend).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: "/goal ship it" } });
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+    fireEvent.change(field, { target: { value: "/goal" } });
+    // Said again only when it is sent again.
+    expect(screen.queryByTestId("goal-missing")).toBeNull();
+  });
+
+  it("does not send a /goal to Claude Code and offers a Codex tab", async () => {
+    const { getErrorToasts, dismissError } = await import("@/lib/errorToasts");
+    const onSend = vi.fn();
+    const openCodex = vi.fn();
+    function Claude() {
+      const [draft, setDraft] = useState("");
+      return <Composer tab={{ ...tab, harness: "claude", title: "Review saved views" }} busy={false} draft={draft} onDraftChange={setDraft} onSend={onSend} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} onOpenCodexTab={openCodex} />;
+    }
+    render(<Claude />);
+    const field = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(field, { target: { value: "/goal Keep the overview tests green" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    const toast = getErrorToasts().at(-1)!;
+    expect(toast.title).toBe("Goals work in Codex chats only");
+    expect(toast.action).toBe("“Review saved views” runs Claude Code, which has no goals. Your text is still in the composer");
+    expect(toast.icon).toBe("target");
+    expect(toast.copy).toBe(false);
+    toast.actions![0].run();
+    expect(openCodex).toHaveBeenCalled();
+    expect(field.value).toBe("/goal Keep the overview tests green");
+    expect(onSend).not.toHaveBeenCalled();
+    dismissError(toast.id);
   });
 
   it.each(["click", "keyboard"])("hands the message on at once from a %s, and submits once until acceptance", async (action) => {
@@ -1389,6 +1542,17 @@ it.each([false, true])("waits for PR context before sending, unless Escape cance
   if (cancel) await act(async () => finish("/context/pr-12.md"));
 });
 
+// PRO-352: a held composer (its machine is away) sends nothing, Compact included.
+it("does not compact while its machine is away", async () => {
+  const send = vi.fn();
+  render(<Composer tab={tab} busy={false} draft="" onDraftChange={vi.fn()} onSend={send} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} contextUsed={90000} contextMax={100000} heldReason="Can't send until Mac mini is back" />);
+  fireEvent.click(screen.getByRole("button", { name: "Context 90% used" }));
+  const compact = (await screen.findByRole("button", { name: "Compact now" })) as HTMLButtonElement;
+  expect(compact.disabled).toBe(true);
+  fireEvent.click(compact);
+  expect(send).not.toHaveBeenCalled();
+});
+
 it("compacts from the ring through the CLI send path while keeping the draft", async () => {
   const send = vi.fn();
   const change = vi.fn();
@@ -1407,8 +1571,10 @@ describe("attaching any file (PRO-290)", () => {
   const file = (name: string, type = "text/plain", bytes: Uint8Array = new Uint8Array([1, 2, 3])) => new File([bytes], name, { type });
   const dropOn = (container: HTMLElement, files: File[]) =>
     fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files, types: ["Files"] } });
-  const chips = () => screen.queryAllByTestId("file-chip");
-  const sentChips = () => chips().filter((chip) => !chip.hasAttribute("data-refused"));
+  /** Every file above the draft: a refused one as a red chip, the rest with their previews (PRO-461). */
+  const chips = () => [...document.querySelectorAll<HTMLElement>('[data-testid="file-chip"], [data-testid="attachment-preview"]')];
+  const sentChips = () => screen.queryAllByTestId("attachment-preview");
+  const nameOf = (chip: HTMLElement) => within(chip).getByTestId("attachment-name").textContent;
   /** Nine traces, the reserved name, then six more: 10 attached, 1 refused, 4 not added (screen 03.23). */
   const fifteen = () => [
     ...Array.from({ length: 9 }, (_, i) => file(`trace-${i + 1}.log`)),
@@ -1423,7 +1589,7 @@ describe("attaching any file (PRO-290)", () => {
     dropOn(container, fifteen());
     await waitFor(() => expect(chips()).toHaveLength(11));
     expect(sentChips()).toHaveLength(10);
-    expect(sentChips().map((chip) => chip.textContent)).toEqual([...Array.from({ length: 9 }, (_, i) => `trace-${i + 1}.log`), "extra-1.log"]);
+    expect(sentChips().map(nameOf)).toEqual([...Array.from({ length: 9 }, (_, i) => `trace-${i + 1}.log`), "extra-1.log"]);
     const summary = screen.getByTestId("attachment-summary");
     expect(summary.textContent).toBe("10 attached · 1 refused · 4 not added");
     expect(within(summary).getByText("1 refused").className).toContain("text-destructive");
@@ -1475,7 +1641,7 @@ describe("attaching any file (PRO-290)", () => {
     const pending = renderHook(() => useComposerSend("tab-1"));
     onSend.mockImplementation(() => {
       // The message drawn as sending lists its files by name.
-      expect(pending.result.current.pending?.message?.files).toEqual([{ name: "notes.md" }, { name: "huge.png" }]);
+      expect(pending.result.current.pending?.message?.files).toEqual([{ name: "notes.md", size: 3 }, { name: "huge.png", size: 5 * 1024 * 1024 + 1 }]);
     });
     dropOn(container, [file("notes.md", "text/markdown"), file("shot.png", "image/png"), file("huge.png", "image/png", new Uint8Array(5 * 1024 * 1024 + 1))]);
     await waitFor(() => expect(chips()).toHaveLength(3));
@@ -1510,7 +1676,7 @@ describe("attaching any file (PRO-290)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
     // Back above the draft, in their order.
-    await waitFor(() => expect(chips().map((chip) => chip.textContent)).toEqual(["notes.md", "shot.png"]));
+    await waitFor(() => expect(chips().map(nameOf)).toEqual(["notes.md", "shot.png"]));
     await waitFor(() => expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
@@ -1518,5 +1684,162 @@ describe("attaching any file (PRO-290)", () => {
     expect(again[3][0]).toBe(first[3][0]);
     expect(again[1][0]).toBe(first[1][0]);
     await waitFor(() => expect(chips()).toHaveLength(0));
+  });
+});
+
+describe("attachment previews (PRO-461)", () => {
+  const dropOn = (container: HTMLElement, files: File[]) =>
+    fireEvent.drop(container.querySelector("textarea")!.parentElement!, { dataTransfer: { files, types: ["Files"] } });
+
+  it("shows an image as a thumbnail that opens the image viewer, and keeps its remove control", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    dropOn(container, [new File([new Uint8Array([1])], "Screenshot 1.42.png", { type: "image/png" }), new File([new Uint8Array([2])], "Screenshot 1.43.png", { type: "image/png" })]);
+    const tiles = await waitFor(() => {
+      const found = screen.getAllByTestId("attachment-preview");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(tiles.map((tile) => tile.dataset.kind)).toEqual(["image", "image"]);
+    expect(within(tiles[1]).getByRole("img", { name: "Screenshot 1.43.png" }).getAttribute("src")).toMatch(/^blob:/);
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("2 attached");
+    const { useImageViewer, closeImageViewer } = await import("@/lib/imageViewer");
+    const viewer = renderHook(() => useImageViewer());
+    fireEvent.click(screen.getByRole("button", { name: "View Screenshot 1.43.png" }));
+    expect(viewer.result.current?.index).toBe(1);
+    expect(viewer.result.current?.images.map((image) => image.name)).toEqual(["Screenshot 1.42.png", "Screenshot 1.43.png"]);
+    act(() => closeImageViewer());
+    fireEvent.click(screen.getByRole("button", { name: "Remove Screenshot 1.42.png" }));
+    await waitFor(() => expect(screen.getAllByTestId("attachment-preview")).toHaveLength(1));
+    expect(screen.getByTestId("attachment-summary").textContent).toBe("1 attached");
+  });
+
+  it("shows a text file's first lines, and any other file's type and size", async () => {
+    const { container } = render(<TestComposer onSend={vi.fn()} />);
+    dropOn(container, [
+      new File(["\n# Plan\n\nShip the previews.\nThen the rest.\nNot this line.\n"], "plan.md", { type: "text/markdown" }),
+      new File([new Uint8Array(2048)], "spec.pdf", { type: "application/pdf" }),
+    ]);
+    const [text, pdf] = await waitFor(() => {
+      const found = screen.getAllByTestId("attachment-preview");
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(text.dataset.kind).toBe("text");
+    await waitFor(() => expect(within(text).getByTestId("attachment-text").textContent).toBe("# Plan\n\nShip the previews."));
+    expect(pdf.dataset.kind).toBe("file");
+    expect(within(pdf).getByTestId("attachment-name").textContent).toBe("spec.pdf");
+    expect(within(pdf).getByTestId("attachment-meta").textContent).toBe("2 KB · PDF");
+    expect(within(pdf).getByRole("button", { name: "Remove spec.pdf" })).toBeTruthy();
+  });
+
+  it("shows a picked image that goes as a file through the media server, and lets the grant go when it is removed", async () => {
+    openDialog.mockResolvedValue(["/Users/me/Desktop/photo.heic"]);
+    invoke.mockImplementation(async (command: string, args?: { paths?: string[]; root?: string; rel?: string; token?: string }) => {
+      if (command === "inspect_attachments") return args!.paths!.map((path) => ({ path, name: path.split("/").pop()!, size: 4_200_000, mediaType: "image/heic" }));
+      if (command === "open_media_file") return { token: "grant-1", url: "http://127.0.0.1:9/grant-1", mtimeMs: 1 };
+      return undefined;
+    });
+    render(<TestComposer onSend={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    const tile = await screen.findByTestId("attachment-preview");
+    expect(invoke).toHaveBeenCalledWith("open_media_file", { root: "/Users/me/Desktop", rel: "photo.heic" });
+    expect(within(tile).getByRole("img", { name: "photo.heic" }).getAttribute("src")).toBe("http://127.0.0.1:9/grant-1");
+    fireEvent.click(screen.getByRole("button", { name: "Remove photo.heic" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("close_media_file", { token: "grant-1" }));
+  });
+});
+
+describe("the composer's model picker (PRO-397)", () => {
+  const entry = (id: string, label: string) => ({ id, label, harness: "claude", efforts: ["low", "high"], defaultEffort: "high", acceptsImages: true, isDefault: false, upgrade: null, description: null });
+  const onOpus: TabEntry = { ...tab, harness: "claude", model: "claude-opus-5-5", effort: "high" };
+  const show = (props: Partial<Parameters<typeof Composer>[0]> = {}) =>
+    render(<Composer tab={onOpus} busy={false} draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} {...props} />);
+  const pickSonnet = async () => {
+    mouseClick(screen.getByTestId("model-picker"));
+    await screen.findByRole("menu");
+    fireEvent.click(within(await openRow(/^Model/)).getByRole("menuitemradio", { name: "Sonnet 5.5", hidden: true }));
+    await waitFor(() => expect(screen.queryByRole("menu", { hidden: true })).toBeNull());
+  };
+
+  beforeEach(() => {
+    listed.models = [entry("claude-opus-5-5", "Opus 5.5"), entry("claude-sonnet-5-5", "Sonnet 5.5")];
+  });
+  afterEach(() => {
+    listed.models = [];
+  });
+
+  it("puts the model and the permission mode at the left, and the context, mention, attach, mic and Send at the right", () => {
+    show({ files: { key: "repo", search: async () => [] }, contextUsed: 31_000, contextMax: 100_000 });
+    const toolbar = document.querySelector("[data-composer-toolbar]")!;
+    const order = [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("data-testid") ?? button.getAttribute("aria-label"));
+    expect(order).toEqual(["model-picker", "permission-mode", "Context 31% used", "Mention a file", "Attach files", "Dictate", "Send"]);
+    expect(screen.getByTestId("model-picker").textContent).toBe("Opus 5.5high");
+    expect(screen.getByTestId("permission-mode-label").textContent).toBe("Auto");
+    expect(screen.getByTestId("context-percent").textContent).toBe("31%");
+    expect(screen.queryByRole("button", { name: "More options" })).toBeNull();
+  });
+
+  it("switches at once before the first turn", async () => {
+    const onSetModel = vi.fn();
+    show({ onSetModel });
+    await pickSonnet();
+    expect(onSetModel).toHaveBeenCalledWith("claude-sonnet-5-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+  });
+
+  it("asks before a mid-chat switch, switches only on 'Switch model', and Undo goes back", async () => {
+    const onSetModel = vi.fn();
+    const view = show({ onSetModel, hasConversation: true });
+    await pickSonnet();
+    expect(onSetModel).not.toHaveBeenCalled();
+    const card = screen.getByTestId("model-switch-confirm");
+    expect(within(card).getByText("Mid-chat model change")).toBeTruthy();
+    expect(card.textContent).toContain("Switching to Sonnet 5.5 mid-chat rebuilds the prompt cache.");
+    fireEvent.click(within(card).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(onSetModel).not.toHaveBeenCalled();
+
+    await pickSonnet();
+    fireEvent.click(within(screen.getByTestId("model-switch-confirm")).getByRole("button", { name: "Switch model" }));
+    expect(onSetModel).toHaveBeenCalledExactlyOnceWith("claude-sonnet-5-5");
+    expect(screen.queryByTestId("model-switch-confirm")).toBeNull();
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+    view.rerender(<Composer tab={{ ...onOpus, requestedModel: "claude-sonnet-5-5" }} busy hasConversation draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={onSetModel} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
+    const notice = screen.getByTestId("model-switch-notice");
+    expect(notice.textContent).toBe("Switch requested for Sonnet 5.5·Undo");
+    fireEvent.click(within(notice).getByRole("button", { name: "Undo" }));
+    expect(onSetModel).toHaveBeenLastCalledWith("claude-opus-5-5");
+    expect(screen.queryByTestId("model-switch-notice")).toBeNull();
+  });
+
+  it("says the switch once, not again in the pending line, while the agent has not taken it", async () => {
+    const view = show({ hasConversation: true, busy: true });
+    await pickSonnet();
+    fireEvent.click(screen.getByRole("button", { name: "Switch model" }));
+    view.rerender(<Composer tab={{ ...onOpus, requestedModel: "claude-sonnet-5-5" }} busy hasConversation draft="" onDraftChange={vi.fn()} onSend={vi.fn()} onStop={vi.fn()} onSetModel={vi.fn()} onSetEffort={vi.fn()} onSetMode={vi.fn()} />);
+    expect(screen.getByTestId("model-switch-notice").textContent).toContain("Switch requested for Sonnet 5.5");
+    expect(screen.queryByTestId("composer-settings-pending")).toBeNull();
+  });
+
+  it("keeps the session's model on the button when the agent lists none, and says so beside the Model row", async () => {
+    listed.models = [];
+    // The agent has answered, with nothing.
+    listed.loaded = true;
+    const props = { tab: { ...tab, harness: "codex", model: "gpt-6.1-sol", effort: null }, busy: false, draft: "", onDraftChange: vi.fn(), onSend: vi.fn(), onStop: vi.fn(), onSetModel: vi.fn(), onSetEffort: vi.fn(), onSetMode: vi.fn() };
+    render(<Composer {...props} agentHandoff={{ id: "claude", name: "Claude Code", run: vi.fn() }} />);
+    const button = screen.getByTestId("model-picker");
+    expect(button.textContent).toBe("GPT-6.1 Sol");
+    mouseClick(button);
+    const top = await screen.findByRole("menu");
+    await waitFor(() => expect(within(top).getByTestId("model-picker-model-value").textContent).toBe("None found"));
+    expect(within(top).getByTestId("model-picker-model-value").className).toContain("text-destructive");
+    const card = await openRow(/^Model/);
+    expect(within(card).getByText("No models from Codex")).toBeTruthy();
+    expect(card.textContent).toContain("Its ChatGPT sign-in may have expired");
+    expect(within(card).getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent)).toEqual(["Open Settings › Agents", "Retry"]);
+    expect(card.textContent).toContain("Claude Code models still work.");
+    expect(button.textContent).toBe("GPT-6.1 Sol");
+    listed.loaded = false;
   });
 });

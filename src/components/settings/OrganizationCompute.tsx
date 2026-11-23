@@ -2,58 +2,58 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw } from "@/icons";
 import { Button } from "@/components/ui/button";
 import {
-  COMPUTE_PROVIDERS,
   IDLE_CAP_OPTIONS,
   alertMessage,
+  checkLimits,
   computeErrorMessage,
+  createBudgetSentence,
   effectiveRunningLimit,
+  effectiveWorkspaceLimit,
   formatHours,
   formatMicros,
   organizationCompute,
   parseAllowList,
-  providerLabel,
+  usageText,
   type ComputePolicy,
   type ComputePolicyView,
   type ComputeProviderUsage,
   type ComputeUsageReport,
+  type LimitField,
+  type LimitsText,
 } from "@/lib/organizationCompute";
-import { machine0Offered } from "@/lib/hiddenProviders";
+import { api } from "@/lib/api";
+import { cloudProviderDescriptor, cloudProviderIsPlatform, cloudProviderLabel as providerLabel, useCloudProviderDescriptors } from "@/lib/cloudProviders";
 
 const inputClass = "h-7 rounded-md border border-hairline bg-background px-2 text-xs disabled:opacity-60";
 
-interface LimitsDraft {
-  maxWorkspaces: string;
-  maxRunningWorkspaces: string;
-  perMember: string;
-  createsPerHour: string;
-  createsPerDay: string;
+interface LimitsDraft extends LimitsText {
   maxIdleSuspendMinutes: string;
   machineClasses: Record<string, string>;
   locations: Record<string, string>;
 }
 
+// A limit that is not set is an empty field, which says "No limit" (PRO-371).
+const limitText = (limit: number | null | undefined) => (limit == null ? "" : String(limit));
+
 const draftFrom = (policy: ComputePolicy): LimitsDraft => ({
-  maxWorkspaces: String(policy.maxWorkspaces),
-  maxRunningWorkspaces: policy.maxRunningWorkspaces === null ? "" : String(policy.maxRunningWorkspaces),
-  perMember: policy.maxRunningWorkspacesPerMember == null ? "" : String(policy.maxRunningWorkspacesPerMember),
-  createsPerHour: policy.maxCreatesPerMemberPerHour == null ? "" : String(policy.maxCreatesPerMemberPerHour),
-  createsPerDay: policy.maxCreatesPerMemberPerDay == null ? "" : String(policy.maxCreatesPerMemberPerDay),
+  maxWorkspaces: limitText(policy.maxWorkspaces),
+  maxRunningWorkspaces: limitText(policy.maxRunningWorkspaces),
+  perMember: limitText(policy.maxRunningWorkspacesPerMember),
+  createsPerHour: limitText(policy.maxCreatesPerMemberPerHour),
+  createsPerDay: limitText(policy.maxCreatesPerMemberPerDay),
   maxIdleSuspendMinutes: policy.maxIdleSuspendMinutes === null ? "" : String(policy.maxIdleSuspendMinutes),
-  machineClasses: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedMachineClasses[provider] ?? []).join(", ")])),
-  locations: Object.fromEntries(COMPUTE_PROVIDERS.map((provider) => [provider, (policy.allowedLocations[provider] ?? []).join(", ")])),
+  machineClasses: Object.fromEntries(Object.entries(policy.allowedMachineClasses).map(([provider, ids]) => [provider, ids.join(", ")])),
+  locations: Object.fromEntries(Object.entries(policy.allowedLocations).map(([provider, ids]) => [provider, ids.join(", ")])),
 });
 
-/** The most the server takes for a create budget. */
-const CREATE_BUDGET_MAX = 500;
+const NO_LIMIT = "No limit";
 
-const limitValue = (text: string, ceiling: number): number | null => {
-  const value = Number(text.trim());
-  return Number.isInteger(value) && value >= 1 && value <= ceiling ? value : null;
-};
+/** What an empty field means, for its placeholder: the limit that applies anyway, or none. */
+const blankMeans = (limit: number | null) => (limit === null ? NO_LIMIT : `${limit} (default)`);
 
-// Providers this build does not edit keep whatever the server holds for them.
+// Providers the form did not edit keep whatever the server holds for them.
 const allowLists = (texts: Record<string, string>, stored: Record<string, string[]>): Record<string, string[]> => ({
-  ...Object.fromEntries(Object.entries(stored).filter(([provider]) => !(COMPUTE_PROVIDERS as readonly string[]).includes(provider))),
+  ...Object.fromEntries(Object.entries(stored).filter(([provider]) => !(provider in texts))),
   ...Object.fromEntries(
     Object.entries(texts).flatMap(([provider, text]) => {
       const ids = parseAllowList(text);
@@ -62,10 +62,16 @@ const allowLists = (texts: Record<string, string>, stored: Record<string, string
   ),
 });
 
-// A hidden provider (Machine0, see hiddenProviders) gets no row unless the
-// policy already limits it, so an admin can still see and clear those limits.
-const shownProviders = (policy: ComputePolicy) =>
-  COMPUTE_PROVIDERS.filter((provider) => provider !== "machine0" || machine0Offered() || Boolean(policy.allowedMachineClasses[provider]?.length || policy.allowedLocations[provider]?.length));
+// Every provider the server describes, in its descriptors' order (PRO-415),
+// and any the policy already limits. A hidden provider (see hiddenProviders)
+// gets no row unless the policy already limits it, so an admin can still see
+// and clear those limits.
+const shownProviders = (policy: ComputePolicy, described: ReturnType<typeof useCloudProviderDescriptors>): string[] => {
+  const limited = (provider: string) => Boolean(policy.allowedMachineClasses[provider]?.length || policy.allowedLocations[provider]?.length);
+  const ordered = [...described.values()].sort((left, right) => left.order - right.order).filter((item) => item.listed || limited(item.id)).map((item) => item.id);
+  const others = [...new Set([...Object.keys(policy.allowedMachineClasses), ...Object.keys(policy.allowedLocations)])].filter((provider) => limited(provider) && !ordered.includes(provider));
+  return [...ordered, ...others];
+};
 
 const formatTime = (timestamp: number | null | undefined) => (timestamp ? new Date(timestamp).toLocaleString() : "never");
 
@@ -85,6 +91,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
 
   const dirtyRef = useRef(false);
   dirtyRef.current = dirty;
+  const described = useCloudProviderDescriptors();
 
   const loadUsage = useCallback(async (fresh: () => boolean) => {
     try {
@@ -127,6 +134,10 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     setBusy(null);
     setError(null);
     void load();
+    // The provider rows come from the server's descriptors: read them, so a
+    // provider the server gained has its row. A failure keeps the ones the
+    // app already knows.
+    api.cloudProviders().catch(() => undefined);
     return () => {
       contextEpoch.current += 1;
     };
@@ -182,31 +193,26 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
   }
 
   const { policy, counts, canEdit } = view;
-  const ceiling = view.workspaceCeiling;
-  const maxWorkspaces = limitValue(draft.maxWorkspaces, ceiling);
-  const runningText = draft.maxRunningWorkspaces.trim();
-  const maxRunning = runningText ? limitValue(runningText, view.runningWorkspaceCeiling ?? ceiling) : null;
-  // The running limit in force, and what a blank field would mean: never
-  // "no limit", since the server always applies one (PRO-76).
-  const runningLimit = effectiveRunningLimit(view);
-  const blankRunningLimit = effectiveRunningLimit({ ...view, policy: { ...policy, maxWorkspaces: maxWorkspaces ?? policy.maxWorkspaces, maxRunningWorkspaces: null } });
-  const runningInvalid = Boolean(runningText) && (maxRunning === null || (maxWorkspaces !== null && maxRunning > maxWorkspaces));
-  // The cap per person (PRO-73), where the server has it. Blank means no cap of its own.
+  const check = checkLimits(draft, view);
+  const limits = check.values;
+  const invalid = new Set<LimitField>(check.problems.flatMap((problem) => problem.fields));
+  const limitsInvalid = check.problems.length > 0;
+  // What an empty "Running at once" would mean under the workspace limit as
+  // typed: the operator's cap where there is one, else no limit (PRO-371).
+  const blankRunningLimit = effectiveRunningLimit({
+    ...view,
+    policy: { ...policy, maxWorkspaces: invalid.has("maxWorkspaces") ? policy.maxWorkspaces : limits.maxWorkspaces, maxRunningWorkspaces: null },
+  });
+  // The cap per person (PRO-73) and the create budgets, where the server has them.
   const hasPerMember = policy.maxRunningWorkspacesPerMember !== undefined;
-  const perMemberText = draft.perMember.trim();
-  const perMember = perMemberText ? limitValue(perMemberText, ceiling) : null;
-  const perMemberInvalid = hasPerMember && Boolean(perMemberText) && (perMember === null || (maxWorkspaces !== null && perMember > maxWorkspaces));
-  // How many one person may create per hour and per day (PRO-73), where the server has it. Blank is the service's default.
   const hasCreateBudget = policy.maxCreatesPerMemberPerHour !== undefined && policy.maxCreatesPerMemberPerDay !== undefined;
-  const budgetValue = (text: string) => (text.trim() ? limitValue(text, CREATE_BUDGET_MAX) : null);
-  const createsPerHour = budgetValue(draft.createsPerHour);
-  const createsPerDay = budgetValue(draft.createsPerDay);
-  const budgetInvalid =
-    hasCreateBudget &&
-    ((Boolean(draft.createsPerHour.trim()) && createsPerHour === null) ||
-      (Boolean(draft.createsPerDay.trim()) && createsPerDay === null) ||
-      (createsPerHour !== null && createsPerDay !== null && createsPerHour > createsPerDay));
-  const limitsInvalid = maxWorkspaces === null || runningInvalid || perMemberInvalid || budgetInvalid;
+  // An empty create budget is the operator's default; "No limit" where the operator set none.
+  const budgetDefaults = view.createBudgetDefaults;
+  const blankBudget = (budget: number | null | undefined) => (budgetDefaults ? blankMeans(budget ?? null) : "Default");
+  const budgetSentence = createBudgetSentence(
+    policy.maxCreatesPerMemberPerHour ?? budgetDefaults?.perHour ?? null,
+    policy.maxCreatesPerMemberPerDay ?? budgetDefaults?.perDay ?? null,
+  );
   // The paused banner already says this.
   const alerts = (usage?.alerts ?? []).filter((alert) => alert.code !== "provisioning-paused");
   const idleOptions = [...new Set([...IDLE_CAP_OPTIONS, ...(policy.maxIdleSuspendMinutes === null ? [] : [policy.maxIdleSuspendMinutes])])].sort((a, b) => a - b);
@@ -214,22 +220,27 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
     setDraft(next);
     setDirty(true);
   };
+  // The providers TerminalX itself provides (PRO-452): no account of the organization's, so the billing note says so.
+  const platformProviders = [...described.values()].filter((item) => item.listed && cloudProviderIsPlatform(item)).sort((left, right) => left.order - right.order);
 
   const saveLimits = () =>
     void mutate("limits", (current) =>
       organizationCompute.updatePolicy(
         {
           expectedVersion: current.policy.version,
-          maxWorkspaces: maxWorkspaces!,
-          maxRunningWorkspaces: maxRunning,
+          // An empty limit is sent as null: no limit (PRO-371).
+          maxWorkspaces: limits.maxWorkspaces,
+          maxRunningWorkspaces: limits.maxRunningWorkspaces,
           // Sent only to a server that reported it: an older one refuses a key it does not know.
-          ...(current.policy.maxRunningWorkspacesPerMember !== undefined ? { maxRunningWorkspacesPerMember: perMember } : {}),
+          ...(current.policy.maxRunningWorkspacesPerMember !== undefined ? { maxRunningWorkspacesPerMember: limits.perMember } : {}),
           ...(current.policy.maxCreatesPerMemberPerHour !== undefined && current.policy.maxCreatesPerMemberPerDay !== undefined
-            ? { maxCreatesPerMemberPerHour: createsPerHour, maxCreatesPerMemberPerDay: createsPerDay }
+            ? { maxCreatesPerMemberPerHour: limits.createsPerHour, maxCreatesPerMemberPerDay: limits.createsPerDay }
             : {}),
           maxIdleSuspendMinutes: draft.maxIdleSuspendMinutes ? Number(draft.maxIdleSuspendMinutes) : null,
           allowedMachineClasses: allowLists(draft.machineClasses, current.policy.allowedMachineClasses),
           allowedLocations: allowLists(draft.locations, current.policy.allowedLocations),
+          // Tells a server since PRO-371 that a workspace limit of 1 here was typed, not an older desktop's stand-in for no limit.
+          ...(current.noLimitAware ? { noLimitAware: true as const } : {}),
         },
         current.contextRevision,
       ),
@@ -259,15 +270,17 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
         Cloud workspaces run on the provider account this organization connected. That provider bills the account directly for compute and storage,
         separately from agent usage and from any TerminalX plan. These limits stop new workspaces from starting; they are not a spending cap. Provider
         billing can arrive late, and stopped disks, archives and snapshots keep charging until they are deleted.
+        {platformProviders.map((item) => (
+          <span key={item.id} data-testid="compute-platform-billing">
+            {" "}
+            {item.label} is provided by TerminalX, with no provider account to connect{item.billing ? `: ${item.billing}` : ""}.
+          </span>
+        ))}
       </p>
 
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs" aria-label="Compute status">
-        <span>
-          Workspaces {counts.workspaces} of {Math.min(policy.maxWorkspaces, ceiling)}
-        </span>
-        <span>
-          Running {counts.running} of {runningLimit}
-        </span>
+        <span>Workspaces {usageText(counts.workspaces, effectiveWorkspaceLimit(view))}</span>
+        <span>Running {usageText(counts.running, effectiveRunningLimit(view))}</span>
       </div>
       {policy.provisioningPaused && (
         <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-[11px]" role="status">
@@ -325,9 +338,12 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                 <input
                   aria-label="Maximum workspaces"
                   inputMode="numeric"
+                  // A server before PRO-371 needs a number here, so nothing is promised for an empty field.
+                  placeholder={view.workspaceCeiling === null ? NO_LIMIT : undefined}
                   className={inputClass}
                   value={draft.maxWorkspaces}
                   disabled={Boolean(busy)}
+                  aria-invalid={invalid.has("maxWorkspaces") || undefined}
                   onChange={(event) => change({ ...draft, maxWorkspaces: event.target.value })}
                 />
               </label>
@@ -336,53 +352,54 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                 <input
                   aria-label="Maximum running workspaces"
                   inputMode="numeric"
-                  placeholder={`${blankRunningLimit} (default)`}
+                  placeholder={blankMeans(blankRunningLimit)}
                   className={inputClass}
                   value={draft.maxRunningWorkspaces}
                   disabled={Boolean(busy)}
+                  aria-invalid={invalid.has("maxRunningWorkspaces") || undefined}
                   onChange={(event) => change({ ...draft, maxRunningWorkspaces: event.target.value })}
                 />
               </label>
               {hasPerMember && (
-                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many running workspaces one person's own creations may hold. Blank: no cap per person; the organization's limit applies.">
+                <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many running workspaces one person's own creations may hold. Blank: no limit per person; the organization's limit, if it has one, applies.">
                   Running per person
                   <input
                     aria-label="Maximum running workspaces per person"
                     inputMode="numeric"
-                    placeholder="No cap"
+                    placeholder={NO_LIMIT}
                     className={inputClass}
                     value={draft.perMember}
                     disabled={Boolean(busy)}
-                    aria-invalid={perMemberInvalid || undefined}
+                    aria-invalid={invalid.has("perMember") || undefined}
                     onChange={(event) => change({ ...draft, perMember: event.target.value })}
                   />
                 </label>
               )}
               {hasCreateBudget && (
                 <>
-                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in an hour, whatever became of them. Blank: the default.">
+                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in an hour, whatever became of them. Blank: this TerminalX service's default, or no limit where it has none.">
                     New per person, per hour
                     <input
                       aria-label="Maximum workspaces one person may create per hour"
                       inputMode="numeric"
-                      placeholder={view.createBudgetDefaults ? `${view.createBudgetDefaults.perHour} (default)` : "Default"}
+                      placeholder={blankBudget(budgetDefaults?.perHour)}
                       className={inputClass}
                       value={draft.createsPerHour}
                       disabled={Boolean(busy)}
-                      aria-invalid={budgetInvalid || undefined}
+                      aria-invalid={invalid.has("createsPerHour") || undefined}
                       onChange={(event) => change({ ...draft, createsPerHour: event.target.value })}
                     />
                   </label>
-                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in a day, whatever became of them. Blank: the default.">
+                  <label className="flex flex-col gap-1 text-[11px] text-muted-foreground" title="How many workspaces one person may create in a day, whatever became of them. Blank: this TerminalX service's default, or no limit where it has none.">
                     New per person, per day
                     <input
                       aria-label="Maximum workspaces one person may create per day"
                       inputMode="numeric"
-                      placeholder={view.createBudgetDefaults ? `${view.createBudgetDefaults.perDay} (default)` : "Default"}
+                      placeholder={blankBudget(budgetDefaults?.perDay)}
                       className={inputClass}
                       value={draft.createsPerDay}
                       disabled={Boolean(busy)}
-                      aria-invalid={budgetInvalid || undefined}
+                      aria-invalid={invalid.has("createsPerDay") || undefined}
                       onChange={(event) => change({ ...draft, createsPerDay: event.target.value })}
                     />
                   </label>
@@ -406,22 +423,20 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                 </select>
               </label>
             </div>
-            {maxWorkspaces === null && <p className="text-[11px] text-destructive">Workspaces must be a whole number from 1 to {ceiling}, the most this TerminalX service allows.</p>}
-            {runningInvalid && (
-              <p className="text-[11px] text-destructive">
-                Running at once must be blank or a whole number no larger than the workspace limit
-                {view.runningWorkspaceCeiling === null ? "" : ` or ${view.runningWorkspaceCeiling}, the most this TerminalX service allows`}.
+            {check.problems.map((problem) => (
+              <p key={problem.message} role="alert" className="text-[11px] text-destructive">
+                {problem.message}
               </p>
-            )}
+            ))}
             <div className="text-[11px] text-muted-foreground">Allowed sizes and regions (comma-separated IDs; blank allows any)</div>
-            {shownProviders(view.policy).map((provider) => (
+            {shownProviders(view.policy, described).map((provider) => (
               <div key={provider} className="grid grid-cols-[5rem_1fr_1fr] items-center gap-2">
                 <span className="text-[11px]">{providerLabel(provider)}</span>
                 <input
                   aria-label={`Allowed sizes for ${providerLabel(provider)}`}
                   placeholder="Any size"
                   className={inputClass}
-                  value={draft.machineClasses[provider]}
+                  value={draft.machineClasses[provider] ?? ""}
                   disabled={Boolean(busy)}
                   onChange={(event) => change({ ...draft, machineClasses: { ...draft.machineClasses, [provider]: event.target.value } })}
                 />
@@ -429,7 +444,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
                   aria-label={`Allowed regions for ${providerLabel(provider)}`}
                   placeholder="Any region"
                   className={inputClass}
-                  value={draft.locations[provider]}
+                  value={draft.locations[provider] ?? ""}
                   disabled={Boolean(busy)}
                   onChange={(event) => change({ ...draft, locations: { ...draft.locations, [provider]: event.target.value } })}
                 />
@@ -451,11 +466,7 @@ export function OrganizationCompute({ contextRevision }: { contextRevision: stri
               Each person can have {policy.maxRunningWorkspacesPerMember} of their own workspace{policy.maxRunningWorkspacesPerMember === 1 ? "" : "s"} running at once.
             </p>
           )}
-          {view.createBudgetDefaults && (
-            <p>
-              Each person can create {policy.maxCreatesPerMemberPerHour ?? view.createBudgetDefaults.perHour} workspaces an hour and {policy.maxCreatesPerMemberPerDay ?? view.createBudgetDefaults.perDay} a day.
-            </p>
-          )}
+          {budgetSentence && <p>{budgetSentence}</p>}
           {policy.maxIdleSuspendMinutes !== null && <p>Workspaces must suspend after at most {policy.maxIdleSuspendMinutes} idle minutes.</p>}
           {[...new Set([...Object.keys(policy.allowedMachineClasses), ...Object.keys(policy.allowedLocations)])].sort().map((provider) => (
             <p key={provider}>
@@ -526,7 +537,12 @@ function ProviderUsage({ usage }: { usage: ComputeProviderUsage }) {
         <dt className="text-muted-foreground">Provider billing</dt>
         <dd>
           {reported.status === "unavailable" || reported.totalMicros === undefined ? (
-            <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            cloudProviderIsPlatform(usage.provider) ? (
+              // TerminalX provides it (PRO-452): there is no provider console or invoice of the organization's own.
+              <span className="text-faint">{cloudProviderDescriptor(usage.provider)?.billing || "Provided by TerminalX"}. There is no provider invoice for it.</span>
+            ) : (
+              <span className="text-faint">Not reported to TerminalX. Check the provider's console for the invoice.</span>
+            )
           ) : (
             <>
               {formatMicros(reported.totalMicros, reported.currency ?? usage.currency)}{" "}

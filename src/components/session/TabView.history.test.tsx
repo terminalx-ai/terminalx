@@ -61,7 +61,7 @@ function cloudBackend(onChange: () => void): SessionBackend {
     kind: "cloud",
     key: `cloud:org-1:ws-1:${logSessionId}`,
     generation: "g1",
-    caps: { local: false, write: true, steer: true, images: false, recovery: false, interrupt: false },
+    caps: { local: false, write: true, steer: true, images: false, files: false, recovery: false, interrupt: false },
     readOnlyReason: null,
     logSessionId,
     openTab: () => undefined,
@@ -82,7 +82,7 @@ function cloudBackend(onChange: () => void): SessionBackend {
     markRead: async () => undefined,
     patchTab: () => undefined,
     setTabStatus: () => undefined,
-    outbox: { entries: (tabId) => entries.filter((entry) => entry.tabId === tabId), followUps: () => queued, deciding: () => false, sendAgain: async () => undefined },
+    outbox: { entries: (tabId) => entries.filter((entry) => entry.tabId === tabId), followUps: () => queued, workspaceStatus: null, deciding: () => false, sendAgain: async () => undefined },
   };
 }
 

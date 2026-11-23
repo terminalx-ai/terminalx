@@ -22,7 +22,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 vi.mock("@/lib/agentReadiness", () => ({ checkAgentReadiness: mocks.readiness }));
-vi.mock("@/lib/sessions", () => ({ upsertSession: mocks.upsertSession, openStats: mocks.openStats }));
+vi.mock("@/lib/sessions", () => ({ upsertSession: mocks.upsertSession }));
+vi.mock("@/lib/settingsLinks", () => ({ openStatsSettings: mocks.openStats }));
 vi.mock("@/lib/status", () => ({ useStatus: () => ({ usage: { windows: mocks.windows } }) }));
 vi.mock("@/lib/models", () => ({ modelLabel: (_harness: string, id: string) => ({ "gpt-6.1-sol": "GPT-6.1 Sol", "claude-sonnet-5-5": "Sonnet 5.5" })[id] ?? id }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => {}) }));
@@ -50,6 +51,7 @@ const twoModels = () => session([
 ]);
 
 const chip = () => screen.getByTestId("session-cost");
+const machineSession = { name: "Mac mini", sessionId: "rt-1", generation: "1" };
 
 beforeEach(() => {
   resetExperimentalSettingsForTests();
@@ -142,6 +144,113 @@ describe("usage arithmetic", () => {
     expect(totals([row("a", 1, 2, 3, 0.5), row("b", 10, 20, 30, null)])).toEqual({ inputTokens: 11, outputTokens: 22, cacheReadTokens: 33, cacheWriteTokens: 0, costUsd: 0.5, unpricedModels: ["b"] });
     expect(totals([row("b", 10, 0, 0, null)]).costUsd).toBeNull();
     expect(totals([]).costUsd).toBe(0);
+  });
+
+  // PRO-408: a machine session's agents ran on the machine.
+  it("on a machine session, reads usage, billing and windows on the machine, never this computer's", async () => {
+    mocks.windows = [{ agent: "claude", key: "five_hour", label: "5h", usedPercent: 99, resetsAt: null, windowMinutes: 300, updatedAt: Date.now(), stale: false, source: "" }];
+    const read = vi.fn(async () => ({
+      usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const },
+      loginMethods: { codex: "API key", claude: "API key" },
+      windows: [{ agent: "codex" as const, key: "five_hour", label: "5h", usedPercent: 63, resetsAt: Date.now() + 3_600_000, windowMinutes: 300, updatedAt: Date.now(), stale: false }],
+    }));
+    render(<SessionCost session={twoModels()} machine={{ ...machineSession, read }} />);
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    const popover = await screen.findByRole("dialog", { name: "Session usage" });
+    await waitFor(() => expect(within(popover).getByTestId("session-usage-billing").textContent).toBe("API key · billed per token"));
+    expect(read).toHaveBeenCalled();
+    // Nothing of this computer: not its logins, its transcripts or its windows.
+    expect(mocks.readiness).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    const windows = within(popover).getAllByTestId("session-usage-window").map((w) => w.textContent ?? "");
+    expect(windows.map((w) => w.split("resets")[0])).toEqual(["Codex · 5h63%"]);
+    // The command names the session as the machine knows it; Stats is this computer's.
+    expect(within(popover).getByRole("button", { name: "Copy terminalx sessions usage rt-1 --json, to run on Mac mini" })).toBeTruthy();
+    expect(within(popover).getByTestId("session-usage-where").textContent).toBe("on Mac mini");
+    expect(within(popover).queryByRole("button", { name: /Open Stats/ })).toBeNull();
+  });
+
+  it("on a machine session not connected, shows the totals its list carries and reads nothing", async () => {
+    render(<SessionCost session={twoModels()} machine={{ ...machineSession, read: null }} />);
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    const popover = await screen.findByRole("dialog", { name: "Session usage" });
+    expect(within(popover).getByTestId("session-usage-billing").textContent).toBe("at API list prices");
+    expect(mocks.readiness).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("reads a machine session's totals once when its tabs have messages and none yet", async () => {
+    const models = [row("claude-sonnet-5-5", 9_000, 6_000, 88_000, 0.13)];
+    const read = vi.fn(async () => ({
+      usage: { sessionId: "rt-1", title: "Work", tabs: [{ tabId: "t1", agent: "claude", models, updated: "2026-11-11T10:00:00Z" }], models, estimate: true as const },
+      loginMethods: {}, windows: [],
+    }));
+    const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
+    const machine = { ...machineSession, read };
+    const { rerender } = render(<SessionCost session={unread} machine={machine} />);
+    // The RPC reply is sufficient even if a session-list update has not arrived.
+    expect((await screen.findByTestId("session-cost")).textContent).toBe("≈ $0.13");
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    const newer = { ...unread.tabs[0], usage: { updated: "2026-11-11T10:01:00Z", models: [row("claude-sonnet-5-5", 12_000, 8_000, 88_000, 0.25)] } };
+    rerender(<SessionCost session={{ ...unread, tabs: [newer] }} machine={machine} />);
+    expect(chip().textContent).toBe("≈ $0.25");
+    expect(read).toHaveBeenCalledOnce();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each(["timeout", "reconnect"])("backfills missing machine totals after a failed read and %s", async (recovery) => {
+    vi.useFakeTimers();
+    try {
+      const models = [row("claude-sonnet-5-5", 9_000, 6_000, 88_000, 0.13)];
+      const answer = {
+        usage: { sessionId: machineSession.sessionId, title: "Work", tabs: [{ tabId: "t1", agent: "claude", models, updated: "2026-11-11T10:00:00Z" }], models, estimate: true as const },
+        loginMethods: {},
+        windows: [],
+      };
+      const read = vi.fn(async () => answer).mockRejectedValueOnce(new Error("Usage read failed"));
+      const unread = session([{ ...tab("t1", "Work", "claude", null), providerSessionId: undefined, hasMessages: true }]);
+      const renderCost = (generation: string, connected = true) => (
+        <SessionCost session={unread} machine={{ ...machineSession, generation, read: connected ? () => read() : null }} />
+      );
+      const { rerender } = render(renderCost("1"));
+      await act(async () => {});
+      expect(screen.queryByTestId("session-cost")).toBeNull();
+      expect(read).toHaveBeenCalledOnce();
+
+      rerender(renderCost("1"));
+      expect(read).toHaveBeenCalledOnce();
+      if (recovery === "reconnect") {
+        rerender(renderCost("offline", false));
+        rerender(renderCost("2"));
+      }
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(chip().textContent).toBe("≈ $0.13");
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // PRO-408 review: each read makes the machine re-read every transcript, so a parent render must not ask again.
+  it("reads a machine session's usage once per opening, however often its view renders", async () => {
+    const answer = { usage: { sessionId: "rt-1", title: "Work", tabs: [], models: [], estimate: true as const }, loginMethods: {}, windows: [] };
+    const read = vi.fn(async () => answer);
+    // A new `read` on every render, as SessionView builds it.
+    const view = (current: ReturnType<typeof twoModels>) => <SessionCost session={current} machine={{ ...machineSession, read: () => read() }} />;
+    const { rerender } = render(view(twoModels()));
+    await waitFor(() => expect(chip().textContent).toBe("≈ $0.84"));
+    fireEvent.click(chip());
+    await screen.findByRole("dialog", { name: "Session usage" });
+    await waitFor(() => expect(read).toHaveBeenCalledOnce());
+    for (let i = 0; i < 3; i++) rerender(view({ ...twoModels() }));
+    await act(async () => {});
+    expect(read).toHaveBeenCalledOnce();
+    // Closing and opening again reads again.
+    fireEvent.click(chip());
+    fireEvent.click(chip());
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
   it("formats tokens and dollars as the design does", () => {

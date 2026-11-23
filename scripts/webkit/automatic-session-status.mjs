@@ -10,6 +10,13 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { launch, open, serve } from "./harness.mjs";
 
+/** The overview's view is chosen in its Display menu (02.15). */
+async function showView(page, name) {
+  await page.getByRole("button", { name: "Display", exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).click();
+  await page.keyboard.press("Escape");
+}
+
 const pr = (number, fields) => ({ branch: "", checked: true, headMatches: true, pr: { number, state: "OPEN", draft: false, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", checks: "SUCCESS", inMergeQueue: false, ...fields } });
 // The screens' own rows: what the runtime says about each, and what each surface must show.
 const rows = [
@@ -57,7 +64,7 @@ const browser = await launch();
 const screenshots = process.env.SESSION_STATUS_SCREENSHOTS;
 if (screenshots) await mkdir(screenshots, { recursive: true });
 try {
-  for (const colorScheme of ["light", "dark"]) for (const width of [960, 1360]) {
+  for (const colorScheme of ["light", "dark"]) for (const width of [960, 1360, 1440]) {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 820 }, { extra, colorScheme });
     page.setDefaultTimeout(30_000);
     const sidebar = page.getByRole("navigation", { name: "Conversations" });
@@ -83,13 +90,71 @@ try {
     }
     if (screenshots && width === 1360) await sidebar.screenshot({ path: join(screenshots, `sidebar-${colorScheme}.png`) });
 
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
-    await page.getByRole("button", { name: "Table", exact: true }).click();
+    await page.getByRole("button", { name: /^Overview/ }).click();
+    await showView(page, "Table");
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     for (const row of rows) {
-      const badge = table.getByRole("row", { name: new RegExp(row.title) }).locator("[data-session-status]");
+      const tr = table.getByRole("row", { name: new RegExp(row.title) });
+      const badge = tr.locator("[data-session-status]");
       await badge.scrollIntoViewIfNeeded();
       assert.equal((await badge.innerText()).trim(), row.label, `table: ${row.title}`);
+      // PRO-385: the one status the row shows is in the Status column; the board's bucket ("Done") is not.
+      const cells = await tr.locator("td").allInnerTexts();
+      assert.equal(cells.filter((text) => text.trim() === "Done").length, 0, `table: ${row.title} shows no "Done" (${JSON.stringify(cells)})`);
+      // No machine is paired in this fixture, so there is no Where column (PRO-346): Status is the fifth.
+      assert.equal(await tr.locator("td").nth(4).locator("[data-session-status]").count(), 1, `table: ${row.title} status sits in the Status column`);
+    }
+    if (width === 1440) {
+      // PRO-385 (02.01, 02.05): every default column in view, uppercase tracked headers, 13px cells, 44px rows.
+      const layout = await table.evaluate((element) => {
+        const scroller = element.parentElement;
+        const headers = [...element.querySelectorAll("thead th")];
+        const rows = [...element.querySelectorAll("tbody tr[data-session]")];
+        const cell = rows[0].querySelector("td");
+        return {
+          headers: headers.map((th) => th.innerText.trim()),
+          transform: getComputedStyle(headers[0].querySelector("button")).textTransform,
+          tracking: parseFloat(getComputedStyle(headers[0]).letterSpacing),
+          lastRight: headers.at(-1).getBoundingClientRect().right,
+          scrollerRight: scroller.getBoundingClientRect().right,
+          scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth, docWidth: document.documentElement.scrollWidth,
+          rowHeights: [...new Set(rows.map((row) => Math.round(row.getBoundingClientRect().height)))],
+          fontSize: getComputedStyle(cell).fontSize,
+        };
+      });
+      assert.deepEqual(layout.headers, ["SESSION", "PROJECT", "BRANCH", "CHANGES", "STATUS", "AGENT", "OWNER", "ACTIVE"], "table: the designed columns, in order (Where joins only with a machine paired, PRO-346)");
+      assert.equal(layout.transform, "uppercase", "table: headers are uppercase");
+      assert.ok(layout.tracking > 0, "table: headers are tracked");
+      assert.ok(layout.scrollWidth <= layout.clientWidth && layout.lastRight <= layout.scrollerRight + 0.5 && layout.docWidth <= width, `table: every column fits at 1440 without horizontal scroll ${JSON.stringify(layout)}`);
+      assert.deepEqual(layout.rowHeights, [44], "table: 44px rows");
+      assert.equal(layout.fontSize, "13px", "table: 13px cells");
+      // The toolbar row: search first, the chips after it, New session last, nothing overlapping or wrapped.
+      const toolbar = await page.evaluate(() => {
+        const header = document.querySelector('input[aria-label="Search sessions"]').closest("header");
+        const items = [...header.children].map((child) => child.getBoundingClientRect()).map(({ left, right, top, bottom }) => ({ left, right, top, bottom }));
+        return { items, header: header.getBoundingClientRect().toJSON(), text: header.innerText };
+      });
+      for (let i = 1; i < toolbar.items.length; i++) assert.ok(toolbar.items[i].left >= toolbar.items[i - 1].right - 0.5 && Math.abs(toolbar.items[i].top - toolbar.items[0].top) < 6, `toolbar: item ${i} sits after the one before it on one row ${JSON.stringify(toolbar)}`);
+      for (const label of ["Everyone", "Hiding automations", "Hiding archived", "Last active", "Display", "New session"]) assert.ok(toolbar.text.includes(label), `toolbar: ${label}`);
+      assert.ok(!toolbar.text.includes("Agents"), "toolbar: no page heading");
+      if (screenshots) await page.screenshot({ path: join(screenshots, `table-1440-${colorScheme}.png`) });
+      // The people picker (02.05) and the Display menu (02.15), as captures.
+      await page.getByRole("button", { name: /^People: / }).click();
+      const picker = page.getByRole("dialog", { name: "Filter by people" });
+      await picker.getByRole("checkbox", { name: /Anyone/ }).waitFor();
+      assert.equal(await picker.getByRole("checkbox", { name: /You/ }).count(), 1, "people: you are listed");
+      const settled = () => page.waitForFunction(() => document.getAnimations().every((animation) => animation.playState !== "running" || animation.effect?.getTiming().iterations === Infinity));
+      await settled();
+      if (screenshots) await page.screenshot({ path: join(screenshots, `people-1440-${colorScheme}.png`) });
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: "Display", exact: true }).click();
+      const menu = page.getByRole("menu");
+      for (const name of ["Project", "Branch", "Line changes", "Status", "Agent", "Owner", "Last active"]) assert.equal(await menu.getByRole("menuitemcheckbox", { name, exact: true }).getAttribute("aria-checked"), "true", `display: ${name} shown`);
+      assert.equal(await menu.getByRole("menuitemcheckbox", { name: "Where", exact: true }).count(), 0, "display: no Where without a paired machine (PRO-346)");
+      for (const name of ["Pull request", "Created", "Compact rows"]) assert.equal(await menu.getByRole("menuitemcheckbox", { name, exact: true }).getAttribute("aria-checked"), "false", `display: ${name} off`);
+      await settled();
+      if (screenshots) await page.screenshot({ path: join(screenshots, `display-1440-${colorScheme}.png`) });
+      await page.keyboard.press("Escape");
     }
     await table.evaluate((element) => element.closest("[data-scroll-root], .overflow-auto")?.scrollTo?.(0, 0));
     if (screenshots && width === 1360) await page.screenshot({ path: join(screenshots, `table-${colorScheme}.png`) });

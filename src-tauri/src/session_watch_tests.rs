@@ -27,6 +27,57 @@ const TAB: &str = "watched-tab";
 const FIXTURE: &str = include_str!("harness/claude/fixtures/interactive_session.jsonl");
 
 #[test]
+fn automation_completion_waits_for_a_followup_turn_already_open() {
+    let rig = Rig::new();
+    rig.start_turn();
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+}
+
+#[test]
+fn automation_completion_holds_the_tab_lock_through_the_transition() {
+    let rig = Rig::new();
+    let manager = rig.manager.clone();
+    let runtime = rig.rt.clone();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let task = scope.spawn(move || manager.with_automation_quiescent(SESSION, TAB, None, || {
+            entered.send(()).unwrap();
+            proceed.recv_timeout(Duration::from_secs(10)).unwrap();
+        }));
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(runtime.try_lock().is_err(), "a new turn must wait until the transition finishes");
+        release.send(()).unwrap();
+        assert_eq!(task.join().unwrap(), Some(()));
+        runtime.lock().unwrap().open_turn();
+    });
+    assert!(rig.manager.automation_execution_continues(SESSION, TAB));
+    // Even if the new turn closes before an older callback acquires the lock,
+    // its generation cannot be mistaken for the previous turn's.
+    runtime.lock().unwrap().turn_open = false;
+    assert_eq!(rig.manager.with_automation_quiescent(SESSION, TAB, Some(0), || "stale"), None);
+}
+
+#[test]
+fn deferred_automation_keeps_tab_working_until_reconciled() {
+    let rig = Rig::new();
+    let entry: index::SessionEntry = serde_json::from_value(json!({
+        "id": SESSION, "projectPath": rig._dir.path(), "cwd": rig._dir.path(),
+        "title": "automation", "created": index::now(), "modified": index::now(),
+        "tabs": [{ "id": TAB, "harness": "claude", "created": index::now() }]
+    })).unwrap();
+    index::save(&[entry]).unwrap();
+    rig.manager.set_display_status(&mut rig.rt.lock().unwrap(), TabStatus::Completed);
+    rig.manager.automation_deferred_status(SESSION, TAB, true);
+    assert_eq!(rig.status(), TabStatus::InProgress);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::InProgress);
+    assert!(rig.manager.idle_for(SESSION, TAB, Instant::now()).is_none());
+    rig.manager.automation_deferred_status(SESSION, TAB, false);
+    assert_eq!(rig.status(), TabStatus::Completed);
+    assert_eq!(index::get(SESSION).unwrap().tab(TAB).unwrap().status, TabStatus::Completed);
+}
+
+#[test]
 fn row_status_distinguishes_live_permission_question_and_plan_and_clears_after_answer() {
     let rig = Rig::new();
     for (tool, expected) in [("Bash", "needs_permission"), ("AskUserQuestion", "needs_answer"), ("ExitPlanMode", "review_plan")] {
@@ -80,7 +131,7 @@ impl SessionObserver for Observer {
     fn answered(&self, session: &str, tab: &str) {
         self.answered.lock().unwrap().push((session.into(), tab.into()));
     }
-    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>) {
+    fn automation_completed(&self, session: &str, tab: &str, message: Option<String>, _generation: u64) {
         let rt = self.rt.lock().unwrap().upgrade().unwrap();
         // Another thread may hold the lock for a moment, as the input thread a
         // typed `/effort` starts does. Only the caller holding it never lets go.
@@ -122,6 +173,7 @@ struct Rig {
     _home: store::TempHome,
 }
 
+#[cfg(unix)]
 #[test]
 fn a_shared_session_may_switch_to_bypass_at_the_hosts_choice() {
     struct StopBeforeGuards<'a>(&'a SessionManager);
@@ -223,6 +275,7 @@ impl Rig {
     }
 
     /// Wait until the pane's program has read everything written into it.
+    #[cfg(unix)]
     fn pane_has_read_it_all(&self) {
         let deadline = Instant::now() + Duration::from_secs(60);
         while self.manager.terminals.unread_input(&self.pane) != Some(0) {
@@ -232,6 +285,7 @@ impl Rig {
     }
 
     /// From now on, each stage the tab tells a continuation's dialog.
+    #[cfg(unix)]
     fn hear_deliveries(&self) -> Arc<Mutex<Vec<String>>> {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let into = heard.clone();
@@ -278,6 +332,8 @@ impl Rig {
         let rt = Arc::new(Mutex::new(TabRuntime {
             session_id: SESSION.into(),
             tab_id: TAB.into(),
+            acting_bot: None,
+            bot_builtin: None,
             harness: match kind {
                 CliKind::Claude => "claude".into(),
                 CliKind::Codex => "codex".into(),
@@ -306,6 +362,7 @@ impl Rig {
                 recorded: false,
                 tail: tail.clone(),
                 echoed: Default::default(),
+                lapsed: Default::default(),
                 awaiting_delivery: None,
                 delivery_sent_at: None,
                 accept_by: None,
@@ -330,6 +387,8 @@ impl Rig {
             queued: Vec::new(),
             held_queue: Default::default(),
             turn_open: false,
+            turn_generation: 0,
+            automation_completions_in_flight: 0,
             turn_opener: None,
             compact_completed: false,
             compact_boundary_at: None,
@@ -506,12 +565,98 @@ fn permission_card(kind: CliKind, mode: &str, gate: &str, payload: Value, answer
     {
         let rt = rig.rt.lock().unwrap();
         let Engine::Cli(p) = &rt.engine else { unreachable!() };
-        p.decisions[&request].sender.send(answer).unwrap();
+        p.decisions[&request].sender.send(QueuedDecision { decision: answer, mobile: None }).ok().unwrap();
     }
     let reply = worker.join().unwrap();
     (serde_json::to_value(event.payload).unwrap(), reply)
 }
 
+#[cfg(unix)]
+#[test]
+fn a_revoked_phone_cannot_deliver_its_cli_hook_approval() { withheld_mobile_reply(Withhold::RevokeApproval); }
+
+#[cfg(unix)]
+#[test]
+fn a_cancelled_hook_cannot_deliver_a_queued_phone_approval() { withheld_mobile_reply(Withhold::Cancel); }
+
+#[cfg(unix)]
+#[test]
+fn a_revoked_phone_cannot_deliver_its_claude_question_answer() { withheld_mobile_reply(Withhold::RevokeAnswer); }
+
+#[cfg(unix)]
+#[test]
+fn a_failed_hook_write_does_not_report_a_phone_answer() { withheld_mobile_reply(Withhold::Disconnect); }
+
+#[cfg(unix)]
+enum Withhold { RevokeApproval, RevokeAnswer, Cancel, Disconnect }
+
+#[cfg(unix)]
+fn withheld_mobile_reply(reason: Withhold) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    let rig = Rig::in_mode(CliKind::Claude, "manual");
+    let mut settings = store::settings::load();
+    settings.agents.read_only_commands = false;
+    store::settings::save(&settings).unwrap();
+    let phone = crate::local_runtime::mobile::ApprovalPhone::register(&rig.manager);
+    let manager = rig.manager.clone();
+    let (entered, paused) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (finished, completion) = std::sync::mpsc::channel();
+    let barrier = Mutex::new(Some((entered, released)));
+    let socket = crate::hooks::serve_private(crate::hooks::prepare_control().unwrap(), move |frame| {
+        let reply = manager.on_hook(frame);
+        let (entered, released) = barrier.lock().unwrap().take().unwrap();
+        entered.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(10)).unwrap();
+        let finished = finished.clone();
+        crate::hooks::after_reply(Box::new(move || finished.send(()).unwrap()));
+        reply
+    }, |_| unreachable!()).unwrap();
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let frame = HookFrame {
+        session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
+        payload: if matches!(reason, Withhold::RevokeAnswer) {
+            json!({"cwd":"/workspace/app","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which branch?","header":"Branch","options":[]}]}})
+        } else {
+            json!({"cwd": "/workspace/app", "tool_name": "Bash", "tool_input": {"command": "printf hello"}})
+        },
+    };
+    writeln!(stream, "{}", serde_json::to_string(&frame).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let request = loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
+        assert!(Instant::now() < deadline, "the hook must publish a permission request");
+        std::thread::sleep(MOMENT);
+    };
+    if matches!(reason, Withhold::RevokeAnswer) {
+        phone.answer_question(&rig.manager, SESSION, TAB, &request);
+    } else {
+        phone.answer(&rig.manager, SESSION, TAB, &request, "allow");
+    }
+    paused.recv_timeout(Duration::from_secs(10)).unwrap();
+    let status = rig.rt.lock().unwrap().status;
+    let mut peer = Some(stream);
+    match reason {
+        Withhold::Cancel => rig.manager.cancel_asks(&mut rig.rt.lock().unwrap()),
+        Withhold::Disconnect => drop(peer.take()),
+        _ => phone.revoke(&rig.manager),
+    }
+    release.send(()).unwrap();
+    completion.recv_timeout(Duration::from_secs(10)).unwrap();
+    if let Some(mut stream) = peer {
+        let mut line = String::new();
+        stream.read_to_string(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<HookReply>(&line).unwrap(), reply_for(CliKind::Claude, "PermissionRequest", Decision::Deny));
+    }
+    assert!(rig.rt.lock().unwrap().pending.is_empty());
+    assert_eq!(rig.rt.lock().unwrap().status, status);
+    assert!(rig.observer.answered.lock().unwrap().is_empty());
+}
+
+// Its hook directories are POSIX paths, which only read as absolute on Unix.
+#[cfg(unix)]
 #[test]
 fn permission_context_survives_the_hook_without_changing_tool_input() {
     // The app's own gate is said apart from the agent's words (#775).
@@ -535,16 +680,20 @@ fn permission_context_survives_the_hook_without_changing_tool_input() {
 /// command. Each hook has a start record with its stdin and an end record
 /// with what it printed, so hooks that waited at once are replayed that way.
 /// Only paths are rewritten.
+#[cfg(unix)]
 const FIRST_COMMAND: &str = include_str!("harness/codex/fixtures/permission_gates_first_command.jsonl");
 /// The same, with the command denied, and the model running it once more.
+#[cfg(unix)]
 const DENIED: &str = include_str!("harness/codex/fixtures/permission_gates_denied.jsonl");
 /// The same, with the card left for a while: `exec` hands the turn back to
 /// the model after its yield time while the call waits on the card, and
 /// the model runs the same command again. The hook that recorded it turned
 /// the repeat away as TerminalX now does.
+#[cfg(unix)]
 const REPEATED_WHILE_WAITING: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_waiting.jsonl");
 /// The same, with the command allowed and its card to leave the sandbox left
 /// for a while: the model's repeat reaches `PreToolUse`, the other gate.
+#[cfg(unix)]
 const REPEATED_WHILE_LEAVING_SANDBOX: &str = include_str!("harness/codex/fixtures/permission_gates_repeated_while_leaving_sandbox.jsonl");
 /// In auto mode, where only the sandbox asks: the model's repeat reaches
 /// `PermissionRequest` with its justification reworded.
@@ -624,9 +773,11 @@ fn stale_clicks_do_nothing(rig: &Rig, cards: &[String]) {
 /// Why a Codex card in Ask every time is up when the hook names no workdir,
 /// as code-mode calls never do: the session allowance it offers is held to
 /// the directory Codex reports (PRO-198).
+#[cfg(unix)]
 const ASK_IN_REPORTED_DIRECTORY: &str = "Session allowances are limited to /workspace/app. Commands executing in another directory are blocked and need a separate one-time approval.";
 const JUSTIFICATION: &str = "Probe: may I create a file outside the workspace?";
 
+#[cfg(unix)]
 /// PRO-160 as it was seen: a reader takes a while over a session's first
 /// card, the model's `exec` yields while the call waits, and the model runs
 /// the same command again. Before, the repeat filed a second, identical
@@ -646,6 +797,7 @@ fn a_command_run_again_while_it_waits_on_its_card_files_no_second_card() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// A repeat is the same command whichever gate it reaches and whichever gate
 /// the first call waits at: here the first waits to leave the sandbox and
 /// the repeat asks at `PreToolUse`. It files no card, and the command runs once.
@@ -676,6 +828,7 @@ fn a_command_run_again_with_a_reworded_justification_files_no_second_card() {
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// Allowing the command at `PreToolUse` does not let it out of the sandbox:
 /// Codex then asks for that at `PermissionRequest`, on its own card, which
 /// says so and carries the model's justification.
@@ -692,6 +845,7 @@ fn a_codex_command_asked_about_runs_outside_the_sandbox_only_when_that_is_allowe
     stale_clicks_do_nothing(&rig, &cards);
 }
 
+#[cfg(unix)]
 /// A denied command is blocked at `PreToolUse`, and Codex does not ask about
 /// it again. When the model runs it once more, that run is asked about too:
 /// an earlier answer stands for nothing but the call it was given to.
@@ -710,6 +864,7 @@ fn a_denied_codex_command_run_again_is_asked_about_again() {
 
 /// The status and output of a read-only command TerminalX ran itself, from
 /// the hook reply that answers for it in the provider's place.
+#[cfg(unix)]
 fn ran_by_terminalx(reply: &HookReply, kind: CliKind) -> Option<(i32, String)> {
     let output = &reply.output.as_ref()?["hookSpecificOutput"];
     let (decision, report) = match kind {
@@ -774,7 +929,7 @@ fn ask_mode_discovery_skips_cards_with_normalized_input_for_both_clis() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir(&app).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let app_path = app.to_str().unwrap();
@@ -807,7 +962,7 @@ fn a_command_terminalx_ran_for_codex_gets_its_own_row() {
     for kind in [CliKind::Codex, CliKind::Claude] {
         let rig = Rig::in_mode(kind, "manual");
         let gate = if kind == CliKind::Codex { "PreToolUse" } else { "PermissionRequest" };
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap();
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let mut frame = command_frame(&rig, gate, "grep hello file", app.to_str().unwrap());
         frame.payload["tool_use_id"] = json!("call_ran");
@@ -857,8 +1012,10 @@ fn a_provider_sandbox_that_could_narrow_reads_keeps_discovery_on_the_card() {
 }
 
 /// The rig's tab as a run's verifier, until dropped: every rig shares its ids.
+#[cfg(unix)]
 struct AsVerifier;
 
+#[cfg(unix)]
 impl AsVerifier {
     fn noted() -> Self {
         // Read the runs first, so that noting it is not lost to a later first read.
@@ -869,6 +1026,7 @@ impl AsVerifier {
     }
 }
 
+#[cfg(unix)]
 impl Drop for AsVerifier {
     fn drop(&mut self) {
         crate::orchestration::store::forget_verifier(SESSION, TAB);
@@ -881,7 +1039,7 @@ fn verifier_lookups_keep_actionable_model_visible_outcomes() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
         let _verifier = AsVerifier::noted();
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir_all(app.join("src")).unwrap();
         let lines: String = (1..=70).map(|n| format!("line{n}\n")).collect();
         std::fs::write(app.join("file"), &lines).unwrap();
@@ -982,7 +1140,7 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     for kind in [CliKind::Claude, CliKind::Codex] {
         let rig = Rig::in_mode(kind, crate::orchestration::guard::VERIFIER_MODE);
         let _verifier = AsVerifier::noted();
-        let app = std::fs::canonicalize(rig._dir.path()).unwrap().join("app");
+        let app = crate::paths::canonicalize(rig._dir.path()).unwrap().join("app");
         std::fs::create_dir(&app).unwrap();
         std::fs::write(app.join("file"), "hello\n").unwrap();
         let frame = || command_frame(&rig, "PreToolUse", "cat file", app.to_str().unwrap());
@@ -1027,6 +1185,7 @@ fn a_verifier_s_read_only_command_is_answered_at_pre_tool_use_or_refused() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1053,6 +1212,7 @@ fn codex_normalized_input_never_reuses_unguarded_turn_answers() {
 /// Captured with Codex 0.164.0 and a loopback Responses provider requesting
 /// exec_command({cmd:"pwd", workdir:B}) from session A. Only paths and IDs
 /// are anonymized: the hook omits B, and calls the tool Bash.
+#[cfg(unix)]
 fn codex_0164_frame(rig: &Rig, cwd: &std::path::Path, command: &str) -> HookFrame {
     let mut payload: Value = serde_json::from_str(include_str!("harness/codex/fixtures/pre_tool_use_0164.json")).unwrap();
     assert_eq!(payload["tool_input"], json!({"command":"pwd"}));
@@ -1097,6 +1257,7 @@ fn codex_0164_discovery_and_session_grants_enforce_their_directory_at_execution(
     assert!(rig.events().iter().any(|e| matches!(&e.payload, Payload::PermissionRequested { reason: Some(reason), .. } if reason.contains("Session allowances are limited to"))));
 }
 
+#[cfg(unix)]
 #[test]
 fn execution_directory_never_falls_back_to_a_codex_session_directory() {
     let mut payload = json!({"cwd":"/workspace/a", "tool_name":"Bash", "tool_input":{"command":"git diff"}});
@@ -1123,6 +1284,7 @@ fn turning_the_builtin_list_off_asks_on_the_next_command_in_a_running_tab() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn session_allowance_matches_the_exact_input_directory_and_tab_across_turns() {
     for kind in [CliKind::Claude, CliKind::Codex] {
@@ -1160,6 +1322,7 @@ fn automatic_discovery_and_session_grants_never_answer_codex_escalation() {
     answer_command(&rig, command_frame(&rig, "PermissionRequest", "touch note", "/workspace/app"), "deny", false);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_codex_cmd_approval_cannot_authorize_a_different_write_in_the_same_turn() {
     let rig = Rig::in_mode(CliKind::Codex, "manual");
@@ -1224,7 +1387,7 @@ fn a_prompt_sent_to_an_idle_cli_counts_as_activity_before_the_pane_draws() {
         let old = Instant::now() - PATIENCE.stall - MOMENT;
         rig.rt.lock().unwrap().last_activity = old;
         rig.drew.set(Some(old));
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "hello".into(), display: "hello".into() };
         // The production send path, up to dispatching the input thread. Do
         // not use `stamp`: the send itself must refresh the activity clock.
         let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
@@ -1499,7 +1662,7 @@ fn a_queued_compact_echo_preserves_command_classification() {
     for completed in [false, true] {
         let rig = Rig::new();
         rig.start_turn();
-        let prompt = PromptText { collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "/compact".into(), display: "/compact".into() };
         let (sent, queued) = rig.manager.record_composer_prompt(
             &mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None,
         );
@@ -1659,6 +1822,7 @@ fn a_silent_live_turn_keeps_counting_after_the_warning() {
     assert_eq!(rig.counts(), (0, 0), "completion releases compute even though the CLI stays alive");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_silent_live_turn_has_a_separate_one_hour_cloud_budget() {
     let rig = Rig::with_live_pane();
@@ -2761,6 +2925,7 @@ fn enter_written_unacknowledged(rig: &Rig, seq: u64) {
 
 /// The same for a continuation: its echo carries a receipt, and the tab
 /// sets it no deadline of its own.
+#[cfg(unix)]
 fn continuation_entered_unacknowledged(rig: &Rig, seq: u64) -> std::sync::mpsc::Receiver<std::result::Result<(), String>> {
     enter_written_unacknowledged(rig, seq);
     let (receipt, heard) = std::sync::mpsc::channel();
@@ -2779,6 +2944,7 @@ fn delivery_stages(rig: &Rig) -> Vec<String> {
         .filter(|v| v["type"] == "prompt_delivery").filter_map(|v| v["stage"].as_str().map(String::from)).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     let rig = Rig::running("cat >/dev/null");
@@ -2808,6 +2974,7 @@ fn an_enter_the_cli_let_go_by_is_written_again_before_the_reader_is_told() {
     assert_eq!(delivery_stages(&rig), ["nudged", "nudged", "unconfirmed"]);
 }
 
+#[cfg(unix)]
 /// The handoff whose Enter was lost: nothing ever wrote it again, because a
 /// continuation was kept out of the nudge along with the banner (#662). It
 /// is nudged like any prompt, and the dialog that sent it hears each one;
@@ -2840,6 +3007,7 @@ fn a_continuation_left_in_the_input_is_nudged_without_raising_the_banner() {
     assert!(delivery_stages(&rig).ends_with(&["accepted".to_string()]));
 }
 
+#[cfg(unix)]
 /// A CLI that has not read what it was given is not taking input at all. An
 /// Enter written after it says nothing new, and once its input queue is full
 /// the write never returns, holding the tab (#661). The nudge stands back
@@ -2869,6 +3037,7 @@ fn no_enter_is_written_into_a_cli_that_has_not_read_its_input() {
     assert_eq!(rig.manager.terminals.unread_input(&rig.pane), unread, "nothing was added to it");
 }
 
+#[cfg(unix)]
 /// The reader's own Enter, from the dialog: held to what a nudge is held to,
 /// and only for the prompt still awaited.
 #[test]
@@ -3140,6 +3309,7 @@ fn wait_tells_a_permission_ask_from_an_agent_that_stopped_on_an_error() {
     assert!(rig.manager.pending_permissions().is_empty());
 }
 
+#[cfg(unix)]
 /// #765 review: what a handover reads, every tab held, of the cards hooks
 /// wait on. A card is one from when its hook asks until it is answered, which
 /// happens under the tab's lock: answered, it is none a hook waits on, though
@@ -3166,6 +3336,58 @@ fn a_handover_reads_which_cards_hooks_still_wait_on() {
     assert!(awaited().is_empty(), "answered, whether or not its hook has woken to say so");
     let reply = worker.join().unwrap();
     assert_eq!(reply.output, Some(codex::pty::permission_decision(true)), "the answer reaches the agent");
+}
+
+#[cfg(unix)]
+#[test]
+fn handover_keeps_handled_background_reports_from_becoming_pending_again() {
+    use std::io::Write;
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().background = Some(Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone()))));
+    let now = index::now();
+    let records = [
+        json!({ "type": "assistant", "timestamp": now, "message": { "content": [{ "type": "tool_use", "id": "ci", "name": "Bash", "input": { "run_in_background": true } }] } }),
+        json!({ "type": "user", "timestamp": now, "message": { "content": [{ "type": "tool_result", "tool_use_id": "ci" }] }, "toolUseResult": { "backgroundTaskId": "bci" } }),
+        json!({ "type": "user", "timestamp": now, "turnOrigin": "task_notification", "message": { "content": "<task-notification><task-id>bci</task-id><tool-use-id>ci</tool-use-id><status>completed</status></task-notification>" } }),
+    ];
+    let mut file = std::fs::OpenOptions::new().append(true).open(&rig.transcript).unwrap();
+    for record in records { writeln!(file, "{record}").unwrap(); }
+    let watch = rig.rt.lock().unwrap().background.clone().unwrap();
+    let start = chrono::Utc::now() + chrono::TimeDelta::seconds(1);
+    watch.lock().unwrap().automation_turn_completed(Some(start), start + chrono::TimeDelta::seconds(1), Some("Handled"));
+    assert!(watch.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+
+    let record = rig.manager.hold_tabs(Duration::from_secs(5), |mut held| held.tabs.remove(0)).unwrap();
+    let record = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+    rig.manager.adopt_tab(record).unwrap();
+    let adopted = rig.rt.lock().unwrap().background.clone().unwrap();
+    assert!(adopted.lock().unwrap().automation_outstanding(chrono::Utc::now()).is_none());
+    rig.manager.terminals.kill_all();
+}
+
+#[cfg(unix)]
+#[test]
+fn handover_keeps_its_deadline_when_background_work_is_being_read() {
+    let rig = Rig::with_live_pane();
+    let watch = Arc::new(Mutex::new(claude::background::Watch::new(rig.tail.clone())));
+    rig.rt.lock().unwrap().background = Some(watch.clone());
+    let reading = watch.lock().unwrap();
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(reading);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
+}
+
+#[cfg(unix)]
+#[test]
+fn handover_keeps_a_completion_callback_from_being_lost() {
+    let rig = Rig::with_live_pane();
+    rig.rt.lock().unwrap().automation_completions_in_flight = 1;
+    let completion = AutomationCompletionGuard(rig.rt.clone());
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_err());
+    drop(completion);
+    assert!(rig.manager.hold_tabs(Duration::from_secs(1), |_| ()).is_ok());
+    rig.manager.terminals.kill_all();
 }
 
 /// What an issue pipeline stopped on its author's answer hears (#725): a
@@ -3253,6 +3475,7 @@ fn deleting_session_preserves_history_when_detached_ownership_is_unconfirmed() {
     assert!(index::get(SESSION).is_err(), "confirmed retry should complete deletion");
 }
 
+#[cfg(unix)]
 #[test]
 fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     let rig = Rig::with_live_pane();
@@ -3281,6 +3504,7 @@ fn stop_retry_keeps_its_detached_launch_and_does_not_stop_a_replacement() {
     assert!(!rig.rt.lock().unwrap().stopping);
 }
 
+#[cfg(unix)]
 #[test]
 fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     let rig = Rig::with_live_pane();
@@ -3309,6 +3533,7 @@ fn relocation_refuses_unconfirmed_agent_exit_and_retains_workspace_metadata() {
     assert!(index::get(SESSION).unwrap().worktree_name.is_none());
 }
 
+#[cfg(unix)]
 /// An earlier launch whose exit cannot be confirmed refuses only the start
 /// that found it (#467 review): the tab is not left stopping, and Stop still
 /// finds the launch by its pane and ends it.
@@ -3340,6 +3565,7 @@ fn startup_refuses_only_itself_while_detached_ownership_is_unconfirmed() {
     rig.manager.require_prior_cli_exit(&mut rt, &rig.pane).unwrap();
 }
 
+#[cfg(unix)]
 /// #467 review: the CLI exits into a #437 shell, whose respawn lets go of
 /// the old process with a terminate that waits up to two seconds for it.
 /// A prompt in that window waits for it and starts the CLI, and the tab is
@@ -3406,6 +3632,7 @@ fn restartable(rig: &Rig) {
     index::save(&[entry]).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn restart_stop_retains_unconfirmed_launch_during_wait_and_after_failed_completion() {
     for complete_failure in [false, true] {
@@ -3473,6 +3700,7 @@ fn restart_completion_retires_only_its_exact_current_handle() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn later_pty_confirmation_resolves_only_the_captured_batch_failure() {
     let rig = Rig::with_live_pane();
@@ -3523,6 +3751,7 @@ fn confirmed_pty_stop_preserves_unrelated_tab_failure() {
 /// phone handler, and the agent gets what the desktop's card would have sent.
 /// A read-only phone, a tab of another session and a question already closed
 /// are each refused, and none of them answers anything.
+#[cfg(unix)]
 #[test]
 fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     use crate::local_runtime::{mobile, Lifetime};
@@ -3546,7 +3775,12 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
         session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PermissionRequest".into(),
         payload: json!({"cwd": "/workspace/app", "tool_name": "AskUserQuestion", "tool_input": questions}),
     };
-    let worker = std::thread::spawn(move || manager.on_hook(frame));
+    use std::io::Write;
+    let socket = crate::hooks::serve_private(crate::hooks::prepare_control().unwrap(),
+        move |frame| manager.on_hook(frame), |_| unreachable!()).unwrap();
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&frame).unwrap()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     let request = loop {
         if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() { break request; }
@@ -3566,7 +3800,7 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     assert!(rig.rt.lock().unwrap().pending.contains_key(&request), "a refused answer leaves the question open");
 
     assert_eq!(answer("phone", TAB).unwrap(), json!({"status":"answered"}));
-    let reply = worker.join().unwrap().output.expect("the agent is answered");
+    let reply = serde_json::from_reader::<_, HookReply>(stream).unwrap().output.expect("the agent is answered");
     assert_eq!(reply["hookSpecificOutput"]["decision"]["behavior"], "allow");
     assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], answers);
     assert_eq!(reply["hookSpecificOutput"]["decision"]["updatedInput"]["questions"], questions["questions"], "the questions go back as they were asked");
@@ -3578,4 +3812,402 @@ fn a_driving_phone_answers_a_question_as_the_desktop_card_does() {
     // The Mac, or another phone, answered first: said, not swallowed.
     assert!(refused(answer("phone", TAB)).contains("that question is no longer open"));
     lifetime.command("runtime.detach", lease).unwrap();
+}
+
+/// A record of Claude Code's `!` shell passthrough, as 2.1.319 writes it.
+fn shell_record(uuid: &str, content: &str) -> String {
+    format!("{}\n", json!({ "type": "user", "uuid": uuid, "timestamp": "2026-11-19T10:00:00.000Z", "message": { "role": "user", "content": content } }))
+}
+
+const SHELL_INPUT: &str = "<bash-input> git status</bash-input>";
+const SHELL_OUTPUT: &str = "<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>";
+
+fn user_texts(rig: &Rig) -> Vec<String> {
+    rig.events().into_iter().filter_map(|event| match event.payload { Payload::UserMessage { text, .. } => Some(text), _ => None }).collect()
+}
+
+/// #1294: a `!` command typed in the terminal is no prompt. Both its records
+/// are drawn, and neither opens a turn: no model turn or Stop would end it.
+#[test]
+fn a_shell_command_typed_in_the_terminal_opens_no_turn() {
+    let rig = Rig::new();
+    rig.append(&shell_record("shell-in", SHELL_INPUT));
+    rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+    assert!(!rig.turn_open());
+    assert_ne!(rig.status(), TabStatus::InProgress);
+    assert_eq!(user_texts(&rig), [SHELL_INPUT, SHELL_OUTPUT]);
+}
+
+/// #1346: a prompt typed in the terminal that is shaped like a shell record
+/// but is not one (the reader's words between the tags, the parts out of
+/// order, a tag closed as another) is a prompt: the chat draws it as one, and
+/// it opens a turn and puts the tab to work like any other.
+#[test]
+fn a_prompt_shaped_like_a_shell_record_is_a_prompt() {
+    for prompt in [
+        "<bash-input>pwd</bash-input> please explain <bash-stdout>ok</bash-stdout>",
+        "<bash-stderr>x</bash-stderr><bash-stdout>y</bash-stdout>",
+        "<bash-input>ls</bash-stdout>",
+    ] {
+        let rig = Rig::new();
+        rig.append(&shell_record("not-shell", prompt));
+        assert!(rig.turn_open(), "{prompt}");
+        assert_eq!(rig.status(), TabStatus::InProgress, "{prompt}");
+        assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Opened), "{prompt}");
+        assert_eq!(user_texts(&rig), [prompt]);
+    }
+}
+
+/// #1294: a `!command` sent from the composer opens a turn as it goes, and
+/// its output settles it, whether the CLI records the output apart or in the
+/// command's own record. The output is drawn either way; the command's
+/// record is the composer prompt's echo, not a second message.
+#[test]
+fn a_shell_command_from_the_composer_settles_at_its_output() {
+    for combined in [false, true] {
+        let rig = Rig::new();
+        let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+        let (_, queued) = rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+        assert!(!queued);
+        assert!(rig.turn_open());
+        if combined {
+            rig.append(&shell_record("shell-both", &format!("{SHELL_INPUT}\n{SHELL_OUTPUT}")));
+        } else {
+            rig.append(&shell_record("shell-in", SHELL_INPUT));
+            rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+        }
+        assert_eq!(user_texts(&rig), ["!git status", SHELL_OUTPUT], "combined: {combined}");
+        assert_eq!(rig.transcript_turn(), Some(tui::TurnMark::Ended), "combined: {combined}");
+        rig.advance(PATIENCE.settle + MOMENT);
+        rig.tick();
+        assert!(!rig.turn_open(), "combined: {combined}");
+        assert_eq!(rig.recovery(), None, "combined: {combined}");
+    }
+}
+
+/// #1383: while a composer `!command` awaits its echo, a prompt typed in the
+/// terminal that opens with the same input tags and goes on in the reader's
+/// words is theirs, drawn as a message. The real shell record that follows
+/// is still the composer prompt's echo.
+#[test]
+fn a_prompt_with_the_pending_commands_input_tags_is_not_its_echo() {
+    let rig = Rig::new();
+    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+    let prose = format!("{SHELL_INPUT} please explain");
+    rig.append(&shell_record("prose", &prose));
+    assert_eq!(user_texts(&rig), ["!git status", prose.as_str()], "the reader's prompt is drawn");
+    rig.append(&shell_record("shell-both", &format!("{SHELL_INPUT}\n{SHELL_OUTPUT}")));
+    assert_eq!(user_texts(&rig), ["!git status", prose.as_str(), SHELL_OUTPUT], "the shell record is the echo, its output drawn");
+}
+
+/// #1294: should the agent take up a `!` command's output (Claude Code
+/// 2.1.295 did), the turn is the agent's and is not cut short at the output.
+#[test]
+fn a_shell_command_the_agent_answers_ends_with_the_agents_turn() {
+    let rig = Rig::new();
+    let prompt = PromptText { request_id: None, collaboration: collaboration_v2::current(), files: Vec::new(), hold_if_busy: None, mobile: None, shared_connection: None, author: None, agent: "!git status".into(), display: "!git status".into() };
+    rig.manager.record_composer_prompt(&mut rig.rt.lock().unwrap(), &prompt, vec![], rig._dir.path().to_str().unwrap(), None);
+    rig.append(&shell_record("shell-in", SHELL_INPUT));
+    rig.append(&shell_record("shell-out", SHELL_OUTPUT));
+    let reply = json!({ "type": "assistant", "uuid": "shell-reply", "timestamp": "2026-11-19T10:00:05.000Z", "message": { "id": "m1", "role": "assistant", "model": "claude-opus-5-5", "content": [{ "type": "text", "text": "The tree is clean." }] } });
+    rig.append(&format!("{reply}\n"));
+    assert_eq!(rig.transcript_turn(), None);
+    rig.advance(PATIENCE.settle + MOMENT);
+    rig.tick();
+    assert!(rig.turn_open());
+}
+
+/// A stand-in for Claude Code stopped on its autocompact offer (PRO-460):
+/// it draws the dialog, moves its pointer on the arrow keys, and on Enter
+/// writes the chosen label to `chosen` and goes back to its input box.
+const OFFER_STAND_IN: &str = r#"
+import os, sys, tty
+tty.setraw(0)
+options = ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]
+chosen = sys.argv[1]
+at = 0
+def draw():
+    out = "\x1b[2J\x1b[1;1H❯ summarise the logs\r\n\r\n● Done.\r\n\x1b[5;1H" + "─" * 80 + "\r\n"
+    out += " \x1b[1mWe recommend compacting earlier\x1b[22m\r\n\r\n   Want to autocompact at 400k tokens instead?\r\n\r\n"
+    for i, label in enumerate(options):
+        out += "   " + ("❯ " if i == at else "  ") + label + "\r\n"
+    out += "\r\n   \x1b[2m↑/↓ choose · enter confirm · esc not now\x1b[22m"
+    os.write(1, out.encode())
+draw()
+while True:
+    keys = os.read(0, 16)
+    if keys in (b"\x1b[A", b"\x1bOA"): at = max(0, at - 1); draw()
+    elif keys in (b"\x1b[B", b"\x1bOB"): at = min(len(options) - 1, at + 1); draw()
+    elif keys == b"q": sys.exit(0)
+    elif keys in (b"\r", b"\x1b"):
+        open(chosen, "w").write("esc" if keys == b"\x1b" else options[at])
+        rule = "─" * 80
+        os.write(1, ("\x1b[2J\x1b[1;1H● Done.\r\n\x1b[20;1H" + rule + "\r\n❯ \r\n" + rule).encode())
+"#;
+
+/// A tab whose pane runs the offer's stand-in, ready, with the offer drawn.
+fn offer_rig() -> Option<(Rig, tempfile::TempDir, std::path::PathBuf)> {
+    crate::binpath::resolve("python3")?;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("offer.py");
+    let chosen = dir.path().join("chosen");
+    std::fs::write(&script, OFFER_STAND_IN).unwrap();
+    let rig = Rig::running(&format!("python3 '{}' '{}'", script.display(), chosen.display()));
+    if let Engine::Cli(p) = &rig.rt.lock().unwrap().engine {
+        p.ready.mark();
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !rig.manager.terminals.screen(&rig.pane, |screen| screen.contents()).unwrap().contains("esc not now") {
+        assert!(Instant::now() < deadline, "the stand-in never drew its offer");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Some((rig, dir, chosen))
+}
+
+fn prompt_told(rig: &Rig) -> Option<Option<tui::ScreenPrompt>> {
+    rig.events().iter().filter_map(|e| match &e.payload { Payload::TerminalPrompt { prompt } => Some(prompt.clone()), _ => None }).next_back()
+}
+
+#[test]
+fn a_question_claude_code_drew_itself_has_a_card_and_is_answered_from_the_chat() {
+    let Some((rig, _dir, chosen)) = offer_rig() else { return };
+
+    // Still being drawn a moment ago: not yet.
+    rig.pane_draws();
+    rig.tick();
+    assert_eq!((prompt_told(&rig), rig.status()), (None, TabStatus::Idle));
+
+    rig.advance(Duration::from_secs(1));
+    rig.tick();
+    let prompt = prompt_told(&rig).flatten().expect("the chat is told of the offer");
+    assert_eq!(prompt.title.as_deref(), Some("We recommend compacting earlier"));
+    assert_eq!(prompt.options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(), ["Autocompact at ‹ 400k › tokens", "Keep auto (1m tokens)"]);
+    assert_eq!(rig.status(), TabStatus::Waiting, "the tab needs the reader");
+    // Told once, not on every pass it stays up.
+    rig.tick();
+    assert_eq!(rig.kinds().iter().filter(|k| *k == "terminal_prompt").count(), 1);
+
+    // A question that is no longer the one shown is not answered.
+    assert!(rig.manager.answer_terminal_prompt(SESSION, TAB, "another", Some(1)).unwrap_err().to_string().contains("has changed"));
+    assert!(!chosen.exists());
+
+    rig.manager.answer_terminal_prompt(SESSION, TAB, &prompt.id, Some(1)).unwrap();
+    assert_eq!(std::fs::read_to_string(&chosen).unwrap(), "Keep auto (1m tokens)", "Down, then Enter");
+    assert_eq!(prompt_told(&rig), Some(None), "the card is taken down with the dialog");
+    assert_eq!(rig.status(), TabStatus::Idle, "back to what it was");
+}
+
+/// A CLI that keeps redrawing something around the dialog (a timer) never
+/// goes quiet: the same question read on two passes is shown all the same.
+#[test]
+fn a_question_read_the_same_on_two_passes_is_shown_while_the_pane_keeps_drawing() {
+    let Some((rig, _dir, _chosen)) = offer_rig() else { return };
+    rig.pane_draws();
+    rig.tick();
+    assert_eq!(prompt_told(&rig), None);
+    rig.advance(Duration::from_secs(5));
+    rig.pane_draws();
+    rig.tick();
+    assert!(prompt_told(&rig).flatten().is_some(), "steady on screen, if not quiet");
+    assert_eq!(rig.status(), TabStatus::Waiting);
+}
+
+/// The CLI goes while its question is up (Stop, Ctrl+C, a restart): the card
+/// goes with it, and a hook's request in the meantime is answered on its own.
+#[test]
+fn a_question_goes_with_the_cli_and_waits_behind_a_hooks_request() {
+    let Some((rig, _dir, chosen)) = offer_rig() else { return };
+    rig.pane_draws();
+    rig.advance(Duration::from_secs(1));
+    rig.tick();
+    let prompt = prompt_told(&rig).flatten().expect("shown");
+
+    rig.rt.lock().unwrap().pending.insert("ask-1".into(), PendingAsk { tool_use_id: "tool-1".into(), tool_name: "Bash".into(), input: json!({}), suggestions: Vec::new() });
+    let refused = rig.manager.answer_terminal_prompt(SESSION, TAB, &prompt.id, Some(1)).unwrap_err().to_string();
+    assert!(refused.contains("asking something else first"), "{refused}");
+    assert!(!chosen.exists(), "no key went in");
+    rig.rt.lock().unwrap().pending.clear();
+
+    // A CLI started again on the tab is built afresh and knows nothing of what
+    // its log told: the card still goes once that CLI is no longer asking.
+    if let Engine::Cli(p) = &mut rig.rt.lock().unwrap().engine {
+        p.input = InputBox::default();
+    }
+    rig.manager.terminals.write(&rig.pane, b"q").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while rig.manager.terminals.is_running(&rig.pane) {
+        assert!(Instant::now() < deadline, "the stand-in never exited");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rig.tick();
+    assert_eq!(prompt_told(&rig), Some(None), "taken down with the CLI");
+    // Said once.
+    rig.tick();
+    assert_eq!(rig.kinds().iter().filter(|k| *k == "terminal_prompt").count(), 2);
+}
+
+/// A bot's access, through the real hook path (PRO-478): each level against the
+/// same chat, in either agent. Read and report refuses an edit and lets a read
+/// through; Ask before outward actions asks about a command — Claude by
+/// answering "ask" at once, so its own permission request carries the card
+/// with the gate's reason, and Codex on the card at `PreToolUse`, where only
+/// the owner's allow lets it run.
+#[test]
+#[cfg(unix)]
+fn a_bots_access_gates_its_chat_through_on_hook() {
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let rig = Rig::in_mode(kind, "bypassPermissions");
+        let mut settings = store::settings::load();
+        settings.experimental.bots = true;
+        store::settings::save(&settings).unwrap();
+        let sink = crate::sink::BroadcastSink::new(16);
+        let bot = crate::bots::create(&sink, "security-auditor", "Sentry").unwrap();
+        index::update_session(SESSION, |entry| {
+            entry.unknown.insert("bot".into(), json!({"id": bot.id, "home": true}));
+            Ok(())
+        })
+        .unwrap();
+        // The rig made its runtime before the entry was marked; a real one reads the mark when it is made.
+        let runtime = rig.manager.runtime(SESSION, TAB).unwrap();
+        assert_eq!(runtime.lock().unwrap().acting_bot, None);
+        runtime.lock().unwrap().acting_bot = crate::bots::chat::acting_bot(&index::get(SESSION).unwrap());
+        // A runtime made for a session a bot's chat started is stamped with the bot from its entry.
+        let with_tab = || crate::session_ops::NewQuickChat { tab: Some(crate::session_ops::NewTab { harness: "claude".into(), transport: Default::default(), model: String::new(), effort: None, permission_mode: Some("plan".into()) }), ..Default::default() };
+        let started = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        index::update_session(&started.id, |entry| {
+            entry.unknown.insert(crate::bots::chat::STARTED_KEY.into(), json!({"id": bot.id}));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(rig.manager.runtime(&started.id, &started.tabs[0].id).unwrap().lock().unwrap().acting_bot.as_deref(), Some(bot.id.as_str()));
+        let plain = crate::session_ops::create_quick_chat_entry(with_tab()).unwrap();
+        assert_eq!(rig.manager.runtime(&plain.id, &plain.tabs[0].id).unwrap().lock().unwrap().acting_bot, None);
+        let set = |access: &str| {
+            crate::bots::update(&sink, &bot.id, serde_json::from_value(json!({"access": access})).unwrap()).unwrap();
+        };
+        let cwd = std::fs::canonicalize(rig._dir.path()).unwrap();
+        let cwd = cwd.to_str().unwrap();
+        let edit = || HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(),
+            payload: json!({"cwd": cwd, "tool_name": "Edit", "tool_input": {"file_path": format!("{cwd}/x"), "old_string": "a", "new_string": "b"}}) };
+        let decision = |reply: &HookReply| reply.output.as_ref().map(|output| output["hookSpecificOutput"]["permissionDecision"].clone()).unwrap_or(Value::Null);
+
+        // Read and report: the edit is refused, saying why; a read goes on to the agent's own mode.
+        set("readReport");
+        let reply = rig.manager.on_hook(edit());
+        assert_eq!(decision(&reply), "deny", "{kind:?}");
+        assert!(reply.output.unwrap()["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("Read and report"));
+        assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "ls", cwd))), "deny", "{kind:?}: a read");
+        assert!(rig.manager.pending_permissions().is_empty());
+        // A sub-agent's call (PRO-494): Claude Code sends it on the same session's hooks, with the
+        // sub-agent's id and type and its own transcript. The gate goes by the tab, so it meets it the same.
+        let mut by_subagent = edit();
+        by_subagent.payload["agent_id"] = json!("a5f2c1");
+        by_subagent.payload["agent_type"] = json!("general-purpose");
+        by_subagent.payload["transcript_path"] = json!(format!("{cwd}/subagents/agent-a5f2c1.jsonl"));
+        assert_eq!(decision(&rig.manager.on_hook(by_subagent.clone())), "deny", "{kind:?}: a sub-agent's edit");
+        let mut subagent_push = command_frame(&rig, "PreToolUse", "git push origin main", cwd);
+        for key in ["agent_id", "agent_type", "transcript_path"] {
+            subagent_push.payload[key] = by_subagent.payload[key].clone();
+        }
+        assert_eq!(decision(&rig.manager.on_hook(subagent_push)), "deny", "{kind:?}: a sub-agent's push");
+        // The lead's N1 and N3, through the hook: a `terminalx` command that changes state, or any
+        // program named like it, is refused; a `terminalx` read and the agent's own bookkeeping are not.
+        for command in ["terminalx issues status PRO-1 --to Done", "./scripts/terminalx sessions list", "terminalx computer type-text --app sessions --text list"] {
+            assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd))), "deny", "{kind:?}: {command}");
+        }
+        assert_ne!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx sessions list --json", cwd))), "deny", "{kind:?}");
+        let named = |name: &str| HookFrame { session: SESSION.into(), tab: TAB.into(), token: rig.token.clone(), event: "PreToolUse".into(), payload: json!({"cwd": cwd, "tool_name": name, "tool_input": {}}) };
+        for name in ["TaskCreate", "ToolSearch", "Skill"] {
+            assert_ne!(decision(&rig.manager.on_hook(named(name))), "deny", "{kind:?}: {name}");
+        }
+        // Codex's `write_stdin` types into a running program: not a read (the lead's third review).
+        assert_eq!(decision(&rig.manager.on_hook(named("write_stdin"))), "deny", "{kind:?}");
+        assert!(rig.manager.pending_permissions().is_empty());
+        // One that reaches the permission request anyway is denied there too, saying why, with no card.
+        let mut asked = edit();
+        asked.event = "PermissionRequest".into();
+        let reply = rig.manager.on_hook(asked);
+        let output = reply.output.unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny", "{kind:?}");
+        assert!(output["hookSpecificOutput"]["decision"]["message"].as_str().unwrap().contains("Read and report"), "{output}");
+        assert!(rig.manager.pending_permissions().is_empty(), "no card for a refusal");
+
+        // Ask before outward actions: the command is asked about.
+        set("askOutward");
+        match kind {
+            CliKind::Claude => {
+                let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", "git push origin main", cwd));
+                assert_eq!(decision(&reply), "ask");
+                assert!(rig.manager.pending_permissions().is_empty(), "nothing waits inside PreToolUse");
+                // Claude's permission request follows; its card says why.
+                let manager = rig.manager.clone();
+                let frame = command_frame(&rig, "PermissionRequest", "git push origin main", cwd);
+                let worker = std::thread::spawn(move || manager.on_hook(frame));
+                let request = wait_for_card(&rig, &worker);
+                let reason = rig.events().into_iter().rev().find_map(|event| match event.payload {
+                    Payload::PermissionRequested { reason, .. } => Some(reason),
+                    _ => None,
+                });
+                assert!(reason.flatten().is_some_and(|reason| reason.contains("asks before it changes anything")), "the card carries the gate's reason");
+                rig.manager.respond_permission(SESSION, TAB, &request, "deny").unwrap();
+                let output = worker.join().unwrap().output.unwrap();
+                assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny");
+            }
+            CliKind::Codex => {
+                for (answer, expect) in [("deny", Some("deny")), ("allow", None)] {
+                    let manager = rig.manager.clone();
+                    let frame = command_frame(&rig, "PreToolUse", "git push origin main", cwd);
+                    let worker = std::thread::spawn(move || manager.on_hook(frame));
+                    let request = wait_for_card(&rig, &worker);
+                    rig.manager.respond_permission(SESSION, TAB, &request, answer).unwrap();
+                    let reply = worker.join().unwrap();
+                    assert_eq!(decision(&reply).as_str(), expect, "Codex, {answer}");
+                }
+            }
+        }
+
+        // The lead's M1: at every level, and paused, the bot's own memory commands pass with no card. H1: the
+        // browser's `wait --fn` is refused at Read and report and while paused.
+        let notes = ["terminalx bots memory add 'Status updates go in a table.'", "terminalx bots memory forget 'status updates'", "terminalx bots memory list", "terminalx bots items add --title 'Fix the build'", "terminalx bots items list"];
+        for level in ["full", "askOutward", "readReport", "paused"] {
+            if level == "paused" {
+                crate::bots::pause(&sink, &bot.id, crate::bots::OWNER).unwrap();
+            } else {
+                set(level);
+            }
+            for command in notes {
+                let reply = rig.manager.on_hook(command_frame(&rig, "PreToolUse", command, cwd));
+                assert!(!matches!(decision(&reply).as_str(), Some("deny" | "ask")), "{kind:?} {level}: {command}");
+                assert!(rig.manager.pending_permissions().is_empty(), "{kind:?} {level}: no card for {command}");
+            }
+            if matches!(level, "readReport" | "paused") {
+                assert_eq!(decision(&rig.manager.on_hook(command_frame(&rig, "PreToolUse", "terminalx wait --fn x", cwd))), "deny", "{kind:?} {level}");
+            }
+        }
+        crate::bots::resume(&sink, &bot.id).unwrap();
+
+        // A sub-agent's call reaches the same hook, with the tab's launch token, and meets the same gate.
+        set("readReport");
+        let mut from_sub_agent = edit();
+        from_sub_agent.payload["agent_id"] = json!("a1b2c3");
+        from_sub_agent.payload["agent_type"] = json!("general-purpose");
+        assert_eq!(decision(&rig.manager.on_hook(from_sub_agent)), "deny", "{kind:?}: a sub-agent's edit");
+
+        // Full access: the agent's own mode decides; the gate refuses nothing.
+        set("full");
+        assert_ne!(decision(&rig.manager.on_hook(edit())), "deny", "{kind:?}");
+    }
+}
+
+fn wait_for_card(rig: &Rig, worker: &std::thread::JoinHandle<HookReply>) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(request) = rig.rt.lock().unwrap().pending.keys().next().cloned() {
+            return request;
+        }
+        assert!(!worker.is_finished(), "the call must ask");
+        assert!(Instant::now() < deadline, "the call must publish a card");
+        std::thread::sleep(MOMENT);
+    }
 }

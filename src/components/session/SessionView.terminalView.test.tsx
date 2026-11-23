@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CloudWorkspaceListItem } from "@/lib/api";
+import type { CloudWorkspaceListItem, TabLayout } from "@/lib/api";
 import type { AgentTabInfo } from "@terminalx/portable/workspace";
 import type { AgentEvent, Payload } from "@/types/events";
 import type { SessionEntry } from "@/types/session";
@@ -93,11 +93,18 @@ import { resetCloudConnections } from "@/lib/cloudConnections";
 import { TERMINAL_APPROVAL_REASON, VIEWER_REASON, resetCollab } from "@/lib/cloudCollab";
 import { dropSessionTerminals, selectSessionTab } from "@/lib/terminal";
 import { TERMINAL_VIEW_OLD_RUNTIME, resetCloudWakes } from "@/lib/sessionBackend";
+import { getTabState, layoutOf, resetTabLayouts, saveTabLayout } from "@/lib/tabLayouts";
+import { workspaceRow } from "@/lib/sessionTabs";
 import { resetTabViews } from "@/lib/tabViews";
 import { addProject, getSessionStore, selectSession, upsertSession, useSessionStore } from "@/lib/sessions";
 import { cloudSessionKey } from "@/types/target";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FakeAgentRuntime, agentTab, fakeXterm, type FakeXterm } from "@/test/fakeAgentRuntime";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
+
+// The app has read its provider list, so a listed workspace's provider is
+// known and nothing reads the list again behind the guarded API (PRO-415).
+learnDescriptors();
 
 mocks.guard = guardedApi();
 Element.prototype.scrollIntoView ??= function scrollIntoView() {};
@@ -196,6 +203,7 @@ afterEach(() => {
   resetCloudConnections();
   resetCollab();
   resetTabViews();
+  resetTabLayouts();
   client.close();
 });
 
@@ -368,6 +376,49 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(screen.getByRole("tabpanel", { name })).toBeTruthy();
   });
 
+  it.each([false, true])("keeps one switch per split pane with tabStrip=%s, then restores the header when collapsed (#1107)", async (strip) => {
+    mocks.prefs.tabStrip = strip;
+    const header = show();
+    const row = workspaceRow(local());
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:st-2"], active: "agent:st-2" },
+    ] }));
+    const strips = screen.getAllByTestId("workspace-tab-strip");
+    expect(strips).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(2);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    for (const pane of strips) {
+      fireEvent.click(within(pane).getByRole("button", { name: "Show terminal view" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Back to chat" })).toBeTruthy());
+      fireEvent.click(within(pane).getByRole("button", { name: "Back to chat" }));
+      await waitFor(() => expect(within(pane).getByRole("button", { name: "Show terminal view" })).toBeTruthy());
+    }
+    // A saved second pane with no surviving tabs is not a rendered split.
+    act(() => saveTabLayout(row.workspace, { ...row.layout, panes: [
+      { id: "left", tabs: ["agent:st-1", "agent:st-2"], active: "agent:st-1" },
+      { id: "right", tabs: ["agent:closed"], active: "agent:closed" },
+    ] }));
+    expect(screen.getAllByRole("button", { name: "Show terminal view" })).toHaveLength(1);
+    expect(screen.queryAllByTestId("workspace-tab-strip")).toHaveLength(strip ? 1 : 0);
+    expect(within(header).queryByRole("button", { name: "Show terminal view" }) !== null).toBe(!strip);
+  });
+
+  it("puts the terminal view switch at the right end of the strip, not in the title bar (PRO-381)", async () => {
+    const header = show();
+    expect(within(header).queryByRole("button", { name: "Show terminal view" })).toBeNull();
+    const toggle = await screen.findByTestId("strip-terminal-view");
+    expect(toggle.getAttribute("aria-label")).toBe("Show terminal view");
+    expect(toggle.textContent).toContain("terminal view");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Back to chat"));
+    expect(screen.getByTestId("strip-terminal-view").textContent).toBe("Claude Code · same process");
+    // The tab says it is in its terminal view.
+    expect(within(screen.getByRole("tab", { name: "Investigate" })).getByLabelText("In terminal view").textContent).toBe("terminal view");
+    fireEvent.click(screen.getByTestId("strip-terminal-view"));
+    await waitFor(() => expect(screen.getByTestId("strip-terminal-view").getAttribute("aria-label")).toBe("Show terminal view"));
+  });
+
   it("names the place in the title bar, with the actions at the right, and puts the tabs in a row under it with the + after them", () => {
     const header = show();
     // The title bar: the project and the branch, with the session's chips.
@@ -376,7 +427,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(within(header).getByRole("button", { name: "#12" })).toBeTruthy();
     expect(screen.getByTestId("session-automation").textContent).toBe("Nightly #3");
     expect(screen.getByTestId("session-branch").getAttribute("title")).toContain("Base 1234567 · fetched at creation");
-    expect(within(header).getByRole("button", { name: "Workspace details" })).toBeTruthy();
+    expect(within(header).getByRole("button", { name: "Session actions" })).toBeTruthy();
     expect(within(header).queryByRole("tablist")).toBeNull();
     // The row of tabs is right under the title bar, and the + ends it.
     const row = screen.getByTestId("workspace-tab-strip");
@@ -408,7 +459,7 @@ describe("a local session's row of tabs under the title bar", () => {
     // The tab on screen can differ from the session's persisted activeTab.
     fireEvent.click(screen.getByRole("tab", { name: "Write the fix" }));
     if (entry === "workspace menu") {
-      const menu = within(header).getByRole("button", { name: "Workspace details" });
+      const menu = within(header).getByRole("button", { name: "Session actions" });
       fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
       fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
       fireEvent.click(menu);
@@ -437,7 +488,7 @@ describe("a local session's row of tabs under the title bar", () => {
       branch: null,
       worktreeName: null,
     });
-    expect(within(header).queryByRole("button", { name: "Workspace details" })).toBeNull();
+    expect(within(header).queryByRole("button", { name: "Session actions" })).toBeNull();
     expect(within(header).getByRole("button", { name: "Continue in New Session…" })).toBeTruthy();
   });
 
@@ -448,11 +499,11 @@ describe("a local session's row of tabs under the title bar", () => {
     const header = show();
     await waitFor(() => expect(guard.calls.some(({ command }) => command === "repo_mirror_status")).toBe(true));
     expect(within(header).queryByRole("button", { name: /repo root/ })).toBeNull();
-    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    const menu = within(header).getByRole("button", { name: "Session actions" });
     fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
     fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
     fireEvent.click(menu);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Mirror into repo root…" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Mirror into repo root/ }));
     const dialog = await screen.findByRole("dialog", { name: "Mirror into repo root" });
     await waitFor(() => expect((within(dialog).getByRole("button", { name: "Mirror into repo root" }) as HTMLButtonElement).disabled).toBe(false));
   });
@@ -464,7 +515,7 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(await screen.findByRole("dialog", { name: "Stop mirroring" })).toBeTruthy();
     fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    const menu = within(header).getByRole("button", { name: "Workspace details" });
+    const menu = within(header).getByRole("button", { name: "Session actions" });
     fireEvent.pointerDown(menu, { button: 0, pointerType: "mouse" });
     fireEvent.pointerUp(menu, { button: 0, pointerType: "mouse" });
     fireEvent.click(menu);
@@ -506,18 +557,134 @@ describe("a local session's row of tabs under the title bar", () => {
     expect(document.querySelector('[role="tabpanel"]')!.getAttribute("aria-labelledby")).toBe("session-agent-tab-st-1");
   });
 
-  it("is not drawn for a cloud session", async () => {
-    await open();
-    expect(screen.queryByRole("tablist", { name: "Workspace tabs" })).toBeNull();
-    expect(screen.getByTestId("session-project")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Continue in New Session…" })).toBeNull();
+  describe("for a cloud session (#1325)", () => {
+    /** The runtime's session with a second agent tab, "Review the fix". */
+    const twoTabs = () => {
+      runtime.tabs = [agentTab(), agentTab({ tabId: "t-2", title: "Review the fix", created: "2026-09-29T00:00:01Z" })];
+      runtime.sessions = runtime.sessions.map((session) => ({ ...session, tabs: [...session.tabs, { id: "t-2", harness: "claude", model: "", permissionMode: "bypassPermissions", status: "idle", created: "", modified: "" }] }));
+    };
+    const strips = () => screen.getAllByTestId("workspace-tab-strip");
+    const contextMenu = async (tab: HTMLElement) => {
+      fireEvent.contextMenu(tab);
+      return screen.findByRole("menu");
+    };
+    const layoutSaves = () => guard.calls.filter((call) => call.command === "set_tab_layout").map((call) => call.args as { workspace: string; layout: { panes?: { id: string; tabs: string[] }[] } });
+
+    it("draws the runtime's tabs in the row, ended by the cloud session's +, which says what stays on this computer", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      await waitFor(() => expect(within(strip).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual(["Fix login", "Review the fix"]));
+      expect(screen.getByTestId("session-project")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Continue in New Session…" })).toBeNull();
+      // The + is the strip's, not the title bar's, and it is the cloud one: agents and a terminal on the VM.
+      expect(within(screen.getByRole("banner")).queryByRole("button", { name: "New tab" })).toBeNull();
+      const plus = within(strip).getByRole("button", { name: "New tab" });
+      fireEvent.pointerDown(plus, { button: 0, pointerType: "mouse" });
+      fireEvent.pointerUp(plus, { button: 0, pointerType: "mouse" });
+      fireEvent.click(plus);
+      expect(await screen.findByRole("menuitem", { name: /Terminal.*on the VM/ })).toBeTruthy();
+      expect(screen.getByTestId("cloud-local-only").textContent).toMatch(/Browser tabs and orchestration runs stay on this computer/);
+      expect(screen.queryByRole("menuitem", { name: /Browser/ })).toBeNull();
+    });
+
+    it("shows the tab picked in the row, through the session's selection", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      const review = await within(strip).findByRole("tab", { name: "Review the fix" });
+      fireEvent.click(review);
+      await waitFor(() => expect(review.getAttribute("aria-selected")).toBe("true"));
+      expect(screen.getByRole("tabpanel", { name: "Review the fix" }).getAttribute("aria-hidden")).toBe("false");
+    });
+
+    it("splits the row into panes on this computer, never on the runtime", async () => {
+      twoTabs();
+      await open();
+      const review = await within(strips()[0]).findByRole("tab", { name: "Review the fix" });
+      const menu = await contextMenu(review);
+      // What the runtime cannot do for a tab yet is left out.
+      expect(within(menu).queryByRole("menuitem", { name: /Rename|Fork|Mute/ })).toBeNull();
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Move to the right pane" }));
+      await waitFor(() => expect(strips()).toHaveLength(2));
+      expect(strips().map((strip) => within(strip).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label")))).toEqual([["Fix login"], ["Review the fix"]]);
+      // Kept per viewer under the session's own key, and nothing about it reaches the runtime.
+      const saved = layoutSaves().at(-1)!;
+      expect(saved.workspace).toBe(`remote:${KEY}`);
+      expect(saved.layout.panes?.map((pane) => [pane.id, pane.tabs])).toEqual([["left", ["agent:t-1"]], ["right", ["agent:t-2"]]]);
+      for (const method of ["session.configure", "session.addTab", "session.close"]) expect(runtime.methods(method)).toEqual([]);
+      // Both panes' chats are on screen, side by side.
+      expect(screen.getAllByRole("textbox", { name: "Prompt" })).toHaveLength(2);
+    });
+
+    it("closes a tab on the runtime, for everyone, and the next tab takes its place", async () => {
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      fireEvent.click(await within(strip).findByRole("tab", { name: "Review the fix" }));
+      fireEvent.click(within(strip).getByRole("button", { name: "Close Review the fix" }));
+      await waitFor(() => expect(runtime.params("session.close")).toHaveLength(1));
+      expect(runtime.params("session.close")[0]).toMatchObject({ sessionId: "s-1", tabId: "t-2", remove: true });
+      await waitFor(() => expect(within(strip).getAllByRole("tab").map((tab) => [tab.getAttribute("aria-label"), tab.getAttribute("aria-selected")])).toEqual([["Fix login", "true"]]));
+    });
+
+    it.each(["driver", "viewer"] as const)("leaves a %s's row without a close, which the runtime would refuse them", async (role) => {
+      shared(role);
+      twoTabs();
+      await open();
+      const strip = (await screen.findAllByTestId("workspace-tab-strip"))[0];
+      await within(strip).findByRole("tab", { name: "Review the fix" });
+      expect(within(strip).queryByRole("button", { name: /^Close / })).toBeNull();
+      expect(runtime.methods("session.close")).toEqual([]);
+    });
+
+    it("forgets what this viewer arranged of a tab closed elsewhere, once the runtime has listed its tabs", async () => {
+      twoTabs();
+      // Arranged here earlier: a tab someone else has since closed is pinned, and in the right pane.
+      saveTabLayout(`remote:${KEY}`, { order: ["agent:t-gone", "agent:t-1", "agent:t-2"], pinned: ["agent:t-gone"], muted: [], titles: {}, panes: [{ id: "left", tabs: ["agent:t-1"], active: "agent:t-1" }, { id: "right", tabs: ["agent:t-2", "agent:t-gone"], active: "agent:t-gone" }] });
+      await open(null);
+      await settle();
+      // Not connected yet: the lists may be partial, so nothing is taken out.
+      expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual(["agent:t-gone"]);
+      await act(async () => runtime.connect());
+      await waitFor(() => expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual([]));
+      const layout = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(layout.order).not.toContain("agent:t-gone");
+      expect(layout.panes?.map((pane) => [pane.id, pane.tabs, pane.active])).toEqual([["left", ["agent:t-1"], "agent:t-1"], ["right", ["agent:t-2"], "agent:t-2"]]);
+    });
+
+    it("keeps the saved layout while the runtime's agent list has not come, though the cache failed and the shells are listed (#1379)", async () => {
+      twoTabs();
+      // This desktop kept nothing it can read: the cache fails, so the store is loaded with no agent tabs at all.
+      guard.handlers.cloud_agent_cache_load = () => { throw new Error("cache unreadable"); };
+      const arranged: TabLayout = { order: ["agent:t-2", "agent:t-1"], pinned: ["agent:t-2"], muted: [], titles: {}, panes: [{ id: "left", tabs: ["agent:t-1"], active: "agent:t-1" }, { id: "right", tabs: ["agent:t-2"], active: "agent:t-2" }] };
+      saveTabLayout(`remote:${KEY}`, arranged);
+      // Connected, the shells listed, the agent list not answered yet.
+      runtime.withheld = ["session.tabs"];
+      await open(null);
+      await act(async () => runtime.connect());
+      await waitFor(() => expect(runtime.methods("pty.list").length).toBeGreaterThan(0));
+      await waitFor(() => expect(runtime.methods("session.tabs").length).toBeGreaterThan(0));
+      await settle(); await settle();
+      const kept = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(kept.order).toEqual(arranged.order);
+      expect(kept.pinned).toEqual(["agent:t-2"]);
+      expect(kept.panes?.map((pane) => [pane.id, pane.tabs])).toEqual([["left", ["agent:t-1"]], ["right", ["agent:t-2"]]]);
+      // The agent list comes, and t-2 was closed meanwhile: now, and only for it, the layout is pruned.
+      runtime.tabs = runtime.tabs.filter((tab) => tab.tabId !== "t-2");
+      await act(async () => runtime.answerWithheld());
+      await waitFor(() => expect(layoutOf(getTabState(), `remote:${KEY}`).pinned).toEqual([]));
+      const pruned = layoutOf(getTabState(), `remote:${KEY}`);
+      expect(pruned.order).toEqual(["agent:t-1"]);
+      expect(pruned.panes?.flatMap((pane) => pane.tabs)).toEqual(["agent:t-1"]);
+    });
   });
 
   it("leaves the reader on the terminal they are in when the last agent tab is closed from the strip", async () => {
     // The title bar and the row of tabs under it.
     const header = show({ tabs: [tab("st-1", "claude", "Investigate")] }).parentElement!;
     fireEvent.click(within(header).getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(1));
     const tabs = () => within(header).getAllByRole("tab");
     await waitFor(() => expect(tabs().map((item) => item.getAttribute("aria-selected"))).toEqual(["false", "true"]));
@@ -588,10 +755,11 @@ describe("a quick chat in the floating window's compact chrome", () => {
     guard.local = () => null;
   });
 
-  it("is the same session view with less around it: no sidebar toggle, no panel, the window's own controls in the header", async () => {
+  it.each([false, true])("keeps the compact header switch with tabStrip=%s and the window's own controls", async (tabStrip) => {
     const session = quick();
     upsertSession(session);
-    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={compact} />));
+    render(wrap(<SessionView session={session} sidebarOpen={false} onToggleSidebar={() => undefined} chrome={{ ...compact, tabStrip }} />));
+    expect(screen.queryByTestId("strip-terminal-view")).toBeNull();
     // What a compact window has no room for.
     expect(screen.queryByRole("button", { name: "Show sidebar" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Toggle panel" })).toBeNull();
@@ -643,7 +811,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(screen.queryByTestId("workspace-tab-strip")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     const strip = await screen.findByTestId("workspace-tab-strip");
     await waitFor(() => expect(spawned()).toHaveLength(1));
     // In the session's working directory: the scratch folder, not the home directory or a repository.
@@ -651,7 +819,7 @@ describe("a quick chat in the floating window's compact chrome", () => {
     expect(spawned()[0].id.startsWith("quick-1:")).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "New tab" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(spawned()).toHaveLength(2));
     const tabs = () => [...strip.querySelectorAll('[role="tab"]')];
     await waitFor(() => expect(tabs().map((tab) => tab.textContent)).toEqual(["claude", "Terminal 1", "Terminal 2"]));
@@ -1353,7 +1521,7 @@ describe("#644 on a cloud agent tab", () => {
     await act(async () => runtime.emit({ state: "reconnecting", attempt: 1, reason: "1006", retryInMs: 250 }));
     runtime.events.push(lifecycle({ type: "item_completed", turnId: "turn", itemId: "item" }), lifecycle({ type: "turn_ended", turnId: "turn", outcome: "completed" }));
     await act(async () => runtime.connect());
-    expect(await screen.findByText(/Context compacted/)).toBeTruthy();
+    expect(await screen.findByText(/Chat compacted/)).toBeTruthy();
     expect(screen.queryByText("Compacting context…")).toBeNull();
     expect(screen.queryByText(/Compaction status unknown/)).toBeNull();
   });

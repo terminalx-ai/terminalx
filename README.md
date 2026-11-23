@@ -5,7 +5,7 @@ on your machine. Every session is its own git worktree, and a session holds tabs
 tab an agent conversation against that same tree. A Claude Code or Codex tab
 *is* the real interactive CLI, running in a PTY: the chat you read is a
 projection of that one process, built from the transcript the CLI writes and
-the hooks it runs, and ⌘⇧T flips between the chat and the terminal without
+the hooks it runs, and ⇧⌘T flips between the chat and the terminal without
 stopping anything or waiting for a turn to end. One process, two views. See
 [docs/PTY-FIRST.md](docs/PTY-FIRST.md) for how that works and why.
 
@@ -35,7 +35,7 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   on Windows. Linux screenshots and hotkeys require X11; Windows cannot reach
   elevated windows from a non-elevated app.
   See [docs/COMPUTER-USE.md](docs/COMPUTER-USE.md).
-- **Dictation** (hold Right ⌥, or ⌘⇧D) using the Mac's own on-device speech
+- **Dictation** (hold Right ⌥, or ⇧⌘D) using the Mac's own on-device speech
   recognition, with optional local models (Parakeet, Nemotron, Canary,
   Whisper) downloaded on demand. Audio never leaves the machine.
 - **Keyboard shortcuts you can change** in Settings → Shortcuts: click one,
@@ -46,20 +46,24 @@ TerminalX brings no compute of its own: it drives the `claude` and `codex` CLIs 
   session review it, and takes the findings back to the first; it stops at
   *Ready to merge* unless you turn on merging for that issue
   ([docs/ISSUE-PIPELINE.md](docs/ISSUE-PIPELINE.md)).
-- **File explorer** (⌘⇧E) with git status badges and Material icons, **editor
+- **File explorer** (⇧⌘E) with git status badges and Material icons, **editor
   tabs** with a gutter against HEAD and markdown preview, ⌘P quick open and
-  ⌘⇧F project search.
+  ⇧⌘F project search.
 - **Changes, git and pull requests** in the right panel: the last turn's diff
   or the whole session's, repository status and history, and PRs through the
   GitHub CLI.
 - **Full-height shell tabs** (⌘J) beside agent conversations, whose processes,
   scrollback and working directories survive tab and session switches.
-- **Agent dashboard** (⌘⇧A): every session across every project in three
+- **Agent dashboard** (⇧⌘A): every session across every project in three
   columns — needs you, working, done — with search, filters and keyboard
   navigation.
 - **Projects and workspaces**: a projects rail with colours and logos, and
   every checkout — including worktrees made outside the app — listed with its
   sessions.
+- **Machines**: pair with another Mac or a headless Linux server in Settings →
+  Machines. Its projects and sessions appear in your sidebar. Chat, approvals,
+  terminals, files and git run on that computer. See
+  [the Machines guide](docs/MACHINES-GUIDE.md).
 - **A first-party command line interface**: `terminalx` (or `tnx`) drives
   projects, sessions, tabs, transcripts, permission cards, worktrees, issues
   and issue pipelines through the running app's authenticated control socket.
@@ -228,6 +232,9 @@ All of them, in full:
   file without printing it.
 - **`~/.local/bin/terminalx` and `~/.local/bin/tnx`** — symlinks to the
   app executable, only when you press Install under Settings → General.
+- **On Windows** the sockets above are named pipes that only your account can
+  open, and Install writes `terminalx.cmd` and `tnx.cmd` to `~/.local/bin`
+  instead of links; see "Windows" in [docs/LOCAL-RUNTIME.md](docs/LOCAL-RUNTIME.md).
 - **`~/.claude/skills/terminalx-cli` and
   `~/.agents/skills/terminalx-cli`** — the first-party discovery stub,
   only when you install it under Settings → Agents. Its full version-matched

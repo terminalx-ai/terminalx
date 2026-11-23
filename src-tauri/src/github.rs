@@ -121,6 +121,9 @@ pub struct PullRequest {
     pub checks: Vec<PrCheck>,
     pub body: String,
     pub author: String,
+    /// `owner/name` of the repository the head is on, when that is a fork. Read only where it was asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_repository: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +182,11 @@ pub(crate) fn parse_pr(v: &Value) -> PullRequest {
         checks,
         body: v["body"].as_str().unwrap_or("").into(),
         author: v["author"]["login"].as_str().unwrap_or("").into(),
+        head_repository: v["isCrossRepository"]
+            .as_bool()
+            .unwrap_or(false)
+            .then(|| Some(format!("{}/{}", v["headRepositoryOwner"]["login"].as_str()?, v["headRepository"]["name"].as_str()?)))
+            .flatten(),
     }
 }
 
@@ -371,7 +379,7 @@ fn has_own_head(pr: &Value, ours: &[String]) -> bool {
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn tracked_pr_branches() -> Result<BTreeSet<(PathBuf, String)>> {
@@ -474,6 +482,48 @@ pub fn merge_associated_pr(cwd: &Path, number: u64, method: &str, url: Option<&s
     if url.is_none() { return merge_pr(cwd, number, method); }
     let target = associated_target(number, url)?;
     merge_pr_target(&outside_checkouts(), &target, method)
+}
+
+/// "Delete the branch after merge" in the panel's merge menu: the pull request's head branch on GitHub, only once it has
+/// merged, only when it is in the same repository (a fork's branch is not ours), and only while it still points at the
+/// head that merged. Already gone (GitHub deletes merged branches itself when the repository is set to) is done.
+pub fn delete_merged_branch(cwd: &Path, number: u64, url: Option<&str>) -> Result<()> {
+    let _request = crate::github_process::scope();
+    let target = associated_target(number, url)?;
+    let dir = if url.is_some() { outside_checkouts() } else { cwd.to_path_buf() };
+    delete_merged_branch_with(&target, |args| run(&dir, args))
+}
+
+fn delete_merged_branch_with(target: &str, mut run: impl FnMut(&[&str]) -> Result<String>) -> Result<()> {
+    let view: Value = serde_json::from_str(&run(&["pr", "view", target, "--json", "state,url,headRefName,headRefOid,isCrossRepository"])?)?;
+    if view["state"] != "MERGED" { bail!("the pull request has not merged"); }
+    if view["isCrossRepository"] != false { bail!("it is in another repository"); }
+    let branch = view["headRefName"].as_str().filter(|b| !b.is_empty()).context("GitHub omitted the head branch")?;
+    let head = view["headRefOid"].as_str().filter(|h| !h.is_empty()).context("GitHub omitted the head commit")?;
+    if branch.starts_with('-') || !branch.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/')) {
+        bail!("its name cannot be deleted from here");
+    }
+    let identity = crate::pr_associations::identity(view["url"].as_str().context("GitHub omitted the pull request URL")?)?;
+    let parts: Vec<_> = identity.trim_start_matches("https://").split('/').collect();
+    let [host, owner, repo, "pull", _] = parts.as_slice() else { bail!("Invalid pull request URL"); };
+    let reference = format!("repos/{owner}/{repo}/git/ref/heads/{branch}");
+    let at = match run(&["api", "--hostname", host, &reference, "--jq", ".object.sha"]) {
+        Ok(at) => at,
+        // GitHub also answers Not Found when the account cannot see the repository (SSO not authorised, a token
+        // without it): gone only when the repository itself can be read.
+        Err(error) if format!("{error:#}").contains("Not Found") => {
+            return match run(&["api", "--hostname", host, &format!("repos/{owner}/{repo}"), "--jq", ".full_name"]) {
+                Ok(_) => Ok(()),
+                Err(_) => bail!("this account cannot see the branch on GitHub"),
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    if at.trim() != head { bail!("it has moved since the merge"); }
+    match run(&["api", "--hostname", host, "--method", "DELETE", &format!("repos/{owner}/{repo}/git/refs/heads/{branch}")]) {
+        Err(error) if !format!("{error:#}").contains("Reference does not exist") => Err(error),
+        _ => Ok(()),
+    }
 }
 
 pub fn ready_associated_pr(cwd: &Path, number: u64, url: Option<&str>) -> Result<()> {
@@ -1161,7 +1211,7 @@ fn default_hostname() -> String {
     std::env::var("GH_HOST").ok().filter(|host| !host.is_empty()).unwrap_or_else(|| "github.com".into())
 }
 
-fn hostname_from_remote(remote: &str) -> Option<String> {
+pub(crate) fn hostname_from_remote(remote: &str) -> Option<String> {
     hostname_from_remote_with(remote, &mut |host| ssh_hostname(host, Command::new(crate::binpath::resolve("ssh")?)))
 }
 
@@ -2182,6 +2232,31 @@ mod tests {
     }
 
     #[test]
+    fn deleting_the_merged_branch_checks_state_fork_and_head() {
+        let view = |state: &str, cross: bool| serde_json::json!({"state":state,"url":"https://github.com/acme/one/pull/7","headRefName":"feature/x","headRefOid":"abc","isCrossRepository":cross}).to_string();
+        let target = "https://github.com/acme/one/pull/7";
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        delete_merged_branch_with(target, |args| {
+            calls.push(args.iter().map(|a| a.to_string()).collect());
+            Ok(match calls.len() { 1 => view("MERGED", false), 2 => "abc\n".into(), _ => String::new() })
+        }).unwrap();
+        assert_eq!(calls[1], ["api", "--hostname", "github.com", "repos/acme/one/git/ref/heads/feature/x", "--jq", ".object.sha"]);
+        assert_eq!(calls[2], ["api", "--hostname", "github.com", "--method", "DELETE", "repos/acme/one/git/refs/heads/feature/x"]);
+        assert!(delete_merged_branch_with(target, |_| Ok(view("OPEN", false))).is_err());
+        assert!(delete_merged_branch_with(target, |_| Ok(view("MERGED", true))).is_err());
+        let mut n = 0;
+        let moved = delete_merged_branch_with(target, |args| { n += 1; assert!(!args.contains(&"DELETE")); Ok(if n == 1 { view("MERGED", false) } else { "def".into() }) });
+        assert!(format!("{:#}", moved.unwrap_err()).contains("moved"));
+        // Already gone: the ref is not there, and the repository can be read.
+        let mut n = 0;
+        delete_merged_branch_with(target, |args| { n += 1; match n { 1 => Ok(view("MERGED", false)), 2 => bail!("gh: Not Found (HTTP 404)"), _ => { assert_eq!(args[3], "repos/acme/one"); Ok("acme/one".into()) } } }).unwrap();
+        // Not Found because the account cannot see the repository: not reported as deleted.
+        let mut n = 0;
+        let hidden = delete_merged_branch_with(target, |args| { n += 1; assert!(!args.contains(&"DELETE")); if n == 1 { Ok(view("MERGED", false)) } else { bail!("gh: Not Found (HTTP 404)") } });
+        assert!(format!("{:#}", hidden.unwrap_err()).contains("cannot see"));
+    }
+
+    #[test]
     fn associated_targets_keep_repository_identity_and_reject_mismatched_numbers() {
         assert_eq!(associated_target(7, Some("https://github.com/Acme/one/pull/7/")).unwrap(), "https://github.com/acme/one/pull/7");
         assert_eq!(associated_target(7, Some("https://github.com/Acme/two/pull/7")).unwrap(), "https://github.com/acme/two/pull/7");
@@ -2258,6 +2333,7 @@ mod tests {
         assert_eq!((out.status.code(), out.stdout.as_slice(), out.stderr.as_slice()), (Some(3), b"out".as_slice(), b"err".as_slice()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn privacy_blocks_and_drains_app_github_processes() {
         for managed in [false, true] {
@@ -2298,6 +2374,8 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(5);
         while !marker.exists() { assert!(Instant::now() < until); std::thread::sleep(Duration::from_millis(5)); }
         let pid: i32 = std::fs::read_to_string(&marker).unwrap().parse().unwrap();
+        #[cfg(not(unix))]
+        let _ = pid;
         crate::store::write_json(&preference, &serde_json::json!({"enabled":true})).unwrap();
         let started = Instant::now();
         assert!(crate::data_privacy::refresh().enabled);
@@ -2876,12 +2954,18 @@ pub fn search_prs(cwd: &Path, query: &str) -> Result<Vec<PullRequest>> {
     search_prs_with(cwd, query, run)
 }
 
-fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+/// `search_prs` with the `gh` runner given: a workspace runtime runs its own
+/// (`remote::git`), so the composer's `#` list names the workspace's pull
+/// requests (#1329).
+pub(crate) fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) -> Result<String>) -> Result<Vec<PullRequest>> {
+    // The fork a head is on, for the row that says where it comes from.
+    let fields = format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner");
+    let fields = fields.as_str();
     let query = query.trim().trim_start_matches('#');
     if !query.is_empty() && query.bytes().all(|b| b.is_ascii_digit()) {
         let number = query.parse::<u64>()?;
         if number == 0 { return Ok(vec![]); }
-        let out = match run(cwd, &["pr", "view", &number.to_string(), "--json", FIELDS]) {
+        let out = match run(cwd, &["pr", "view", &number.to_string(), "--json", fields]) {
             Ok(out) => out,
             Err(error) if error.to_string().contains("Could not resolve to a PullRequest") || error.to_string().contains("no pull requests found") => return Ok(vec![]),
             Err(error) => return Err(error),
@@ -2889,12 +2973,12 @@ fn search_prs_with(cwd: &Path, query: &str, mut run: impl FnMut(&Path, &[&str]) 
         return Ok(vec![parse_pr(&serde_json::from_str(&out)?)]);
     }
     let search = format!("\"{}\" in:title", query.replace(['"', '\\'], " "));
-    let mut args = vec!["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS];
+    let mut args = vec!["pr", "list", "--state", "open", "--limit", "30", "--json", fields];
     if !query.is_empty() { args.extend(["--search", &search]); }
     let mut records: Vec<Value> = serde_json::from_str(&run(cwd, &args)?)?;
     let author = query.trim_start_matches('@');
     if !author.is_empty() && author.len() <= 39 && author.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        let authored: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", "30", "--json", FIELDS, "--author", author])?)?;
+        let authored: Vec<Value> = serde_json::from_str(&run(cwd, &["pr", "list", "--state", "open", "--limit", "30", "--json", fields, "--author", author])?)?;
         records.extend(authored);
     }
     let mut seen = BTreeSet::new();
@@ -2988,10 +3072,18 @@ pub fn attach_pr(cwd: &Path, number: u64) -> Result<String> {
     attach_pr_with(cwd, number, run)
 }
 
-fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+/// The context file a `#` mention attaches: the pull request's title,
+/// description and changed files, as Markdown. A workspace runtime reads it
+/// with its own `gh` (#1329); this computer's is in [`attach_pr`].
+pub(crate) fn pr_context_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
     if number == 0 { bail!("Invalid pull request number"); }
     let fields = format!("{FIELDS},files,changedFiles");
     let value = serde_json::from_str(&run(cwd, &["pr", "view", &number.to_string(), "--json", &fields])?)?;
+    Ok(pr_markdown(&value))
+}
+
+fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> Result<String>) -> Result<String> {
+    let text = pr_context_with(cwd, number, run)?;
     let dir = crate::store::root()?.join("pr-attachments");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("pr-{number}-{}.md", uuid::Uuid::now_v7()));
@@ -3002,7 +3094,7 @@ fn attach_pr_with(cwd: &Path, number: u64, run: impl FnOnce(&Path, &[&str]) -> R
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(&path)?.write_all(pr_markdown(&value).as_bytes())?;
+    options.open(&path)?.write_all(text.as_bytes())?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -3084,10 +3176,11 @@ mod start_from_tests {
         for query in ["12", "#12", " 12 "] {
             let found = search_prs_with(Path::new("/repo"), query, |cwd, args| {
                 assert_eq!(cwd, Path::new("/repo"));
-                assert_eq!(args, ["pr", "view", "12", "--json", FIELDS]);
+                assert_eq!(args, ["pr", "view", "12", "--json", &format!("{FIELDS},isCrossRepository,headRepository,headRepositoryOwner")]);
                 Ok(PR.into())
             }).unwrap();
             assert_eq!(found.len(), 1);
+            assert_eq!(found[0].head_repository, None, "a head on the repository itself names no fork");
             assert_eq!(found[0].number, 12);
             assert_eq!(found[0].state, "MERGED");
         }
@@ -3103,6 +3196,8 @@ mod start_from_tests {
             Ok(format!("[{PR}]"))
         }).unwrap();
         assert_eq!(found.len(), 1);
+        let fork = r#"[{"number":7,"title":"From a fork","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"},"headRepository":{"name":"app"}}]"#;
+        assert_eq!(search_prs_with(Path::new("/repo"), "", |_, _| Ok(fork.into())).unwrap()[0].head_repository.as_deref(), Some("alice/app"));
         assert_eq!(&calls[0][8..], ["--search", "\"alice\" in:title"]);
         assert_eq!(&calls[1][8..], ["--author", "alice"]);
         assert!(search_prs_with(Path::new("/repo"), "", |_, _| Ok("not json".into())).is_err());

@@ -126,7 +126,7 @@ fn read_work(cwd: &Path) -> Result<WorkStatus> {
     if work.branch.is_none() && work.operation.as_deref() == Some("rebase") {
         let dir = git::run(cwd, &["rev-parse", "--absolute-git-dir"])?;
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name"] {
-            if let Ok(name) = std::fs::read_to_string(Path::new(dir.trim()).join(marker)) {
+            if let Ok(name) = std::fs::read_to_string(Path::new(crate::git::path_line(&dir)).join(marker)) {
                 if let Some(branch) = name.trim().strip_prefix("refs/heads/") {
                     if git::run(cwd, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok() {
                         work.branch = Some(branch.to_string());
@@ -194,7 +194,7 @@ pub fn preview(session: &SessionEntry, working: bool, mode: Refresh) -> Result<S
     let remote = git::remote_url(cwd);
     if !supported(&work, remote.as_deref()) { return Ok(hidden(session, revision)); }
     let branch = work.branch.as_deref().unwrap();
-    let key = format!("{}\0{branch}\0{}", std::fs::canonicalize(cwd)?.display(), remote.as_deref().unwrap());
+    let key = format!("{}\0{branch}\0{}", crate::paths::canonicalize(cwd)?.display(), remote.as_deref().unwrap());
     let fetch = !working && HOSTED.lock().unwrap().entry(key.clone()).or_default().start(mode, Instant::now());
     if fetch {
         let result = (|| {
@@ -278,7 +278,7 @@ static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(H
 pub struct RunGuard(String);
 impl RunGuard {
     pub fn acquire(cwd: &str) -> Result<Self> {
-        let key = std::fs::canonicalize(cwd)?.to_string_lossy().into_owned();
+        let key = crate::paths::canonicalize(cwd)?.to_string_lossy().into_owned();
         if !RUNNING.lock().unwrap().insert(key.clone()) { bail!("Another Git action is running in this checkout."); }
         Ok(Self(key))
     }

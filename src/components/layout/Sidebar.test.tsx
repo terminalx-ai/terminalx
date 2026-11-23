@@ -17,9 +17,8 @@ describe("Sidebar", () => {
         onToggle={() => {}}
         onOpenSettings={() => {}}
         onOpenAccount={() => {}}
-        onOpenHome={() => {}} onOpenIssues={() => {}}
+        onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}}
         onOpenAgents={() => {}}
-        onOpenStats={() => {}}
         onOpenAutomations={() => {}}
         onOpenSkills={() => {}}
         onSearch={() => {}}
@@ -38,7 +37,7 @@ describe("the sidebar's width", () => {
     const prefs = await import("@/lib/prefs");
     prefs.setPrefs({ sidebarWidth: 268 });
     render(
-      <Sidebar onToggle={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />,
+      <Sidebar onToggle={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />,
     );
     const handle = screen.getByRole("separator", { name: "Resize sidebar" });
     handle.setPointerCapture = () => {};

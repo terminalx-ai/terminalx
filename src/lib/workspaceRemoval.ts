@@ -36,9 +36,17 @@ export interface WorkspaceHost {
   key: string;
   /** A host must refuse retention when its removal API cannot honor it. */
   keepConversationsUnavailable?: string;
+  /** Offer the bulk cleanup dialog as an alternative for this host. */
+  bulkCleanupAvailable?: boolean;
   /** `fetch` asks for the clean-and-merged verdict the removal dialog shows; without it the read is quick. */
   disposition(options?: { fetch?: boolean }): Promise<WorkspaceDisposition>;
   remove(options: WorkspaceRemoveOptions): Promise<BranchOutcome>;
+  /**
+   * Settle a pull request a create left unverified, which blocks the check:
+   * the host clears it once GitHub shows it merged or closed, and keeps it
+   * otherwise. Only hosts that record such creates (machines) offer it.
+   */
+  reconcilePrCreation?(url: string): Promise<void>;
   /** Whether an agent turn runs in any of these sessions, as far as this window knows. */
   turnRunning(sessionIds: string[]): boolean;
 }

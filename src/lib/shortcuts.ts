@@ -1,4 +1,5 @@
 import { getPrefs, setPrefs, usePrefs } from "@/lib/prefs";
+import { getExperimentalSettings } from "@/lib/experimentalSettings";
 
 /**
  * Every keyboard shortcut the app has: one registry of actions, each with its
@@ -43,6 +44,8 @@ interface ActionDef {
   hold?: boolean;
   /** A character typed in the composer, not a key that can be moved. */
   fixed?: boolean;
+  /** The Experimental switch the action is behind: while it is off, Settings and ⌘K do not list it. */
+  requires?: "bots";
 }
 
 const ACTIONS = [
@@ -62,26 +65,43 @@ const ACTIONS = [
   { id: "app.docs", label: "Documentation", group: "App", keys: [], menu: { section: "help", order: 0, label: "Documentation" } },
   { id: "app.shortcuts", label: "Keyboard shortcuts", group: "App", keys: [], menu: { section: "help", order: 1, label: "Keyboard Shortcuts" } },
   { id: "app.reportIssue", label: "Report an issue", group: "App", keys: [], menu: { section: "help", order: 2, label: "Report an Issue…" } },
+  { id: "app.supportReport", label: "Send a support report", group: "App", keys: [], menu: { section: "help", order: 3, label: "Send a Support Report…" } },
 
   { id: "app.commandPalette", label: "Command palette", group: "App", keys: ["mod+k"] },
-  { id: "app.home", label: "Home", group: "App", keys: [] },
+  // Keep Mod+G / Mod+Shift+G for next/previous search matches in editors and chats.
+  { id: "app.home", label: "Home", group: "App", keys: ["mod+alt+0"] },
   { id: "app.newSession", label: "New session", group: "App", keys: ["mod+n"], menu: { section: "file", order: 0, label: "New Chat", target: "focused" } },
   { id: "app.startFrom", label: "Start session from…", group: "App", keys: ["mod+shift+n"], menu: { section: "file", order: 1.5, label: "Start From…" } },
   { id: "app.issues", label: "Issues", group: "App", keys: ["mod+i"], menu: { section: "go", order: 1, label: "Issues" } },
-  { id: "app.agentDashboard", label: "Agent dashboard", group: "App", keys: ["mod+shift+a"], menu: { section: "go", order: 0, label: "Dashboard" } },
-  { id: "app.stats", label: "Stats & Usage", group: "App", keys: ["mod+shift+u"] },
+  { id: "app.agentDashboard", label: "Overview", group: "App", keys: ["mod+1"], menu: { section: "go", order: 0, label: "Overview" } },
+  { id: "app.stats", label: "Stats & usage", group: "App", keys: ["mod+shift+u"] },
   { id: "app.automations", label: "Automations", group: "App", keys: ["mod+shift+r"], menu: { section: "go", order: 2, label: "Automations" } },
+  // The Bots page (PRO-467); does nothing while Settings → Experimental → Bots is off.
+  { id: "app.bots", label: "Bots", group: "App", keys: ["mod+shift+j"], requires: "bots" },
+  // PRO-474: the designs' ⇧⌘P is the markdown preview's (`files.togglePreview`), so Pause all takes ⌥⇧⌘P.
+  { id: "app.pauseAllBots", label: "Pause all bots", group: "App", keys: ["mod+alt+shift+p"], requires: "bots" },
   // The open session's Run view, while it leads a run (Settings → Experimental → Orchestration runs). The drafts
-  // (18.01) drew ⌘⇧R, but that is Automations; ⌘⇧O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
+  // (18.01) drew ⇧⌘R, but that is Automations; ⇧⌘O (Ctrl+Shift+O), O for orchestrator, is bound to nothing else.
   { id: "app.runView", label: "Run view", group: "App", keys: ["mod+shift+o"], menu: { section: "go", order: 2.5, label: "Run View" } },
   { id: "app.skills", label: "Skills", group: "App", keys: ["mod+shift+k"] },
   { id: "app.settings", label: "Settings", group: "App", keys: ["mod+,"], menu: { section: "app", order: 1, label: "Settings…" } },
   { id: "app.toggleSidebar", label: "Toggle sidebar", group: "App", keys: ["mod+b"], menu: { section: "view", order: 0, label: "Toggle Sidebar" } },
+  // #1131 owner decision (https://github.com/terminalx-ai/terminalx/issues/1131): match the design. Light/dark is
+  // ⌥⌘T on macOS (⇧⌘T is Switch chat / terminal view, so Reopen closed tab moves to ⌥⇧⌘T); elsewhere it keeps
+  // Ctrl+Alt+Shift+L, since Ctrl+Alt+T opens a terminal on GNOME/Ubuntu. A saved binding still wins over either default.
+  { id: "app.toggleMode", label: "Switch light and dark", group: "App", keys: ["mod+alt+shift+l"], macKeys: ["mod+alt+t"] },
   { id: "app.togglePanel", label: "Toggle right panel", group: "App", keys: ["mod+e"], menu: { section: "view", order: 1, label: "Toggle Right Panel" } },
   // No keys inside the window by default: the floating window has a system-wide shortcut of its own (Settings → Shortcuts).
   { id: "app.quickChat", label: "Open the floating chat window", group: "App", keys: [] },
   { id: "session.archive", label: "Archive session", group: "Session", keys: [] },
+  // The title bar's '…' menu (PRO-397). No keys by default: the design's ⌘I is Issues' and ⇧⌘C is Create pull request's.
+  { id: "session.linkIssue", label: "Link an issue to the session", group: "Session", keys: [] },
+  { id: "session.copyLink", label: "Copy a link to the session", group: "Session", keys: [] },
   { id: "session.newTab", label: "New tab", group: "Session", keys: ["mod+t"] },
+  // PRO-381: the new-tab menu's Browser. ⌘B is the sidebar; with Shift it is free.
+  { id: "session.newBrowserTab", label: "New browser tab", group: "Session", keys: ["mod+shift+b"] },
+  // PRO-381: fork the on-screen tab's conversation into a new session.
+  { id: "session.forkTab", label: "Fork the conversation to a new session", group: "Session", keys: ["mod+alt+enter"] },
   // PRO-363: the Run menu's first visible action, or the menu itself as a picker when there are several. ⌘R is free in the
   // terminal and the editor on macOS; elsewhere Ctrl+R is the shell's history search, so the default adds Alt.
   { id: "session.runAction", label: "Run the project's action", group: "Session", keys: ["mod+alt+r"], macKeys: ["mod+r"] },
@@ -96,8 +116,9 @@ const ACTIONS = [
   { id: "session.closeTab", label: "Close tab or file", group: "Session", keys: ["mod+w"], menu: { section: "file", order: 4, label: "Close Tab", target: "focused", separator: true } },
   { id: "session.nextTab", label: "Next tab", group: "Session", keys: ["mod+shift+]"] },
   { id: "session.previousTab", label: "Previous tab", group: "Session", keys: ["mod+shift+["] },
-  // The browser's keys: the main modifier and a digit for a position in the tab row, 9 for the last tab.
-  { id: "session.tab1", label: "Switch to tab 1", group: "Session", keys: ["mod+1"] },
+  // Overview owns mod+1 everywhere. Add Shift for tab 1; other positions keep their existing keys.
+  // Explicit saved bindings still win over these defaults, including a saved mod+1 for tab 1.
+  { id: "session.tab1", label: "Switch to tab 1", group: "Session", keys: ["mod+shift+1"] },
   { id: "session.tab2", label: "Switch to tab 2", group: "Session", keys: ["mod+2"] },
   { id: "session.tab3", label: "Switch to tab 3", group: "Session", keys: ["mod+3"] },
   { id: "session.tab4", label: "Switch to tab 4", group: "Session", keys: ["mod+4"] },
@@ -107,11 +128,12 @@ const ACTIONS = [
   { id: "session.tab8", label: "Switch to tab 8", group: "Session", keys: ["mod+8"] },
   { id: "session.lastTab", label: "Switch to last tab", group: "Session", keys: ["mod+9"] },
   { id: "session.focusOtherPane", label: "Focus other pane", group: "Session", keys: ["mod+alt+o"] },
-  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"] },
+  // ⌘\ is the design's (PRO-381); Ctrl+\ is the shell's quit key elsewhere, so it is macOS's alone.
+  { id: "session.moveTabToOtherPane", label: "Move tab to other pane", group: "Session", keys: ["mod+alt+shift+o"], macKeys: ["mod+\\", "mod+alt+shift+o"] },
   { id: "session.moveTabLeft", label: "Move tab left", group: "Session", keys: ["mod+alt+shift+["] },
   { id: "session.moveTabRight", label: "Move tab right", group: "Session", keys: ["mod+alt+shift+]"] },
   // The browser's own keys for this (mod+shift+t) switch the tab to its terminal view here; Ctrl+Alt+T opens a terminal on most Linux desktops.
-  { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"], macKeys: ["mod+alt+t"] },
+  { id: "session.reopenTab", label: "Reopen closed tab", group: "Session", keys: ["mod+alt+shift+t"] },
   { id: "session.latestShell", label: "Activate latest shell tab", group: "Session", keys: ["mod+j"], menu: { section: "view", order: 2, label: "Terminal", target: "focused" } },
   { id: "session.toggleTerminalView", label: "Switch the tab between chat and terminal view", group: "Session", keys: ["mod+shift+t"], menu: { section: "view", order: 3, label: "Switch Chat / Terminal", target: "focused" } },
   // Escape in the chat is Escape in the agent: the turn is interrupted and the agent's process stays (#427).
@@ -266,12 +288,24 @@ function holdCap(code: string, mac: boolean): string {
   return `${side} ${name}`;
 }
 
-/** Keycaps for a binding: ["⌘", "B"] on mac, ["Ctrl", "B"] elsewhere, ["Right ⌥"] for a held key. */
+/** The order macOS writes modifiers in, in its menus and its documentation: ⌃⌥⇧⌘, then the key. */
+const MAC_MODIFIER_ORDER = ["ctrl", "alt", "shift", "mod"];
+
+/**
+ * Keycaps for a binding: ["⌘", "B"] on mac, ["Ctrl", "B"] elsewhere, ["Right ⌥"] for a held key.
+ * A binding is stored with its modifiers in one fixed order (`normalizeBinding`); on a Mac they are
+ * drawn in the system's order instead, so ⇧⌘D reads as it does in every other app's menus.
+ */
 export function keycaps(binding: string, mac = isMac): string[] {
   const code = holdCode(binding);
   if (code != null) return [holdCap(code, mac)];
-  return normalizeBinding(binding)
-    .split("+")
+  const parts = normalizeBinding(binding).split("+");
+  if (mac) {
+    const rank = (part: string) => MAC_MODIFIER_ORDER.indexOf(part);
+    const mods = parts.filter((part) => rank(part) >= 0).sort((a, b) => rank(a) - rank(b));
+    parts.splice(0, parts.length, ...mods, ...parts.filter((part) => rank(part) < 0));
+  }
+  return parts
     .map((p) => {
       switch (p) {
         case "mod":
@@ -306,7 +340,18 @@ export function keycaps(binding: string, mac = isMac): string[] {
     });
 }
 
-/** A binding in a sentence: "⌘⇧D", "Ctrl+Shift+D", "Right ⌥". */
+/** ARIA uses KeyboardEvent key names, not the glyphs drawn on keycaps. */
+export function ariaKeyShortcut(binding: string, mac = isMac): string | undefined {
+  if (holdCode(binding)) return undefined;
+  const names: Record<string, string> = {
+    mod: mac ? "Meta" : "Control", ctrl: "Control", meta: "Meta", alt: "Alt", shift: "Shift",
+    up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
+    escape: "Escape", enter: "Enter", space: "Space", plus: "Plus",
+  };
+  return normalizeBinding(binding).split("+").map((key) => names[key] ?? (key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1))).join("+");
+}
+
+/** A binding in a sentence: "⇧⌘D", "Ctrl+Shift+D", "Right ⌥". */
 export function bindingText(binding: string, mac = isMac): string {
   return keycaps(binding, mac).join(mac ? "" : "+");
 }
@@ -412,8 +457,19 @@ export function resolveKeymap(raw: unknown, mac = isMac): Keymap {
     });
   for (const action of SHORTCUT_ACTIONS) if (action.fixed) keymap[action.id] = claim(defaultBindings(action.id, mac));
   for (const action of SHORTCUT_ACTIONS) if (overrides[action.id]) keymap[action.id] = claim(overrides[action.id]!);
+  // An action behind an Experimental switch takes its default keys last: whatever else uses them keeps them.
+  for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id] && !gated(action)) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
   for (const action of SHORTCUT_ACTIONS) if (!keymap[action.id]) keymap[action.id] = claim(defaultBindings(action.id, mac).map(normalizeBinding));
   return keymap;
+}
+
+function gated(action: ShortcutAction): boolean {
+  return !!action.requires;
+}
+
+/** False while the Experimental switch the action is behind is off (or not read yet): its keys then belong to nothing. */
+export function shortcutOffered(action: ShortcutAction): boolean {
+  return !action.requires || getExperimentalSettings()?.[action.requires] === true;
 }
 
 let cached: { raw: unknown; keymap: Keymap } | null = null;
@@ -439,7 +495,7 @@ export function bindingsOf(id: ShortcutId): string[] {
 /** The other action that has `binding`, if any. */
 export function conflictOf(binding: string, id: ShortcutId, keymap: Keymap = currentKeymap()): ShortcutAction | null {
   const wanted = normalizeBinding(binding);
-  return SHORTCUT_ACTIONS.find((action) => action.id !== id && keymap[action.id].includes(wanted)) ?? null;
+  return SHORTCUT_ACTIONS.find((action) => action.id !== id && shortcutOffered(action) && keymap[action.id].includes(wanted)) ?? null;
 }
 
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((binding, i) => binding === b[i]);

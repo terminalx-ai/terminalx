@@ -24,6 +24,45 @@ impl Sessions {
         self.call("runtime.session.create", json!({"req": req}))
     }
 
+    /// [`Self::create`], its first tab on agent account `account` (#980).
+    /// The account rides in the request, where a runtime that does not know
+    /// accounts reads past it; when the runtime says it cannot honour it,
+    /// the tab is marked in the reply ([`crate::session_ops::TAB_ACCOUNT_FALLBACK`]):
+    /// it starts on This Mac's login, and the window says so.
+    pub fn create_on(&self, req: &crate::session_ops::NewSession, account: Option<&str>) -> Result<crate::store::index::SessionEntry> {
+        let Some(account) = account else { return self.create(req) };
+        let supported = self.supports_accounts()?;
+        let mut params = serde_json::to_value(req)?;
+        if supported { params["account"] = json!(account); }
+        let mut entry: crate::store::index::SessionEntry = self.call("runtime.session.create", json!({"req": params}))?;
+        if !supported {
+            for tab in &mut entry.tabs { mark_fallback(tab); }
+        }
+        Ok(entry)
+    }
+
+    /// Whether the runtime starts tabs on the account they ask for (#980).
+    /// One from before accounts answers that it has no such operation.
+    pub fn supports_accounts(&self) -> Result<bool> {
+        match self.quick::<bool>("runtime.session.accountSupport", json!({})) {
+            Ok(supported) => Ok(supported),
+            Err(error) if unsupported(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Restart a tab's agent on agent account `account` and resume its
+    /// conversation (#980). A runtime from before accounts cannot.
+    /// `true` when a running agent was restarted on it, `false` when the
+    /// account was only recorded for the tab's next start.
+    pub fn switch_account(&self, session: &str, tab: &str, account: &str) -> Result<bool> {
+        match self.tab::<bool>("switchAccount", session, tab, json!({"account": account})) {
+            Ok(restarted) => Ok(restarted),
+            Err(error) if unsupported(&error) => anyhow::bail!("{OLDER_RUNTIME}"),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn workspace_setup(&self, operation: &str, session: Option<&str>, pane: Option<&str>) -> Result<Value> {
         self.call("runtime.session.workspaceSetup", json!({"operation": operation, "sessionId": session, "paneId": pane}))
     }
@@ -106,6 +145,20 @@ impl Sessions {
         self.call("runtime.session.manualStatus", json!({"sessionId":session,"status":status}))
     }
 
+    /// Bots (`bots`, PRO-466). A read fails fast on a wedged owner; a change waits for its answer.
+    pub fn bots<T: DeserializeOwned>(&self, operation: &str, params: Value) -> Result<T> {
+        self.bots_request(json!({"operation": operation, "params": params}))
+    }
+
+    /// [`Self::bots`] with the whole request, as `window_consent::guarded` sends it again.
+    pub fn bots_request<T: DeserializeOwned>(&self, request: Value) -> Result<T> {
+        if request["operation"].as_str().is_some_and(bots_read) {
+            self.quick(crate::serve_cli::consent::BOTS_COMMAND, request)
+        } else {
+            self.call(crate::serve_cli::consent::BOTS_COMMAND, request)
+        }
+    }
+
     pub fn automations(&self) -> Result<Vec<crate::automations::Automation>> {
         self.quick("runtime.session.automations", json!({}))
     }
@@ -124,6 +177,16 @@ impl Sessions {
 
     pub fn delete_automation(&self, id: &str) -> Result<()> {
         self.call("runtime.session.automationDelete", json!({"id":id}))
+    }
+
+    /// Room for an automation's longest first check (Try it waits for it)
+    /// plus the usual call.
+    fn precheck_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(crate::automations::precheck::MAX_TIMEOUT_SECONDS) + 120)
+    }
+
+    pub fn try_automation_precheck(&self, input: Value) -> Result<crate::automations::precheck::PrecheckTrial> {
+        self.0.call_within("runtime.session.automationPrecheckTry", json!({"input":input}), Self::precheck_timeout())
     }
 
     pub fn run_automation(&self, id: &str) -> Result<crate::automations::AutomationRun> {
@@ -146,6 +209,27 @@ impl Sessions {
         crate::status::usage::UsageSnapshot::from_runtime(self.quick("runtime.session.usage", json!({}))?)
     }
 
+    /// The account a new session of `harness` in `project` starts on when
+    /// automatic switching moves it off `account` (#981). `None` with the
+    /// setting off, the account not full, or a runtime from before it.
+    pub fn launch_account_choice(&self, harness: &str, project: Option<&str>, account: Option<&str>) -> Result<Option<crate::session::account_switch::LaunchChoice>> {
+        match self.quick::<Value>("runtime.session.accountChoice", json!({"harness": harness, "project": project, "account": account})) {
+            Ok(Value::Null) => Ok(None),
+            Ok(value) => Ok(Some(serde_json::from_value(value)?)),
+            Err(error) if unsupported(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The person is typing in a tab's composer (#981). Older runtimes have no use for it.
+    pub fn note_typing(&self, session: &str, tab: &str) -> Result<()> {
+        match self.quick_tab::<Value>("noteTyping", session, tab, json!({})) {
+            Ok(_) => Ok(()),
+            Err(error) if unsupported(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn refresh_usage(&self, manual: bool) -> Result<crate::status::usage::UsageSnapshot> {
         crate::status::usage::UsageSnapshot::from_runtime(self.call("runtime.session.refreshUsage", json!({"manual":manual}))?)
     }
@@ -160,6 +244,17 @@ impl Sessions {
 
     pub fn add_tab(&self, session: &str, tab: &crate::session_ops::NewTab) -> Result<crate::store::index::TabEntry> {
         self.call("runtime.session.addTab", add_tab_params(session, tab))
+    }
+
+    /// [`Self::add_tab`] on agent account `account` (#980); see [`Self::create_on`].
+    pub fn add_tab_on(&self, session: &str, tab: &crate::session_ops::NewTab, account: Option<&str>) -> Result<crate::store::index::TabEntry> {
+        let Some(account) = account else { return self.add_tab(session, tab) };
+        let supported = self.supports_accounts()?;
+        let mut params = add_tab_params(session, tab);
+        if supported { params["account"] = json!(account); }
+        let mut added: crate::store::index::TabEntry = self.call("runtime.session.addTab", params)?;
+        if !supported { mark_fallback(&mut added); }
+        Ok(added)
     }
 
     pub fn pane_agents(&self) -> Result<Vec<crate::session::follow::PaneAgent>> {
@@ -229,15 +324,18 @@ impl Sessions {
     }
 
     pub fn send(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>) -> Result<SendOutcome> {
-        self.send_pressed(session, tab, text, images, None, Vec::new())
+        self.send_pressed(session, tab, text, images, None, Vec::new(), None)
     }
 
     /// A composer's send, with when Send was pressed (`SessionManager::send_pressed`).
     /// `files`: stored attachments (PRO-290), sent only when there are any,
     /// so an older runtime is never handed a parameter it does not know.
-    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>) -> Result<SendOutcome> {
+    /// `prompt_request_id`: the Create preview's identity, when there is one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_pressed(&self, session: &str, tab: &str, text: String, images: Vec<ImageInput>, pressed_at: Option<i64>, files: Vec<crate::events::FileRef>, prompt_request_id: Option<uuid::Uuid>) -> Result<SendOutcome> {
         let mut params = json!({"text":text,"images":images,"pressedAt":pressed_at});
         if !files.is_empty() { params["files"] = json!(files); }
+        if let Some(id) = prompt_request_id { params["promptRequestId"] = json!(id); }
         self.tab("send", session, tab, params)
     }
 
@@ -272,8 +370,9 @@ impl Sessions {
         self.tab("submitWaiting", session, tab, json!({"seq":seq}))
     }
 
-    pub fn prepare_continuation(&self, session: &str, tab: &str) -> Result<crate::continuation::Context> {
-        self.tab("prepareContinuation", session, tab, json!({}))
+    /// `portable`: for another computer (PRO-348), with no path of this one in it.
+    pub fn prepare_continuation(&self, session: &str, tab: &str, portable: bool) -> Result<crate::continuation::Context> {
+        self.tab("prepareContinuation", session, tab, if portable { json!({ "portable": true }) } else { json!({}) })
     }
 
     pub fn interrupt(&self, session: &str, tab: &str) -> Result<bool> {
@@ -313,6 +412,12 @@ impl Sessions {
         self.quick_tab("questions", session, tab, json!({"requestId":request,"answers":answers}))
     }
 
+    /// A question the CLI drew in its own terminal (PRO-460). Not a quick
+    /// call: the keys go in with the pauses the CLI needs between them.
+    pub fn answer_terminal_prompt(&self, session: &str, tab: &str, prompt: &str, choice: Option<usize>) -> Result<()> {
+        self.tab("terminalPrompt", session, tab, json!({"promptId":prompt,"choice":choice}))
+    }
+
     pub fn set_model(&self, session: &str, tab: &str, model: &str) -> Result<()> {
         self.tab("model", session, tab, json!({"model":model}))
     }
@@ -346,6 +451,20 @@ impl Sessions {
 
 /// The tab as the runtime makes it, transport included: a native Codex tab
 /// chosen on the desktop side must not arrive as a terminal one.
+/// What the window is told when the runtime it runs on predates accounts.
+pub const OLDER_RUNTIME: &str = "The background runtime is older than this app and starts every tab on This Mac's login. Quit and reopen TerminalX to update it, then choose the account again.";
+
+/// The runtime has no such operation: one from before it was added.
+fn unsupported(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("unsupported local session operation") || text.contains("unsupported local runtime operation")
+}
+
+/// A tab that asked for an account its runtime could not honour (#980).
+fn mark_fallback(tab: &mut crate::store::index::TabEntry) {
+    tab.unknown.insert(crate::session_ops::TAB_ACCOUNT_FALLBACK.into(), json!("olderRuntime"));
+}
+
 fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
     json!({"sessionId":session, "tab":{
         "harness":tab.harness,"model":tab.model,"effort":tab.effort,"permissionMode":tab.permission_mode,
@@ -353,9 +472,29 @@ fn add_tab_params(session: &str, tab: &crate::session_ops::NewTab) -> Value {
     }})
 }
 
+/// The `bots` operations that only read, and so fail fast on a wedged owner.
+fn bots_read(operation: &str) -> bool {
+    matches!(operation, "list" | "get" | "templates" | "roleRead" | "spentToday" | "duties" | "dutyWeek" | "dutyKeptLog" | "items" | "item" | "needsYou" | "handoffs" | "brief")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRO-497: the week of duties is a read, as a duty's tab is; a change still waits for its answer.
+    #[test]
+    fn the_week_of_duties_is_a_fast_read_and_a_change_is_not() {
+        assert!(bots_read("dutyWeek") && bots_read("duties") && bots_read("dutyKeptLog"));
+        assert!(!bots_read("dutySave") && !bots_read("dutyRun") && !bots_read("dutyDelete"));
+    }
+
+    /// PRO-498: the hand-offs and the team brief are reads; stopping, resending, handing an item and writing the
+    /// brief are not.
+    #[test]
+    fn the_hand_offs_and_the_brief_are_fast_reads_and_their_changes_are_not() {
+        assert!(bots_read("handoffs") && bots_read("brief"));
+        assert!(!bots_read("handoffStop") && !bots_read("handoffResend") && !bots_read("itemHand") && !bots_read("briefWrite"));
+    }
 
     #[test]
     fn a_new_tab_reaches_the_runtime_with_its_transport() {

@@ -104,15 +104,92 @@ impl LiveChild {
         }
     }
 
-    #[cfg(not(unix))]
+    /// Windows: the pipe end is put in no-wait mode, the named-pipe form of
+    /// `O_NONBLOCK`. A write then takes what fits in the pipe's buffer and
+    /// returns at once; none of it fitting is `WouldBlock`, as on Unix.
+    #[cfg(windows)]
+    pub(crate) fn try_write_stdin(&self, bytes: &[u8]) -> std::io::Result<usize> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Pipes::{SetNamedPipeHandleState, PIPE_NOWAIT};
+        let guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
+        let stdin = guard.as_ref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child stdin closed"))?;
+        let handle = stdin.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let mode = PIPE_NOWAIT;
+        // SAFETY: a live pipe handle this child owns; only the wait mode is changed.
+        if unsafe { SetNamedPipeHandleState(handle, &mode, std::ptr::null(), std::ptr::null()) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // A no-wait pipe takes a write whole or not at all, and holds about
+        // 64 KiB: at most that is offered, then halves of it until a piece
+        // fits, so a long frame goes in as it would through a Unix pipe.
+        let mut size = bytes.len().min(STDIN_CHUNK);
+        loop {
+            let written = write_now(handle, &bytes[..size])?;
+            if written > 0 {
+                return Ok(written);
+            }
+            if size == 1 {
+                return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "child input pipe is full"));
+            }
+            size /= 2;
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub(crate) fn try_write_stdin(&self, _bytes: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "experimental stdio requires nonblocking Unix pipes"))
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "nonblocking child input is not available here"))
     }
 
     pub fn close_stdin(&self) {
         let mut guard = self.stdin.lock().unwrap_or_else(|e| e.into_inner());
         guard.take();
     }
+}
+
+/// The most a no-wait pipe write offers at once (see `try_write_stdin`).
+#[cfg(windows)]
+const STDIN_CHUNK: usize = 64 * 1024;
+
+/// One write to a no-wait pipe: how much of `bytes` it took, all or none.
+#[cfg(windows)]
+fn write_now(handle: windows_sys::Win32::Foundation::HANDLE, bytes: &[u8]) -> std::io::Result<usize> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING};
+    use windows_sys::Win32::Storage::FileSystem::WriteFile;
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    let mut written = 0u32;
+    // The runtime's end of a child's pipe may be opened for overlapped I/O;
+    // an OVERLAPPED is valid either way, and in no-wait mode the write
+    // completes at once.
+    // SAFETY: zeroed OVERLAPPED is its documented initial state.
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // SAFETY: `bytes` outlives the call, which completes before it returns
+    // (or is waited for below); its length is at most `STDIN_CHUNK`.
+    let done = unsafe { WriteFile(handle, bytes.as_ptr(), bytes.len() as u32, &mut written, &mut overlapped) };
+    if done == 0 {
+        // SAFETY: reads the calling thread's last error.
+        if unsafe { GetLastError() } != ERROR_IO_PENDING {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the same handle and OVERLAPPED; a no-wait pipe does not
+        // leave a write pending, so this is a safeguard, cancelled if not done.
+        if unsafe { GetOverlappedResult(handle, &overlapped, &mut written, 0) } == 0 {
+            // SAFETY: reads the calling thread's last error.
+            if unsafe { GetLastError() } != ERROR_IO_INCOMPLETE {
+                // The pipe broke (the child is gone): an error, not a full pipe.
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: the same handle and OVERLAPPED; the cancelled write is
+            // waited for, so neither is in use once this returns.
+            unsafe {
+                CancelIoEx(handle, &overlapped);
+                GetOverlappedResult(handle, &overlapped, &mut written, 1);
+            }
+        }
+    }
+    Ok(written as usize)
 }
 
 /// What a spawn wants to be told about its child.
@@ -520,9 +597,7 @@ pub fn kill_now(pid: u32) {
         libc::kill(pid as i32, libc::SIGKILL);
     }
     #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
+    taskkill(pid);
 }
 
 pub fn terminate(pid: u32) {
@@ -541,9 +616,17 @@ pub fn terminate(pid: u32) {
         });
     }
     #[cfg(not(unix))]
-    {
-        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
-    }
+    taskkill(pid);
+}
+
+/// End process `pid` and its descendants. Windows has no signal a process
+/// can take as a request to stop; `taskkill /T /F` ends the tree. Started
+/// with no console, so a runtime without one opens no window for it.
+#[cfg(windows)]
+fn taskkill(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW).output();
 }
 
 impl Drop for Host {
@@ -569,7 +652,7 @@ mod tests {
     #[test]
     fn a_file_a_process_holds_open_is_listed_for_it() {
         let dir = tempfile::tempdir().unwrap();
-        let path = std::fs::canonicalize(dir.path()).unwrap().join("held.lock");
+        let path = crate::paths::canonicalize(dir.path()).unwrap().join("held.lock");
         let held = std::fs::File::create(&path).unwrap();
         assert!(open_files(std::process::id()).contains(&path), "{path:?} is not among this process's open files");
         drop(held);
@@ -602,6 +685,84 @@ mod tests {
         assert!(!is_alive(pid));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_child_reads_a_line_and_a_full_pipe_never_blocks_the_writer() {
+        let host = Host::new();
+        let (tx, rx) = mpsc::channel();
+        let sink = Arc::new(S(Mutex::new(tx)));
+        let args = vec!["/d".to_string(), "/v:on".to_string(), "/c".to_string(), "set /p l=& echo got:!l!& echo oops 1>&2& exit 3".to_string()];
+        let cwd = std::env::temp_dir();
+        let child = host.spawn("k", SpawnSpec { program: Path::new("cmd.exe"), args: &args, cwd: &cwd, env: &[], unset: &[] }, sink).unwrap();
+        child.write_line("hello").unwrap();
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            got.push(rx.recv_timeout(Duration::from_secs(10)).unwrap());
+        }
+        assert!(got.iter().any(|line| line.trim_end() == "out:got:hello"), "{got:?}");
+        assert!(got.iter().any(|line| line.trim_end() == "err:oops"), "{got:?}");
+        assert!(got.contains(&"exit:Some(3)".to_string()), "{got:?}");
+
+        // A child that never reads: writes fill the pipe, then say so at once.
+        let (tx, _rx) = mpsc::channel();
+        let args = vec!["-NoProfile".to_string(), "-Command".to_string(), "Start-Sleep -Seconds 30".to_string()];
+        let idle = host.spawn("idle", SpawnSpec { program: Path::new("powershell.exe"), args: &args, cwd: &cwd, env: &[], unset: &[] }, Arc::new(S(Mutex::new(tx)))).unwrap();
+        let chunk = vec![b'x'; 64 * 1024];
+        let started = std::time::Instant::now();
+        let mut total = 0usize;
+        let full = loop {
+            match idle.try_write_stdin(&chunk) {
+                Ok(written) => total += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break true,
+                Err(error) => panic!("{error}"),
+            }
+            if total > 64 * 1024 * 1024 { break false; }
+        };
+        assert!(full, "64 MiB went into a pipe nobody reads");
+        assert!(total > 0, "nothing went into an empty pipe");
+        // One frame far larger than the pipe still goes in, a piece at a time.
+        let (tx, _rx) = mpsc::channel();
+        let fresh = host.spawn("idle2", SpawnSpec { program: Path::new("powershell.exe"), args: &args, cwd: &cwd, env: &[], unset: &[] }, Arc::new(S(Mutex::new(tx)))).unwrap();
+        let first = fresh.try_write_stdin(&vec![b'y'; 4 * 1024 * 1024]).unwrap();
+        assert!(first > 0 && first <= STDIN_CHUNK, "{first}");
+        host.kill("idle2");
+        // A writer that blocked would never get here; the bound only catches a stall.
+        assert!(started.elapsed() < Duration::from_secs(60));
+        host.kill("idle");
+    }
+
+    /// Closing a child's input after a partial write: it reads what was
+    /// written, then end of input, as a Unix child would.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_child_reads_what_was_written_then_the_end_of_its_input() {
+        let host = Host::new();
+        let (tx, rx) = mpsc::channel();
+        let args = vec!["-NoProfile".to_string(), "-Command".to_string(),
+            "Start-Sleep -Milliseconds 300; $n = 0; $in = [Console]::OpenStandardInput(); $b = New-Object byte[] 4096; while (($r = $in.Read($b, 0, 4096)) -gt 0) { $n += $r }; [Console]::Out.WriteLine(\"eof:$n\")".to_string()];
+        let cwd = std::env::temp_dir();
+        let child = host.spawn("eof", SpawnSpec { program: Path::new("powershell.exe"), args: &args, cwd: &cwd, env: &[], unset: &[] }, Arc::new(S(Mutex::new(tx)))).unwrap();
+        let chunk = vec![b'x'; 256 * 1024];
+        let mut total = 0usize;
+        loop {
+            match child.try_write_stdin(&chunk) {
+                Ok(written) => total += written,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        child.close_stdin();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let line = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).expect("the child never saw the end of its input");
+            if let Some(count) = line.trim_end().strip_prefix("out:eof:") {
+                assert_eq!(count.parse::<usize>().unwrap(), total);
+                break;
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn echo_round_trip_and_exit() {
         let host = Host::new();
@@ -623,6 +784,7 @@ mod tests {
         assert!(!host.is_live("k"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn respawn_evicts_previous() {
         let host = Host::new();

@@ -134,9 +134,90 @@ pub enum Composer {
     /// Something the app is not typing now, its words as drawn: what the
     /// reader typed in the terminal, or a prompt the CLI put back there.
     Holds(String),
+    /// A list of choices is drawn where the box was, one of them selected: a
+    /// question the CLI asks on its own, such as Codex's working-directory
+    /// prompt on resume (PRO-462). Nothing typed goes in until it is answered.
+    Choice,
     /// The box is not on screen (a picker or dialog is in its place), or
     /// this CLI's box cannot be read.
     Unseen,
+}
+
+/// A question the CLI is asking in its own screen, outside the hooks
+/// (PRO-460): a choice it drew itself and is stopped on, such as Claude
+/// Code's "We recommend compacting earlier". No hook says it is there and
+/// none answers it; the chat learns of it from the screen and answers it
+/// with the keys the CLI's own hint names.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPrompt {
+    /// Which question this is: the same for as long as its title and choices
+    /// stay the same, so an answer cannot land on a different one.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// What it says between its title and its choices, paragraphs apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Empty when something is waiting in the terminal that could not be
+    /// read: the chat can then only send the reader there.
+    #[serde(default)]
+    pub options: Vec<ScreenOption>,
+    /// The choice the CLI's pointer is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<usize>,
+    /// What Escape does here, in the hint's words ("Not now"), when the
+    /// hint offers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismiss: Option<String>,
+    /// The keys line the CLI draws under the choices, as drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl ScreenPrompt {
+    /// The terminal is stopped on something this cannot read.
+    pub const UNREAD: &'static str = "unread";
+
+    pub fn unread() -> Self {
+        Self { id: Self::UNREAD.into(), title: None, text: None, options: Vec::new(), selected: None, dismiss: None, hint: None }
+    }
+
+    /// An id from what makes the question this one: its title and the
+    /// choices' labels, not where the pointer is.
+    pub fn identify(title: Option<&str>, options: &[ScreenOption]) -> String {
+        // FNV-1a: the same in every build, unlike the std hasher.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |text: &str| {
+            for byte in text.bytes().chain([0u8]) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100_0000_01b3);
+            }
+        };
+        feed(title.unwrap_or(""));
+        for option in options {
+            feed(&option.label);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+/// Arrow keys, as the terminal sends them in its current cursor-key mode.
+pub fn arrow(up: bool, application: bool) -> &'static [u8] {
+    match (up, application) {
+        (true, false) => b"\x1b[A",
+        (false, false) => b"\x1b[B",
+        (true, true) => b"\x1bOA",
+        (false, true) => b"\x1bOB",
+    }
 }
 
 /// How often an input box that holds something is looked at again.
@@ -306,11 +387,13 @@ impl Ready {
 
     /// How long ago the CLI said it was up, if it has: what a handover
     /// carries (#765).
+    #[cfg(unix)]
     pub(crate) fn since(&self) -> Option<Duration> {
         self.at.lock().unwrap().map(|at| at.elapsed())
     }
 
     /// One a handed-over CLI said it was up on, `since` ago (#765).
+    #[cfg(unix)]
     pub(crate) fn restored(announces_start: bool, since: Option<Duration>) -> Self {
         let at = since.map(|since| std::time::Instant::now().checked_sub(since).unwrap_or_else(std::time::Instant::now));
         Self { at: Mutex::new(at), announces_start }
@@ -799,22 +882,26 @@ impl Tail {
     /// Where a handover leaves this tail (#765): the file, how far into it
     /// every complete record has been read (a record still being written is
     /// read again), where reading it began, and the records it drops.
+    #[cfg(unix)]
     pub(crate) fn position(&self) -> (PathBuf, u64, u64, HashSet<String>) {
         let path = self.path.lock().unwrap().clone();
         let stream = self.stream.lock().unwrap();
         (path, stream.offset - stream.partial.len() as u64, stream.began, stream.skip.clone())
     }
 
+    #[cfg(unix)]
     pub(crate) fn usage(&self) -> super::metrics::TurnUsage {
         self.stream.lock().unwrap().usage.clone()
     }
 
+    #[cfg(unix)]
     pub(crate) fn with_usage(mut self, usage: super::metrics::TurnUsage) -> Self {
         self.stream.get_mut().unwrap().usage = usage;
         self
     }
 
     /// Follow on from where a handover left a tail (`position`).
+    #[cfg(unix)]
     pub(crate) fn resumed(path: PathBuf, offset: u64, began: u64, decode: Decoder, skip: HashSet<String>) -> Self {
         let mut stream = Streamer::skipping(offset, decode, skip);
         stream.began = began;
@@ -986,10 +1073,12 @@ impl Default for TurnTail {
 impl TurnTail {
     /// What a handover carries of it (#765): the reply said, the replies
     /// drawn ahead of their records, and whether the turn is closed.
+    #[cfg(unix)]
     pub(crate) fn parts(&self) -> (Option<String>, Vec<String>, bool) {
         (self.said.clone(), self.anticipated.iter().cloned().collect(), self.closed)
     }
 
+    #[cfg(unix)]
     pub(crate) fn from_parts(said: Option<String>, anticipated: Vec<String>, closed: bool) -> Self {
         Self { said, anticipated: anticipated.into(), closed }
     }

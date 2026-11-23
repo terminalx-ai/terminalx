@@ -1,15 +1,18 @@
-import type { AgentProcessState, AgentTabInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
-import { agent, attachments, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import type { AgentProcessState, AgentTabInfo, HeldFollowUpInfo, WorkspaceConnectionState, WorkspaceRpcClient, WorkspaceYou } from "@terminalx/portable/workspace";
+import { agent, attachments, errorMessage, experimental, type FileInput, type ImageInput, type SendOutcome } from "@/lib/api";
+import type { ContinuationContext } from "@terminalx/portable/continuation";
 import type { FileRef } from "@/types/events";
+import type { WorkspaceStatus } from "@/lib/cloudPendingMessages";
 import { showError } from "@/lib/errorToasts";
-import { loadTab, setTabStatus } from "@/lib/agentEvents";
-import { patchTab } from "@/lib/sessions";
+import { applyEvent, getTabLog, loadTab, reloadTabHistory, setTabStatus, showFirstMessage } from "@/lib/agentEvents";
+import { forkTurn, patchTab, refreshSessions, selectCloudSession } from "@/lib/sessions";
 import {
   attachCloudAgentTab,
   configureCloudAgentTab,
   decideCloudAgent,
   discardPendingConfig,
   isDeciding,
+  isDevScope,
   markCloudAgentRead,
   refreshFromCheckpoint,
   sendAgain,
@@ -17,14 +20,19 @@ import {
   setViewing,
   steerCloudAgent,
   stopCloudAgent,
+  applyLiveTab,
+  changeCloudFollowUp,
+  changesFollowUps,
 } from "@/lib/cloudAgents";
 import type { CloudAgentScope, OutboxEntry } from "@/lib/cloudAgentApi";
 import { APPROVE_BLOCKED_REASON, canApprove, mayConfigure, roleBlockReason } from "@/lib/cloudCollab";
-import { CLOUD_FILES_REFUSED, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudImagesBlocked, type ComposerCommands, type ComposerFiles } from "@/lib/cloudComposer";
+import { CLOUD_FILES_NEED_RUNNING, MACHINE_FILES_OLD_RUNTIME, CLOUD_IMAGES_NEED_RUNNING, CloudImageError, cloudComposerCommands, cloudComposerFiles, cloudComposerPrs, cloudFilesBlocked, cloudImagesBlocked, type ComposerCommands, type ComposerFiles, type ComposerPrs } from "@/lib/cloudComposer";
 import { isPtyFirst } from "@/lib/tabViews";
-import type { TerminalInstance } from "@/lib/terminal";
+import { selectSessionTab, type TerminalInstance } from "@/lib/terminal";
 import type { AgentEvent } from "@/types/events";
 import type { TabEntry, TabStatus } from "@/types/session";
+import { localTurnCheckpoints, type TurnCheckpointApi } from "@/lib/turnCheckpoints";
+import type { HeldQueueChange } from "@/lib/heldQueue";
 
 /**
  * What one session can do, wherever it runs (PRO-23 CS-10). SessionView,
@@ -45,6 +53,15 @@ export interface SessionBackendCaps {
   steer: boolean;
   /** Images go with a prompt. */
   images: boolean;
+  /**
+   * Files other than images go with a prompt: a local tab (PRO-290), a
+   * machine that serves `composer/4` (PRO-407), and a cloud workspace whose
+   * connected runtime serves it (#1329; while it is not connected, as for
+   * images, none attach). While a machine is away it is true: the send is
+   * held until it is back, and a machine from before `composer/4` then says
+   * it needs an update.
+   */
+  files: boolean;
   /** The local recovery flows (retry safely, resume after a stop). */
   recovery: boolean;
   /**
@@ -54,6 +71,148 @@ export interface SessionBackendCaps {
    */
   interrupt: boolean;
 }
+
+/**
+ * Why an option a local session has is off for this one (#1289). The control
+ * is shown disabled with the reason where a local session has it, instead of
+ * being left out. A key that is absent is either offered or does not apply.
+ */
+export interface SessionUnavailable {
+  /** Turn menu: Fork to a new tab or session (PRO-379). */
+  fork?: string;
+  /** Turn menu: Reset chat to here. */
+  reset?: string;
+  /** Turn footer: a second opinion from another agent. */
+  secondOpinion?: string;
+  /** A failed turn: Retry in a new chat. */
+  retryInNewChat?: string;
+  /** Composer, Agent menu: hand the conversation off to another agent in a new tab (#1327). */
+  agentHandoff?: string;
+  /** Header: the project's saved actions and previews (PRO-363). */
+  runMenu?: string;
+  /** Held follow-ups: reordering them (#1328). */
+  moveHeld?: string;
+  /** Held follow-ups: pausing the queue (#1328). */
+  pauseHeld?: string;
+}
+
+/**
+ * What a session that runs on a workspace runtime or a paired machine cannot
+ * do, and why. Fork and Reset are its runtime's (#1326): see `TURNS_*`; a
+ * second opinion, Retry in a new chat and the agent handoff too (#1327): see `HANDOFF_*`.
+ */
+export const REMOTE_UNAVAILABLE: Readonly<SessionUnavailable> = Object.freeze({
+  runMenu: "Saved actions and previews run on this computer. A cloud workspace's ports and previews are in its workspace menu.",
+  moveHeld: "Held messages here go in the order they were sent. Send one now to put it first.",
+  pauseHeld: "This session's runtime sends held messages one after each turn and cannot pause them. Delete one to keep it from going.",
+});
+
+/** Why Fork and Reset are off on a remote session that could offer them (#1326). */
+export const TURNS_OFFLINE: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Fork needs this session's runtime connected. It is offered once the workspace or machine is back.",
+  reset: "Reset needs this session's runtime connected. It is offered once the workspace or machine is back.",
+});
+export const TURNS_OLD_RUNTIME: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Fork needs a newer runtime. It is offered here once this session's runtime is updated.",
+  reset: "Reset needs a newer runtime. It is offered here once this session's runtime is updated.",
+});
+export const TURNS_NEED_ADMIN: Readonly<Pick<SessionUnavailable, "fork" | "reset">> = Object.freeze({
+  fork: "Forking a conversation changes the workspace's sessions, which needs a workspace admin.",
+  reset: "Resetting a chat changes the workspace's files and conversation, which needs a workspace admin.",
+});
+
+type HandoffOff = Pick<SessionUnavailable, "secondOpinion" | "retryInNewChat" | "agentHandoff">;
+
+/** Why a second opinion, Retry in a new chat and the agent handoff are off on a remote session that could offer them (#1327). */
+export const HANDOFF_OFFLINE: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion needs this session's runtime connected. It is offered once the workspace or machine is back.",
+  retryInNewChat: "Retry in a new chat needs this session's runtime connected. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off to another agent needs this session's runtime connected. It is offered once the workspace or machine is back.",
+});
+export const HANDOFF_OLD_RUNTIME: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion needs a newer runtime. It is offered here once this session's runtime is updated.",
+  retryInNewChat: "Retry in a new chat needs a newer runtime. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off to another agent needs a newer runtime. It is offered here once this session's runtime is updated.",
+});
+export const HANDOFF_NEED_ADMIN: Readonly<HandoffOff> = Object.freeze({
+  secondOpinion: "A second opinion opens a new tab in this session, which needs a workspace admin.",
+  retryInNewChat: "Retry in a new chat opens a new tab in this session, which needs a workspace admin. Retry sends the prompt again in this chat.",
+  agentHandoff: "Handing off opens a new tab in this session, which needs a workspace admin.",
+});
+
+/**
+ * `REMOTE_UNAVAILABLE` with why Fork and Reset, and the handoffs, are off:
+ * one object per pair of reasons, so a rebuilt backend keeps the same one.
+ */
+const remoteOff = new Map<string, Readonly<SessionUnavailable>>();
+const TURNS_REASONS = [TURNS_OFFLINE, TURNS_OLD_RUNTIME, TURNS_NEED_ADMIN];
+const HANDOFF_REASONS = [HANDOFF_OFFLINE, HANDOFF_OLD_RUNTIME, HANDOFF_NEED_ADMIN];
+function remoteUnavailable(turns: object | null, handoff: object | null): Readonly<SessionUnavailable> {
+  if (!turns && !handoff) return REMOTE_UNAVAILABLE;
+  const key = `${turns ? TURNS_REASONS.indexOf(turns) : -1}:${handoff ? HANDOFF_REASONS.indexOf(handoff) : -1}`;
+  let off = remoteOff.get(key);
+  if (!off) remoteOff.set(key, off = Object.freeze({ ...REMOTE_UNAVAILABLE, ...turns, ...handoff }));
+  return off;
+}
+
+/**
+ * A second opinion, Retry in a new chat and the composer's agent handoff
+ * (#1327) on a remote session: another agent's tab in it, opened with its
+ * first prompt by the runtime in one call (`handoff/1`). A local session
+ * takes them through `ContinuationDialog` on this computer.
+ */
+export interface HandoffActions {
+  /**
+   * Add a tab running `agent` with these settings, sent `prompt` as its first
+   * message, and show it. `startError`: the tab was opened and its prompt
+   * could not be sent; its chat says why, and it is never opened twice.
+   * `requestId`: one id for every try of one handoff, so a try after an
+   * unknown outcome gets the tab the first try made instead of a second.
+   */
+  open(params: { agent: string; model?: string; effort?: string | null; mode?: string; prompt: string; requestId?: string }): Promise<{ tabId: string; startError: string | null }>;
+  /** What `tabId`'s conversation hands on, read on the runtime with its own transcript path. */
+  context(tabId: string): Promise<ContinuationContext>;
+}
+
+/** A fork made (PRO-379): the session it is in, by its selection key, and its tab. */
+export interface ForkedTab {
+  key: string;
+  tabId: string;
+  /** Said beside the fork when its files are not the turn's. */
+  note: string | null;
+}
+
+/**
+ * Reset, Fork and the per-turn checkpoints a tab's turn cards review
+ * (PRO-379, #1326), wherever the session runs: this computer's runtime for a
+ * local session, the session's own runtime (`checkpoints/1`) for a cloud
+ * workspace's or a machine's.
+ */
+export interface TurnActions {
+  checkpoints: TurnCheckpointApi;
+  /**
+   * Reset the chat to the end of the turn `endSeq`, or with null undo the
+   * last reset. Refused with `OVERLAP …` and a token when files would be
+   * overwritten; sent again with that token as `confirm`, it goes ahead.
+   * Resolves to a warning about what went wrong after the reset, or null.
+   */
+  reset(tabId: string, endSeq: number | null, resetFiles: boolean, confirm: string | null): Promise<string | null>;
+  /** Fork the conversation as it stood at the end of the turn `endSeq`; the caller shows the fork. */
+  fork(tabId: string, endSeq: number, into: "tab" | "session"): Promise<ForkedTab>;
+}
+
+/**
+ * What a cloud workspace session leaves on this computer (#1325, as
+ * MACHINES.md decision 7 does for a machine): browser tabs and orchestration
+ * runs act on the computer a person sits at, and a runtime answers
+ * `browser.*` with `unsupported`. A workspace's port opens in this computer's
+ * browser from Ports and previews.
+ */
+export const REMOTE_LOCAL_ONLY = "Browser tabs and orchestration runs stay on this computer. A workspace's port opens in this computer's browser from Ports and previews.";
+
+/** Why a message cannot be sent again from its place in the chat. */
+export const RESEND_ATTACHMENTS = "This message had attachments, which are not kept to send again. Attach them again in the composer and send it from there.";
+export const RESEND_MISSING = "That message is not in this tab's conversation any more.";
 
 /** Whether a tab's terminal view is offered, and why not when it is not. */
 export interface TerminalViewOffer {
@@ -101,6 +260,11 @@ export interface SessionBackend {
   caps: SessionBackendCaps;
   /** Why writes are off, shown wherever they would be. Null while they are allowed. */
   readOnlyReason: string | null;
+  /**
+   * Why a send waits (a machine that is away, 21.09): the composer keeps what
+   * is typed and sends nothing until it is null. Absent where sends never wait.
+   */
+  sendHeldReason?: string | null;
   /** The session id the agent event logs are keyed by (the runtime's own id for a cloud session). */
   logSessionId: string;
   /** Start showing a tab: load its log (local), or its checkpoint and live stream (cloud). Returns the cleanup. */
@@ -118,15 +282,30 @@ export interface SessionBackend {
    */
   send(tabId: string, text: string, images: ImageInput[], options?: { wake?: boolean; pressedAt?: number; files?: FileInput[] }): Promise<SendResult>;
   steer(tabId: string, text: string): Promise<void>;
-  /** Local only: persist and control messages held until the turn ends. */
+  /**
+   * Persist and control messages held until the turn ends. A cloud or
+   * machine tab's runtime holds them itself (#1328): a held message is
+   * queued by a send, and edited, deleted or sent now by a command to it;
+   * `unavailable` says what it cannot do (reorder, pause). Absent where the
+   * runtime cannot take that command.
+   */
   changeHeldQueue?(tabId: string, change: import("@/lib/heldQueue").HeldQueueChange): Promise<SendResult>;
   /** Local only (PRO-290): store files in the session's attachments folder, for a follow-up that is held rather than sent. */
   storeFiles?(files: FileInput[]): Promise<FileRef[]>;
-  /** Local only: interrupt so the CLI sends input it already holds. */
+  /**
+   * Interrupt so the CLI sends input it already holds. On a cloud or machine
+   * tab (#1328) it is Escape for the running turn, which needs a runtime
+   * with `session/3` that is connected.
+   */
   sendQueuedNow?(tabId: string, seq: number): Promise<void>;
   /** Local only: send the last prompt the agent never received again, as it was sent (#663). */
   resendUnsent?(tabId: string): Promise<SendResult>;
-  /** Local only: send the message at `seq`, which the agent dropped unanswered, again as a new message (#722). */
+  /**
+   * Send the message at `seq` again as a new message: one the agent dropped
+   * unanswered (#722), or a failed turn's prompt (Retry). A cloud tab sends
+   * its text through the mailbox as any message (#1289); one with
+   * attachments is refused, since they are not kept to send again.
+   */
   resendMessage?(tabId: string, seq: number): Promise<SendResult>;
   /**
    * Escape, as the agent's own screen takes it (#427): the running turn is
@@ -138,6 +317,11 @@ export interface SessionBackend {
   stop(tabId: string): Promise<void>;
   respondPermission(tabId: string, requestId: string, optionId: string): Promise<void>;
   answerQuestions(tabId: string, requestId: string, answers: Record<string, string>): Promise<void>;
+  /**
+   * Local only (PRO-460): answer a question the agent's CLI drew in its own
+   * terminal, typed there as its keys: an option's index, or null for Escape.
+   */
+  answerTerminalPrompt?(tabId: string, promptId: string, choice: number | null): Promise<void>;
   setModel(tabId: string, model: string): Promise<void>;
   setEffort(tabId: string, effort: string | null): Promise<void>;
   setPermissionMode(tabId: string, mode: string): Promise<void>;
@@ -156,9 +340,26 @@ export interface SessionBackend {
   /**
    * Cloud only (PRO-78): why the tab's agent has no way to sign in in its
    * workspace, as the runtime last said, and the organization whose Agent
-   * logins fix it. Null when it can sign in.
+   * logins fix it; on a machine (PRO-347) the machine's name instead, where
+   * it is signed in. Null when it can sign in.
    */
-  signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string } | null;
+  signIn?(tabId: string): { signIn: NonNullable<AgentTabInfo["signIn"]>; organizationId: string; machine?: string } | null;
+  /** Options a local session has that this one cannot take, each with why (#1289). Absent on a local session. */
+  unavailable?: Readonly<SessionUnavailable>;
+  /** Reset, Fork and turn checkpoints (#1326). Absent where the session cannot take them; `unavailable` says why. */
+  turns?: TurnActions;
+  /**
+   * Remote only (#1327): a second opinion, Retry in a new chat and the agent
+   * handoff, on the session's runtime. Absent on a local session (it hands
+   * off on this computer) and where the runtime cannot take them; `unavailable` says why.
+   */
+  handoff?: HandoffActions;
+  /**
+   * Where turn cards read what a turn changed when this person may not
+   * review it (a viewer, #1326): `keep`, `undo` and `restore` refuse.
+   * Absent where no checkpoint can be read; `turns.checkpoints` otherwise.
+   */
+  checkpoints?: TurnCheckpointApi;
   /** Why this person may not answer permission requests (a shared workspace's non-approver), or null. */
   approveBlockedReason?: string | null;
   /** The workspace client for model discovery, independent of collaboration capabilities. */
@@ -196,16 +397,25 @@ export interface SessionBackend {
    * runtime from before `composer/2`.
    */
   files?(): ComposerFiles | null;
+  /**
+   * Cloud and machine tabs (#1329): the composer's `#` list, from the
+   * runtime's own `gh`, a picked pull request attached as a context file.
+   * Null while it is not connected, for a view-only reader, and on a runtime
+   * from before `composer/5`. A local tab's composer asks this computer.
+   */
+  prs?(): ComposerPrs | null;
   /** Cloud only: commands on their way for a tab, the runtime's queued follow-ups, and resending an unconfirmed one. */
   outbox?: {
     entries(tabId: string): OutboxEntry[];
-    followUps(tabId: string): { clientCommandId: string; text: string }[];
+    followUps(tabId: string): HeldFollowUpInfo[];
+    /** Where the workspace stands, for the line under a queued message (#1291); null where nothing says (a machine). */
+    workspaceStatus: WorkspaceStatus;
     deciding(requestId: string): boolean;
     sendAgain(entry: OutboxEntry): Promise<void>;
   };
 }
 
-const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, recovery: true, interrupt: true };
+const LOCAL_CAPS: SessionBackendCaps = { local: true, write: true, steer: false, images: true, files: true, recovery: true, interrupt: true };
 const OFFERED: TerminalViewOffer = { available: true, reason: null };
 
 /** The terminal view switch for `tab` on `backend`: every local tab has one. */
@@ -244,6 +454,7 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     stop: (tabId) => agent.stop(sessionId, tabId),
     respondPermission: (tabId, requestId, optionId) => agent.respondPermission(sessionId, tabId, requestId, optionId),
     answerQuestions: (tabId, requestId, answers) => agent.answerQuestions(sessionId, tabId, requestId, answers),
+    answerTerminalPrompt: (tabId, promptId, choice) => agent.answerTerminalPrompt(sessionId, tabId, promptId, choice),
     setModel: (tabId, model) => agent.setModel(sessionId, tabId, model),
     setEffort: (tabId, effort) => agent.setEffort(sessionId, tabId, effort),
     setPermissionMode: (tabId, mode) => agent.setPermissionMode(sessionId, tabId, mode),
@@ -251,10 +462,29 @@ export function localSessionBackend(sessionId: string): SessionBackend {
     patchTab: (tabId, patch) => patchTab(sessionId, tabId, patch),
     setTabStatus: (tabId, status) => setTabStatus(sessionId, tabId, status),
     terminalView: () => OFFERED,
+    turns: localTurnActions(sessionId),
   };
   if (localBackends.size > 256) localBackends.clear();
   localBackends.set(sessionId, backend);
   return backend;
+}
+
+/** A local session's Reset and Fork: this computer's runtime, then the window's copy of the tab and the session list. */
+function localTurnActions(sessionId: string): TurnActions {
+  return {
+    checkpoints: localTurnCheckpoints,
+    reset: async (tabId, endSeq, resetFiles, confirm) => {
+      const warning = await agent.resetChat(sessionId, tabId, endSeq, resetFiles, confirm);
+      // Also refresh directly: the window may have missed the owner event.
+      const refreshed = await Promise.allSettled([reloadTabHistory(sessionId, tabId), refreshSessions()]);
+      if (warning) return warning;
+      return refreshed.some((result) => result.status === "rejected") ? "Chat reset. Reopen the tab if its history has not refreshed yet." : null;
+    },
+    fork: async (tabId, endSeq, into) => {
+      const forked = await forkTurn(sessionId, tabId, endSeq, into);
+      return { key: forked.session.id, tabId: forked.tabId, note: forked.note ?? null };
+    },
+  };
 }
 
 /**
@@ -282,14 +512,34 @@ export async function storeOnce(sessionId: string, files: FileInput[]): Promise<
  * here and go with the message by reference. Without files it is sent exactly
  * as any first prompt was.
  */
-export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<SendOutcome> {
-  if (!files?.length) return agent.send(sessionId, tabId, text, images);
-  // Nothing else on screen holds this message any more: a store that fails says so, rather than leaving the session silent.
-  const stored = await storeOnce(sessionId, files).catch((error) => {
+export async function sendFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[], promptRequestId?: string): Promise<SendOutcome> {
+  // Tell the reader which attachments could not be stored.
+  const stored = files?.length ? await storeOnce(sessionId, files).catch((error) => {
     showError(`Couldn't attach ${files.length === 1 ? files[0].name : `${files.length} files`} to the first message`, error);
     throw error;
+  }) : undefined;
+  return agent.send(sessionId, tabId, text, images, false, undefined, stored, promptRequestId);
+}
+
+/** Show the local Create prompt immediately, using the same send and attachment storage as before. */
+export async function sendHeldFirstMessage(sessionId: string, tabId: string, text: string, images?: ImageInput[], files?: FileInput[]): Promise<void> {
+  const requestId = crypto.randomUUID();
+  const finish = showFirstMessage(sessionId, tabId, {
+    requestId,
+    text,
+    images: (images ?? []).map(({ mediaType, data, name }) => ({ url: `data:${mediaType};base64,${data}`, name })),
+    files: (files ?? []).map(({ name }) => ({ name })),
+    startedAt: Date.now(),
+    error: null,
   });
-  return agent.send(sessionId, tabId, text, images, false, undefined, stored);
+  try {
+    const { events } = await sendFirstMessage(sessionId, tabId, text, images, files, requestId);
+    events.forEach(applyEvent);
+    finish();
+  } catch (error) {
+    finish(errorMessage(error) || "The agent did not take the message.");
+    throw error;
+  }
 }
 
 // ---- cloud
@@ -341,6 +591,7 @@ export function clearCloudWake(workspaceKey: string) {
 export function resetCloudWakes() {
   waking.clear();
   agentPtySeen.clear();
+  followUpsSeen.clear();
 }
 
 /**
@@ -355,6 +606,17 @@ export function agentPtyServed(workspaceKey: string, served: boolean | null): bo
   if (served !== null) agentPtySeen.set(workspaceKey, served);
   return served ?? agentPtySeen.get(workspaceKey) ?? null;
 }
+
+/**
+ * Whether each cloud workspace's runtime took changes to its held
+ * follow-ups (`follow-ups/1`, #1328) when last connected. They go through
+ * the mailbox, so a workspace that is asleep or reconnecting still takes
+ * them; one never connected to here is not offered them until it says so.
+ */
+const followUpsSeen = new Map<string, boolean>();
+
+/** The mailbox kind that changes a held follow-up. */
+const FOLLOW_UP_KIND = "follow-up";
 
 export interface CloudSessionContext {
   key: string;
@@ -371,7 +633,15 @@ export interface CloudSessionContext {
   /** What the connection granted, else what the list says opening would grant. */
   authority: string | null;
   outbox: OutboxEntry[];
-  followUps: (tabId: string) => { clientCommandId: string; text: string }[];
+  followUps: (tabId: string) => HeldFollowUpInfo[];
+  /**
+   * The agent command kinds the cloud API takes for this workspace, as its
+   * list says (terminalx-saas#289); absent from an API that takes only the
+   * first four. Held follow-ups are changed only where it lists `follow-up`.
+   */
+  mailboxKinds?: readonly string[] | null;
+  /** The header chip's state, for the line under a queued message (#1291). */
+  workspaceStatus?: WorkspaceStatus;
   /** Raise the connection to `wake`: only called for an interactive command on a stopped workspace. */
   wake: () => Promise<void>;
   /** What became of a tab's last setting change (see `SessionBackend.settingsNotice`). */
@@ -395,6 +665,64 @@ export interface CloudSessionContext {
   agentProcess?: (tabId: string) => AgentProcessState | null;
   /** Why a tab's agent cannot sign in, as the runtime last said (see `SessionBackend.signIn`). */
   signIn?: (tabId: string) => AgentTabInfo["signIn"];
+}
+
+/** Why reviewing a turn is refused to a reader who may only read it. */
+export const REVIEW_NEEDS_ADMIN = "Keeping or undoing a turn's changes needs a workspace admin.";
+
+/** A runtime's checkpoints of a tab's turns (`checkpoints/1`); `review: false` reads them only. */
+function remoteTurnCheckpoints(client: WorkspaceRpcClient, review: boolean): TurnCheckpointApi {
+  const refuse = () => Promise.reject(new Error(REVIEW_NEEDS_ADMIN));
+  return {
+    readOnly: !review,
+    get: (sessionId, tabId, seq) => client.turnCheckpoint(sessionId, tabId, seq),
+    keep: review ? (sessionId, tabId, seq) => client.keepTurn(sessionId, tabId, seq) : refuse,
+    undo: review ? (sessionId, tabId, seq, confirmed) => client.undoTurn(sessionId, tabId, seq, confirmed) : refuse,
+    restore: review ? (sessionId, tabId, seq, confirmed) => client.restoreUndo(sessionId, tabId, seq, confirmed) : refuse,
+  };
+}
+
+/**
+ * A cloud or machine session's Reset and Fork (#1326), on its runtime. The
+ * new history a reset leaves reaches every reader through `session.tabs`
+ * (`AgentTabInfo.history`), and a fork's tab or session through the
+ * runtime's tab and session lists, as a tab added any other way does.
+ */
+function cloudTurnActions(ctx: CloudSessionContext, client: WorkspaceRpcClient): TurnActions {
+  const sessionKey = (sessionId: string) => `${ctx.key.slice(0, ctx.key.length - ctx.sessionId.length)}${sessionId}`;
+  return {
+    checkpoints: remoteTurnCheckpoints(client, true),
+    reset: async (tabId, endSeq, resetFiles, confirm) => {
+      const { warning, tab } = await client.resetAgentTab({ sessionId: ctx.sessionId, tabId, endSeq, resetFiles, confirm });
+      // The runtime's own account of the tab, at once: its new history replaces the turns that went.
+      if (tab) applyLiveTab(ctx.scope, tab);
+      return warning;
+    },
+    fork: async (tabId, endSeq, into) => {
+      const forked = await client.forkAgentTab({ sessionId: ctx.sessionId, tabId, endSeq, into });
+      if (forked.tab) applyLiveTab(ctx.scope, forked.tab);
+      // Shown at once, as a local fork is: its session (when it is a new one) on its tab.
+      const key = sessionKey(forked.sessionId);
+      if (key !== ctx.key) selectCloudSession(key);
+      selectSessionTab(key, { kind: "agent", id: forked.tabId });
+      return { key, tabId: forked.tabId, note: forked.note };
+    },
+  };
+}
+
+/** A remote session's handoffs (#1327): the runtime adds the tab and sends its first prompt, and it is shown at once. */
+function cloudHandoff(ctx: CloudSessionContext, client: WorkspaceRpcClient): HandoffActions {
+  return {
+    open: async ({ prompt, requestId, ...settings }) => {
+      // The desktop's Native Codex setting, as a tab added from the "+" menu takes it.
+      const nativeCodex = (await experimental.nativeCodexFor(settings.agent)) || undefined;
+      const made = await client.handoffAgentTab(ctx.sessionId, { ...settings, nativeCodex, prompt }, requestId);
+      if (made.tab) applyLiveTab(ctx.scope, made.tab);
+      selectSessionTab(ctx.key, { kind: "agent", id: made.tabId });
+      return { tabId: made.tabId, startError: made.startError };
+    },
+    context: (tabId) => client.handoffContext(ctx.sessionId, tabId),
+  };
 }
 
 /** Whether a cloud workspace's compute is asleep as far as this client knows. */
@@ -434,13 +762,77 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
   const terminalBase = ctx.terminalBase;
   // An interrupt is a live call: there is a turn to interrupt only on a runtime that is up.
   const interrupts = write && !!client?.hasCapability("session/3");
+  // Reset and Fork (#1326): live calls to a runtime that keeps the turns' checkpoints, by a workspace admin.
+  const turnsOff = !client ? TURNS_OFFLINE : !client.hasCapability("checkpoints/1") ? TURNS_OLD_RUNTIME : ctx.authority !== "manage" ? TURNS_NEED_ADMIN : null;
+  const turns = !turnsOff && write && client ? cloudTurnActions(ctx, client) : undefined;
+  // A second opinion, Retry in a new chat and the agent handoff (#1327): a new tab with its first prompt, by a workspace admin.
+  const handoffOff = !client ? HANDOFF_OFFLINE : !client.hasCapability("handoff/1") ? HANDOFF_OLD_RUNTIME : ctx.authority !== "manage" ? HANDOFF_NEED_ADMIN : null;
+  const handoff = !handoffOff && write && client ? cloudHandoff(ctx, client) : undefined;
+  // Turn cards read what a turn changed while the runtime is up, whoever may read the chat.
+  const readsCheckpoints = !!client?.hasCapability("checkpoints/1");
+  // Held follow-ups (#1328): a machine's change is a live call; a cloud workspace's goes through the mailbox
+  // whether or not it is connected now, to a runtime that last said it takes it, through an API that lists
+  // the `follow-up` kind (one that does not refuses every such change for good).
+  if (client && !isDevScope(scope)) followUpsSeen.set(ctx.workspaceKey, changesFollowUps(scope, client));
+  const heldChanges = write && (isDevScope(scope)
+    ? changesFollowUps(scope, client)
+    : (followUpsSeen.get(ctx.workspaceKey) ?? false) && !!ctx.mailboxKinds?.includes(FOLLOW_UP_KIND));
+  const changeHeld = async (tabId: string, change: HeldQueueChange): Promise<SendResult> => {
+    guard();
+    switch (change.type) {
+      case "enqueue": {
+        // A held message is a send, which the runtime holds while a turn runs (or others wait).
+        const sent = await sendHeld(tabId, change.text, change.images, change.files ?? []);
+        // "Interrupt and send": it goes first, and the turn is interrupted. Not awaited:
+        // its receipt is the outbox's to show; one that found the tab idle has nothing to do.
+        if (change.sendNow && sent) {
+          void interactive(() => changeCloudFollowUp(scope, tabId, { op: "release", followUpId: sent.clientCommandId }, client)).catch(() => undefined);
+        }
+        break;
+      }
+      case "edit":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "edit", followUpId: change.id, text: change.text }, client));
+        break;
+      case "delete":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "withdraw", followUpId: change.id }, client));
+        break;
+      case "sendNow":
+        await interactive(() => changeCloudFollowUp(scope, tabId, { op: "release", followUpId: change.id }, client));
+        break;
+      case "move":
+        throw new Error(REMOTE_UNAVAILABLE.moveHeld);
+      case "pause":
+        throw new Error(REMOTE_UNAVAILABLE.pauseHeld);
+    }
+    return { events: [], queued: true };
+  };
+  /** A prompt as `send` makes it, with its images and files; the outbox entry of a mailbox send. */
+  const sendHeld = async (tabId: string, text: string, images: ImageInput[], files: FileInput[]) => {
+    if (files.length && isDevScope(scope) && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
+    const asleep = cloudAsleep(ctx.state, ctx.workspaceState);
+    const blocked = (images.length ? cloudImagesBlocked(client, asleep) : null) ?? (files.length && !isDevScope(scope) ? cloudFilesBlocked(client, asleep) : null);
+    if (blocked) {
+      if (blocked === CLOUD_IMAGES_NEED_RUNNING || blocked === CLOUD_FILES_NEED_RUNNING) followWake();
+      throw new CloudImageError(blocked);
+    }
+    if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
+    let entry: OutboxEntry | undefined;
+    await interactive(async () => {
+      entry = await sendToCloudAgent(scope, tabId, text, client, images, { files });
+    });
+    return entry;
+  };
   return {
     kind: "cloud",
     key: ctx.key,
     generation: live ? `${live.runtimeGeneration}:${live.runtimeEpoch ?? ""}:${ctx.connects ?? 0}` : `offline:${ctx.client ? "client" : "none"}`,
-    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), recovery: false, interrupt: interrupts },
+    caps: { local: false, write, steer: true, images: !!client?.hasCapability("composer/3"), files: isDevScope(scope) ? !client || client.hasCapability("composer/4") : !!client?.hasCapability("composer/4"), recovery: false, interrupt: interrupts },
     readOnlyReason,
     approveBlockedReason,
+    unavailable: remoteUnavailable(turnsOff, handoffOff),
+    turns,
+    handoff,
+    checkpoints: turns?.checkpoints ?? (readsCheckpoints && client ? remoteTurnCheckpoints(client, false) : undefined),
     collab: { key: ctx.workspaceKey, you, client: ctx.collabClient ?? null },
     logSessionId: ctx.sessionId,
     modelClient: cloudAsleep(ctx.state, ctx.workspaceState) ? null : client,
@@ -464,23 +856,44 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     },
     send: async (tabId, text, images, options) => {
       guard();
-      // Files other than images are stored on this computer (PRO-290); a cloud agent takes images only.
-      if (options?.files?.length) throw new CloudImageError(CLOUD_FILES_REFUSED);
-      // Images are uploaded straight to the runtime (PRO-22): a stopped workspace is started
+      // Files other than images are uploaded to the runtime and stored in the session's attachments
+      // folder there: a machine's (PRO-407) and a cloud workspace's (#1329).
+      const files = options?.files ?? [];
+      if (files.length && isDevScope(scope) && client?.connection.state === "connected" && !client.hasCapability("composer/4")) throw new CloudImageError(MACHINE_FILES_OLD_RUNTIME);
+      // Images and files are uploaded straight to a cloud runtime (PRO-22): a stopped workspace is started
       // for them, by the same single wake a message asks for, and the message stays in the composer.
-      const blocked = images.length ? cloudImagesBlocked(client, cloudAsleep(ctx.state, ctx.workspaceState)) : null;
+      const asleep = cloudAsleep(ctx.state, ctx.workspaceState);
+      const blocked = (images.length ? cloudImagesBlocked(client, asleep) : null) ?? (files.length && !isDevScope(scope) ? cloudFilesBlocked(client, asleep) : null);
       if (blocked) {
-        if (blocked === CLOUD_IMAGES_NEED_RUNNING) followWake();
+        if (blocked === CLOUD_IMAGES_NEED_RUNNING || blocked === CLOUD_FILES_NEED_RUNNING) followWake();
         throw new CloudImageError(blocked);
       }
       // Settings chosen while this person could approve are not sent once they cannot: the runtime would ignore them.
       if (!mayConfigure(you)) discardPendingConfig(scope, tabId);
       // Told not to start anything: the server refuses a stopped workspace, and no wake follows from here either.
-      if (options?.wake === false) await sendToCloudAgent(scope, tabId, text, client, images, { wake: false });
-      else await interactive(() => sendToCloudAgent(scope, tabId, text, client, images));
+      if (options?.wake === false) await sendToCloudAgent(scope, tabId, text, client, images, { wake: false, files });
+      else await interactive(() => sendToCloudAgent(scope, tabId, text, client, images, { files }));
       return { events: [], queued: true };
     },
     steer: (tabId, text) => interactive(() => steerCloudAgent(scope, tabId, text, client)),
+    changeHeldQueue: heldChanges ? changeHeld : undefined,
+    // A message the CLI already holds goes when the turn is interrupted: Escape, live only.
+    sendQueuedNow: interrupts
+      ? async (tabId) => {
+          guard();
+          await client!.interruptAgentTab({ sessionId: ctx.sessionId, tabId });
+        }
+      : undefined,
+    // Retry and Send again (#1289): the message's own text, as a new message through the mailbox.
+    resendMessage: async (tabId, seq) => {
+      guard();
+      const event = getTabLog(ctx.sessionId, tabId).events.find((candidate) => candidate.seq === seq && candidate.payload.type === "user_message");
+      if (!event || event.payload.type !== "user_message") throw new Error(RESEND_MISSING);
+      const { text, images, files } = event.payload;
+      if (images?.length || files?.length) throw new Error(RESEND_ATTACHMENTS);
+      await interactive(() => sendToCloudAgent(scope, tabId, text, client, []));
+      return { events: [], queued: true };
+    },
     // Never through the mailbox: a queued Escape would land in some later turn. A runtime that cannot take it is left alone.
     interrupt: async (tabId) => {
       guard();
@@ -538,6 +951,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     commands: (tab) =>
       write ? cloudComposerCommands({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, tabId: tab.id, harness: tab.harness, client, you }) : null,
     files: () => (write ? cloudComposerFiles({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
+    prs: () => (write ? cloudComposerPrs({ workspaceKey: ctx.workspaceKey, sessionId: ctx.sessionId, client }) : null),
     agentTerminal: terminalBase && {
       workspaceKey: ctx.workspaceKey,
       client: client?.hasCapability("agent-pty/1") ? client : null,
@@ -553,6 +967,7 @@ export function cloudSessionBackend(ctx: CloudSessionContext): SessionBackend {
     outbox: {
       entries: (tabId) => ctx.outbox.filter((entry) => entry.tabId === tabId),
       followUps: ctx.followUps,
+      workspaceStatus: ctx.workspaceStatus ?? null,
       deciding: (requestId) => isDeciding(scope, requestId),
       sendAgain: (entry) => interactive(() => sendAgain(scope, entry, client)),
     },

@@ -99,11 +99,16 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output(command(cwd).args(args))?)?.trim_end().to_owned())
 }
 
+/// A path Git printed, without only its line ending (see `git::path_line`).
+fn git_path(cwd: &Path, args: &[&str]) -> Result<PathBuf> {
+    Ok(PathBuf::from(crate::git::path_line(&String::from_utf8(output(command(cwd).args(args))?)?)))
+}
+
 fn repository(project: &Path) -> Result<(PathBuf, PathBuf)> {
-    let root = fs::canonicalize(project).context("The repository root is unavailable")?;
-    let top = fs::canonicalize(git(&root, &["rev-parse", "--show-toplevel"])?)?;
-    let common = fs::canonicalize(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
-    let own = fs::canonicalize(git(&root, &["rev-parse", "--absolute-git-dir"])?)?;
+    let root = crate::paths::canonicalize(project).context("The repository root is unavailable")?;
+    let top = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--show-toplevel"])?)?;
+    let common = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
+    let own = crate::paths::canonicalize(git_path(&root, &["rev-parse", "--absolute-git-dir"])?)?;
     if root != top || own != common {
         bail!("Mirroring needs the project's main checkout as the repository root.");
     }
@@ -111,9 +116,9 @@ fn repository(project: &Path) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn source_check(root: &Path, common: &Path, source: &Path) -> Result<PathBuf> {
-    let source = fs::canonicalize(source).context("The local workspace is unavailable")?;
-    let top = fs::canonicalize(git(&source, &["rev-parse", "--show-toplevel"])?)?;
-    let source_common = fs::canonicalize(git(&source, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
+    let source = crate::paths::canonicalize(source).context("The local workspace is unavailable")?;
+    let top = crate::paths::canonicalize(git_path(&source, &["rev-parse", "--show-toplevel"])?)?;
+    let source_common = crate::paths::canonicalize(git_path(&source, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?)?;
     if source == root || source != top || source_common != common {
         bail!("Choose a local worktree of this repository to mirror.");
     }
@@ -157,7 +162,7 @@ fn ordinary_checkout(cwd: &Path) -> Result<()> {
     if entries.split('\0').any(|entry| entry.starts_with("160000 ")) {
         bail!("Mirroring does not support repositories with submodules.");
     }
-    let own = PathBuf::from(git(cwd, &["rev-parse", "--absolute-git-dir"])?);
+    let own = git_path(cwd, &["rev-parse", "--absolute-git-dir"])?;
     if ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "index.lock"]
         .iter()
         .any(|name| own.join(name).exists())
@@ -185,7 +190,7 @@ fn snapshot_pending(cwd: &Path, seed: &str, pending: Option<&str>) -> Result<Str
             .to_owned())
     };
     if seed == "INDEX" {
-        let own = git(cwd, &["rev-parse", "--absolute-git-dir"])?;
+        let own = git_path(cwd, &["rev-parse", "--absolute-git-dir"])?;
         fs::copy(Path::new(&own).join("index"), &index)?;
     } else {
         run(&["read-tree", seed])?;
@@ -350,7 +355,7 @@ impl Mirror {
 
     fn sync(&mut self) -> Result<()> {
         source_check(&self.root, &self.common, &self.journal.source)?;
-        let source_git = PathBuf::from(git(&self.journal.source, &["rev-parse", "--absolute-git-dir"])?);
+        let source_git = git_path(&self.journal.source, &["rev-parse", "--absolute-git-dir"])?;
         // A routine add/commit in the workspace should defer one tick, not
         // permanently pause mirroring. The root's lock still fails closed.
         if source_git.join("index.lock").exists() {

@@ -23,8 +23,9 @@
 //!   branch as the remote has it now.
 //! - **unverifiable**: the answer could not be established (not a working
 //!   tree of the project, files hidden from `git status`, submodules, another
-//!   checkout inside an ignored folder, git failing). Unknown is never read
-//!   as clean.
+//!   checkout inside an ignored folder, git failing, a pull request created
+//!   from it that GitHub has not yet confirmed). Unknown is never read as
+//!   clean.
 //! - **ignoredData**: clean, but it holds ignored files that are not known
 //!   build or dependency output (`.env`, a local database). Removable only
 //!   when the request says so for that worktree. Known output is a fixed list
@@ -346,10 +347,11 @@ pub struct Host<'a> {
 pub type StopAgents<'a> = &'a dyn Fn(&SessionEntry) -> Result<(), String>;
 
 pub(crate) fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Whether two paths are one directory, however each is spelled.
+#[cfg_attr(not(unix), allow(clippy::needless_bool))]
 pub(crate) fn same_dir(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -469,7 +471,7 @@ pub(crate) struct Repository<'a> {
 impl<'a> Repository<'a> {
     pub(crate) fn open(project: &'a Project, fetch: Fetch) -> Result<Self, String> {
         let privacy = crate::github_process::ticket();
-        let root = std::fs::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
+        let root = crate::paths::canonicalize(&project.path).map_err(|_| "Its folder is not on disk.".to_string())?;
         if !root.is_dir() || !git::is_repo(&root) {
             return Err("Not a Git repository, so it has no worktrees.".into());
         }
@@ -699,6 +701,9 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         if let Some(why) = roots.protection(repository, &path) {
             return (Verdict::Protected, Some(why));
         }
+        if let Err(reason) = session_ops::ensure_workspace_identity(all_sessions, &path) {
+            return (Verdict::Unverifiable, Some(reason));
+        }
         if entry.bare {
             return (Verdict::Protected, Some("This is the repository itself. It is never removed.".into()));
         }
@@ -716,6 +721,10 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
         }
         if !git::is_worktree_of(&repository.root, &path) {
             return unverifiable("It is not a working Git checkout of this project, so it cannot be checked for unsaved work.");
+        }
+        if let Some(why) = pending_pr_creation(&path) {
+            candidate.brief = Some("pull request to verify".into());
+            return (Verdict::Unverifiable, Some(why));
         }
         candidate.head = git::head_commit(&path);
         candidate.branch = git::current_branch(&path).or(candidate.branch.take());
@@ -842,6 +851,19 @@ pub(crate) fn inspect(host: &Host<'_>, roots: &Roots, repository: &Repository<'_
     candidate
 }
 
+/// Why a worktree must stay while a pull request created from it is not yet
+/// confirmed: GitHub accepted the create but its read-back failed, so the
+/// pending record in it is the only evidence of an open pull request. The
+/// branch it was made on may since have been switched for a clean, merged
+/// one, so nothing else in the review sees it. Unknown is never read as none.
+pub(crate) fn pending_pr_creation(path: &Path) -> Option<String> {
+    match crate::remote::git::pending_pr_creation_in(path) {
+        Ok(None) => None,
+        Ok(Some(url)) => Some(format!("Verify the pull request at {url} before removing this workspace.")),
+        Err(error) => Some(format!("Pull requests created from it could not be checked: {}", error.message)),
+    }
+}
+
 fn token(candidate: &Candidate, listing: &str) -> String {
     let mut hasher = Sha256::new();
     let mut field = |value: &str| {
@@ -945,12 +967,13 @@ fn reconcile(host: &Host<'_>, sink: &dyn EventSink, repository: &Repository<'_>,
         // Not removed by a clean-up: git would have dropped its record.
         return result(item, Outcome::Skipped, "Its folder is missing, but Git still lists it as a worktree. Nothing was changed.".to_string());
     }
-    let left: Vec<SessionEntry> = sessions
+    if let Err(reason) = session_ops::ensure_workspace_identity(&sessions, &spelled) {
+        return result(item, Outcome::Skipped, reason);
+    }
+    let left: Vec<SessionEntry> = session_ops::sessions_within(sessions, &spelled)
         .into_iter()
-        .filter(|session| {
-            let cwd = Path::new(&session.cwd);
-            session.worktree_name.is_some() && !session.worktree_removed && (cwd.starts_with(target) || cwd.starts_with(&spelled)) && canonical(Path::new(&session.project_path)) == repository.root
-        })
+        .filter(|session| !session.worktree_removed
+            && canonical(Path::new(&session.project_path)) == repository.root)
         .collect();
     if left.is_empty() {
         return result(item, Outcome::Skipped, "Nothing is at that path. If an earlier clean-up removed it, there is nothing left to do.".to_string());
@@ -1047,6 +1070,11 @@ fn remove_one(host: &Host<'_>, sink: &dyn EventSink, repositories: &[Repository<
             return failed;
         }
     };
+    // The final admission, after any archive hook: a pull request created
+    // meanwhile keeps the worktree and its conversations.
+    if let Some(why) = pending_pr_creation(&target) {
+        return result(item, Outcome::Skipped, why);
+    }
     if ran {
         // A hook may modify files or start processes: reapply the full review,
         // including ignored data and sessions, after it has finished.
@@ -1210,7 +1238,7 @@ fn walk_size(path: &Path, stop: &AtomicBool) -> Option<u64> {
 pub fn estimate_size(host: &Host<'_>, jobs: &Jobs, job: &str, project_path: &str, path: &str) -> anyhow::Result<Option<u64>> {
     let asked = canonical(Path::new(project_path));
     let project = host.projects.iter().find(|project| same_dir(&canonical(Path::new(&project.path)), &asked)).ok_or_else(|| anyhow::anyhow!("that project is not open on this host"))?;
-    let target = std::fs::canonicalize(path)?;
+    let target = crate::paths::canonicalize(path)?;
     let known = list_worktrees(Path::new(&project.path))?.iter().any(|entry| same_dir(&canonical(Path::new(&entry.path)), &target));
     anyhow::ensure!(known, "{path} is not a worktree of this project");
     let stop = jobs.start(job);

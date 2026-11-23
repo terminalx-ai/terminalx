@@ -11,6 +11,13 @@ import userPreferenceDefaults from "./userPreferenceDefaults.json";
  * User-facing preferences live in settings.json after the one-time migration.
  * Transient navigation/layout state stays in localStorage.
  */
+/** A prompt kept to send again: offered as `/name` in the composer, which puts its text in. */
+export interface PromptSnippet {
+  id: string;
+  name: string;
+  text: string;
+}
+
 export interface Prefs {
   dashboard: DashboardPreferences;
   linkBrowser: "terminalx" | "system" | "ask";
@@ -62,6 +69,8 @@ export interface Prefs {
   resetFiles: boolean;
   /** Appended to the prompt that sends failed CI logs to an agent. */
   fixErrorsInstructions: string;
+  /** Prompts saved from a turn's menu (PRO-379), offered by name under / in the composer. */
+  promptSnippets: PromptSnippet[];
   /**
    * The system's spelling correction, smart quotes and dashes, and text
    * replacements in the fields where the reader writes to an agent, and in the
@@ -123,7 +132,12 @@ export interface Prefs {
    * is known by that workspace's name on every device.
    */
   cloudBlankProjects: Record<string, string[]>;
-  /** Cloud projects the reader pinned, per organization, as repository identities. */
+  /**
+   * Cloud projects the reader pinned, per organization, as repository
+   * identities, as windows kept them before #1403. The app keeps them now
+   * (`@/lib/cloudPins`), where a paired phone reads them too: what is left
+   * here is moved there once and then cleared. Nothing else reads it.
+   */
   cloudPinned: Record<string, string[]>;
   /** Cloud projects the reader collapsed, by project key (`cloud:<orgId>:<identity>`); expanded by default. */
   cloudCollapsed: Record<string, true>;
@@ -178,14 +192,15 @@ const DEFAULTS: Prefs = {
   sounds: true,
   animations: true,
   fontScale: "md",
-  transcriptLayout: "wide",
-  // Off: every step of a turn stays in view between its paragraphs, so a turn reads as what the agent did, in order.
-  foldToolCalls: false,
+  transcriptLayout: "chat",
+  // On: a settled turn's steps fold behind one summary row; opened, they read in the order the agent did them.
+  foldToolCalls: true,
   turnChanges: true,
   writeCommitMessagesWithAgent: false,
   promptMap: true,
   resetFiles: false,
   fixErrorsInstructions: "",
+  promptSnippets: [],
   autocorrect: false,
   followUps: "now",
   lastProject: null,
@@ -327,6 +342,8 @@ function load(legacyOnly = false): Prefs {
     if (typeof prefs.fixErrorsInstructions !== "string") prefs.fixErrorsInstructions = "";
     if (typeof prefs.resetFiles !== "boolean") prefs.resetFiles = false;
     prefs.fixErrorsInstructions = prefs.fixErrorsInstructions.slice(0, 8000);
+    prefs.promptSnippets = Array.isArray(prefs.promptSnippets) ? prefs.promptSnippets.filter((snippet: Partial<PromptSnippet> | null): snippet is PromptSnippet =>
+      !!snippet && typeof snippet.id === "string" && typeof snippet.name === "string" && typeof snippet.text === "string") : [];
     let migrated = false;
     // Older versions saved the whole object, including the TerminalX default,
     // without recording whether it was chosen. Migrate unmarked values once;
@@ -391,6 +408,11 @@ export function legacyUserPreferences(): Record<string, unknown> {
     const legacy = load(true);
     return Object.fromEntries(fileKeys.filter((key) => key in saved || (key === "shortcutsVersion" && "shortcuts" in saved)).map((key) => [key, legacy[key]]));
   } catch { return {}; }
+}
+
+/** A preference's built-in value, for "Reset to default" to name (PRO-374). */
+export function preferenceDefault(key: string): unknown {
+  return Object.hasOwn(DEFAULTS, key) ? (DEFAULTS as unknown as Record<string, unknown>)[key] : undefined;
 }
 
 export function connectPreferenceFile(writer: FileWriter) { fileWriter = writer; }

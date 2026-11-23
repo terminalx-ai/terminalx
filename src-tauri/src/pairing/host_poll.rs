@@ -19,7 +19,7 @@ use rand_core::{OsRng, RngCore};
 
 use crate::account::AccountContext;
 
-use super::cloud::{self, RetryAfter};
+use super::cloud::{self, GrantScope, RetryAfter};
 use super::diagnostics::{Event, Failure, Stage};
 use super::model::{AccountPairingGrant, AccountPairingRevocation};
 use super::relay::{RelayLive, CONTROL_LIVENESS};
@@ -124,7 +124,42 @@ fn jitter() -> f64 {
     f64::from(OsRng.next_u32()) / (f64::from(u32::MAX) + 1.0)
 }
 
-type Round = (AccountContext, Vec<AccountPairingGrant>, Vec<AccountPairingRevocation>);
+/// What one round fetched: the phones' grants and revocations, then the
+/// machine host's (`runtime` scope, PRO-349).
+struct Round {
+    context: AccountContext,
+    grants: Vec<AccountPairingGrant>,
+    revocations: Vec<AccountPairingRevocation>,
+    runtime_grants: Vec<AccountPairingGrant>,
+    runtime_revocations: Vec<AccountPairingRevocation>,
+    /// What the heartbeat advertised, when one was sent.
+    capabilities: Option<Vec<String>>,
+}
+
+/// The `runtime`-scope lists are best effort: a failure there leaves them
+/// empty, so phones pair and are revoked exactly as before. A rate limit
+/// fails the round like any other, so its `Retry-After` is waited out.
+fn runtime_list<T>(what: &str, listed: Result<Vec<T>>) -> Result<Vec<T>> {
+    match listed {
+        Ok(listed) => Ok(listed),
+        Err(error) if error.downcast_ref::<cloud::CloudHttpError>().is_some_and(|status| status.0 == 429) => Err(error),
+        Err(error) => {
+            log::debug!("machine {what} unavailable this round: {error:#}");
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// The `runtime` revocations that are not the phones'. An account service
+/// before PRO-349 ignores `requestedScope` and answers the phones' list
+/// again; a phone's revocation must never be acknowledged by the machine
+/// host, which would find no computer for it.
+fn runtime_only(runtime: Vec<AccountPairingRevocation>, mobile: &[AccountPairingRevocation]) -> Vec<AccountPairingRevocation> {
+    runtime
+        .into_iter()
+        .filter(|revocation| !mobile.iter().any(|phone| phone.revocation_id == revocation.revocation_id))
+        .collect()
+}
 
 impl PairingManager {
     /// Runs until the control channel closes, the epoch moves on (another
@@ -190,23 +225,46 @@ impl PairingManager {
                     else {
                         return Ok(None);
                     };
+                    // The switch may have changed since the last round.
+                    let capabilities = manager.host_capabilities();
                     if heartbeat {
-                        cloud::heartbeat(&base, &context, &host_id, generation)?;
+                        cloud::heartbeat(&base, &context, &host_id, generation, &capabilities)?;
                     }
-                    let grants = cloud::pending_grants(&base, &context, &host_id, generation)?;
-                    let revocations = cloud::pending_revocations(&base, &context, &host_id, generation)?;
-                    Ok(Some((context, grants, revocations)))
+                    let grants = cloud::pending_grants(&base, &context, &host_id, generation, GrantScope::Mobile)?;
+                    let revocations = cloud::pending_revocations(&base, &context, &host_id, generation, GrantScope::Mobile)?;
+                    let runtime_grants = if super::machine_grants::runtime_grants_wanted(&capabilities) {
+                        runtime_list("grants", cloud::pending_grants(&base, &context, &host_id, generation, GrantScope::Runtime))?
+                    } else {
+                        Vec::new()
+                    };
+                    // Listed even while the switch is off: a computer removed
+                    // on its side is removed here before it could connect again.
+                    let runtime_revocations = runtime_only(
+                        runtime_list("revocations", cloud::pending_revocations(&base, &context, &host_id, generation, GrantScope::Runtime))?,
+                        &revocations,
+                    );
+                    Ok(Some(Round {
+                        context,
+                        grants,
+                        revocations,
+                        runtime_grants,
+                        runtime_revocations,
+                        capabilities: heartbeat.then_some(capabilities),
+                    }))
                 }
             })
             .await;
             match round {
                 // Signed out or another account: the relay supervisor takes it from here.
                 Ok(Ok(None)) => return,
-                Ok(Ok(Some((context, grants, revocations)))) => {
+                Ok(Ok(Some(Round { context, grants, revocations, runtime_grants, runtime_revocations, capabilities }))) => {
                     if heartbeat {
                         schedule.heartbeat_sent(started);
                         if let Some(host) = self.inner.lock().unwrap().host.as_mut() {
                             host.last_seen_at = Some(Utc::now().to_rfc3339());
+                            if let Some(capabilities) = capabilities {
+                                host.capabilities = capabilities;
+                            }
                         }
                     }
                     if schedule.failures() > 0 {
@@ -215,7 +273,7 @@ impl PairingManager {
                     }
                     recorded = None;
                     // A phone is pairing; it may retry or another may follow.
-                    if !grants.is_empty() {
+                    if !grants.is_empty() || !runtime_grants.is_empty() {
                         schedule.hinted(Instant::now());
                     }
                     for grant in grants {
@@ -223,6 +281,12 @@ impl PairingManager {
                     }
                     for revocation in revocations {
                         self.apply_revocation(&base, &context, &relay, generation, revocation).await;
+                    }
+                    for grant in runtime_grants {
+                        self.fulfill_runtime_grant(epoch, &context, &relay, generation, grant).await;
+                    }
+                    for revocation in runtime_revocations {
+                        self.apply_runtime_revocation(&base, &context, &relay, generation, revocation).await;
                     }
                     self.emit();
                     next = schedule.succeeded(Instant::now());
@@ -261,25 +325,34 @@ impl PairingManager {
         {
             return;
         }
-        if let Ok(Some(device)) = self.registry.automatic_for_grant(
+        let devices = match self.registry.automatic_for_grant(
             &context.user_id,
+            generation,
             &revocation.client_installation_id,
             &revocation.grant_request_id,
         ) {
-            if let Err(error) = self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device.id})) {
-                // The failed fence disconnects the attachment before
-                // the persisted credential is retired below.
-                log::warn!("fence revoked mobile grant: {error:#}");
+            Ok(devices) => devices,
+            Err(error) => {
+                log::warn!("read revoked mobile grant before acknowledging: {error:#}");
+                return;
             }
-        }
-        if let Ok(Some(device)) = self.registry.revoke_automatic_grant(
-            &context.user_id,
-            &revocation.client_installation_id,
-            &revocation.grant_request_id,
-        ) {
+        };
+        for device in devices {
+            if let Err(error) = self.registry.revoke(&device.id) {
+                log::warn!("save revoked mobile grant before acknowledging: {error:#}");
+                return;
+            }
+            let fence = self.fence_runtime_mobile("revoke", serde_json::json!({
+                "deviceId": device.id, "persisted": true,
+            }));
+            self.account.sync_runtime_copy();
             let _ = self.secrets.delete_device_token(&device.id);
             self.cancel_connections(&device.id);
             relay.revoke(device.id);
+            if let Err(error) = fence {
+                log::warn!("fence revoked mobile grant before acknowledging: {error:#}");
+                return;
+            }
         }
         let base = base.to_string();
         let context = context.clone();
@@ -297,6 +370,37 @@ mod tests {
     use super::*;
     use crate::pairing::cloud::fixture::{KeepAliveServer, Recorded, Reply};
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn revocation(id: &str, grant: &str) -> AccountPairingRevocation {
+        AccountPairingRevocation {
+            revocation_id: id.into(),
+            user_id: "test-user".into(),
+            host_id: "test-host".into(),
+            client_installation_id: "installation".into(),
+            grant_request_id: grant.into(),
+            binding_generation: 3,
+        }
+    }
+
+    #[test]
+    fn a_phones_revocation_is_never_taken_for_a_machines() {
+        let phones = [revocation("r-phone", "g-phone")];
+        // An account service that ignores requestedScope lists the phones' again.
+        assert!(runtime_only(phones.to_vec(), &phones).is_empty());
+        let runtime = runtime_only(vec![revocation("r-machine", "g-machine"), revocation("r-phone", "g-phone")], &phones);
+        assert_eq!(runtime.iter().map(|revocation| revocation.revocation_id.as_str()).collect::<Vec<_>>(), ["r-machine"]);
+    }
+
+    #[test]
+    fn a_runtime_list_failure_leaves_it_empty_but_a_rate_limit_fails_the_round() {
+        let unavailable: Result<Vec<u8>> = Err(anyhow::Error::new(cloud::CloudHttpError(400)));
+        assert!(runtime_list("grants", unavailable).unwrap().is_empty(), "an older account service, or a bad gateway");
+        let limited: Result<Vec<u8>> =
+            Err(anyhow::Error::new(RetryAfter(Duration::from_secs(7))).context(cloud::CloudHttpError(429)));
+        let error = runtime_list("grants", limited).unwrap_err();
+        assert_eq!(error.downcast_ref::<RetryAfter>(), Some(&RetryAfter(Duration::from_secs(7))), "waited out as the phones' is");
+        assert_eq!(runtime_list("grants", Ok(vec![1u8])).unwrap(), [1]);
+    }
 
     const SECOND: Duration = Duration::from_secs(1);
 
@@ -417,6 +521,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_poll_reuses_a_connection_follows_the_token_and_claims_live_only_when_heard() {
+        // Settings of their own: "Let other computers operate this Mac" is off.
+        let _home = crate::store::temp_home();
         let server = KeepAliveServer::start(reply);
         let account = Arc::new(crate::account::AccountManager::default());
         account.set_context_for_test(Some(context("token-a")));
@@ -444,11 +550,16 @@ mod tests {
             TEST_CADENCE,
         ));
 
-        wait_for("the first round", || count(&server, "revocations") >= 1).await;
+        wait_for("the first round", || count(&server, "revocations") >= 2).await;
         wait_for("the heartbeat to be noted", || last_seen().is_some()).await;
         let first: Vec<_> = server.requests().iter().map(kind).collect();
-        assert_eq!(first, ["heartbeat", "grants", "revocations"]);
-        assert!(server.requests()[1].path.ends_with("/host-account-bindings/test-host/pairing-grant-requests?bindingGeneration=3"));
+        assert_eq!(first, ["heartbeat", "grants", "revocations", "revocations"]);
+        let requests = server.requests();
+        assert_eq!(requests[0].body.as_ref().unwrap()["capabilities"], serde_json::json!([super::super::model::CAPABILITY]), "not operable: no machine-operating.v1");
+        assert!(requests[1].path.ends_with("/host-account-bindings/test-host/pairing-grant-requests?bindingGeneration=3"), "the phones' poll is unchanged");
+        assert!(requests[2].path.ends_with("/host-account-bindings/test-host/revocations?bindingGeneration=3"));
+        // A computer removed on its side is removed here even while the switch is off.
+        assert!(requests[3].path.ends_with("/revocations?bindingGeneration=3&requestedScope=runtime"));
 
         // The access token refreshes every 30 minutes; the poll takes the new one.
         account.set_context_for_test(Some(context("token-b")));
@@ -490,6 +601,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_hint_polls_at_once_and_a_rate_limit_is_waited_out_and_recorded() {
+        let _home = crate::store::temp_home();
         let limited = Arc::new(AtomicBool::new(false));
         let refused_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
         let server = KeepAliveServer::start({
@@ -567,6 +679,57 @@ mod tests {
         for sensitive in ["token-a", "test-host", "test-user", "127.0.0.1"] {
             assert!(!bytes.contains(sensitive));
         }
+
+        drop(control);
+        tokio::time::timeout(Duration::from_secs(5), poll).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn while_operating_is_on_the_heartbeat_offers_it_and_runtime_grants_are_polled() {
+        let _home = crate::store::temp_home();
+        let mut settings = crate::store::settings::load();
+        settings.machines.allow_operating = true;
+        crate::store::settings::save(&settings).unwrap();
+        let server = KeepAliveServer::start(reply);
+        let account = Arc::new(crate::account::AccountManager::default());
+        account.set_context_for_test(Some(context("token-a")));
+        let manager = manager(&account);
+        let epoch = manager.epoch.load(Ordering::SeqCst);
+        let (relay, control) = RelayLive::for_test("test-host", 3);
+        let poll = tokio::spawn(manager.clone().host_poll_with(
+            epoch,
+            "test-user".into(),
+            relay.clone(),
+            3,
+            server.base.clone(),
+            TEST_CADENCE,
+        ));
+        wait_for("the first round", || count(&server, "revocations") >= 2).await;
+        let requests = server.requests();
+        assert_eq!(requests.iter().map(kind).collect::<Vec<_>>(), ["heartbeat", "grants", "revocations", "grants", "revocations"]);
+        assert_eq!(
+            requests[0].body.as_ref().unwrap()["capabilities"],
+            serde_json::json!([super::super::model::CAPABILITY, super::super::model::MACHINE_OPERATING_CAPABILITY])
+        );
+        assert!(requests[1].path.ends_with("pairing-grant-requests?bindingGeneration=3"), "the phones' grants, as before");
+        assert!(requests[3].path.ends_with("pairing-grant-requests?bindingGeneration=3&requestedScope=runtime"));
+        assert!(requests[4].path.ends_with("revocations?bindingGeneration=3&requestedScope=runtime"));
+
+        // Off again: the next heartbeat no longer offers it, and no runtime grants are listed.
+        settings.machines.allow_operating = false;
+        crate::store::settings::save(&settings).unwrap();
+        let before = server.requests().len();
+        // The second heartbeat after the save: the first may have been read before it.
+        let heartbeats_after = |requests: &[Recorded]| -> Vec<usize> {
+            requests.iter().enumerate().skip(before).filter(|(_, request)| kind(request) == "heartbeat").map(|(at, _)| at).collect()
+        };
+        wait_for("two heartbeats after the switch went off", || heartbeats_after(&server.requests()).len() >= 2).await;
+        let heartbeat = heartbeats_after(&server.requests())[1];
+        wait_for("the rest of that round", || server.requests().len() >= heartbeat + 4).await;
+        let after = &server.requests()[heartbeat..heartbeat + 4];
+        assert_eq!(after[0].body.as_ref().unwrap()["capabilities"], serde_json::json!([super::super::model::CAPABILITY]));
+        assert_eq!(after.iter().map(kind).collect::<Vec<_>>(), ["heartbeat", "grants", "revocations", "revocations"]);
+        assert!(!after[1].path.contains("requestedScope"));
 
         drop(control);
         tokio::time::timeout(Duration::from_secs(5), poll).await.unwrap().unwrap();

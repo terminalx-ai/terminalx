@@ -48,7 +48,7 @@ impl Fixture {
     fn new() -> Self {
         let home = crate::store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
         let mut fixture = Self { _home: home, _dir: dir, base, projects: Vec::new(), live: Mutex::new(Live::default()), events: Arc::new(Events::default()), stopped: Mutex::new(Vec::new()), refuse_stop: Mutex::new(None) };
         fixture.project("alpha");
         fixture
@@ -703,7 +703,13 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     let f = Fixture::new();
     let alpha = f.alpha();
     let wt = f.pushed(&alpha, "half-done");
-    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let mut session = f.session(&alpha, &wt, TabStatus::Idle);
+    session.set_checkout_root(wt.to_str());
+    index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
+    let mut companion = f.session(&alpha, &wt, TabStatus::Idle);
+    companion.worktree_name = None;
+    companion.set_checkout_root(wt.to_str());
+    index::update_session(&companion.id, |entry| { *entry = companion.clone(); Ok(()) }).unwrap();
     let main = f.session(&alpha, &alpha, TabStatus::Idle);
     let item = f.item(&f.find(&wt));
     // The first attempt removed the worktree and died before its sessions were filed.
@@ -713,7 +719,8 @@ fn a_retry_after_a_partial_removal_reconciles_without_removing_more() {
     assert_eq!(done.outcome, Outcome::AlreadyRemoved, "{:?}", done.reason);
     assert_eq!(done.freed_bytes, 0);
     // Its conversation is kept even though deletion was asked for: nothing was reviewed this time.
-    assert_eq!(done.sessions_kept, vec![session.id.clone()]);
+    assert_eq!(done.sessions_kept, vec![session.id.clone(), companion.id.clone()]);
+    assert!(index::get(&companion.id).unwrap().worktree_removed);
     assert!(index::get(&session.id).unwrap().worktree_removed);
     assert_eq!(index::get(&main.id).unwrap(), main);
 
@@ -734,7 +741,9 @@ fn a_reconciled_removal_stops_its_sessions_agents_before_filing_them() {
     let f = Fixture::new();
     let alpha = f.alpha();
     let wt = f.pushed(&alpha, "cut-short");
-    let session = f.session(&alpha, &wt, TabStatus::Idle);
+    let mut session = f.session(&alpha, &wt, TabStatus::Idle);
+    session.set_checkout_root(wt.to_str());
+    index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
     let main = f.session(&alpha, &alpha, TabStatus::Idle);
     let item = f.item(&f.find(&wt));
     sh(&alpha, &["worktree", "remove", wt.to_str().unwrap()]);
@@ -965,6 +974,49 @@ fn archive_changes_are_checked_again_before_bulk_removal() {
     terminals.kill_all();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pull_request_created_during_the_archive_hook_keeps_the_worktree_and_its_conversations() {
+    let f = Fixture::new();
+    let tree = f.worktree(&f.alpha(), "pending");
+    let session = f.session(&f.alpha(), &tree, TabStatus::Idle);
+    let item = f.item(&f.find(&tree));
+    // GitHub accepted a create from this worktree while its archive hook ran,
+    // and the read-back failed: only the pending record says a PR is open.
+    let pending = serde_json::json!([{
+        "session": session.id,
+        "checkout": { "path": canonical(&tree), "git_dir": tree.join(".git"), "directory": [0, 0], "admin": [0, 0] },
+        "branch": "feature/pr", "base": "main", "head": "0000000", "url": "https://github.test/octo/repo/pull/7",
+    }]);
+    let staged = f.base.join("pending.json");
+    std::fs::write(&staged, serde_json::to_vec(&pending).unwrap()).unwrap();
+    let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+    let marker = f.base.join("hook-ran");
+    let project = crate::store::projects::add(f.alpha().to_str().unwrap()).unwrap();
+    crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+        scripts: Some(crate::store::projects::RepositoryScripts {
+            setup: String::new(),
+            archive: format!("cp '{}' '{}' && touch '{}'", staged.display(), record.display(), marker.display()),
+            archive_timeout_minutes: None,
+        }), ..Default::default()
+    }).unwrap();
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let sink: Arc<dyn EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+    let results = f.with_host(&[], None, |host| {
+        let host = Host { archive: Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false }), ..*host };
+        remove(&host, &*sink, &[RemoveItem { delete_sessions: true, ..item }], Watch::default())
+    });
+    terminals.kill_all();
+    assert!(marker.exists(), "the archive hook ran");
+    assert_eq!(results[0].outcome, Outcome::Skipped, "{:?}", results[0]);
+    assert_eq!(results[0].reason.as_deref(), Some("Verify the pull request at https://github.test/octo/repo/pull/7 before removing this workspace."));
+    assert!(tree.is_dir());
+    assert!(index::get(&session.id).is_ok());
+    let candidate = f.find(&tree);
+    assert_eq!(candidate.verdict, Verdict::Unverifiable);
+    assert!(candidate.reason.unwrap().contains("pull/7"));
+}
+
 #[test]
 fn removal_wire_format_preserves_archive_consent_and_omits_absent_receipts() {
     let old = serde_json::json!({ "projectPath": "/p", "path": "/p/tree", "token": "review" });
@@ -1003,4 +1055,50 @@ fn archive_may_remove_reviewed_ignored_data_but_cannot_add_new_ignored_data() {
     assert_eq!(run(f.item(&f.find(&grows)))[0].outcome, Outcome::Skipped);
     assert!(grows.join(".env").exists());
     terminals.kill_all();
+}
+
+#[test]
+fn cleanup_refuses_a_parent_with_an_unidentified_pruned_legacy_checkout() {
+    let fixture = Fixture::new();
+    let project = fixture.alpha();
+    let parent = fixture.worktree(&project, "parent-legacy");
+    let nested = parent.join("nested");
+    sh(&project, &["worktree", "add", "-q", "-b", "nested-legacy", nested.to_str().unwrap()]);
+    let sub = nested.join("src");
+    std::fs::create_dir(&sub).unwrap();
+    let legacy = fixture.session(&project, &sub, TabStatus::Idle);
+    let companion = fixture.session(&project, &nested, TabStatus::Idle);
+    std::fs::remove_dir_all(&nested).unwrap();
+    sh(&project, &["worktree", "prune"]);
+    // Recreated ordinary directories resolve through Git to the parent.
+    std::fs::create_dir_all(&sub).unwrap();
+    assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), parent.to_str().unwrap());
+    let candidate = fixture.find(&parent);
+    assert_eq!(candidate.verdict, Verdict::Unverifiable);
+    assert!(candidate.reason.as_deref().unwrap().contains("Cannot establish the checkout"));
+    let result = fixture.remove(&[fixture.item(&candidate)]);
+    assert_eq!(result[0].outcome, Outcome::Skipped);
+    assert!(parent.exists());
+    assert!(index::get(&legacy.id).is_ok());
+    assert!(index::get(&companion.id).is_ok());
+}
+
+#[test]
+fn cleanup_does_not_reconcile_an_unidentified_pruned_shared_checkout() {
+    let fixture = Fixture::new();
+    let project = fixture.alpha();
+    let root = fixture.worktree(&project, "shared-legacy");
+    let sub = root.join("src");
+    std::fs::create_dir(&sub).unwrap();
+    let fork = fixture.session(&project, &sub, TabStatus::Idle);
+    let companion = fixture.session(&project, &root, TabStatus::Idle);
+    let item = fixture.item(&fixture.find(&root));
+    std::fs::remove_dir_all(&root).unwrap();
+    sh(&project, &["worktree", "prune"]);
+    let result = fixture.remove(&[item]);
+    assert_eq!(result[0].outcome, Outcome::Skipped);
+    assert!(result[0].reason.as_deref().unwrap().contains("Cannot establish the checkout"));
+    assert!(index::get(&fork.id).is_ok());
+    assert!(index::get(&companion.id).is_ok());
+    assert!(fixture.stopped.lock().unwrap().is_empty());
 }

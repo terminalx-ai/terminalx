@@ -1,0 +1,10 @@
+# Text is checked out with LF line endings on every system, whatever the
+# machine's git settings, so tests, scripts and builds read the same bytes
+# on Windows as on macOS and Linux.
+* text=auto eol=lf
+
+# Kept byte for byte as committed: cmd.exe reads batch files with CRLF, and
+# these fixtures are compared exactly.
+*.cmd -text
+*.bat -text
+docs/testing/**/*.csv -text

@@ -103,7 +103,13 @@ const ROLES_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// asks at once, unless an answer arrived this recently: a burst of refusals
 /// is one question.
 const ROLES_REFRESH_FLOOR: Duration = Duration::from_secs(2);
-const REFRESH_NOT_SAVED: &str = "The account session refreshed, but macOS Keychain could not save it.";
+/// Where the account session is kept, as a message names it.
+#[cfg(not(windows))]
+macro_rules! secret_store { () => { "macOS Keychain" } }
+#[cfg(windows)]
+macro_rules! secret_store { () => { "the Windows secret store" } }
+
+const REFRESH_NOT_SAVED: &str = concat!("The account session refreshed, but ", secret_store!(), " could not save it.");
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +161,11 @@ pub struct OrganizationSummary {
     /// What the cloud offers in this organization (PRO-69); absent from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<OrganizationCloud>,
+    /// The organization's cloud computer name and colour (PRO-370); absent from older servers and when not chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_color: Option<String>,
 }
 
 /// What creating an organization did (PRO-16): the organization, and whether
@@ -300,6 +311,10 @@ struct Organization {
     is_personal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud: Option<OrganizationCloud>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    computer_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    computer_color: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -415,6 +430,9 @@ pub struct AccountManager {
     /// When the server last answered with organizations and roles. Held while
     /// asking, so concurrent callers share one answer.
     roles_refreshed: Mutex<Option<Instant>>,
+    /// When the runtime's copy of the session last changed, as last checked
+    /// (see "The runtime's copy" below).
+    runtime_copy_seen: Mutex<Option<SystemTime>>,
 }
 
 enum CallbackAction {
@@ -444,7 +462,7 @@ impl AccountManager {
         );
         inner.session = context.map(|context| DesktopSession {
             access_token: context.access_token,
-            refresh_token: "test-refresh".into(),
+            refresh_token: "drt_test-family.test-refresh".into(),
             expires_at: 4_000_000_000_000,
             cloud: CloudIdentity {
                 cloud_profile_id: context.profile_id,
@@ -471,7 +489,7 @@ impl AccountManager {
         let session = inner.session.as_mut().expect("signed in");
         session.organizations = organizations
             .iter()
-            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None })
+            .map(|id| Organization { org_id: (*id).into(), name: (*id).into(), role: "member".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None })
             .collect();
         session.capabilities.flags.insert(MULTI_ORG_CAPABILITY.into(), multi_org);
     }
@@ -662,6 +680,7 @@ impl AccountManager {
     /// Access tokens never cross the Tauri command boundary.
     pub(crate) fn context(&self) -> Option<AccountContext> {
         self.ensure_loaded();
+        self.adopt_runtime_rotation();
         self.refresh_if_needed();
         let inner = self.inner.lock().unwrap();
         inner.session.as_ref().map(|session| AccountContext {
@@ -804,6 +823,14 @@ impl AccountManager {
         })
     }
 
+    pub(crate) fn support_scope(&self, revision: &str) -> Option<CloudScope> {
+        let inner = self.inner.lock().unwrap();
+        let session = inner.session.as_ref()?;
+        let scope = cloud_scope(session);
+        let key = context_scope(&scope.user_id, &scope.profile_id, &scope.active_org_id);
+        (revision == format!("{key}:{}", inner.generation)).then_some(scope)
+    }
+
     pub(crate) fn context_revision(context: &AccountContext) -> String {
         format!("{}:{}", context_scope(&context.user_id, &context.profile_id, &context.organization_id), context.generation)
     }
@@ -885,6 +912,43 @@ impl AccountManager {
         self.store().map_err(StoreError::into_error).context("save selected organization")
     }
 
+    /// Save an organization's cloud computer name and colour (PRO-370), any
+    /// organization the person manages, whichever is active. Fenced by the
+    /// account context it was asked for; the saved values go into the
+    /// account snapshot so every view shows them before the next refresh.
+    pub(crate) fn save_computer_identity(&self, organization_id: &str, revision: &str, name: Option<&str>, color: Option<&str>) -> Result<()> {
+        if let Some(name) = name {
+            let valid = (1..=40).contains(&name.len())
+                && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !name.starts_with('-') && !name.ends_with('-') && !name.contains("--");
+            if !valid { return Err(anyhow!("invalid_computer_name")); }
+        }
+        if color.is_some_and(|color| !COMPUTER_COLORS.contains(&color)) { return Err(anyhow!("invalid_computer_color")); }
+        if organization_id.is_empty() || !organization_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(anyhow!("invalid organization"));
+        }
+        let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
+        if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
+        let (target, access) = self.context_in(organization_id).map_err(|error| anyhow!(error))?;
+        if target.user_id != context.user_id || target.profile_id != context.profile_id { return Err(anyhow!("account context changed")); }
+        let saved: ComputerIdentity = send_authenticated(
+            "PUT",
+            &format!("{ORGANIZATIONS_PATH}/{organization_id}/computer"),
+            json!({ "computerName": name, "computerColor": color }),
+            Some(&target.access_token),
+        )?;
+        if !self.is_current_in(&target, access) { return Err(anyhow!("account context changed after saving the computer")); }
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation != target.generation || inner.session.as_ref().is_none_or(|session| session.cloud.user_id != target.user_id || session.cloud.cloud_profile_id != target.profile_id) {
+            return Err(anyhow!("account context changed after saving the computer"));
+        }
+        if let Some(org) = inner.session.as_mut().and_then(|session| session.organizations.iter_mut().find(|org| org.org_id == organization_id)) {
+            org.computer_name = saved.computer_name;
+            org.computer_color = saved.computer_color;
+        }
+        Ok(())
+    }
+
     pub(crate) fn select_organization_for_revision(&self, organization_id: &str, revision: &str) -> Result<()> {
         let context = self.context().ok_or_else(|| anyhow!("account is signed out"))?;
         if Self::context_revision(&context) != revision { return Err(anyhow!("account context changed")); }
@@ -963,7 +1027,12 @@ impl AccountManager {
     /// may already own the account by the time the logout request finishes.
     pub fn sign_out(&self, app: &AppHandle) -> (AccountStatus, u64) {
         self.ensure_loaded();
+        // Signed out with the token the runtime may have rotated meanwhile,
+        // so the account service ends the session, not a superseded token.
+        self.adopt_runtime_rotation();
         let (session, generation) = self.end_session();
+        // The runtime ends its relay registration (PRO-368).
+        self.sync_runtime_copy_after(session.as_ref());
         let status = self.snapshot();
         self.emit(app);
 
@@ -1006,7 +1075,7 @@ impl AccountManager {
         log::warn!("could not remove TerminalX account session from Keychain: {:#}", error.into_error());
         // A sign-in begun meanwhile owns the account now.
         if inner.generation == generation {
-            inner.last_error = Some("Sign-out could not remove the account session from macOS Keychain.".into());
+            inner.last_error = Some(concat!("Sign-out could not remove the account session from ", secret_store!(), ".").into());
             if inner.session.is_none() && session.is_some() {
                 inner.set_session(session);
             }
@@ -1107,9 +1176,10 @@ impl AccountManager {
         }
         // Signed in as soon as the exchange answers; the Keychain follows.
         self.emit(app);
-        if self.persist(generation, Some("Signed in for this run, but macOS Keychain could not save the session.")) {
+        if self.persist(generation, Some(concat!("Signed in for this run, but ", secret_store!(), " could not save the session."))) {
             self.emit(app);
         }
+        self.sync_runtime_copy();
     }
 
     /// Take a sign-in's outcome, in memory. False when the sign-in it belongs
@@ -1182,15 +1252,39 @@ impl AccountManager {
         // Refresh tokens rotate. Serializing this section prevents two status
         // reads from submitting the same token family at once.
         let _gate = self.refresh_gate.lock().unwrap();
-        let (generation, session) = {
+        let due = || {
             let inner = self.inner.lock().unwrap();
             inner.session.as_ref().and_then(|session| {
                 should_refresh(session.expires_at, now_ms())
                     .then(|| (inner.generation, session.clone()))
             })
-        }?;
-        let result = refresh(&session);
-        Some((generation, self.apply_refresh(generation, &session, result)))
+        };
+        due()?;
+        // The runtime rotates this same session while no window is attached
+        // (PRO-368). Under the session file's lock, a rotation it made is
+        // taken instead of presenting the token it superseded, which would
+        // end the session; and this one is written there before the lock
+        // is released.
+        let rotate = || {
+            let adopted = self.adopt_runtime_rotation_now();
+            let Some((generation, session)) = due() else { return adopted };
+            let result = refresh(&session);
+            let changed = self.apply_refresh(generation, &session, result);
+            self.write_runtime_copy(None);
+            Some((generation, changed))
+        };
+        match crate::store::root() {
+            Ok(root) if Self::runtime_copy_wanted() || crate::machine_account::session_path(&root).exists() => {
+                match crate::machine_account::locked(&root, || Ok(rotate())) {
+                    Ok(rotated) => rotated,
+                    Err(error) => {
+                        log::warn!("could not take the account session's lock: {error:#}");
+                        rotate()
+                    }
+                }
+            }
+            _ => rotate(),
+        }
     }
 
     /// After a change made in memory for `generation`: announce it, then
@@ -1261,6 +1355,114 @@ impl AccountManager {
         Ok(())
     }
 
+    // ------------------------------------------------ The runtime's copy
+    //
+    // While "Let other computers operate this Mac" is on, the runtime
+    // registers this Mac with the relay from the account (PRO-368), with the
+    // window closed too. It reads the session from
+    // `<data dir>/account/session.json` (`machine_account`), which the window
+    // keeps from here, mode 0600 in a 0700 folder, as a headless machine
+    // keeps its own. Refresh tokens rotate, and presenting a superseded one
+    // ends the whole session, so one process rotates at a time, under that
+    // file's lock: the window while it is attached (the runtime asks it,
+    // `account.refresh`), the runtime while it is not. Whichever rotated
+    // writes the file before releasing the lock; the window takes a rotation
+    // it finds there before it uses or refreshes its own tokens. With
+    // neither computer hosting nor an approved phone, the file is removed
+    // after any rotation in it is taken.
+
+    /// Whether the runtime keeps a copy of the session.
+    fn runtime_copy_wanted() -> bool {
+        !crate::data_privacy::enabled()
+            && (crate::store::settings::load().machines.allow_operating
+                || crate::phone::registry::has_paired_phone().unwrap_or(false))
+    }
+
+    /// Take a rotation the runtime made, when its copy changed since the
+    /// last look. Cheap enough for every [`Self::context`]: one `stat`.
+    fn adopt_runtime_rotation(&self) {
+        let Ok(root) = crate::store::root() else { return };
+        let modified = std::fs::metadata(crate::machine_account::session_path(&root)).and_then(|metadata| metadata.modified()).ok();
+        {
+            let mut seen = self.runtime_copy_seen.lock().unwrap();
+            if modified.is_none() || *seen == modified {
+                return;
+            }
+            *seen = modified;
+        }
+        self.adopt_runtime_rotation_now();
+    }
+
+    /// Take the runtime's copy when it is a later rotation of the session in
+    /// memory, and store it. The generation it was taken for, when it was.
+    fn adopt_runtime_rotation_now(&self) -> Option<(u64, bool)> {
+        let root = crate::store::root().ok()?;
+        let saved = crate::machine_account::load(&root).ok().flatten()?;
+        let generation = {
+            let mut inner = self.inner.lock().unwrap();
+            let generation = inner.generation;
+            let current = inner.session.as_ref()?;
+            if !crate::machine_account::rotated(&current.refresh_token, current.expires_at, &saved) {
+                return None;
+            }
+            let mut session = current.clone();
+            session.access_token = saved.access_token;
+            session.refresh_token = saved.refresh_token;
+            session.expires_at = saved.expires_at;
+            inner.set_session(Some(session));
+            generation
+        };
+        log::info!("took the account session the runtime refreshed while this window was closed");
+        self.settle(generation, false, Some(REFRESH_NOT_SAVED));
+        Some((generation, false))
+    }
+
+    /// Bring the runtime's copy in line with the session in memory and the
+    /// switch, under the file's lock. Blocking.
+    pub(crate) fn sync_runtime_copy(&self) {
+        self.sync_runtime_copy_after(None);
+    }
+
+    /// [`Self::sync_runtime_copy`]; `ended`: a session just signed out,
+    /// whose copy goes too.
+    fn sync_runtime_copy_after(&self, ended: Option<&DesktopSession>) {
+        let Ok(root) = crate::store::root() else { return };
+        if let Err(error) = crate::machine_account::locked(&root, || {
+            self.adopt_runtime_rotation_now();
+            self.write_runtime_copy(ended);
+            Ok(())
+        }) {
+            log::warn!("could not update the runtime's copy of the account session: {error:#}");
+        }
+    }
+
+    /// Write, keep or remove the copy, holding its lock. Keep this window's
+    /// session while the runtime serves computers or an approved phone.
+    /// A session that `terminalx-serve login` saved for another account stays.
+    fn write_runtime_copy(&self, ended: Option<&DesktopSession>) {
+        let Ok(root) = crate::store::root() else { return };
+        let session = self.inner.lock().unwrap().session.clone();
+        let saved = crate::machine_account::load(&root).ok().flatten();
+        let ours = |session: &DesktopSession| {
+            saved.as_ref().is_some_and(|saved| crate::machine_account::family(&saved.refresh_token).is_some() && crate::machine_account::family(&saved.refresh_token) == crate::machine_account::family(&session.refresh_token))
+        };
+        let result = match (&session, Self::runtime_copy_wanted()) {
+            (Some(session), true) => serde_json::to_value(session)
+                .and_then(serde_json::from_value::<crate::machine_account::Session>)
+                .map_err(anyhow::Error::from)
+                .and_then(|copy| crate::machine_account::save(&root, &copy)),
+            (Some(session), false) if ours(session) => crate::machine_account::remove(&root).map(|_| ()),
+            _ => match ended {
+                Some(ended) if ours(ended) => crate::machine_account::remove(&root).map(|_| ()),
+                _ => Ok(()),
+            },
+        };
+        if let Err(error) = result {
+            log::warn!("could not keep the runtime's copy of the account session: {error:#}");
+        }
+        *self.runtime_copy_seen.lock().unwrap() = std::fs::metadata(crate::machine_account::session_path(&root)).and_then(|metadata| metadata.modified()).ok();
+    }
+
     fn ensure_loaded(&self) {
         if self.inner.lock().unwrap().loaded {
             return;
@@ -1295,7 +1497,7 @@ impl AccountManager {
                 log::warn!("could not read TerminalX account session from Keychain: {error:#}");
                 inner.session_unreadable = true;
                 inner.last_error = Some(
-                    "The saved TerminalX account session could not be read from macOS Keychain."
+                    concat!("The saved TerminalX account session could not be read from ", secret_store!(), ".")
                         .into(),
                 );
             }
@@ -1433,7 +1635,7 @@ fn snapshot(inner: &Inner) -> AccountStatus {
             let account = account_key(&session.cloud.user_id, &session.cloud.cloud_profile_id);
             OnboardingContext { revision: format!("{scope}:{}", inner.generation), scope, account }
         }),
-        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone() }).collect()).unwrap_or_default(),
+        organizations: inner.session.as_ref().map(|session| session.organizations.iter().map(|org| OrganizationSummary { id: org.org_id.clone(), name: org.name.clone(), role: org.role.clone(), is_personal: org.is_personal, cloud: org.cloud.clone(), computer_name: org.computer_name.clone(), computer_color: org.computer_color.clone() }).collect()).unwrap_or_default(),
         multi_org: inner.session.as_ref().is_some_and(multi_org),
         catalog_feed: inner.session.as_ref().is_some_and(catalog_feed),
         member_workspaces: inner.session.as_ref().is_some_and(|session| session.capabilities.flags.get(MEMBER_WORKSPACES_CAPABILITY) == Some(&true)),
@@ -1602,6 +1804,27 @@ fn post_json<T: DeserializeOwned>(
     Ok(value)
 }
 
+/// The colours an organization's cloud computer can have (PRO-370), as the server allows them.
+const COMPUTER_COLORS: [&str; 6] = ["orange", "blue", "green", "violet", "red", "gray"];
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComputerIdentity {
+    #[serde(default)]
+    computer_name: Option<String>,
+    #[serde(default)]
+    computer_color: Option<String>,
+}
+
+fn send_authenticated<T: DeserializeOwned>(method: &str, path: &str, body: serde_json::Value, access_token: Option<&str>) -> Result<T, anyhow::Error> {
+    let mut request = cloud_agent().request(method, &endpoint(path)).set("content-type", "application/json");
+    if let Some(token) = access_token {
+        request = request.set("authorization", &format!("Bearer {token}"));
+    }
+    let response = request.send_json(body).map_err(|error| anyhow!("account service request failed: {error}"))?;
+    response.into_json::<T>().map_err(|error| anyhow!("account service returned invalid JSON: {error}"))
+}
+
 fn post_authenticated<T: DeserializeOwned>(
     path: &str,
     body: serde_json::Value,
@@ -1738,7 +1961,7 @@ mod tests {
 
     #[test]
     fn a_created_organization_says_whether_it_was_selected() {
-        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None };
+        let organization = OrganizationSummary { id: "org-1".into(), name: "Team".into(), role: "owner".into(), is_personal: false, cloud: None, computer_name: None, computer_color: None };
         let unselected = OrganizationCreated { organization: organization.clone(), selected: false };
         assert_eq!(
             serde_json::to_value(&unselected).unwrap(),
@@ -1944,7 +2167,7 @@ mod tests {
     #[test]
     fn a_saved_session_that_could_not_be_read_is_reported_as_unreadable_not_as_a_sign_out() {
         // What `ensure_loaded` leaves when the Keychain read fails.
-        let unreadable = Inner { loaded: true, session_unreadable: true, last_error: Some("The saved TerminalX account session could not be read from macOS Keychain.".into()), ..Default::default() };
+        let unreadable = Inner { loaded: true, session_unreadable: true, last_error: Some(concat!("The saved TerminalX account session could not be read from ", secret_store!(), ".").into()), ..Default::default() };
         let status = serde_json::to_value(snapshot(&unreadable)).unwrap();
         assert_eq!(status["state"], "signed-out");
         assert_eq!(status["sessionUnreadable"], true);
@@ -2327,7 +2550,7 @@ mod tests {
         let mut session = from.clone();
         session.access_token = "rotated-access".into();
         session.refresh_token = "rotated-refresh".into();
-        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None }];
+        session.organizations = vec![Organization { org_id: "org-a".into(), name: "Acme".into(), role: role.into(), is_personal: false, cloud: None, computer_name: None, computer_color: None }];
         session
     }
 
@@ -2535,7 +2758,7 @@ mod tests {
         assert!(manager.settled_scope().is_some_and(|scope| scope.is_some()), "settled, and signed in");
         let status = serde_json::to_value(manager.snapshot()).unwrap();
         assert_eq!(status["state"], "signed-in");
-        assert_eq!(status["lastError"], "Sign-out could not remove the account session from macOS Keychain.");
+        assert_eq!(status["lastError"], concat!("Sign-out could not remove the account session from ", secret_store!(), "."));
         assert_eq!(manager.context().unwrap().access_token, "rotated-access");
         // Once the Keychain answers again the sign-out goes through.
         store.fail_writes(false);

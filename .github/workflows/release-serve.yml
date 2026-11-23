@@ -5,25 +5,35 @@ name: Release terminalx-serve
 # `terminalx-serve-linux-x64`, checked against SHA256SUMS and gated on the
 # `protocol` in `terminalx-serve.json`.
 #
-# When dispatched by hand from main (see `on:` below), and only if the
+# After CI succeeds on a push to main (or by hand from main), and only if the
 # commit is a strict descendant of the newest runtime prerelease's commit and
 # is still on main, this builds and publishes
-# `runtime-v<serve version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
+# `runtime-v<TerminalX version>-<commit UTC yyyymmddHHMMSS>-<sha7>`. Anything
 # else, including a re-run of an old CI or release run, is a skip, so a
 # publish can never roll the fleet back. Prereleases are never marked latest
 # (the desktop updater's latest.json is never involved), and only the newest
 # 10 are kept. Nothing here touches any other release.
 #
+# Releases are published unsigned. The owner signs SHA256SUMS locally with
+# `scripts/release/sign-runtime.py`, which uploads SHA256SUMS.sig; the signing
+# key never reaches GitHub. scripts/install/install.sh (terminalx.ai/install.sh)
+# and `terminalx-serve update` only install signed releases, so pruning always
+# keeps the newest signed one. The cloud server does not need the signature.
+#
 # The build job runs third-party build scripts and the freshly built binary,
 # so it gets a read-only token and no GH_TOKEN; only the publish job can
 # write. Built on Ubuntu 22.04: glibc floor 2.35 or lower.
 
-# Manual only for now: run it from main with `gh workflow run
-# release-serve.yml --ref main` once a runtime change has been checked live.
-# To publish after every green CI on main again, add back:
-#   workflow_run: { workflows: [CI], types: [completed], branches: [main] }
-# The plan step below still handles that event.
+# Every green CI on main publishes, so a runtime fix reaches new cloud
+# workspaces without anyone remembering to release it: while this was manual
+# only, a Box launch fix merged to main sat unreleased for two weeks and every
+# new Box workspace's first launch failed. By hand from main still works:
+# `gh workflow run release-serve.yml --ref main`.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -101,8 +111,11 @@ jobs:
               || { echo "::error::cannot fetch $base for $previous"; exit 1; }
             git merge-base --is-ancestor "$base" "$sha" || skip "$sha is not newer than $previous"
           fi
-          version=$(git show "$sha:src-tauri/serve/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
-          [ -n "$version" ] || { echo "::error::no serve version at $sha"; exit 1; }
+          # The version the binary itself reports (`terminalx-serve --version` is
+          # compiled into the library crate, src-tauri/Cargo.toml): the installer
+          # and `terminalx-serve update` refuse a release whose binary says another.
+          version=$(git show "$sha:src-tauri/Cargo.toml" | sed -n 's/^version = "\([0-9.]*\)"$/\1/p' | head -1)
+          [ -n "$version" ] || { echo "::error::no TerminalX version at $sha"; exit 1; }
           # The committer time orders tags by commit, not by when this ran.
           committed=$(git show -s --format=%ct "$sha")
           out mode runtime
@@ -145,6 +158,9 @@ jobs:
       - name: Self-test (start, shell PTY, clean exit)
         working-directory: src-tauri/serve
         run: ../target/release/terminalx-serve --data-dir "$RUNNER_TEMP/serve" --project-root "$GITHUB_WORKSPACE" --runtime-kind cloud-workspace --self-test
+      - name: Self-test under the cloud workspace unit's sandbox (ProtectHome, own user)
+        if: runner.os == 'Linux'
+        run: bash scripts/remote-runtime/cloud-unit-self-test.sh src-tauri/target/release/terminalx-serve
       - name: Report the glibc floor
         if: runner.os == 'Linux'
         run: objdump -T src-tauri/target/release/terminalx-serve | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
@@ -189,7 +205,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.plan.outputs.ref }}
-          sparse-checkout: src-tauri/serve/Cargo.toml
+          sparse-checkout: |
+            src-tauri/Cargo.toml
+            src-tauri/serve/Cargo.toml
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -202,8 +220,11 @@ jobs:
           import json, os, tomllib
           with open('src-tauri/serve/Cargo.toml', 'rb') as f:
               crate = tomllib.load(f)['package']
+          # The version the binary reports, which is the library crate's.
+          with open('src-tauri/Cargo.toml', 'rb') as f:
+              version = tomllib.load(f)['package']['version']
           manifest = {
-              'version': crate['version'],
+              'version': version,
               'protocol': int(crate['metadata']['terminalx']['runtime-protocol']),
               'commit': os.environ['REF'],
               'builtAt': os.environ['BUILT_AT'],
@@ -242,7 +263,12 @@ jobs:
           gh release create "$TAG" "${files[@]}" SHA256SUMS \
             --target "$REF" --prerelease --latest=false \
             --title "$TAG" \
-            --notes "Cloud workspace and macOS arm64 guest runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest. Guest providers and desktop driver are separately installed."
+            --notes "Cloud workspace, headless server and macOS arm64 guest runtime (terminalx-serve) built from $REF. Runtime-only prerelease: no desktop app, never marked latest. Guest providers and desktop driver are separately installed. Headless servers install it only once SHA256SUMS.sig is attached (scripts/release/sign-runtime.py $TAG)."
+          {
+            echo "Published $TAG unsigned. To offer it to headless servers, sign it locally:"
+            echo
+            echo "    scripts/release/sign-runtime.py $TAG"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Prune runtime prereleases beyond the newest ${{ env.KEEP_RUNTIME_RELEASES }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -250,14 +276,23 @@ jobs:
         run: |
           set -euo pipefail
           # Only prereleases whose tag is a runtime tag are ever candidates.
-          gh api --paginate "repos/$GH_REPO/releases" \
-            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name] | @tsv' \
-            | while IFS=$'\t' read -r created tag; do
-                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\n' "$created" "$tag"; fi
-              done | sort -r \
+          # Third column: whether the release is signed (has SHA256SUMS.sig).
+          runtime=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.prerelease and (.draft | not)) | [.created_at, .tag_name, ([.assets[].name] | index("SHA256SUMS.sig") != null)] | @tsv' \
+            | while IFS=$'\t' read -r created tag signed; do
+                if [[ "$tag" =~ $RUNTIME_TAG_PATTERN ]]; then printf '%s\t%s\t%s\n' "$created" "$tag" "$signed"; fi
+              done | sort -r)
+          # The newest signed release is what headless servers install; it is
+          # kept however many unsigned ones were published after it.
+          newest_signed=$(printf '%s\n' "$runtime" | awk -F'\t' '$3 == "true" { print $2; exit }')
+          printf '%s\n' "$runtime" | sed '/^$/d' \
             | tail -n +"$((KEEP_RUNTIME_RELEASES + 1))" | cut -f2 \
             | while read -r old; do
                 [[ "$old" =~ $RUNTIME_TAG_PATTERN ]] || continue
+                if [ "$old" = "$newest_signed" ]; then
+                  echo "keeping $old: the newest signed runtime release"
+                  continue
+                fi
                 echo "deleting $old"
                 gh release delete "$old" --cleanup-tag --yes
               done

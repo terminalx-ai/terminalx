@@ -6,6 +6,7 @@ import type { NewSessionOptions } from "@mobile/data/host-api";
 import { agentDefaults, blocked, chooseModel, initialChoices, request, type NewSessionChoices } from "@mobile/data/new-session";
 import { draftContent, draftIdFor, type DraftId } from "@mobile/data/draft-id";
 import { useApp } from "@mobile/state/AppProvider";
+import { AccountChoices } from "@mobile/ui/AccountChoices";
 import { Button, Card, EmptyState, Screen, SectionTitle } from "@mobile/ui/primitives";
 import { useTheme } from "@mobile/ui/theme";
 
@@ -57,10 +58,10 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     if (reason || busy) return;
     setBusy(true);
     setError(null);
-    const content = draftContent("agent", JSON.stringify([choices.where, choices.agent, choices.model, choices.effort, choices.mode, choices.title, choices.text]), []);
+    const content = draftContent("agent", JSON.stringify([choices.where, choices.agent, choices.model, choices.effort, choices.mode, choices.account ?? null, choices.title, choices.text]), []);
     draftId.current = draftIdFor(draftId.current, content);
     try {
-      const result = await app.api.createSession(request(choices), draftId.current.id);
+      const result = await app.api.createSession(request(choices, options), draftId.current.id);
       if (!result.created) { setError(result.message); return; }
       draftId.current = null;
       void app.refreshSessions();
@@ -89,6 +90,7 @@ export function NewSessionForm({ title, onStarted }: { title?: string; onStarted
     <SectionTitle>Agent</SectionTitle>
     <Card style={styles.group}>{options.agents.map((candidate) => choice(candidate.id, candidate.name, candidate.id === choices.agent, () => change(agentDefaults(candidate)), candidate.available ? undefined : `Not installed · ${candidate.installHint}`, !candidate.available))}</Card>
     {agent && agent.models.length ? <><SectionTitle>Model</SectionTitle><Card style={styles.group}>{agent.models.map((candidate) => choice(candidate.id, candidate.label, candidate.id === choices.model, () => setChoices(chooseModel(choices, agent, candidate.id))))}</Card></> : null}
+    <AccountChoices agent={agent} choices={choices} onChange={change} />
     {agent?.effort && model && model.efforts.length ? <><SectionTitle>Effort</SectionTitle><Card style={styles.row}>{model.efforts.map((effort) => <Pressable key={effort} accessibilityRole="button" accessibilityState={{ selected: effort === choices.effort }} onPress={() => change({ effort })} style={[styles.pill, { backgroundColor: effort === choices.effort ? palette.selected : palette.raised }]}><Text style={[styles.choiceLabel, { color: palette.ink }]}>{effort}</Text></Pressable>)}</Card></> : null}
     {agent?.permissionModes !== false ? <><SectionTitle>Permissions</SectionTitle><Card style={styles.group}>{options.modes.map((mode) => choice(mode.id, mode.label, mode.id === choices.mode, () => change({ mode: mode.id })))}</Card></> : null}
     {agent?.id === "codex" && options.nativeCodex ? <Text style={[styles.detail, styles.note, { color: palette.muted }]}>Native Codex is on for this Mac: unless you choose Ask every time, the session connects to Codex directly.</Text> : null}

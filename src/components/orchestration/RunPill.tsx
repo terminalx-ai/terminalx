@@ -5,7 +5,9 @@ import { useReducedMotion } from "@/lib/reducedMotion";
 import { resetClock } from "@/lib/orchestration";
 import type { Run } from "@/types/orchestration";
 
-/** What a lead's title bar says of its run (18.01, 18.03): that it needs the person, else how many workers run. `null` for neither. */
+/** What a lead's title bar says of its run (18.01, 18.03): that it needs the person, else how many workers run. `null` for
+ * a session that leads no run (#1404: it looks like any other session), while the run is still being read, and for a run
+ * with nothing to say. */
 export function runPillOf(run: Run | null | undefined): { kind: "needs" | "approval" | "running" | "waiting"; text: string; why: string } | null {
   if (!run || ["done", "stopped"].includes(run.state)) return null;
   if (run.state === "awaitingApproval") return { kind: "approval", text: "Needs you", why: "The plan waits for your approval" };
@@ -44,7 +46,7 @@ export function RunPill({ run, onOpen }: { run: Run | null | undefined; onOpen: 
 }
 
 /**
- * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⌘⇧O run view". The reader's
+ * The keys that open the Run view, beside the pill in a lead's title bar (18.01): "⇧⌘O run view". The reader's
  * own keys when they changed them (Settings → Keyboard shortcuts); nothing when the action has none.
  */
 export function RunViewHint({ className }: { className?: string }) {

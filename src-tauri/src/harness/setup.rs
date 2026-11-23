@@ -72,19 +72,46 @@ impl Step {
 /// which step. Only a hint for [`current`]: the pane's own state is the truth.
 static RUNS: std::sync::Mutex<std::collections::BTreeMap<String, (String, Step)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// Steps started from another computer (a machine's page, PRO-350), in a
+/// terminal of the machine connection rather than a setup pane: terminal id
+/// to agent. Both kinds count in [`running`], so neither side starts a
+/// second step while the other's runs.
+static ELSEWHERE: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Note a step of `harness` that runs in terminal `id` for another computer.
+pub fn began_elsewhere(harness: &str, id: &str) {
+    ELSEWHERE.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), harness.to_string());
+}
+
+/// Terminal `id`'s step is over (it exited or was closed).
+pub fn ended_elsewhere(id: &str) {
+    ELSEWHERE.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+}
+
+/// The steps of `harness` running for another computer.
+pub fn running_elsewhere(harness: &str) -> Vec<String> {
+    ELSEWHERE.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(_, agent)| agent.as_str() == harness).map(|(id, _)| id.clone()).collect()
+}
+
 /// Start `step` for `harness` in pane `id` with `spawn`, unless one of the
 /// agent's setup panes still runs (`running` lists them): two installers
 /// would write the same folders, and two sign-ins wait on the same local
 /// callback. Another window, or a page loaded again during a run, would
 /// otherwise start one under a pane of its own. Decided under one lock, so
 /// two requests at once cannot both pass.
-pub fn begin(harness: &str, id: &str, step: Step, running: impl Fn() -> Vec<String>, spawn: impl FnOnce() -> Result<()>) -> Result<()> {
+///
+/// `id` is `None` for a step started from another computer, whose terminal
+/// id is made as it starts: [`current`] answers for setup panes only, so it
+/// is not recorded there ([`began_elsewhere`] keeps it).
+pub fn begin(harness: &str, id: Option<&str>, step: Step, running: impl Fn() -> Vec<String>, spawn: impl FnOnce() -> Result<()>) -> Result<()> {
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
-    if !running().is_empty() {
+    if !running().is_empty() || !running_elsewhere(harness).is_empty() {
         bail!("{} is already being set up.", super::display_name(harness));
     }
     spawn()?;
-    runs.insert(harness.to_string(), (id.to_string(), step));
+    if let Some(id) = id {
+        runs.insert(harness.to_string(), (id.to_string(), step));
+    }
     Ok(())
 }
 
@@ -120,6 +147,17 @@ const PROTOCOLS: &str = "=https";
 
 /// The command a setup pane runs for this step, made from the registry.
 pub fn command(harness: &str, step: Step) -> Result<String> {
+    command_for(harness, step, false)
+}
+
+/// The command for a step that a person at another computer started and
+/// watches (a machine's page, PRO-350): the same installer, and the CLI's
+/// sign-in that needs no browser here where it has one.
+pub fn command_elsewhere(harness: &str, step: Step) -> Result<String> {
+    command_for(harness, step, true)
+}
+
+fn command_for(harness: &str, step: Step, elsewhere: bool) -> Result<String> {
     let spec = super::REGISTRY.iter().find(|spec| spec.id == harness && super::visible(spec.id)).context("unknown agent")?;
     let Some(setup) = spec.setup.as_ref() else { bail!("{} cannot be installed from TerminalX. Follow its setup guide.", spec.name) };
     if cfg!(windows) {
@@ -132,7 +170,11 @@ pub fn command(harness: &str, step: Step) -> Result<String> {
             // Just installed: the miss from before must not be believed.
             crate::binpath::invalidate();
             let Some(binary) = crate::binpath::resolve(spec.binary) else { bail!("{} is not installed.", spec.name) };
-            login_line(spec.name, setup.probe, PROTOCOLS, &binary, setup.login)
+            let login = match setup.login_elsewhere {
+                Some(login) if elsewhere => login,
+                _ => setup.login,
+            };
+            login_line(spec.name, setup.probe, PROTOCOLS, &binary, login)
         }
     })
 }
@@ -253,6 +295,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_step_for_another_computer_and_a_windows_setup_pane_exclude_each_other() {
+        // An agent id of this test's own: the notes are process-wide.
+        let harness = "pro-350-agent";
+        began_elsewhere(harness, "pty-remote-1");
+        let refused = begin(harness, Some("setup:pro-350-agent:r1"), Step::Install, Vec::new, || Ok(()));
+        assert!(refused.is_err(), "the window waits for the step another computer started");
+        ended_elsewhere("pty-remote-1");
+        let mut spawned = false;
+        begin(harness, Some("setup:pro-350-agent:r1"), Step::Install, Vec::new, || { spawned = true; Ok(()) }).unwrap();
+        assert!(spawned);
+        // A remote step records no pane for `current`, which answers for the window's panes only.
+        begin(harness, None, Step::Login, Vec::new, || Ok(())).unwrap();
+        assert_eq!(current(harness, &["setup:pro-350-agent:r1".to_string()]), Some(("setup:pro-350-agent:r1".to_string(), Step::Install)));
+    }
+
+    #[test]
     fn setup_panes_name_their_agent_and_nothing_else_is_one() {
         assert_eq!(pane_harness("setup:claude:r1"), Some("claude"));
         assert!(is_pane("codex", "setup:codex:0f3a-9"));
@@ -270,22 +328,22 @@ mod tests {
         let agent = "one-at-a-time-test";
         let started = std::cell::Cell::new(0);
         let spawn = || { started.set(started.get() + 1); Ok(()) };
-        begin(agent, "setup:x:a", Step::Install, Vec::new, spawn).unwrap();
+        begin(agent, Some("setup:x:a"), Step::Install, Vec::new, spawn).unwrap();
         assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Install)));
         // While it runs, no other pane (or the same one) starts a step for this agent.
         for pane in ["setup:x:b", "setup:x:a"] {
-            let refused = begin(agent, pane, Step::Login, || vec!["setup:x:a".into()], spawn).unwrap_err();
+            let refused = begin(agent, Some(pane), Step::Login, || vec!["setup:x:a".into()], spawn).unwrap_err();
             assert!(refused.to_string().contains("already being set up"), "{refused}");
         }
         assert_eq!(started.get(), 1);
         // Once it has ended, the next step goes on, and is the one reported.
-        begin(agent, "setup:x:a", Step::Login, Vec::new, spawn).unwrap();
+        begin(agent, Some("setup:x:a"), Step::Login, Vec::new, spawn).unwrap();
         assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Login)));
         assert_eq!(current(agent, &[]), None);
         // A pane this runtime did not start (handed over): found, step not known.
         assert_eq!(current(agent, &["setup:x:z".into()]), Some(("setup:x:z".into(), Step::Install)));
         // A step that cannot start is not recorded.
-        assert!(begin(agent, "setup:x:c", Step::Install, Vec::new, || anyhow::bail!("spawn failed")).is_err());
+        assert!(begin(agent, Some("setup:x:c"), Step::Install, Vec::new, || anyhow::bail!("spawn failed")).is_err());
         assert_eq!(current(agent, &["setup:x:a".into()]), Some(("setup:x:a".into(), Step::Login)));
     }
 
@@ -310,6 +368,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_wrapper_survives_quotes_in_its_arguments() {
         assert_eq!(quote("it's"), r#"'it'\''s'"#);

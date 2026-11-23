@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import CloudScreen from "../app/(tabs)/cloud";
 import CloudWorkspaceScreen from "../app/cloud/[workspaceId]";
 import CloudSharesScreen from "../app/cloud/shares";
+import { CloudApiError } from "./cloud/api";
+import { ResumeUnconfirmed } from "./cloud/resume";
 
 const mocks = vi.hoisted(() => ({
   params: { workspaceId: "ws-1", orgId: "org-1" } as Record<string, string>,
@@ -30,13 +32,13 @@ vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.cat
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole, accessibilityLabel, testID }: { children?: ReactNode; accessibilityRole?: string; accessibilityLabel?: string; testID?: string }) => <div role={accessibilityRole === "alert" ? "alert" : accessibilityRole === "progressbar" ? "progressbar" : undefined} aria-label={accessibilityLabel} data-testid={testID}>{children}</div>;
   return {
-    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null,
+    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box, RefreshControl: () => null, Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => undefined },
     Animated: { View: Box, Value: class { constructor(public value: number) {} }, timing: () => ({ start: () => undefined, stop: () => undefined }) },
     Alert: { alert: mocks.alert },
     Switch: ({ value, onValueChange, disabled, accessibilityLabel }: any) => <input type="checkbox" aria-label={accessibilityLabel} checked={value} disabled={disabled} onChange={(event) => onValueChange(event.currentTarget.checked)} />,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
+    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, style, hitSlop }: any) => <button disabled={disabled} aria-label={accessibilityLabel} data-hitslop={hitSlop} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} data-style={JSON.stringify([typeof style === "function" ? style({ pressed: false }) : style].flat(3).filter(Boolean).reduce((all: object, entry: object) => ({ ...all, ...entry }), {}))} onClick={onPress}>{typeof children === "function" ? children({ pressed: false }) : children}</button>,
     TextInput: ({ value, onChangeText, placeholder, editable, accessibilityLabel }: any) => <input type="text" aria-label={accessibilityLabel} value={value} disabled={editable === false} onInput={(event) => onChangeText(event.currentTarget.value)} placeholder={placeholder} />,
     FlatList: ({ data, renderItem, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, ...rest }: any) => (mocks.listProps = { data, ...rest }) && <div>{ListHeaderComponent}{data.length ? data.map((item: unknown, index: number) => <div key={index}>{renderItem({ item })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
     SectionList: ({ sections, renderItem, renderSectionHeader, renderSectionFooter, ListHeaderComponent, ListEmptyComponent, ListFooterComponent, contentContainerStyle }: any) => (mocks.listProps = { sections, contentContainerStyle }) && <div>{ListHeaderComponent}{sections.length ? sections.map((section: any) => <div key={section.key} data-testid="cloud-section">{renderSectionHeader({ section })}{section.data.map((item: any, index: number) => <div key={item.workspace.id}>{renderItem({ item, index, section })}</div>)}{renderSectionFooter?.({ section })}</div>) : ListEmptyComponent}{ListFooterComponent}</div>,
@@ -92,11 +94,11 @@ function world(options: { state?: string | null; role?: string | null; canApprov
   };
   const release = vi.fn();
   const unwatch = vi.fn();
-  const listed = state === null ? null : item("ws-1", { name: "fix-login", state }).workspace;
+  const listed = state === null ? null : item(mocks.params.workspaceId, { name: "fix-login", state }).workspace;
   const organizations = [{ organization: { orgId: "org-1", name: "Acme", role: "member" }, workspaces: listed ? [{ workspace: listed, latestOperation: null }] : [], error: null, loaded: true }];
   mocks.catalog = {
     getSnapshot: () => ({ organizations, loading: false, error: null, refreshedAt: 1, saved: false, titles: {} }),
-    start: vi.fn(async () => undefined),
+    start: vi.fn(async () => "started"),
     refresh: vi.fn(async () => undefined),
     watch: vi.fn(() => unwatch),
     workspace: () => listed,
@@ -139,21 +141,24 @@ describe("the Cloud tab", () => {
   const listing = (organizations: unknown[], fields: Record<string, unknown> = {}) => { mocks.catalog.getSnapshot = () => ({ loading: false, error: null, refreshedAt: 1, saved: false, titles: {}, organizations, ...fields }); };
   const organization = (orgId: string, name: string, workspaces: unknown[], error: string | null = null) => ({ organization: { orgId, name, role: "member" }, error, loaded: true, workspaces });
 
-  it("lists each workspace as the Sessions list does: mark, title, status with its time, then repository and branch; and only reads", async () => {
+  it("lists each workspace with its status, provider, repository and branch, and only reads", async () => {
     world();
     const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
     listing([
       organization("org-1", "Acme", [
-        item("fix-login", { runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
-        item("old-work", { state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+        item("fix-login", { provider: "new-compute", providerDescriptor: { label: "New Compute" }, runtimeActivity: { pendingApprovals: 1 }, lastActivityAt: minutesAgo(6), repositories: [{ fullName: "acme/web", primary: true }], launch: { workBranch: "tx/fix-login" } }),
+        item("old-work", { provider: "unlabelled-compute", providerDescriptor: { label: 42 }, state: "suspended", you: { role: "viewer", canApprove: false }, sharedWith: 3 }),
+        item("warm-up", { state: "suspended", lastActivityAt: minutesAgo(2 * 24 * 60 + 5) }),
       ]),
       organization("org-2", "Beta", [], "cloud_provider_unavailable"),
     ]);
     await show(<CloudScreen />);
     expect(text()).toContain("Acme");
-    const row = button("fix-login, Needs your answer, Can send");
-    expect(row.textContent).toBe("fix-loginNeeds your answer · 6macme/web · tx/fix-login");
-    expect(button("old-work, Stopped, View only, Shared with 3").textContent).toBe("old-workStopped");
+    const row = button("fix-login, Needs your answer, Can send, New Compute");
+    expect(row.textContent).toBe("fix-loginNeeds your answer · 6mNew Compute · acme/web · tx/fix-login");
+    expect(button("old-work, Stopped, View only, Shared with 3, unlabelled-compute").textContent).toBe("old-workStoppedunlabelled-compute");
+    // Days, where the status has room for them, as 22.06 says them.
+    expect(button("warm-up, Stopped, Can send, box").textContent).toBe("warm-upStopped · 2 days agobox");
     expect(text()).toContain("The cloud provider is not answering right now.");
     // Coming to the tab reads the list, and keeps reading it now and then until the tab is left; nothing else is asked for.
     const leave = mocks.focus.at(-1)!();
@@ -162,7 +167,7 @@ describe("the Cloud tab", () => {
     expect(leave).toBe(mocks.catalog.watch.mock.results[0].value);
     expect(mocks.catalog.retain).not.toHaveBeenCalled();
     expect(mocks.catalog.start).not.toHaveBeenCalled();
-    await click("old-work, Stopped, View only, Shared with 3");
+    await click("old-work, Stopped, View only, Shared with 3, unlabelled-compute");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "old-work", orgId: "org-1", title: "old-work" } });
   });
 
@@ -216,9 +221,9 @@ describe("the Cloud tab", () => {
     listing([organization("org-1", "Acme", [item("ws-9", { state: "suspended" })])], { loading: true, refreshedAt: null, saved: true, titles: { "org-1/ws-9": "Checkout redesign" } });
     await show(<CloudScreen />);
     expect(container.querySelector('[data-testid="cloud-placeholders"]')).toBeNull();
-    expect(button("Checkout redesign, Stopped, Can send")).toBeTruthy();
+    expect(button("Checkout redesign, Stopped, Can send, box")).toBeTruthy();
     expect(text()).not.toContain("ws-9");
-    await click("Checkout redesign, Stopped, Can send");
+    await click("Checkout redesign, Stopped, Can send, box");
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
@@ -348,6 +353,54 @@ describe("a cloud workspace screen", () => {
     expect(mocks.catalog.start).toHaveBeenCalledTimes(1);
   });
 
+  it("offers managers retry and tells others who can retry when setup failed", async () => {
+    for (const role of ["manager", "driver", "viewer"]) {
+      await show(null);
+      world({ state: "attention-required", role });
+      mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_workspace_runtime_bootstrap_failed" };
+      await show(<CloudWorkspaceScreen />);
+      expect(stateLine().textContent).toContain("Needs attention");
+      expect(container.querySelector("input")).toBeNull();
+      expect(startBar().textContent).toContain("runtime could not be set up");
+      if (role === "manager") {
+        await click("Retry resume");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalled();
+      } else {
+        expect(startBar().textContent).toContain("can retry resume");
+        expect(() => button("Retry resume")).toThrow();
+      }
+    }
+  });
+
+  it("allows a manager to retry a transient failed resume", async () => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode: "cloud_provider_unavailable" };
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("provider did not answer");
+    await click("Retry resume");
+  });
+
+  it("keeps the composer for an online workspace needing attention", async () => {
+    const { session } = world({ state: "attention-required", role: "manager", connection: "connected" });
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"]')).toBeNull();
+    await type("continue");
+    await click("Send");
+    expect(session.send).toHaveBeenCalledWith("t1", "continue");
+  });
+
+  it.each([null, { state: "failed", action: "delete", errorCode: "cloud_provider_unavailable" }])("uses desktop recovery for other attention causes: %s", async (operation) => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = operation;
+    await show(<CloudWorkspaceScreen />);
+    expect(startBar().textContent).toContain("desktop");
+    expect(startBar().textContent).not.toContain("runtime could not be set up");
+    expect(() => button("Retry resume")).toThrow();
+    expect(container.querySelector("input")).toBeNull();
+  });
+
   it("shows a running workspace's composer, with or without a conversation, and no Start (#988)", async () => {
     world({ role: "manager" });
     await show(<CloudWorkspaceScreen />);
@@ -407,12 +460,14 @@ describe("a cloud workspace screen", () => {
 
   it("says a workspace is starting once Start was pressed, and the server's word when it would not start it (#988)", async () => {
     world({ state: "suspended", role: "manager" });
-    mocks.catalog.start.mockRejectedValueOnce(Object.assign(new Error("forbidden"), { code: "cloud_workspace_manager_required" }));
+    mocks.catalog.start.mockRejectedValueOnce(new CloudApiError("cloud_workspace_manager_required", 403));
     await show(<CloudWorkspaceScreen />);
     await click("Start");
     await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
-    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe("Only this workspace's creator or an organization owner or admin can do that.");
-    expect(button("Start").disabled).toBe(false);
+    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe("Only this workspace's creator or an organization owner or admin can start it.");
+    // Asking again cannot help: no button that would only be refused again.
+    expect(() => button("Start")).toThrow();
+    expect(() => button("Try again")).toThrow();
 
     // The list says it is starting: the bar says so, and the composer is not back yet.
     world({ state: "resuming", role: "manager", connection: "waitingForRuntime" });
@@ -423,13 +478,90 @@ describe("a cloud workspace screen", () => {
     expect(container.querySelector("input")).toBeNull();
   });
 
-  it("puts Sharing in the header as an icon button with a 44 pt target, and the role as plain text (#988)", async () => {
+  it("says each way a resume fails in plain words, with Try again where asking again can help (#1290)", async () => {
+    const failures: [unknown, string, boolean][] = [
+      [new CloudApiError("cloud_workspace_unavailable", null, "network"), "This phone could not reach the service. Check its connection, then try again.", true],
+      [new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), true), "The service did not answer in time, and the list does not show the workspace starting. Try again.", true],
+      [new ResumeUnconfirmed(new CloudApiError("cloud_workspace_unavailable", null, "timeout"), false), "The service did not answer in time, and the list could not be read to check whether the workspace is starting. If it stays stopped, try again.", true],
+      [new CloudApiError("cloud_workspace_unavailable", 502, "unreadable"), "The service had a problem and did not start the workspace. Try again in a moment.", true],
+      [new CloudApiError("cloud_workspace_invalid_response", 200), "The service answered in a way this version of the app cannot read. The workspace may be starting anyway; update the app to follow it here.", false],
+      [new CloudApiError("cloud_brand_new_code", 409), "The service would not start this workspace. Try again; if it keeps failing, open it on the desktop to see why.", true],
+      [new Error("no code at all"), "This phone could not send the request to start the workspace. Try again.", true],
+    ];
+    for (const [error, said, retry] of failures) {
+      await show(null);
+      mocks.alert.mockClear();
+      world({ state: "suspended", role: "manager" });
+      mocks.catalog.start.mockRejectedValueOnce(error);
+      await show(<CloudWorkspaceScreen />);
+      await click("Start");
+      await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+      expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')!.textContent).toBe(said);
+      expect(startBar().textContent).toContain("The workspace did not start");
+      expect(startBar().textContent).not.toContain("That did not work");
+      if (retry) {
+        await click("Try again");
+        expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Try starting again?");
+        await act(async () => mocks.alert.mock.calls.at(-1)![2][1].onPress());
+        expect(mocks.catalog.start).toHaveBeenCalledTimes(2);
+        mocks.catalog.start.mockClear();
+      } else {
+        expect(() => button("Try again")).toThrow();
+        mocks.catalog.start.mockClear();
+      }
+    }
+  });
+
+  it("shows a resume that got no answer but is starting as under way, not as a failure (#1290)", async () => {
+    world({ state: "suspended", role: "manager" });
+    let finish!: (outcome: string) => void;
+    mocks.catalog.start.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+    await show(<CloudWorkspaceScreen />);
+    await click("Start");
+    await act(async () => mocks.alert.mock.calls[0][2][1].onPress());
+    // Asked once however often the button would be pressed meanwhile: it is disabled while asking.
+    expect(button("Starting…").disabled).toBe(true);
+    const start = mocks.catalog.start;
+    await act(async () => finish("in-progress"));
+    expect(start).toHaveBeenCalledTimes(1);
+    // The list, read again, shows it resuming: said as starting, with no failure.
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].workspace.state = "resuming";
+    mocks.catalog.workspace().state = "resuming";
+    await show(<CloudWorkspaceScreen />);
+    expect(container.querySelector('[data-testid="start-bar"] [role="alert"]')).toBeNull();
+    expect(startBar().textContent).toContain("Starting the workspace…The service has not confirmed yet, but the workspace is starting.");
+  });
+
+  it.each(["cloud_provider_state_conflict", "cloud_provider_credential_invalid", null, "cloud_brand_new_code"])("offers Retry resume after any failed resume, with what failed: %s (#1290)", async (errorCode) => {
+    world({ state: "attention-required", role: "manager" });
+    mocks.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation = { state: "failed", action: "resume", errorCode };
+    await show(<CloudWorkspaceScreen />);
+    const said = startBar().textContent!;
+    expect(said).toContain(errorCode === "cloud_provider_state_conflict" ? "does not allow resuming yet" : errorCode === "cloud_provider_credential_invalid" ? "An admin can repair it" : "The last resume did not finish.");
+    expect(said).toContain("Retry resume, or open it on the desktop to see more.");
+    expect(said).not.toContain("This workspace needs attention.This workspace needs attention.");
+    await click("Retry resume");
+    expect(mocks.alert.mock.calls.at(-1)![0]).toBe("Retry resume?");
+  });
+
+  it("says why the service refused to connect this phone to a running workspace, with Reconnect (#1290)", async () => {
+    world({ role: "manager", connection: "stopped", problem: { kind: "api", code: "cloud_brand_new_code", unreachable: false } });
+    await show(<CloudWorkspaceScreen />);
+    expect(text()).toContain("The service would not connect this phone to the workspace.");
+    expect(text()).not.toContain("Not connected.");
+    expect(button("Reconnect")).toBeTruthy();
+  });
+
+  it("puts Sharing in the session's own bar as a glass icon button with a 44 pt target, and the role as plain text (#988, 22.06)", async () => {
     world({ role: "manager" });
     await show(<CloudWorkspaceScreen />);
-    const sharing = container.querySelector('[data-testid="header-right"] button')!;
-    expect(sharing.getAttribute("aria-label")).toBe("Sharing");
+    // The screen draws its own bar, as a session does: nothing is left to the navigator's.
+    expect(container.querySelector('[data-testid="header-right"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Back"]')).not.toBeNull();
+    const sharing = container.querySelector('button[aria-label="Sharing"]')!;
     expect(sharing.textContent).toBe("");
-    expect(JSON.parse(sharing.getAttribute("data-style")!)).toMatchObject({ width: 44, height: 44 });
+    // A 40 pt glass circle with 6 pt more to tap on each side: 52 pt.
+    expect(Number(sharing.getAttribute("data-hitslop"))).toBeGreaterThanOrEqual(2);
     expect([...container.querySelectorAll("button")].some((entry) => /manager/i.test(entry.textContent ?? ""))).toBe(false);
   });
 

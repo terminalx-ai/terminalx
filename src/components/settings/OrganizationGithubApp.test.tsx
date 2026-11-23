@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { githubConnectClockScenarios } from "@/lib/githubConnectClockScenarios";
 import { organizationGithubApp, type GithubAppSummary, type LiveRepositories } from "@/lib/organizationGithubApp";
 import { organizationMembers, type OrganizationRoster } from "@/lib/organizationMembers";
 import { OrganizationGithubApp } from "./OrganizationGithubApp";
@@ -132,7 +133,7 @@ it("explains a failed connect attempt and stops polling", async () => {
   api.attempt.mockResolvedValue({ attemptId: "att_1", state: "failed", errorCode: "github_installation_pending_approval", browserOpened: false });
   await renderPanel();
   fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
-  await screen.findByText(/waiting for an owner of the GitHub organization to approve it/);
+  await screen.findByText(/sent the installation to an owner of the GitHub organization for approval/);
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(api.attempt).toHaveBeenCalledTimes(1);
 });
@@ -149,12 +150,13 @@ it.each([
   await screen.findByText(message);
 });
 
-it("shows an attempt canceled on the TerminalX confirmation page as canceled, not an error", async () => {
+it("says an attempt canceled on the TerminalX confirmation page was canceled there, not an error", async () => {
   api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true });
   api.attempt.mockResolvedValue({ attemptId: "att_1", state: "canceled", browserOpened: false });
   await renderPanel();
   fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
-  await screen.findByText("Connection canceled.");
+  await screen.findByText(/Cancel was chosen on the TerminalX confirmation page in your browser/);
+  expect(screen.queryByText("Connection canceled.")).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByText(/could not reach/)).toBeNull();
   await new Promise((resolve) => setTimeout(resolve, 30));
@@ -178,6 +180,46 @@ it("cancels a waiting attempt", async () => {
   await screen.findByText("Connection canceled.");
   expect(api.cancelAttempt).toHaveBeenCalledWith("att_1", "rev-1");
   expect(await screen.findByRole("button", { name: "Connect another installation" })).toBeTruthy();
+});
+
+it("keeps the install page and the browser state across polls", async () => {
+  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true, installUrl: "https://github.com/apps/terminalx/installations/new?state=s" });
+  // A poll answer carries neither field.
+  api.attempt.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: false });
+  await renderPanel();
+  fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+  await waitFor(() => expect(api.attempt.mock.calls.length).toBeGreaterThanOrEqual(3));
+  expect(screen.getByText(/Finish in your browser/)).toBeTruthy();
+  expect(screen.queryByText(/Your browser did not open/)).toBeNull();
+  expect(screen.getByRole("button", { name: "Open install page" })).toBeTruthy();
+});
+
+it.each([
+  ["failed", { errorCode: "github_installation_already_connected" }, /already connected to another TerminalX organization/],
+  ["expired", {}, /expired before it was confirmed/],
+  ["connected", { installation: installation() }, /Connected acme\./],
+])("says what happened when the desktop's cancel finds the attempt %s", async (state, extra, message) => {
+  api.connect.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: true });
+  api.attempt.mockResolvedValue({ attemptId: "att_1", state: "waiting", browserOpened: false });
+  api.cancelAttempt.mockResolvedValue({ attemptId: "att_1", state, browserOpened: false, ...extra });
+  await renderPanel();
+  fireEvent.click(await screen.findByRole("button", { name: "Connect another installation" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+  await screen.findByText(message);
+  expect(screen.queryByText("Connection canceled.")).toBeNull();
+});
+
+describe("connect attempt clocks", () => {
+  githubConnectClockScenarios({
+    api,
+    connected: installation({ id: "ghinst_2", accountLogin: "globex" }),
+    summaryWith: (added) => summary({ installations: [installation(), added] }),
+    shown: (accountLogin) => screen.queryByRole("button", { name: `Choose repositories for ${accountLogin}` }),
+    begin: async () => {
+      await renderPanel();
+      fireEvent.click(screen.getByRole("button", { name: "Connect another installation" }));
+    },
+  });
 });
 
 it("searches and refreshes the live repository list", async () => {

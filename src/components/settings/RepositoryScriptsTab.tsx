@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useSettingsLeaveGuard } from "./settingsLeaveGuard";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Popover as PopoverPrimitive } from "radix-ui";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { FileLock, FileText, Info, Lock, Play, ShieldAlert } from "lucide-react";
+import { FileLock, Info, Lock, Play, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { errorMessage } from "@/lib/api";
 import { configuration, type Configuration, type ConfigurationLayer } from "@/lib/configuration";
 import { updateProject, useSessionStore } from "@/lib/sessions";
 import { rerunSetup, useWorkspaceSetups } from "@/lib/workspaceSetup";
+import { useShortcutKeys } from "@/lib/hotkeys";
+import { visibleActions, type RepositoryAction } from "@/lib/repositoryActions";
+import { KbdGroup } from "@/components/ui/tooltip";
 import type { Project, RepositoryScripts } from "@/types/session";
 import { RegisteredSetting } from "./settingsRegistry";
 import { ScriptEditor } from "./ScriptEditor";
+import { EnvironmentTable } from "./EnvironmentSettings";
 
 type Kind = "setup" | "archive";
 const KEYS: Record<Kind, string> = { setup: "setupScript", archive: "archiveScript" };
@@ -17,8 +21,9 @@ const TIMEOUT_KEY = "archiveTimeoutMinutes";
 /** Matches `ARCHIVE_TIMEOUT_CHOICES` in store/configuration.rs. */
 export const ARCHIVE_TIMEOUT_CHOICES = [1, 2, 5, 10, 15, 30] as const;
 const DEFAULT_TIMEOUT = 5;
-const SHARED_FILE = "settings.json";
-const LOCAL_FILE = "settings.local.json";
+/** The repository's own files, named with their folder so they never read as your ~/.raccoon/settings.json (PRO-388). */
+const SHARED_FILE = ".terminalx/settings.json";
+const LOCAL_FILE = ".terminalx/settings.local.json";
 
 export function RepositoryScriptsTab({ projectPath }: { projectPath: string }) {
   const { projects } = useSessionStore();
@@ -72,7 +77,8 @@ function ScriptsPage({ project }: { project: Project }) {
   // Only a script whose effective value is the committed one waits for trust; a local override or policy replaces it.
   const untrusted = (kind: Kind) => !!trust?.required && trust.keys.includes(KEYS[kind]) && resolved?.values[KEYS[kind]]?.source === "repositoryShared";
   const scriptsNeedTrust = untrusted("setup") || untrusted("archive");
-  const sharedFile = `${project.path}/.terminalx/${SHARED_FILE}`;
+  const committed = (["setup", "archive"] as const).some((kind) => resolved?.values[KEYS[kind]]?.source === "repositoryShared");
+  const environmentId = `${useId()}-environment`;
   const review = async () => {
     setTrusting(true); setActionError(null); setNotice(null);
     try {
@@ -82,29 +88,40 @@ function ScriptsPage({ project }: { project: Project }) {
     } catch (cause) { setActionError(errorMessage(cause)); }
     finally { setTrusting(false); }
   };
+  // Design 11.01/11.05: Setup, Run and Archive cards, one footnote for the page, then the project's variables.
+  // The project file is opened from the title bar's one Open button (PRO-388), not from here.
   return <section aria-label={`${project.name} scripts`} className="flex flex-col gap-6">
-    <header className="flex items-start justify-between gap-4">
-      <div className="min-w-0">
-        <h3 className="text-xl font-semibold tracking-tight">Scripts</h3>
-        <p className="mt-1 text-[13px] text-muted-foreground">Commands that run when a workspace is set up or removed. The run command lives in Actions.</p>
-      </div>
-      {trust && <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" onClick={() => void openPath(sharedFile).catch((cause) => setActionError(errorMessage(cause)))}>
-        <FileText /> Open <span className="font-mono">{SHARED_FILE}</span>
-      </Button>}
+    <header className="min-w-0">
+      <h3 className="text-sm font-medium">Scripts</h3>
+      <p className="mt-0.5 text-[12.5px] text-muted-foreground">Commands that run when a workspace is set up, run or removed.</p>
     </header>
     {scriptsNeedTrust && !notNow && <div role="region" aria-label="Repository trust" className="-mt-2 flex items-center gap-3 rounded-lg border border-warning/50 bg-warning/5 px-4 py-3">
       <ShieldAlert className="size-4 shrink-0 self-start text-warning" aria-hidden />
-      <p className="min-w-0 flex-1 text-[13px] leading-5"><span className="font-mono font-medium">.terminalx/{SHARED_FILE}</span> in this repository wants to run commands when a workspace is created or removed. Nothing runs until you trust it.</p>
+      <p className="min-w-0 flex-1 text-[13px] leading-5"><span className="font-mono font-medium">{SHARED_FILE}</span> in this repository wants to run commands when a workspace is created or removed. Nothing runs until you trust it.</p>
       <Button variant="outline" size="sm" className="shrink-0 whitespace-nowrap" disabled={trusting} onClick={() => setNotNow(true)}>Not now</Button>
       <Button size="sm" className="shrink-0 whitespace-nowrap" disabled={trusting} onClick={() => void review()}>{trusting ? "Reviewing…" : "Review and trust"}</Button>
     </div>}
     {(error || actionError) && <p role="alert" className="text-xs text-destructive">{error || actionError}</p>}
     {notice && <p role="status" className="text-xs text-muted-foreground">{notice}</p>}
     {resolved?.warnings.filter((warning) => /setupScript|archiveScript|archiveTimeoutMinutes/.test(warning)).map((warning) => <p key={warning} role="status" className="text-xs text-warning">{warning}</p>)}
-    {resolved ? <>
-      <ScriptCard kind="setup" project={project} resolved={resolved} reload={reload} untrusted={untrusted("setup")} />
-      <ScriptCard kind="archive" project={project} resolved={resolved} reload={reload} untrusted={untrusted("archive")} />
-    </> : !error && <p role="status" className="text-xs text-muted-foreground">Loading scripts…</p>}
+    {resolved ? <div className="flex flex-col gap-4">
+      <ScriptCard kind="setup" project={project} resolved={resolved} reload={reload} untrusted={untrusted("setup")} environmentId={environmentId} />
+      <RunCard project={project} />
+      <ScriptCard kind="archive" project={project} resolved={resolved} reload={reload} untrusted={untrusted("archive")} environmentId={environmentId} />
+      <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground">
+        <Lock className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+        {committed
+          ? <span>Scripts from <span className="font-mono">{SHARED_FILE}</span> are committed in the repository, so everyone on the project gets the same ones. Scripts from a newly cloned repository ask before they run.</span>
+          : <span>Saved on this computer for this project as you leave each script. Leave one blank to skip it. Run is the first action in this project's Run menu.</span>}
+      </p>
+    </div> : !error && <p role="status" className="text-xs text-muted-foreground">Loading scripts…</p>}
+    <section id={environmentId} aria-labelledby={`${environmentId}-title`} className="flex min-w-0 scroll-mt-6 flex-col gap-3">
+      <div>
+        <h4 id={`${environmentId}-title`} className="text-[15px] font-semibold">Environment variables</h4>
+        <p className="mt-1 text-[13px] text-muted-foreground">Passed to scripts, agents and terminals in {project.name}, over your personal ones.</p>
+      </div>
+      <EnvironmentTable key={project.path} project={project.path} projects={[project]} emptyText={`No variables set for ${project.name}.`} />
+    </section>
   </section>;
 }
 
@@ -115,113 +132,191 @@ function sourceLabel(source: ConfigurationLayer): string | null {
   return null;
 }
 
-function ScriptCard({ kind, project, resolved, reload, untrusted }: { kind: Kind; project: Project; resolved: Configuration; reload: () => Promise<void>; untrusted: boolean }) {
+const CARD = "overflow-hidden rounded-lg border border-hairline-strong bg-well";
+const CARD_HEADER = "flex min-h-10 items-center gap-2 border-b border-hairline px-3 py-1.5";
+
+/** A script card's header: its name, what it does, and its controls on the right. */
+function CardHeader({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
+  return <div className={CARD_HEADER}>
+    <h4 className="shrink-0 text-[13px] font-semibold">{title}</h4>
+    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{description}</span>
+    {children}
+  </div>;
+}
+
+/** ⌘S or ⌘↵ in a script saves it at once; leaving the field saves it too. */
+const saveKey = (event: KeyboardEvent, save: () => void) => {
+  if ((event.metaKey || event.ctrlKey) && (event.key === "Enter" || event.key === "s") && !event.nativeEvent.isComposing) {
+    event.preventDefault();
+    save();
+  }
+};
+
+function ScriptCard({ kind, project, resolved, reload, untrusted, environmentId }: { kind: Kind; project: Project; resolved: Configuration; reload: () => Promise<void>; untrusted: boolean; environmentId: string }) {
   const entry = resolved.values[KEYS[kind]];
   const source: ConfigurationLayer = entry?.source ?? "defaults";
   const value = typeof entry?.value === "string" ? entry.value : "";
   const timeoutEntry = resolved.values[TIMEOUT_KEY];
   const timeout = typeof timeoutEntry?.value === "number" ? timeoutEntry.value : DEFAULT_TIMEOUT;
   const [overriding, setOverriding] = useState(false);
-  // Where Save writes: the Scripts page's own store, or the git-ignored local file over a committed value.
+  // Where a save writes: the Scripts page's own store, or the git-ignored local file over a committed value.
   const target: "user" | "repositoryLocal" | null = source === "managed" ? null
     : source === "repositoryLocal" || (source === "repositoryShared" && overriding) ? "repositoryLocal"
       : source === "repositoryShared" ? null : "user";
   const [draft, setDraft] = useState(value);
   const [draftTimeout, setDraftTimeout] = useState(timeout);
+  const [edited, setEdited] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const dirty = draft !== value || (kind === "archive" && draftTimeout !== timeout);
+  // A resolved-value change is not itself an edit (for example removing an override).
+  const dirty = edited && (draft !== value || (kind === "archive" && draftTimeout !== timeout));
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  useSettingsLeaveGuard(dirtyRef.current || busy);
+  const saving = useRef(false);
   useEffect(() => {
     // Follow the resolved value until the person starts editing.
     if (!dirtyRef.current) { setDraft(value); setDraftTimeout(timeout); }
-  }, [value, timeout, source]);
-  const save = async (reset = false) => {
+  }, [value, timeout, source, edited]);
+  const save = async ({ reset = false, script = draft, minutes = draftTimeout }: { reset?: boolean; script?: string; minutes?: number } = {}) => {
+    if (saving.current) return;
+    saving.current = true;
     setBusy(true); setError(null); setMessage(null);
     try {
       if (target === "repositoryLocal") {
-        await configuration.write(project.path, "repositoryLocal", KEYS[kind], reset ? null : draft);
-        if (kind === "archive" && (reset || draftTimeout !== timeout) && !timeoutEntry?.locked) {
-          await configuration.write(project.path, "repositoryLocal", TIMEOUT_KEY, reset ? null : draftTimeout);
+        await configuration.write(project.path, "repositoryLocal", KEYS[kind], reset ? null : script);
+        if (kind === "archive" && (reset || minutes !== timeout) && !timeoutEntry?.locked) {
+          await configuration.write(project.path, "repositoryLocal", TIMEOUT_KEY, reset ? null : minutes);
         }
         if (reset) setOverriding(false);
       } else {
         const saved: RepositoryScripts = { setup: project.scripts?.setup ?? "", archive: project.scripts?.archive ?? "", archiveTimeoutMinutes: project.scripts?.archiveTimeoutMinutes ?? null };
-        const next: RepositoryScripts = { ...saved, [kind]: draft };
-        if (kind === "archive") next.archiveTimeoutMinutes = draftTimeout === DEFAULT_TIMEOUT ? null : draftTimeout;
+        const next: RepositoryScripts = { ...saved, [kind]: script };
+        if (kind === "archive") next.archiveTimeoutMinutes = minutes === DEFAULT_TIMEOUT ? null : minutes;
         if (next.archiveTimeoutMinutes == null) delete next.archiveTimeoutMinutes;
         await updateProject(project.path, { scripts: next });
       }
-      dirtyRef.current = false;
       await reload();
+      setEdited(false);
       setMessage(reset ? "Local override removed." : `${kind === "setup" ? "Setup" : "Archive"} script saved.`);
     } catch (cause) { setError(errorMessage(cause)); }
-    finally { setBusy(false); }
+    finally { saving.current = false; setBusy(false); }
   };
   const label = kind === "setup" ? "Setup script" : "Archive script";
   const chip = sourceLabel(source);
   const locked = target === null;
   const timeoutLocked = locked || !!timeoutEntry?.locked || (timeoutEntry?.source === "repositoryShared" && target !== "repositoryLocal");
-  return <div className="flex flex-col gap-2.5">
-    <div className="flex items-end justify-between gap-3">
-      <div className="min-w-0">
-        <h4 className="text-[15px] font-semibold">{label}</h4>
-        <p className="mt-1 text-[13px] text-muted-foreground">{kind === "setup" ? "Runs once when a new workspace is created." : "Runs in the workspace before it is removed. If it fails or times out, TerminalX asks before removing."}</p>
-      </div>
-      {chip && <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded bg-mention/10 px-1.5 py-0.5 text-[11px] text-mention"><FileLock className="size-3" aria-hidden />{chip}</span>}
-    </div>
-    <div className="rounded-lg border border-hairline-strong bg-well">
-      <div className="flex h-9 items-center justify-between gap-2 border-b border-hairline px-3">
-        <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-          {locked && <Lock className="size-3.5 text-warning" aria-label="Locked" />}
-          <span className="truncate">{kind}.sh</span>
-        </span>
-        {kind === "setup" ? <EnvironmentInfo /> : <label className="flex items-center gap-2 text-xs text-faint">timeout
-          <select aria-label="Archive timeout" disabled={busy || timeoutLocked} value={draftTimeout} onChange={(event) => { setDraftTimeout(Number(event.target.value)); setMessage(null); }}
+  const saveIfChanged = () => { if (!locked && dirtyRef.current) void save(); };
+  const note = source === "repositoryShared" || source === "repositoryLocal" || source === "managed";
+  return <div className="flex flex-col gap-2">
+    <div role="group" aria-label={kind === "setup" ? "Setup" : "Archive"} className={CARD}>
+      <CardHeader title={kind === "setup" ? "Setup" : "Archive"} description={kind === "setup" ? "runs once when a worktree is created" : "runs before a worktree is removed"}>
+        {!locked && (dirty || busy) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : `Save ${kind} script`}</Button>}
+        {locked && <Lock className="size-3.5 shrink-0 text-warning" aria-label="Locked" />}
+        {chip && <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded bg-mention/10 px-1.5 py-0.5 text-[11px] text-mention"><FileLock className="size-3" aria-hidden />{chip}</span>}
+        {kind === "setup" ? <EnvironmentInfo environmentId={environmentId} /> : <label className="flex shrink-0 items-center gap-2 text-xs text-faint" title="If it fails or times out, TerminalX asks before removing the worktree.">timeout
+          <select aria-label="Archive timeout" disabled={busy || timeoutLocked} value={draftTimeout} onChange={(event) => {
+            const minutes = Number(event.target.value);
+            setEdited(true); setDraftTimeout(minutes); setMessage(null);
+            void save({ minutes });
+          }}
             className="h-6 rounded-md border border-hairline-strong bg-transparent px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:opacity-60">
             {ARCHIVE_TIMEOUT_CHOICES.map((minutes) => <option key={minutes} value={minutes}>{minutes} minute{minutes === 1 ? "" : "s"}</option>)}
           </select>
         </label>}
+      </CardHeader>
+      <div onKeyDown={(event) => saveKey(event, saveIfChanged)}>
+        <ScriptEditor label={label} value={draft} readOnly={locked} disabled={busy} onBlur={saveIfChanged}
+          placeholder={kind === "setup" ? "pnpm install" : "docker compose down"} onChange={(next) => { setEdited(true); setDraft(next); setMessage(null); }} />
       </div>
-      <ScriptEditor label={label} value={draft} readOnly={locked} disabled={busy}
-        placeholder={kind === "setup" ? "pnpm install" : "docker compose down"} onChange={(next) => { setDraft(next); setMessage(null); }} />
     </div>
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+    {(note || kind === "setup") && <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <p className="flex min-w-0 flex-1 items-center gap-1.5 text-xs text-muted-foreground">
         {source === "repositoryShared" && !overriding && <><Lock className="size-3.5 shrink-0 text-warning" aria-hidden />
           <span>Edits go in your own <span className="font-mono">{LOCAL_FILE}</span>, which git ignores.</span>
           <button type="button" className="whitespace-nowrap text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => setOverriding(true)}>Override locally</button></>}
-        {source === "repositoryShared" && overriding && <span>Saving writes your own <span className="font-mono">{LOCAL_FILE}</span>, which git ignores. The committed script stays as it is.</span>}
+        {source === "repositoryShared" && overriding && <span>Your edits save to <span className="font-mono">{LOCAL_FILE}</span>, which git ignores. The committed script stays as it is.</span>}
         {source === "repositoryLocal" && <><span>Saved in your own <span className="font-mono">{LOCAL_FILE}</span>, which git ignores.</span>
-          <button type="button" disabled={busy} className="whitespace-nowrap text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => void save(true)}>Remove local override</button></>}
+          <button type="button" disabled={busy} className="whitespace-nowrap text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => void save({ reset: true })}>Remove local override</button></>}
         {source === "managed" && <span>Set by your organization's managed policy. It cannot be changed here.</span>}
-        {(source === "user" || source === "defaults") && <span>Saved on this computer for this repository. Leave blank to skip.</span>}
       </p>
       {kind === "setup" && <RunSetupNow project={project} disabled={dirty || busy || !value.trim() || untrusted} />}
-      {!locked && <Button size="sm" className="shrink-0 whitespace-nowrap" disabled={busy || !dirty} onClick={() => void save()}>{busy ? "Saving…" : "Save"}</Button>}
-    </div>
-    {untrusted && <p className="text-xs text-warning">This script comes from a file that is not trusted yet. It does not run until you choose Review and trust.</p>}
+    </div>}
     {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     {message && <p role="status" className="text-xs text-muted-foreground">{message}</p>}
   </div>;
 }
 
-function EnvironmentInfo() {
+/**
+ * Run (design 11.01): the command ⌘R starts, which is the first visible action of the project's Run menu. Editing it
+ * changes that action; with no actions yet, a command makes one named Run.
+ */
+function RunCard({ project }: { project: Project }) {
+  const actions = project.actions ?? [];
+  const first = visibleActions(actions)[0];
+  const value = first?.command ?? "";
+  const keys = useShortcutKeys("session.runAction");
+  const [draft, setDraft] = useState(value);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = draft !== value;
+  useSettingsLeaveGuard(dirtyRef.current || busy);
+  const saving = useRef(false);
+  useEffect(() => { if (!dirtyRef.current) setDraft(value); }, [value, first?.id]);
+  const save = async () => {
+    if (saving.current || !dirtyRef.current) return;
+    if (!draft.trim()) {
+      if (first) setError(`Enter a command, or hide or delete “${first.name}” in Actions.`);
+      return;
+    }
+    saving.current = true;
+    setBusy(true); setError(null); setMessage(null);
+    try {
+      const names = new Set(actions.map((action) => action.name.trim().toLowerCase()));
+      let name = "Run";
+      for (let n = 2; names.has(name.toLowerCase()); n++) name = `Run ${n}`;
+      const next: RepositoryAction[] = first
+        ? actions.map((action) => action.id === first.id ? { ...action, command: draft } : action)
+        : [{ id: crypto.randomUUID(), name, icon: "play", command: draft, runAfterSetup: false, concurrent: false, hidden: false }, ...actions];
+      await updateProject(project.path, { actions: next });
+      dirtyRef.current = false;
+      setMessage("Run command saved.");
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { saving.current = false; setBusy(false); }
+  };
+  return <div className="flex flex-col gap-2">
+    <div role="group" aria-label="Run" className={CARD}>
+      <CardHeader title="Run" description={first && first.name !== "Run" ? `starts and stops the app for this session · ${first.name}` : "starts and stops the app for this session"}>
+        {(dirtyRef.current || busy) && <Button size="sm" variant="outline" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : "Save run script"}</Button>}
+        {keys.length > 0 && <KbdGroup keys={keys} />}
+      </CardHeader>
+      <div onKeyDown={(event) => saveKey(event, () => void save())}>
+        <ScriptEditor label="Run script" value={draft} disabled={busy} onBlur={() => void save()} placeholder="pnpm dev"
+          onChange={(next) => { setDraft(next); setMessage(null); setError(null); }} />
+      </div>
+    </div>
+    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+    {message && <p role="status" className="text-xs text-muted-foreground">{message}</p>}
+  </div>;
+}
+
+function EnvironmentInfo({ environmentId }: { environmentId: string }) {
   return <PopoverPrimitive.Root>
     <PopoverPrimitive.Trigger asChild>
-      <button type="button" className="flex h-6 items-center gap-1.5 rounded-md border border-hairline-strong px-2 text-xs text-muted-foreground outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-veil-raised">
+      <button type="button" className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-hairline-strong px-2 text-xs text-muted-foreground outline-none hover:bg-veil-raised focus-visible:ring-2 focus-visible:ring-ring/40 data-[state=open]:bg-veil-raised">
         <Info className="size-3.5" aria-hidden /> Environment info
       </button>
     </PopoverPrimitive.Trigger>
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content side="bottom" align="end" sideOffset={6} aria-label="Environment info"
-        className="z-(--z-menu) w-[20.5rem] max-w-[calc(100vw-2rem)] rounded-lg bg-popover p-4 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in">
-        <ul className="flex list-disc flex-col gap-2 pl-4 text-xs leading-5 text-muted-foreground marker:text-faint">
-          <li>Runs with /bin/sh in the new workspace’s folder, in a visible Setup tab. Agents can start while it runs; it stops after 30 minutes, and at most two run at once.</li>
-          <li>Loads your variables and this repository’s from Settings → Environment, and your login shell’s PATH. Agent-only credentials are not passed on.</li>
-          <li><span className="font-mono">$TERMINALX_REPO_ROOT</span> is the project root and <span className="font-mono">$TERMINALX_WORKSPACE_PATH</span> the workspace; <span className="font-mono">$TERMINALX_BRANCH</span> and <span className="font-mono">$TERMINALX_SESSION_ID</span> name its branch and session.</li>
+        className="z-(--z-menu) w-[20.5rem] max-w-[calc(100vw-2rem)] rounded-lg bg-popover px-4 py-3 text-popover-foreground shadow-surface hairline outline-none data-[state=open]:animate-fade-in">
+        <ul className="flex list-disc flex-col gap-1.5 pl-4 text-xs leading-5 text-muted-foreground marker:text-faint">
+          <li>Runs in the new workspace’s folder, in a visible Setup tab.</li>
+          <li>Loads <PopoverPrimitive.Close asChild><button type="button" className="text-foreground underline underline-offset-2 hover:opacity-80" onClick={() => document.getElementById(environmentId)?.scrollIntoView({ block: "start", behavior: "smooth" })}>your and the project’s variables</button></PopoverPrimitive.Close>.</li>
+          <li><span className="font-mono">$TERMINALX_REPO_ROOT</span> is the project root; <span className="font-mono">$TERMINALX_WORKSPACE_PATH</span> the workspace.</li>
         </ul>
       </PopoverPrimitive.Content>
     </PopoverPrimitive.Portal>

@@ -45,6 +45,7 @@
         "accessMode": "organization",
         "archivedAt": null,
         "authority": "participate",
+        "agentCommandKinds": ["send", "steer", "stop", "permission-decision", "follow-up"],
         "createdAt": 1790000000000,
         "createdBy": "user_1",
         "deleteAfter": null,

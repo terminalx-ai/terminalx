@@ -1,0 +1,5 @@
+#!/bin/sh
+# `sysctl -n sysctl.proc_translated` for scripts/install/test.sh: 1 pretends
+# the shell runs under Rosetta (FAKE_TRANSLATED, 0 by default).
+[ "$*" = "-n sysctl.proc_translated" ] || exit 1
+echo "${FAKE_TRANSLATED:-0}"

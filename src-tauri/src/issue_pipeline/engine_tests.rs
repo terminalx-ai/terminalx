@@ -367,7 +367,9 @@ impl Host for FakeHost {
         Ok(())
     }
 
-    fn open_reviewer(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+    fn open_reviewer(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        // As the app's: the reviewer runs on the author tab's agent.
+        if author.tab(&pipeline.author.tab_id).is_none() { bail!("the author's conversation is gone"); }
         let mut world = self.world();
         world.reviewers += 1;
         let id = format!("reviewer-{}", world.reviewers);
@@ -439,7 +441,8 @@ impl Host for FakeHost {
         world.workspace.head = head.into();
         Ok(())
     }
-    fn open_resolver(&self, _pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+    fn open_resolver(&self, pipeline: &Pipeline, author: &SessionEntry) -> Result<SessionRef> {
+        if author.tab(&pipeline.author.tab_id).is_none() { bail!("the author's conversation is gone"); }
         let mut world = self.world();
         world.resolvers += 1;
         let id = if world.resolvers == 1 { "resolver".into() } else { format!("resolver-{}", world.resolvers) };
@@ -1478,6 +1481,169 @@ fn a_reviewer_that_changes_the_checkout_voids_its_review() {
     assert!(run.merges().is_empty());
 }
 
+impl Run {
+    /// The author pushes `commit` to the pull request while the reviewer reads.
+    fn pushed(&self, commit: &str) {
+        self.host.commit(commit);
+        let mut world = self.host.world();
+        world.pr.as_mut().unwrap().head_sha = commit.into();
+        // In a turn of its own that ends after the review was asked for.
+        let now = world.now;
+        world.replies.insert("author".into(), (now, "Pushed a fix.".into()));
+    }
+
+    /// The poller's pass, `minutes` from now.
+    fn poll_after(&self, minutes: i64) -> Pipeline {
+        self.host.world().now += TimeDelta::minutes(minutes);
+        poll(&self.host);
+        self.pipeline()
+    }
+}
+
+#[test]
+fn a_commit_pushed_mid_review_is_reviewed_again_in_the_same_round_with_no_person() {
+    let run = Run::start(&github_issue(), true);
+    let first = run.to_review();
+    assert_eq!(first.round, 1);
+    let reviewer = first.reviewer.unwrap();
+    run.pushed(C2);
+    let again = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((again.stage, again.state, again.round, again.review_commit.as_deref()), (Stage::Review, State::Working, 1, Some(C2)), "{:?}", again.note);
+    assert!(again.verdict.is_none() && again.reason.is_none() && run.merges().is_empty());
+    assert!(again.events.iter().any(|event| event.kind == "reviewAgain" && event.message == "Reviewing again: the branch moved from 1111111111 to 2222222222 during the review."), "{:?}", run.kinds());
+    let asked = run.host.prompts_to(&reviewer.session_id);
+    assert_eq!(asked.len(), 2);
+    assert!(asked[1].contains("so your verdict on 1111111111 does not count") && asked[1].contains("Commit to review: 2222222222"), "{}", asked[1]);
+
+    let merged = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((merged.state, merged.round, merged.moved_reviews), (State::Merged, 1, 0));
+    assert_eq!(run.merges(), [("merge".to_string(), C2.to_string())]);
+    assert!(!run.kinds().iter().any(|kind| kind == "needsYou"), "{:?}", run.kinds());
+}
+
+#[test]
+fn a_commit_pushed_during_the_last_round_does_not_use_up_the_round_limit() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.reviewer(&reviewed(C1, "changes", HIGH));
+    run.host.commit(C2);
+    run.author(&done("Second try."));
+    run.reviewer(&reviewed(C2, "changes", HIGH));
+    run.host.commit(C3);
+    let third = run.author(&done("Third try."));
+    assert_eq!((third.round, third.max_rounds), (3, 3));
+    run.pushed(C4);
+    let again = run.reviewer(&reviewed(C3, "merge", "[]"));
+    assert_eq!((again.stage, again.state, again.round, again.review_commit.as_deref()), (Stage::Review, State::Working, 3, Some(C4)), "{:?}", again.reason);
+    assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Merged);
+}
+
+#[test]
+fn a_head_that_keeps_moving_is_waited_on_until_still_and_then_left_to_a_person() {
+    const C6: &str = "6666666666666666666666666666666666666666";
+    const C7: &str = "7777777777777777777777777777777777777777";
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    // The first move: read again at once.
+    run.pushed(C2);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).review_commit.as_deref(), Some(C2));
+
+    // The second: the branch is waited on until it holds still.
+    run.pushed(C3);
+    let waiting = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!((waiting.stage, waiting.state, waiting.round, waiting.review_commit.as_deref()), (Stage::Review, State::Waiting, 1, Some(C2)), "{:?}", waiting.note);
+    assert!(waiting.note.as_deref().unwrap().contains("held still for 2 minutes"), "{:?}", waiting.note);
+    assert_eq!(run.poll_after(1).state, State::Waiting);
+    // It moves again while waited on: the clock starts over.
+    run.pushed(C4);
+    assert_eq!(run.poll_after(1).head_wait.unwrap().head, C4);
+    assert_eq!(run.poll_after(1).state, State::Waiting);
+    let reading = run.poll_after(1);
+    assert_eq!((reading.state, reading.round, reading.review_commit.as_deref()), (State::Working, 1, Some(C4)), "{:?}", reading.note);
+    assert!(reading.head_wait.is_none());
+    assert!(run.pipeline().events.iter().any(|event| event.kind == "reviewAgain" && event.message == "Reviewing again: the branch moved from 2222222222 to 4444444444 during the review."));
+
+    // The third.
+    run.pushed(C6);
+    assert_eq!(run.reviewer(&reviewed(C4, "merge", "[]")).state, State::Waiting);
+    assert_eq!(run.poll_after(2).review_commit.as_deref(), Some(C6));
+
+    // The fourth is past the tries: a person's, with the reason.
+    run.pushed(C7);
+    let stopped = run.reviewer(&reviewed(C6, "merge", "[]"));
+    assert_eq!((stopped.stage, stopped.state, stopped.round), (Stage::Review, State::NeedsYou, 1));
+    assert!(
+        matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail == "the branch moved during 4 reviews in a row, most recently from 6666666666 to 7777777777. Review it again once it holds still."),
+        "{:?}",
+        stopped.reason
+    );
+    assert!(stopped.verdict.is_none() && stopped.head_wait.is_none() && run.merges().is_empty());
+
+    // A person asking reviews the head in a new round.
+    let asked = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((asked.state, asked.round, asked.moved_reviews, asked.review_commit.as_deref()), (State::Working, 2, 0, Some(C7)));
+}
+
+#[test]
+fn a_branch_that_never_holds_still_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.pushed(C2);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    run.pushed(C3);
+    assert_eq!(run.reviewer(&reviewed(C2, "merge", "[]")).state, State::Waiting);
+    let mut stopped = run.pipeline();
+    for minute in 0..40 {
+        run.pushed(if minute % 2 == 0 { C4 } else { C3 });
+        stopped = run.poll_after(1);
+        if stopped.state != State::Waiting {
+            break;
+        }
+    }
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("did not hold still for 2 minutes within 30")), "{:?}", stopped.reason);
+    assert_eq!(stopped.review_commit.as_deref(), Some(C2), "never reviewed while it moved");
+}
+
+#[test]
+fn a_commit_the_reviewer_pushed_itself_is_not_reviewed_as_the_authors() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    // On the pull request, but the author did nothing while the review ran.
+    run.host.commit(C2);
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!((stopped.state, stopped.round, stopped.review_commit.as_deref()), (State::NeedsYou, 1, Some(C1)));
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("author session was not at work meanwhile")), "{:?}", stopped.reason);
+    assert!(!run.kinds().iter().any(|kind| kind == "reviewAgain"));
+
+    // An author turn still running counts as the author at work.
+    drop(run);
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.host.commit(C2);
+    run.host.world().pr.as_mut().unwrap().head_sha = C2.into();
+    run.host.agent(&author_tab(), true);
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).review_commit.as_deref(), Some(C2));
+}
+
+#[test]
+fn a_commit_made_only_in_the_checkout_while_waiting_is_left_to_a_person() {
+    let run = Run::start(&github_issue(), true);
+    run.to_review();
+    run.pushed(C2);
+    run.reviewer(&reviewed(C1, "merge", "[]"));
+    run.pushed(C3);
+    run.reviewer(&reviewed(C2, "merge", "[]"));
+    // Committed here and never pushed: whose it is cannot be told.
+    run.host.commit(C4);
+    run.poll_after(1);
+    let stopped = run.poll_after(2);
+    assert_eq!(stopped.state, State::NeedsYou);
+    assert!(matches!(&stopped.reason, Some(StopReason::ReviewerChangedWorkspace { detail }) if detail.contains("4444444444, which is not on the pull request (at 3333333333)")), "{:?}", stopped.reason);
+    assert_eq!(run.host.world().pushes, [C1], "nothing made in the checkout is pushed");
+}
+
 #[test]
 fn the_author_session_is_never_asked_to_review() {
     let run = Run::start(&github_issue(), true);
@@ -2483,6 +2649,191 @@ fn a_missing_reviewer_can_be_replaced_when_the_head_moves() {
     assert_ne!(again.reviewer.as_ref(), Some(&old));
     assert_eq!(again.reviewer.unwrap().session_id, "author");
     assert_eq!(run.host.world().sessions.len(), 1);
+}
+
+// ---- #1014: the pipeline follows its session, not one tab ----------------------
+
+/// TerminalX restarted: the author's tab is gone and the lead carries on in
+/// `tab`, which the session now shows.
+fn restart_into(host: &FakeHost, tab: &str) {
+    let mut world = host.world();
+    let session = world.sessions.get_mut("author").unwrap();
+    session.tabs.retain(|entry| entry.id != "t1");
+    let mut entry = session_tab(tab);
+    entry.title = Some("Work".into());
+    session.tabs.push(entry);
+    session.active_tab = Some(tab.into());
+}
+
+fn session_tab(id: &str) -> crate::store::index::TabEntry {
+    let mut tab = session("unused", None).tabs.remove(0);
+    tab.id = id.into();
+    tab
+}
+
+#[test]
+fn a_pipeline_whose_author_tab_is_replaced_goes_on_to_review_findings_and_merge() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    restart_into(&run.host, "t2");
+
+    // The lead reports from its new tab: that tab is the author from here on.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.stage, reviewing.state), (Stage::Review, State::Working), "{:?}", reviewing.note);
+    assert_eq!(reviewing.author, SessionRef { session_id: "author".into(), tab_id: "t2".into() });
+    let moved = reviewing.events.iter().find(|event| event.kind == "authorMoved").expect("an event says the author moved");
+    assert!(moved.message.contains("Tab t2 became the author") && moved.message.contains("t1 is no longer in this session"), "{}", moved.message);
+    assert_eq!(moved.session_id.as_deref(), Some("author"));
+    let reviewer = reviewing.reviewer.clone().unwrap();
+    assert_ne!(reviewer.tab_id, "t2");
+
+    // Findings go to the new author tab, which fixes them; the fix is reviewed and merged.
+    let addressing = run.reviewer(&reviewed(C1, "changes", HIGH));
+    assert_eq!(addressing.stage, Stage::Address, "{:?} {:?} {:?}", addressing.state, addressing.note, addressing.events.iter().map(|e| (&e.kind, &e.message)).collect::<Vec<_>>());
+    assert!(run.host.prompts_to("author").last().unwrap().contains("Off by one"));
+    run.host.commit(C2);
+    turn_completed(&run.host, "author", "t2", Some(&done("Fixed.")));
+    assert_eq!(run.pipeline().stage, Stage::Review);
+    assert_eq!(run.pipeline().reviewer, Some(reviewer), "the same reviewer reads the fix");
+    let merged = run.reviewer(&reviewed(C2, "merge", "[]"));
+    assert_eq!(merged.state, State::Merged, "{:?}", merged.note);
+    assert_eq!(run.merges().len(), 1);
+    assert_eq!(merged.events.iter().filter(|event| event.kind == "authorMoved").count(), 1);
+}
+
+#[test]
+fn the_successor_is_never_a_reviewer_tab_and_a_report_from_another_tab_is_ignored() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    restart_into(&run.host, "t2");
+    {
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        let mut reviewer = session_tab("t3");
+        reviewer.title = Some(super::REVIEWER_TAB.into());
+        session.tabs.push(reviewer);
+        session.active_tab = Some("t3".into());
+    }
+    // A tab that is not the successor reports: nothing moves.
+    turn_completed(&run.host, "author", "t3", Some(&done("Not mine.")));
+    assert_eq!(run.pipeline().stage, Stage::Work);
+    // The most recent agent tab is: it carries on as the author.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    let reviewing = run.pipeline();
+    assert_eq!((reviewing.author.tab_id.as_str(), reviewing.stage), ("t2", Stage::Review));
+    assert!(reviewing.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("most recent agent tab")));
+}
+
+#[test]
+fn a_pipeline_stuck_on_a_gone_author_moves_on_when_asked_again() {
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    // The author's tab went with nothing in its place: the review cannot start.
+    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
+    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
+    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    assert!(matches!(&stuck.reason, Some(StopReason::Failed { message, .. }) if message.contains("the author's conversation is gone")), "{:?}", stuck.reason);
+    // The lead's new tab appears; asking for the review again starts it.
+    restart_into(&run.host, "t2");
+    let reviewing = act(&run.host, &run.id, Action::Review).unwrap();
+    assert_eq!((reviewing.stage, reviewing.state, reviewing.author.tab_id.as_str()), (Stage::Review, State::Working, "t2"), "{:?}", reviewing.note);
+}
+
+#[test]
+fn start_adopt_pr_takes_over_a_pipeline_whose_author_tab_is_gone() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    let stuck = stuck_without_author(&run);
+    let pr = stuck.pr.clone().expect("the pull request was opened");
+    let events = stuck.events.len();
+    {
+        // Two tabs after the restart; the session shows the other one.
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        session.tabs.push(session_tab("t2"));
+        session.tabs.push(session_tab("t3"));
+        session.active_tab = Some("t3".into());
+    }
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor.clone()).unwrap();
+    assert_eq!(taken.id, run.id, "the old pipeline is kept, not replaced");
+    assert_eq!(taken.author.tab_id, "t2");
+    assert_eq!(taken.pr.as_ref().map(|link| link.number), Some(pr.number));
+    assert!(taken.auto_merge);
+    assert!(taken.events.len() > events && taken.events[..events] == stuck.events[..], "its record is kept");
+    let moves: Vec<_> = taken.events.iter().filter(|event| event.kind == "authorMoved").map(|event| event.message.as_str()).collect();
+    assert_eq!(moves.len(), 1, "no move that did not stick is recorded: {moves:?}");
+    assert!(moves[0].contains("Tab t2 took this pipeline over") && moves[0].contains("t1 is no longer in this session"), "{}", moves[0]);
+    assert!(!taken.author_followed);
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    // Asked again, it is the same pipeline; the review carries it to a merge.
+    assert_eq!(engine::start_existing(&run.host, "author", "t2", None, None, true, actor.clone()).unwrap().author.tab_id, "t2");
+    let refused = engine::start_existing(&run.host, "author", "t3", None, None, true, actor).unwrap_err();
+    assert!(refused.to_string().contains("Use its author tab, t2"), "{refused:#}");
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
+}
+
+/// Stuck as in #1014: the PR is open and its review stopped on the gone author tab.
+fn stuck_without_author(run: &Run) -> Pipeline {
+    run.host.world().sessions.get_mut("author").unwrap().tabs.clear();
+    let stuck = act(&run.host, &run.id, Action::Advance).unwrap();
+    assert_eq!((stuck.stage, stuck.state), (Stage::PullRequest, State::NeedsYou));
+    stuck
+}
+
+#[test]
+fn adopt_pr_corrects_a_successor_terminalx_chose_wrongly() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    stuck_without_author(&run);
+    {
+        // The lead works in t2; the session shows another agent tab, t3.
+        let mut world = run.host.world();
+        let session = world.sessions.get_mut("author").unwrap();
+        session.tabs.push(session_tab("t2"));
+        session.tabs.push(session_tab("t3"));
+        session.active_tab = Some("t3".into());
+    }
+    // A background pass makes the shown tab the author.
+    let guessed = act(&run.host, &run.id, Action::Refresh).unwrap();
+    assert_eq!((guessed.author.tab_id.as_str(), guessed.author_followed), ("t3", true));
+    // The lead's report is not the author's, but its adoption is honoured.
+    turn_completed(&run.host, "author", "t2", Some(&done("Pads the minutes.")));
+    assert_eq!(run.pipeline().state, State::NeedsYou);
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor).unwrap();
+    assert_eq!((taken.author.tab_id.as_str(), taken.author_followed), ("t2", false));
+    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("from tab t3, which TerminalX had made the author")));
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    // Chosen by the agent now, not guessed: another tab cannot take it.
+    let other = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t3".into()) };
+    assert!(engine::start_existing(&run.host, "author", "t3", None, None, true, other).is_err());
+}
+
+#[test]
+fn adopt_pr_from_the_tab_already_chosen_takes_the_stopped_step_again() {
+    use super::SwitchActor;
+    let host = FakeHost::new(&github_issue());
+    host.world().reviewer_tabs = true;
+    let run = Run::start_in(host, true);
+    stuck_without_author(&run);
+    restart_into(&run.host, "t2");
+    // A background pass already made t2 the author; the pipeline is still stopped.
+    let moved = act(&run.host, &run.id, Action::Refresh).unwrap();
+    assert_eq!((moved.author.tab_id.as_str(), moved.state), ("t2", State::NeedsYou));
+    let actor = SwitchActor::Cli { session_id: Some("author".into()), tab_id: Some("t2".into()) };
+    let taken = engine::start_existing(&run.host, "author", "t2", None, None, true, actor).unwrap();
+    assert_eq!((taken.stage, taken.state), (Stage::Review, State::Working), "{:?}", taken.note);
+    assert!(taken.events.iter().any(|event| event.kind == "authorMoved" && event.message.contains("confirmed as the author")));
+    assert_eq!(run.reviewer(&reviewed(C1, "merge", "[]")).state, State::Merged);
 }
 
 #[test]
@@ -4822,4 +5173,47 @@ fn resolver_retry_does_not_reclaim_a_changed_checkout_or_stopped_pipeline() {
         assert!(engine::retry_interrupted_resolver(&run.host, "resolver", "t1", || -> Result<()> { panic!("must not send") }).is_err());
         assert!(run.pipeline().resolution.is_none());
     }
+}
+
+// ---- a paired phone's news (#990) ------------------------------------------------
+
+#[test]
+fn a_phone_is_told_once_that_checks_failed_and_once_that_it_merged() {
+    let host = FakeHost::new(&github_issue());
+    host.world().checks = vec![check("build", "success"), check("test", "failure")];
+    let run = Run::start_in(host, true);
+    // Working, under review: nothing a phone is told.
+    let reviewing = run.to_review();
+    assert_eq!(engine::phone_notice(&reviewing, Some("Work"), run.host.now()), None);
+    let stopped = run.reviewer(&reviewed(C1, "merge", "[]"));
+    let failed = engine::phone_notice(&stopped, Some("Work"), run.host.now()).expect("checks failed is news");
+    assert_eq!(failed.kind, engine::PhoneNoticeKind::ChecksFailed);
+    assert_eq!(failed.pull_request, github_issue().title, "named as the pipeline titled the pull request");
+    assert_eq!(failed.detail, "Failed: test.");
+    assert_eq!(failed.author, author_tab(), "it belongs to the author's conversation");
+    // Announced again with nothing new: the same news, under the same key.
+    assert_eq!(engine::phone_notice(&run.pipeline(), Some("Work"), run.host.now()).map(|notice| notice.key), Some(failed.key.clone()));
+    // Long after, it is old news.
+    let later = run.host.now() + TimeDelta::minutes(engine::PHONE_NOTICE_MINUTES + 1);
+    assert_eq!(engine::phone_notice(&stopped, Some("Work"), later), None);
+
+    run.host.world().pr.as_mut().unwrap().checks = vec![check("build", "success"), check("test", "success")];
+    let merged = run.poll();
+    let notice = engine::phone_notice(&merged, Some("Work"), run.host.now()).expect("a merge is news");
+    assert_eq!(notice.kind, engine::PhoneNoticeKind::Merged);
+    assert_ne!(notice.key, failed.key);
+    assert!(notice.detail.contains("merged pull request"), "{}", notice.detail);
+}
+
+#[test]
+fn a_pull_request_without_an_issue_is_named_by_its_session() {
+    let host = FakeHost::new(&github_issue());
+    host.world().sessions.get_mut("author").unwrap().issue = None;
+    let run = Run::start_in(host, true);
+    run.to_review();
+    let merged = run.reviewer(&reviewed(C1, "merge", "[]"));
+    assert_eq!(merged.state, State::Merged);
+    let notice = engine::phone_notice(&merged, Some("Work"), run.host.now()).unwrap();
+    assert_eq!((notice.kind, notice.pull_request.as_str()), (engine::PhoneNoticeKind::Merged, "Work"));
+    assert_eq!(engine::phone_notice(&merged, None, run.host.now()).unwrap().pull_request, merged.branch, "the branch, as the pipeline would title it");
 }

@@ -1,4 +1,4 @@
-import { ACCOUNT_PAIRING_CAPABILITY } from "../pairing/contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, HEADLESS_PHONE_PAIRING_CAPABILITY } from "../pairing/contracts";
 import type { AccountHost } from "../pairing/account-client";
 import { accountHostIdentityMatches } from "../pairing/account-identity";
 import type { AccountMachinePrefs } from "../store/account-machines";
@@ -47,6 +47,7 @@ export interface AvailableMachine extends Common {
   host: AccountHost;
   hidden: boolean;
   pairBlocked: Blocked;
+  terminalPairing: boolean;
 }
 
 export type Machine = PairedMachine | AvailableMachine;
@@ -65,6 +66,7 @@ export const OFFLINE_REASON = "Open TerminalX on that machine first";
 /** The account has not heard from it lately: not known to be offline, but not pairable through the account now. */
 export const UNREACHABLE_REASON = "Not reachable right now. Open TerminalX on that machine";
 export const INCOMPATIBLE_REASON = "Update TerminalX on that machine to pair it";
+export const TERMINAL_PAIRING = "Run terminalx-serve pair --phone on the server";
 
 /**
  * Names a machine gives itself when nobody named it: they say nothing on a
@@ -121,7 +123,7 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
     // account has no recent proof, not that it is off: it may still answer directly or over the relay.
     const offline = account?.reachability === "exited";
     const lastSeen = Math.max(account?.lastSeenAt ? Date.parse(account.lastSeenAt) || 0 : 0, host.lastConnectedAt);
-    const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account) };
+    const common = { id: host.id, name, ownName: ownNames.get(host.id) ?? null, customName: cleanHostName(host.customName), custom: cleanHostName(host.customName) !== null, icon: iconFor(name, account, host) };
     if (active) {
       const { connection } = input;
       const connected = connection === "connected" || connection === "updating";
@@ -140,10 +142,13 @@ export function machineList(input: MachineInput): { paired: PairedMachine[]; ava
 
   const listed = unpaired.map((host): AvailableMachine => {
     const name = names.get(host.hostId)!;
-    const compatible = host.capabilities.includes(ACCOUNT_PAIRING_CAPABILITY) && accountHostIdentityMatches(host);
+    const verified = accountHostIdentityMatches(host);
+    const terminalPairing = verified && host.capabilities.includes(HEADLESS_PHONE_PAIRING_CAPABILITY);
+    const compatible = verified && host.capabilities.includes(ACCOUNT_PAIRING_CAPABILITY);
     const live = host.reachability === "live";
     const lastSeen = host.lastSeenAt ? Date.parse(host.lastSeenAt) || 0 : 0;
-    const common = { id: host.hostId, name, ownName: ownNames.get(host.hostId) ?? null, customName: cleanHostName(input.prefs[host.hostId]?.customName), custom: cleanHostName(input.prefs[host.hostId]?.customName) !== null, icon: iconFor(name, host), hidden: input.prefs[host.hostId]?.hidden === true, kind: "available" as const, host };
+    const common = { id: host.hostId, name, ownName: ownNames.get(host.hostId) ?? null, customName: cleanHostName(input.prefs[host.hostId]?.customName), custom: cleanHostName(input.prefs[host.hostId]?.customName) !== null, icon: iconFor(name, host), hidden: input.prefs[host.hostId]?.hidden === true, kind: "available" as const, host, terminalPairing };
+    if (terminalPairing) return { ...common, pairBlocked: null, state: TERMINAL_PAIRING, tone: live ? "online" : "unknown" };
     if (!compatible) return { ...common, pairBlocked: INCOMPATIBLE_REASON, state: INCOMPATIBLE_REASON, tone: "offline" };
     if (host.reachability === "exited") return { ...common, pairBlocked: OFFLINE_REASON, state: offlineLine(lastSeen, input.now), tone: "offline" };
     // Pairing through the account needs a live machine; an unverifiable one is not called offline.
@@ -175,7 +180,9 @@ export function ago(at: number, now: number): string {
   return unit(Math.floor(days / 365), "year");
 }
 
-function iconFor(name: string, account: AccountHost | null): MachineIcon {
-  if (account?.environmentKind === "ssh" || account?.platform === "linux") return "server";
+/** A machine's mark: a server for SSH, Linux or one with no TerminalX window (PRO-359), a laptop by its name, else a desktop. */
+export function iconFor(name: string, account: AccountHost | null, paired?: Pick<StoredHost, "headless" | "platform">): MachineIcon {
+  if (account?.environmentKind === "ssh" || account?.platform === "linux" || account?.capabilities.includes(HEADLESS_PHONE_PAIRING_CAPABILITY)) return "server";
+  if (paired?.headless === true || paired?.platform === "linux") return "server";
   return /book|laptop/i.test(name) ? "laptop" : "desktop";
 }

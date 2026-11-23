@@ -7,6 +7,7 @@ import { MobileE2EESession, type RandomSource } from "../transport/e2ee-session"
 import { secureRandom } from "../transport/random";
 import { CloudApiError, type AttachTicket, type CloudApi } from "./api";
 import { b64 } from "./crypto";
+import { resumeLogDetail } from "./resume";
 
 /**
  * The phone's connection to one cloud workspace's runtime: the transport the
@@ -63,6 +64,8 @@ export interface CloudLinkOptions {
   createSocket?: (url: string) => SocketLike;
   random?: RandomSource;
   now?: () => number;
+  /** The phone's connection log: a refused `open` is written there with its code (#1290). */
+  log?: (level: "info" | "warning" | "error", message: string, detail?: string) => void;
 }
 
 /** Why the connection is not up, beside its state: the API's or the relay's own word, for the screen to put in words. */
@@ -184,7 +187,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
     this.actedOn = listed;
     // Never asked of a workspace that is not running: asking is how a desktop
     // wakes one, and a phone only looks.
-    if (listed !== "ready") {
+    if (listed !== "ready" && listed !== "attention-required") {
       this.issue = null;
       if (listed === "provisioning" || listed === "resuming") {
         // Nothing to ask yet; the list says when it runs (`listChanged`).
@@ -192,7 +195,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       } else if (listed === "suspended" || listed === "archived") {
         this.setState({ state: "suspended" });
       } else {
-        // Not listed for this person, deleted, or needing attention: nothing to connect to.
+        // Not listed for this person, or deleted: nothing to connect to.
         this.setState({ state: "stopped" });
       }
       return;
@@ -205,6 +208,7 @@ export class CloudWorkspaceLink implements WorkspaceTransport {
       if (generation !== this.generation || !this.running) return;
       const api = error instanceof CloudApiError ? error : new CloudApiError("cloud_workspace_unavailable", null);
       this.issue = { kind: "api", code: api.code, unreachable: api.unreachable };
+      if (!api.unreachable) this.options.log?.("error", "Cloud workspace connect refused", resumeLogDetail({ stage: "open", code: api.code, status: api.status }, this.options.target.workspaceId));
       // An answer this app cannot read will not become readable by asking again.
       if (api.code === "cloud_workspace_invalid_response") return this.setState({ state: "updateRequired" });
       // The service or the network: try again. A refusal (no access, stopped

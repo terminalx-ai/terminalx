@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
-import { Terminal as TerminalIcon } from "lucide-react-native";
+import { SquareTerminal } from "lucide-react-native";
 import type { ToolCall } from "@terminalx/portable/transcript";
 import { useTheme } from "./theme";
 import { callCommand, callDescription, callsLabel, commandFirstLine, folds } from "./transcript-rows";
@@ -23,7 +23,7 @@ export function WorkGroup({ calls }: { calls: ToolCall[] }) {
   const label = callsLabel(calls);
   const shown = held || (opens && open);
   const header = <>
-    <TerminalIcon size={16} color={shown ? palette.ink : palette.muted} />
+    <SquareTerminal size={16} color={shown ? palette.ink : palette.muted} />
     <Text numberOfLines={2} style={[styles.label, { color: shown ? palette.ink : palette.muted }]}>{label}</Text>
     {opens ? <Chevron open={open} color={open ? palette.ink : palette.muted} /> : null}
   </>;
@@ -71,7 +71,7 @@ const styles = StyleSheet.create({
   group: { gap: 8 },
   header: { flexDirection: "row", alignItems: "center", gap: 8, minHeight: 28, alignSelf: "flex-start", maxWidth: "100%" },
   label: { flexShrink: 1, fontSize: 14, lineHeight: 20 },
-  calls: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
+  calls: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 16, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
   call: { gap: 3 },
   callAfter: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 10 },
   description: { fontSize: 14, lineHeight: 20, fontWeight: "600" },

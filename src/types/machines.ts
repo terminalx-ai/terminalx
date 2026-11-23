@@ -8,7 +8,7 @@
 export type MachineRoute = "relayAndNearby" | "thisNetwork";
 
 export interface MachineOs {
-  family: "macos" | "linux" | string;
+  family: "macos" | "linux" | "windows" | string;
   version: string | null;
 }
 
@@ -29,6 +29,50 @@ export interface PairedComputer {
   approvedAt: number;
   lastSeenAt: number | null;
   connected: boolean;
+  /**
+   * `host_id` of the computer's client key (base64url, 16 characters), the
+   * source of the short key label on its row. Null for a record with no
+   * client key; absent from a runtime older than PRO-349.
+   */
+  keyId?: string | null;
+  /** How it is connected now; null when it is not. Absent from a runtime older than PRO-349. */
+  route?: MachineRouteKind | null;
+  /**
+   * When the person pressed Disconnect (PRO-357): it is refused until they
+   * let it back. Null otherwise; absent from a runtime older than PRO-357.
+   */
+  disconnectedAt?: number | null;
+}
+
+/**
+ * What an operating computer did on this Mac (PRO-357, `machines_activity`,
+ * `machine_host::activity`). Names and times only: never a prompt, a command
+ * or a file's contents. `other` is a kind a newer TerminalX wrote.
+ */
+export type MachineActivityKind =
+  | "paired"
+  | "connected"
+  | "disconnected"
+  | "sessionCreated"
+  | "terminalOpened"
+  | "projectAdded"
+  | "projectRemoved"
+  | "update"
+  | "revoked"
+  | "expired"
+  | "held"
+  | "letBack"
+  | "other";
+
+export interface MachineActivityEntry {
+  /** Milliseconds since the epoch. */
+  at: number;
+  kind: MachineActivityKind;
+  computerId?: string;
+  /** The computer's name when it happened. Absent for a project added or removed. */
+  computer?: string;
+  /** A project's name, a route (`lan`, `tailscale`, `relay`) or a version. */
+  detail?: string;
 }
 
 /** A computer asking to operate this machine, waiting for Allow. */
@@ -44,6 +88,33 @@ export interface PendingComputer {
 }
 
 /** The runtime's machine host (`machine_wire::Status`). */
+/** `machines.listen` (PRO-487): where a machine listens for computers and phones on TCP 6768. */
+export type MachineListen = "relay" | "tailscale" | "lan" | "all";
+
+/** Where a machine listens now and who it answers: `listen` of its host status and of `machine.describe`. */
+export interface MachineListenStatus {
+  /** The choice, or every interface while nobody has chosen. */
+  choice: MachineListen;
+  /** False on an install that listened before the setting existed and keeps every interface until someone chooses. */
+  chosen: boolean;
+  /** The addresses bound now, as `192.168.1.20:6768`; `0.0.0.0:6768` is every interface. */
+  addresses: string[];
+  /** Callers from public addresses are answered. */
+  allowPublic: boolean;
+  /** The one-time question is open: keep the public address, or close it. Public callers are refused meanwhile. */
+  askPublic: boolean;
+  refusedPublicAt: number | null;
+}
+
+/** Who a machine's runtime runs as: `runsAs` of its host status and of `machine.describe`. */
+export interface MachineRunsAs {
+  user: string;
+  /** Every paired computer and every agent there acts as root. */
+  root: boolean;
+  /** Null: not known (not checked yet, or root, who needs none). */
+  passwordlessSudo: boolean | null;
+}
+
 export interface MachineHostStatus {
   enabled: boolean;
   hostKey: "ready" | "needed" | "error";
@@ -58,6 +129,20 @@ export interface MachineHostStatus {
   code: { expiresAt: number } | null;
   /** Pairing is paused after five wrong attempts in a minute, until then. */
   pausedUntil: number | null;
+  /** The runtime's relay registration from the account (PRO-368); absent from older runtimes. */
+  relayState?: "off" | "signedOut" | "connecting" | "retrying" | "registered" | "superseded";
+  relay?: {
+    relayHostId: string;
+    directorUrl: string;
+    cellUrl: string;
+    assignmentEpoch: number;
+    generation: number;
+    runtimeGeneration: number;
+  } | null;
+  /** Where the runtime listens and who it answers (PRO-487); absent from older runtimes. */
+  listen?: MachineListenStatus | null;
+  /** Who the runtime runs as (PRO-487); absent from older runtimes. */
+  runsAs?: MachineRunsAs | null;
 }
 
 /**
@@ -69,8 +154,19 @@ export interface MachineHostView {
   allowOperating: boolean;
   /** `pairing.keepAwake`, shared with phones. */
   keepAwake: boolean;
+  /** `machines.listen` in settings (PRO-487); null while never chosen: every interface, as before the setting. */
+  listen?: MachineListen | null;
+  /** `machines.allowPublic`: callers from public addresses are answered. */
+  allowPublic?: boolean;
+  /** The addresses the window's own phone listener holds, while the runtime does not hold the port. */
+  phoneListening?: string[];
   /** Null while the runtime cannot be reached. */
   status: MachineHostStatus | null;
+  /**
+   * The attached runtime cannot verify this window and was left running for what it serves (PRO-486):
+   * `runtime_restart_required:<epoch>: <message>`, shown with Restart runtime beside it. Null otherwise.
+   */
+  restartRequired?: string | null;
 }
 
 /**
@@ -97,14 +193,109 @@ export interface InspectedMachineCode {
 /** A machine this computer paired with (`machines.json`); `machines_set_route` answers the updated one. */
 export interface PairedMachine {
   machineId: string;
+  /** The name shown here: the machine's own, or the one given on this computer (`namedHere`). */
   name: string;
+  /** Renamed on this computer (PRO-350, `machines_rename`): the machine's own name no longer replaces it. */
+  namedHere?: boolean;
   os: MachineOs;
   version: string;
   publicKeyB64: string;
+  /** The machine's latest direct addresses (from its code, then from `machine.describe`). */
   directEndpoints: string[];
   route: MachineRoute;
   pairedAt: number;
   lastSeenAt: number | null;
+  /** The route that last worked; null before the first connection (PRO-345). */
+  lastRoute?: MachineRouteUsed | null;
+  /** Where this computer reaches the machine through the relay; null without a relay credential. Never the credential. */
+  relay?: MachineRelayInfo | null;
+  /** From `machine.describe`: a desktop app (true) or headless (false); absent until it was connected (PRO-349). */
+  hasWindow?: boolean;
+}
+
+/**
+ * The connection to a machine (PRO-345, docs/MACHINES.md "As built
+ * (PRO-345)"). One supervisor per machine owns it.
+ */
+
+/** How a route reaches the machine: a direct address on this network, a Tailscale address, or the relay. */
+export type MachineRouteKind = "lan" | "tailscale" | "relay";
+
+/** One route as used: `endpoint` is the direct `ws://…/machine/1` address, null for the relay. */
+export interface MachineRouteUsed {
+  kind: MachineRouteKind;
+  endpoint: string | null;
+}
+
+export interface MachineRelayInfo {
+  directorUrl: string;
+  cellUrl: string;
+  assignmentEpoch: number;
+  relayHostId: string;
+  relayDeviceId: string;
+  /** The account that obtained the credential; the relay is used only while it is signed in. */
+  userId: string;
+}
+
+/**
+ * - `idle`: not attached; nothing touches the network.
+ * - `connecting`: the first round of routes is being tried.
+ * - `direct`: connected on this network or Tailscale (`route.kind` says which).
+ * - `relay`: connected through TerminalX Relay.
+ * - `reconnecting`: a link was lost less than 30 s ago.
+ * - `offline`: no route answered for 30 s; it keeps retrying every 10 s at most.
+ * - `needsUpdate`: the runtime does not serve `machine/1`, or refused `rpc.hello` with `update_required`; `side` says which computer updates.
+ * - `updating`: the machine is handing its runtime over to a new version; a lost link is expected (PRO-354).
+ * - `accessRemoved`: the machine refused this computer's credential; nothing retries until "Try again".
+ * - `disconnected`: the person on the machine pressed Disconnect (PRO-357); nothing retries until "Try again", which works once they let this computer back.
+ *
+ * `localNetworkDenied`: macOS refused Local Network access to a `lan` address.
+ */
+export type MachineConnectionState =
+  | { state: "idle" }
+  | { state: "connecting"; trying: MachineRouteKind[]; localNetworkDenied?: boolean }
+  | {
+      state: "direct" | "relay";
+      route: MachineRouteUsed;
+      /** When this link was established (ms since epoch). */
+      since: number;
+      /** End-to-end round trip of the last `machine.describe`; null until measured. */
+      rttMs: number | null;
+      localNetworkDenied?: boolean;
+    }
+  | {
+      state: "reconnecting";
+      /** When the link was lost (ms since epoch): "Lost it 12 seconds ago". */
+      lostAt: number;
+      attempt: number;
+      retryInMs: number;
+      trying: MachineRouteKind[];
+      localNetworkDenied?: boolean;
+    }
+  | { state: "offline"; lastSeenAt: number | null; retryInMs: number; localNetworkDenied?: boolean }
+  | {
+      state: "needsUpdate";
+      /** The machine's TerminalX version, when known. */
+      version: string | null;
+      /** Which side must update (PRO-354): the older machine, or this Mac when the machine is newer. */
+      side: MachineUpdateSide;
+    }
+  | {
+      /** The machine is handing its runtime over to a new version (PRO-354): "Updating · Back in under a minute". */
+      state: "updating";
+      version: string;
+      since: number;
+    }
+  | { state: "accessRemoved" }
+  | { state: "disconnected" };
+
+/** Which computer must update for the two to work together. */
+export type MachineUpdateSide = "machine" | "thisMac";
+
+/** `machines_connections` and the `machines_connection_changed` event. */
+export interface MachineConnectionView {
+  machineId: string;
+  state: MachineConnectionState;
 }
 
 /**
@@ -124,6 +315,8 @@ export type MachinePairingFailure =
   | "pairing-paused"
   | "unreachable"
   | "invalid-code"
+  /** The machine is reached through the relay only, and nobody is signed in on this Mac (PRO-487). */
+  | "sign-in-required"
   | "cancelled";
 
 /**
@@ -138,3 +331,79 @@ export type MachinePairResult =
 export const MACHINE_CODE_PREFIX = "txm2." as const;
 export const MACHINE_CODE_TTL_MS = 5 * 60_000;
 export const MACHINE_APPROVAL_TTL_MS = 120_000;
+
+/**
+ * Pairing through the account (PRO-349, docs/MACHINES.md "Pairing through the
+ * account"; terminalx-server `machine-relay-access.md`).
+ *
+ * `machines_account_list`: the account's computers from `GET /v1/account/hosts`.
+ * - `signedIn: false`: no TerminalX account is signed in on this Mac.
+ * - `installation`: this Mac's client installation as the account sees it;
+ *   only `ready` lists machines.
+ */
+export type MachineAccountDirectory =
+  | { signedIn: false }
+  | { signedIn: true; installation: "ready" | "approvalRequired" | "reauthenticationRequired"; machines: AccountMachine[] };
+
+/**
+ * One computer on the account.
+ * - `online`: `reachability: "live"` and it advertises `machine-operating.v1`.
+ * - `offline`: it advertises it, but is not live; `lastSeenAt` says when it was.
+ * - `notAvailable`: "Let other computers operate this Mac" is off there (no `machine-operating.v1`).
+ */
+export interface AccountMachine {
+  hostId: string;
+  /** `host_id(hostPublicKeyB64)`: equals a paired machine's `machineId`. */
+  machineId: string;
+  name: string;
+  /** `macos`, `linux`, … as the account lists it; null when it does not say. */
+  platform: string | null;
+  environmentKind: "native" | "wsl" | "ssh" | null;
+  availability: "online" | "offline" | "notAvailable";
+  lastSeenAt: number | null;
+  /** This Mac's own entry: listed, never connectable. */
+  thisMac: boolean;
+  /** Already in Your machines. */
+  paired: boolean;
+}
+
+/**
+ * `machines_account_request { hostId }`: asks the machine for a one-time grant
+ * and waits (up to five minutes) for its sealed offer. The answer is the
+ * offer as a `txm2.` code, so the dialog inspects it, shows the fingerprint
+ * and pairs it exactly as a pasted code. Refused with a string starting
+ * `machine_offline:`, `machine_not_available:`, `grant_refused:`,
+ * `grant_expired:`, `key_mismatch:`, `not_signed_in:` or `cancelled:`.
+ */
+export interface MachineAccountOffer {
+  code: string;
+  grantRequestId: string;
+}
+
+/**
+ * Versions and updates (PRO-354, docs/MACHINES.md "Versions and updates").
+ * `machine.updateStatus`, `machine.update` and `machine.updateChanged`
+ * (`machine/3`) answer this shape.
+ */
+
+export type {
+  MachineUpdateBlocker,
+  MachineUpdateMethod,
+  MachineUpdateOtherComputer,
+  MachineUpdatePhase,
+  MachineUpdateProgress,
+  MachineUpdateRequest,
+  MachineUpdateStatus,
+} from "@terminalx/portable/workspace";
+
+/** The window's report of its own updater run (`machines_app_update_report`). */
+export interface MachineAppUpdateReport {
+  phase: "checking" | "downloading" | "installing" | "restarting" | "upToDate" | "failed";
+  step?: string | null;
+  message?: string | null;
+  /** The version this Mac's updater found: the machine's `available` for an app machine. */
+  available?: string | null;
+}
+
+/** The Tauri event the desktop re-emits when another computer asks this Mac's app to update. */
+export const MACHINES_APP_UPDATE_REQUESTED_EVENT = "machines_app_update_requested" as const;

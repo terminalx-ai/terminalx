@@ -1,0 +1,617 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Bot, BotList, BotRoleTemplate } from "@/types/bots";
+import type { SessionEntry, TabStatus } from "@/types/session";
+
+const mocks = vi.hoisted(() => ({
+  api: {
+    list: vi.fn(),
+    templates: vi.fn(),
+    create: vi.fn(),
+    pause: vi.fn(),
+    resume: vi.fn(),
+    pauseAll: vi.fn(),
+    resumeAll: vi.fn(),
+    pauseHeld: vi.fn(),
+    spentToday: vi.fn(),
+  },
+  switches: { bots: true } as { bots: boolean } | null,
+}));
+
+vi.mock("@/lib/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/api")>()), botsApi: mocks.api }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mocks.switches, getExperimentalSettings: () => mocks.switches }));
+
+const { bootBots, resetBotsForTests } = await import("@/lib/bots");
+const { resetBotsPageForTests, showHireBot, showBotsTeam } = await import("@/lib/botsPage");
+const { getSessionStore, openAgents, upsertSession, patchTab, removeSessions } = await import("@/lib/sessions");
+const { useLeaveBotsWhenOff } = await import("@/lib/botsPage");
+const { conflictOf, resolveKeymap } = await import("@/lib/shortcuts");
+const { BotsView } = await import("./BotsView");
+const { TooltipProvider } = await import("@/components/ui/tooltip");
+const { BotsSidebarSection, NO_BOTS_TEXT } = await import("./BotsSidebarSection");
+const { groupRoles } = await import("./HireBot");
+const { accessLabel, roleDuties } = await import("./botLabels");
+
+const bot = (id: string, name: string, extra: Partial<Bot> = {}): Bot => ({
+  id, slug: name.toLowerCase(), name, roleTitle: "CTO", roleTemplateId: "cto", harness: "claude", model: "", access: "full", runsOn: "thisMac",
+  reportsTo: "owner", worksIn: ["personal"], created: "2026-11-20T10:00:00Z", modified: "2026-11-20T10:00:00Z", ...extra,
+});
+const listOf = (revision: number, bots: Bot[], unreadable = 0): BotList => ({ revision, bots, unreadable });
+const template = (id: string, title: string): BotRoleTemplate => ({
+  id, title, description: `${title} does its job.`, role: `# ${title}\n\n## What you do\n\n- First thing for ${title}.\n- Second thing.\n\n## How you work\n\n- Not listed.\n`,
+  skills: ["code-review"], duties: [{ id: `${id}-duty`, title: `Duty of ${title}`, description: "", wake: { kind: "github", event: "pull_request" }, enabled: false }],
+});
+const TEMPLATES = [template("cto", "CTO"), template("watcher", "Watcher"), template("security-auditor", "Security auditor"), template("mystery", "Mystery role")];
+
+function Screen() {
+  return (
+    <TooltipProvider>
+      <nav aria-label="Sidebar"><BotsSidebarSection /></nav>
+      <main><BotsView /></main>
+    </TooltipProvider>
+  );
+}
+
+async function boot(list: BotList | Error) {
+  if (list instanceof Error) mocks.api.list.mockRejectedValue(list);
+  else mocks.api.list.mockResolvedValue(list);
+  await act(async () => {
+    await bootBots();
+  });
+}
+
+const sidebar = () => within(screen.getByRole("navigation", { name: "Sidebar" }));
+const main = () => within(screen.getByRole("main"));
+
+beforeEach(() => {
+  for (const mock of Object.values(mocks.api)) mock.mockReset();
+  mocks.api.templates.mockResolvedValue(TEMPLATES);
+  mocks.api.pauseHeld.mockResolvedValue({ bots: [], entries: [], errors: [] });
+  mocks.api.spentToday.mockResolvedValue({ usd: 0, day: "2026-11-20" });
+  mocks.switches = { bots: true };
+  resetBotsPageForTests();
+  localStorage.clear();
+});
+afterEach(() => {
+  cleanup();
+  resetBotsForTests();
+});
+
+describe("Bots: the sidebar section and the first-bot page (PRO-467)", () => {
+  it("shows nothing while the experimental switch is off", async () => {
+    mocks.switches = { bots: false };
+    await boot(listOf(1, [bot("1", "Atlas")]));
+    render(<TooltipProvider><BotsSidebarSection /></TooltipProvider>);
+    expect(screen.queryByTestId("bots-sidebar-section")).toBeNull();
+  });
+
+  it("with no bots: the sidebar's short empty text and the first-bot page with three roles", async () => {
+    await boot(listOf(0, []));
+    render(<Screen />);
+    expect(sidebar().getByText(NO_BOTS_TEXT)).toBeTruthy();
+    expect(await main().findByText("Hire your first bot")).toBeTruthy();
+    await waitFor(() => expect(main().getAllByTestId("bots-role-card").map((card) => card.dataset.role)).toEqual(["cto", "watcher", "security-auditor"]));
+    expect(main().getByRole("button", { name: /All 4 roles/ })).toBeTruthy();
+    expect(main().getByText("A bot")).toBeTruthy();
+  });
+
+  it("never says there are no bots when records exist that cannot be read", async () => {
+    await boot(listOf(2, [], 2));
+    render(<Screen />);
+    expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
+    expect(sidebar().getByTestId("bots-sidebar-unreadable").textContent).toMatch(/2 bots were saved by a newer TerminalX/);
+    expect(main().queryByText("Hire your first bot")).toBeNull();
+    expect(main().getByTestId("bots-unreadable")).toBeTruthy();
+  });
+
+  it("never says there are no bots when they could not be read", async () => {
+    await boot(new Error("store is locked"));
+    render(<Screen />);
+    expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
+    expect(sidebar().getByRole("alert").textContent).toMatch(/store is locked/);
+    expect(main().queryByText("Hire your first bot")).toBeNull();
+  });
+
+  it("hires from a first-bot card in one click: the bot shows in the sidebar and the table at once", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockResolvedValue(bot("b1", "CTO"));
+    render(<Screen />);
+    fireEvent.click(await main().findByRole("button", { name: "Hire CTO" }));
+    await waitFor(() => expect(mocks.api.create).toHaveBeenCalledWith("cto", "CTO"));
+    await waitFor(() => expect(sidebar().getAllByTestId("bot-row")).toHaveLength(1));
+    expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
+    expect(main().getAllByTestId("bots-table-row").map((row) => row.dataset.bot)).toEqual(["b1"]);
+  });
+
+  it("says why a one-click hire failed and lets it be tried again", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("The bots' store is read-only.");
+    render(<Screen />);
+    fireEvent.click(await main().findByRole("button", { name: "Hire CTO" }));
+    expect((await main().findByRole("alert")).textContent).toMatch(/read-only/);
+    expect(main().getByText("Hire your first bot")).toBeTruthy();
+    await waitFor(() => expect((main().getByRole("button", { name: "Hire CTO" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(sidebar().queryAllByTestId("bot-row")).toHaveLength(0);
+  });
+});
+
+describe("Bots: a bot's own view (PRO-468)", () => {
+  it("opens from its sidebar row and its name in the table", async () => {
+    await boot(listOf(2, [bot("b1", "Atlas"), bot("b2", "Argus")]));
+    render(<Screen />);
+    const [first, second] = await waitFor(() => {
+      const rows = sidebar().getAllByTestId("bot-row");
+      expect(rows).toHaveLength(2);
+      return rows;
+    });
+    fireEvent.click(first);
+    expect([getSessionStore().view, getSessionStore().selectedBotId]).toEqual(["bot", first.dataset.bot]);
+    expect(first.getAttribute("aria-current")).toBe("page");
+    act(() => showBotsTeam());
+    const open = main().getAllByTestId("bot-open");
+    fireEvent.click(open[1]);
+    expect([getSessionStore().view, getSessionStore().selectedBotId]).toEqual(["bot", second.dataset.bot]);
+  });
+});
+
+describe("Bots: states (PRO-467 review)", () => {
+  it("says it is reading until the list arrives, with no counts or table", async () => {
+    mocks.api.list.mockReturnValue(new Promise(() => {}));
+    void bootBots();
+    act(() => showBotsTeam());
+    render(<Screen />);
+    expect(main().getByTestId("bots-reading")).toBeTruthy();
+    expect(main().queryByTestId("bots-stats")).toBeNull();
+    expect(main().queryByTestId("bots-table")).toBeNull();
+    expect(main().queryByText("Hire your first bot")).toBeNull();
+    expect(sidebar().queryByText(NO_BOTS_TEXT)).toBeNull();
+  });
+
+  it("on a failed read shows no counts or table and offers Retry, which reads again", async () => {
+    await boot(new Error("store is locked"));
+    render(<Screen />);
+    expect(main().queryByTestId("bots-stats")).toBeNull();
+    expect(main().queryByTestId("bots-table")).toBeNull();
+    mocks.api.list.mockResolvedValue(listOf(3, [bot("a", "Atlas")]));
+    fireEvent.click(main().getByTestId("bots-retry"));
+    await waitFor(() => expect(main().getAllByTestId("bots-table-row")).toHaveLength(1));
+    expect(main().queryByRole("alert")).toBeNull();
+  });
+
+  it("counts records this version cannot read alongside the ones it can, the same in the sidebar and the Team card", async () => {
+    await boot(listOf(2, [bot("a", "Atlas"), bot("i", "Iris", { reportsTo: "hidden-lead" })], 2));
+    render(<Screen />);
+    expect(screen.getByTestId("bots-sidebar-section").querySelector("[data-list-name]")?.nextElementSibling?.textContent).toBe("4");
+    const team = main().getAllByTestId("bots-stat")[0].textContent;
+    expect(team).toMatch(/^Team4 bots/);
+    expect(team).toMatch(/2 cannot be read by this version/);
+    expect(sidebar().getAllByTestId("bot-row")).toHaveLength(2);
+    // Its lead may be one of the records that cannot be read: it is not called removed.
+    const iris = main().getAllByTestId("bots-table-row")[1];
+    expect(iris.textContent).toMatch(/A bot this version can't read/);
+    expect(iris.textContent).not.toMatch(/A removed bot/);
+  });
+
+  it("a folded section still says that records cannot be read, and why the list failed", async () => {
+    await boot(listOf(2, [bot("a", "Atlas")], 1));
+    render(<Screen />);
+    fireEvent.click(sidebar().getByRole("button", { name: "Bots", expanded: true }));
+    expect(sidebar().queryAllByTestId("bot-row")).toHaveLength(0);
+    expect(sidebar().getByTestId("bots-sidebar-unreadable")).toBeTruthy();
+    // The fold is kept: open it again for the tests after this one.
+    fireEvent.click(sidebar().getByRole("button", { name: "Bots", expanded: false }));
+  });
+
+  it("names a lowered access level, an unknown place and an unknown wake as themselves", async () => {
+    const { wakeLabel } = await import("./botLabels");
+    expect(wakeLabel({ kind: "calendar" } as never)).toBe("calendar");
+    await boot(listOf(2, [bot("a", "Atlas", { access: "readReport", runsOn: "otherMac" })]));
+    render(<Screen />);
+    expect(main().getByTestId("bot-role-line").textContent).toBe("CTO · Read and report");
+    expect(main().getByTestId("bots-table-row").textContent).toMatch(/otherMac/);
+  });
+});
+
+describe("Bots: the switch and the shortcut", () => {
+  function Bounce() {
+    useLeaveBotsWhenOff();
+    return null;
+  }
+
+  it("leaves the Bots page for the welcome screen when the switch goes off, not before the switches are read", () => {
+    act(() => showBotsTeam());
+    mocks.switches = null;
+    const { rerender } = render(<Bounce />);
+    expect(getSessionStore().view).toBe("bots");
+    mocks.switches = { bots: false };
+    act(() => rerender(<Bounce key="off" />));
+    expect(getSessionStore().view).toBe("welcome");
+    // Any other page is left alone.
+    act(() => openAgents());
+    rerender(<Bounce key="again" />);
+    expect(getSessionStore().view).toBe("agents");
+  });
+
+  it("with the switch off, ⇧⌘J belongs to nothing: another action can take it and keeps it", () => {
+    const action = { id: "app.home" } as const;
+    expect(conflictOf("mod+shift+j", action.id)?.id).toBe("app.bots");
+    mocks.switches = { bots: false };
+    expect(conflictOf("mod+shift+j", action.id)).toBeNull();
+    const keymap = resolveKeymap({ "app.home": ["mod+shift+j"] });
+    expect(keymap["app.home"]).toEqual(["mod+shift+j"]);
+    expect(keymap["app.bots"]).toEqual([]);
+  });
+
+  it("Pause all has ⌥⇧⌘P, which nothing else holds (⇧⌘P is the markdown preview's), and frees it with the switch off", () => {
+    const keymap = resolveKeymap({});
+    expect(keymap["app.pauseAllBots"]).toEqual(["mod+alt+shift+p"]);
+    expect(keymap["files.togglePreview"]).toContain("mod+shift+p");
+    expect(conflictOf("mod+alt+shift+p", "app.home")?.id).toBe("app.pauseAllBots");
+    mocks.switches = { bots: false };
+    expect(conflictOf("mod+alt+shift+p", "app.home")).toBeNull();
+  });
+});
+
+describe("Bots: hiring (23.03)", () => {
+  it("asks for a name and nothing else, hires with the picked role, then shows the team", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockResolvedValue(bot("b2", "Argus", { roleTemplateId: "watcher", roleTitle: "Watcher" }));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    await waitFor(() => expect(main().getByRole("heading", { name: "Watcher" })).toBeTruthy());
+    // What it does comes from the role's own text; every duty starts off.
+    expect(main().getByText("First thing for Watcher.")).toBeTruthy();
+    expect(main().queryByText("Not listed.")).toBeNull();
+    const duty = main().getByRole("switch", { name: /Duty of Watcher/ });
+    expect(duty.getAttribute("aria-checked")).toBe("false");
+    const submit = main().getByTestId("bots-hire-submit") as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    const form = main().getByTestId("bots-hire-form");
+    expect(within(form).getAllByRole("textbox")).toHaveLength(1);
+    fireEvent.change(main().getByTestId("bots-hire-name"), { target: { value: "  Argus " } });
+    expect(submit.textContent).toMatch(/Hire Argus/);
+    fireEvent.click(submit);
+    await waitFor(() => expect(mocks.api.create).toHaveBeenCalledWith("watcher", "Argus"));
+    await waitFor(() => expect(main().getByTestId("bots-team")).toBeTruthy());
+    expect(main().getAllByTestId("bots-table-row").map((row) => row.dataset.bot)).toEqual(["b2"]);
+    expect(sidebar().getByRole("button", { name: /Argus, Watcher/ })).toBeTruthy();
+    expect(getSessionStore().view).toBe("bots");
+  });
+
+  it("keeps the name and says why when hiring is refused", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("A bot named Argus already exists.");
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    const input = await main().findByTestId("bots-hire-name");
+    fireEvent.change(input, { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    expect((await main().findByRole("alert")).textContent).toMatch(/already exists/);
+    expect((input as HTMLInputElement).value).toBe("Argus");
+    expect(main().getByTestId("bots-hire-page")).toBeTruthy();
+  });
+
+  it("offers Restart runtime when the runtime cannot confirm a hire, as pairing does", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockRejectedValue("runtime_restart_required:e1: The TerminalX runtime that is running was not started by this window, so it cannot confirm that you asked. Restarting stops what it runs: Atlas's chat.");
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    const alert = await main().findByRole("alert");
+    expect(alert.textContent).toMatch(/cannot confirm that you asked/);
+    expect(alert.textContent).not.toMatch(/runtime_restart_required/);
+    expect(main().getByRole("button", { name: /Restart runtime/ })).toBeTruthy();
+  });
+
+  it("starts with the defaults the new bot really gets, focuses the name and keeps it when the role changes", async () => {
+    await boot(listOf(0, []));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    const input = (await main().findByTestId("bots-hire-name")) as HTMLInputElement;
+    expect(document.activeElement).toBe(input);
+    const defaults = main().getByTestId("bots-hire-defaults").textContent;
+    expect(defaults).toMatch(/Works inPersonal/);
+    expect(defaults).toMatch(/AccessFull access/);
+    fireEvent.change(input, { target: { value: "Argus" } });
+    fireEvent.click(main().getAllByTestId("bots-hire-role").find((row) => row.dataset.role === "cto")!);
+    await waitFor(() => expect(main().getByRole("heading", { name: "CTO" })).toBeTruthy());
+    expect((main().getByTestId("bots-hire-name") as HTMLInputElement).value).toBe("Argus");
+  });
+
+  it("does not take the person back to the team when they went elsewhere while the hire ran", async () => {
+    await boot(listOf(0, []));
+    let answer!: (value: Bot) => void;
+    mocks.api.create.mockReturnValue(new Promise<Bot>((resolve) => (answer = resolve)));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    await waitFor(() => expect(mocks.api.create).toHaveBeenCalled());
+    act(() => openAgents());
+    await act(async () => answer(bot("b2", "Argus")));
+    expect(getSessionStore().view).toBe("agents");
+  });
+
+  it("after a hire the team page takes the focus", async () => {
+    await boot(listOf(0, []));
+    mocks.api.create.mockResolvedValue(bot("b2", "Argus"));
+    act(() => showHireBot("watcher"));
+    render(<Screen />);
+    fireEvent.change(await main().findByTestId("bots-hire-name"), { target: { value: "Argus" } });
+    fireEvent.click(main().getByTestId("bots-hire-submit"));
+    await waitFor(() => expect(document.activeElement).toBe(main().getByRole("heading", { name: "Bots", level: 1 })));
+  });
+
+  it("groups the roles, putting one this build does not place under Other, and filters them", async () => {
+    expect(groupRoles(TEMPLATES).map((group) => [group.label, group.templates.map((value) => value.id)])).toEqual([
+      ["Lead", ["cto"]],
+      ["Guard", ["security-auditor", "watcher"]],
+      ["Other", ["mystery"]],
+    ]);
+    await boot(listOf(0, []));
+    act(() => showHireBot());
+    render(<Screen />);
+    await waitFor(() => expect(main().getAllByTestId("bots-hire-role")).toHaveLength(4));
+    fireEvent.change(main().getByRole("textbox", { name: "Search roles" }), { target: { value: "secur" } });
+    expect(main().getAllByTestId("bots-hire-role").map((row) => row.dataset.role)).toEqual(["security-auditor"]);
+  });
+
+  it("the sidebar's + opens Hire a bot", async () => {
+    await boot(listOf(1, [bot("1", "Atlas")]));
+    act(() => showBotsTeam());
+    render(<Screen />);
+    fireEvent.click(sidebar().getByRole("button", { name: "Hire a bot" }));
+    expect(await main().findByTestId("bots-hire-page")).toBeTruthy();
+  });
+});
+
+describe("Bots: the team table (23.02)", () => {
+  const atlas = bot("a", "Atlas");
+  const iris = bot("i", "Iris", { roleTemplateId: "ux-designer", roleTitle: "UX designer", reportsTo: "a", worksIn: ["personal", "org-1"] });
+  const ghost = bot("g", "Ghost", { roleTemplateId: "from-the-future", roleTitle: "Future role", reportsTo: "gone", runsOn: "cloudWorkspace", worksIn: [], paused: { at: "2026-11-20T11:00:00Z", by: "owner" } });
+
+  it("shows each bot's role, pause state, where it runs, whom it reports to and where it works", async () => {
+    await boot(listOf(4, [atlas, iris, ghost]));
+    render(<Screen />);
+    const rows = main().getAllByTestId("bots-table-row");
+    expect(rows.map((row) => row.dataset.bot)).toEqual(["a", "i", "g"]);
+    const cells = (row: HTMLElement) => [...row.querySelectorAll("td")].map((cell) => cell.textContent?.trim());
+    expect(cells(rows[0]).slice(0, 6)).toEqual(["AtlasCTO", "Quiet", "–", "This Mac", "You", "Personal"]);
+    expect(cells(rows[1]).slice(3, 6)).toEqual(["This Mac", "Atlas", "Personal, org-1"]);
+    // A place and a role a newer app wrote are shown as their own text; a lead that is gone is said to be.
+    expect(cells(rows[2]).slice(0, 6)).toEqual(["GhostFuture role", "Paused", "–", "cloudWorkspace", "A removed bot", "Wherever you give it work"]);
+    expect(rows[2].dataset.paused).toBe("true");
+    expect(within(rows[2]).getByTestId("bot-avatar-paused")).toBeTruthy();
+    expect(main().getAllByTestId("bots-stat").map((card) => card.textContent)).toEqual([
+      "Team3 bots2 on this Mac · 1 elsewhere",
+      "Needs you0Nothing waiting",
+      "Working now2 ready1 paused",
+      "Spent today—Model and cloud time · shown, never capped",
+    ]);
+    expect(sidebar().getAllByTestId("bot-row")).toHaveLength(3);
+    expect(sidebar().getByRole("button", { name: /Ghost, Future role, Paused, runs on cloudWorkspace/ })).toBeTruthy();
+  });
+
+  it("Pause all pauses every bot and then offers Resume all", async () => {
+    await boot(listOf(4, [atlas, iris]));
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    mocks.api.pauseAll.mockResolvedValue(listOf(5, [{ ...atlas, paused: pausedAt }, { ...iris, paused: pausedAt }]));
+    mocks.api.resumeAll.mockResolvedValue(listOf(6, [atlas, iris]));
+    render(<Screen />);
+    // The call and the store update it makes settle inside `act`, so nothing waits on waitFor's one second, which a
+    // loaded machine can take to render the paused page (PRO-492).
+    await act(async () => {
+      fireEvent.click(main().getByTestId("bots-pause-all"));
+    });
+    expect(main().getByTestId("bots-all-paused")).toBeTruthy();
+    expect(mocks.api.pauseAll).toHaveBeenCalledWith("app");
+    // Every bot paused: the paused page (23.12), a row per bot with its Resume.
+    expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent?.trim())).toEqual(["Paused", "Paused"]);
+    expect(main().getAllByTestId("bots-paused-resume")).toHaveLength(2);
+    await act(async () => {
+      fireEvent.click(main().getByTestId("bots-resume-all"));
+    });
+    expect(main().queryByTestId("bots-all-paused")).toBeNull();
+    expect(main().getByTestId("bots-pause-all")).toBeTruthy();
+  });
+
+  it("shows a resume a bot asked for from the CLI on the team page and its sidebar row", async () => {
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    await boot(listOf(4, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }]));
+    render(<Screen />);
+    await waitFor(() => expect(main().getAllByTestId("bots-paused-was")).toHaveLength(2));
+    expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent?.trim())).toEqual(["Paused · asks to resume", "Paused"]);
+    expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · asks to resume, runs on/ })).toBeTruthy();
+    expect(sidebar().getByRole("button", { name: /Iris, .*, Paused, runs on/ })).toBeTruthy();
+  });
+
+  it("all paused: the paused page says who paused them and when, what each holds, and resumes one or all (23.12)", async () => {
+    const at = new Date(Date.now() - 18 * 60_000).toISOString();
+    const paused = (was: string, extra = {}) => ({ at, by: "owner", from: "phone", stopped: { was, spent: { day: "2026-11-20", usd: 1 }, ...extra } });
+    await boot(listOf(4, [{ ...atlas, paused: paused("was running 2 workers", { workers: 2 }) }, { ...iris, paused: paused("was quiet") }]));
+    mocks.api.pauseHeld.mockResolvedValue({
+      bots: [{ id: "a", inTurn: 0, needsYou: 0 }, { id: "i", inTurn: 0, needsYou: 0 }],
+      entries: [
+        { kind: "skipped", source: "duty", botId: "a", dutyId: "d1", name: "Stalled sessions and runs", at, count: 3 },
+        { kind: "kept", source: "answer", botId: "i", number: 4, messageKind: "answer", at },
+      ],
+      errors: [],
+    });
+    mocks.api.spentToday.mockImplementation(async (id: string) => ({ usd: id === "a" ? 3.5 : 1, day: "2026-11-20" }));
+    const { bootBotPause, noteBotsForPause, resetBotPauseForTests } = await import("@/lib/botPause");
+    await bootBotPause();
+    render(<Screen />);
+    await act(async () => noteBotsForPause([{ ...atlas, paused: paused("") }]));
+    try {
+      await waitFor(() => expect(main().getAllByTestId("bots-held-entry")).toHaveLength(2));
+      expect(main().getByText("Both bots are paused")).toBeTruthy();
+      expect(main().getByTestId("bots-paused-by").textContent).toMatch(/^You paused them from your phone at \d\d:\d\d, 18 minutes ago\. Nothing runs on its own/);
+      expect(main().getAllByTestId("bots-paused-was").map((cell) => cell.textContent)).toEqual(["Paused · was running 2 workers", "Paused · was quiet"]);
+      expect(main().getAllByTestId("bots-paused-held").map((cell) => cell.textContent)).toEqual(["2 workers stopped after their current step · 3 checks skipped so far", "Your answer is kept and used on resume"]);
+      expect(main().getAllByTestId("bots-held-entry").map((row) => row.dataset.kind)).toEqual(["skipped", "kept"]);
+      await waitFor(() => expect(main().getAllByTestId("bots-stat").map((card) => card.textContent)).toEqual([
+        "Working now02 workers stopped at a safe point",
+        "Needs you0you can still answer; used on resume",
+        "Held while paused43 checks skipped · 1 kept for resume",
+        "Spent today$4.50$2.50 since the pause",
+      ]));
+      expect(sidebar().getByRole("button", { name: /Atlas, .*, Paused · 2 workers stopped, runs on/ })).toBeTruthy();
+      expect(sidebar().getByRole("button", { name: /Iris, .*, Paused · your answer is kept, runs on/ })).toBeTruthy();
+
+      mocks.api.resume.mockResolvedValue(iris);
+      fireEvent.click(main().getByRole("button", { name: "Resume Iris" }));
+      await waitFor(() => expect(mocks.api.resume).toHaveBeenCalledWith("i"));
+      await waitFor(() => expect(main().queryByTestId("bots-paused")).toBeNull());
+      // Some paused: the team again, with what the paused one holds under it.
+      expect(main().getByTestId("bot-paused-held").textContent).toBe("2 workers stopped after their current step · 3 checks skipped so far");
+      expect(main().getByText("Held while paused")).toBeTruthy();
+    } finally {
+      resetBotPauseForTests();
+    }
+  });
+
+  it("pauses and resumes one bot from its row", async () => {
+    // Two bots: pausing the only one would make every bot paused, and show the paused page instead of the table.
+    await boot(listOf(4, [atlas, iris]));
+    mocks.api.pause.mockResolvedValue({ ...atlas, paused: { at: "2026-11-20T12:00:00Z", by: "owner" } });
+    render(<Screen />);
+    fireEvent.click(main().getByRole("button", { name: "Pause Atlas" }));
+    await waitFor(() => expect(main().getAllByTestId("bots-table-row").map((row) => row.dataset.paused)).toEqual(["true", "false"]));
+    expect(main().queryByTestId("bots-paused")).toBeNull();
+    expect(mocks.api.pause).toHaveBeenCalledWith("a", "app");
+    expect(main().getByRole("button", { name: "Resume Atlas" })).toBeTruthy();
+  });
+});
+
+describe("Bots: what a bot is doing, from its sessions (PRO-515)", () => {
+  const atlas = bot("a", "Atlas");
+  const iris = bot("i", "Iris", { roleTemplateId: "ux-designer", roleTitle: "UX designer" });
+  const session = (id: string, title: string, status: TabStatus, extra: Partial<SessionEntry> = {}): SessionEntry => ({
+    id, title, kind: "quick", projectPath: "/bots/a", cwd: "/bots/a", worktreeRemoved: false, archived: false, created: "2026-11-22T10:00:00Z", modified: "2026-11-22T10:00:00Z",
+    tabs: [{ id: `${id}-t`, title: "Claude", harness: "claude", permissionMode: "bypassPermissions", status, created: "2026-11-22T10:00:00Z", modified: "2026-11-22T10:00:00Z" }],
+    ...extra,
+  } as SessionEntry);
+  const seeded: string[] = [];
+  const seed = (...sessions: SessionEntry[]) => act(() => {
+    for (const entry of sessions) {
+      seeded.push(entry.id);
+      upsertSession(entry);
+    }
+  });
+  afterEach(() => {
+    removeSessions(seeded.splice(0));
+  });
+  const row = (id: string) => sidebar().getAllByTestId("bot-row").find((el) => el.dataset.bot === id)!;
+  const sidebarStatus = (id: string) => within(row(id)).getByTestId("bot-row-status");
+  const doingNow = (id: string) => within(main().getAllByTestId("bots-table-row").find((el) => el.dataset.bot === id)!).getByTestId("bot-doing-now");
+
+  it("a bot with a running session says it is working, and on what, in the sidebar and in Doing now; one without stays Quiet", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("home-a", "Home chat", "in_progress", { bot: { id: "a", home: true } }), session("home-i", "Home chat", "idle", { bot: { id: "i", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Working · Home chat");
+    expect(sidebarStatus("a").dataset.doing).toBe("working");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Home chat");
+    expect(doingNow("a").dataset.doing).toBe("working");
+    expect(sidebar().getByRole("button", { name: /Atlas, CTO, Working · Home chat, runs on This Mac/ })).toBeTruthy();
+    // Iris has a chat, and nothing of hers is in a turn.
+    expect(sidebarStatus("i").textContent).toBe("Quiet");
+    expect(doingNow("i").textContent?.trim()).toBe("Quiet");
+    expect(doingNow("i").dataset.doing).toBe("quiet");
+  });
+
+  it("follows the session as its turn starts and ends, with no reload", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("home-a", "Home chat", "idle", { bot: { id: "a", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Quiet");
+    expect(doingNow("a").textContent?.trim()).toBe("Quiet");
+    act(() => patchTab("home-a", "home-a-t", { status: "in_progress" }));
+    expect(sidebarStatus("a").textContent).toBe("Working · Home chat");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Home chat");
+    act(() => patchTab("home-a", "home-a-t", { status: "completed" }));
+    expect(sidebarStatus("a").textContent).toBe("Quiet");
+    expect(doingNow("a").textContent?.trim()).toBe("Quiet");
+    expect(mocks.api.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a duty's run, a hand-off's chat, a run's lead and its workers as the bot's, and nobody else's sessions", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(
+      // A duty's run of Atlas's, and a run he leads with two workers: sessions his chats started.
+      session("duty", "Stalled sessions and runs", "in_progress", { bot: { id: "a" }, botDuty: { id: "auto-1" } }),
+      session("lead", "Phase 2: restarting blocked runs", "in_progress", { bot: { id: "a" } }),
+      session("w1", "Piece 1", "in_progress", { botStarted: { id: "a" }, runWorker: true }),
+      session("w2", "Piece 2", "in_progress", { botStarted: { id: "a" }, runWorker: true }),
+      // Not a bot's: an ordinary session at work changes no bot's line.
+      session("plain", "Fix the login page", "in_progress"),
+      // Iris's hand-off chat, archived while in a turn as the index last said: not counted.
+      session("gone", "Hand-off #3", "in_progress", { bot: { id: "i" }, archived: true }),
+    );
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Working · Stalled sessions and runs · 2 workers");
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Stalled sessions and runs · 2 workers");
+    expect(doingNow("i").textContent?.trim()).toBe("Quiet");
+    // The duty's run ends: the run he leads is what he is on.
+    act(() => patchTab("duty", "duty-t", { status: "completed" }));
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Phase 2: restarting blocked runs · 2 workers");
+    // Only workers left at work.
+    act(() => patchTab("lead", "lead-t", { status: "completed" }));
+    act(() => patchTab("w1", "w1-t", { status: "completed" }));
+    expect(sidebarStatus("a").textContent).toBe("Working · 1 worker");
+    // Iris's hand-off chat, in a turn: hers.
+    seed(session("handoff", "Hand-off #4 from Atlas", "in_progress", { bot: { id: "i" } }));
+    expect(doingNow("i").textContent?.trim()).toBe("Working · Hand-off #4 from Atlas");
+  });
+
+  it("a session stopped on the person says it waits for them, and working wins over waiting", async () => {
+    await boot(listOf(2, [atlas, iris]));
+    seed(session("ask", "Review #12", "waiting", { bot: { id: "a" } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Waiting for you · Review #12");
+    expect(doingNow("a").dataset.doing).toBe("waiting");
+    seed(session("busy", "Chat with Atlas", "in_progress", { bot: { id: "a" } }));
+    expect(doingNow("a").textContent?.trim()).toBe("Working · Chat with Atlas");
+  });
+
+  it("a paused bot keeps its paused lines whatever its sessions say", async () => {
+    const pausedAt = { at: "2026-11-20T12:00:00Z", by: "owner" };
+    await boot(listOf(2, [{ ...atlas, paused: pausedAt, resumeRequest: { at: "2026-11-20T12:05:00Z", by: "cli" } }, { ...iris, paused: pausedAt }, bot("s", "Sentry")]));
+    seed(session("home-a", "Home chat", "in_progress", { bot: { id: "a", home: true } }), session("home-i", "Home chat", "in_progress", { bot: { id: "i", home: true } }));
+    render(<Screen />);
+    expect(sidebarStatus("a").textContent).toBe("Paused · asks to resume");
+    expect(sidebarStatus("i").textContent).toBe("Paused");
+    expect(doingNow("a").textContent?.trim()).toBe("Paused · asks to resume");
+    expect(doingNow("i").textContent?.trim()).toBe("Paused");
+    expect(doingNow("s").textContent?.trim()).toBe("Quiet");
+  });
+});
+
+describe("Bots: labels", () => {
+  it("reads What it does from the role's text and names an unknown access level plainly", () => {
+    expect(roleDuties(TEMPLATES[0].role)).toEqual(["First thing for CTO.", "Second thing."]);
+    expect(roleDuties("No headings here")).toEqual([]);
+    expect(accessLabel("full")).toBe("Full access");
+    expect(accessLabel("ownerOnly")).toBe("ownerOnly (acts as Read and report)");
+  });
+});
+
+describe("Bots: the destination (PRO-467)", () => {
+  const destinations = async () => {
+    const { AppDestinations } = await import("@/components/layout/ProjectRail");
+    const noop = () => {};
+    render(<TooltipProvider><AppDestinations onOpenHome={noop} onNewSession={noop} onSearch={noop} onOpenIssues={noop} onOpenAgents={noop} onOpenAutomations={noop} /></TooltipProvider>);
+    return screen.getAllByRole("button").map((button) => button.getAttribute("aria-label"));
+  };
+
+  it("lists Bots before Automations only while the switch is on", async () => {
+    const labels = await destinations();
+    expect(labels.indexOf("Bots")).toBeGreaterThan(-1);
+    expect(labels.indexOf("Bots")).toBe(labels.indexOf("Automations") - 1);
+    cleanup();
+    mocks.switches = { bots: false };
+    expect(await destinations()).not.toContain("Bots");
+  });
+});

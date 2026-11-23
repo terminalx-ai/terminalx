@@ -113,6 +113,10 @@ async function finishNewPairing(journal: PairingJournal, clientSecretKey: Uint8A
   const offer = offerFromJournal(journal);
   const candidates: PairingCandidate[] = directEndpoints(offer).map((endpoint) => directCandidate({ ...offer, endpoint }, clientSecretKey, progress));
   if (offer.relay.inviteExpiresAt > Date.now()) candidates.push(inviteCandidate(offer, clientSecretKey, progress));
+  if (candidates.length === 0) {
+    await pairingStep("persistence", clearPairingJournal);
+    throw new PairingFailure("parsing", "expired-offer");
+  }
   const winner = await forgetIfNotApproved(() => firstVerified(candidates));
   try {
     await describeDevice(winner.client, device);
@@ -183,6 +187,7 @@ async function pairDirect(args: {
 }
 
 function firstVerified(candidates: PairingCandidate[]): Promise<PairingCandidate> {
+  if (!candidates.length) return Promise.reject(new PairingFailure("transport"));
   return new Promise((resolve, reject) => {
     const successes: PairingCandidate[] = [];
     let failures = 0;

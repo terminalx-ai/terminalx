@@ -19,7 +19,7 @@ const { automationStore, createAutomation, updateAutomation, runAutomationNow, s
   openUrl: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => true) }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 vi.mock("@/components/AgentMark", () => ({ AgentMark: () => <span aria-hidden>agent</span> }));
 vi.mock("@/components/chat/Markdown", () => ({ Markdown: ({ text }: { text: string }) => <div>{text}</div> }));
@@ -69,17 +69,18 @@ vi.mock("@/lib/prefs", () => ({
   subscribePrefs: () => () => {},
 }));
 // The store lists archived sessions too, flagged: only the sidebar filters them out.
-const sessionList = vi.hoisted(() => ({ archived: false }));
+const sessionList = vi.hoisted(() => ({ archived: false, status: "completed" }));
 vi.mock("@/lib/sessions", () => ({
   selectSession,
   useSessionStore: () => ({
     projects: [{ path: "/repo", name: "Raccoon" }, { path: "/docs", name: "Docs", kind: "folder" }],
     harnesses: discovery.harnesses,
-    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: sessionList.archived }],
+    sessions: [{ id: "session-7", title: "Automation run 7", projectPath: "/repo", archived: sessionList.archived, tabs: [{ id: "tab-7", status: sessionList.status }] }],
   }),
 }));
 
 const { AutomationsView } = await import("./AutomationsView");
+const { automationsApi } = await import("@/lib/api");
 const initialModels = structuredClone(catalog.models);
 const initialHarnesses = structuredClone(discovery.harnesses);
 
@@ -148,6 +149,7 @@ function run(overrides: Partial<AutomationRun> = {}): AutomationRun {
 }
 
 beforeEach(() => {
+  automationStore.issueStates = {};
   catalog.models = structuredClone(initialModels);
   discovery.harnesses = structuredClone(initialHarnesses);
   automationStore.automations = [
@@ -157,6 +159,7 @@ beforeEach(() => {
   automationStore.runs = { "automation-1": [run()] };
   automationStore.loadingRuns = {};
   sessionList.archived = false;
+  sessionList.status = "completed";
   prefs.lastMode = "auto";
   prefs.lastModel = {};
   prefs.lastEffort = {};
@@ -183,6 +186,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("automation workspace navigation", () => {
+  it("shows a live run waiting for its session without reopening a finished run", async () => {
+    sessionList.status = "waiting";
+    automationStore.runs = { "automation-1": [run({ status: "running", endedAt: null }), run({ runId: "old", runNumber: 6 })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText("Waiting")).toBeTruthy();
+    expect(screen.getByText("Completed")).toBeTruthy();
+  });
+
   it("opens a selected automation in a dedicated run-table view and returns to the list", async () => {
     render(<AutomationsView />);
 
@@ -230,7 +242,7 @@ describe("automation workspace navigation", () => {
     render(<AutomationsView />);
     fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
 
-    for (const label of ["Starting", "Running", "Completed", "Failed", "Cancelled", "Timed out", "Precheck skipped", "Missed", "Unavailable"]) {
+    for (const label of ["Starting", "Running", "Completed", "Failed", "Cancelled", "Timed out", "Nothing new", "Missed", "Unavailable"]) {
       expect(await screen.findByText(label)).toBeTruthy();
     }
 
@@ -586,5 +598,170 @@ describe("archiving a run when it completes", () => {
     fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
     await screen.findByRole("table", { name: "Automation runs" });
     expect(screen.queryByText("Archived")).toBeNull();
+  });
+});
+
+describe("event trigger sources", () => {
+  it("saves a GitHub pull request trigger from the picker and shows its pull request in the run history", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    expect(screen.getByRole("radio", { name: "Linear issue" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub pull request" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "acme/widgets" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Review pushes" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Review #{{number}}." } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review pushes" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({
+      issueTrigger: null,
+      workspace: "newWorktree",
+      eventTrigger: expect.objectContaining({ source: expect.objectContaining({ kind: "githubPullRequest", repo: "acme/widgets", events: ["opened", "pushed"] }) }),
+    }));
+    expect(screen.getByText("GitHub pull requests in acme/widgets: opened, new commits pushed, checked every 5 min")).toBeTruthy();
+  });
+
+  it("keeps the event trigger when the automation is switched off, and shows the trigger's notice", async () => {
+    const eventTrigger = { source: { kind: "githubPullRequest" as const, repo: "acme/widgets", events: ["pushed" as const], base: null, author: null, labels: [], draft: null, fromForks: false }, pollIntervalMinutes: 5, maxRunsPerTick: 3 };
+    automationStore.automations = automationStore.automations.map((value) => value.id === "automation-1" ? { ...value, workspace: "newWorktree", eventTrigger } : value);
+    automationStore.issueStates = { "automation-1": { automationId: "automation-1", notice: "Stopped waking on pull request #2 after 3 runs in a row with no push from anyone else." } };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText(/Stopped waking on pull request #2/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "Disable automation" }));
+    await waitFor(() => expect(updateAutomation).toHaveBeenLastCalledWith("automation-1", expect.objectContaining({ enabled: false, eventTrigger })));
+  });
+
+  it("sets an issue search's runs a day, empty for the default, and shows its day's hold (PRO-490 review)", async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    fireEvent.click(screen.getByRole("radio", { name: "GitHub issues" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Repository" }), { target: { value: "acme/widgets" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Fix issues" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Fix it." } });
+    const field = screen.getByRole("textbox", { name: "Runs a day, at most" });
+    fireEvent.change(field, { target: { value: "1.5" } });
+    expect((screen.getByRole("button", { name: "Create automation" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(field, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Fix issues" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ issueTrigger: expect.objectContaining({ maxRunsPerDay: 20 }) }));
+  });
+
+  it("shows an issue search's notice, as an event trigger's", async () => {
+    automationStore.automations = automationStore.automations.map((value) => value.id === "automation-1" ? { ...value, workspace: "newWorktree", issueTrigger: { provider: "github" as const, repo: "acme/widgets", query: "label:bot", pollIntervalMinutes: 5, maxRunsPerTick: 3, runOnExisting: false, report: { comment: true, addLabels: [], removeLabels: [], openPr: false, onFailure: { comment: true, addLabels: [] } } } } as never : value);
+    automationStore.issueStates = { "automation-1": { automationId: "automation-1", notice: "Holding what it read until 2026-11-23 10:00 UTC: it started 48 runs in a day, the most this automation starts." } };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    expect(await screen.findByText(/it started 48 runs in a day/)).toBeTruthy();
+  });
+
+  it("links a pull request run to its pull request", async () => {
+    automationStore.runs = { "automation-1": [run({ trigger: "pullRequest", pullRequest: { number: 12, title: "Add cache", url: "https://github.com/acme/widgets/pull/12", head: "cache", headSha: "abc", base: "main", event: "pushed" } })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    fireEvent.click(await screen.findByText("Pushed · Add cache"));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/acme/widgets/pull/12");
+  });
+});
+
+describe("an automation's first check", () => {
+  const firstCheck = () => screen.getByRole("switch", { name: "Run a first check" });
+  const openNew = async () => {
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
+    await screen.findByRole("heading", { name: "New automation" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), { target: { value: "Review duty" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Prompt" }), { target: { value: "Review what is new." } });
+  };
+  const trial = (outcome: "nothingNew" | "proceed" | "failed", stdoutTail = "", reason: string | null = null) => ({
+    outcome,
+    reason,
+    result: { exitCode: outcome === "failed" ? 2 : 0, stdoutTail, stderrTail: "", truncated: false, timedOut: false, durationMs: 120 },
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("is off for a new automation, which saves with no check", async () => {
+    await openNew();
+    expect(firstCheck().getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByRole("textbox", { name: "Command" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review duty" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ precheck: null }));
+  });
+
+  it("saves the command and timeout, and needs a command once turned on", async () => {
+    await openNew();
+    fireEvent.click(firstCheck());
+    expect((screen.getByRole("button", { name: "Create automation" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "gh pr list --json number" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Timeout (seconds)" }), { target: { value: "5000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+    await screen.findByRole("heading", { name: "Review duty" });
+    expect(createAutomation).toHaveBeenLastCalledWith(expect.objectContaining({ precheck: { command: "gh pr list --json number", timeoutSeconds: 300 } }));
+  });
+
+  it.each([
+    ["nothingNew", "", /Nothing new: the run would end here/],
+    ["proceed", "PR #12 needs review", /would go ahead/],
+    ["failed", "", /would fail without starting the agent/],
+  ] as const)("Try it shows what a %s check printed and what would happen", async (outcome, output, verdict) => {
+    const tryPrecheck = vi.spyOn(automationsApi, "tryPrecheck").mockResolvedValue(trial(outcome, output, outcome === "failed" ? "The first check exited with status 2." : null));
+    await openNew();
+    fireEvent.click(firstCheck());
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./check.sh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    const result = await screen.findByRole("status", { name: "First check result" });
+    expect(result.textContent).toMatch(verdict);
+    if (output) expect(result.textContent).toContain(output);
+    else expect(result.textContent).toContain("It printed nothing.");
+    if (outcome === "failed") expect(result.textContent).toContain("exited with status 2");
+    expect(tryPrecheck).toHaveBeenCalledWith({ projectPath: "/repo", workspace: "newWorktree", sessionId: null, precheck: { command: "./check.sh", timeoutSeconds: 60 } });
+    expect(createAutomation).not.toHaveBeenCalled();
+  });
+
+  it("shows no Try it result for a command that changed while it ran", async () => {
+    let answer: (value: ReturnType<typeof trial>) => void = () => {};
+    vi.spyOn(automationsApi, "tryPrecheck").mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    await openNew();
+    fireEvent.click(firstCheck());
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./check.sh" } });
+    fireEvent.click(screen.getByRole("button", { name: "Try it" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "./other.sh" } });
+    answer(trial("proceed", "from the old command"));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Try it" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole("status", { name: "First check result" })).toBeNull();
+    expect(screen.queryByText(/from the old command/)).toBeNull();
+  });
+
+  it("lets the timeout field be cleared while typing and restores it on leaving", async () => {
+    await openNew();
+    fireEvent.click(firstCheck());
+    const timeout = screen.getByRole("spinbutton", { name: "Timeout (seconds)" }) as HTMLInputElement;
+    fireEvent.change(timeout, { target: { value: "" } });
+    expect(timeout.value).toBe("");
+    fireEvent.change(timeout, { target: { value: "45" } });
+    expect(timeout.value).toBe("45");
+    fireEvent.change(timeout, { target: { value: "" } });
+    fireEvent.blur(timeout);
+    expect(timeout.value).toBe("45");
+  });
+
+  it("reads a nothing-new run as such, quietly, with its output one click away", async () => {
+    automationStore.runs = { "automation-1": [run({
+      status: "skippedPrecheck", sessionId: null, tabId: null, worktreeName: null, finalMessage: null, changedFiles: null, reported: null,
+      precheck: { exitCode: 0, stdoutTail: "", stderrTail: "checked 4 PRs", truncated: false, timedOut: false, durationMs: 800 },
+    })] };
+    render(<AutomationsView />);
+    fireEvent.click(screen.getByRole("button", { name: /Dependency audit/ }));
+    const status = await screen.findByText("Nothing new");
+    expect(status.parentElement?.querySelector(".bg-destructive, .bg-warning")).toBeNull();
+    expect(screen.queryByText("Error")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Check output" }));
+    expect(screen.getByText(/no session started and no model was called/)).toBeTruthy();
+    expect(screen.getByText("checked 4 PRs")).toBeTruthy();
+    expect(screen.getByText(/First check · exit 0/)).toBeTruthy();
   });
 });

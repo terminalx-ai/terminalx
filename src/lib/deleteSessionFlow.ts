@@ -1,6 +1,7 @@
 import { CONVERSATION_DELETION } from "@/lib/conversationRetention";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { api, errorMessage } from "@/lib/api";
+import { chooseInApp, confirmInApp } from "@/lib/confirm";
 import { openWorkspaceDelete } from "@/lib/dialogs";
 import { deleteSession } from "@/lib/sessions";
 import { inScratch, isQuickChat } from "@/lib/quickChats";
@@ -8,15 +9,14 @@ import type { SessionEntry } from "@/types/session";
 
 const SESSION_ONLY = "Delete session";
 const WITH_WORKSPACE = "Also delete the workspace…";
-const CANCEL = "Cancel";
 
 /**
  * Ask before deleting a session, then delete it. Deleting a session deletes
  * that session and nothing else: its workspace stays, and so does every
  * other session in it.
  *
- * When it is the last session in its workspace, the dialog also offers to
- * delete the workspace. That is not done here: it opens the same workspace
+ * The question is the app's own dialog (design 17.01). When it is the last
+ * session in its workspace, the dialog also offers to delete the workspace. That is not done here: it opens the same workspace
  * dialog as everywhere else, which checks that the work is clean and merged
  * and names what goes.
  */
@@ -27,7 +27,8 @@ export async function confirmDeleteSession(session: SessionEntry) {
     // the removal does. If it cannot say, the workspace is left alone.
     workspace = await api.soleWorkspaceOf(session.id).catch(() => null);
   }
-  const base = `Delete "${session.title}"? Its transcript and attachments are removed.\n\n${CONVERSATION_DELETION}`;
+  const title = `Delete "${session.title}"?`;
+  const base = `Its transcript and attachments are removed.\n\n${CONVERSATION_DELETION}`;
   if (isQuickChat(session)) {
     // A quick chat's scratch folder goes with it. Files in it are named
     // before they are deleted; an empty one needs no mention.
@@ -35,22 +36,25 @@ export async function confirmDeleteSession(session: SessionEntry) {
     const count = scratch?.files ?? 0;
     const files = count > 0 ? `\n\nIts scratch folder holds ${count}${scratch?.more ? " or more" : ""} file${count === 1 && !scratch?.more ? "" : "s"}, which ${count === 1 && !scratch?.more ? "is" : "are"} deleted with it:\n${scratch!.path}` : "";
     const elsewhere = inScratch(session) ? "" : `\n\nThe folder it runs in (${session.cwd}) is yours and is not touched.`;
-    const yes = await ask(`${base}${files}${elsewhere}`, { title: "Delete quick chat", kind: "warning", okLabel: count > 0 ? "Delete chat and files" : "Delete", cancelLabel: "Cancel" }).catch(() => false);
+    const yes = await confirmInApp({ title, body: `${base}${files}${elsewhere}`, action: count > 0 ? "Delete chat and files" : "Delete", destructive: true });
     if (!yes) return;
   } else if (!workspace) {
     const stays = session.worktreeName && !session.worktreeRemoved ? ` Its workspace ${session.worktreeName} stays, with the other sessions in it.` : "";
-    const yes = await ask(`${base}${stays}`, { title: "Delete session", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" }).catch(() => false);
+    const yes = await confirmInApp({ title, body: `${base}${stays}`, action: "Delete", destructive: true });
     if (!yes) return;
   } else {
-    const choice = await message(
-      `${base}\n\nIt is the last session in the workspace ${session.worktreeName}. Deleting only the session leaves the workspace on disk, listed with no sessions.`,
-      { title: "Delete session", kind: "warning", buttons: { yes: SESSION_ONLY, no: WITH_WORKSPACE, cancel: CANCEL } },
-    ).catch(() => CANCEL);
-    if (choice === WITH_WORKSPACE) {
+    const choice = await chooseInApp({
+      title,
+      body: `${base}\n\nIt is the last session in the workspace ${session.worktreeName}. Deleting only the session leaves the workspace on disk, listed with no sessions.`,
+      action: SESSION_ONLY,
+      alternative: WITH_WORKSPACE,
+      destructive: true,
+    });
+    if (choice === "alternative") {
       openWorkspaceDelete(session.projectPath, workspace, session.worktreeName ?? workspace);
       return;
     }
-    if (choice !== SESSION_ONLY) return;
+    if (choice !== "action") return;
   }
   try {
     await deleteSession(session.id);
@@ -73,10 +77,12 @@ export async function confirmDeleteSessions(sessions: SessionEntry[]): Promise<b
   }
   const scratch = await scratchNotice(sessions.filter(isQuickChat));
   const workspaces = sessions.some((session) => session.worktreeName && !session.worktreeRemoved) ? " Their workspaces stay on disk." : "";
-  const yes = await ask(
-    `Delete ${sessions.length} sessions? Their transcripts and attachments are removed.${workspaces}\n\n${CONVERSATION_DELETION}${scratch.text}`,
-    { title: "Delete sessions", kind: "warning", okLabel: scratch.files > 0 ? `Delete ${sessions.length} and files` : `Delete ${sessions.length}`, cancelLabel: "Cancel" },
-  ).catch(() => false);
+  const yes = await confirmInApp({
+    title: `Delete ${sessions.length} sessions?`,
+    body: `Their transcripts and attachments are removed.${workspaces}\n\n${CONVERSATION_DELETION}${scratch.text}`,
+    action: scratch.files > 0 ? `Delete ${sessions.length} and files` : `Delete ${sessions.length}`,
+    destructive: true,
+  });
   if (!yes) return false;
   const failed: string[] = [];
   for (const session of sessions) {

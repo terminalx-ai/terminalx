@@ -1,7 +1,7 @@
 //! Read-only access to the usage endpoint Claude Code already authenticates.
 
 use std::path::Path;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 use std::process::Command;
 use std::time::Duration;
 
@@ -13,13 +13,15 @@ use super::{claude_used_percent, parse_claude_window, parse_scoped_claude_window
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// The rolling windows every account has, whether or not one is running.
 const ACCOUNT_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+/// The person's own login, which an added account never reads.
+const KEYCHAIN_SERVICE_PERSON: &str = "Claude Code-credentials";
 #[cfg(target_os = "macos")]
-const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+const KEYCHAIN_SERVICE: &str = KEYCHAIN_SERVICE_PERSON;
 #[cfg(target_os = "macos")]
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(3);
 /// What `security find-generic-password` exits with when there is no such
 /// item: the low byte of `errSecItemNotFound` (-25300).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 const SECURITY_NOT_FOUND: i32 = 44;
 
 /// Why Claude Code's OAuth access token could not be read. No variant carries
@@ -98,7 +100,7 @@ fn parse_token(raw: &str) -> Option<String> {
 /// exits, and the item grows with every MCP server Claude Code signs in to;
 /// its output is drained while it runs, or a payload larger than the pipe
 /// buffer would block it until the deadline.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn read_command_token(command: Command, timeout: Duration) -> Result<String, CredentialError> {
     let output = crate::git::capture_within(command, timeout).map_err(|error| match error.kind() {
         std::io::ErrorKind::TimedOut => CredentialError::TimedOut(timeout),
@@ -116,15 +118,44 @@ fn read_command_token(command: Command, timeout: Duration) -> Result<String, Cre
 
 #[cfg(target_os = "macos")]
 fn read_keychain_token() -> Result<String, CredentialError> {
-    let account = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).map_err(|_| CredentialError::NotFound)?;
-    let mut command = Command::new("/usr/bin/security");
-    command.args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", &account, "-w"]);
-    read_command_token(command, KEYCHAIN_TIMEOUT)
+    read_keychain_service(KEYCHAIN_SERVICE)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn read_keychain_token() -> Result<String, CredentialError> {
     Err(CredentialError::NotFound)
+}
+
+/// The access token in the generic-password item `service`, account `$USER`,
+/// as Claude Code writes it. Read only: `security -w` prints the item.
+#[cfg(target_os = "macos")]
+pub(super) fn read_keychain_service(service: &str) -> Result<String, CredentialError> {
+    let account = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).map_err(|_| CredentialError::NotFound)?;
+    let mut command = Command::new("/usr/bin/security");
+    command.args(["find-generic-password", "-s", service, "-a", &account, "-w"]);
+    read_command_token(command, KEYCHAIN_TIMEOUT)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn read_keychain_service(_service: &str) -> Result<String, CredentialError> {
+    Err(CredentialError::NotFound)
+}
+
+/// The access token of an added account whose `CLAUDE_CONFIG_DIR` is `dir`
+/// (#980): its own Keychain item, the one Claude Code keys to that directory
+/// (`Claude Code-credentials-<h>`, docs/AGENT-ACCOUNTS.md), else the
+/// directory's `.credentials.json`. Never the person's own unsuffixed item,
+/// and never another account's: `keychain` is asked for this directory's
+/// service alone. A path the service cannot be named for reads the file.
+pub(super) fn read_account_token(
+    dir: &Path,
+    keychain: impl FnOnce(&str) -> Result<String, CredentialError>,
+) -> Result<String, CredentialError> {
+    let from_keychain = match crate::agent_accounts::claude_dir::keychain_service(dir) {
+        Some(service) if service != KEYCHAIN_SERVICE_PERSON => keychain(&service),
+        _ => Err(CredentialError::NotFound),
+    };
+    keychain_then_file(from_keychain, || read_file_token(&dir.join(".credentials.json")))
 }
 
 fn read_file_token(path: &Path) -> Result<String, CredentialError> {

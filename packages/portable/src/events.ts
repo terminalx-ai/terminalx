@@ -14,6 +14,8 @@ export interface AgentEvent {
   ts: string;
   /** Verified source/send time; legacy `ts` may only record when history was imported. */
   messageTs?: string;
+  /** Correlates a recorded desktop Create prompt with its pending preview. */
+  promptRequestId?: string;
   subagent?: SubagentRef;
   payload: Payload;
 }
@@ -79,6 +81,10 @@ export interface Usage {
   costUsd?: number;
   /** The full id of the model that produced this reading, when the agent says. */
   model?: string;
+  /** The reasoning effort the turn ran at, when the agent's records say. */
+  effort?: string;
+  /** Whether the turn ran in the agent's fast mode, when its records say. */
+  fast?: boolean;
 }
 
 export type TurnStatus = "ok" | "error" | "aborted";
@@ -150,8 +156,29 @@ export interface Goal {
   tokensUsed: number;
 }
 
+/**
+ * A question the agent's CLI drew in its own terminal, which no hook reports
+ * (PRO-460): Claude Code's "We recommend compacting earlier", say. `options`
+ * is empty when something waits there that could not be read.
+ */
+export interface ScreenPrompt {
+  /** Which question: answers name it, so they cannot land on another. */
+  id: string;
+  title?: string;
+  text?: string;
+  options: { label: string; description?: string }[];
+  /** The option the CLI's pointer is on. */
+  selected?: number;
+  /** What Escape does, in the CLI's words ("Not now"), when it offers that. */
+  dismiss?: string;
+  /** The keys line the CLI draws under the options. */
+  hint?: string;
+}
+
 export type Payload =
   | { type: "held_queue"; queue: HeldQueue }
+  /** The agent's CLI is stopped on a question it drew itself (PRO-460); null once it is gone. */
+  | { type: "terminal_prompt"; prompt: ScreenPrompt | null }
   | { type: "goal_updated"; goal: Goal }
   | { type: "goal_cleared" }
   | { type: "recovery"; kind: RecoveryKind | null }
@@ -183,8 +210,11 @@ export type Payload =
     }
   /** The agent took the queued `user_message` at `promptSeq` while its turn was still running (#551). */
   | { type: "prompt_absorbed"; promptSeq: number }
-  /** The `user_message` at `promptSeq` waits to be typed: the agent's input box holds something else (#722). `occupied: false` once it went in. */
-  | { type: "input_occupied"; promptSeq: number; occupied: boolean }
+  /**
+   * The `user_message` at `promptSeq` waits to be typed: the agent's input box holds something else (#722). `occupied: false` once it went in.
+   * `choice`: what is in the way is a question the agent drew in place of its box, a list of choices to answer in the terminal (PRO-462).
+   */
+  | { type: "input_occupied"; promptSeq: number; occupied: boolean; choice?: boolean }
   /** The agent dropped the turn of the `user_message` at `promptSeq` before answering it, and took another prompt in its place (#722). */
   | { type: "prompt_replaced"; promptSeq: number }
   /** The agent recorded the `user_message` at `promptSeq` as `text`, not as it was sent (#722). */

@@ -10,6 +10,12 @@
 //! connections are. On a server that authorizes by membership (CS-18) a
 //! change of the default Organization stops nothing; without it, as before,
 //! only the active Organization's connections survive.
+//!
+//! A paired machine's connection (PRO-345, `machine_remote_attach` in
+//! `machines::connect`) lives in the same table and speaks through the same
+//! event, so `cloud_remote_send`, `cloud_remote_detach` and `cloud_port_*`
+//! work on it. No account owns it: a machine paired by code stays connected
+//! through a sign-out, and only its relay link closes.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,12 +29,32 @@ use tokio::sync::mpsc;
 use crate::account::{AccountManager, CloudScope};
 use crate::cloud_agent_client::CloudAgentClient;
 use crate::cloud_diagnostics::ConnectionCloseLog;
-use crate::cloud_ports::{Forward, PortForwarder};
+use crate::cloud_ports::{Forward, ForwardsChanged, PortForwarder, PortSettings};
 use crate::cloud_workspaces::{CloudWorkspaceService, WorkspaceState};
 use crate::remote::client::{open_outcome, AttachSource, ClientEvent, ClientState, OpenOutcome, Supervisor};
+use crate::remote::machine_client::{MachineEnv, MachineSupervisor, NetDialer, OnState};
 use crate::remote::protocol::Activation;
 
 pub const EVENT: &str = "cloud_remote_event";
+/// A connection's forwards or switches changed (`CloudPortForwardsChanged`, PRO-355).
+pub const PORTS_EVENT: &str = "cloud_port_forwards_changed";
+
+/// `cloud_port_forwards_changed`'s payload, as `CloudPortForwardsChanged`
+/// in src/lib/api.ts reads it.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PortForwardsChanged {
+    connection_id: String,
+    forwards: Vec<Forward>,
+    settings: PortSettings,
+    opened: Vec<Forward>,
+}
+
+impl PortForwardsChanged {
+    fn new(connection_id: &str, changed: ForwardsChanged) -> Self {
+        Self { connection_id: connection_id.to_string(), forwards: changed.forwards, settings: changed.settings, opened: changed.opened }
+    }
+}
 
 /// The web view's `NativeWorkspaceTransport` reads `kind`, `connectionId`,
 /// `state`, `message` and `connectionIds`: `rename_all` only renames the
@@ -59,11 +85,35 @@ impl Identity {
     }
 }
 
+/// What keeps one connection: a cloud workspace's supervisor, or a paired
+/// machine's (PRO-345).
+#[derive(Clone)]
+enum Handle {
+    Cloud(Supervisor),
+    Machine(MachineSupervisor),
+}
+
+impl Handle {
+    fn send(&self, frame: Value) -> bool {
+        match self {
+            Handle::Cloud(supervisor) => supervisor.send(frame),
+            Handle::Machine(supervisor) => supervisor.send(frame),
+        }
+    }
+
+    fn stop(&self) {
+        match self {
+            Handle::Cloud(supervisor) => supervisor.stop(),
+            Handle::Machine(supervisor) => supervisor.stop(),
+        }
+    }
+}
+
 struct Attached {
-    supervisor: Supervisor,
+    supervisor: Handle,
     /// This connection's local port forwards (PRO-28).
     ports: PortForwarder,
-    /// None only for a debug-build attach by pairing code, which no account owns.
+    /// None only for a paired machine's connection, which no account owns.
     identity: Option<Identity>,
 }
 
@@ -84,8 +134,8 @@ pub struct CloudRemote {
 
 enum Outgoing {
     Frame { connection_id: String, frame: Value },
-    /// After every frame sent before it.
-    Detach { connection_id: String, done: tokio::sync::oneshot::Sender<()> },
+    /// After every frame sent before it. `holder` is the web view letting go.
+    Detach { connection_id: String, holder: Option<String>, done: tokio::sync::oneshot::Sender<()> },
 }
 
 /// Request ids the desktop itself sends; their answers never reach the web view.
@@ -125,16 +175,49 @@ impl CloudRemote {
                     supervisor.send(frame);
                 }
             }
-            Outgoing::Detach { connection_id, done } => {
-                self.detach(&connection_id);
+            Outgoing::Detach { connection_id, holder, done } => {
+                self.detach(&connection_id, holder.as_deref());
                 let _ = done.send(());
             }
         }
     }
 
-    fn detach(&self, connection_id: &str) {
-        let attached = self.connections.lock().unwrap().remove(connection_id);
+    /// A machine's connection is shared by every web view that attached it,
+    /// and ends when the last of them (`holder`) lets go; `None` ends it.
+    fn detach(&self, connection_id: &str, holder: Option<&str>) {
+        let attached = {
+            let mut connections = self.connections.lock().unwrap();
+            let last = match connections.get(connection_id).map(|attached| &attached.supervisor) {
+                Some(Handle::Machine(supervisor)) => supervisor.release(holder),
+                _ => true,
+            };
+            if !last {
+                return;
+            }
+            connections.remove(connection_id)
+        };
         if let Some(attached) = attached {
+            attached.ports.shutdown();
+            attached.supervisor.stop();
+        }
+    }
+
+    /// A window closed: it lets go of every machine connection it held, and
+    /// those nobody else holds end. A closed window runs no cleanup of its
+    /// own, so without this its hold would keep a machine connecting after
+    /// the last window that wanted it has gone.
+    pub fn release_holder(&self, holder: &str) {
+        let ended: Vec<Attached> = {
+            let mut connections = self.connections.lock().unwrap();
+            let held: Vec<String> = connections
+                .iter()
+                .filter(|(_, attached)| matches!(&attached.supervisor, Handle::Machine(supervisor) if supervisor.holds(holder)))
+                .map(|(id, _)| id.clone())
+                .collect();
+            let last: Vec<String> = held.into_iter().filter(|id| matches!(&connections[id].supervisor, Handle::Machine(supervisor) if supervisor.release(Some(holder)))).collect();
+            last.into_iter().filter_map(|id| connections.remove(&id)).collect()
+        };
+        for attached in ended {
             attached.ports.shutdown();
             attached.supervisor.stop();
         }
@@ -205,17 +288,41 @@ impl CloudRemote {
 
     /// Called from an async command, so inside the Tauri runtime.
     /// `workspace_id` names the cloud workspace whose content keys this
-    /// connection fetches (`keys.get`) once connected; none for a dev attach.
+    /// connection fetches (`keys.get`) once connected.
     fn start(&self, app: &AppHandle, identity: Option<Identity>, workspace_id: Option<String>, source: Arc<dyn AttachSource>, activation: Activation) -> String {
         let connection_id = format!("cloud-{}", uuid::Uuid::new_v4().simple());
-        let (events, mut receiver) = mpsc::unbounded_channel();
-        let supervisor = Supervisor::start(source, activation, events);
+        let (events, receiver) = mpsc::unbounded_channel();
+        let supervisor = Handle::Cloud(Supervisor::start(source, activation, events));
+        self.register(app, connection_id.clone(), identity, workspace_id, supervisor, receiver);
+        connection_id
+    }
+
+    /// A paired machine's connection (PRO-345): its one supervisor, in this
+    /// table, its states and messages as `cloud_remote_event`. Called inside
+    /// the Tauri runtime; `machines::connect` keeps it to one per machine.
+    pub(crate) fn start_machine(&self, app: &AppHandle, machine_id: &str, env: Arc<dyn MachineEnv>, on_state: OnState) -> (String, MachineSupervisor) {
+        let connection_id = format!("machine-{}", uuid::Uuid::new_v4().simple());
+        let (events, receiver) = mpsc::unbounded_channel();
+        let supervisor = MachineSupervisor::start(machine_id, env, Arc::new(NetDialer), events, on_state);
+        self.register(app, connection_id.clone(), None, None, Handle::Machine(supervisor.clone()), receiver);
+        (connection_id, supervisor)
+    }
+
+    fn register(&self, app: &AppHandle, connection_id: String, identity: Option<Identity>, workspace_id: Option<String>, supervisor: Handle, mut receiver: mpsc::UnboundedReceiver<ClientEvent>) {
         let ports = {
             // Under the same rule as every frame the web view sends: nothing
             // goes out for an identity that is no longer current, a pending
             // sign-out included.
-            let (supervisor, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
-            PortForwarder::new(move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && supervisor.send(frame))
+            let (sender, account, made_for) = (supervisor.clone(), self.account.clone(), identity.clone());
+            let send = move |frame| made_for.as_ref().is_none_or(|identity| identity.allowed_by(account.current_scope().as_ref())) && sender.send(frame);
+            // A machine's forwards wait through a dropped link and return
+            // with it; a cloud workspace's end with the connection (PRO-355).
+            let ports = if matches!(supervisor, Handle::Machine(_)) { PortForwarder::for_machine(send) } else { PortForwarder::new(send) };
+            let (app, id) = (app.clone(), connection_id.clone());
+            ports.on_change(move |changed| {
+                let _ = app.emit(PORTS_EVENT, PortForwardsChanged::new(&id, changed));
+            });
+            ports
         };
         self.connections.lock().unwrap().insert(connection_id.clone(), Attached { supervisor: supervisor.clone(), ports: ports.clone(), identity: identity.clone() });
         let app = app.clone();
@@ -236,8 +343,12 @@ impl CloudRemote {
                 let payload = match event {
                     ClientEvent::State(state) => {
                         if let Some(code) = close_code(&state) {
-                            // A dev attach has no identity: its close is recorded without an Organization and never exported.
-                            closes.record(identity.as_ref().map(|identity| identity.organization_id.as_str()), workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis());
+                            // A machine has no identity: its close is recorded without an Organization and never exported.
+                            closes.record_for(
+                                identity.as_ref().map(|identity| (identity.user_id.as_str(), identity.profile_id.as_str())),
+                                identity.as_ref().map(|identity| identity.organization_id.as_str()),
+                                workspace_id.as_deref(), code, chrono::Utc::now().timestamp_millis(),
+                            );
                         }
                         // A participant gets the key only while the workspace
                         // is shared with them (saas contract §21.5).
@@ -248,7 +359,8 @@ impl CloudRemote {
                         if keys_granted {
                             fetch_keys(&mut keys_request);
                         }
-                        // Port streams live and end with the connection.
+                        // Port streams live and end with the connection; a
+                        // machine's forwards wait for it to return.
                         ports.set_connected(match &state {
                             ClientState::Connected { capabilities, .. } => Some(capabilities.as_slice()),
                             _ => None,
@@ -286,9 +398,9 @@ impl CloudRemote {
                 };
                 let _ = app.emit(EVENT, payload);
             }
+            // Detached for good: everything is forgotten, a machine's waiting forwards too.
             ports.shutdown();
         });
-        connection_id
     }
 
     /// The connection's port forwarder, under the same identity rule as
@@ -303,7 +415,7 @@ impl CloudRemote {
         Ok(attached.ports.clone())
     }
 
-    fn supervisor(&self, connection_id: &str) -> Result<Supervisor, String> {
+    fn supervisor(&self, connection_id: &str) -> Result<Handle, String> {
         crate::data_privacy::require_network().map_err(|error| error.to_string())?;
         // Read before the connections are locked: one lock at a time.
         let scope = self.scope();
@@ -426,31 +538,6 @@ pub async fn cloud_remote_attach(
     Ok(remote.start(&app, Some(identity), Some(workspace_id), source, activation))
 }
 
-/// Debug builds only: attach with a pairing code (and optional ticket)
-/// straight from a local runtime, without the API. Used with
-/// `terminalx-serve --relay-link` and `scripts/remote-runtime/relay-harness.ts`.
-#[tauri::command]
-pub async fn cloud_remote_attach_dev(
-    app: AppHandle,
-    remote: tauri::State<'_, Arc<CloudRemote>>,
-    pairing_code: String,
-    ticket: Option<crate::remote::client::AttachTicket>,
-) -> Result<String, String> {
-    crate::data_privacy::require_network().map_err(|error| error.to_string())?;
-    if !cfg!(debug_assertions) {
-        return Err("cloud_remote_dev_attach_unavailable".into());
-    }
-    struct DevSource(crate::remote::client::AttachGrant);
-    impl AttachSource for DevSource {
-        fn open(&self, _refresh: bool, _activation: Activation) -> anyhow::Result<OpenOutcome> {
-            Ok(OpenOutcome::Ready(Box::new(self.0.clone())))
-        }
-    }
-    let offer = crate::remote::client::decode_pairing_code(&pairing_code).map_err(|e| e.to_string())?;
-    let grant = crate::remote::client::AttachGrant { attachment_id: "dev".into(), offer, ticket };
-    Ok(remote.start(&app, None, None, Arc::new(DevSource(grant)), Activation::Connect))
-}
-
 /// Runs on the main thread, in the order the web view sent: it checks the
 /// frame's shape and hands it over (see [`CloudRemote::outgoing`]), touching
 /// no lock. True means accepted for delivery, not delivered: a frame for a
@@ -466,16 +553,20 @@ pub fn cloud_remote_send(remote: tauri::State<'_, Arc<CloudRemote>>, connection_
 
 #[tauri::command]
 pub async fn cloud_remote_activate(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, activation: Activation) -> Result<(), String> {
-    remote.supervisor(&connection_id)?.set_activation(activation);
+    // A machine has no compute to wake: it connects while attached.
+    if let Handle::Cloud(supervisor) = remote.supervisor(&connection_id)? {
+        supervisor.set_activation(activation);
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn cloud_remote_detach(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
+pub async fn cloud_remote_detach(webview: tauri::Webview, remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<(), String> {
     // Behind the frames already handed over, so none of them is lost.
+    let holder = webview.label().to_string();
     let (done, detached) = tokio::sync::oneshot::channel();
-    if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), done }).is_err() || detached.await.is_err() {
-        remote.detach(&connection_id);
+    if remote.outgoing.send(Outgoing::Detach { connection_id: connection_id.clone(), holder: Some(holder.clone()), done }).is_err() || detached.await.is_err() {
+        remote.detach(&connection_id, Some(&holder));
     }
     Ok(())
 }
@@ -497,9 +588,27 @@ pub async fn cloud_port_unforward(remote: tauri::State<'_, Arc<CloudRemote>>, co
     Ok(remote.ports(&connection_id)?.unforward(port))
 }
 
+/// The connection's forwards, each `open` or `waiting`, and whether
+/// auto-forward opened it.
 #[tauri::command]
 pub async fn cloud_port_forwards(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<Vec<Forward>, String> {
     Ok(remote.ports(&connection_id)?.forwards())
+}
+
+/// The connection's forwarding switches (PRO-355).
+#[tauri::command]
+pub async fn cloud_port_settings(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String) -> Result<PortSettings, String> {
+    Ok(remote.ports(&connection_id)?.settings())
+}
+
+/// Change either switch; answers the switches as they now are. Forwarding
+/// off closes every listener and keeps the forwards waiting; auto-forward on
+/// forwards ports that start listening from now on. Neither wakes the
+/// workspace.
+#[tauri::command]
+pub async fn cloud_port_set_settings(remote: tauri::State<'_, Arc<CloudRemote>>, connection_id: String, enabled: Option<bool>, auto: Option<bool>) -> Result<PortSettings, String> {
+    let scope = remote.scope().map(|scope| scope.active_org_id);
+    Ok(remote.ports(&connection_id)?.set_settings(enabled, auto, scope))
 }
 
 /// Keep what `keys.get` answered, for the identity the connection was made for.
@@ -522,7 +631,7 @@ fn store_keys(agents: &Arc<CloudAgentClient>, identity: Option<&Identity>, works
 /// only follows a 4103 close.
 fn close_code(state: &ClientState) -> Option<u16> {
     match state {
-        ClientState::Reconnecting { close_code, .. } => *close_code,
+        ClientState::Reconnecting { close_code, .. } | ClientState::WaitingForRuntime { close_code } => *close_code,
         ClientState::UpdateRequired => Some(4103),
         _ => None,
     }
@@ -676,7 +785,7 @@ mod intercept_tests {
         ));
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents);
         let (supervisor, mut frames) = Supervisor::connected_for_test();
-        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+        remote.connections.lock().unwrap().insert("cloud-1".into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
 
         store.block_writes();
         let refreshing = {
@@ -744,7 +853,7 @@ mod intercept_tests {
         let remote = CloudRemote::new(account.clone(), Arc::new(CloudWorkspaceService::new(account.clone())), agents.clone());
         let attach = |id: &str| {
             let (supervisor, frames) = Supervisor::connected_for_test();
-            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor, ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
+            remote.connections.lock().unwrap().insert(id.into(), Attached { supervisor: Handle::Cloud(supervisor), ports: PortForwarder::new(|_| false), identity: Some(made_in("org-a")) });
             frames
         };
         let _frames = attach("cloud-1");
@@ -805,5 +914,31 @@ mod intercept_tests {
         assert_eq!(message, json!({ "kind": "message", "connectionId": "cloud-1", "message": { "id": "r1" } }));
         let changed = serde_json::to_value(RemoteEvent::IdentityChanged { connection_ids: vec!["cloud-1".into()] }).unwrap();
         assert_eq!(changed, json!({ "kind": "identityChanged", "connectionIds": ["cloud-1"] }));
+    }
+
+    /// `CloudPortForwardsChanged`, `CloudPortForward` and `CloudPortSettings`
+    /// in src/lib/api.ts, field for field.
+    #[test]
+    fn port_changes_reach_the_web_view_in_its_field_names() {
+        use crate::cloud_ports::ForwardState;
+        let returned = Forward { port: 5173, local_port: 5173, reassigned: false, state: ForwardState::Open, auto: true };
+        let waiting = Forward { port: 3000, local_port: 51234, reassigned: true, state: ForwardState::Waiting, auto: false };
+        let changed = PortForwardsChanged::new(
+            "machine-1",
+            ForwardsChanged { forwards: vec![waiting, returned.clone()], settings: PortSettings { enabled: true, auto: true }, opened: vec![returned] },
+        );
+        assert_eq!(
+            serde_json::to_value(changed).unwrap(),
+            json!({
+                "connectionId": "machine-1",
+                "forwards": [
+                    { "port": 3000, "localPort": 51234, "reassigned": true, "state": "waiting", "auto": false },
+                    { "port": 5173, "localPort": 5173, "reassigned": false, "state": "open", "auto": true },
+                ],
+                "settings": { "enabled": true, "auto": true },
+                "opened": [{ "port": 5173, "localPort": 5173, "reassigned": false, "state": "open", "auto": true }],
+            })
+        );
+        assert_eq!(PORTS_EVENT, "cloud_port_forwards_changed");
     }
 }

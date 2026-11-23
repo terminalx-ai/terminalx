@@ -462,21 +462,39 @@ describe("TabView recovery lifecycle", () => {
     emit(request);
     emit(request);
     act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
-    expect(screen.getAllByText("Waiting for permission to run a command")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : "Deny" }));
-    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : "Deny" }));
+    expect(screen.getAllByText("Run a command")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : /^Deny/ }));
+    fireEvent.click(screen.getByRole("button", { name: option === "allow" ? /^Allow/ : /^Deny/ }));
     expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(1);
     await act(async () => enqueued());
     // IPC success acknowledges the queue, not provider delivery. A duplicate
     // request must still leave one usable card until the owner settles it.
     expect(screen.getByRole("button", { name: /^Allow/ })).toBeTruthy();
     emit(request);
-    expect(screen.getAllByText("Waiting for permission to run a command")).toHaveLength(1);
+    expect(screen.getAllByText("Run a command")).toHaveLength(1);
     emit({ type: "permission_decided", requestId: "codex-request", allowed: option === "allow", label: option === "allow" ? "Allowed" : "Denied", automatic: false });
     await waitFor(() => expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull());
     emit(request);
     expect(screen.queryByRole("button", { name: /^Allow/ })).toBeNull();
     expect(mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission")).toHaveLength(1);
+  });
+
+  it("draws a lone request inline in the chat's turn, and Escape denies it instead of interrupting (PRO-382)", () => {
+    mocks.views.views[session.tabs[0].id] = "chat";
+    render(<Harness />);
+    emit({ type: "permission_requested", requestId: "esc-request", toolUseId: "", toolName: "Bash", input: { command: "pwd" }, options: [
+      { id: "allow", kind: "allow_once", label: "Allow" }, { id: "deny", kind: "deny", label: "Deny" },
+    ] });
+    act(() => setTabStatus(session.id, session.tabs[0].id, "waiting"));
+    const card = screen.getByTestId("permission-title");
+    // In the transcript at the messages' width, not docked over the composer.
+    expect(card.closest("[data-chat-scroller]")).toBeTruthy();
+    expect(card.closest('[aria-label="Session recovery"]')).toBeNull();
+    fireEvent.keyDown(document.activeElement ?? window, { key: "Escape" });
+    const answers = mocks.invoke.mock.calls.filter(([c]) => c === "respond_permission");
+    expect(answers).toHaveLength(1);
+    expect(JSON.stringify(answers[0][1])).toContain("deny");
+    expect(mocks.invoke.mock.calls.filter(([c]) => c === "interrupt_turn" || c === "interrupt")).toHaveLength(0);
   });
 
   it("retires a request answered in the terminal immediately (PRO-160)", () => {

@@ -5,8 +5,9 @@
 //! sidebar draws and what resume reads, so it is written **before** any child
 //! is spawned — a session whose agent fails to start is still visible.
 
+use crate::paths::Canonical;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -570,6 +571,34 @@ const RUN_WORKER: &str = "runWorker";
 const ORCHESTRATE_START: &str = "orchestrateStart";
 
 impl SessionEntry {
+    /// The checkout this session was attached to, retained even if its cwd disappears.
+    pub(crate) fn checkout_root(&self) -> Option<&str> {
+        self.unknown.get("checkoutRoot").and_then(serde_json::Value::as_str)
+    }
+
+    pub(crate) fn set_checkout_root(&mut self, root: Option<&str>) {
+        if let Some(root) = root {
+            self.unknown.insert("checkoutRoot".into(), serde_json::Value::String(root.into()));
+        } else {
+            self.unknown.remove("checkoutRoot");
+            self.unknown.remove("checkoutIdentity");
+        }
+    }
+
+    /// Bind a newly attached checkout while Git and the directory are available.
+    pub(crate) fn bind_checkout_root(&mut self, root: &str) {
+        self.set_checkout_root(Some(root));
+        self.unknown.remove("checkoutIdentity");
+        if let Some(identity) = crate::git::worktree_identity::WorktreeIdentity::capture(
+            Path::new(&self.project_path), Path::new(root),
+        ).and_then(|identity| serde_json::to_value(identity).ok()) {
+            self.unknown.insert("checkoutIdentity".into(), identity);
+        }
+    }
+
+    pub(crate) fn checkout_identity(&self) -> Option<crate::git::worktree_identity::WorktreeIdentity> {
+        serde_json::from_value(self.unknown.get("checkoutIdentity")?.clone()).ok()
+    }
     /// Whether this session was started as an orchestration run's worker
     /// (`orchestration::guard`): it never pushes, merges or deploys.
     pub fn run_worker(&self) -> bool {
@@ -724,7 +753,15 @@ fn file_path() -> Result<PathBuf> {
     Ok(super::sessions_dir()?.join("index.json"))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How often this thread read the index, for tests of what must not (PRO-468).
+    pub(crate) static TEST_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn load_file() -> Result<IndexFile> {
+    #[cfg(test)]
+    TEST_READS.with(|reads| reads.set(reads.get() + 1));
     Ok(super::read_json::<IndexFile>(&file_path()?)?.unwrap_or_default())
 }
 
@@ -846,7 +883,7 @@ fn reconcile_sidebar_sessions(saved: &mut Vec<String>, sessions: &[SessionEntry]
 /// conversations, including archives and linked chats. Forget only vanished groups.
 fn sidebar_projects(sessions: &[SessionEntry], attached: &[super::projects::Project]) -> Result<Vec<String>> {
     let chats = super::root()?.join("Chats");
-    let chats = chats.canonicalize().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
+    let chats = chats.canonical().unwrap_or(chats).to_string_lossy().trim_end_matches('/').to_string();
     let mut groups: BTreeMap<String, (bool, String, bool)> = attached.iter()
         .filter(|p| p.path.trim_end_matches('/') != chats)
         .map(|p| (p.path.trim_end_matches('/').to_string(), (p.pinned, p.last_opened.clone().unwrap_or_default(), false)))
@@ -1145,6 +1182,7 @@ pub fn mark_workspace_removed(session: &mut SessionEntry, project_branch: Option
         });
     }
     session.cwd = session.project_path.clone();
+    session.set_checkout_root(None);
     session.worktree_name = None;
     session.worktree_removed = true;
     // A quick chat that was pointed at the workspace goes back to its scratch
@@ -1371,7 +1409,7 @@ mod tests {
         let real = crate::store::ensure_dir(root.join("chat-target")).unwrap();
         std::os::unix::fs::symlink(&real, root.join("Chats")).unwrap();
         let mut chat = entry("chat");
-        chat.project_path = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        chat.project_path = real.canonical().unwrap().to_string_lossy().into_owned();
         chat.link = Some(ChatLink { path: "/linked".into(), branch: None });
         save(&[chat]).unwrap();
         let order = set_sidebar_order(SidebarOrderPatch { custom: Some(true), ..Default::default() }).unwrap();

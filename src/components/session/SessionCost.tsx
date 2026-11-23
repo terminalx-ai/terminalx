@@ -6,11 +6,13 @@ import { agentName } from "@/components/AgentMark";
 import { checkAgentReadiness } from "@/lib/agentReadiness";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { modelLabel } from "@/lib/models";
-import { openStats, upsertSession } from "@/lib/sessions";
+import { upsertSession } from "@/lib/sessions";
+import { openStatsSettings } from "@/lib/settingsLinks";
 import { useStatus } from "@/lib/status";
 import { copyText } from "@/lib/clipboard";
 import { cn } from "@/lib/cn";
 import type { UsageWindow } from "@/lib/api";
+import type { RuntimeSessionUsage } from "@terminalx/portable/workspace";
 import type { ModelUsage, SessionEntry, SessionUsageReport, UsageTotals } from "@/types/session";
 
 /**
@@ -117,21 +119,38 @@ function WindowRow({ window, now }: { window: UsageWindow; now: number }) {
   </div>;
 }
 
-function UsagePopover({ session, models, total, onClose }: { session: SessionEntry; models: ModelUsage[]; total: UsageTotals; onClose: () => void }) {
+/**
+ * A machine session's usage (PRO-408): its agents ran on the machine, so how
+ * each signs in, the usage windows and the command are the machine's.
+ * `answer` is its last `session.usage`, `null` until one arrives.
+ */
+export interface MachineUsage {
+  name: string;
+  /** The session's id on the machine, which its `terminalx` names it by. */
+  sessionId: string;
+  generation: string;
+  /** Reads `session.usage` on the machine; `null` while it is not connected. */
+  read: (() => Promise<RuntimeSessionUsage>) | null;
+}
+
+function UsagePopover({ session, models, total, onClose, machine }: { session: SessionEntry; models: ModelUsage[]; total: UsageTotals; onClose: () => void; machine?: { name: string; sessionId: string; answer: RuntimeSessionUsage | null } }) {
   const { usage } = useStatus();
   const agents = useMemo(() => [...new Set(models.map((row) => modelAgent(row.model)))], [models]);
-  const [methods, setMethods] = useState<(string | null | undefined)[] | null>(null);
+  const [localMethods, setMethods] = useState<(string | null | undefined)[] | null>(null);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
+    // A machine's agents sign in there: this computer's logins say nothing of them.
+    if (machine) return;
     let live = true;
     void Promise.all(agents.map((agent) => checkAgentReadiness(agent).then((answer) => answer.loginMethod))).then((found) => { if (live) setMethods(found); });
     return () => { live = false; };
-  }, [agents]);
+  }, [agents, !!machine]); // eslint-disable-line react-hooks/exhaustive-deps
+  const methods = machine ? (machine.answer ? agents.map((agent) => machine.answer!.loginMethods[agent] ?? null) : null) : localMethods;
   const billing = methods ? billingOf(methods) : "unknown";
   const now = Date.now();
-  const windows = usage.windows.filter((window) => agents.includes(window.agent as "claude" | "codex"));
+  const windows = (machine ? (machine.answer?.windows ?? []) as UsageWindow[] : usage.windows).filter((window) => agents.includes(window.agent as "claude" | "codex"));
   const tabs = session.tabs.filter((tab) => tab.usage?.models.length);
-  const command = `terminalx sessions usage ${session.id} --json`;
+  const command = `terminalx sessions usage ${machine ? machine.sessionId : session.id} --json`;
   return <>
     <div className="flex items-center gap-2 px-3.5 pt-3 pb-2.5 text-[13px]">
       <span className="shrink-0 whitespace-nowrap font-medium">Session usage</span>
@@ -168,13 +187,17 @@ function UsagePopover({ session, models, total, onClose }: { session: SessionEnt
       {windows.map((window) => <WindowRow key={`${window.agent}:${window.key}`} window={window} now={now} />)}
     </div>}
     <div className="flex h-10 items-center gap-2 border-t border-hairline px-3.5 text-[12px] text-muted-foreground">
-      <button type="button" className="flex min-w-0 items-center gap-2 hover:text-foreground" title={copied ? "Copied" : `Copy ${command}`} aria-label={copied ? "Copied" : `Copy ${command}`} onClick={() => void copyText(command).then(() => setCopied(true))}>
+      <button type="button" className="flex min-w-0 items-center gap-2 hover:text-foreground"
+        title={copied ? "Copied" : machine ? `Copy ${command}, to run on ${machine.name}` : `Copy ${command}`}
+        aria-label={copied ? "Copied" : machine ? `Copy ${command}, to run on ${machine.name}` : `Copy ${command}`} onClick={() => void copyText(command).then(() => setCopied(true))}>
         <Terminal className="size-[13px] shrink-0" />
         <span className="truncate font-mono text-[11.5px]">terminalx sessions usage</span>
+        {machine && <span className="shrink-0 truncate text-[11px] text-faint" data-testid="session-usage-where">on {machine.name}</span>}
       </button>
-      <button type="button" className="ml-auto flex shrink-0 items-center gap-1.5 hover:text-foreground" onClick={() => { onClose(); openStats(); }}>
+      {/* Stats counts this computer's sessions; a machine's are counted on the machine. */}
+      {!machine && <button type="button" className="ml-auto flex shrink-0 items-center gap-1.5 hover:text-foreground" onClick={() => { onClose(); openStatsSettings(); }}>
         <BarChart3 className="size-[13px]" />Open Stats
-      </button>
+      </button>}
     </div>
   </>;
 }
@@ -190,23 +213,89 @@ async function refresh(sessionId: string): Promise<SessionUsageReport | null> {
   }
 }
 
-export function SessionCost({ session, className }: { session: SessionEntry; className?: string }) {
+/**
+ * `machine`: a machine session's (PRO-408). Its tabs' totals come with the
+ * machine's session list; reading them again, how its agents sign in and its
+ * usage windows are asked of the machine, which tells the list when they move.
+ */
+export function SessionCost({ session, className, machine }: { session: SessionEntry; className?: string; machine?: MachineUsage }) {
   const settings = useExperimentalSettings();
   const enabled = settings?.sessionCost === true;
   const [open, setOpen] = useState(false);
-  const models = useMemo(() => sessionModels(session), [session]);
+  const [answer, setAnswer] = useState<{ sessionId: string; usage: RuntimeSessionUsage } | null>(null);
+  const read = machine?.read ?? null;
+  const machineSession = machine?.sessionId ?? null;
+  const generation = machine?.generation;
+  const readable = !machine || !!read;
+  const readKey = JSON.stringify([session.id, generation, readable]);
+  const currentReadKey = useRef(readKey);
+  currentReadKey.current = readKey;
+  const machineAnswer = answer?.sessionId === session.id ? answer.usage : null;
+  const usageSession = useMemo(() => {
+    if (!machineAnswer) return session;
+    const refreshed = new Map(machineAnswer.usage.tabs.map((tab) => [tab.tabId, tab]));
+    return { ...session, tabs: session.tabs.map((tab) => {
+      const usage = refreshed.get(tab.id);
+      // Turn-end updates from the session list can arrive after this refresh.
+      if (!usage || (tab.usage && tab.usage.updated >= usage.updated)) return tab;
+      return { ...tab, usage: { models: usage.models, updated: usage.updated } };
+    }) };
+  }, [session, machineAnswer]);
+  const models = useMemo(() => sessionModels(usageSession), [usageSession]);
   const total = useMemo(() => totals(models), [models]);
+  const latestRequest = useRef(0);
+  const reread = async () => {
+    if (machine) {
+      if (!read) return false;
+      const request = ++latestRequest.current;
+      try {
+        const usage = await read();
+        if (request !== latestRequest.current || currentReadKey.current !== readKey || usage.usage.sessionId !== machineSession) return false;
+        setAnswer({ sessionId: session.id, usage });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return (await refresh(session.id)) !== null;
+  };
+  const latestReread = useRef(reread);
+  latestReread.current = reread;
   // A session last worked on before totals were kept has none until its next
-  // turn: read them once, so the header is not empty in the meantime.
+  // turn: backfill so the header is not empty in the meantime.
   const backfilled = useRef<string | null>(null);
-  const unread = session.tabs.some((tab) => tab.providerSessionId) && session.tabs.every((tab) => !tab.usage);
+  // A machine's tab names no conversation here: one that has messages is one the machine may have totals for.
+  const unread = session.tabs.some((tab) => machine ? tab.hasMessages : tab.providerSessionId) && session.tabs.every((tab) => !tab.usage);
+  const remote = !!machine;
   useEffect(() => {
-    if (!enabled || !unread || backfilled.current === session.id) return;
-    backfilled.current = session.id;
-    void refresh(session.id);
-  }, [enabled, unread, session.id]);
+    if (!enabled || !unread || !readable || backfilled.current === session.id) return;
+    if (!remote) {
+      backfilled.current = session.id;
+      void latestReread.current();
+      return;
+    }
+    let canceled = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const backfill = async (canRetry: boolean) => {
+      const read = await latestReread.current();
+      if (canceled) return;
+      if (read) backfilled.current = session.id;
+      else if (canRetry) retry = setTimeout(() => void backfill(false), 1_000);
+    };
+    // Retry a transient timeout once on this connection. A new connection
+    // gets its own attempt if there still is no successful read.
+    void backfill(true);
+    return () => {
+      canceled = true;
+      clearTimeout(retry);
+    };
+  }, [enabled, unread, readable, session.id, generation, remote]);
+  // Read again once each time the popover opens. Keyed on `open` alone: the
+  // caller's `read` is a new function on every render, and on a machine each
+  // read re-reads every tab's transcripts there, whose move renders this
+  // again (PRO-408 review).
   useEffect(() => {
-    if (open) void refresh(session.id);
+    if (open) void latestReread.current();
   }, [open, session.id]);
   if (!enabled || !models.length) return null;
   // A cost that leaves models out says so: "+" for the tokens it could not price.
@@ -229,7 +318,8 @@ export function SessionCost({ session, className }: { session: SessionEntry; cla
     <Popover.Portal>
       <Popover.Content side="bottom" align="start" sideOffset={6} collisionPadding={12} aria-label="Session usage"
         className="z-(--z-menu) w-[400px] max-w-[calc(100vw-24px)] max-h-[var(--radix-popover-content-available-height)] overflow-auto rounded-xl border border-hairline bg-popover text-sm text-popover-foreground shadow-surface outline-none">
-        <UsagePopover session={session} models={models} total={total} onClose={() => setOpen(false)} />
+        <UsagePopover session={usageSession} models={models} total={total} onClose={() => setOpen(false)}
+          machine={machine ? { name: machine.name, sessionId: machine.sessionId, answer: machineAnswer } : undefined} />
       </Popover.Content>
     </Popover.Portal>
   </Popover.Root>;

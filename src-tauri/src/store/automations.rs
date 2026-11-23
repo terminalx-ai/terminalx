@@ -7,9 +7,10 @@ use std::sync::Mutex;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::automations::{Automation, AutomationRun};
+use crate::automations::{Automation, AutomationRun, AutomationRunStatus};
 
-const RUN_RETENTION: usize = 100;
+/// How many finished runs each automation's log keeps; older ones are dropped.
+pub const RUN_RETENTION: usize = 100;
 static RUN_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static DEFINITION_WRITE_LOCK: Mutex<()> = Mutex::new(());
 static SEEN_WRITE_LOCK: Mutex<()> = Mutex::new(());
@@ -35,6 +36,12 @@ pub struct SeenState {
     pub last_polled_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    /// When its runs started over the last day, for its runs a day (PRO-490 review).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub started: Vec<String>,
+    /// Until when it holds what it found, its runs a day met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_until: Option<String>,
 }
 
 pub fn list() -> Result<Vec<Automation>> {
@@ -117,6 +124,128 @@ pub fn remove(id: &str) -> Result<()> {
         std::fs::remove_dir_all(dir)?;
     }
     Ok(())
+}
+
+/// What a deleted automation leaves beside its kept run log (PRO-499).
+const DELETED_FILE: &str = "deleted.json";
+/// A run log's file in an automation's folder.
+const RUNS_FILE: &str = "runs.jsonl";
+/// What a run still open when its duty was deleted says: nothing closes it after (PRO-499 review).
+pub const DELETED_MID_RUN: &str = "Its duty was deleted before this run finished.";
+
+/// `runs` of an automation deleted at `deleted_at`, with any still open read
+/// as stopped then: a kept log is never left with a run going on (one a
+/// scheduler tick wrote just after the delete too).
+pub fn closed_at_deletion(mut runs: Vec<AutomationRun>, deleted_at: &str) -> Vec<AutomationRun> {
+    for run in runs.iter_mut().filter(|run| !run.status.is_terminal()) {
+        close_at_deletion(run, deleted_at);
+    }
+    runs
+}
+
+fn close_at_deletion(run: &mut AutomationRun, deleted_at: &str) {
+    run.status = AutomationRunStatus::Cancelled;
+    run.deferred_completion = None;
+    // Never ended before it began: one written after the delete ends when it began.
+    let at = |text: &str| chrono::DateTime::parse_from_rfc3339(text).ok();
+    let began = run.started_at.clone().or_else(|| run.scheduled_for.clone());
+    run.ended_at = Some(match began {
+        Some(began) if at(&began).zip(at(deleted_at)).is_some_and(|(began, deleted)| began > deleted) => began,
+        _ => deleted_at.to_owned(),
+    });
+    run.error.get_or_insert_with(|| DELETED_MID_RUN.to_owned());
+}
+
+/// A deleted automation whose run log is kept: its definition as it was, and
+/// when it went. Nothing schedules or runs it; the week of duties reads its
+/// past runs and names it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deleted {
+    pub deleted_at: String,
+    pub automation: Automation,
+}
+
+/// Remove an automation's definition but keep its run log, with the
+/// definition beside it as [`Deleted`] (PRO-499). Everything else in its
+/// folder (what it has seen) goes. One that never ran leaves nothing.
+pub fn remove_keeping_runs(id: &str, deleted_at: &str) -> Result<()> {
+    let mut removed = None;
+    update_definitions(|values| {
+        let at = values
+            .iter()
+            .position(|value| value.id == id)
+            .ok_or_else(|| anyhow::anyhow!("automation {id} not found"))?;
+        removed = Some(values.remove(at));
+        Ok(())
+    })?;
+    let automation = removed.ok_or_else(|| anyhow::anyhow!("automation {id} not found"))?;
+    // A run finishing now waits, so the log is not written while its folder is emptied.
+    let _guard = RUN_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let dir = super::root()?.join("automations").join(id);
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.file_name() == RUNS_FILE {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    let runs = dir.join(RUNS_FILE);
+    if std::fs::metadata(&runs).map_or(true, |meta| meta.len() == 0) {
+        std::fs::remove_dir_all(dir)?;
+        return Ok(());
+    }
+    // A run still going ends here: recovery and the run's own ending read only the duties there are, so nothing
+    // would close it after, and the week would draw it running for ever.
+    for mut open in resolve_runs(&runs)?.into_iter().filter(|run| !run.status.is_terminal()) {
+        close_at_deletion(&mut open, deleted_at);
+        append_and_compact_unlocked(&open)?;
+    }
+    super::write_json(
+        &dir.join(DELETED_FILE),
+        &Deleted {
+            deleted_at: deleted_at.to_owned(),
+            automation,
+        },
+    )
+}
+
+/// The deleted automations whose run logs are kept. One whose record cannot be
+/// read is left out (and said in the log), never taken for one still defined.
+pub fn list_deleted() -> Result<Vec<Deleted>> {
+    let dir = super::root()?.join("automations");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path().join(DELETED_FILE);
+        match super::read_json::<Deleted>(&path) {
+            Ok(Some(deleted)) => out.push(deleted),
+            Ok(None) => {}
+            Err(error) => log::warn!("{}: {error:#}", path.display()),
+        }
+    }
+    out.sort_by(|a, b| a.automation.id.cmp(&b.automation.id));
+    Ok(out)
+}
+
+/// The deleted automation `id`, when its run log is kept.
+pub fn get_deleted(id: &str) -> Result<Option<Deleted>> {
+    // An id that names no single folder names no deleted automation.
+    if id.is_empty() || id.contains(['/', '\\']) || id == "." || id == ".." {
+        return Ok(None);
+    }
+    super::read_json(&super::root()?.join("automations").join(id).join(DELETED_FILE))
 }
 
 pub fn load_seen(automation_id: &str) -> Result<Option<SeenState>> {
@@ -223,6 +352,28 @@ pub fn replace_run(
     Ok(run)
 }
 
+/// Take one run out of the history: a pending run whose first check's result
+/// was folded into an earlier record (PRO-484).
+pub fn remove_run(automation_id: &str, run_id: &str) -> Result<()> {
+    let _guard = RUN_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let path = runs_path(automation_id)?;
+    let mut runs = resolve_runs(&path)?;
+    runs.retain(|run| run.run_id != run_id);
+    runs.sort_by_key(|run| run.run_number);
+    let mut lines = runs
+        .into_iter()
+        .map(|run| serde_json::to_string(&run))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join("\n");
+    if !lines.is_empty() {
+        lines.push('\n');
+    }
+    super::write_atomic(&path, lines.as_bytes())?;
+    Ok(())
+}
+
 fn resolve_runs(path: &std::path::Path) -> Result<Vec<AutomationRun>> {
     let records: Vec<AutomationRun> = super::read_lines(path)?;
     let mut latest = BTreeMap::new();
@@ -304,6 +455,7 @@ mod tests {
             last_run_at: None,
             last_outcome: None,
             issue_trigger: None,
+            event_trigger: None,
             pipeline: None,
             created: "2026-09-02T12:00:00Z".into(),
             modified: "2026-09-02T12:00:00Z".into(),
@@ -326,6 +478,7 @@ mod tests {
             worktree_name: None,
             issue: None,
             final_message: None,
+            deferred_completion: None,
             changed_files: None,
             usage: None,
             precheck: None,

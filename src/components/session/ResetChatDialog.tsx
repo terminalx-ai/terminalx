@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { agent, errorMessage } from "@/lib/api";
-import { reloadTabHistory } from "@/lib/agentEvents";
+import { errorMessage } from "@/lib/api";
 import { usePref } from "@/lib/prefs";
-import { refreshSessions } from "@/lib/sessions";
 import { Button } from "@/components/ui/button";
+import { keycaps } from "@/lib/hotkeys";
+import type { ResetTarget } from "@/components/chat/Chat";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 /** Starts the backend's refusal when restoring files would overwrite other changes (session_reset.rs `OVERLAP`). */
@@ -29,8 +29,18 @@ export function overlapRefusal(message: string): { paths: string[]; token: strin
 const SHOWN = 5;
 
 /** Mounted per selection, so confirmation always names the selected turn. */
-export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClose, onWarning }: {
-  sessionId: string; tabId: string; endSeq: number | null;
+export function ResetChatDialog({ reset: run, endSeq, target, agent: agentLabel, filesRestored, onClose, onWarning }: {
+  /**
+   * The session's reset (`TurnActions.reset`): this computer's runtime for a
+   * local tab, the session's own for a cloud or machine one (#1326). Resolves
+   * to a warning about what went wrong after the reset, or null.
+   */
+  reset: (endSeq: number | null, resetFiles: boolean, confirm: string | null) => Promise<string | null>;
+  endSeq: number | null;
+  /** The turn reset to, the turns that go, and how many files changed since: what the dialog names. */
+  target?: ResetTarget;
+  /** The agent's name, for what it remembers ("Claude Code"). */
+  agent?: string;
   /** Undo only: how many files the reset being undone restored. */
   filesRestored?: number;
   onClose: () => void; onWarning: (message: string) => void;
@@ -50,11 +60,8 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
     try {
       // "Reset anyway" hands back the token of the list that was shown; the backend
       // goes ahead only if nothing changed since that plan was made.
-      const warning = await agent.resetChat(sessionId, tabId, endSeq, !undo && resetFiles, refusal?.token ?? null);
-      // Also refresh directly: the window may have missed the owner event.
-      const refreshed = await Promise.allSettled([reloadTabHistory(sessionId, tabId), refreshSessions()]);
+      const warning = await run(endSeq, !undo && resetFiles, refusal?.token ?? null);
       if (warning) onWarning(warning);
-      else if (refreshed.some((result) => result.status === "rejected")) onWarning("Chat reset. Reopen the tab if its history has not refreshed yet.");
       onClose();
     } catch (e) {
       const message = errorMessage(e);
@@ -66,25 +73,36 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
       setBusy(false);
     }
   }
-  const action = undo ? "Undo reset" : "Reset chat";
+  const action = undo ? "Undo reset" : "Reset";
+  const n = target?.turn;
+  const removed = target?.removed ?? [];
+  const turnsGo = !removed.length ? "Later messages are" : removed.length === 1 ? `Turn ${removed[0]} is` : `Turns ${listed(removed)} are`;
+  const files = target?.files ?? 0;
   return <Dialog open onOpenChange={(open) => { if (!open && !busy) onClose(); }}>
-    <DialogContent showClose={!busy}>
+    <DialogContent showClose={!busy} onKeyDown={(event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        void reset();
+      }
+    }}>
       <DialogHeader>
-        <DialogTitle>{undo ? "Undo chat reset?" : "Reset to here?"}</DialogTitle>
+        <DialogTitle>{undo ? "Undo chat reset?" : n ? `Reset the chat to turn ${n}?` : "Reset the chat to here?"}</DialogTitle>
         <DialogDescription>{undo
           ? `Restore the conversation saved before the last reset. Messages sent since that reset will leave this chat.${filesRestored ? ` The ${filesRestored === 1 ? "file it restored goes" : `${filesRestored} files it restored go`} back to how ${filesRestored === 1 ? "it was" : "they were"} before the reset.` : ""}`
-          : "Later messages will be removed from this chat and the agent’s conversation. You can undo the last reset."}</DialogDescription>
+          : `${turnsGo} removed from this chat and from what ${agentLabel ?? "the agent"} remembers. You can undo one reset afterwards.`}</DialogDescription>
       </DialogHeader>
       <div className="my-4 space-y-2 text-sm">
         {!undo && <>
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={resetFiles} disabled={busy} aria-describedby="reset-files-hint"
+          <label className={`flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2.5 ${resetFiles ? "border-hairline-strong bg-veil-raised" : "border-hairline"}`}>
+            <input type="checkbox" className="mt-0.5 accent-accent" checked={resetFiles} disabled={busy} aria-labelledby="reset-files-label" aria-describedby="reset-files-hint"
               onChange={(e) => { setResetFiles(e.target.checked); setRefusal(null); setError(null); }} />
-            Also reset files
+            <span className="min-w-0">
+              <span id="reset-files-label" className="block">Also reset files</span>
+              <span id="reset-files-hint" className="block text-xs text-muted-foreground">{files
+                ? `${files === 1 ? "1 file" : `${files} files`} changed since ${n ? `turn ${n}` : "this turn"} ${files === 1 ? "goes" : "go"} back to how ${files === 1 ? "it was" : "they were"} then`
+                : `Files changed since ${n ? `turn ${n}` : "this turn"} go back to how they were then`}</span>
+            </span>
           </label>
-          <p id="reset-files-hint" className="pl-6 text-xs text-muted-foreground">{resetFiles
-            ? "Files changed since this turn go back to how they were when it ended."
-            : "Files stay as they are."}</p>
         </>}
         {overlap && <div role="alert" className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs">
           <p>{overlap.length === 1 ? "This file was" : `${overlap.length} files were`} changed by another chat or by hand since {undo ? "the reset" : "this turn"}:</p>
@@ -98,8 +116,14 @@ export function ResetChatDialog({ sessionId, tabId, endSeq, filesRestored, onClo
       </div>
       <DialogFooter>
         <Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
-        <Button disabled={busy} onClick={() => void reset()}>{busy ? "Resetting…" : overlap ? `${undo ? "Undo" : "Reset"} anyway` : action}</Button>
+        <Button disabled={busy} onClick={() => void reset()}>{busy ? "Resetting…" : overlap ? `${undo ? "Undo" : "Reset"} anyway` : action}{!busy && <kbd aria-hidden className="ml-1 rounded-sm bg-current/15 px-1 font-sans text-[12px] leading-5 opacity-80">{keycaps("mod+enter").join("")}</kbd>}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;
+}
+
+/** "3", "3 and 4", "3, 4 and 5", then "3 to 9": later turns always run on to the last. */
+function listed(numbers: number[]): string {
+  if (numbers.length > 3) return `${numbers[0]} to ${numbers.at(-1)}`;
+  return numbers.length < 2 ? numbers.join("") : `${numbers.slice(0, -1).join(", ")} and ${numbers.at(-1)}`;
 }

@@ -33,7 +33,7 @@
 //! keeps in the Keychain (`cli_auth_credentials_store = "keyring"`) is not
 //! read: it reads as not found.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 use zeroize::Zeroizing;
@@ -190,14 +190,14 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 /// Claude Code's Keychain item. macOS asks the person before `security`
 /// may read another program's item, so the wait is long enough to answer.
 #[cfg(target_os = "macos")]
-fn claude_keychain() -> Result<Zeroizing<String>, LocalLoginError> {
+fn claude_keychain(service: &str) -> Result<Zeroizing<String>, LocalLoginError> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     let account = std::env::var("USER").map_err(|_| LocalLoginError::NotFound)?;
     let mut child = Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-a", &account, "-w"])
+        .args(["find-generic-password", "-s", service, "-a", &account, "-w"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -228,7 +228,7 @@ fn claude_keychain() -> Result<Zeroizing<String>, LocalLoginError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn claude_keychain() -> Result<Zeroizing<String>, LocalLoginError> {
+fn claude_keychain(_service: &str) -> Result<Zeroizing<String>, LocalLoginError> {
     Err(LocalLoginError::NotFound)
 }
 
@@ -236,22 +236,132 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_millis() as i64).unwrap_or(0)
 }
 
+/// The Keychain item Claude Code keeps this Mac's own login in.
+const CLAUDE_SERVICE: &str = "Claude Code-credentials";
+
 /// This computer's Claude Code sign-in, as far as it may be lent.
 pub fn claude() -> Result<LocalLogin, LocalLoginError> {
-    let account_in = |dir: PathBuf| std::fs::read_to_string(dir.join(".claude.json")).ok().and_then(|raw| claude_account_from_raw(&raw));
     // A custom config directory never falls back to another account's Keychain item.
     if let Some(dir) = env_dir("CLAUDE_CONFIG_DIR") {
-        let (secret, expires_at_ms) = claude_from_raw(&read_file(dir.join(".credentials.json"))?, now_ms())?;
-        return Ok(LocalLogin { secret, expires_at_ms, account: account_in(dir) });
+        return claude_in(&dir);
     }
     let home = dirs::home_dir();
-    let raw = match claude_keychain() {
+    let raw = match claude_keychain(CLAUDE_SERVICE) {
         Ok(raw) => raw,
         Err(LocalLoginError::NotFound) => read_file(home.clone().ok_or(LocalLoginError::NotFound)?.join(".claude/.credentials.json"))?,
         Err(error) => return Err(error),
     };
     let (secret, expires_at_ms) = claude_from_raw(&raw, now_ms())?;
-    Ok(LocalLogin { secret, expires_at_ms, account: home.and_then(account_in) })
+    Ok(LocalLogin { secret, expires_at_ms, account: home.and_then(|home| claude_account_in(&home)) })
+}
+
+fn claude_account_in(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(".claude.json")).ok().and_then(|raw| claude_account_from_raw(&raw))
+}
+
+/// The Claude Code sign-in of configuration directory `dir` (an agent
+/// account's, #980, or the app's own `$CLAUDE_CONFIG_DIR`), as far as it may
+/// be lent. Claude Code keeps a directory's login in a Keychain item of its
+/// own ([`crate::agent_accounts::claude_dir::keychain_service`]), or in
+/// `<dir>/.credentials.json`; never the person's unsuffixed item.
+pub fn claude_in(dir: &Path) -> Result<LocalLogin, LocalLoginError> {
+    let from_item = match crate::agent_accounts::claude_dir::keychain_service(dir) {
+        Some(service) => claude_keychain(&service),
+        None => Err(LocalLoginError::NotFound),
+    };
+    let raw = match from_item {
+        Ok(raw) => raw,
+        Err(LocalLoginError::NotFound) => read_file(dir.join(".credentials.json"))?,
+        Err(error) => return Err(error),
+    };
+    let (secret, expires_at_ms) = claude_from_raw(&raw, now_ms())?;
+    Ok(LocalLogin { secret, expires_at_ms, account: claude_account_in(dir) })
+}
+
+/// The Codex sign-in of `CODEX_HOME` `home` (an agent account's, #980), as
+/// far as it may be lent.
+pub fn codex_in(home: &Path) -> Result<LocalLogin, LocalLoginError> {
+    let (secret, expires_at_ms, account) = codex_from_raw(&read_file(home.join("auth.json"))?, now_ms())?;
+    Ok(LocalLogin { secret, expires_at_ms, account })
+}
+
+pub use crate::agent_accounts::Identity;
+
+/// A short display string: one line, no control characters.
+fn display_text(raw: &str, max: usize) -> Option<String> {
+    let text = raw.trim();
+    (!text.is_empty() && text.chars().count() <= max && !text.chars().any(char::is_control)).then(|| text.to_string())
+}
+
+/// An id: letters, digits, dashes and underscores.
+fn plain_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    (!id.is_empty() && id.len() <= 80 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')).then(|| id.to_string())
+}
+
+/// A plan as the agents name them, capitalised for a label.
+fn plan_name(raw: &str) -> Option<String> {
+    let plan = raw.trim().to_ascii_lowercase();
+    let plan = plan.strip_prefix("claude_").unwrap_or(&plan);
+    let known = ["free", "pro", "max", "team", "enterprise", "plus", "business", "edu", "go"];
+    known.contains(&plan).then(|| {
+        let mut chars = plan.chars();
+        chars.next().map(|first| first.to_ascii_uppercase().to_string() + chars.as_str()).unwrap_or_default()
+    })
+}
+
+/// Who Claude Code is signed in as in a `.claude.json`: its `oauthAccount`.
+pub fn claude_identity_from_raw(raw: &str) -> Identity {
+    let Ok(parsed) = object(raw) else { return Identity::default() };
+    let Some(account) = parsed.get("oauthAccount").and_then(Value::as_object) else { return Identity::default() };
+    let text = |key: &str| account.get(key).and_then(Value::as_str);
+    Identity {
+        email: text("emailAddress").and_then(display_address),
+        plan: text("organizationType").and_then(plan_name).or_else(|| text("planDisplayName").and_then(|plan| display_text(plan, 30))),
+        organization: text("organizationName").and_then(|name| display_text(name, 120)),
+        organization_id: text("organizationUuid").and_then(plain_id),
+    }
+}
+
+/// Who a Codex `auth.json` is signed in as: its ID token's claims.
+pub fn codex_identity_from_raw(raw: &str) -> Identity {
+    let Ok(parsed) = object(raw) else { return Identity::default() };
+    let Some(id_token) = parsed.get("tokens").and_then(Value::as_object).and_then(|tokens| non_empty(tokens, "id_token")) else { return Identity::default() };
+    let Some(claims) = jwt_claims(id_token) else { return Identity::default() };
+    let auth = claims.get("https://api.openai.com/auth").and_then(Value::as_object);
+    let text = |key: &str| auth.and_then(|auth| auth.get(key)).and_then(Value::as_str);
+    Identity {
+        email: claims.get("email").and_then(Value::as_str).and_then(display_address),
+        plan: text("chatgpt_plan_type").and_then(plan_name),
+        organization: None,
+        organization_id: text("chatgpt_account_id").and_then(plain_id),
+    }
+}
+
+/// Who the configuration directory `dir` of `agent` ("claude" or "codex")
+/// is signed in as: Claude Code's `<dir>/.claude.json`, Codex's
+/// `<dir>/auth.json`. Read only; a file that is missing or not a login is
+/// nobody.
+pub fn identity_in(agent: &str, dir: &Path) -> Identity {
+    match agent {
+        "claude" => read_file(dir.join(".claude.json")).map(|raw| claude_identity_from_raw(&raw)).unwrap_or_default(),
+        "codex" => read_file(dir.join("auth.json")).map(|raw| codex_identity_from_raw(&raw)).unwrap_or_default(),
+        _ => Identity::default(),
+    }
+}
+
+/// Who This Mac's own login (`local`) is, for telling an added account
+/// apart from it: `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`),
+/// and `$CODEX_HOME` or `~/.codex`. Read only.
+pub fn local_identity(agent: &str) -> Identity {
+    match agent {
+        "claude" => match env_dir("CLAUDE_CONFIG_DIR") {
+            Some(dir) => identity_in("claude", &dir),
+            None => dirs::home_dir().map(|home| identity_in("claude", &home)).unwrap_or_default(),
+        },
+        "codex" => crate::harness::codex::home::user_root().map(|home| identity_in("codex", &home)).unwrap_or_default(),
+        _ => Identity::default(),
+    }
 }
 
 /// This computer's Codex sign-in, as far as it may be lent. A custom
@@ -353,6 +463,45 @@ pub(crate) mod tests {
         assert_eq!(expires_at, LATER / 1000 * 1000);
         assert_eq!(account.as_deref(), Some("ada@example.com"));
         assert!(!secret.contains("rt-must-stay-here") && !secret.contains("refresh"));
+    }
+
+    #[test]
+    fn whose_sign_in_a_directory_holds_is_read_as_display_strings_only() {
+        let raw = json!({ "oauthAccount": {
+            "emailAddress": "ada@example.com", "organizationType": "claude_max", "planDisplayName": "Max",
+            "organizationName": "Acme", "organizationUuid": "8d3c1a2e-0000-4000-8000-000000000001", "accountUuid": "not-kept",
+        }, "mcpServers": {} }).to_string();
+        let identity = claude_identity_from_raw(&raw);
+        assert_eq!(identity, Identity { email: Some("ada@example.com".into()), plan: Some("Max".into()), organization: Some("Acme".into()), organization_id: Some("8d3c1a2e-0000-4000-8000-000000000001".into()) });
+        for raw in ["{}", "not json", r#"{"oauthAccount":{"emailAddress":"two words@x"}}"#] {
+            assert!(!claude_identity_from_raw(raw).signed_in(), "{raw}");
+        }
+        let id_token = jwt(json!({ "email": "ada@example.com", "https://api.openai.com/auth": { "chatgpt_plan_type": "plus", "chatgpt_account_id": "acct_1" } }));
+        let raw = json!({ "auth_mode": "chatgpt", "tokens": { "id_token": id_token, "access_token": "at-secret", "refresh_token": "rt-secret" } }).to_string();
+        let identity = codex_identity_from_raw(&raw);
+        assert_eq!(identity, Identity { email: Some("ada@example.com".into()), plan: Some("Plus".into()), organization: None, organization_id: Some("acct_1".into()) });
+        assert!(!format!("{identity:?}").contains("secret"));
+
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!identity_in("codex", dir.path()).signed_in());
+        std::fs::write(dir.path().join("auth.json"), &raw).unwrap();
+        assert_eq!(identity_in("codex", dir.path()).email.as_deref(), Some("ada@example.com"));
+        assert!(!identity_in("claude", dir.path()).signed_in());
+    }
+
+    #[test]
+    fn an_account_directory_lends_its_own_file_login() {
+        let dir = tempfile::tempdir().unwrap();
+        // A scratch directory: no Keychain item is named for it, so the file is read.
+        assert_eq!(claude_in(dir.path()).err(), Some(LocalLoginError::NotFound));
+        let later = now_ms() + 6 * 60 * 60 * 1000;
+        std::fs::write(dir.path().join(".credentials.json"), json!({ "claudeAiOauth": { "accessToken": "at-1", "refreshToken": "rt-stays", "expiresAt": later } }).to_string()).unwrap();
+        std::fs::write(dir.path().join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"bo@example.com"}}"#).unwrap();
+        let lent = claude_in(dir.path()).unwrap();
+        assert_eq!(lent.account.as_deref(), Some("bo@example.com"));
+        assert!(!lent.secret.contains("rt-stays"));
+        let codex = tempfile::tempdir().unwrap();
+        assert_eq!(codex_in(codex.path()).err(), Some(LocalLoginError::NotFound));
     }
 
     #[test]

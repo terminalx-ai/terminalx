@@ -1,14 +1,21 @@
 import { preparePipelineLaunch, preparePipelineContinuation } from "@/lib/pipelineLaunch";
-import { agent, api, errorMessage, onPromptDelivery } from "@/lib/api";
+import { agent, api, files, errorMessage, type ImageInput, onPromptDelivery } from "@/lib/api";
 import { applyEvent } from "@/lib/agentEvents";
 import { getDraftRevision, setDraft } from "@/lib/drafts";
-import { addTab, archiveSession, selectSession, upsertSession } from "@/lib/sessions";
+import { addTab, archiveSession, getSessionStore, patchSession, selectSession, upsertSession } from "@/lib/sessions";
+import { setSelectedAgent } from "@/lib/terminal";
 import type { LaunchSettings } from "@/lib/useSessionAgent";
+import type { ImageRef, FileRef } from "@/types/events";
 import type { TabEntry } from "@/types/session";
 import type { ContinuationContext } from "@terminalx/portable/continuation";
 
 // The prompt is built the same way on the phone.
 export * from "@terminalx/portable/continuation";
+
+export interface PromptAttachments {
+  images?: ImageRef[];
+  files?: FileRef[];
+}
 
 /** The conversation a continuation started, and the workspace it is in. */
 export interface Launched {
@@ -36,6 +43,29 @@ async function ensureAvailable(harness: string) {
   if (!providers.some((p) => p.id === harness && p.available)) throw new Error("The selected provider is no longer available on this host.");
 }
 
+/**
+ * A launch request's tab and account (#980): the account goes beside the
+ * tab, as the request takes it, and only when one was chosen, so a start
+ * with one account sends what it always did.
+ */
+function onAccount(settings: LaunchSettings) {
+  const { account, ...tab } = settings;
+  return { tab, ...(account ? { account } : {}) };
+}
+
+/**
+ * Add the handoff's tab to its session. On an account, through the request
+ * that takes one, then shown as the session's `addTab` shows a tab.
+ */
+async function addHandoffTab(sessionId: string, settings: LaunchSettings): Promise<TabEntry> {
+  if (!settings.account) return addTab(sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
+  const tab = await api.addTab(sessionId, { harness: settings.harness, model: settings.model, effort: settings.effort, permissionMode: settings.permissionMode }, settings.account);
+  const session = getSessionStore().sessions.find((x) => x.id === sessionId);
+  if (session) patchSession(sessionId, { tabs: [...session.tabs.filter((t) => t.id !== tab.id), tab], activeTab: tab.id });
+  setSelectedAgent(sessionId, tab.id);
+  return tab;
+}
+
 // A retry retains the same Launched object. Weak ownership survives launch failures
 // without a listener to dispose or a tab-id registry that retains abandoned launches.
 const seededDrafts = new WeakMap<Launched, number>();
@@ -44,7 +74,7 @@ function seedDraft(launched: Launched, prompt: string) {
   seededDrafts.set(launched, setDraft(launched.tab.id, prompt));
 }
 
-async function deliver(launched: Launched, prompt: string, onDelivering?: () => void): Promise<ContinuationResult> {
+async function deliver(launched: Launched, prompt: string, onDelivering?: () => void, attachments?: { images?: ImageInput[]; files?: FileRef[] }): Promise<ContinuationResult> {
   // Remove only our prepared draft before send can publish a user message.
   // The actual prompt may include pipeline instructions added after creation.
   const seedRevision = seededDrafts.get(launched);
@@ -53,7 +83,11 @@ async function deliver(launched: Launched, prompt: string, onDelivering?: () => 
   const removedRevision = ownsDraft ? setDraft(launched.tab.id, "") : undefined;
   try {
     onDelivering?.();
-    const out = await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
+    // Native confirmed delivery is text-only. Attachment retries must use the
+    // normal composer path, which validates files and forwards image data.
+    const out = attachments?.images?.length || attachments?.files?.length
+      ? await agent.send(launched.sessionId, launched.tab.id, prompt, attachments.images, false, undefined, attachments.files)
+      : await agent.send(launched.sessionId, launched.tab.id, prompt, undefined, true);
     for (const event of out.events) applyEvent(event);
     // In the agent's input, not in the composer: it is there to send, once.
     const seq = out.events[0]?.seq;
@@ -65,7 +99,7 @@ async function deliver(launched: Launched, prompt: string, onDelivering?: () => 
       ? "Your composer edits have been preserved."
       : "The prepared prompt is in its composer.";
     if (!edited) forgetOnceDelivered(launched, setDraft(launched.tab.id, prompt));
-    return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. ${recovery} ${errorMessage(e)}` };
+    return { stage: "delivery", launched, error: `The new session opened, but context delivery failed or could not be confirmed. Check its chat and terminal before retrying. ${recovery}${attachments?.images?.length || attachments?.files?.length ? " Attachments remain in the original prompt; retry from that prompt to include them again." : ""} ${errorMessage(e)}` };
   }
 }
 
@@ -96,12 +130,21 @@ export async function launchContinuation(
   context: ContinuationContext, settings: LaunchSettings, prompt: string,
   onCreated: (launched: Launched) => void, existing?: Launched, onDelivering?: () => void,
   purpose: "continue" | "review" = "continue",
+  attachments?: PromptAttachments,
 ): Promise<ContinuationResult> {
   let launched = existing;
+  let images: ImageInput[] | undefined;
   try {
+    images = attachments?.images ? await Promise.all(attachments.images.map(async (image) => {
+      const input = await files.readImage(image.url).catch((error) => {
+        throw new Error(`Cannot retry attachment “${image.name ?? image.url}”: ${errorMessage(error)}`);
+      });
+      if (!input) throw new Error(`Cannot retry attachment “${image.name ?? image.url}”: the image is unavailable or unsupported.`);
+      return { ...input, name: image.name ?? input.name };
+    })) : undefined;
     await ensureAvailable(settings.harness);
     if (!launched) {
-      const tab = await addTab(context.sessionId, settings.harness, settings.model, settings.effort, settings.permissionMode);
+      const tab = await addHandoffTab(context.sessionId, settings);
       launched = { sessionId: context.sessionId, tab };
       seedDraft(launched, prompt);
       onCreated(launched);
@@ -112,7 +155,7 @@ export async function launchContinuation(
   } catch (e) {
     return { stage: "launch", launched, error: `Could not start the new session: ${errorMessage(e)}` };
   }
-  return deliver(launched, prompt, onDelivering);
+  return deliver(launched, prompt, onDelivering, attachments ? { images, files: attachments.files } : undefined);
 }
 
 /** Where a chat moving into a project starts again: in place, or in a new worktree. */
@@ -145,7 +188,7 @@ export async function moveChatToProject(
   try {
     await ensureAvailable(settings.harness);
     if (!launched) {
-      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings });
+      const session = await api.createSession({ projectPath: to.projectPath, title: chat.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), ...onAccount(settings) });
       upsertSession(session);
       selectSession(session.id);
       const tab = session.tabs[0];
@@ -183,8 +226,8 @@ export async function launchContinuationInDestination(
     await ensureAvailable(settings.harness);
     if (!launched) {
       const session = to
-        ? await api.createSession({ projectPath: to.projectPath, title: context.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), tab: settings })
-        : await api.createQuickChat({ title: context.title, tab: settings });
+        ? await api.createSession({ projectPath: to.projectPath, title: context.title, useWorktree: to.worktree, onMain: !to.worktree, ...(to.cwd ? { cwd: to.cwd } : {}), ...onAccount(settings) })
+        : await api.createQuickChat({ title: context.title, ...onAccount(settings) });
       upsertSession(session);
       selectSession(session.id);
       const tab = session.tabs[0];

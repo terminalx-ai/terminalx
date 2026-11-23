@@ -1,7 +1,7 @@
 import { MANUAL_STATUSES, manualStatusLabel, normalizeManualStatus, type ManualStatus } from "@terminalx/portable/manualStatus";
 import { ManualStatusIcon } from "@/components/session/ManualStatus";
 import { conversationTitle } from "@/lib/sessions";
-import { openSectionDialog } from "@/lib/localSections";
+import { editLocalSection, openSectionDialog, useLocalSections, type LocalSectionEdit } from "@/lib/localSections";
 import {
   useCallback,
   useDeferredValue,
@@ -11,15 +11,27 @@ import {
   useState,
 } from "react";
 import {
+  AppWindow,
+  Archive,
+  ArrowLeft,
   AtSign,
+  BookOpen,
+  FileDiff,
+  RefreshCw,
+  SquarePen,
+  Wrench,
   BarChart3,
   Bot,
   FlaskConical,
   CalendarClock,
+  Check,
   CircleDot,
   Command as CommandIcon,
   FileText,
+  Folder,
   FolderGit2,
+  FolderInput,
+  FolderMinus,
   FolderOpen,
   FolderPlus,
   Gauge,
@@ -69,6 +81,7 @@ import { cn } from "@/lib/cn";
 import {
   indexPaletteItem,
   movePaletteSelection,
+  orderPaletteItems,
   PALETTE_TABS,
   paletteScopeShows,
   palettePlaceholder,
@@ -76,6 +89,8 @@ import {
   parseSmartInput,
   rankPaletteItems,
   searchPaletteIndex,
+  sectionChoices,
+  stepPaletteTab,
   buildCloudPaletteProjects,
   buildCloudPaletteSessions,
   withCloudProjects,
@@ -107,7 +122,7 @@ import {
   upsertSession,
   useSessionStore,
 } from "@/lib/sessions";
-import { SHORTCUT_ACTIONS, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
+import { SHORTCUT_ACTIONS, isMac, keycaps, useKeymap, type ShortcutAction } from "@/lib/shortcuts";
 import { openCloudSession, useCloudDashboard } from "@/lib/cloudDashboard";
 import { updateCloudSession, useCloudSessionForStatus } from "@/lib/cloudSessions";
 import { openNewCloudWorkspace } from "@/components/cloud/NewCloudWorkspaceDialog";
@@ -131,7 +146,9 @@ const GROUP_CAPS: Record<string, number> = {
   workspaces: 6,
   projects: 4,
   files: 8,
+  "session-actions": 8,
   commands: 8,
+  sections: 500,
   settings: 30,
   "settings-pages": 30,
   "settings-projects": 30,
@@ -142,6 +159,7 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   account: User,
   devices: Smartphone,
   machines: Laptop,
+  stats: BarChart3,
   general: Settings,
   appearance: Palette,
   agents: Bot,
@@ -156,12 +174,59 @@ const SETTINGS_PAGE_ICONS: Record<SettingsSection, LucideIcon> = {
   storage: HardDrive,
   shortcuts: Keyboard,
   experimental: FlaskConical,
+  advanced: Wrench,
   about: Info,
 };
+
+/**
+ * The Actions list with nothing typed (design 07.04): the open session's actions
+ * under its title, then the app's, each with the most used first. An action
+ * named here leads its group in this order; the rest follow as the shortcut
+ * registry lists them, and the app's housekeeping (updates, help, About) ends it.
+ */
+const SESSION_ACTIONS_FIRST = [
+  "command:shortcut:session.fixErrors",
+  "command:shortcut:git.createPr",
+  "command:shortcut:git.merge",
+  "command:shortcut:git.commitPush",
+  "command:shortcut:git.pull",
+  "command:shortcut:panel.changes",
+  "command:shortcut:panel.pullRequests",
+  "command:session-status",
+  "command:local-section:move",
+  "command:shortcut:session.archive",
+  "command:shortcut:session.newTab",
+  "command:shortcut:files.quickOpen",
+  "command:shortcut:files.search",
+];
+const APP_ACTIONS_FIRST = [
+  "command:shortcut:app.newSession",
+  "command:local-section:create",
+  "command:shortcut:app.addProject",
+  "command:shortcut:app.automations",
+  "command:shortcut:app.startFrom",
+  "command:new-issue",
+  "command:shortcut:app.home",
+  "command:shortcut:app.issues",
+  "command:shortcut:app.agentDashboard",
+  "command:shortcut:app.stats",
+  "command:shortcut:app.skills",
+  "command:shortcut:app.settings",
+  "command:settings:search",
+  "command:shortcut:app.shortcuts",
+  "command:shortcut:app.toggleSidebar",
+  "command:shortcut:app.togglePanel",
+];
+const APP_ACTIONS_LAST = ["command:shortcut:app.checkUpdates", "command:shortcut:app.docs", "command:shortcut:app.reportIssue", "command:shortcut:app.about"];
+
+/** A binding as one keycap (design 07.04): ⇧⌘X on the Mac, Ctrl+Shift+X elsewhere. */
+const chordCap = (binding: string) => keycaps(binding).join(isMac ? "" : "+");
 
 interface CommandEntry extends PaletteEntityBase {
   group: "commands";
   icon: LucideIcon;
+  /** The action is the open session's: listed under "This session", not under "App". */
+  session?: boolean;
   /** The entry is a keyboard shortcut's action: it runs where the focus was. */
   shortcut?: boolean;
   /** The action's current keys, when it has any. */
@@ -191,13 +256,31 @@ interface PaletteRow {
   run: () => void | Promise<void>;
   restoreFocus?: boolean;
   closeBefore?: boolean;
-  /** One line: the title, and the secondary text after it (the Settings pages list, design 07.05). */
-  inline?: boolean;
+  /**
+   * One 36px line instead of a tile with two. "line" is an action (design 07.04): the label, a grey detail after
+   * it, and its keys at the end. "page" is a Settings page (design 07.05): the title, and what it holds at the end.
+   */
+  layout?: "line" | "page";
+  /** A section's emoji, drawn where the icon would be. */
+  emoji?: string;
+  /** Said in small type at the row's end, before the keys: a section's session count. */
+  trailing?: string;
+  /** The row has a check column, and this row's is ticked: the section the session is in. */
+  checked?: boolean;
+  /** While selected, the row shows the Enter keycap. */
+  enterHint?: boolean;
 }
 
 interface PaletteGroup {
   id: string;
+  /** The heading; none for a list that needs no name (the sections of Move to section). */
   label: string;
+  /** Said after the heading in ordinary case: the open session's title. */
+  labelDetail?: string;
+  /** A hairline above the group, when another precedes it. */
+  divider?: boolean;
+  /** Said above the group in place of rows that are not there: no section matches. */
+  note?: { title: string; detail: string };
   rows: PaletteRow[];
 }
 
@@ -215,6 +298,21 @@ const START_ACTION_ICONS: Record<StartAction["id"], LucideIcon> = { local: Folde
 function shortcutIcon(shortcut: ShortcutAction): LucideIcon {
   const label = shortcut.label.toLowerCase();
   if (shortcut.id === "app.home") return Home;
+  // Design 07.04 gives an action its own glyph where there is one; the keyboard is what is left.
+  if (shortcut.id === "app.newSession" || shortcut.id === "app.startFrom") return SquarePen;
+  if (shortcut.id === "app.about") return Info;
+  if (shortcut.id === "app.checkUpdates") return RefreshCw;
+  if (shortcut.id === "app.docs") return BookOpen;
+  if (shortcut.id === "session.archive") return Archive;
+  if (shortcut.id === "session.runAction") return Play;
+  if (shortcut.id === "panel.changes") return FileDiff;
+  if (shortcut.id === "panel.repository") return GitBranch;
+  if (shortcut.id === "files.search" || shortcut.id === "files.replace" || shortcut.id === "files.find") return Search;
+  if (label.includes("pull request")) return GitPullRequest;
+  if (label.includes("check")) return Wrench;
+  if (shortcut.id.startsWith("git.")) return GitBranch;
+  if (label.includes("project")) return FolderGit2;
+  if (label.includes("window") || label.includes("zoom") || label.includes("size") || label.includes("full screen")) return AppWindow;
   if (label.includes("session") || label === "send" || label.includes("chat")) return MessageSquare;
   if (label.includes("issue")) return CircleDot;
   if (label.includes("dashboard")) return LayoutGrid;
@@ -325,6 +423,10 @@ export function CommandPalette({
   const [fileHits, setFileHits] = useState<FileHit[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
   const [statusSessionId, setStatusSessionId] = useState<string | null>(null);
+  // Move to section is a view of the palette (design 07.13): these sessions are being given a section.
+  const [moveIds, setMoveIds] = useState<string[] | null>(null);
+  const movePending = useRef(false);
+  const { sections } = useLocalSections();
   const [settingStatus, setSettingStatus] = useState(false);
   const [selected, setSelected] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -381,6 +483,7 @@ export function CommandPalette({
     setQuery("");
     setScope("all");
     setStatusSessionId(null);
+    setMoveIds(null);
     setFileHits([]);
     setSelected(0);
     setExpanded({});
@@ -501,26 +604,30 @@ export function CommandPalette({
   }, [account]);
 
   const commandEntries = useMemo<CommandEntry[]>(() => {
-    const shortcutEntries = SHORTCUT_ACTIONS.map((shortcut, index) =>
+    // An action behind an Experimental switch that is off (Bots) is not offered.
+    const shortcutEntries = SHORTCUT_ACTIONS.filter((shortcut) => !shortcut.requires || switches?.[shortcut.requires] === true).map((shortcut, index) =>
       indexPaletteItem({
         id: `command:shortcut:${shortcut.id}`,
         group: "commands" as const,
         primary: shortcut.label,
-        secondary: shortcut.id === "app.home" ? "Open the welcome screen" : `${shortcut.group} shortcut`,
+        // One line each: an action says more than its name only when it has something to say (design 07.04).
+        secondary: shortcut.id === "app.home" ? "Open the welcome screen" : "",
         recentAt: SHORTCUT_ACTIONS.length - index,
         icon: shortcutIcon(shortcut),
         shortcut: true,
+        session: shortcut.group !== "App",
         chord: keymap[shortcut.id][0],
         run: () => runAction(shortcut),
-      }, keymap[shortcut.id]),
+      }, [...keymap[shortcut.id], `${shortcut.group} shortcut`]),
     );
+    const inSection = selectedSession ? sections.find((section) => section.sessions.includes(selectedSession.id)) : undefined;
     const extras: CommandEntry[] = [
       ...(statusTarget ? [indexPaletteItem({
         id: "command:session-status", group: "commands" as const, primary: "Set status…",
-        secondary: `${statusTarget.title} · ${manualStatusLabel(statusTarget.manualStatus)}`,
-        recentAt: 25, icon: CircleDot, keepOpen: true,
+        secondary: manualStatusLabel(statusTarget.manualStatus),
+        recentAt: 25, icon: CircleDot, keepOpen: true, session: true,
         run: () => { setStatusSessionId(statusTarget.key); setQuery(""); setSelected(0); setError(null); },
-      }, ["session backlog progress review done canceled workflow"])] : []),
+      }, [statusTarget.title, "session backlog progress review done canceled workflow"])] : []),
       indexPaletteItem({
         id: "command:status-toggle",
         group: "commands" as const,
@@ -566,8 +673,8 @@ export function CommandPalette({
       indexPaletteItem({ id: "command:new-issue", group: "commands" as const, primary: "New issue…", secondary: "Create a GitHub or Linear issue for the project", recentAt: 2, icon: CircleDot, run: () => openNewIssue() }, ["issue create new bug feature github linear ticket"]),
       indexPaletteItem({ id: "command:pair-phone", group: "commands" as const, primary: "Pair a phone…", secondary: "Drive this Mac's sessions from TerminalX for iPhone", recentAt: 2, icon: Smartphone, run: () => openPairPhone() }, ["phone iphone mobile pair pairing device qr remote"]),
       indexPaletteItem({ id: "command:worktree-cleanup", group: "commands" as const, primary: "Clean up worktrees…", secondary: "Review and remove safe worktrees across open projects, here and on cloud workspaces", recentAt: 2, icon: Trash2, run: () => openWorktreeCleanup() }, ["worktree workspace cleanup disk space remove delete prune"]),
-      indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New local section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar section"]),
-      ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: conversationTitle(selectedSession), recentAt: 3, icon: FolderPlus, run: () => openSectionDialog({ kind: "move", sessionIds: [selectedSession.id] }) }, ["move session sidebar section"])] : []),
+      indexPaletteItem({ id: "command:local-section:create", group: "commands" as const, primary: "New section…", secondary: "Group sessions across local projects", recentAt: 2, icon: FolderPlus, run: () => openSectionDialog({ kind: "create" }) }, ["create sidebar local section"]),
+      ...(selectedSession && !store.selectedCloudWorkspace ? [indexPaletteItem({ id: "command:local-section:move", group: "commands" as const, primary: "Move to section…", secondary: inSection ? `In ${inSection.name}` : "", recentAt: 3, icon: FolderInput, keepOpen: true, session: true, run: () => { setMoveIds([selectedSession.id]); setQuery(""); setError(null); } }, [conversationTitle(selectedSession), "move session sidebar section"])] : []),
       // The start screen's three ways to a project, for after the first one exists.
       ...START_ACTIONS.map((action, index) =>
         indexPaletteItem({
@@ -598,18 +705,18 @@ export function CommandPalette({
           // ⌘R runs an action only when it is the only one; with several it opens the Run menu, which shows the key.
           ...runVisible.map((action, index) => indexPaletteItem({
             id: `command:run-action:${action.id}`, group: "commands" as const, primary: `Run ${action.name}`, secondary: action.command,
-            recentAt: 30 - index, icon: Play, chord: runVisible.length === 1 ? keymap["session.runAction"][0] : undefined,
+            recentAt: 30 - index, icon: Play, session: true, chord: runVisible.length === 1 ? keymap["session.runAction"][0] : undefined,
             run: () => startAction(selectedSession, action),
           }, ["run action start script"])),
           ...(runProject.previewUrls ?? []).map((preview, index) => indexPaletteItem({
             id: `command:open-preview:${preview.id}`, group: "commands" as const, primary: `Open ${preview.name}`, secondary: preview.url,
-            recentAt: 28 - index, icon: Globe,
+            recentAt: 28 - index, icon: Globe, session: true,
             run: () => openPreview(selectedSession, preview),
           }, ["open preview url browser"])),
         ]
       : [];
     return [...runEntries, ...shortcutEntries, ...extras];
-  }, [store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme]);
+  }, [sections, store.projects, selectedSession, statusTarget, store.selectedCloudWorkspace, cloud.live, cloud.mayCreate, cloud.orgName, runAction, keymap, status.settings.percent, status.settings.visible, theme.mode, theme.theme, switches]);
 
   const fileEntries = useMemo<FileEntry[]>(
     () => fileHits.map((hit, index) => indexPaletteItem({
@@ -706,13 +813,101 @@ export function CommandPalette({
     );
   }, [store.paletteIndex, cloudSessions, cloudProjects, store.harnesses, visibleIds, deferredQuery]);
 
+  // The open session's title: what "This session" is, and what Move to section moves.
+  const sessionTitle = selectedSession ? conversationTitle(selectedSession) : (statusTarget?.title ?? null);
+  const movedSession = moveIds?.length === 1 ? store.sessions.find((session) => session.id === moveIds[0]) : undefined;
+  const moveTitle = !moveIds ? "" : moveIds.length > 1 ? `${moveIds.length} sessions` : movedSession ? conversationTitle(movedSession) : "this session";
+  const leaveSubview = useCallback(() => {
+    setMoveIds(null);
+    setStatusSessionId(null);
+    setScope("actions");
+    setQuery("");
+    setError(null);
+    inputRef.current?.focus();
+  }, []);
+  /** Save a section edit from the Move to section view: the palette closes when it is saved and says why when it is not. */
+  const moveTo = useCallback(async (edit: LocalSectionEdit) => {
+    if (movePending.current) return;
+    movePending.current = true;
+    setError(null);
+    try {
+      await editLocalSection(edit);
+      setOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      movePending.current = false;
+    }
+  }, [setOpen]);
+
   const groups = useMemo<PaletteGroup[]>(() => {
+    if (moveIds) {
+      // Its own small list, filtered as typed: not deferred, so the row under the cursor is never a stale one.
+      const listed = new Set(store.sessions.filter((session) => !session.archived).map((session) => session.id));
+      const { choices, createName } = sectionChoices(sections, moveIds, query, (id) => listed.has(id));
+      const line = { kind: "command" as const, layout: "line" as const, primaryRanges: [], secondaryRanges: [], closeBefore: false };
+      const sectionRows: PaletteRow[] = choices.map((choice) => ({
+        ...line,
+        id: `palette:section:${choice.section.id}`,
+        primary: choice.section.name,
+        secondary: "",
+        primaryRanges: choice.nameRanges,
+        icon: Folder,
+        emoji: choice.section.emoji?.trim() || undefined,
+        trailing: `${choice.count} ${choice.count === 1 ? "session" : "sessions"}`,
+        checked: choice.current,
+        // Already there: choosing it again changes nothing, so nothing is sent.
+        run: () => (choice.current ? setOpen(false) : moveTo({ kind: "move", sessionIds: moveIds, sectionId: choice.section.id })),
+      }));
+      if (query.trim()) {
+        return [
+          { id: "sections", label: "", rows: sectionRows },
+          {
+            id: "section-actions",
+            label: "",
+            divider: true,
+            ...(choices.length ? {} : { note: { title: "No matching sections", detail: `${sections.length} local ${sections.length === 1 ? "section" : "sections"}` } }),
+            rows: createName ? [{
+              ...line,
+              id: "palette:section-create-named",
+              primary: `New section “${createName}”`,
+              secondary: `and move ${moveTitle} into it`,
+              icon: FolderPlus,
+              enterHint: true,
+              run: () => moveTo({ kind: "create", name: createName, emoji: null, sessionIds: moveIds }),
+            }] : [],
+          },
+        ];
+      }
+      const home = movedSession && movedSession.kind !== "quick" ? store.projects.find((project) => project.path === movedSession.projectPath)?.name : undefined;
+      const inAny = sections.some((section) => section.sessions.some((id) => moveIds.includes(id)));
+      return [
+        { id: "sections", label: "", rows: sectionRows },
+        {
+          id: "section-actions",
+          label: "",
+          divider: true,
+          rows: [
+            // The name and emoji are asked for in the section dialog, which then moves the session into it.
+            { ...line, id: "palette:section-create", primary: "New section…", secondary: "", icon: FolderPlus, closeBefore: undefined, run: () => openSectionDialog({ kind: "create", sessionIds: moveIds }) },
+            ...(inAny ? [{
+              ...line,
+              id: "palette:section-remove",
+              primary: "Remove from section",
+              secondary: home ? `Back under ${home}` : "Back in the main list",
+              icon: FolderMinus,
+              run: () => moveTo({ kind: "move", sessionIds: moveIds, sectionId: null }),
+            }] : []),
+          ],
+        },
+      ];
+    }
     if (statusSessionId) {
       if (!statusTarget) return [{ id: "statuses", label: "Status is unavailable for this session", rows: [] }];
       return [{ id: "statuses", label: `Set status · ${statusTarget.title}`, rows: MANUAL_STATUSES
         .filter((status) => manualStatusLabel(status).toLocaleLowerCase().includes(deferredQuery.toLocaleLowerCase()))
         .map((status) => ({
-          id: `status:${status}`, kind: "command", primary: manualStatusLabel(status),
+          id: `status:${status}`, kind: "command", layout: "line", primary: manualStatusLabel(status),
           secondary: status === normalizeManualStatus(statusTarget.manualStatus) ? "Current status" : "", primaryRanges: [], secondaryRanges: [], manualStatus: status,
           closeBefore: false,
           run: async () => {
@@ -758,7 +953,7 @@ export function CommandPalette({
             primaryRanges: [],
             secondaryRanges: [],
             icon: SETTINGS_PAGE_ICONS[page.id],
-            inline: true,
+            layout: "page",
             run: () => onOpenSettings(page.id),
           })),
         };
@@ -775,13 +970,19 @@ export function CommandPalette({
         secondaryRanges: [],
         icon: FolderGit2,
         project,
-        inline: true,
+        layout: "page",
         run: () => requestProjectSettings(project.path),
       })),
     };
     if (scope === "settings") return deferredQuery.trim() ? [settingsGroup] : [settingsGroup, settingsProjectsGroup];
     const entityMatches = searchPaletteIndex(paletteIndex, deferredQuery);
-    const commandMatches = rankPaletteItems(commandEntries, deferredQuery);
+    // With an open session its actions are a group of their own, under its title; without one, every action is the app's.
+    const sessionEntries = sessionTitle ? commandEntries.filter((entry) => entry.session) : [];
+    const appEntries = sessionTitle ? commandEntries.filter((entry) => !entry.session) : commandEntries;
+    // The project's own Run and Open entries lead the session's actions, as they did the list.
+    const projectActions = sessionEntries.filter((entry) => /^command:(run-action|open-preview):/.test(entry.id)).map((entry) => entry.id);
+    const sessionMatches = rankPaletteItems(orderPaletteItems(sessionEntries, [...projectActions, ...SESSION_ACTIONS_FIRST]), deferredQuery);
+    const appMatches = rankPaletteItems(orderPaletteItems([...appEntries.filter((entry) => !APP_ACTIONS_LAST.includes(entry.id)), ...APP_ACTIONS_LAST.flatMap((id) => appEntries.filter((entry) => entry.id === id))], APP_ACTIONS_FIRST), deferredQuery);
     const rankedFiles = deferredQuery.trim() ? rankPaletteItems(fileEntries, deferredQuery) : [];
     const smartRows: PaletteRow[] = [];
 
@@ -850,12 +1051,13 @@ export function CommandPalette({
       }, { project });
     });
     const fileRows = rankedFiles.map((match) => entityRow(match, "file", () => void openFileHit(match.item.hit)));
-    const commandRows = commandMatches.map((match) => entityRow(match, "command", match.item.run, {
+    const commandRow = (match: PaletteMatch<CommandEntry>) => entityRow(match, "command", match.item.run, {
       ...(match.item.keepOpen ? { closeBefore: false } : {}),
+      layout: "line",
       chord: match.item.chord,
       icon: match.item.icon,
       restoreFocus: !!match.item.shortcut,
-    }));
+    });
 
     if (scope === "cloud") {
       const cloudRows = entityMatches.sessions.flatMap((match, index) => (match.item.cloudKey ? [sessionRows[index]] : []));
@@ -864,36 +1066,43 @@ export function CommandPalette({
     const searched = !!deferredQuery.trim();
     // A strong settings match ("font") should beat a fuzzy command; an exact
     // command ("Home") should still win over incidental settings keywords.
-    const commandGroup: PaletteGroup = { id: "commands", label: "Views and commands", rows: commandRows };
-    const settingsFirst = searched && (settingsMatches[0]?.score ?? Infinity) < (commandMatches[0]?.score ?? Infinity);
+    const commandGroups: PaletteGroup[] = [
+      { id: "session-actions", label: "This session", labelDetail: sessionTitle ?? undefined, rows: sessionMatches.map(commandRow) },
+      { id: "commands", label: "App", rows: appMatches.map(commandRow) },
+    ];
+    const settingsFirst = searched && (settingsMatches[0]?.score ?? Infinity) < Math.min(sessionMatches[0]?.score ?? Infinity, appMatches[0]?.score ?? Infinity);
     return [
       { id: "smart", label: "Smart input", rows: smartRows },
       { id: "sessions", label: searched ? "Sessions" : "Recent sessions", rows: sessionRows },
       { id: "workspaces", label: searched ? "Workspaces" : "Recent workspaces", rows: workspaceRows },
       { id: "projects", label: searched ? "Projects" : "Recent projects", rows: projectRows },
       { id: "files", label: activeProject ? `Files · ${activeProject.name}` : "Files", rows: fileRows },
-      ...(settingsFirst ? [settingsGroup, commandGroup] : [commandGroup, settingsGroup]),
+      ...(settingsFirst ? [settingsGroup, ...commandGroups] : [...commandGroups, settingsGroup]),
     ].filter((group) => paletteScopeShows(scope, group.id));
-  }, [statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
+  }, [moveIds, movedSession, moveTitle, moveTo, sections, query, sessionTitle, statusSessionId, statusTarget, settingStatus, setOpen, scope, onOpenSettings, activeProject, commandEntries, deferredQuery, fileEntries, openFileHit, resolvedWorkItem, smartInput, smartProject, startWorkItem, paletteIndex, store.paletteIndex, store.projects, store.sessions, workItemLoading, orchestratorRuns, localVmTasks]);
 
   const renderedGroups = useMemo(() => {
     let offset = 0;
     return groups.flatMap((group) => {
-      if (!group.rows.length) return [];
-      const cap = expanded[group.id] ? group.rows.length : (GROUP_CAPS[group.id] ?? 8);
+      if (!group.rows.length && !group.note) return [];
+      // The Actions tab is the whole list, scrolled (design 07.04); elsewhere a group shows its first few.
+      const cap = expanded[group.id] || scope === "actions" ? group.rows.length : (GROUP_CAPS[group.id] ?? 8);
       const rows = group.rows.slice(0, cap);
       const rendered = { ...group, rows, offset, more: group.rows.length - rows.length };
       offset += rows.length;
       return rendered;
     });
-  }, [expanded, groups]);
+  }, [expanded, groups, scope]);
   const selectableRows = useMemo(() => renderedGroups.flatMap((group) => group.rows), [renderedGroups]);
 
   useEffect(() => {
-    setSelected(0);
+    // Move to section opens on the section the session is in, so Enter alone never takes it out of one (PRO-401).
+    // The sections are read as they are when the view opens or the query changes, not followed.
+    const current = moveIds && !query ? sectionChoices(sections, moveIds, "", () => true).choices.findIndex((choice) => choice.current) : -1;
+    setSelected(Math.max(0, current));
     setExpanded({});
     listRef.current?.scrollTo(0, 0);
-  }, [query, scope]);
+  }, [query, scope, moveIds]);
 
   useEffect(() => {
     if (selected >= selectableRows.length) setSelected(Math.max(0, selectableRows.length - 1));
@@ -907,6 +1116,8 @@ export function CommandPalette({
     (row: PaletteRow) => {
       if (row.closeBefore === false) {
         void row.run();
+        // A row clicked with the mouse took the focus, and may be gone now: typing and Enter stay with the search.
+        inputRef.current?.focus();
         return;
       }
       skipRestoreRef.current = !row.restoreFocus;
@@ -916,6 +1127,7 @@ export function CommandPalette({
     [setOpen],
   );
 
+  const subview = moveIds ? "move" : statusSessionId ? "status" : null;
   const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
@@ -925,8 +1137,12 @@ export function CommandPalette({
       event.preventDefault();
       const row = selectableRows[selected];
       if (row && !startingWorkItem) choose(row);
-    } else if (event.key === "Backspace" && statusSessionId && !query) {
-      setStatusSessionId(null);
+    } else if (event.key === "Backspace" && subview && !query) {
+      leaveSubview();
+    } else if (event.key === "Tab" && !subview && !event.altKey && !event.ctrlKey && !event.metaKey) {
+      // Tab switches tabs (design 07.04); the query is kept.
+      event.preventDefault();
+      setScope(stepPaletteTab(paletteTabOf(scope), event.shiftKey ? -1 : 1));
     } else if (event.key === "Backspace" && scope !== "all" && !query) {
       // Backspace on an empty search returns to every group.
       setScope("all");
@@ -941,8 +1157,9 @@ export function CommandPalette({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent
         showClose={false}
-        width="max-w-[46rem]"
-        className="top-[12%] max-h-[78vh] translate-y-0 overflow-hidden p-0"
+        width="max-w-[42.5rem]"
+        // A fixed top (design 07.04: 96px), not centred in what is left: the palette stays where it is whatever it lists.
+        className="bottom-auto top-24 max-h-[calc(100dvh-7rem)] gap-0 overflow-hidden p-0"
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -955,33 +1172,49 @@ export function CommandPalette({
       >
         <DialogTitle className="sr-only">Command palette</DialogTitle>
         <DialogDescription className="sr-only">Search sessions, workspaces, projects, files, settings, views and commands</DialogDescription>
-        <div className="mx-3 mt-3 flex items-center gap-2 rounded-lg bg-well px-3 hairline focus-within:ring-1 focus-within:ring-ring/40">
-          <Search className="size-4 shrink-0 text-faint" />
+        <div className="flex h-12 items-center gap-2.5 border-b border-hairline px-4">
+          <Search className="size-4 shrink-0 text-muted-foreground" />
           <input
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={onInputKeyDown}
-            placeholder={palettePlaceholder(scope)}
+            placeholder={subview === "move" ? "Search sections…" : subview === "status" ? "Search statuses…" : palettePlaceholder(scope)}
             aria-label="Command palette search"
             aria-controls="command-palette-results"
             aria-activedescendant={selectableRows[selected]?.id}
             autoComplete="off"
             spellCheck={false}
-            className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
+            className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-faint"
           />
           {searching && <Loader2 className="size-3.5 shrink-0 animate-spin text-faint" aria-label="Searching" />}
-          <kbd className="rounded-md bg-veil-raised px-1.5 py-0.5 text-[10px] text-faint">Esc</kbd>
+          <Keycap>{keycaps("escape")[0]}</Keycap>
         </div>
 
-        {!statusSessionId && (
-          <div role="tablist" aria-label="Search in" className="mt-2 flex h-10 items-center gap-1 border-b border-hairline px-2.5">
+        {subview ? (
+          // A view of one action (design 07.13): the way back, and what it acts on.
+          <div className="flex h-10 items-center gap-2 border-b border-hairline px-3 text-[12.5px]">
+            <button
+              type="button"
+              className="flex h-6 shrink-0 items-center gap-1 rounded-md bg-veil-strong px-2 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              onClick={leaveSubview}
+            >
+              <ArrowLeft className="size-3" aria-hidden />
+              Back to actions
+            </button>
+            <span className="shrink-0 text-faint">{subview === "move" ? "Move" : "Set status of"}</span>
+            <span className="min-w-0 truncate text-foreground">{subview === "move" ? moveTitle : (statusTarget?.title ?? "this session")}</span>
+            {subview === "move" && <span className="shrink-0 text-faint">to a section</span>}
+          </div>
+        ) : (
+          <div role="tablist" aria-label="Search in" className="flex h-10 items-center gap-1 border-b border-hairline px-2.5">
             {PALETTE_TABS.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 role="tab"
                 aria-selected={tab === item.id}
+                tabIndex={-1}
                 className={cn(
                   "flex h-7 items-center rounded-md px-2.5 text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
                   tab === item.id ? "bg-selected text-foreground" : "text-muted-foreground hover:bg-veil-raised hover:text-foreground",
@@ -1000,12 +1233,22 @@ export function CommandPalette({
 
         {error && <div role="alert" className="mx-3 mt-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>}
 
-        <div ref={listRef} id="command-palette-results" role="listbox" className="mt-2 max-h-[min(34rem,calc(78vh-7rem))] overflow-y-auto px-2 pb-2 scrollbar-thin">
-          {renderedGroups.map((group) => (
-            <section key={group.id} role="group" aria-labelledby={`palette-group-${group.id}`} className="pt-2">
-              <h2 id={`palette-group-${group.id}`} className="px-2 pb-1 text-[10px] font-medium uppercase tracking-[0.12em] text-faint">
-                {group.label}
-              </h2>
+        <div ref={listRef} id="command-palette-results" role="listbox" aria-label="Results" className={cn("max-h-[min(35rem,calc(100dvh-15rem))] overflow-y-auto px-1.5 pb-1.5 scrollbar-thin", subview && "pt-1.5")}>
+          {renderedGroups.map((group, at) => (
+            <section key={group.id} role="group" {...(group.label ? { "aria-labelledby": `palette-group-${group.id}` } : { "aria-label": group.id === "sections" ? "Sections" : "More" })}>
+              {group.note && (
+                <div role="status" className="py-5 text-center">
+                  <p className="text-[13px] text-muted-foreground">{group.note.title}</p>
+                  <p className="mt-0.5 text-xs text-faint">{group.note.detail}</p>
+                </div>
+              )}
+              {group.divider && (at > 0 || group.note) && group.rows.length > 0 && <div className="my-1 border-t border-hairline" />}
+              {group.label && (
+                <h2 id={`palette-group-${group.id}`} className="truncate px-2.5 pb-1 pt-3 text-xs uppercase tracking-[.08em] text-faint">
+                  {group.label}
+                  {group.labelDetail && <> · <span className="normal-case tracking-normal">{group.labelDetail}</span></>}
+                </h2>
+              )}
               {group.rows.map((row, index) => {
                 const paletteIndex = group.offset + index;
                 return (
@@ -1023,7 +1266,7 @@ export function CommandPalette({
               {group.more > 0 && (
                 <button
                   type="button"
-                  className="mx-2 mt-1 rounded-md px-2 py-1 text-[11px] text-faint outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                  className="mx-2 mt-1 rounded-md px-2 py-1 text-xs text-faint outline-none hover:bg-veil-raised hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
                   onClick={() => {
                     setExpanded((current) => ({ ...current, [group.id]: true }));
                     inputRef.current?.focus();
@@ -1037,20 +1280,42 @@ export function CommandPalette({
           {empty && (
             <div className="px-5 py-10 text-center">
               <p role="status" className="text-sm text-muted-foreground">{scope === "settings" ? `No settings match ${query.trim()}` : "No results match this search."}</p>
-              {scope === "all" && <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, setting, issue, pull request or command.</p>}
+              {scope === "all" && !subview && <p className="mt-1 text-xs text-faint">Try a session, branch, project, file path, setting, issue, pull request or command.</p>}
             </div>
           )}
         </div>
 
-        <div className="flex h-9 items-center gap-4 border-t border-hairline px-4 text-xs text-faint">
-          <span>↑↓ to move</span>
-          <span>↵ to open</span>
-          {/* Design 07.05: with nothing typed, Settings lists only its pages. */}
-          {scope === "settings" && !query.trim() && <span className="ml-auto truncate">Type to search every setting, not only pages</span>}
+        <div className="flex h-9 shrink-0 items-center gap-4 whitespace-nowrap border-t border-hairline px-4 text-xs text-faint">
+          {subview === "move" ? (
+            // Design 07.13 and 07.14: what Enter does to the row under the cursor, and the way back.
+            <>
+              <span>{selectableRows[selected]?.id === "palette:section-create-named" ? "↵ create and move" : "↵ move"}</span>
+              <span>{query ? "⌫ edits the query" : "⌫ on an empty query goes back"}</span>
+              <span className="ml-auto">esc closes</span>
+            </>
+          ) : subview === "status" ? (
+            <>
+              <span>↵ set status</span>
+              <span>{query ? "⌫ edits the query" : "⌫ on an empty query goes back"}</span>
+              <span className="ml-auto">esc closes</span>
+            </>
+          ) : (
+            <>
+              <span>↑↓ to move</span>
+              <span>↵ to open</span>
+              {/* Design 07.05: with nothing typed, Settings lists only its pages. Elsewhere, what Tab does (design 07.04). */}
+              <span className="ml-auto truncate">{scope === "settings" && !query.trim() ? "Type to search every setting, not only pages" : "Tab switches tabs"}</span>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+/** One keycap for a whole chord (design 07.04), at the 12px the smallest text is drawn at. */
+function Keycap({ children }: { children: React.ReactNode }) {
+  return <kbd className="shrink-0 rounded-[5px] border border-border px-1 py-0.5 font-sans text-xs font-medium leading-none text-muted-foreground">{children}</kbd>;
 }
 
 function PaletteResultRow({
@@ -1087,19 +1352,39 @@ function PaletteResultRow({
       onFocus={() => onHover(index)}
       onClick={() => onSelect(row)}
       className={cn(
-        "flex w-full items-center rounded-lg px-2.5 text-left outline-none",
-        row.inline ? "h-9 gap-2.5" : "gap-3 py-2",
+        "flex w-full items-center rounded-md px-2.5 text-left outline-none",
+        row.layout ? "h-9 gap-2.5" : "gap-3 py-2",
         selected ? "bg-selected text-foreground shadow-button" : "text-muted-foreground hover:bg-veil-raised",
       )}
     >
-      {row.inline ? <>
-        {row.project ? <ProjectGlyph project={row.project} size={14} /> : <Icon className="size-3.5 shrink-0 text-muted-foreground" />}
-        <span className="min-w-0 truncate text-[13px] text-foreground">
+      {row.layout ? <>
+        {busy ? <Loader2 className="size-3.5 shrink-0 animate-spin" />
+          : row.emoji ? <span aria-hidden className="flex size-3.5 shrink-0 items-center justify-center text-[13px] leading-none">{row.emoji}</span>
+            : row.manualStatus ? <ManualStatusIcon status={row.manualStatus} />
+              : row.project ? <ProjectGlyph project={row.project} size={14} />
+                : <Icon className="size-3.5 shrink-0 text-muted-foreground" />}
+        <span className={cn("min-w-0 truncate text-[13px] text-foreground", row.layout === "line" && "max-w-[70%] shrink-0")}>
           <HighlightedText text={row.primary} ranges={row.primaryRanges} />
         </span>
-        <span className="ml-auto min-w-0 max-w-[60%] shrink truncate pl-3 text-right text-xs text-faint">
-          <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
-        </span>
+        {row.layout === "page" ? (
+          <span className="ml-auto min-w-0 max-w-[60%] shrink truncate pl-3 text-right text-xs text-faint">
+            <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
+          </span>
+        ) : <>
+          {row.secondary && (
+            <span className="min-w-0 truncate text-xs text-faint">
+              <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
+            </span>
+          )}
+          <span className="ml-auto flex shrink-0 items-center gap-2 text-xs text-faint">
+            {row.trailing && <span className="font-mono">{row.trailing}</span>}
+            {row.chord && <Keycap>{chordCap(row.chord)}</Keycap>}
+            {row.enterHint && selected && <Keycap>↵</Keycap>}
+            {row.checked !== undefined && (
+              <span className="flex w-4 justify-center">{row.checked && <Check className="size-3.5 text-foreground" aria-label="Current section" />}</span>
+            )}
+          </span>
+        </>}
       </> : <>
       <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-veil-raised text-muted-foreground">
         {busy ? <Loader2 className="size-3.5 animate-spin" /> : row.manualStatus ? <ManualStatusIcon status={row.manualStatus} /> : row.agentId ? <AgentMark id={row.agentId} className="size-4" decorative /> : row.project ? <ProjectGlyph project={row.project} /> : <Icon className="size-4" />}
@@ -1108,19 +1393,11 @@ function PaletteResultRow({
         <span className="block truncate text-[13px] font-medium text-foreground">
           <HighlightedText text={row.primary} ranges={row.primaryRanges} />
         </span>
-        <span className="block truncate text-[11px] text-faint">
+        <span className="block truncate text-xs text-faint">
           <HighlightedText text={row.secondary} ranges={row.secondaryRanges} />
         </span>
       </span>
-      {row.chord && (
-        <span className="flex shrink-0 gap-0.5">
-          {keycaps(row.chord).map((key, index) => (
-            <kbd key={`${key}:${index}`} className="min-w-5 rounded-md bg-veil-raised px-1 py-0.5 text-center text-[10px] text-faint hairline">
-              {key}
-            </kbd>
-          ))}
-        </span>
-      )}
+      {row.chord && <Keycap>{chordCap(row.chord)}</Keycap>}
       </>}
     </button>
   );

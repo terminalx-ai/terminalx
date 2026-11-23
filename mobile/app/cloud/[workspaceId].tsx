@@ -1,17 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { Play, Send, Square, SquareDashed, Users } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { MessageSquareDashed, Play, Send, Square, Users } from "lucide-react-native";
 import { interruptUnanswered } from "@terminalx/portable/events";
 import { buildTranscript, type PendingAsk } from "@terminalx/portable/transcript";
 import { leaseHeldBy, NOTE_MAX_CHARS } from "@terminalx/portable/workspaceCollab";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle, type CloudCatalog } from "@mobile/cloud/catalog";
+import { resumeFailure, resumeRetryable, type ResumeFailure } from "@mobile/cloud/resume";
 import type { CloudRole } from "@mobile/cloud/api";
-import { accessText, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
+import { accessText, attentionDetail, codeText, connectionLine, leaseLine, outboxLine, presenceLine, rolePhrase, whoCanStart } from "@mobile/cloud/words";
 import type { CloudWorkspaceSession } from "@mobile/cloud/workspace";
 import { useConversationState } from "@mobile/state/conversation-state";
+import { useKeyboardShown } from "@mobile/ui/keyboard";
 import { Button, EmptyState, StatusDot } from "@mobile/ui/primitives";
+import { GlassIconButton } from "@mobile/ui/glass";
+import { HeaderLine, ScreenHeader } from "@mobile/ui/SessionChrome";
 import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
@@ -109,18 +114,11 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
   const presence = presenceLine(snapshot.collab.participants, snapshot.collab.userId, (id) => snapshot.tabs.find((entry) => entry.tabId === id)?.title ?? null, nameOf);
 
   return <>
-    <Stack.Screen options={{
-      title,
-      headerTitle: () => <View accessibilityRole="header" style={styles.headerTitle}>
-        <Text numberOfLines={1} style={[styles.headerName, { color: palette.ink }]}>{title}</Text>
-        {/* The state and the role, as plain words: nothing here is a button. */}
-        <View style={styles.headerLine}>
-          <StatusDot color={line.tone === "live" ? palette.success : line.tone === "warn" ? palette.warning : palette.faint} />
-          <Text testID="workspace-state-line" accessibilityLabel={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} numberOfLines={1} style={[styles.headerState, { color: palette.muted }]}>{subtitle}</Text>
-        </View>
-      </View>,
-      headerRight: sharing ? () => <Pressable accessibilityRole="button" accessibilityLabel="Sharing" hitSlop={4} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} style={({ pressed }) => [styles.sharing, pressed && { opacity: 0.6 }]}><Users size={21} color={palette.ink} strokeWidth={1.8} /></Pressable> : undefined,
-    }} />
+    {/* The bar a session has (22.06): back, the title over its state and the person's role as plain words, and Sharing. */}
+    <Stack.Screen options={{ title, headerShown: false }} />
+    <ScreenHeader title={title} onBack={() => router.back()}
+      subtitle={<HeaderLine testID="workspace-state-line" text={subtitle} label={[line.tone === "live" ? line.text : line.short, role].filter(Boolean).join(", ")} />}
+      trailing={sharing ? <GlassIconButton label="Sharing" size={40} icon={<Users size={19} color={palette.ink} strokeWidth={1.9} />} onPress={() => router.push({ pathname: "/cloud/shares", params: { orgId, workspaceId } })} /> : null} />
     {/* A warning says more than fits under the title, here, with what can be done about it. */}
     {line.tone === "warn" ? <View accessibilityRole="summary" style={[styles.banner, { backgroundColor: `${palette.warning}18` }]}>
       <StatusDot color={palette.warning} />
@@ -133,18 +131,18 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} />
       : <View style={styles.flex}>
-        <View style={styles.flex}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
-          : stopped || starting ? <EmptyState icon={(color) => <SquareDashed size={28} color={color} />} title="No conversation yet" detail="Nothing was said in this workspace before it stopped." />
+        <View style={[styles.flex, styles.centred]}>{live ? <EmptyState title="No agent tabs" detail="This workspace has no agent conversation." />
+          : stopped || starting || listedState === "attention-required" ? <EmptyState icon={(color) => <MessageSquareDashed size={34} color={color} strokeWidth={1.6} />} title="No conversation yet" detail={listedState === "attention-required" ? "Nothing has been saved in this workspace yet." : "Nothing was said in this workspace before it stopped."} />
           : listedState === "archived" ? <EmptyState title="No conversation yet" detail="Nothing was saved in this workspace before it was archived." />
           : <EmptyState title="Connecting…" detail="The conversation shows once this phone reaches the workspace." busy />}</View>
-        {startBarShown(listedState, starting) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
+        {startBarShown(listedState, starting, live) ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleNow} creatorId={listed?.createdBy ?? null} starting={starting} /> : null}
       </View>}
   </>;
 }
 
 /** Whether the composer's place holds the Start bar: stopped, or starting and not running yet. */
-function startBarShown(listedState: string | null, starting: boolean): boolean {
-  return listedState === "suspended" || listedState === "resuming" || listedState === "provisioning" || starting;
+function startBarShown(listedState: string | null, starting: boolean, live: boolean): boolean {
+  return listedState === "suspended" || listedState === "resuming" || listedState === "provisioning" || (listedState === "attention-required" && !live) || starting;
 }
 
 /**
@@ -155,36 +153,57 @@ function startBarShown(listedState: string | null, starting: boolean): boolean {
  */
 function StartBar({ catalog, orgId, workspaceId, role, creatorId, starting }: { catalog: CloudCatalog; orgId: string; workspaceId: string; role: CloudRole | null; creatorId: string | null; starting: boolean }) {
   const { palette } = useTheme();
+  const insets = useSafeAreaInsets();
   const nameOf = useNames(catalog);
   const [asking, setAsking] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
+  // One request at a time, also between a tap and the render that disables the button.
+  const inFlight = useRef(false);
+  const [failure, setFailure] = useState<ResumeFailure | null>(null);
+  // No answer came, but the list shows it starting: said as under way, not as a failure (#1290).
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const listedState = catalog.workspace(orgId, workspaceId)?.state ?? null;
   const changing = starting || asking || listedState === "resuming" || listedState === "provisioning";
   const mayStart = role === "manager";
-  const start = () => Alert.alert("Start this workspace?", "It is billed to the organization while it runs.", [
+  const needsAttention = listedState === "attention-required";
+  const operation = catalog.getSnapshot().organizations.find((entry) => entry.organization.orgId === orgId)?.workspaces.find((item) => item.workspace.id === workspaceId)?.latestOperation;
+  // As the desktop offers it: any failed resume can be retried; the detail says what failed and what else may be needed.
+  const retryResume = needsAttention && resumeRetryable(operation);
+  const start = () => Alert.alert(retryResume ? "Retry resume?" : failure ? "Try starting again?" : "Start this workspace?", "It is billed to the organization while it runs.", [
     { text: "Cancel", style: "cancel" },
-    { text: "Start", onPress: () => {
+    { text: retryResume ? "Retry resume" : failure ? "Try again" : "Start", onPress: () => {
+      if (inFlight.current) return;
+      inFlight.current = true;
       setAsking(true);
       setFailure(null);
-      void catalog.start(orgId, workspaceId).catch((error: unknown) => {
-        const code = (error as { code?: unknown })?.code;
-        setFailure(codeText(typeof code === "string" ? code : null) ?? "That did not work.");
-      }).finally(() => setAsking(false));
+      setUnconfirmed(false);
+      void catalog.start(orgId, workspaceId).then((outcome) => setUnconfirmed(outcome === "in-progress"), (error: unknown) => setFailure(resumeFailure(error))).finally(() => {
+        inFlight.current = false;
+        setAsking(false);
+      });
     } },
   ]);
-  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
+  const detail = changing ? (unconfirmed ? "The service has not confirmed yet, but the workspace is starting. The composer appears when it is running." : "The composer appears when it is running.")
+    : needsAttention ? (retryResume ? (mayStart ? `${attentionDetail(operation?.errorCode)} Retry resume, or open it on the desktop to see more.` : `${attentionDetail(operation?.errorCode)} ${creatorId ? `${nameOf(creatorId)}, its creator, or an organization owner or admin` : "Its creator or an organization owner or admin"} can retry resume.`) : "This workspace needs attention. Open it on the desktop to see how to recover.")
+    : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null);
+  const label = changing ? "Starting…" : retryResume ? "Retry resume" : failure?.retry ? "Try again" : "Start";
+  // In the composer's place, as a card like it (22.06).
+  return <View testID="start-bar" style={[styles.startBar, { backgroundColor: palette.card, borderColor: palette.border, marginBottom: insets.bottom + 8 }]}>
     <View style={styles.flex}>
-      <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : "This workspace is stopped"}</Text>
-      <Text style={[styles.startDetail, { color: palette.muted }]}>{changing ? "The composer appears when it is running." : mayStart ? "Start it to send a message." : whoCanStart(creatorId ? nameOf(creatorId) : null)}</Text>
+      <Text style={[styles.startTitle, { color: palette.ink }]}>{changing ? "Starting the workspace…" : needsAttention ? "This workspace needs attention" : failure ? "The workspace did not start" : "This workspace is stopped"}</Text>
+      <Text style={[styles.startDetail, { color: palette.muted }]}>{detail}</Text>
       {/* A refusal is about the last Start: once the workspace starts after all (from elsewhere too), it is past. */}
-      {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure}</Text> : null}
+      {failure && !changing ? <Text accessibilityRole="alert" style={[styles.startDetail, { color: palette.danger }]}>{failure.text}</Text> : null}
     </View>
-    {mayStart ? <Button label={changing ? "Starting…" : "Start"} icon={changing ? undefined : (color) => <Play size={16} color={color} />} disabled={changing} onPress={start} style={styles.startButton} /> : null}
+    {mayStart && (!needsAttention || retryResume) && (!failure || failure.retry || changing) ? <Button label={label} size="small" icon={changing ? undefined : (color) => <Play size={14} color={color} />} disabled={changing} onPress={start} /> : null}
   </View>;
 }
 
 function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live, listedState }: { catalog: CloudCatalog; session: CloudWorkspaceSession; scope: string; orgId: string; workspaceId: string; tabId: string; live: boolean; listedState: string | null }) {
   const { palette } = useTheme();
+  // Docked at the bottom: clear of the home indicator and the screen's rounded corners, as the session screen's composer is.
+  const insets = useSafeAreaInsets();
+  const keyboardShown = useKeyboardShown();
+  const dockBottom = { paddingBottom: (keyboardShown ? 0 : insets.bottom) + 12 };
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const tab = snapshot.tabs.find((entry) => entry.tabId === tabId);
   const [draft, setDraft] = useConversationState(`cloud:${scope}:${tabId}:draft`, "");
@@ -337,10 +356,10 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
         {held.length && mayWrite ? <Button label={held.length === 1 ? "Send it and start the workspace" : `Send ${held.length} messages and start the workspace`} kind="secondary" disabled={sending} onPress={sendHeld} style={styles.held} /> : null}
       </>} />
     {failure ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.danger }]}>{failure}</Text> : null}
-    {startBarShown(listedState, starting) && !sendStarts
+    {startBarShown(listedState, starting, live) && !sendStarts
       ? <StartBar catalog={catalog} orgId={orgId} workspaceId={workspaceId} role={roleHere} creatorId={catalog.workspace(orgId, workspaceId)?.createdBy ?? null} starting={starting} />
       : mayWrite && listedState !== "archived" && listedState !== null
-      ? <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
+      ? <View style={[styles.composer, dockBottom, { backgroundColor: palette.card, borderTopColor: palette.border }]}>
         {!snapshot.hasKey ? <Text style={[styles.notice, { color: palette.muted }]}>{codeText("no-key")}</Text> : null}
         {wheel.heldByOther ? <Text style={[styles.notice, { color: palette.warning }]}>{`${nameOf(lease?.holderId)} is driving this tab. ${wheel.canTakeOver ? "Take over to send." : "You can send when they release it."}`}</Text> : null}
         <View style={styles.composeLine}>
@@ -349,7 +368,7 @@ function Conversation({ catalog, session, scope, orgId, workspaceId, tabId, live
           <Pressable accessibilityRole="button" accessibilityLabel="Send" disabled={!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther} onPress={() => void send()} style={[styles.round, { backgroundColor: palette.accent }, (!draft.trim() || sending || !snapshot.hasKey || wheel.heldByOther) && styles.disabled]}><Send size={17} color={palette.accentInk} /></Pressable>
         </View>
       </View>
-      : <View style={[styles.composer, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
+      : <View style={[styles.composer, dockBottom, { backgroundColor: palette.card, borderTopColor: palette.border }]}><Text style={[styles.notice, { color: palette.muted }]}>{listedState === "archived" ? "This workspace is archived. Its conversation can be read." : listedState === null ? codeText("cloud_workspace_not_found") : codeText("read-only")}</Text></View>}
   </KeyboardAvoidingView>;
 }
 
@@ -359,20 +378,15 @@ const CANNOT_ANSWER = "Only someone allowed to approve can answer this question.
 const styles = StyleSheet.create({
   page: { flex: 1 },
   flex: { flex: 1 },
+  centred: { justifyContent: "center" },
   banner: { flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 16, paddingVertical: 10 },
   bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
   // The title and, under it, the state and the role in plain words.
-  headerTitle: { maxWidth: 240, alignItems: "center" },
-  headerName: { fontSize: 16, fontWeight: "600" },
-  headerLine: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 },
-  headerState: { fontSize: 12, lineHeight: 16 },
   // An icon button with a full 44 pt target.
-  sharing: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   reconnectText: { fontSize: 12, fontWeight: "600" },
-  startBar: { flexDirection: "row", alignItems: "center", gap: 12, borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16 },
+  startBar: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 12, marginTop: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, borderCurve: "continuous", paddingHorizontal: 14, paddingVertical: 12 },
   startTitle: { fontSize: 15, fontWeight: "600", lineHeight: 20 },
   startDetail: { fontSize: 13, lineHeight: 18, marginTop: 2 },
-  startButton: { minWidth: 88 },
   presence: { fontSize: 12, lineHeight: 17, paddingHorizontal: 16, paddingTop: 6 },
   // Wraps on a narrow phone: the buttons go under the driver's name rather than squeezing it.
   wheel: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 4, paddingLeft: 16, paddingRight: 6, borderBottomWidth: StyleSheet.hairlineWidth },

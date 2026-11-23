@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, errorMessage, type TurnCheckpoint, type TurnUndoResult } from "@/lib/api";
+import { errorMessage, type TurnCheckpoint, type TurnUndoResult } from "@/lib/api";
+import { localTurnCheckpoints, type TurnCheckpointApi } from "@/lib/turnCheckpoints";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { FileTypeIcon } from "@/components/files/FileTypeIcon";
@@ -8,7 +9,7 @@ import { openDiff, reviewPath } from "@/lib/editors";
 import type { ChangeRange } from "@/lib/changes";
 import { fileName, shortPath } from "@/lib/paths";
 import type { TurnFileChange } from "@/lib/turnChanges";
-import { File } from "@/icons";
+import { Check, File, Undo2 } from "@/icons";
 import { useDisclosure } from "./disclosures";
 
 /** Chips shown before the rest fold into "+N more"; a list one longer than this shows whole. */
@@ -20,7 +21,7 @@ const SHOWN = 2;
  * shows them. A file's chip opens its turn diff in a centre tab, deleted files
  * included; without the turn's snapshots it opens the file. A setting turns the row off.
  */
-export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, range = null }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext; checkpoint?: { sessionId: string; tabId: string; seq: number }; range?: ChangeRange | null }) {
+export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, range = null }: { changes: TurnFileChange[]; cwd?: string; linkContext?: ChatLinkContext; checkpoint?: { sessionId: string; tabId: string; seq: number; api?: TurnCheckpointApi }; range?: ChangeRange | null }) {
   const [saved, setSaved] = useState<TurnCheckpoint | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,11 +31,11 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
     setSaved(null);
     setError(null);
     setOverlap(null);
-    if (checkpoint) void api.turnCheckpoint(checkpoint.sessionId, checkpoint.tabId, checkpoint.seq)
+    if (checkpoint) void (checkpoint.api ?? localTurnCheckpoints).get(checkpoint.sessionId, checkpoint.tabId, checkpoint.seq)
       .then((value) => { if (!cancelled) setSaved(value); })
       .catch((e) => { if (!cancelled) setError(errorMessage(e)); });
     return () => { cancelled = true; };
-  }, [checkpoint?.sessionId, checkpoint?.tabId, checkpoint?.seq]);
+  }, [checkpoint?.sessionId, checkpoint?.tabId, checkpoint?.seq, checkpoint?.api]);
   const changes: TurnFileChange[] = saved ? saved.files.map((f) => ({ path: f.path, kind: f.status === "added" ? "create" : f.status === "deleted" ? "delete" : "update", added: f.additions, removed: f.deletions })) : fallback;
   const review = async (action: "keep" | "undo" | "restore", confirmed: string | null = null) => {
     if (!checkpoint || busy) return;
@@ -42,10 +43,11 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
     setError(null);
     try {
       const { sessionId, tabId, seq } = checkpoint;
+      const checkpoints = checkpoint.api ?? localTurnCheckpoints;
       let backupRef: string | null = null;
-      if (action === "keep") await api.keepTurn(sessionId, tabId, seq);
+      if (action === "keep") await checkpoints.keep(sessionId, tabId, seq);
       else {
-        const result = await (action === "restore" ? api.restoreUndo : api.undoTurn)(sessionId, tabId, seq, confirmed);
+        const result = await (action === "restore" ? checkpoints.restore : checkpoints.undo)(sessionId, tabId, seq, confirmed);
         if (!result.undone) { setOverlap({ ...result, action }); return; }
         backupRef = result.backupRef ?? null;
         window.dispatchEvent(new Event("workspace-files-changed"));
@@ -86,12 +88,12 @@ export function TurnChanges({ changes: fallback, cwd, linkContext, checkpoint, r
           />
         );
       })}
-      {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && <div className="flex gap-1">
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}>Undo</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}>Keep</Button>
+      {saved && changes.length > 0 && !saved.reviewed && !saved.unavailableReason && !checkpoint?.api?.readOnly && <div className="flex gap-1">
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("undo")}><Undo2 /> Undo turn</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void review("keep")}><Check /> Keep</Button>
       </div>}
       {saved?.reviewed && <span role="status" className="text-xs text-muted-foreground">{saved.undone ? "Undone" : saved.restored ? "Restored" : "Kept"}</span>}
-      {saved?.undone && saved.backupRef && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}
+      {saved?.undone && saved.backupRef && !checkpoint?.api?.readOnly && <Button size="sm" variant="ghost" disabled={busy} title={`Backup: ${saved.backupRef}`} onClick={() => void review("restore")}>Restore what Undo removed</Button>}
       {saved?.unavailableReason && <p role="status" className="w-full text-xs text-muted-foreground">{saved.unavailableReason}</p>}
       {error && <p role="alert" className="w-full text-xs text-destructive">{error}</p>}
       <Dialog open={!!overlap} onOpenChange={(open) => { if (!open && !busy) setOverlap(null); }}>

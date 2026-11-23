@@ -34,6 +34,9 @@
   `TERMINALX_UPDATER_KEY`) and its password from
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Every step stops with a message naming
   the missing file or variable when a credential is absent.
+- Runtime releases (`terminalx-serve` for headless servers) are signed with an
+  OpenSSH Ed25519 key at `~/.tauri/terminalx-runtime-signing`, separate from
+  the updater key. See [Signing runtime releases](#signing-runtime-releases).
 - `plugins.updater.endpoints` in `tauri.conf.json` points at
   `https://github.com/terminalx-ai/raccoon/releases/latest/download/latest.json`
   — the `latest.json` below, attached to whichever GitHub Release is marked
@@ -228,21 +231,45 @@ undisturbed: prefix the command with
 
 ## Cut a version
 
-1. Bump `version` in `package.json`, `src-tauri/tauri.conf.json` and
-   `src-tauri/Cargo.toml` (keep all three equal), then refresh the lock entry
-   with `cargo update -p raccoon` in `src-tauri`. The About tab reads
-   `tauri.conf.json`; `terminalx --version`, the pairing handshake and the
-   agent client hellos read `CARGO_PKG_VERSION` from `Cargo.toml`.
-2. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
-3. Commit on `main` and run the release pipeline (next section). It tags
-   `v<version>` itself, after every check has passed.
+A release is built from its own branch, `release/<version>`, cut from `main`.
+PRs keep merging to `main` while a release runs (about an hour, longer under
+load); none of them reach the branch, and none of them can stop the release.
+
+1. Cut the branch. `cut` fetches, creates `release/<version>` from the current
+   `origin/main` and checks it out in its own worktree,
+   `.raccoon/worktrees/release-<version>` (`--worktree` puts it elsewhere), so
+   the main checkout stays free:
+
+   ```sh
+   python3 -I scripts/release/release.py cut 1.2.3
+   ```
+
+2. In that worktree, bump `version` in `package.json`,
+   `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` (keep all three
+   equal), then refresh the lock entry with `cargo update -p raccoon` in
+   `src-tauri`. The About tab reads `tauri.conf.json`; `terminalx --version`,
+   the pairing handshake and the agent client hellos read `CARGO_PKG_VERSION`
+   from `Cargo.toml`.
+3. Add a section to `CHANGELOG.md`; the About tab renders it in the app.
+4. Commit "Prepare TerminalX <version> release" on the branch and run the
+   release pipeline (next section) from the worktree. It tags `v<version>`
+   itself, after every check has passed.
+
+A fix the release needs (for example for a red `main`) goes on the branch in
+its own commit before the release commit; it reaches `main` with the rest of
+the branch. Push it to `main` as well when `main` is red for everyone else.
+
+Releasing straight from `main` still works the old way: `prepare` on `main`
+requires it to contain `origin/main`, and `publish` pushes `main` itself, so a
+merge during the run makes the push fail.
 
 ## The release pipeline
 
 `scripts/release/release.py` builds, notarizes, verifies, scans and publishes
-a release. Run it from the repository root on `main`, on the version and
-changelog commit. Its working directory is the git-ignored
-`.raccoon/release-<version>/`, and the Cargo target directory is
+a release, then merges it back into `main`. Run it from the root of the
+release worktree, on `release/<version>`, on the version and changelog commit.
+Its working directory is the git-ignored `.raccoon/release-<version>/` of that
+worktree, and the Cargo target directory is
 `~/Library/Caches/terminalx-release-<version>` (`TERMINALX_RELEASE_TARGET_DIR`
 moves it):
 
@@ -250,8 +277,11 @@ moves it):
 python3 -I scripts/release/release.py prepare
 $EDITOR .raccoon/release-<version>/notes.md      # the GitHub release notes
 python3 -I scripts/release/release.py publish --dry-run   # after the steps below
-python3 -I scripts/release/release.py all        # check through verify-live
+python3 -I scripts/release/release.py all        # check through merge-back
 ```
+
+The notes name the base main commit the branch was cut from:
+`release-context.json`'s `baseMainCommit`.
 
 `all` runs the steps in this order and stops at the first failure. Each step
 can also be run by name. Each one writes a record, and a later step refuses to
@@ -259,15 +289,16 @@ run on a record that is missing, failed, or for another commit:
 
 | Step | What it does | Record |
 | --- | --- | --- |
-| `prepare` | Requires a clean `main` that contains `origin/main`, equal versions in the three files and a `## <version>` changelog section; pins the source commit | `release-context.json` |
+| `prepare` | Requires a clean `release/<version>` cut from `main` (or a clean `main` that contains `origin/main`), equal versions in the three files and a `## <version>` changelog section; records the branch, the commit it was cut from (`baseMainCommit`) and the source commit. Every later step refuses another branch or a head that moved | `release-context.json` |
 | `check` | The project's checks on that commit: TypeScript, frontend and mobile tests, these scripts' tests, icons, the frontend build, WebKit layout, Swift, Clippy, desktop Rust tests and the runtime (serve) tests | `release-checks.json`, `<check>.log` |
 | `build` | `pnpm tauri build --bundles app,dmg` with the Developer ID identity, the updater key and the App Store Connect key. Tauri notarizes and staples the app before it packages the DMG and the updater archive. A rejected notarization fails the build | `build-metadata.json`, `build.log` |
 | `notarize` | Requires the app to be stapled and rated `Notarized Developer ID`, submits the DMG with `notarytool --wait`, staples it and checks it with `stapler validate` and `spctl`; records the stapled DMG's SHA-256 | `notarization.json`, `notarization-dmg-log.json` |
 | `verify` | Extracts the updater archive and mounts the DMG: Developer ID signatures on the app, helper, runtime, launcher and DMG; stapled tickets on the DMG, on the app inside it and on the app inside the updater archive; version, bundle ID, icons, entitlements, runtime self-test, updater signature; and the same files in the DMG as in the archive | `artifact-verification.json` |
 | `assemble` | Collects the six assets (below) and checks them | `assets/` |
 | `scan` | The secret scan (below) | `secret-scan.json` |
-| `publish` | Checks every record again, then tags, pushes `main` and the tag atomically, uploads a draft release, downloads it back and compares it byte for byte, and only then marks it Latest | `upload-verification.json`, `release-result.json` |
+| `publish` | Checks every record again, then tags, pushes the branch and the tag atomically (a release branch and its tag are new refs, so merges to `main` cannot refuse them), uploads a draft release, downloads it back and compares it byte for byte, and only then marks it Latest | `upload-verification.json`, `release-result.json` |
 | `verify-live` | Downloads what users and installed apps now get: the update feed, its archive and signature, and the stable DMG link. Each must match the published file, and the downloaded DMG must still be stapled and rated `Notarized Developer ID` | `live-verification.json` |
+| `merge-back` | Merges the tagged commit into the current `origin/main` with `--no-ff`, in a scratch worktree, and pushes the merge commit; never rebases the tag. A conflict that is only the new changelog section is resolved (entries `main` gained since the cut stay under Unreleased). Any other conflict, or a `main` that moves under three merges in a row, opens a "Release TerminalX <version>" pull request instead, to merge with a merge commit. Nothing to do for a release built from `main` | `merge-back.json` |
 
 Nothing is pushed or uploaded unless the checks, the build, notarization and
 stapling of the app and the DMG, artifact verification and the secret scan
@@ -276,6 +307,11 @@ whose SHA-256 the notarize step recorded. `publish --dry-run` runs all of
 those gates and prints the tag, push and `gh release` commands without running
 them; `--dry-run` applies to no other step, since building and notarizing
 submit to Apple.
+
+After `merge-back`, remove the release worktree and delete the local branch
+(`git worktree remove .raccoon/worktrees/release-<version>`, `git branch -D
+release/<version>`); the branch stays on origin with its tag. Copy anything
+you want to keep from its `.raccoon/release-<version>/` first.
 
 If `publish` stops after it pushed (a failed upload, a download that did not
 match), fix the cause and run `publish` again. The push is then a no-op, and
@@ -455,11 +491,14 @@ It then:
 3. checks again, now serialized with every other publish, that the commit is
    `ahead` of the newest runtime prerelease (GitHub compare API), and creates
    a **prerelease** tagged
-   `runtime-v<serve crate version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
-   e.g. `runtime-v0.2.2-20260929121810-3001736`, with
+   `runtime-v<TerminalX version>-<commit's UTC committer time yyyymmddHHMMSS>-<7-char commit>`,
+   e.g. `runtime-v0.2.37-20261120132310-68a8fb2` (the version in
+   `src-tauri/Cargo.toml`, which `terminalx-serve --version` reports), with
    `terminalx-serve-linux-x64`, `terminalx-serve-linux-arm64`,
-   `terminalx-serve.json` and `SHA256SUMS`;
-4. deletes runtime prereleases (and their tags) beyond the newest 10.
+   `terminalx-serve-macos-arm64`, `terminalx-serve.json` and `SHA256SUMS`,
+   **unsigned**;
+4. deletes runtime prereleases (and their tags) beyond the newest 10, except
+   the newest signed one, which headless servers install.
 
 The timestamp is the commit's, not the run's, so a tag says when its code was
 committed. Runtime prereleases are created with `--prerelease
@@ -478,6 +517,83 @@ reason), run the workflow from `main`; it applies the same rules:
 ```sh
 gh workflow run release-serve.yml --ref main
 ```
+
+### Signing runtime releases
+
+Headless servers (`scripts/install/install.sh`, served as
+`https://terminalx.ai/install.sh`, and `terminalx-serve update`) install only
+runtime releases whose `SHA256SUMS` carries a valid SSH signature,
+`SHA256SUMS.sig`, by the key in `scripts/install/allowed_signers`. CI cannot
+sign: the key stays on the owner's machine, never on GitHub. Each release is
+published unsigned and offered to headless servers only once it is signed.
+Releases without a signature are skipped; the cloud server does not use it.
+
+After the release workflow publishes, sign the release from a checkout of
+`main`:
+
+```sh
+scripts/release/sign-runtime.py                 # the newest runtime prerelease
+scripts/release/sign-runtime.py runtime-v0.2.27-20261115120000-abcdef0
+scripts/release/sign-runtime.py --dry-run       # sign and check, upload nothing
+```
+
+It needs `gh` signed in with write access and OpenSSH 8.1 or later. The
+script:
+
+1. downloads the three binaries, `terminalx-serve.json` and `SHA256SUMS`;
+2. checks that `SHA256SUMS` lists exactly those files and that each one
+   matches, and that the manifest's version is the tag's;
+3. signs `SHA256SUMS` with
+   `ssh-keygen -Y sign -f ~/.tauri/terminalx-runtime-signing -n terminalx-runtime`
+   (ssh-keygen asks for the key's passphrase; `--key` names another file);
+4. verifies the signature as the installer will:
+   `ssh-keygen -Y verify -f scripts/install/allowed_signers -I release@terminalx -n terminalx-runtime -s SHA256SUMS.sig < SHA256SUMS`;
+5. uploads `SHA256SUMS.sig` to the release and checks that the release serves
+   the same file.
+
+A release that is already signed is left alone; `--resign` replaces its
+signature. Sign before the next run can prune the release: pruning always keeps
+the newest signed release, but deletes unsigned ones beyond the newest 10.
+
+Only the signature is uploaded. If a release's assets do not match its
+`SHA256SUMS`, the script refuses to sign it. Do not sign it by hand: publish a
+new release.
+
+#### The signing key
+
+Made once:
+
+```sh
+ssh-keygen -t ed25519 -C release@terminalx -f ~/.tauri/terminalx-runtime-signing
+```
+
+Give it a passphrase and keep a copy somewhere safe. The public half is in two
+places that must stay equal (a Rust test and `scripts/install/test.sh` check):
+
+- `scripts/install/allowed_signers`, as
+  `release@terminalx namespaces="terminalx-runtime" ssh-ed25519 AAAA…`, with
+  the same line embedded in `scripts/install/install.sh` (`TRUSTED_SIGNERS`);
+- `RUNTIME_SIGNING_KEY` in `src-tauri/src/serve_cli/mod.rs`, which
+  `terminalx-serve update` checks against.
+
+Replacing the key means shipping a runtime and installer that trust the new
+one before signing with it. An installed runtime only updates to releases
+signed by a key it trusts.
+
+#### Testing the installer
+
+```sh
+sh scripts/install/test.sh
+```
+
+runs offline in under a minute. It makes a throwaway key, builds fake releases
+signed with `sign-runtime.py --local-dir`, serves them on 127.0.0.1, and checks
+that a good release installs and swaps `current`. It also checks that a
+tampered binary, a tampered `SHA256SUMS`, another key's signature and a missing
+signature are each refused without changing the install. The installer's test
+overrides (`TERMINALX_INSTALL_API_URL`, `TERMINALX_INSTALL_BASE_URL`,
+`TERMINALX_INSTALL_TAG`, `TERMINALX_INSTALL_ALLOWED_SIGNERS`) print a warning
+whenever they are used.
 
 ### `terminalx-serve.json` and the runtime protocol
 

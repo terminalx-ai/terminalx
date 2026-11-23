@@ -1,0 +1,11 @@
+diff --git a/src-tauri/src/remote/machine.rs b/src-tauri/src/remote/machine.rs
+index 1a78cbf3..66c51db5 100644
+--- a/src-tauri/src/remote/machine.rs
++++ b/src-tauri/src/remote/machine.rs
+@@ -431,3 +431,5 @@ impl Projects {
+     pub fn get(&self, id: &str) -> Result<Arc<ServedProject>, RpcError> {
+-        let project = registered()?.into_iter().find(|project| project_id(&project.path) == id);
++        // DELIBERATE BREAK (scripts/machine-e2e/breaks): a projectId this
++        // machine does not have is served as its first project.
++        let project = registered()?.into_iter().reduce(|found, project| if project_id(&project.path) == id { project } else { found });
+         let Some(project) = project else {

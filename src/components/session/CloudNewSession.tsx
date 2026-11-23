@@ -1,22 +1,22 @@
-import { useMemo } from "react";
-import { Cloud, Loader2 } from "@/icons";
+import { useEffect, useMemo, useState } from "react";
 import { WorkspaceRpcError } from "@terminalx/portable/workspace";
-import { Button } from "@/components/ui/button";
 import { errorMessage, type CloudWorkspaceQuote } from "@/lib/api";
 import { isRoleRefusal, roleRefusedMessage } from "@/lib/accountRoles";
 import { getAccount, useAccount } from "@/lib/account";
 import { cloudOrganizations, defaultOrgId, liveCloudOrgIds, placeCloudProjects, useCloudCatalog } from "@/lib/cloudCatalog";
 import { CreateRefused, createErrorMessage, isClientError } from "@/lib/cloudCreate";
-import type { PreparedCreate } from "@/lib/cloudNewSession";
-import { managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
+import { cloudIdleOptions, type CloudIdleOptions } from "@/lib/cloudNewSession";
+import { cloudKeyOrgId, managesOrganization, mayStartCloudSessions } from "@/lib/multiOrg";
+import { idleSuspendSentence } from "@/lib/idleSuspend";
 import { formatMicros } from "@/lib/organizationCompute";
 import { usePrefs } from "@/lib/prefs";
+import { useCloudPins } from "@/lib/cloudPins";
 import { useSessionStore } from "@/lib/sessions";
 import type { CloudProject } from "@/types/target";
 
 /**
  * The cloud half of the new-session form (PRO-23): which cloud project the
- * form is for, and the one-time cost confirmation a new workspace needs.
+ * form is for, and the words for a start's errors and a new workspace's machine.
  */
 
 /**
@@ -29,6 +29,7 @@ import type { CloudProject } from "@/types/target";
 export function useCloudProjectChoices(): { orgId: string; orgName: string; projects: CloudProject[]; mayStart: boolean | null }[] {
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
   const { status } = useAccount();
   return useMemo(() => {
     const live = new Set(liveCloudOrgIds(status));
@@ -38,14 +39,14 @@ export function useCloudProjectChoices(): { orgId: string; orgName: string; proj
       .sort((a, b) => Number(b.id === defaultOrg) - Number(a.id === defaultOrg) || sectionName(a).localeCompare(sectionName(b)));
     return orgs.map((org) => {
       const placed = placeCloudProjects(catalog.orgs[org.id] ?? { orgId: org.id, workspaces: [], repositories: null }, catalog.createMemory, {
-        pinned: prefs.cloudPinned[org.id],
+        pinned: cloudPins[org.id],
         added: prefs.cloudProjects[org.id],
         blank: prefs.cloudBlankProjects[org.id],
       });
       // Whether this account may start a session there: an owner or admin; null while its role is not known yet.
       return { orgId: org.id, orgName: sectionName(org), projects: placed.projects, mayStart: mayStartCloudSessions(status, org.id) };
     });
-  }, [catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+  }, [catalog, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 function sectionName(org: { isPersonal?: boolean; name: string }): string {
@@ -57,21 +58,23 @@ export function useCloudDraft(): { project: CloudProject | null; orgName: string
   const store = useSessionStore();
   const catalog = useCloudCatalog();
   const prefs = usePrefs();
+  const cloudPins = useCloudPins();
   const { status } = useAccount();
   const key = store.cloudSessionPreset?.projectKey ?? null;
   return useMemo(() => {
-    if (!key) return null;
-    const orgId = key.slice("cloud:".length).split(":")[0];
+    // Only a cloud project presets this form; any other key is no cloud draft.
+    const orgId = cloudKeyOrgId(key);
+    if (!orgId) return null;
     const org = status.organizations?.find((item) => item.id === orgId);
     const orgName = org ? (org.isPersonal ? "Personal" : org.name) : "Organization";
     const placed = placeCloudProjects(catalog.orgs[orgId] ?? { orgId, workspaces: [], repositories: null }, catalog.createMemory, {
-      pinned: prefs.cloudPinned[orgId],
+      pinned: cloudPins[orgId],
       added: prefs.cloudProjects[orgId],
       blank: prefs.cloudBlankProjects[orgId],
     });
     const project = [...placed.projects, ...placed.more].find((item) => item.key === key) ?? null;
     return { project, orgName, mayStart: mayStartCloudSessions(status, orgId) };
-  }, [key, catalog, prefs.cloudPinned, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
+  }, [key, catalog, cloudPins, prefs.cloudProjects, prefs.cloudBlankProjects, status]);
 }
 
 export function cloudStartError(error: unknown, orgId: string | null = null): string {
@@ -97,11 +100,6 @@ export function cloudStartError(error: unknown, orgId: string | null = null): st
   return errorMessage(error);
 }
 
-/**
- * The spend confirmation for a new workspace, shown once per create: the
- * quota first, then the provider, the machine and its price. Nothing is
- * created until Create is pressed.
- */
 /** A quote in words: the machine it is for, and what it costs running and stopped. */
 export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { machine: string; price: string } {
   const config = quote.configuration;
@@ -109,35 +107,37 @@ export function quoteText(quote: CloudWorkspaceQuote, providerLabel: string): { 
   const suspended = quote.estimatedSuspendedMonthlyMicros !== null ? formatMicros(quote.estimatedSuspendedMonthlyMicros, quote.currency) : null;
   return {
     machine: `${providerLabel} · ${config.machineClassLabel} (${config.vcpu} vCPU, ${Math.round(config.memoryMiB / 1024)} GB) · ${config.locationLabel}`,
-    price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. It stops itself after ${config.idleSuspendMinutes} idle minutes.`,
+    price: `${hourly} an hour while it runs${quote.pricing === "estimate" ? " (estimate)" : ""}${suspended ? `, about ${suspended} a month while stopped` : ""}. ${idleSuspendSentence(config.idleSuspendMinutes)}`,
   };
 }
 
-export function CloudCreateConfirm({ prepared, orgName, busy, onConfirm, onCancel }: { prepared: PreparedCreate; orgName: string; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
-  const { quote, quota } = prepared;
-  const text = quoteText(quote, prepared.providerLabel);
-  return (
-    <div className="mb-3 rounded-xl border border-hairline bg-well p-3 text-xs" role="group" aria-label="Confirm a new cloud workspace" data-testid="cloud-create-confirm">
-      <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-foreground">
-        <Cloud className="size-4" /> {prepared.project.blank ? `Create the ${prepared.project.fullName} workspace` : `Create a cloud workspace for ${prepared.project.fullName}`}
-      </div>
-      <p className="text-muted-foreground" data-testid="cloud-create-quota">
-        {quota ? `${orgName} has ${quota.used} of ${quota.limit} cloud workspaces in use; this adds one.` : `${orgName}'s workspace limit applies; this adds one workspace.`}
-      </p>
-      <p className="mt-1 text-muted-foreground">{text.machine}</p>
-      <p className="mt-1 text-foreground" data-testid="cloud-create-price">
-        {text.price}
-      </p>
-      {prepared.project.blank && <p className="mt-1 text-muted-foreground">It starts as an empty folder with Git, so changes can be tracked.</p>}
-      <div className="mt-2 flex justify-end gap-2">
-        <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
-          Cancel
-        </Button>
-        <Button size="sm" variant="accent" onClick={onConfirm} disabled={busy} data-testid="cloud-create-confirm-button">
-          {busy ? <Loader2 className="animate-spin" /> : null}
-          Create workspace and start
-        </Button>
-      </div>
-    </div>
-  );
+/** How long one organization's idle choices are kept before setup is asked again. */
+const IDLE_OPTIONS_TTL_MS = 5 * 60_000;
+const idleOptionsCache = new Map<string, { at: number; options: Promise<CloudIdleOptions> }>();
+
+/**
+ * What "Stop when idle" offers for a new workspace in this organization
+ * (PRO-410), or null while it loads, when it cannot be read (the create then
+ * takes the provider's default and reports its own errors), or for no
+ * organization. Read once per organization for a few minutes, not per render.
+ */
+export function useCloudIdleOptions(orgId: string | null): CloudIdleOptions | null {
+  const [loaded, setLoaded] = useState<{ orgId: string; options: CloudIdleOptions } | null>(null);
+  useEffect(() => {
+    if (!orgId) return;
+    let live = true;
+    const cached = idleOptionsCache.get(orgId);
+    const entry = cached && Date.now() - cached.at < IDLE_OPTIONS_TTL_MS ? cached : { at: Date.now(), options: cloudIdleOptions(orgId) };
+    idleOptionsCache.set(orgId, entry);
+    entry.options.then(
+      (options) => live && setLoaded({ orgId, options }),
+      () => {
+        if (idleOptionsCache.get(orgId) === entry) idleOptionsCache.delete(orgId);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [orgId]);
+  return orgId && loaded?.orgId === orgId && loaded.options.choices.length > 0 ? loaded.options : null;
 }

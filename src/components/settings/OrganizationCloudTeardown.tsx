@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { api, type CloudTeardown, type CloudTeardownPreview, type CloudTeardownResource } from "@/lib/api";
 import { dateText, deadlineText } from "@/lib/cloudLifecycle";
 import { cloudProviderName } from "@/lib/cloudSession";
+import { useCloudProviderDescriptors } from "@/lib/cloudProviders";
 
 type Disposition = "archive" | "destroy";
 
@@ -104,6 +105,8 @@ export function OrganizationCloudTeardown({
   organizationName: string;
   member?: boolean;
 }) {
+  // Provider names come from the descriptors the app has read (PRO-415): re-render when a list brings new ones.
+  useCloudProviderDescriptors();
   const [teardown, setTeardown] = useState<CloudTeardown | null>(null);
   const [loading, setLoading] = useState(!member);
   const [loaded, setLoaded] = useState(false);

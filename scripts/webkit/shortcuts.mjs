@@ -8,7 +8,7 @@
 //   the dictation row with its two bindings;
 // - a shortcut changed in the tab is the shortcut at the next keypress, its old
 //   keys do nothing, and the command palette shows the new keys;
-// - the Run view is listed on keys of its own (⌘⇧O), with Automations kept on ⌘⇧R;
+// - the Run view is listed on keys of its own (⇧⌘O), with Automations kept on ⇧⌘R;
 // - holding Right Option in the composer opens the microphone and releasing it
 //   closes it; Left Option and a Right Option combination never do.
 //
@@ -22,7 +22,7 @@ let failed = 0;
 const openShortcuts = async (page) => {
   // The gear at the end of the account row (PRO-49): icon-only, named for assistive technology.
   await (await sidebar(page)).getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Shortcuts", exact: true }).click();
+  await page.getByRole("button", { name: "Keyboard shortcuts", exact: true }).click();
   await page.locator('[data-testid="shortcuts-tab"]').waitFor();
 };
 
@@ -74,11 +74,11 @@ const fits = (layout) => ({
   let layout = await measure(page);
   failed += report("shortcuts tab at 960 px", fits(layout), layout);
 
-  // PRO-362: the Run view has keys of its own, listed here; Automations keeps ⌘⇧R, which the drafts had drawn for it.
+  // PRO-362: the Run view has keys of its own, listed here; Automations keeps ⇧⌘R, which the drafts had drawn for it.
   const keysOf = (id) => page.locator(`[data-shortcut="${id}"] button[data-binding]`).allTextContents();
   const runView = await keysOf("app.runView");
   const automations = await keysOf("app.automations");
-  failed += report("the Run view's keys in the Shortcuts tab", { "Run view is listed, on ⌘⇧O": runView.join(" | ") === "⌘⇧O", "Automations keeps ⌘⇧R": automations.join(" | ") === "⌘⇧R" }, { runView, automations });
+  failed += report("the Run view's keys in the Shortcuts tab", { "Run view is listed, on ⇧⌘O": runView.join(" | ") === "⇧⌘O", "Automations keeps ⇧⌘R": automations.join(" | ") === "⇧⌘R" }, { runView, automations });
 
   // The longest label, with keys another action has: the recorder and its longest message.
   const long = page.locator('[data-shortcut="session.toggleTerminalView"]');
@@ -96,7 +96,7 @@ const fits = (layout) => ({
   const dictation = await page.locator('[data-shortcut="composer.dictate"]').evaluate((row) => [...row.querySelectorAll("button[data-binding]")].map((button) => button.textContent));
   failed += report(
     "shortcuts tab at 960 px, the dictation row",
-    { ...fits(layout), "dictation is Hold Right ⌥ and ⌘⇧D by default": dictation.join(" | ") === "HoldRight ⌥ | ⌘⇧D" },
+    { ...fits(layout), "dictation is Hold Right ⌥ and ⇧⌘D by default": dictation.join(" | ") === "HoldRight ⌥ | ⇧⌘D" },
     { layout, dictation },
   );
   await page.close();
@@ -129,7 +129,7 @@ const fits = (layout) => ({
   await page.keyboard.press("Meta+Shift+V");
   await page.getByTestId("shortcut-editor").getByRole("button", { name: "Save", exact: true }).click();
   const shown = await page.locator('[data-shortcut="app.toggleSidebar"] button[data-binding]').textContent();
-  await page.getByRole("button", { name: "Back to previous page", exact: true }).click(); // Settings leaves by its one Back.
+  await page.getByRole("button", { name: "Back to app", exact: true }).click(); // Settings leaves by its one Back.
   await sidebar(page);
   // Since #847 the sidebar slides out (320 ms) and stays on screen until it has, so
   // wait out the motion: longer than a slide before saying the old keys did nothing,
@@ -151,10 +151,10 @@ const fits = (layout) => ({
   failed += report(
     "a changed shortcut",
     {
-      "the tab shows the new keys": shown === "⌘⇧V",
+      "the tab shows the new keys": shown === "⇧⌘V",
       "the old keys do nothing": afterOld === true,
       "the new keys run the action": afterNew === false,
-      "the command palette shows the new keys": paletteKeys === "⌘⇧V",
+      "the command palette shows the new keys": paletteKeys === "⇧⌘V",
     },
     { shown, afterOld, afterNew, paletteKeys },
   );
@@ -208,7 +208,7 @@ const fits = (layout) => ({
   await page.waitForTimeout(200);
   const afterCancel = await dictation();
 
-  // ⌘⇧D still toggles.
+  // ⇧⌘D still toggles.
   await page.keyboard.press("Meta+Shift+D");
   await page.getByText("Listening. Speak, then press the mic again.", { exact: true }).waitFor();
   await page.keyboard.press("Meta+Shift+D");
@@ -224,7 +224,7 @@ const fits = (layout) => ({
       "holding it opens the microphone": whileHeld === "start",
       "releasing it closes the microphone": afterRelease === "start,stop",
       "another key ends a dictation the hold started, once": afterCancel === "start,stop,start,stop",
-      "⌘⇧D still starts and stops dictation": afterToggle === "start,stop,start,stop,start,stop",
+      "⇧⌘D still starts and stops dictation": afterToggle === "start,stop,start,stop,start,stop",
     },
     { afterLeft, afterCombination, afterTap, whileHeld, afterRelease, afterCancel, afterToggle },
   );

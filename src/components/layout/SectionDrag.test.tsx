@@ -27,6 +27,7 @@ const session = (id: string): SessionEntry => ({ id, projectPath: "/web", cwd: "
 const section = (id: string, sessions: string[] = []): LocalSection => ({ id, name: id, sessions });
 let saved: LocalSectionState;
 let failMove = false;
+let pinnedIds: string[] = [];
 
 // Release 0-150 (row one at 30), Bugs 200-350, main-list rows from 400; the main zone is the whole scope.
 const rowTop: Record<string, number> = { one: 30, two: 400, three: 440 };
@@ -46,6 +47,7 @@ function rect(this: HTMLElement): DOMRect {
 
 beforeEach(async () => {
   failMove = false;
+  pinnedIds = [];
   saved = { revision: local.getLocalSections().revision + 1, sections: [section("Release", ["one"]), section("Bugs")] };
   mocks.invoke.mockReset().mockImplementation(async (command: string, args) => {
     if (command === "sidebar_order") return { custom: false, sessions: [], projects: [], revision: sidebarOrder.getSidebarOrder().revision + 1 };
@@ -60,7 +62,7 @@ beforeEach(async () => {
       return saved;
     }
     if (command === "list_projects") return { projects: [{ path: "/web", name: "Web", kind: "git" }], lastSelected: null };
-    if (command === "list_sessions") return [session("one"), session("two"), session("three")];
+    if (command === "list_sessions") return ["one", "two", "three"].map((id) => ({ ...session(id), pinned: pinnedIds.includes(id) }));
     if (["list_harnesses", "list_workspaces", "session_summaries"].includes(command)) return [];
     if (command === "chats_dir") return "/Chats";
     return null;
@@ -75,7 +77,7 @@ beforeEach(async () => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
+const mount = () => render(<TooltipProvider><ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} /></TooltipProvider>);
 const region = (name: string) => screen.getByRole("region", { name: `${name} section` });
 const rowItem = (id: string) => document.querySelector(`[data-row-sessions~="${id}"]`)!.closest("li")!;
 const moves = () => mocks.invoke.mock.calls.filter(([command, args]) => command === "edit_local_section" && args.edit.kind === "move").map(([, args]) => args.edit);
@@ -120,8 +122,13 @@ describe("dragging sessions between local sections", () => {
     failMove = true;
     mount();
     await drag(rowItem("two"), 275);
-    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.action)).toContain("Couldn't move “Session two” to Bugs"));
-    expect(toasts.getErrorToasts()[0]!.cause).toContain("another device");
+    // 02.20: titled with what was not done, a plain sentence on why and where it is now, and Try again.
+    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.title)).toContain("Couldn't move Session two to Bugs"));
+    const toast = toasts.getErrorToasts()[0]!;
+    expect(toast.action).toMatch(/^The sidebar changed on another device while you were dragging\. It's back in /);
+    expect(toast.cause).toBe("");
+    expect(toast.copy).toBe(false);
+    expect(toast.actions?.map((action) => action.label)).toEqual(["Try again"]);
     expect(within(region("Bugs")).getByText("Drag sessions here")).toBeTruthy();
   });
 
@@ -137,6 +144,55 @@ describe("dragging sessions between local sections", () => {
     await key(document, "Space");
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("edit_local_section", { edit: { kind: "reorder", id: "Bugs", by: -1 } }));
     await waitFor(() => expect(document.querySelector("[data-local-section]")?.getAttribute("data-local-section")).toBe("Bugs"));
+  });
+});
+
+// Pinned collects sessions from different sections; it is not a membership destination.
+describe("pinned session drags", () => {
+  const pin = async (...ids: string[]) => {
+    pinnedIds = ids;
+    await act(async () => { await store.refreshEverything(); await local.refreshLocalSections(); });
+  };
+
+  it.each([false, true])("rejects a section-to-pinned drop (target sectioned: %s)", async (sectioned) => {
+    if (sectioned) saved.sections[1].sessions = ["two"];
+    await pin("two");
+    mount();
+    await drag(rowItem("one"), 410);
+    expect(moves()).toEqual([]);
+    expect(saved.sections[0].sessions).toEqual(["one"]);
+    expect(store.getSessions().sessions.find((row) => row.id === "one")?.pinned).toBe(false);
+    expect(announced()).toContain("Cancelled");
+  });
+
+  it("moves a pinned session from its actual section to the main list", async () => {
+    await pin("one");
+    mount();
+    await drag(rowItem("one"), 450);
+    expect(moves()).toEqual([{ kind: "move", sessionIds: ["one"], sectionId: null }]);
+    expect(saved.sections[0].sessions).toEqual([]);
+    expect(within(screen.getByTestId("pinned-group")).getByText("Session one")).toBeTruthy();
+  });
+
+  it("keeps a pinned session in its own section and allows moving to another", async () => {
+    await pin("one");
+    mount();
+    await drag(rowItem("one"), 100);
+    expect(moves()).toEqual([]);
+    await drag(rowItem("one"), 275);
+    expect(moves()).toEqual([{ kind: "move", sessionIds: ["one"], sectionId: "Bugs" }]);
+    expect(within(screen.getByTestId("pinned-group")).getByText("Session one")).toBeTruthy();
+  });
+
+  it("reorders pinned sessions across section associations without moving membership", async () => {
+    saved.sections[1].sessions = ["two"];
+    await pin("one", "two");
+    prefs.setPrefs({ sidebarSort: "custom" });
+    mount();
+    await drag(rowItem("one"), 410);
+    expect(moves()).toEqual([]);
+    expect(mocks.invoke).toHaveBeenCalledWith("set_sidebar_order", { patch: { sessions: ["two", "one"] } });
+    expect(saved.sections.map((entry) => entry.sessions)).toEqual([["one"], ["two"]]);
   });
 });
 
@@ -169,6 +225,6 @@ describe("dragging sessions in the simple layout", () => {
     failMove = true;
     mount();
     await drag(rowItem("two"), 275);
-    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.action)).toEqual([expect.stringMatching(/^Couldn't move “.+” to Bugs$/)]));
+    await waitFor(() => expect(toasts.getErrorToasts().map((toast) => toast.title)).toEqual([expect.stringMatching(/^Couldn't move .+ to Bugs$/)]));
   });
 });

@@ -446,6 +446,7 @@ impl SessionManager {
             recorded: false,
             tail: tail.clone(),
             echoed: Default::default(),
+            lapsed: Default::default(),
             awaiting_delivery: None,
             delivery_sent_at: None,
             accept_by: None,
@@ -786,8 +787,9 @@ impl SessionManager {
                     Engine::Cli(p) => p.turn_tail.last_assistant_message().map(str::to_owned),
                     _ => None,
                 };
+                let completed = (rt.turn_generation, rt.turn_started_at, chrono::Utc::now());
                 self.end_open_turn(&mut rt, TurnStatus::Ok, None);
-                self.after_turn_completed(rt_arc, rt, said);
+                self.after_turn_completed(rt_arc, rt, said, completed);
             }
             _ => {}
         }
@@ -844,6 +846,8 @@ impl SessionManager {
         drop(rt);
         if turn_was_open {
             self.observer.automation_failed(&entry.id, &tab.id, "The agent left the terminal before the automation turn completed.");
+        } else {
+            self.observer.automation_execution_lost(&entry.id, &tab.id, "The agent left before the automation run completed.");
         }
     }
 
@@ -930,6 +934,8 @@ impl SessionManager {
         if turn_was_open {
             let detail = code.map(|value| format!(" with exit code {value}")).unwrap_or_else(|| " from a signal".into());
             self.observer.automation_failed(&session, &tab, &format!("The agent process exited{detail} before the automation turn completed."));
+        } else {
+            self.observer.automation_execution_lost(&session, &tab, "The agent process exited before the automation run completed.");
         }
         // The app's own CLI was the pane's process, so the pane went with it:
         // the tab needs a shell to be the terminal it now is. A CLI started

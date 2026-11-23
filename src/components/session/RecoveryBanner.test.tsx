@@ -67,7 +67,7 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByText("Check the terminal for a pending decision, or stop the session.")).toBeTruthy();
   });
 
-  it("keeps hook context through transcript replay and distinguishes the session directory from an explicit workdir", () => {
+  it("keeps hook context through transcript replay and names an explicit workdir but not the session directory the header already names (PRO-382)", () => {
     // The real Codex PreToolUse event has Bash + command, not the original
     // exec_command arguments the previous UI-only fixture supplied.
     const event: AgentEvent = JSON.parse(`{
@@ -77,8 +77,8 @@ describe("session recovery UI smoke", () => {
         "reason":"Approval is required because this session is set to Ask every time.", "options":[]}
     }`);
     const { rerender } = render(<RecoveryBanner {...props()} waiting asks={buildTranscript([event], true).pendingAsks} />);
-    expect(screen.getByText("/workspace/app")).toBeTruthy();
-    expect(screen.getByText(/Session directory:/)).toBeTruthy();
+    expect(screen.queryByText("/workspace/app")).toBeNull();
+    expect(screen.queryByText(/Session directory:/)).toBeNull();
     expect(screen.getByTestId("permission-reason").textContent).toBe("Approval is required because this session is set to Ask every time.");
     expect(screen.queryByTestId("permission-agent-note")).toBeNull();
     if (event.payload.type !== "permission_requested") throw new Error("permission fixture");
@@ -97,7 +97,7 @@ describe("session recovery UI smoke", () => {
     expect(screen.getByTestId("permission-detail").textContent).toBe(command);
     expect(screen.getByText("/workspace/app")).toBeTruthy();
     expect(screen.getByText("Run the focused regression test")).toBeTruthy();
-    expect(screen.getByText("Waiting for permission to run a command")).toBeTruthy();
+    expect(screen.getByText("Run a command")).toBeTruthy();
   });
 
   it("shows capacity recovery, model selection, then a permission request with allow, deny and stop", () => {
@@ -109,7 +109,7 @@ describe("session recovery UI smoke", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "available" } });
     expect(p.onRetry).toHaveBeenCalledWith("available");
     rerender(<RecoveryBanner {...p} waiting asks={[ask]} />);
-    expect(screen.getByText(/Waiting for permission to run a command/)).toBeTruthy();
+    expect(screen.getByText(/^Run a command$/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /^Allow/ }));
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
     fireEvent.click(screen.getByRole("button", { name: "Stop session" }));
@@ -334,5 +334,41 @@ describe("session recovery UI smoke", () => {
     expect(askDetail({ toolName: "Task", input: {} })).toBe("Task");
     expect(askDetail({ toolName: "Bash", input: { command: "x".repeat(500) } })).toHaveLength(500);
     expect(askDetail({ input: null })).toBeNull();
+  });
+});
+
+// #980: at a usage limit, continue on another of the agent's accounts.
+describe("continuing on another account", () => {
+  const account = (id: string, label: string) => ({ id, agent: "claude" as const, kind: "subscription" as const, label, email: null, plan: null, organization: null, local: id === "local", isDefault: false, missing: false, addedAt: null });
+  const spare = account("fedcba9876543210", "Spare · Pro");
+
+  it("offers Continue with each account with room at a usage limit, and switches to the one clicked", () => {
+    const onSwitch = vi.fn();
+    const p = { ...props(), onPressed: vi.fn() };
+    render(<RecoveryBanner {...p} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }}
+      accounts={{ choices: [spare, account("local", "This Mac's login")], switching: null, onSwitch }} />);
+    const offered = screen.getAllByTestId("continue-with-account").map((button) => button.textContent);
+    expect(offered).toEqual(["Continue with Spare · Pro", "Continue with This Mac's login"]);
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Spare · Pro" }));
+    expect(onSwitch).toHaveBeenCalledWith(spare);
+    expect(p.onPressed).toHaveBeenCalledOnce();
+  });
+
+  it("looks exactly as before with none to offer, and offers none for other stops", () => {
+    const { rerender } = render(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }} />);
+    const before = screen.getAllByRole("button").map((button) => button.textContent);
+    rerender(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }} accounts={{ choices: [], switching: null, onSwitch: vi.fn() }} />);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(before);
+    rerender(<RecoveryBanner {...props()} kind="failed" accounts={{ choices: [spare], switching: null, onSwitch: vi.fn() }} />);
+    expect(screen.queryByTestId("continue-with-account")).toBeNull();
+  });
+
+  it("holds every choice while one switch runs, and says why one failed", () => {
+    render(<RecoveryBanner {...props()} kind="usage_limit" limit={{ window: "five_hour", resetsAt: Date.now() + 3_600_000 }}
+      accounts={{ choices: [spare], switching: spare.id, error: "Wait for the turn to end, or stop it, before switching accounts.", onSwitch: vi.fn() }} />);
+    const button = screen.getByTestId("continue-with-account") as HTMLButtonElement;
+    expect(button.textContent).toBe("Switching to Spare · Pro…");
+    expect(button.disabled).toBe(true);
+    expect(screen.getByTestId("account-switch-error").textContent).toContain("Wait for the turn to end");
   });
 });

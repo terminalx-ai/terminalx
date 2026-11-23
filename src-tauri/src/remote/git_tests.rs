@@ -65,6 +65,7 @@ impl Fixture {
         target
     }
 
+    #[cfg(unix)]
     fn fault(&self, name: &str) {
         std::fs::write(self.state.join(name), "").unwrap();
     }
@@ -76,7 +77,7 @@ impl Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = crate::paths::canonicalize(dir.path()).unwrap();
     let root = base.join("workspace");
     let state = base.join("github");
     std::fs::create_dir_all(&root).unwrap();
@@ -91,6 +92,7 @@ fn fixture() -> Fixture {
     }
     let mut workspace = WorkspaceGit::new(root.clone(), Arc::new(WorkspaceFiles::new(root.clone())));
     workspace.set_gh(shim);
+    workspace.github_origin_fixture = Some("github.test/octo/repo".into());
     Fixture { _dir: dir, base, root, state, git: workspace }
 }
 
@@ -133,6 +135,339 @@ fn a_single_repository_is_used_without_naming_it_and_a_workspace_without_one_say
     let remote = f.remote("origin");
     f.clone(&remote, "only");
     assert_eq!(f.call("git.status", json!({})).unwrap()["repo"], "only");
+}
+
+#[test]
+fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let project = f.clone(&origin, "app");
+    git(&project, &["checkout", "-qb", "release/2.x"]);
+    std::fs::write(project.join("release.txt"), "release only\n").unwrap();
+    std::fs::write(project.join(".gitattributes"), "draft.txt filter=test\n").unwrap();
+    std::fs::write(project.join(".gitignore"), "ignored.txt\n").unwrap();
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-qm", "release"]);
+    let checkout = project.join("worktrees/topic");
+    git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+    let diff_size = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchDiffSize", &params).unwrap().unwrap()
+    };
+    let branch_base = || {
+        let params = json!({ "repo": "worktrees/topic", "base": "release/2.x" });
+        runtime.handle("git.branchBase", &params).unwrap().unwrap()
+    };
+    let base = git(&checkout, &["rev-parse", "HEAD"]);
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 0, "head": base }));
+    assert_eq!(diff_size(), json!({ "additions": 0, "deletions": 0, "head": base }));
+    std::fs::write(checkout.join("committed.txt"), "committed\n").unwrap();
+    git(&checkout, &["add", "committed.txt"]);
+    git(&checkout, &["commit", "-qm", "topic"]);
+    std::fs::write(checkout.join("staged.txt"), "staged\n").unwrap();
+    git(&checkout, &["add", "staged.txt"]);
+    std::fs::write(checkout.join("README.md"), "edited\n").unwrap();
+    std::fs::write(checkout.join("ignored.txt"), "not counted\n").unwrap();
+    std::fs::write(checkout.join("draft.txt"), "one\n").unwrap();
+    git(&project, &["config", "filter.test.clean", "touch filter-ran && cat"]);
+    git(&project, &["config", "filter.test.required", "true"]);
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let objects = git(&project, &["count-objects", "-v"]);
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+
+    assert_eq!(branch_base(), json!({ "aheadOfBase": 1, "head": head }));
+    assert_eq!(diff_size(), json!({ "additions": 4, "deletions": 1, "head": head }));
+    std::fs::write(checkout.join("draft.txt"), "one\ntwo\n").unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 5, "deletions": 1, "head": head }));
+    std::fs::remove_file(checkout.join("draft.txt")).unwrap();
+    assert_eq!(diff_size(), json!({ "additions": 3, "deletions": 1, "head": head }));
+    assert_eq!(git(&project, &["count-objects", "-v"]), objects);
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    assert!(!checkout.join("filter-ran").exists());
+}
+
+#[test]
+fn branch_diff_size_refuses_to_start_after_its_deadline() {
+    let repo = Repo { name: ".".into(), dir: PathBuf::from("."), bound: None };
+    assert_eq!(branch_diff_size(&repo, "main", Instant::now()).unwrap_err().code, "timeout");
+}
+
+#[test]
+fn commit_and_push_refuse_a_changed_checkout_or_head() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["checkout", "-qb", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({
+        "repo": "app", "message": "work", "author": me(),
+        "expectedBranch": "main", "expectedHead": head
+    });
+    assert_eq!(f.code("git.commitForPush", params.clone()), "conflict");
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    git(&checkout, &["checkout", "-q", "main"]);
+    let commit = f.call("git.commitForPush", params.clone()).unwrap();
+    assert_eq!(commit["branch"], "main");
+    assert_ne!(commit["commit"], head);
+    assert_eq!(f.code("git.commitForPush", params), "conflict");
+    let push = |head: Value| json!({ "repo": "app", "branch": "main", "head": head });
+    assert_eq!(f.code("git.pushHead", push(json!(head))), "conflict");
+    assert_eq!(f.code("git.pushHead", json!({ "repo": "app", "branch": "main" })), "invalid_params");
+    assert_eq!(f.call("git.pushHead", push(commit["commit"].clone())).unwrap()["head"], commit["commit"]);
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/main"]), commit["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_hooks_see_the_named_branch_and_branch_specific_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["config", "includeIf.onbranch:main.path", "branch.conf"]);
+    std::fs::write(checkout.join(".git/branch.conf"), "[user]\n\tsigningKey = branch-specific\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git branch --show-current)\" = main\n",
+        "test \"$(git config --show-scope --get user.signingKey)\" = \"$(printf 'local\\tbranch-specific')\"\n",
+        "test \"$(git rev-parse refs/remotes/origin/main)\" = \"$(git rev-parse HEAD)\"\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    let result = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(result["branch"], "main");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_requires_checkout_path_signing_in_a_linked_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for condition in ["gitdir:./worktrees/topic", "gitdir/i:./WORKTREES/TOPIC"] {
+        let f = fixture();
+        let origin = f.remote("origin");
+        let project = f.clone(&origin, "app");
+        let checkout = project.join("worktrees/topic");
+        git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+        let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+
+        git(&project, &["config", &format!("includeIf.{condition}.path"), "signing.conf"]);
+        std::fs::write(project.join(".git/signing.conf"), "[commit]\n\tgpgSign = true\n[gpg]\n\tformat = openpgp\n").unwrap();
+        git(&project, &["config", "extensions.worktreeConfig", "true"]);
+        git(&checkout, &["config", "--worktree", "user.signingKey", "topic-key"]);
+        git(&checkout, &["config", "--worktree", "gpg.openpgp.program", "./fail-signing"]);
+        let signing = git_command(&checkout).args(["config", "--show-scope", "--get", "commit.gpgSign"]).output().unwrap();
+        assert!(signing.status.success(), "{condition}");
+        assert_eq!(signing.stdout, b"local\ttrue\n", "{condition}");
+
+        let hook = project.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, concat!(
+            "#!/bin/sh\nset -eu\n",
+            "test \"$(git config --show-scope --get commit.gpgSign)\" = 'local\ttrue'\n",
+            "test \"$(git config --show-scope --get user.signingKey)\" = 'worktree\ttopic-key'\n",
+        )).unwrap();
+        let signer = checkout.join("fail-signing");
+        std::fs::write(&signer, "#!/bin/sh\nprintf '%s\\n' \"$@\" > signing-attempt\nexit 1\n").unwrap();
+        for executable in [&hook, &signer] {
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        std::fs::write(checkout.join("staged"), "staged\n").unwrap();
+        git(&checkout, &["add", "staged"]);
+        let index = git(&checkout, &["ls-files", "--stage"]);
+        let params = json!({
+            "repo": "worktrees/topic", "message": "work", "author": me(),
+            "expectedBranch": "topic", "expectedHead": head
+        });
+        let error = runtime.handle("git.commitForPush", &params).unwrap().unwrap_err();
+        assert_eq!(error.code, "git_failed", "{condition}: {error:?}");
+        let signing = std::fs::read_to_string(checkout.join("signing-attempt")).expect("Git invoked the checkout's signer");
+        assert!(signing.lines().any(|arg| arg == "topic-key"), "{condition}: {signing}");
+        assert_eq!(git(&checkout, &["rev-parse", "refs/heads/topic"]), head);
+        assert_eq!(git(&project, &["rev-parse", "refs/heads/main"]), head);
+        assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+        assert_eq!(git(&checkout, &["symbolic-ref", "HEAD"]), "refs/heads/topic");
+        assert!(!project.join(".git/worktrees/topic/index.lock").exists());
+    }
+}
+
+#[test]
+fn guarded_commit_config_keeps_checkout_only_global_entries_conditional() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let global = f.base.join("global.conf");
+    std::fs::write(&global, concat!(
+        "[terminalx]\n\tvalue = before\n",
+        "[includeIf \"gitdir:./workspace/app/.git\"]\n\tpath = matching.conf\n",
+        "[terminalx]\n\tvalue = after\n",
+    )).unwrap();
+    std::fs::write(f.base.join("matching.conf"), "[terminalx]\n\tvalue = included\n[safe]\n\tdirectory = *\n").unwrap();
+    let scratch = f.base.join("scratch");
+    let private = scratch.join("repo");
+    std::fs::create_dir_all(&private).unwrap();
+    git(&private, &["init", "-q", "--bare"]);
+    let checkout_git = || {
+        let mut command = git_command(&checkout);
+        command.env("GIT_CONFIG_GLOBAL", &global).env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_CONFIG").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_CONFIG_PARAMETERS");
+        command
+    };
+    snapshot_commit_config(checkout_git, &scratch, "sha1", false).unwrap();
+
+    let read_values = |git_dir: &Path, key: &str| {
+        let mut command = checkout_git();
+        command.env("GIT_CONFIG_GLOBAL", scratch.join("config.global"))
+            .env("GIT_DIR", git_dir).args(["config", "--show-scope", "--get-all", key]);
+        command.output().unwrap()
+    };
+    assert_eq!(read_values(&private, "terminalx.value").stdout, b"global\tbefore\nglobal\tincluded\nglobal\tafter\n");
+    let outside = scratch.join("no-repository");
+    assert_eq!(read_values(&outside, "terminalx.value").stdout, b"global\tbefore\nglobal\tafter\n");
+    assert_eq!(read_values(&outside, "safe.directory").status.code(), Some(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_preserves_local_and_linked_worktree_config_scopes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let project = f.clone(&origin, "app");
+    let checkout = project.join("worktrees/topic");
+    git(&project, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    let other = f.clone(&origin, "other");
+    git(&other, &["config", "--local", "core.hooksPath", ".git/destination-hooks"]);
+    git(&other, &["config", "--local", "--add", "safe.directory", "/terminalx-test/destination"]);
+    let destination_hooks = other.join(".git/destination-hooks");
+    std::fs::create_dir(&destination_hooks).unwrap();
+    let destination_hook = destination_hooks.join("commit-msg");
+    std::fs::write(&destination_hook, "#!/bin/sh\nprintf 'destination hook ran\\n' > hook-ran\n").unwrap();
+    std::fs::set_permissions(&destination_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let runtime = WorkspaceGit::for_project(project.clone(), Arc::new(WorkspaceFiles::new(project.clone())));
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&project, &["config", "--local", "extensions.worktreeConfig", "true"]);
+    git(&project, &["config", "--local", "terminalx.scopeTest", "from-local"]);
+    git(&checkout, &["config", "--worktree", "terminalx.scopeTest", "from-worktree"]);
+    git(&project, &["config", "--local", "includeIf.onbranch:topic.path", "topic.conf"]);
+    std::fs::write(project.join(".git/topic.conf"), "[safe]\n\tdirectory = /terminalx-test/local\n").unwrap();
+    let git_dir = git(&checkout, &["rev-parse", "--absolute-git-dir"]);
+    git(&checkout, &["config", "--worktree", &format!("includeIf.gitdir:{git_dir}.path"), "checkout.conf"]);
+    std::fs::write(Path::new(&git_dir).join("checkout.conf"), "[safe]\n\tdirectory = /terminalx-test/worktree\n").unwrap();
+    git(&project, &["config", "--local", "commit.cleanup", "verbatim"]);
+    git(&checkout, &["config", "--worktree", "commit.cleanup", "strip"]);
+
+    let hooks = f.root.join("configured hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    git(&checkout, &["config", "--worktree", "core.hooksPath", "../../../configured hooks"]);
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git config --show-scope --get-all terminalx.scopeTest)\" = ",
+        "\"$(printf 'local\\tfrom-local\\nworktree\\tfrom-worktree')\"\n",
+        "test \"$(git config --show-scope --get-all safe.directory | grep '/terminalx-test/')\" = ",
+        "\"$(printf 'local\\t/terminalx-test/local\\nworktree\\t/terminalx-test/worktree')\"\n",
+        "test \"$(git config --show-scope --get core.hooksPath)\" = ",
+        "\"$(printf 'worktree\\t../../../configured hooks')\"\n",
+        // Move to another checkout without clearing command-scope configuration.
+        "unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY\n",
+        "git -C ../../../other rev-parse --is-inside-work-tree >/dev/null\n",
+        "status=0\n",
+        "git -C ../../../other config --get-all terminalx.scopeTest || status=$?\n",
+        "test \"$status\" = 1\n",
+        "test \"$(git -C ../../../other config --show-scope --get-all safe.directory | grep '/terminalx-test/')\" = ",
+        "\"$(printf 'local\\t/terminalx-test/destination')\"\n",
+        "git -C ../../../other -c commit.gpgsign=false commit --allow-empty -qm 'check destination hook'\n",
+        "printf 'hook ran\\n' > hook-ran\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({
+        "repo": "worktrees/topic", "message": "work\n\n# drop this line", "author": me(),
+        "expectedBranch": "topic", "expectedHead": head,
+    });
+    let result = runtime.handle("git.commitForPush", &params).unwrap().unwrap();
+    assert_eq!(result["branch"], "topic");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD^"]), head);
+    assert_eq!(git(&checkout, &["log", "-1", "--format=%B"]), "work");
+    assert_eq!(std::fs::read_to_string(checkout.join("hook-ran")).unwrap(), "hook ran\n");
+    assert_eq!(std::fs::read_to_string(other.join("hook-ran")).unwrap(), "destination hook ran\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_uses_hooks_selected_by_the_real_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["config", "--local", "extensions.worktreeConfig", "false"]);
+    git(&checkout, &["config", "--local", "core.hooksPath", ".git/default-hooks"]);
+    git(&checkout, &["config", "--local", "includeIf.gitdir:**/app/.git.path", "checkout.conf"]);
+    std::fs::write(checkout.join(".git/checkout.conf"), "[core]\n\thooksPath = .git/checkout-hooks\n").unwrap();
+    assert_eq!(git(&checkout, &["config", "--get", "core.hooksPath"]), ".git/checkout-hooks");
+
+    let hooks = checkout.join(".git/checkout-hooks");
+    std::fs::create_dir(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\nset -eu\n",
+        "test \"$(git config --show-scope --get core.hooksPath | cut -f1)\" = local\n",
+        "printf 'checkout hook ran\\n' > hook-ran\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    let result = f.call("git.commitForPush", params).unwrap();
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), result["commit"]);
+    assert_eq!(std::fs::read_to_string(checkout.join("hook-ran")).unwrap(), "checkout hook ran\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn switching_the_real_head_during_commit_preparation_updates_neither_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let origin = f.remote("origin");
+    let checkout = f.clone(&origin, "app");
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    git(&checkout, &["branch", "other"]);
+    std::fs::write(checkout.join("draft"), "work\n").unwrap();
+    let hook = checkout.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, concat!(
+        "#!/bin/sh\n",
+        "env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git symbolic-ref HEAD refs/heads/other\n",
+    )).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+    assert_eq!(f.code("git.commitForPush", params), "conflict");
+    assert_eq!(git(&checkout, &["branch", "--show-current"]), "other");
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head);
+    assert_eq!(git(&checkout, &["rev-parse", "refs/heads/other"]), head);
+    assert_eq!(git(&checkout, &["status", "--porcelain"]), "?? draft");
+    assert!(!checkout.join(".git/index.lock").exists());
+}
+
+#[test]
+fn machine_base_lookup_reports_a_deleted_ref_separately_from_other_errors() {
+    let f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, "app");
+    assert_eq!(f.code("git.branchBase", json!({ "repo": "app", "base": "deleted/release" })), "base_not_found");
+    assert_eq!(f.call("git.branchBase", json!({ "repo": "app", "base": "main" })).unwrap()["aheadOfBase"], 0);
 }
 
 #[test]
@@ -198,7 +533,7 @@ fn working_changes_and_file_contents_mirror_the_desktop_commands() {
     let files: Vec<(&str, &str)> = changes["files"].as_array().unwrap().iter().map(|file| (file["path"].as_str().unwrap(), file["status"].as_str().unwrap())).collect();
     assert_eq!(files, [("README.md", "modified"), ("new.txt", "added")]);
     let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "README.md", "base": head })).unwrap();
-    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n" }));
+    assert_eq!(pair, json!({ "before": "hello\n", "after": "hello\nworld\n", "beforeSize": 6, "afterSize": 12 }));
 
     // A commit's changes, by the trees `git.log` reports.
     f.call("git.commit", json!({ "repo": "app", "message": "second", "author": me() })).unwrap();
@@ -270,8 +605,8 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "x", "author": me() })).unwrap();
     let answer = f
         .git
-        .push_with(&json!({ "repo": "app" }), |repo, branch| {
-            git(&repo.dir, &["push", "-q", "origin", branch]);
+        .push_with(&json!({ "repo": "app" }), |repo, branch, head| {
+            git(&repo.dir, &["push", "-q", "origin", &format!("{head}:refs/heads/{branch}")]);
             Ok(Ran { ok: false, stdout: String::new(), stderr: "fatal: the remote end hung up unexpectedly".into(), timed_out: false })
         })
         .unwrap();
@@ -282,7 +617,7 @@ fn a_push_that_lands_before_the_connection_drops_is_reported_as_pushed() {
     f.call("git.commit", json!({ "repo": "app", "message": "y", "author": me() })).unwrap();
     let error = f
         .git
-        .push_with(&json!({ "repo": "app" }), |_, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
+        .push_with(&json!({ "repo": "app" }), |_, _, _| Ok(Ran { ok: false, stdout: String::new(), stderr: String::new(), timed_out: true }))
         .unwrap_err();
     assert_eq!(error.code, "outcome_unknown");
 }
@@ -348,6 +683,7 @@ fn expired_credentials_and_an_unreachable_remote_are_told_apart() {
     assert_eq!(error.code, "outcome_unknown", "{}", error.message);
 }
 
+#[cfg(unix)]
 #[test]
 fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_base() {
     let f = fixture();
@@ -386,6 +722,1210 @@ fn pull_requests_are_created_once_after_the_branch_is_pushed_into_the_chosen_bas
     assert_eq!(f.code("git.prs", json!({ "repo": "app", "number": 0 })), "invalid_params");
 }
 
+#[cfg(unix)]
+#[test]
+fn machine_enterprise_pr_creation_retains_verified_repository_routing() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("feature-worktree");
+    let locator = checkout.to_str().unwrap();
+    git(&f.root, &["worktree", "add", "-qb", "feature/pr", locator]);
+    f.call("git.push", json!({ "repo": locator })).unwrap();
+    // The local bare repository stands in for the verified Enterprise origin.
+    git(&f.root, &["remote", "add", "enterprise", "git@work:Octo/Repo.git"]);
+    std::fs::write(f.state.join("repo-url"), "https://github.test/Octo/Repo").unwrap();
+    let conversation = include_str!("../fixtures/github_pr_conversation.json")
+        .replace("https://github.com/acme/widgets/pull/799", "https://github.test/octo/repo/pull/1")
+        .replace("https://github.com/acme/widgets/", "https://github.test/octo/repo/");
+    std::fs::write(f.state.join("conversation.json"), conversation).unwrap();
+    let session = |id: &str, project: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session("native", &f.root), session("root-association", &f.root), session("outside", &f.base)]).unwrap();
+    let create = |id: &str| json!({ "repo": locator, "title": "Add pr", "base": "main", "draft": true, "sessionId": id });
+    assert_eq!(f.code("git.prCreate", create("outside")), "not_found");
+    assert!(!f.gh_calls().contains("\"create\""));
+
+    let created = f.call("git.prCreateForSession", create("native")).unwrap();
+    assert_eq!(created["sessionAssociated"], true);
+    let repeat = f.call("git.prCreate", create("native")).unwrap();
+    assert_eq!(repeat["existing"], true);
+    assert_eq!(repeat["sessionAssociated"], true);
+    assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
+    let read = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    let rows = read();
+    assert_eq!(rows["associations"].as_array().unwrap().len(), 1);
+    let association = &rows["associations"][0];
+    assert_eq!(association["url"], "https://github.test/octo/repo/pull/1");
+    assert_eq!(association["url"], created["pr"]["url"]);
+    assert_eq!(association["repo"], locator);
+    assert_eq!(association["linked"], false);
+    let legacy = f.git.handle_negotiated("git.prAssociations", &json!({ "sessionId": "native" }), false).unwrap().unwrap();
+    assert_eq!(legacy["associations"][0]["url"], association["url"]);
+    assert!(legacy["associations"][0]["repo"].is_null());
+    let unsupported = f.git.handle_negotiated("git.prReady", &json!({ "repo": locator, "url": association["url"] }), false).unwrap().unwrap_err();
+    assert_eq!(unsupported.code, "capability_not_granted");
+
+    let conversation = f.call("git.prConversation", json!({ "repo": association["repo"], "url": association["url"] })).unwrap();
+    assert_eq!(conversation["activity"].as_array().unwrap().len(), 11);
+    assert!(f.gh_calls().contains("\"graphql\", \"--hostname\", \"github.test\""));
+    // A recovered record can name the root, where gh defaults to another
+    // repository with the same PR number despite a matching origin.
+    let url = association["url"].as_str().unwrap();
+    crate::pr_associations::record_local("root-association", &f.root, url, "feature/pr").unwrap();
+    git(&f.root, &["remote", "set-url", "origin", "https://github.test/octo/repo.git"]);
+    let alternate = f.base.join("alternate-github");
+    std::fs::create_dir(&alternate).unwrap();
+    let alternate_url = "https://github.test/other/repo/pull/1";
+    let mut alternate_pr: Value = serde_json::from_slice(&std::fs::read(f.state.join("pr-1.json")).unwrap()).unwrap();
+    alternate_pr["url"] = json!(alternate_url);
+    std::fs::write(alternate.join("repo-url"), "https://github.test/other/repo").unwrap();
+    std::fs::write(alternate.join("pr-1.json"), alternate_pr.to_string()).unwrap();
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
+    std::fs::write(f.base.join("gh"), format!(
+        "#!/bin/sh\nstate='{}'\nif [ \"$(pwd -P)\" = '{}' ] && [ \"$3\" != '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" exec '{}' \"$@\"\n",
+        f.state.display(), f.root.display(), url, alternate.display(), fake.display(),
+    )).unwrap();
+    let root_rows = f.call("git.prAssociations", json!({ "sessionId": "root-association" })).unwrap();
+    let resolved = &root_rows["associations"][0]["repo"];
+    assert_eq!(resolved, locator);
+    let numeric = f.call("git.prs", json!({ "repo": ".", "number": 1 })).unwrap();
+    assert_eq!(numeric["prs"][0]["url"], alternate_url);
+    let pinned = f.call("git.prs", json!({ "repo": resolved, "number": 1, "url": url })).unwrap();
+    assert_eq!(pinned["prs"][0]["url"], url);
+    for method in ["git.prReady", "git.prMerge"] {
+        assert_eq!(f.code(method, json!({ "repo": ".", "url": url })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": resolved, "url": "https://github.test/unrelated/repo/pull/1" })), "invalid_params");
+        assert_eq!(f.code(method, json!({ "repo": resolved, "number": 2, "url": url })), "invalid_params");
+        for host in ["github.test:8443", "www.github.test"] {
+            let error = f.call(method, json!({ "repo": resolved, "url": format!("https://{host}/octo/repo/pull/1") })).unwrap_err();
+            assert_eq!(error.code, "invalid_params");
+            assert!(error.message.contains("hostname exactly"));
+        }
+    }
+    let ready = f.call("git.prReady", json!({ "repo": resolved, "url": url })).unwrap();
+    assert_eq!(ready["pr"]["url"], url);
+    assert_eq!(ready["pr"]["isDraft"], false);
+    let merged = f.call("git.prMerge", json!({ "repo": resolved, "url": url, "method": "squash" })).unwrap();
+    assert_eq!(merged["pr"]["url"], url);
+    assert_eq!(merged["pr"]["state"], "MERGED");
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("markPullRequestReadyForReview(") && line.contains("\"id=PR_fixture_1\"") && !line.contains(url)));
+    assert!(calls.lines().any(|line| line.contains("mergePullRequest(") && line.contains("\"id=PR_fixture_1\"") && !line.contains(url)));
+    let untouched: Value = serde_json::from_slice(&std::fs::read(alternate.join("pr-1.json")).unwrap()).unwrap();
+    assert_eq!(untouched, alternate_pr);
+
+    // The PR command can follow a rename even if repo view still returns the
+    // old URL. No write may run after a different PR URL comes back.
+    let mut relocated = alternate_pr;
+    relocated["url"] = json!("https://github.test/new-owner/repo/pull/1");
+    std::fs::write(f.state.join("pr-1.json"), relocated.to_string()).unwrap();
+    std::fs::write(f.state.join("redirect-from"), url).unwrap();
+    let calls_before = f.gh_calls();
+    for method in ["git.prReady", "git.prMerge", "git.prConversationAction"] {
+        let error = f.call(method, json!({ "repo": resolved, "url": url, "action": {
+            "kind": "edit", "title": "New title", "body": "", "expectedTitle": "Add pr", "expectedBody": ""
+        } })).unwrap_err();
+        assert!(error.message.contains("different pull request"), "{error:?}");
+    }
+    let calls = f.gh_calls();
+    for verb in ["ready", "merge", "edit"] {
+        assert!(!calls[calls_before.len()..].contains(&format!("[\"pr\", \"{verb}\"")));
+    }
+    assert!(!calls[calls_before.len()..].contains("mutation("));
+
+    git(&f.root, &["worktree", "remove", locator]);
+    git(&f.root, &["remote", "set-url", "origin", "https://github.com/octo/repo.git"]);
+    let unavailable = read();
+    assert_eq!(unavailable["associations"][0]["url"], association["url"]);
+    assert!(unavailable["associations"][0]["repo"].is_null());
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_machine_pull_request_locators_bind_numeric_actions_to_the_public_github_pr() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let session = serde_json::from_value(json!({
+        "id": "legacy", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    let url = "https://github.com/octo/repo/pull/7";
+    crate::pr_associations::record_local("legacy", &f.root, url, "feature").unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.com/octo/repo").unwrap();
+    std::fs::write(f.state.join("pr-7.json"), json!({
+        "id": "PR_public", "number": 7, "url": url, "state": "OPEN", "isDraft": true, "headRefName": "feature"
+    }).to_string()).unwrap();
+    let conversation = include_str!("../fixtures/github_pr_conversation.json")
+        .replace("https://github.com/acme/widgets/pull/799", url);
+    std::fs::write(f.state.join("conversation.json"), conversation).unwrap();
+    let call = |method, params| f.git.handle_negotiated(method, &params, false).unwrap();
+    let rows = call("git.prAssociations", json!({ "sessionId": "legacy" })).unwrap();
+    let repo = &rows["associations"][0]["repo"];
+    assert!(repo.as_str().unwrap().starts_with(LEGACY_PR_REPO_PREFIX));
+    assert_eq!(call("git.prs", json!({ "repo": repo, "number": 7 })).unwrap()["prs"][0]["url"], url);
+    assert_eq!(call("git.prConversation", json!({ "repo": repo, "url": url })).unwrap()["url"], url);
+    assert_eq!(call("git.prReady", json!({ "repo": repo, "number": 7 })).unwrap()["pr"]["isDraft"], false);
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 8 })).unwrap_err().code, "invalid_params");
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 7, "method": "squash" })).unwrap()["pr"]["state"], "MERGED");
+    std::fs::write(f.state.join("repo-url"), "https://github.com/another/repo").unwrap();
+    let before = f.gh_calls();
+    assert_eq!(call("git.prMerge", json!({ "repo": repo, "number": 7 })).unwrap_err().code, "invalid_params");
+    assert!(!f.gh_calls()[before.len()..].contains("mutation("));
+}
+
+#[cfg(unix)]
+#[test]
+fn recorded_pull_request_checkouts_are_probed_before_any_fallback_scan() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let remote = f.remote("origin");
+    let fallback = f.clone(&remote, "a-fallback");
+    let recorded = f.clone(&remote, "z-recorded");
+    git(&fallback, &["config", "terminalx.testGithubRepoUrl", "https://github.com/octo/unrelated"]);
+    git(&recorded, &["config", "terminalx.testGithubRepoUrl", "https://github.com/octo/valid"]);
+    let session = serde_json::from_value(json!({
+        "id": "recorded", "projectPath": f.root, "cwd": recorded, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    crate::pr_associations::record_local("recorded", &f.base, "https://github.com/octo/stale/pull/1", "old").unwrap();
+    crate::pr_associations::record_local("recorded", &recorded, "https://github.com/octo/valid/pull/1", "new").unwrap();
+    let shim = f.base.join("gh");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    let log = f.state.join("checkouts");
+    std::fs::write(&shim, script.replacen("#!/bin/sh\n", &format!("#!/bin/sh\npwd -P >> '{}'\n", log.display()), 1)).unwrap();
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
+    assert!(rows["associations"][0]["repo"].is_null());
+    assert_eq!(rows["associations"][1]["repo"], "z-recorded");
+    assert_eq!(std::fs::read_to_string(log).unwrap().lines().collect::<Vec<_>>(), [recorded.to_str().unwrap(), fallback.to_str().unwrap()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stalled_recorded_batch_cannot_skip_the_next_checkout() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let remote = f.remote("origin");
+    let session = serde_json::from_value(json!({
+        "id": "recorded", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session]).unwrap();
+    for number in 0..8 {
+        let checkout = f.clone(&remote, &format!("slow-{number}"));
+        let url = format!("https://github.com/acme/slow-{number}/pull/1");
+        crate::pr_associations::record_local("recorded", &checkout, &url, "old").unwrap();
+    }
+    let checkout = f.clone(&remote, "valid");
+    let valid_url = "https://github.com/acme/valid/pull/1";
+    crate::pr_associations::record_local("recorded", &checkout, valid_url, "new").unwrap();
+    git(&checkout, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/valid"]);
+    let shim = f.base.join("gh");
+    let script = std::fs::read_to_string(&shim).unwrap();
+    std::fs::write(&shim, script.replacen("#!/bin/sh\n", "#!/bin/sh\ncase \"$(pwd -P)\" in */slow-*) exec sleep 30 ;; esac\n", 1)).unwrap();
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "recorded" })).unwrap();
+    let valid = rows["associations"].as_array().unwrap().iter().find(|row| row["url"] == valid_url).unwrap();
+    assert_eq!(valid["repo"], "valid");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rebound_pull_request_url_cannot_redirect_a_verified_write() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let url = "https://github.test/octo/repo/pull/1";
+    let original = json!({
+        "id": "PR_original", "number": 1, "url": url, "state": "OPEN", "isDraft": true, "headRefName": "feature"
+    });
+    let replacement_state = f.base.join("replacement");
+    std::fs::create_dir(&replacement_state).unwrap();
+    let mut replacement = original.clone();
+    replacement["id"] = json!("PR_replacement");
+    let pr_file = f.state.join("pr-1.json");
+    let replacement_file = replacement_state.join("pr-1.json");
+    std::fs::write(&pr_file, original.to_string()).unwrap();
+    std::fs::write(&replacement_file, replacement.to_string()).unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.test/octo/repo").unwrap();
+    let rebound = f.base.join("rebound");
+    let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/remote-runtime/fake-gh");
+    // The URL resolves to a second PR as soon as the verification view finishes.
+    std::fs::write(f.base.join("gh"), format!(
+        "#!/bin/sh\nstate='{}'\nif [ \"$1\" = pr ] && [ -f '{}' ]; then state='{}'; fi\nFAKE_GH_STATE=\"$state\" '{}' \"$@\"\nstatus=$?\nif [ \"$1\" = pr ] && [ \"$2\" = view ]; then touch '{}'; fi\nexit \"$status\"\n",
+        f.state.display(), rebound.display(), replacement_state.display(), fake.display(), rebound.display(),
+    )).unwrap();
+    assert_eq!(f.call("git.prReady", json!({ "repo": "app", "url": url })).unwrap()["pr"]["isDraft"], false);
+    std::fs::remove_file(rebound).unwrap();
+    assert_eq!(f.call("git.prMerge", json!({ "repo": "app", "url": url, "method": "squash" })).unwrap()["pr"]["state"], "MERGED");
+    let saved: Value = serde_json::from_slice(&std::fs::read(pr_file).unwrap()).unwrap();
+    let untouched: Value = serde_json::from_slice(&std::fs::read(replacement_file).unwrap()).unwrap();
+    assert_eq!(saved["state"], "MERGED");
+    assert_eq!(saved["isDraft"], false);
+    assert_eq!(untouched, replacement);
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_records_the_native_session_association() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("topic");
+    git(&f.root, &["worktree", "add", "-qb", "feature/pr", checkout.to_str().unwrap()]);
+    let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": cwd, "branch": "old-saved-branch", "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    let nested = checkout.join("subdirectory");
+    std::fs::create_dir(&nested).unwrap();
+    let mut native = session("native", &f.root, &nested);
+    native.set_checkout_root(checkout.to_str());
+    crate::store::index::save(&[
+        native,
+        session("outside", &f.base, &checkout),
+        session("other", &f.root, &f.root),
+    ]).unwrap();
+    let repo = checkout.to_str().unwrap();
+    let create = |repo: &str, id: &str, branch: &str| json!({ "repo": repo, "title": "Add pr", "base": "main", "sessionId": id, "branch": branch });
+    let rows = |id: &str| f.call("git.prAssociations", json!({ "sessionId": id })).unwrap();
+    let head = git(&checkout, &["rev-parse", "HEAD"]);
+    let publish = |repo: &str, branch: &str, head: &str| {
+        let mut request = create(repo, "native", branch);
+        request["pushHead"] = json!(head);
+        request
+    };
+    git(&f.root, &["checkout", "-qb", "picker"]);
+    assert_eq!(f.code("git.prCreate", create(repo, "outside", "feature/pr")), "not_found");
+    assert_eq!(f.code("git.prCreateForSession", publish(".", "picker", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "develop", &head)), "conflict");
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "feature/pr", &"0".repeat(40))), "conflict");
+    assert!(f.gh_calls().is_empty());
+    assert_eq!(rows("native")["associations"], json!([]));
+    assert!(git(&remote, &["branch", "--list", "picker", "feature/pr"]).is_empty());
+    assert!(git(&f.root, &["branch", "--list", "--format=%(upstream)", "picker"]).is_empty());
+
+    // GitHub's initial lookup may outlast the checkout that started the request.
+    let shim = f.git.gh.as_ref().unwrap();
+    let original = std::fs::read_to_string(shim).unwrap();
+    std::fs::write(shim, original.replacen("#!/bin/sh\n", "#!/bin/sh\ngit checkout -q --detach || exit\n", 1)).unwrap();
+    assert_eq!(f.code("git.prCreateForSession", publish(repo, "feature/pr", &head)), "conflict");
+    assert!(git(&remote, &["branch", "--list", "feature/pr"]).is_empty());
+    std::fs::write(shim, original).unwrap();
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+
+    let created = f.call("git.prCreateForSession", publish(repo, "feature/pr", &head)).unwrap();
+    assert_eq!(created["sessionAssociated"], true);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), head);
+    // Switching the picker cannot attach even an already open PR whose head
+    // names the session's branch in the shared repository.
+    let calls = f.gh_calls();
+    assert_eq!(f.code("git.prCreate", create(".", "native", "feature/pr")), "conflict");
+    assert_eq!(f.gh_calls(), calls);
+    std::fs::remove_dir(nested).unwrap();
+    let repeat = f.call("git.prCreate", create(repo, "native", "feature/pr")).unwrap();
+    assert_eq!(repeat["existing"], true);
+    assert_eq!(repeat["sessionAssociated"], true);
+    assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
+    let owned = rows("native");
+    assert_eq!(owned["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(owned["associations"][0]["url"], created["pr"]["url"]);
+    assert_eq!(owned["associations"][0]["linked"], false);
+
+    git(&checkout, &["checkout", "-q", "--detach"]);
+    git(&f.root, &["checkout", "-q", "feature/pr"]);
+    git(&f.root, &["commit", "-qm", "Advance the open PR", "--allow-empty"]);
+    let next = git(&f.root, &["rev-parse", "HEAD"]);
+    let mut publish_existing = create(".", "other", "feature/pr");
+    publish_existing["pushHead"] = json!(next);
+    let reused = f.call("git.prCreateForSession", publish_existing).unwrap();
+    assert_eq!(reused["existing"], true);
+    assert_eq!(reused["pr"]["url"], created["pr"]["url"]);
+    assert_eq!(reused["sessionAssociated"], false);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), next);
+    assert_eq!(rows("other")["associations"], json!([]));
+    assert_eq!(rows("native"), owned);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_machine_retries_the_confirmed_url_when_readback_was_unavailable() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("pending-checkout");
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let mut request = machine_pr_request(&f, &checkout);
+    f.fault("view-offline");
+    f.fault("live-pr-head");
+    std::fs::write(f.state.join("default-pr-repo"), "github.test/elsewhere/other").unwrap();
+    assert_eq!(f.code("git.prCreateForSession", request.clone()), "outcome_unknown");
+    let associations = || f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(associations()["associations"], json!([]));
+    assert_eq!(associations()["pendingCreation"], true);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some("https://github.test/octo/repo/pull/1"));
+    git(&checkout, &["checkout", "-qb", "merged-branch", "main"]);
+    assert!(crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err().contains("before removing this workspace"));
+    let removal = crate::session_ops::WorkspaceRemoval {
+        project_path: f.root.to_str().unwrap(), path: checkout.to_str().unwrap(),
+        sessions: crate::session_ops::SessionsFate::Delete, delete_branch: true,
+        confirmation: crate::session_ops::Confirmation::Forced, expected_sessions: None,
+        direct: crate::git::DirectDelete::Never, fetch: crate::landed::Fetch::Skip,
+        guard: None, archive: None, archive_failure: None, archive_retry: None, archive_started: None,
+    };
+    let sink = crate::sink::BroadcastSink::new(8);
+    let refused = crate::session_ops::remove_workspace_fallible(&sink, &removal, &|_| panic!("pending PR must stop removal before stopping sessions"));
+    assert!(refused.unwrap_err().contains("before removing this workspace"));
+    assert!(checkout.is_dir() && crate::store::index::get("native").is_ok());
+
+    let mut other: Value = serde_json::from_slice(&std::fs::read(f.state.join("pr-1.json")).unwrap()).unwrap();
+    other["number"] = 2.into();
+    other["baseRefName"] = "develop".into();
+    other["url"] = "https://github.test/octo/repo/pull/2".into();
+    std::fs::write(f.state.join("pr-2.json"), serde_json::to_vec(&other).unwrap()).unwrap();
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+    git(&checkout, &["commit", "-qm", "Advance before retry", "--allow-empty"]);
+    let next = git(&checkout, &["rev-parse", "HEAD"]);
+    request["pushHead"] = json!(next);
+
+    let retried = f.call("git.prCreateForSession", request).unwrap();
+    assert_eq!(retried["pr"]["number"], 1);
+    assert_eq!(retried["sessionAssociated"], true);
+    assert_eq!(retried["reconciled"], true);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature/pr"]), next);
+    assert_eq!(associations()["associations"][0]["url"], retried["pr"]["url"]);
+    assert!(associations().get("pendingCreation").is_none());
+    let calls = f.gh_calls();
+    assert_eq!(calls.matches("\"https://github.test/octo/repo/pull/1\"").count(), 2);
+    assert_eq!(calls.matches("\"list\"").count(), 1);
+    assert_eq!(calls.matches("\"create\"").count(), 1);
+    assert!(calls.contains("\"--repo\", \"github.test/octo/repo\""));
+}
+
+/// A create whose readback was lost leaves `checkout` guarded by PR #1.
+#[cfg(unix)]
+fn unverified_machine_pr(f: &mut Fixture, name: &str) -> (PathBuf, PathBuf) {
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join(name);
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let request = machine_pr_request(f, &checkout);
+    f.fault("view-offline");
+    assert_eq!(f.code("git.prCreateForSession", request), "outcome_unknown");
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some("https://github.test/octo/repo/pull/1"));
+    (remote, checkout)
+}
+
+#[cfg(unix)]
+fn set_pr_state(f: &Fixture, state: &str) {
+    let path = f.state.join("pr-1.json");
+    let mut pr: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    pr["state"] = state.into();
+    std::fs::write(path, serde_json::to_vec(&pr).unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_merged_pending_pr_is_reconciled_by_url_after_its_branch_and_session_are_gone() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (remote, checkout) = unverified_machine_pr(&mut f, "merged-checkout");
+    let url = "https://github.test/octo/repo/pull/1";
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(rows["pendingCreationUrls"], json!([url]));
+
+    // Merged on GitHub, which deleted the topic branch; the session that
+    // created it is deleted and the checkout moved on to other work.
+    set_pr_state(&f, "MERGED");
+    git(&remote, &["branch", "-D", "feature/pr"]);
+    git(&checkout, &["checkout", "-qb", "next-task", "main"]);
+    crate::store::index::save(&[]).unwrap();
+    let blocked = crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err();
+    assert!(blocked.contains(url), "{blocked}");
+    assert_eq!(crate::session_ops::pending_pr_creation_for(&f.root, &checkout).unwrap().as_deref(), Some(url));
+
+    // Neither another repository's URL nor a malformed one touches the record.
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": "https://github.test/elsewhere/other/pull/1" })).unwrap()["cleared"], 0);
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": "not a url" })), "invalid_params");
+    assert!(pending_pr_creation_in(&checkout).unwrap().is_some());
+
+    let settled = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap();
+    assert_eq!(settled, json!({ "url": url, "state": "MERGED", "cleared": 1 }));
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap();
+    // A repeat after a lost answer finds nothing left to clear.
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": url })).unwrap()["cleared"], 0);
+    assert!(f.gh_calls().contains(&format!("\"{url}\"")));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_closed_pending_pr_keeps_its_surviving_session_association() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (_remote, checkout) = unverified_machine_pr(&mut f, "closed-checkout");
+    set_pr_state(&f, "CLOSED");
+    let url = "https://github.test/octo/repo/pull/1";
+    let settled = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap();
+    assert_eq!(settled["cleared"], 1);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    let rows = f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap();
+    assert_eq!(rows["associations"][0]["url"], url);
+    assert!(rows.get("pendingCreation").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_or_unreachable_pending_pr_stays_protected() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let (_remote, checkout) = unverified_machine_pr(&mut f, "open-checkout");
+    let url = "https://github.test/octo/repo/pull/1";
+    crate::store::index::save(&[]).unwrap();
+
+    f.fault("view-offline");
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": url })), "outcome_unknown");
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some(url));
+    std::fs::remove_file(f.state.join("view-offline")).unwrap();
+
+    let open = f.call("git.prReconcileCreation", json!({ "url": url })).unwrap_err();
+    assert_eq!(open.code, "conflict");
+    assert_eq!(open.data.unwrap()["state"], "OPEN");
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap().as_deref(), Some(url));
+    assert!(crate::session_ops::workspace_disposition(&f.root, &checkout, false).unwrap_err().contains("before removing this workspace"));
+
+    // A record of another project's checkout is never cleared from here.
+    let other = f.base.join("other-project");
+    git(&f.base, &["init", "-q", other.to_str().unwrap()]);
+    let foreign = |url: &str| PendingPrCreation {
+        session: "elsewhere".into(),
+        checkout: CheckoutIdentity {
+            path: other.clone(), git_dir: other.join(".git").canonicalize().unwrap(),
+            directory: directory_identity(&other).unwrap(), admin: directory_identity(&other.join(".git")).unwrap(),
+        },
+        branch: "feature/pr".into(), base: "main".into(), head: "0".repeat(40), url: url.into(),
+    };
+    pending_pr_creations(|entries| { entries.push(foreign(url)); ((), true) }).unwrap();
+    set_pr_state(&f, "MERGED");
+    assert_eq!(f.call("git.prReconcileCreation", json!({ "url": url })).unwrap()["cleared"], 1);
+    assert_eq!(pending_pr_creation_in(&checkout).unwrap(), None);
+    assert_eq!(pending_pr_creation_in(&other).unwrap().as_deref(), Some(url));
+
+    // Workspaces that are not a machine project record no creates to settle.
+    f.git.project = false;
+    assert_eq!(f.code("git.prReconcileCreation", json!({ "url": url })), "invalid_params");
+}
+
+#[cfg(unix)]
+#[test]
+fn bulk_cleanup_keeps_a_worktree_whose_pr_readback_failed_after_a_switch_to_a_merged_branch() {
+    use crate::worktree_cleanup as cleanup;
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("pending-checkout");
+    git(&f.root, &["worktree", "add", "-q", "--detach", checkout.to_str().unwrap()]);
+    let request = machine_pr_request(&f, &checkout);
+    let projects: Vec<crate::store::projects::Project> = vec![serde_json::from_value(json!({ "path": f.root, "name": "workspace" })).unwrap()];
+    let live = |_: &[crate::store::index::SessionEntry]| cleanup::Live::default();
+    let with_host = |run: &dyn Fn(&cleanup::Host<'_>) -> Value| run(&cleanup::Host {
+        projects: &projects, protected: &[], confine: None, live: &live, fetch: crate::landed::Fetch::Skip, stop_agents: None, archive: None,
+    });
+    let candidate = || with_host(&|host| {
+        let found = cleanup::scan(host, None).unwrap().into_iter().flat_map(|project| project.candidates)
+            .find(|candidate| std::path::Path::new(&candidate.path) == cleanup::canonical(&checkout)).unwrap();
+        serde_json::to_value(found).unwrap()
+    });
+    // Reviewed on a clean, merged branch before the create.
+    git(&checkout, &["checkout", "-qb", "merged-branch", "main"]);
+    let reviewed = candidate();
+    assert_eq!(reviewed["verdict"], "eligible", "{reviewed}");
+
+    git(&checkout, &["checkout", "-q", "feature/pr"]);
+    f.fault("view-offline");
+    f.fault("live-pr-head");
+    assert_eq!(f.code("git.prCreateForSession", request), "outcome_unknown");
+    git(&checkout, &["checkout", "-q", "merged-branch"]);
+
+    let now = candidate();
+    assert_eq!(now["verdict"], "unverifiable");
+    assert_eq!(now["reason"], "Verify the pull request at https://github.test/octo/repo/pull/1 before removing this workspace.");
+    let sink = crate::sink::BroadcastSink::new(8);
+    for token in [reviewed["token"].as_str().unwrap(), now["token"].as_str().unwrap()] {
+        let item: cleanup::RemoveItem = serde_json::from_value(json!({
+            "projectPath": f.root, "path": now["path"], "token": token, "deleteSessions": true, "acceptIgnored": true,
+        })).unwrap();
+        let done = with_host(&|host| serde_json::to_value(cleanup::remove(host, &sink, std::slice::from_ref(&item), cleanup::Watch::default())).unwrap());
+        assert_eq!(done[0]["outcome"], "skipped", "{done}");
+        assert!(done[0]["reason"].as_str().unwrap().contains("Verify the pull request at https://github.test/octo/repo/pull/1"), "{done}");
+        assert!(checkout.is_dir() && crate::store::index::get("native").is_ok());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_nested_project_session_cannot_create_its_parents_pr() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let parent_remote = f.remote("origin");
+    let nested_remote = f.remote("nested");
+    f.clone(&parent_remote, ".");
+    f.git.project = true;
+    let nested = f.clone(&nested_remote, "nested");
+    // Both checkouts sit on the same branch name with pushed, unshared heads.
+    let mut heads = Vec::new();
+    for checkout in [&f.root, &nested] {
+        git(checkout, &["checkout", "-qb", "feature/pr"]);
+        git(checkout, &["commit", "-qm", "Advance feature", "--allow-empty"]);
+        heads.push(git(checkout, &["rev-parse", "HEAD"]));
+    }
+    git(&nested, &["push", "-q", "origin", "feature/pr"]);
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "nested-session", "projectPath": nested, "cwd": nested, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    assert!(super::super::session_target::owns_project(&f.root, nested.to_str().unwrap()));
+    let request = |repo: &str, head: &str| json!({
+        "repo": repo, "sessionId": "nested-session", "branch": "feature/pr", "pushHead": head, "title": "Add pr", "base": "main"
+    });
+
+    // The parent's checkout contains the nested cwd but is another repository.
+    assert_eq!(f.code("git.prCreateForSession", request(".", &heads[0])), "conflict");
+    assert_eq!(f.code("git.prCreate", request(".", &heads[0])), "conflict");
+    assert!(f.gh_calls().is_empty());
+    assert!(git(&parent_remote, &["branch", "--list", "feature/pr"]).is_empty());
+    assert!(git(&f.root, &["branch", "--list", "--format=%(upstream)", "feature/pr"]).is_empty());
+    assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "nested-session" })).unwrap()["associations"], json!([]));
+    assert_eq!(f.git.files.relative(&nested), "nested");
+    let served = |root: &Path| super::super::machine::session_checkout(root, &WorkspaceFiles::new(root.to_path_buf()), &crate::store::index::get("nested-session").unwrap(), || true);
+    assert_eq!(served(&f.root), Some((String::new(), None)));
+
+    // The nested project's own checkout is the session's.
+    assert_eq!(served(&nested), Some((String::new(), Some(".".into()))));
+    let mut own = WorkspaceGit::for_project(nested.clone(), Arc::new(WorkspaceFiles::new(nested.clone())));
+    own.set_gh(f.git.gh.clone().unwrap());
+    own.github_origin_fixture = f.git.github_origin_fixture.clone();
+    let created = own.handle("git.prCreateForSession", &request(".", &heads[1])).unwrap().unwrap();
+    assert_eq!(created["sessionAssociated"], true);
+    assert_eq!(created["pr"]["head"], "feature/pr");
+    assert_eq!(git(&nested_remote, &["rev-parse", "refs/heads/feature/pr"]), heads[1]);
+    assert!(git(&parent_remote, &["branch", "--list", "feature/pr"]).is_empty());
+    let owned = own.handle("git.prAssociations", &json!({ "sessionId": "nested-session" })).unwrap().unwrap();
+    assert_eq!(owned["associations"][0]["url"], created["pr"]["url"]);
+}
+
+#[test]
+fn machine_pr_routing_uses_the_identity_of_the_fetch_url() {
+    assert_eq!(github_repository_from_origin("https://github.com/ACME/Widgets.git/").as_deref(), Some("github.com/acme/widgets"));
+    assert_eq!(github_repository_from_origin("https://github.example.test:8443/Acme/widgets").as_deref(), Some("github.example.test:8443/acme/widgets"));
+    for remote in ["file:///tmp/acme/widgets", "/tmp/acme/widgets", "https://github.com/acme/widgets/other"] {
+        assert_eq!(github_repository_from_origin(remote), None);
+    }
+}
+
+fn machine_pr_request(f: &Fixture, checkout: &Path) -> Value {
+    let repo = f.git.files.relative(checkout);
+    let repo = if repo.is_empty() { "." } else { &repo };
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "native", "projectPath": f.root, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    git(checkout, &["checkout", "-qb", "feature/pr"]);
+    f.call("git.push", json!({ "repo": repo })).unwrap();
+    git(checkout, &["commit", "-qm", "Advance feature", "--allow-empty"]);
+    json!({ "repo": repo, "sessionId": "native", "branch": "feature/pr", "pushHead": git(checkout, &["rev-parse", "HEAD"]), "title": "Add pr", "base": "main" })
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    let separate = f.remote("push");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let head = request["pushHead"].as_str().unwrap();
+    let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+    let (origin_url, separate_url) = (origin.to_str().unwrap(), separate.to_str().unwrap());
+    let config = |args: &[&str]| { git(&f.root, &[&["config"][..], args].concat()); };
+    // Each destination Git would really push to, other than the verified
+    // fetch origin: an explicit push URL, a second push URL, a push-only
+    // rewrite of origin, and a rewrite of the push URL itself.
+    type Steps<'a> = &'a [&'a [&'a str]];
+    let destinations: [(Steps, Steps); 4] = [
+        (&[&["remote.origin.pushurl", separate_url]], &[&["--unset-all", "remote.origin.pushurl"]]),
+        (
+            &[&["--add", "remote.origin.pushurl", origin_url], &["--add", "remote.origin.pushurl", separate_url]],
+            &[&["--unset-all", "remote.origin.pushurl"]],
+        ),
+        (&[&[&format!("url.{separate_url}.pushInsteadOf"), origin_url]], &[&["--remove-section", &format!("url.{separate_url}")]]),
+        (
+            &[&["remote.origin.pushurl", "alias:widgets"], &[&format!("url.{separate_url}.insteadOf"), "alias:widgets"]],
+            &[&["--unset-all", "remote.origin.pushurl"], &["--remove-section", &format!("url.{separate_url}")]],
+        ),
+    ];
+    for (set, unset) in destinations {
+        set.iter().for_each(|args| config(args));
+        let refused = f.call("git.prCreateForSession", request.clone()).expect_err("an unverified push destination is refused");
+        assert_eq!(refused.code, "conflict", "{set:?}");
+        assert!(refused.message.contains("other than the verified origin"), "{set:?}: {}", refused.message);
+        // Refused before transmission: neither the ref nor the commit reached it.
+        assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty(), "{set:?}");
+        let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+        assert!(!object.success(), "{set:?} received the confirmed commit");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+        unset.iter().for_each(|args| config(args));
+    }
+    assert!(!f.gh_calls().contains("\"create\""));
+
+    // An explicit push URL naming the verified origin itself is accepted.
+    git(&f.root, &["remote", "set-url", "--push", "origin", origin_url]);
+    std::fs::write(f.state.join("pr-head"), earlier).unwrap();
+    assert_eq!(f.code("git.prCreateForSession", request.clone()), "conflict");
+    assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
+    assert_eq!(f.code("git.prCreateForSession", request), "conflict");
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_accepts_a_push_alias_that_rewrites_back_to_the_verified_origin() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    let separate = f.remote("push");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let head = request["pushHead"].as_str().unwrap();
+    let origin_url = origin.to_str().unwrap();
+    // The raw push URL differs from the fetch origin; only its rewrite matches.
+    git(&f.root, &["remote", "set-url", "--push", "origin", "alias:widgets"]);
+    git(&f.root, &["config", &format!("url.{origin_url}.insteadOf"), "alias:widgets"]);
+    // A decoy Git does not apply here: pushInsteadOf never rewrites an
+    // explicit push URL. A resolver that applied it would push to `separate`.
+    git(&f.root, &["config", &format!("url.{}.pushInsteadOf", separate.display()), "alias:widgets"]);
+    assert_eq!(git(&f.root, &["config", "--get", "remote.origin.pushurl"]), "alias:widgets");
+    assert_eq!(git(&f.root, &["remote", "get-url", "--push", "--all", "origin"]), origin_url);
+
+    let created = f.call("git.prCreateForSession", request.clone()).expect("the alias resolves to the verified origin");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["pr"]["head"], "feature/pr");
+    assert_eq!(created["pr"]["headSha"], head);
+    assert_eq!(created["sessionAssociated"], true);
+    // The exact confirmed commit reached the origin, and nothing else did.
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+    assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty());
+    let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+    assert!(!object.success(), "the separate remote received the confirmed commit");
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_changes_before_transmission() {
+    // A push URL, and a push-only rewrite of origin, written after the
+    // destination check and before transmission.
+    for redirect in ["pushurl", "pushInsteadOf"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let separate = f.remote("push");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+        let (origin_url, separate_url) = (origin.to_str().unwrap().to_owned(), separate.to_str().unwrap().to_owned());
+        // The checkout's pre-push hook still runs, told the verified origin.
+        let hook = f.root.join(".git/hooks/pre-push");
+        std::fs::create_dir(f.root.join("frontend")).unwrap();
+        // It reads the real repository (as Git LFS does): its Git directory
+        // and the commit it is told about.
+        std::fs::write(&hook, concat!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\ncat >> ../pre-push-ran\n",
+            "(cd frontend && git rev-parse --show-toplevel --absolute-git-dir) >> ../pre-push-ran 2>&1\n",
+            "git cat-file -e \"$(cut -d' ' -f2 < ../pre-push-ran | sed -n 2p)^{commit}\" && echo found >> ../pre-push-ran\n",
+        )).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let (checkout, reached) = (f.root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let seen = reached.clone();
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "transmit" { return; }
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            match redirect {
+                "pushurl" => git(&checkout, &["config", "remote.origin.pushurl", &separate_url]),
+                _ => git(&checkout, &["config", &format!("url.{separate_url}.pushInsteadOf"), &origin_url]),
+            };
+            assert_eq!(git(&checkout, &["remote", "get-url", "--push", "--all", "origin"]), separate_url);
+        }));
+
+        let outcome = f.call("git.prCreateForSession", request);
+        assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "{redirect}: the barrier ran");
+        // The unverified destination received neither the ref nor the commit.
+        assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty(), "{redirect}");
+        let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+        assert!(!object.success(), "{redirect}: the redirected destination received the confirmed commit");
+        // The push went to the origin that was verified, exactly at the confirmed head.
+        let created = outcome.unwrap_or_else(|error| panic!("{redirect}: {} {}", error.code, error.message));
+        assert_eq!(created["pr"]["headSha"], head.as_str());
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        assert_eq!(std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(), format!(
+            "origin {}\n{head} {head} refs/heads/feature/pr {earlier}\n{}\n{}\nfound\n",
+            origin.display(), f.root.display(), f.root.join(".git").display(),
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_declining_pre_push_hook_stops_the_machine_pr_push() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+    let hook = f.root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\necho 'lfs objects missing' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let refused = f.call("git.prCreateForSession", request).expect_err("the hook declined");
+    assert!(refused.message.contains("pre-push hook declined"), "{}: {}", refused.code, refused.message);
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+    assert!(!f.gh_calls().contains("\"create\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_pre_push_hook_is_told_a_new_remote_branch_by_the_zero_id() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "native", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    git(&f.root, &["checkout", "-qb", "feature/new"]);
+    git(&f.root, &["commit", "-qm", "New branch", "--allow-empty"]);
+    let head = git(&f.root, &["rev-parse", "HEAD"]);
+    let hook = f.root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\ncat >> ../pre-push-ran\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let created = f.call("git.prCreateForSession", json!({
+        "repo": ".", "sessionId": "native", "branch": "feature/new", "pushHead": head, "title": "Add new", "base": "main"
+    })).unwrap();
+    assert_eq!(created["pr"]["headSha"], head.as_str());
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/new"]), head);
+    let zero = "0".repeat(head.len());
+    assert_eq!(
+        std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(),
+        format!("origin {}\n{head} {head} refs/heads/feature/new {zero}\n", origin.display()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_git_without_hook_run_pushes_unless_the_checkout_has_a_pre_push_hook() {
+    for hook in ["none", "not executable", "executable"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        f.git.git_without_hook_run = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+        if hook != "none" {
+            // Where core.hooksPath points, as Git would look.
+            let hooks = f.base.join("shared hooks");
+            std::fs::create_dir(&hooks).unwrap();
+            git(&f.root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+            std::fs::write(hooks.join("pre-push"), "#!/bin/sh\nexit 0\n").unwrap();
+            let mode = if hook == "executable" { 0o755 } else { 0o644 };
+            std::fs::set_permissions(hooks.join("pre-push"), std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        }
+        let outcome = f.call("git.prCreateForSession", request);
+        if hook == "executable" {
+            let refused = outcome.expect_err("a hook this Git cannot run is refused");
+            assert_eq!(refused.code, "git_failed");
+            assert!(refused.message.contains("nothing was pushed"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        } else {
+            let created = outcome.unwrap_or_else(|error| panic!("{hook}: {} {}", error.code, error.message));
+            assert_eq!(created["pr"]["headSha"], head.as_str(), "{hook}");
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{hook}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
+    // After the checkout is verified and before Git runs: core.worktree is
+    // pointed at another folder, another repository replaces the checkout, or
+    // the checkout is only moved away.
+    for change in ["redirect-main", "redirect", "replace", "move"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = if change == "redirect-main" { f.root.clone() } else { f.base.join("topic") };
+        if change != "redirect-main" {
+            git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        }
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("note.txt"), "outside\n").unwrap();
+        let moved = f.base.join("topic-original");
+        if change == "redirect" {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "git" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            match change {
+                "redirect" => { git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]); }
+                "redirect-main" => { git(&target, &["config", "core.worktree", other.to_str().unwrap()]); }
+                "replace" => {
+                    std::fs::rename(&target, &away).unwrap();
+                    std::fs::rename(&other, &target).unwrap();
+                }
+                _ => std::fs::rename(&target, &away).unwrap(),
+            }
+        }));
+
+        let repo = if change == "redirect-main" { ".".to_owned() } else { checkout.to_str().unwrap().to_owned() };
+        let staged = f.call("git.stage", json!({ "repo": repo, "paths": ["note.txt"] }));
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if change.starts_with("redirect") { &checkout } else { &moved };
+        match change {
+            "redirect" => { git(verified, &["config", "--worktree", "--unset", "core.worktree"]); }
+            "redirect-main" => { git(verified, &["config", "--unset", "core.worktree"]); }
+            _ => {}
+        }
+        staged.unwrap_or_else(|error| panic!("{change}: {} {}", error.code, error.message));
+        // The verified checkout staged its own file, wherever it now is; the
+        // other folder's never entered an index.
+        assert_eq!(git(verified, &["show", ":note.txt"]), "verified", "{change}");
+        if change == "replace" {
+            assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_commit_hooks_can_run_git_from_a_subdirectory() {
+    // A pre-commit like `cd frontend && npx lint-staged`, for a plain and a
+    // guarded commit in a main checkout and a guarded commit in a linked
+    // worktree. (A plain `git commit` in a linked worktree exports GIT_DIR to
+    // its hooks itself, from a terminal too, so there the hook sees the
+    // subfolder as the top level on main as well.)
+    for (guarded, linked) in [(false, false), (true, false), (true, true)] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = if linked {
+            let checkout = f.base.join("topic");
+            git(&f.root, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+            checkout
+        } else { f.root.clone() };
+        let hooks = git(&checkout, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"]);
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = Path::new(&hooks).join("pre-commit");
+        let marker = f.base.join("pre-commit-top");
+        std::fs::write(&hook, format!("#!/bin/sh\n(cd frontend && git rev-parse --show-toplevel && git status --porcelain -- ../draft) > '{}' 2>&1\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::create_dir(checkout.join("frontend")).unwrap();
+        std::fs::write(checkout.join("frontend/app.js"), "x\n").unwrap();
+        std::fs::write(checkout.join("draft"), "work\n").unwrap();
+        let repo = if linked { checkout.to_str().unwrap().to_owned() } else { ".".to_owned() };
+        let mut params = json!({ "repo": repo, "message": "work", "author": me() });
+        if guarded {
+            params["expectedBranch"] = json!(if linked { "topic" } else { "main" });
+            params["expectedHead"] = json!(git(&checkout, &["rev-parse", "HEAD"]));
+        }
+        f.call(if guarded { "git.commitForPush" } else { "git.commit" }, params).unwrap_or_else(|error| panic!("guarded={guarded} linked={linked}: {} / hook: {}", error.message, std::fs::read_to_string(&marker).unwrap_or_default()));
+        // The hook found the checkout's top level and the staged change from inside the subfolder.
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), format!("{}\nA  draft\n", checkout.display()), "guarded={guarded} linked={linked}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_git_hooks_can_run_git_from_a_subdirectory() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    std::fs::create_dir(f.root.join("frontend")).unwrap();
+    // What a `cd frontend && npx lint-staged` style hook asks Git.
+    for name in ["post-checkout", "pre-push"] {
+        let hook = f.root.join(".git/hooks").join(name);
+        std::fs::write(&hook, format!("#!/bin/sh\n(cd frontend && git rev-parse --show-toplevel) > ../{name}-top 2>&1\n")).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    f.call("git.checkout", json!({ "repo": ".", "branch": "feature/hooks", "create": true })).unwrap();
+    f.call("git.push", json!({ "repo": "." })).unwrap();
+    for name in ["post-checkout", "pre-push"] {
+        assert_eq!(std::fs::read_to_string(f.base.join(format!("{name}-top"))).unwrap(), format!("{}\n", f.root.display()), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
+    for replace_checkout in [false, true] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        let repo = checkout.to_str().unwrap();
+        git(&f.root, &["worktree", "add", "-qb", "feature/pr", repo]);
+        let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+            "id": "native", "projectPath": f.root, "cwd": checkout, "title": "fixture", "created": "", "modified": ""
+        })).unwrap();
+        crate::store::index::save(&[entry]).unwrap();
+        f.call("git.push", json!({ "repo": repo })).unwrap();
+
+        if replace_checkout {
+            let replacement = f.clone(&remote, "replacement");
+            git(&replacement, &["checkout", "-q", "feature/pr"]);
+            let shim = f.git.gh.as_ref().unwrap();
+            let original = std::fs::read_to_string(shim).unwrap();
+            let command = original.strip_prefix("#!/bin/sh\n").unwrap();
+            let backup = f.base.join("original-checkout");
+            std::fs::write(shim, format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = 'pr create' ]; then\n({command}) || exit\nmv '{repo}' '{}' && mv '{}' '{repo}'\nelse\n{command}fi\n",
+                backup.display(), replacement.display()
+            )).unwrap();
+        } else {
+            f.fault("drop-after-create");
+        }
+
+        let made = f.call("git.prCreateForSession", json!({ "repo": repo, "sessionId": "native", "title": "Add pr", "base": "main" })).unwrap();
+        assert_eq!(made["pr"]["head"], "feature/pr");
+        assert_eq!(made["sessionAssociated"], false);
+        if replace_checkout {
+            assert!(crate::git::is_own_worktree(&checkout));
+            assert_eq!(crate::git::current_branch(&checkout).as_deref(), Some("feature/pr"));
+            assert_eq!(f.code("git.status", json!({ "repo": repo })), "not_found");
+        } else {
+            assert_eq!(made["reconciled"], true);
+        }
+        assert_eq!(f.call("git.prAssociations", json!({ "sessionId": "native" })).unwrap()["associations"], json!([]));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_concurrent_machine_pr_is_reported_as_existing_and_keeps_its_single_session() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, ".");
+    f.git.project = true;
+    let session = |id: &str| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": f.root, "cwd": repo, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[session("native"), session("other")]).unwrap();
+    git(&repo, &["checkout", "-qb", "feature/race"]);
+    f.call("git.push", json!({"repo": "."})).unwrap();
+    f.fault("concurrent-create");
+
+    let legacy_create = json!({"repo": ".", "title": "Create PR", "base": "main", "sessionId": "native"});
+    let read = |session| f.call("git.prAssociations", json!({"sessionId": session})).unwrap()["associations"].clone();
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let response = f.call("git.prCreate", create).unwrap();
+    assert_eq!(response["pr"]["title"], "Opened by another contributor");
+    assert_eq!(response["created"], false);
+    assert_eq!(response["existing"], true);
+    assert_eq!(response["reconciled"], true);
+    assert_eq!(response["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+
+    f.call("git.prLinkBranch", json!({
+        "repo": ".", "branch": "feature/race", "sessionId": "other", "url": response["pr"]["url"],
+    })).unwrap();
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read("native"), json!([]));
+    assert_eq!(read("other").as_array().unwrap().len(), 1);
+    assert_eq!(read("other")[0]["url"], response["pr"]["url"]);
+    assert_eq!(f.gh_calls().matches(r#"["pr", "create","#).count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_branch_pr_links_are_verified_durable_and_removable() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    let root = f.clone(&remote, ".");
+    f.git.project = true;
+    git(&root, &["remote", "set-url", "origin", "https://github.com/acme/widgets.git"]);
+    git(&root, &["worktree", "add", "-qb", "feature", "feature-tree"]);
+    let checkout = root.join("feature-tree");
+    let cwd = checkout.join("subdir");
+    std::fs::create_dir(&cwd).unwrap();
+    let session = |id: &str, project: &Path, cwd: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": id, "projectPath": project, "cwd": cwd, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    let mut native = session("native", &root, &cwd);
+    native.set_checkout_root(checkout.to_str());
+    crate::store::index::save(&[native, session("outside", &f.base, &cwd)]).unwrap();
+
+    let public_url = "https://github.com/acme/widgets/pull/1";
+    let enterprise_url = "https://github.enterprise.test/acme/widgets/pull/2";
+    let wrong_url = "https://github.com/acme/other/pull/1";
+    std::fs::create_dir_all(&f.state).unwrap();
+    let save_pr = |number, url, state, fork| {
+        std::fs::write(f.state.join(format!("pr-{number}.json")), json!({
+            "id": format!("PR_linked_{number}"), "url": url, "number": number, "title": "Branch PR", "headRefName": "feature",
+            "state": state, "isCrossRepository": fork, "isDraft": true, "mergeable": "MERGEABLE",
+        }).to_string()).unwrap();
+    };
+    save_pr(1, public_url, "OPEN", false);
+    save_pr(2, enterprise_url, "OPEN", false);
+    let closed = "https://github.com/acme/widgets/pull/3";
+    let fork = "https://github.com/acme/widgets/pull/4";
+    save_pr(3, closed, "CLOSED", false);
+    save_pr(4, fork, "OPEN", true);
+    let link = |url| json!({"sessionId": "native", "repo": "feature-tree", "branch": "feature", "url": url});
+    let read = || f.call("git.prAssociations", json!({"sessionId": "native"})).unwrap();
+    let mut wrong_scope = link(public_url);
+    wrong_scope["sessionId"] = json!("outside");
+    assert_eq!(f.code("git.prLinkBranch", wrong_scope), "not_found");
+    let mut wrong_checkout = link(public_url);
+    wrong_checkout["repo"] = json!(".");
+    assert_eq!(f.code("git.prLinkBranch", wrong_checkout), "invalid_params");
+    let mut wrong_branch = link(public_url);
+    wrong_branch["branch"] = json!("main");
+    assert_eq!(f.code("git.prLinkBranch", wrong_branch), "invalid_params");
+    for url in [closed, fork, wrong_url] {
+        assert_eq!(f.code("git.prLinkBranch", link(url)), "not_found");
+    }
+    assert_eq!(read()["associations"], json!([]));
+
+    // Older local desktops saved the directory from which the user linked
+    // the PR. Resolve it to the registered worktree even when its origin is
+    // identical to the project root's origin.
+    let legacy_cwd = checkout.join("legacy-subdir");
+    std::fs::create_dir(&legacy_cwd).unwrap();
+    crate::pr_associations::link_local("native", &legacy_cwd, public_url, "feature").unwrap();
+    assert_eq!(f.call("git.prLinkBranch", link(enterprise_url)).unwrap()["sessionAssociated"], true);
+    std::fs::remove_dir(cwd).unwrap();
+    for url in [public_url, enterprise_url] {
+        assert_eq!(f.call("git.prLinkBranch", link(url)).unwrap()["sessionAssociated"], true);
+    }
+    git(&checkout, &["checkout", "-qb", "next"]);
+    std::fs::remove_dir(legacy_cwd).unwrap();
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    let rows = read();
+    assert_eq!(rows["branchPrLinks"], true);
+    assert_eq!(rows["associations"], json!([
+        {"url": public_url, "number": 1, "head": "feature", "repo": "feature-tree", "linked": true},
+        {"url": enterprise_url, "number": 2, "head": "feature", "repo": null, "linked": true},
+    ]));
+    let legacy = json!({"repo": rows["associations"][0]["repo"], "number": 1, "url": public_url});
+    assert_eq!(f.git.handle_negotiated("git.prs", &legacy, false).unwrap().unwrap()["prs"][0]["url"], public_url);
+
+    std::fs::write(f.state.join("repo-url"), "https://github.enterprise.test/acme/widgets").unwrap();
+    assert_eq!(read()["associations"], json!([
+        {"url": public_url, "number": 1, "head": "feature", "repo": null, "linked": true},
+        {"url": enterprise_url, "number": 2, "head": "feature", "repo": "feature-tree", "linked": true},
+    ]));
+    let legacy_rows = f.git.handle_negotiated("git.prAssociations", &json!({"sessionId":"native"}), false).unwrap().unwrap();
+    let legacy_enterprise = &legacy_rows["associations"][1]["repo"];
+    assert!(legacy_enterprise.as_str().unwrap().starts_with(LEGACY_PR_REPO_PREFIX));
+    let legacy = json!({"repo": legacy_enterprise, "number": 2, "url": enterprise_url});
+    assert_eq!(f.git.handle_negotiated("git.prs", &legacy, false).unwrap().unwrap()["prs"][0]["url"], enterprise_url);
+
+    let exact = json!({"repo": "feature-tree", "number": 2, "url": enterprise_url});
+    assert_eq!(f.call("git.prs", exact.clone()).unwrap()["prs"][0]["url"], enterprise_url);
+    assert_eq!(f.call("git.prReady", exact.clone()).unwrap()["pr"]["isDraft"], false);
+    assert_eq!(f.call("git.prMerge", exact).unwrap()["pr"]["state"], "MERGED");
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("markPullRequestReadyForReview(") && line.contains("\"id=PR_linked_2\"")));
+    assert!(calls.lines().any(|line| line.contains("mergePullRequest(") && line.contains("\"id=PR_linked_2\"")));
+
+    // Same number after gh's checkout routing changes. Refuse before issuing
+    // any GitHub mutation, even if the old locator still exists.
+    std::fs::write(f.state.join("repo-url"), "https://github.com/acme/widgets").unwrap();
+    save_pr(1, wrong_url, "OPEN", false);
+    let stale_target = json!({"repo": "feature-tree", "number": 1, "url": public_url});
+    for method in ["git.prs", "git.prReady", "git.prMerge"] {
+        assert_eq!(f.code(method, stale_target.clone()), "not_found");
+    }
+    assert_eq!(f.gh_calls().matches("markPullRequestReadyForReview(").count(), 1);
+    assert_eq!(f.gh_calls().matches("mergePullRequest(").count(), 1);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": public_url})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    assert_eq!(read()["associations"][0]["url"], enterprise_url);
+    save_pr(1, public_url, "OPEN", false);
+    let legacy_create = json!({
+        "repo": "feature-tree", "title": "Existing", "base": "main", "branch": "feature", "sessionId": "native",
+    });
+    let mut create = legacy_create.clone();
+    create["associateExisting"] = json!(false);
+    let existing = f.call("git.prCreate", create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let existing = f.call("git.prCreate", legacy_create.clone()).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], false);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+
+    let new_link = "https://github.com/acme/widgets/pull/5";
+    save_pr(5, new_link, "OPEN", false);
+    let existing = f.call("git.prCreate", legacy_create).unwrap();
+    assert_eq!(existing["existing"], true);
+    assert_eq!(existing["sessionAssociated"], true);
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 2);
+    assert_eq!(read()["associations"][0]["url"], new_link);
+    assert_eq!(read()["associations"][0]["linked"], true);
+    f.call("git.prUnlink", json!({"sessionId": "native", "url": new_link})).unwrap();
+    assert_eq!(read()["associations"].as_array().unwrap().len(), 1);
+    git(&checkout, &["checkout", "feature"]);
+    assert_eq!(f.call("git.prLinkBranch", link(public_url)).unwrap()["sessionAssociated"], true);
+    git(&root, &["worktree", "remove", "feature-tree"]);
+    assert!(read()["associations"][0]["repo"].is_null());
+    assert!(!f.gh_calls().contains(r#"["pr", "create","#));
+}
+
+#[cfg(unix)]
 #[test]
 fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     let f = fixture();
@@ -398,10 +1938,13 @@ fn a_create_whose_answer_is_lost_finds_the_pull_request_it_made() {
     f.fault("drop-after-create");
     let created = f.call("git.prCreate", json!({ "repo": "app", "title": "Drop" })).unwrap();
     assert_eq!(created["reconciled"], true);
+    assert_eq!(created["created"], false);
+    assert_eq!(created["existing"], true);
     assert_eq!(created["pr"]["base"], "main", "the default branch is the default base");
     assert_eq!(f.gh_calls().matches("\"create\"").count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     let f = fixture();
@@ -424,13 +1967,35 @@ fn conflicts_and_expired_github_access_are_visible_in_pull_requests() {
     assert_eq!(f.code("git.prCreate", json!({ "repo": "app", "title": "again" })), "auth_failed");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_merge_pinned_to_a_head_is_refused_once_the_head_has_moved() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, "app");
+    let head = "a".repeat(40);
+    let pr = json!({
+        "number": 8, "title": "Pinned", "url": "https://github.test/octo/repo/pull/8",
+        "state": "OPEN", "headRefName": "feature/p", "baseRefName": "main", "headRefOid": head,
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN", "statusCheckRollup": []
+    });
+    std::fs::write(f.state.join("pr-8.json"), pr.to_string()).unwrap();
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"not a sha"})), "invalid_params");
+    assert_eq!(f.code("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":"b".repeat(40)})), "conflict");
+    assert_eq!(f.call("git.prs", json!({"repo":"app","number":8})).unwrap()["prs"][0]["state"], "OPEN");
+    let merged = f.call("git.prMerge", json!({"repo":"app","number":8,"method":"squash","head":head})).unwrap();
+    assert_eq!(merged["pr"]["state"], "MERGED");
+    assert!(f.gh_calls().contains(&format!("\"--match-head-commit\", \"{head}\"")));
+}
+
+#[cfg(unix)]
 #[test]
 fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let f = fixture();
     let remote = f.remote("origin");
     f.clone(&remote, "app");
     let pr = json!({
-        "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
+        "id": "PR_queue", "number": 7, "title": "Queued work", "url": "https://github.test/octo/repo/pull/7",
         "state": "OPEN", "headRefName": "main", "baseRefName": "develop", "headRefOid": "fake-head",
         "mergeable": "MERGEABLE", "mergeStateStatus": "BLOCKED",
         "statusCheckRollup": [{"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""}],
@@ -450,13 +2015,32 @@ fn panel_queue_details_and_actions_follow_the_selected_repository() {
     let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
     assert_eq!(listed["prs"][0]["state"], "OPEN");
     assert_eq!(listed["prs"][0]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    std::fs::write(f.state.join("repo-url"), "https://github.test/octo/repo").unwrap();
+    let queue = |method| f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":method})).unwrap();
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+    assert_eq!(queue("queue")["pr"]["autoMergeEnabled"], true);
+    let mut clean = pr.clone();
+    clean["mergeStateStatus"] = json!("CLEAN");
+    for method in ["queue", "merge", "squash", "rebase"] {
+        std::fs::write(f.state.join("pr-7.json"), clean.to_string()).unwrap();
+        let result = queue(method);
+        assert_eq!(result["pr"]["state"], "OPEN");
+        assert_eq!(result["pr"]["mergeQueueEntry"], json!({"position":2,"state":"QUEUED"}));
+    }
+    let calls = f.gh_calls();
+    assert!(calls.lines().any(|line| line.contains("enablePullRequestAutoMerge(") && line.contains("\"id=PR_queue\"")));
+    assert!(calls.lines().any(|line| line.contains("enqueuePullRequest(") && line.contains("\"id=PR_queue\"")));
+    assert!(!calls.contains("change: mergePullRequest("));
     f.fault("queue-offline");
+    assert!(f.call("git.prMerge", json!({"repo":"app","url":pr["url"],"method":"squash"})).is_err());
+    assert!(!f.gh_calls().contains("change: mergePullRequest("));
     let listed = f.call("git.prs", json!({"repo":"app","number":7})).unwrap();
     assert_eq!(listed["prs"][0]["number"], 7);
     assert!(listed["prs"][0]["detailsError"].as_str().unwrap().contains("connecting"));
     assert!(listed["prs"][0]["mergeQueueEntry"].is_null());
 }
 
+#[cfg(unix)]
 #[test]
 fn disposition_facts_report_unpublished_work_per_repository() {
     let f = fixture();
@@ -533,6 +2117,7 @@ fn a_root_inside_a_checkout_is_that_repository() {
     assert_eq!(inner.handle("git.status", &json!({})).unwrap().unwrap()["branch"], "main");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_forks_pull_request_from_a_branch_of_the_same_name_is_not_this_branchs() {
     let f = fixture();
@@ -577,6 +2162,7 @@ fn workspace_review_range_includes_committed_modified_and_untracked() {
     assert!(f.call("git.reviewRange", json!({ "repo": "app", "target": "missing" })).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     let _home = crate::store::temp_home();
@@ -584,8 +2170,8 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     let remote = f.remote("origin");
     let repo = f.clone(&remote, "app");
     let other = f.clone(&remote, "libs/other");
-    git(&repo, &["remote", "set-url", "origin", "git@github.com:acme/widgets.git"]);
-    git(&other, &["remote", "set-url", "origin", "https://github.com/acme/other.git"]);
+    git(&repo, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/widgets"]);
+    git(&other, &["config", "terminalx.testGithubRepoUrl", "https://github.com/acme/other"]);
     let session = |id: &str, path: &Path| serde_json::from_value::<crate::store::index::SessionEntry>(json!({
         "id": id, "projectPath": path, "cwd": path, "title": "fixture", "created": "", "modified": ""
     })).unwrap();
@@ -615,12 +2201,20 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     })).unwrap();
     crate::issue_pipeline::store::insert(&pipeline).unwrap();
     crate::pr_associations::record_local("unrelated", &repo, "https://github.com/acme/widgets/pull/99", "main").unwrap();
+    let linked_url = "https://github.com/acme/widgets/pull/2";
+    crate::pr_associations::link("author", crate::pr_associations::Association {
+        url: linked_url.into(), number: 2, head: "another-branch".into(),
+        scope: crate::pr_associations::Scope::Local { cwd: repo.to_string_lossy().into_owned() },
+        linked: false,
+    }).unwrap();
     let read = || f.call("git.prAssociations", json!({"sessionId":"author"})).unwrap();
     let first = read();
+    assert_eq!(f.git.handle_negotiated("git.prAssociations", &json!({"sessionId":"author"}), false).unwrap().unwrap(), first);
     let associations = first["associations"].as_array().unwrap();
-    assert_eq!(associations.len(), 2);
-    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/widgets/pull/1" && a["repo"] == "app"));
-    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/other/pull/1" && a["repo"] == "libs/other"));
+    assert_eq!(associations.len(), 3);
+    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/widgets/pull/1" && a["repo"] == "app" && a["linked"] == false));
+    assert!(associations.iter().any(|a| a["url"] == "https://github.com/acme/other/pull/1" && a["repo"] == "libs/other" && a["linked"] == false));
+    assert!(associations.iter().any(|a| a["url"] == linked_url && a["repo"] == "app" && a["linked"] == true));
     // The registry survives journal/pipeline pruning and a different branch.
     std::fs::remove_file(journal).unwrap();
     crate::store::write_json(&crate::store::root().unwrap().join("issue-pipelines.json"), &json!({"pipelines":[]})).unwrap();
@@ -630,7 +2224,7 @@ fn session_pr_evidence_is_read_from_the_runtime_and_routed_by_repository() {
     assert_eq!(f.code("git.prAssociations", json!({"sessionId":"missing"})), "not_found");
     std::fs::remove_dir_all(other).unwrap();
     let unavailable = read();
-    assert_eq!(unavailable["associations"].as_array().unwrap().len(), 2);
+    assert_eq!(unavailable["associations"].as_array().unwrap().len(), 3);
     assert!(unavailable["associations"].as_array().unwrap().iter().any(|a| a["repo"].is_null()));
 }
 
@@ -674,6 +2268,7 @@ fn remote_landed_verification_recognizes_rewritten_merges_but_not_new_work() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn conversation_uses_workspace_credentials_and_rejects_unrelated_repositories() {
     let f = fixture();
@@ -707,4 +2302,319 @@ fn cloud_approval_is_refused_before_running_gh_even_with_a_personal_viewer_claim
         assert!(error.message.contains("personal account"));
     }
     assert!(f.gh_calls().is_empty(), "approval must never use the App token");
+}
+
+#[test]
+fn log_limits_commits_to_the_selected_base_branch() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    for i in 0..3 {
+        git(&repo, &["commit", "--allow-empty", "-m", &format!("main {i}")]);
+    }
+    git(&repo, &["checkout", "-b", "feature"]);
+    let range = json!({ "repo": "app", "from": "main..HEAD", "limit": 8 });
+    assert_eq!(f.call("git.log", range.clone()).unwrap()["commits"], json!([]));
+    git(&repo, &["commit", "--allow-empty", "-m", "branch change"]);
+    let log = f.call("git.log", range).unwrap();
+    assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(log["commits"][0]["subject"], "branch change");
+    for from in ["--all..HEAD", "main...HEAD", "main~1..HEAD", "main..HEAD~1"] {
+        assert_eq!(f.code("git.log", json!({ "repo": "app", "from": from })), "invalid_params");
+    }
+}
+
+#[test]
+fn oversized_file_contents_keep_actual_revision_byte_sizes() {
+    let f = fixture();
+    let remote = f.remote("origin");
+    let repo = f.clone(&remote, "app");
+    // Beyond both the desktop and relay preview limits; count bytes, not characters.
+    let text = "é".repeat(3 * 1024 * 1024);
+    std::fs::write(repo.join("large.txt"), &text).unwrap();
+    f.call("git.commit", json!({ "repo": "app", "message": "large", "author": me() })).unwrap();
+    let log = f.call("git.log", json!({ "repo": "app", "limit": 1 })).unwrap();
+    let tree = &log["commits"][0]["tree"];
+    let working = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(working["after"], "<file too large to show>");
+    assert_eq!(working["afterSize"], text.len());
+    std::fs::write(repo.join("large.txt"), "small").unwrap();
+    let pair = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert_eq!(pair["before"], "<file too large to show>");
+    assert_eq!(pair["beforeSize"], text.len());
+    assert_eq!(pair["afterSize"], 5);
+    let snapshot = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree, "head": tree })).unwrap();
+    assert_eq!(snapshot["afterSize"], text.len());
+    std::fs::remove_file(repo.join("large.txt")).unwrap();
+    let deleted = f.call("git.fileContents", json!({ "repo": "app", "path": "large.txt", "base": tree })).unwrap();
+    assert!(deleted["afterSize"].is_null());
+}
+
+/// #1329: the composer's `#` list of a remote tab is read with the
+/// workspace's own `gh`, in the session's checkout: a number names one pull
+/// request (an unknown number none), words list open ones, and picking one
+/// reads its context file as Markdown.
+#[test]
+fn mention_lookups_read_the_workspaces_pull_requests_with_its_gh() {
+    let f = fixture();
+    let pr = json!({
+        "number": 7, "title": "Fix the parser", "body": "Why it broke", "url": "https://github.test/octo/repo/pull/7",
+        "state": "OPEN", "isDraft": false, "baseRefName": "main", "headRefName": "fix/parser", "author": { "login": "octocat" },
+        "additions": 3, "deletions": 1, "changedFiles": 1, "files": [{ "path": "src/parser.rs", "additions": 3, "deletions": 1 }],
+        "statusCheckRollup": [], "isCrossRepository": false,
+    });
+    std::fs::write(f.state.join("pr-7.json"), pr.to_string()).unwrap();
+
+    let found = f.git.mention_prs(&f.root, "#7").unwrap();
+    assert_eq!(found.iter().map(|pr| (pr.number, pr.title.as_str())).collect::<Vec<_>>(), [(7, "Fix the parser")]);
+    assert!(f.git.mention_prs(&f.root, "99").unwrap().is_empty(), "an unknown number is no pull request, not an error");
+    assert_eq!(f.git.mention_prs(&f.root, "").unwrap().len(), 1, "an empty query lists open pull requests");
+
+    let text = f.git.mention_pr_context(&f.root, 7).unwrap();
+    assert!(text.starts_with("# #7 Fix the parser"), "{text}");
+    assert!(text.contains("Why it broke") && text.contains("- src/parser.rs: +3 / -1"), "{text}");
+    assert_eq!(f.git.mention_pr_context(&f.root, 0).unwrap_err().code, "invalid_params");
+    assert!(f.gh_calls().contains("\"view\", \"7\""));
+
+    // The runtime's own refusal comes back, not a bare message.
+    f.fault("auth-expired");
+    assert_eq!(f.git.mention_prs(&f.root, "fix").unwrap_err().code, "auth_failed");
+    assert_eq!(f.git.mention_pr_context(&f.root, 7).unwrap_err().code, "auth_failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_checkout_whose_name_ends_in_a_space_is_verified_listed_and_served() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("topic ");
+    git(&f.root, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    // The same name without the space is another repository; it must not
+    // stand in for the checkout.
+    f.clone(&remote, "../topic");
+    std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+    assert!(crate::git::is_own_worktree(&checkout));
+    // A folder inside it is not its own top level, space or not.
+    std::fs::create_dir(checkout.join("inner ")).unwrap();
+    assert!(!crate::git::is_own_worktree(&checkout.join("inner ")));
+    assert_eq!(crate::git::common_dir(&checkout), crate::git::common_dir(&f.root));
+
+    let name = checkout.to_str().unwrap();
+    let listed = f.call("git.repositories", json!({})).unwrap();
+    let names: Vec<_> = listed["repositories"].as_array().unwrap().iter().map(|repo| repo["repo"].as_str().unwrap().to_owned()).collect();
+    assert!(names.iter().any(|listed| listed == name), "listed: {names:?}");
+    let status = f.call("git.status", json!({ "repo": name })).unwrap();
+    assert_eq!(status["branch"], "topic");
+    assert_eq!(status["operation"], Value::Null);
+    let changes = f.call("git.workingChanges", json!({ "repo": name })).unwrap();
+    assert!(changes["files"].as_array().unwrap().iter().any(|file| file["path"] == "note.txt"), "{changes}");
+    f.call("git.stage", json!({ "repo": name, "paths": ["note.txt"] })).unwrap();
+    assert_eq!(git(&checkout, &["show", ":note.txt"]), "verified");
+    assert!(git(&f.base.join("topic"), &["ls-files", "--", "note.txt"]).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    for condition in ["gitdir", "gitdir/i"] {
+        let f = fixture();
+        let origin = f.remote("origin");
+        let checkout = f.clone(&origin, "app");
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        let git_dir = git(&checkout, &["rev-parse", "--absolute-git-dir"]);
+        let pattern = if condition == "gitdir" { git_dir.clone() } else { git_dir.to_uppercase() };
+        git(&checkout, &["config", &format!("includeIf.{condition}:{pattern}.path"), "signing.conf"]);
+        let signer = f.base.join("fail-signing");
+        std::fs::write(&signer, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n", f.base.join("signing-attempt").display())).unwrap();
+        std::fs::set_permissions(&signer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(checkout.join(".git/signing.conf"), format!(
+            "[commit]\n\tgpgSign = true\n[user]\n\tsigningKey = checkout-key\n[gpg]\n\tformat = openpgp\n\tprogram = {}\n", signer.display(),
+        )).unwrap();
+        // In this Git directory the condition holds.
+        assert_eq!(git(&checkout, &["config", "--get", "user.signingKey"]), "checkout-key", "{condition}");
+
+        std::fs::write(checkout.join("draft"), "work\n").unwrap();
+        let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+        let error = f.call("git.commitForPush", params).expect_err("the failing signer stops the commit");
+        assert_eq!(error.code, "git_failed", "{condition}: {error:?}");
+        let signing = std::fs::read_to_string(f.base.join("signing-attempt")).expect("Git asked the checkout's signer");
+        assert!(signing.lines().any(|arg| arg == "checkout-key"), "{condition}: {signing}");
+        assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head, "{condition}");
+        assert!(!checkout.join(".git/index.lock").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_verified_pr_push_never_pushes_submodules_through_their_own_config() {
+    use std::os::unix::fs::PermissionsExt;
+    // Each configuration that makes `git push` push submodules, with the
+    // submodule's commit already on its remote or not. Only the last case
+    // fails without the fix: there Git starts `git push` in the submodule,
+    // with the submodule's own configuration (it then stops on the
+    // superproject's refspec). In the first two Git finds nothing to push
+    // there either way; they show that a submodule commit already on its
+    // remote does not stop the verified push.
+    for (key, value, on_remote) in [
+        ("push.recurseSubmodules", "on-demand", true),
+        ("submodule.recurse", "true", true),
+        ("push.recurseSubmodules", "on-demand", false),
+    ] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let mut request = machine_pr_request(&f, &f.root);
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+
+        let submodule = f.root.join("lib");
+        std::fs::write(submodule.join("lib.txt"), "new\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Library change"]);
+        if on_remote {
+            git(&submodule, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        }
+        // Any connection the submodule's own configuration makes is recorded.
+        let spy = f.base.join("receive-pack-spy");
+        let contacted = f.base.join("submodule-contacted");
+        std::fs::write(&spy, format!("#!/bin/sh\ntouch '{}'\nexec git-receive-pack \"$@\"\n", contacted.display())).unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&submodule, &["config", "remote.origin.receivepack", spy.to_str().unwrap()]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Bump lib"]);
+        let head = git(&f.root, &["rev-parse", "HEAD"]);
+        request["pushHead"] = json!(head);
+        git(&f.root, &["config", key, value]);
+
+        let result = f.call("git.prCreateForSession", request);
+        assert!(!contacted.exists(), "{key}={value}: the submodule's remote was contacted");
+        if on_remote {
+            let created = result.unwrap_or_else(|error| panic!("{key}={value}: {} {}", error.code, error.message));
+            assert_eq!(created["created"], true);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        } else {
+            let refused = result.expect_err("a submodule commit on no remote is refused");
+            assert_eq!(refused.code, "conflict", "{}", refused.message);
+            assert!(refused.message.contains("submodule"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_git_helpers_read_the_checkout_that_was_verified() {
+    // Right after verification, another clone (with a merge left in
+    // progress) replaces the checkout at its path, or core.worktree is
+    // pointed at another folder. The reads through `crate::git` that follow
+    // must still answer for the verified checkout.
+    for (change, method) in [("replace", "git.workingChanges"), ("replace", "git.status"), ("replace", "git.commitForPush"), ("redirect", "git.workingChanges")] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside-only.txt"), "outside\n").unwrap();
+        if change == "replace" {
+            std::fs::write(outside.join(".git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+        } else {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+        let moved = f.base.join("topic-original");
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "verified" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            if change == "replace" {
+                std::fs::rename(&target, &away).unwrap();
+                std::fs::rename(&other, &target).unwrap();
+            } else {
+                git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]);
+            }
+        }));
+        let params = match method {
+            "git.commitForPush" => json!({
+                "repo": checkout.to_str().unwrap(), "message": "work", "author": me(),
+                "expectedBranch": "feature/topic", "expectedHead": head,
+            }),
+            _ => json!({ "repo": checkout.to_str().unwrap() }),
+        };
+        let result = f.call(method, params);
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change} {method}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if change == "replace" { &moved } else { &checkout };
+        if change == "redirect" {
+            git(verified, &["config", "--worktree", "--unset", "core.worktree"]);
+        }
+        let result = result.unwrap_or_else(|error| panic!("{change} {method}: {} {}", error.code, error.message));
+        match method {
+            "git.workingChanges" => {
+                let files: Vec<_> = result["files"].as_array().unwrap().iter().map(|file| file["path"].as_str().unwrap().to_owned()).collect();
+                assert!(files.iter().any(|file| file == "note.txt"), "{change}: {files:?}");
+                assert!(!files.iter().any(|file| file == "outside-only.txt"), "{change}: {files:?}");
+            }
+            "git.status" => {
+                assert_eq!(result["branch"], "feature/topic", "{change}");
+                assert_eq!(result["head"], head.as_str(), "{change}");
+                assert_eq!(result["operation"], Value::Null, "{change}");
+            }
+            _ => {
+                assert_eq!(git(verified, &["rev-parse", "HEAD^"]), head, "{change}");
+                assert_eq!(git(verified, &["show", "HEAD:note.txt"]), "verified");
+                assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_submodule_check_of_a_verified_pr_push_looks_only_at_commits_origin_lacks() {
+    // An old commit, long on origin, points at a submodule commit that is
+    // now only on a local submodule branch. An ordinary push does not look
+    // at it again, and neither may the verified one.
+    for value in ["check", "on-demand"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let submodule = f.root.join("lib");
+        git(&submodule, &["checkout", "-qb", "local-only"]);
+        std::fs::write(submodule.join("lib.txt"), "local\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Local library change"]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Old bump"]);
+        git(&f.root, &["push", "-q", "--recurse-submodules=no", "origin", "HEAD:refs/heads/main"]);
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        git(&f.root, &["config", "push.recurseSubmodules", value]);
+        // What an ordinary push would do, without sending anything.
+        git(&f.root, &["push", "-q", "--dry-run", "origin", &format!("{head}:refs/heads/feature/pr")]);
+
+        let created = f.call("git.prCreateForSession", request)
+            .unwrap_or_else(|error| panic!("{value}: {} {}", error.code, error.message));
+        assert_eq!(created["created"], true, "{value}");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{value}");
+    }
 }

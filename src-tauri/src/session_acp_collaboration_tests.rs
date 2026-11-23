@@ -5,7 +5,7 @@ use super::provider_authority::{Attempt, Correlation, OperationContext, Provider
 use crate::harness::{acp::{self, Acp, Chunk, Delivery}, host::{Host, LiveChild, Sink, SpawnSpec}, Action, ProviderAction};
 use crate::remote::collab::{Collaboration, v2::{Action as Right, Permit, Snapshot}};
 use serde_json::{json, Value};
-use std::{path::Path, sync::{Arc, Mutex, mpsc}, time::{Duration, Instant}};
+use std::{sync::{Arc, Mutex, mpsc}, time::{Duration, Instant}};
 
 const AGENT: &str = r#"
 import json, os, pathlib, sys, time
@@ -80,10 +80,10 @@ impl Wire {
         if paused { std::fs::write(dir.path().join("pause-read"), b"").unwrap(); }
         let host = Host::new();
         let (tx, lines) = mpsc::channel();
-        let program = crate::binpath::resolve("python3").expect("real ACP fixture needs python3");
+        let program = crate::binpath::python3_path().expect("real ACP fixture needs python3");
         let args = vec!["-u".into(), "-c".into(), AGENT.into(), dir.path().to_string_lossy().into_owned()];
         let child = host.spawn("provider-acp-collaboration", SpawnSpec { program: &program, args: &args,
-            cwd: Path::new("/tmp"), env: &[], unset: &[] }, Arc::new(Lines(Mutex::new(tx)))).unwrap();
+            cwd: dir.path(), env: &[], unset: &[] }, Arc::new(Lines(Mutex::new(tx)))).unwrap();
         assert!(lines.recv_timeout(Duration::from_secs(5)).unwrap().contains("fixtureReady"));
         let binding = ProviderBinding::owned("session", "tab", &child);
         Self { host, child, binding, lines, dir }

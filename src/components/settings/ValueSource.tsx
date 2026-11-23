@@ -1,6 +1,6 @@
 // PRO-140 (09.32): the badge on a layered value and its "Where this value comes from" popover.
 import { useState } from "react";
-import { Check, FileText, RotateCcw } from "@/icons";
+import { Check, RotateCcw } from "@/icons";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/menu";
 import { cn } from "@/lib/cn";
 import { badgeForValue, layerRows, resetFor } from "@/lib/settingSources";
@@ -49,13 +49,14 @@ export function ValueSource({ value, label, repository, files, onReset }: {
         })}
       </ol>
       {(reset || source) && <DropdownMenuSeparator />}
-      <div className="flex flex-wrap items-center gap-1">
-        {reset && <DropdownMenuItem disabled={busy} className="hairline" onSelect={() => {
+      {/* Design 09.32: an outlined Reset button and the file as a link, on one line. */}
+      <div className="flex items-center gap-2 px-1 pt-1 pb-0.5">
+        {reset && <DropdownMenuItem disabled={busy} className="h-7 shrink-0 rounded-md px-2.5 hairline" onSelect={() => {
           setBusy(true);
           void onReset(reset.layer).finally(() => setBusy(false));
         }}><RotateCcw />{reset.label}</DropdownMenuItem>}
-        {source?.path && source.displayPath && <DropdownMenuItem onSelect={() => void openSettingsPath(source.path!, source.displayPath!)}>
-          <FileText />Open <span className="font-mono text-xs">{shortFileName(source.displayPath)}</span>
+        {source?.path && source.displayPath && <DropdownMenuItem title={`Open ${shortFileName(source.displayPath)}`} className="h-7 min-w-0 px-1 text-muted-foreground data-[highlighted]:bg-transparent data-[highlighted]:text-foreground data-[highlighted]:underline underline-offset-2" onSelect={() => void openSettingsPath(source.path!, source.displayPath!)}>
+          <span className="truncate">Open {shortFileName(source.displayPath)}</span>
         </DropdownMenuItem>}
       </div>
     </DropdownMenuContent>

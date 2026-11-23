@@ -8,19 +8,23 @@ vi.mock("@/lib/dataPrivacy", () => ({
   useDataPrivacy: () => ({ enabled: false, managed: false, ready: true }),
 }));
 import "@testing-library/dom";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
+import type { Project } from "@/types/session";
+import type { PairedDevice } from "@/types/pairing";
+import { device } from "@/components/pairing/pairingFixtures.test-utils";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getPrefs, setPrefs } from "@/lib/prefs";
-import { announceProjectAdded } from "@/lib/projectAdded";
+import { announceProjectAdded, requestProjectSettings } from "@/lib/projectAdded";
 
-// The native side of setting links (PRO-127): the link `settings_link_take` hands out once, and the ping
-// a link arriving while the app runs sends. Every other command fails as it does outside the app.
+// The native side of setting links (PRO-127), through the one link router (PRO-130): the links
+// `desktop_link_take` hands out once, and the ping a link arriving while the app runs sends. Every other
+// command fails as it does outside the app.
 const native = vi.hoisted(() => ({ pending: [] as unknown[], listeners: new Map<string, Set<() => void>>() }));
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
   invoke: vi.fn(async (command: string) => {
-    if (command === "settings_link_take") return native.pending.shift() ?? null;
+    if (command === "desktop_link_take") return native.pending.splice(0).map((link) => ({ kind: "settings", ...(link as object) }));
     throw new Error(`${command} is not available in this test`);
   }),
 }));
@@ -33,7 +37,9 @@ vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
     return () => set.delete(handler);
   }),
 }));
-const pingSettingsLink = () => { for (const handler of native.listeners.get("settings_link_requested") ?? []) handler(); };
+const pingSettingsLink = () => { for (const handler of native.listeners.get("desktop_link_requested") ?? []) handler(); };
+// Where the app was left is the last-view tests' (lastView.test.ts); this shell starts where each test puts it.
+vi.mock("@/lib/lastView", () => ({ bootLastView: vi.fn(), savedPanelTab: () => null, savePanelTab: vi.fn(), resetLastView: vi.fn() }));
 
 vi.mock("@/components/session/LocalSectionDialogs", () => ({ LocalSectionDialogs: () => null }));
 vi.mock("@/components/session/GuestSession", () => ({ GuestSessionHost: () => null }));
@@ -42,13 +48,14 @@ vi.mock("@/components/session/ShareSessionDialog", () => ({ ShareSessionDialogHo
 const { sessionStore } = vi.hoisted(() => ({
   sessionStore: {
     loaded: true,
-    projects: [{ path: "/repo", name: "Raccoon" }],
+    projects: [{ path: "/repo", name: "Raccoon" }] as Project[],
     lastProject: "/repo" as string | null,
     sessions: [],
     harnesses: [],
     selectedSessionId: null,
     selectedAutomationId: null as string | null,
-    view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "stats" | "automations" | "skills",
+    selectedCloudWorkspace: null as string | null,
+    view: "new" as "home" | "welcome" | "new" | "issues" | "agents" | "automations" | "skills",
     showArchived: false,
     selectedProject: "/repo" as string | null,
     workspaces: {
@@ -76,20 +83,23 @@ const { sessionStore } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/sessions", () => ({
+  updateProject: scriptSettings.update,
   bootSessions: vi.fn(),
   openHome: vi.fn(() => { sessionStore.view = "home"; sessionStore.selectedSessionId = null; }),
   openAgents: vi.fn(),
   openAutomations: vi.fn(),
   openIssues: vi.fn(),
   openSkills: vi.fn(),
-  openStats: vi.fn(),
   selectSession: vi.fn(),
   startIdleArchive: vi.fn(),
   useSessionStore: () => sessionStore,
+  getSessionStore: () => sessionStore,
+  archiveSession: machineSessions.archiveLocal,
 }));
 // The latest handler registered for each shortcut, so a test can press one.
 const shortcuts = vi.hoisted(() => new Map<string, () => void>());
 vi.mock("@/lib/hotkeys", () => ({
+  hasEscapeOverlay: () => false,
   keycaps: () => [],
   useHotkey: vi.fn(),
   useShortcut: (id: string, handler: () => void) => void shortcuts.set(id, handler),
@@ -97,8 +107,25 @@ vi.mock("@/lib/hotkeys", () => ({
   useShortcutKeycaps: () => () => [],
 }));
 // PRO-362: whether runs are on, and the run each session leads, as the Run view shortcut reads them.
-const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
-vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns }) }));
+const runShortcut = vi.hoisted(() => ({ orchestratorRuns: false, bots: false, runs: {} as Record<string, unknown>, showRunView: vi.fn() }));
+vi.mock("@/lib/experimentalSettings", () => ({ getExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }), useExperimentalSettings: () => ({ orchestratorRuns: runShortcut.orchestratorRuns, bots: runShortcut.bots }) }));
+// PRO-466: the bots' store is booted only while Settings → Experimental → Bots is on.
+const botStore = vi.hoisted(() => ({ bootBots: vi.fn(async () => {}), shutBots: vi.fn(), listed: [] as { id: string }[] }));
+vi.mock("@/lib/bots", () => ({ bootBots: botStore.bootBots, shutBots: botStore.shutBots, useBotStore: () => ({ bots: botStore.listed }) }));
+// PRO-468: a bot's view, with the chat it shows.
+vi.mock("@/components/bots/BotView", () => ({ BotView: ({ botId, chatId }: { botId: string; chatId: string | null }) => <main data-testid="bot-view" data-bot={botId} data-chat={chatId ?? ""} /> }));
+// PRO-345, PRO-360: every paired machine stays attached while the window is open.
+const machineConnections = vi.hoisted(() => ({ stop: vi.fn(), start: vi.fn() }));
+vi.mock("@/lib/machineConnections", () => ({ startMachineConnections: () => (machineConnections.start(), machineConnections.stop) }));
+// PRO-346: Archive on a machine session goes to the machine.
+const machineSessions = vi.hoisted(() => ({ update: vi.fn(async () => undefined), archiveLocal: vi.fn(async () => undefined) }));
+// The machine sessions' store is the views' business, not the shell's: kept out of these tests.
+vi.mock("@/lib/machineDashboard", () => ({}));
+vi.mock("@/lib/machineCatalog", () => ({ updateMachineSession: machineSessions.update }));
+vi.mock("@/components/machines/MachineMain", () => ({ MachineMain: ({ machineKey }: { machineKey: string }) => <main data-testid="machine-main" data-key={machineKey} /> }));
+vi.mock("@/components/machines/MachineSessionHost", () => ({ MachineSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="machine-session" data-key={sessionKey} /> }));
+vi.mock("@/components/session/CloudSessionHost", () => ({ CloudSessionHost: ({ sessionKey }: { sessionKey: string }) => <div data-testid="cloud-session" data-key={sessionKey} /> }));
+vi.mock("@/components/cloud/CloudWorkspaceMain", () => ({ CloudWorkspaceMain: ({ workspaceKey }: { workspaceKey: string }) => <main data-testid="cloud-workspace-main" data-key={workspaceKey} /> }));
 vi.mock("@/lib/orchestration", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/orchestration")>()),
   showRunView: runShortcut.showRunView,
@@ -106,18 +133,20 @@ vi.mock("@/lib/orchestration", async (importOriginal) => ({
 }));
 vi.mock("@/lib/status", () => ({ bootStatus: vi.fn(), useStatus: () => ({ settings: { visible: true } }) }));
 vi.mock("@/components/layout/StatusBar", () => ({
-  StatusBar: ({ onOpenAgentSettings }: { onOpenAgentSettings: () => void }) => (
-    <button type="button" onClick={onOpenAgentSettings}>Agent settings</button>
+  StatusBar: ({ onOpenAgentSettings, onOpenUsageDetails }: { onOpenAgentSettings: () => void; onOpenUsageDetails: () => void }) => (
+    <><button type="button" onClick={onOpenAgentSettings}>Agent settings</button><button type="button" onClick={onOpenUsageDetails}>Open Stats & Usage</button></>
   ),
 }));
 vi.mock("@/lib/agentEvents", () => ({ applyEvent: vi.fn(), subscribeAgentEvents: vi.fn() }));
 const mirrorApi = vi.hoisted(() => ({
+  cliToolStatus: vi.fn().mockRejectedValue(new Error("CLI unavailable in test")),
   cloudMirrorStatus: vi.fn(),
   cloudMirrorClaimOwner: vi.fn(),
 }));
 // The machine approval host (PRO-342) reads the machine host on mount; with no
 // `invoke` here that read fails, and the store reports it with the real errorMessage.
 vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   agent: { send: vi.fn() },
   api: mirrorApi,
   errorMessage: (await importOriginal<typeof import("@/lib/api")>()).errorMessage,
@@ -144,18 +173,30 @@ vi.mock("@/lib/models", () => ({
 vi.mock("@/lib/automations", () => ({ bootAutomations: vi.fn() }));
 vi.mock("@/lib/account", () => ({ bootAccount: vi.fn(), useAccount: () => ({ status: { state: "signed-out" }, ready: true, busy: false }), closePasteLink: vi.fn(), pasteSignInLink: vi.fn() }));
 vi.mock("@/lib/desktopInbox", () => ({ bootDesktopInbox: vi.fn() }));
-vi.mock("@/lib/cloudCatalog", () => ({ bootCloudCatalog: vi.fn(), refreshCloudCatalog: vi.fn() }));
+vi.mock("@/lib/cloudCatalog", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/cloudCatalog")>()), bootCloudCatalog: vi.fn() }));
 vi.mock("@/lib/cloudPresence", () => ({ bootCloudPresence: vi.fn() }));
 vi.mock("@/components/layout/WorkspaceReassignedNotices", () => ({ WorkspaceReassignedNotices: () => null }));
 vi.mock("@/lib/cloudSelection", () => ({ bootCloudSelection: vi.fn() }));
 vi.mock("@/lib/cloudWorkClaims", () => ({ bootCloudWorkClaims: vi.fn() }));
-vi.mock("@/lib/pairing", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/pairing")>()), bootPairing: vi.fn() }));
+const pairing = vi.hoisted(() => ({ devices: [] as PairedDevice[] }));
+vi.mock("@/lib/pairing", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/pairing")>();
+  return {
+    ...actual,
+    bootPairing: vi.fn(),
+    usePairing: () => {
+      const state = actual.usePairing();
+      return { ...state, status: { ...state.status, devices: pairing.devices } };
+    },
+  };
+});
 vi.mock("@/lib/notify", () => ({ startNotifications: vi.fn() }));
 vi.mock("@/lib/tabViews", () => ({ subscribeTabPty: vi.fn() }));
-vi.mock("@/components/ui/tooltip", () => ({ WithTooltip: ({ children }: { children: ReactNode }) => children }));
+vi.mock("@/components/ui/tooltip", () => ({ KbdGroup: () => null, WithTooltip: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/components/layout/Sidebar", () => ({
-  Sidebar: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
+  Sidebar: ({ onOpenSettings, onOpenHome }: { onOpenSettings: () => void; onOpenHome: () => void }) => (
     <div data-testid="sidebar">
+      <button type="button" onClick={onOpenHome}>Home</button>
       <button type="button" onClick={onOpenSettings}>Open settings</button>
     </div>
   ),
@@ -183,13 +224,27 @@ vi.mock("@/components/editor/EditorSplit", () => ({ EditorSplit: ({ sessionId }:
 vi.mock("@/components/layout/RightPanel", () => ({
   RightPanel: ({ cwd, branch }: { cwd: string; branch?: string | null }) => <div data-testid="right-panel" data-cwd={cwd} data-branch={branch ?? ""} />,
 }));
+const scriptSettings = vi.hoisted(() => ({ real: false, update: vi.fn(), step: vi.fn(), setup: "npm ci", archive: "" }));
+vi.mock("@/lib/sessionNavigation", () => ({ stepVisibleSession: scriptSettings.step, stepAttentionSession: vi.fn() }));
+vi.mock("@/lib/configuration", () => ({ configuration: {
+  files: async () => [], watch: async () => () => {},
+  resolve: async () => ({ values: {
+    setupScript: { value: scriptSettings.setup, source: "user" },
+    archiveScript: { value: scriptSettings.archive, source: "user" },
+  }, warnings: [], registry: [], trust: null }),
+} }));
+vi.mock("@/components/settings/AccountTab", () => ({ AccountTab: () => <div>Account settings</div> }));
+vi.mock("@/components/settings/EnvironmentSettings", () => ({ EnvironmentTable: () => null }));
+vi.mock("@/lib/workspaceSetup", () => ({ useWorkspaceSetups: () => ({ runs: [] }) }));
 vi.mock("@/components/settings/SettingsPage", () => ({
-  SettingsPage: ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
+  SettingsPage: (props: ComponentProps<typeof RealSettingsPage>) => scriptSettings.real
+    ? <RealSettingsPage {...props} /> : <StubSettingsPage {...props} />,
+}));
+const StubSettingsPage = ({ onBack, initialTab, initialProjectPath, openRequest }: { onBack: () => void; initialTab?: unknown; initialProjectPath?: string; openRequest?: number }) => (
     <div data-testid="settings-page" data-initial-tab={typeof initialTab === "string" ? initialTab : "not-a-section"} data-project-path={initialProjectPath ?? ""} data-open-request={openRequest}>
       <button type="button" onClick={onBack}>Back to previous page</button>
     </div>
-  ),
-}));
+  );
 vi.mock("@/components/command/CommandPalette", () => ({
   CommandPalette: ({ onOpenSettings }: { onOpenSettings: (tab?: string) => void }) => (
     <button type="button" onClick={() => onOpenSettings("appearance")}>Open Appearance settings</button>
@@ -206,14 +261,21 @@ vi.mock("@/components/cleanup/CleanupIndicator", () => ({
   ),
 }));
 
+// Load the real Settings fixture during test setup, not inside the first lazy
+// navigation assertion (which otherwise includes its entire module import time).
+const { SettingsPage: RealSettingsPage } = await vi.importActual<typeof import("@/components/settings/SettingsPage")>("@/components/settings/SettingsPage");
 const { AppShell } = await import("./AppShell");
 const { closeAllEditors, openFile } = await import("@/lib/editors");
 const { claimCloudMirrorOwner, cloudMirrorState, resetCloudMirrors } = await import("@/lib/cloudMirror");
 const { forgetSettingToasts, getSettingToasts } = await import("@/lib/settingsToasts");
-const { openSettingRow } = await import("@/lib/settingsLinks");
+const { openSettingRow, openStatsSettings } = await import("@/lib/settingsLinks");
 const { dismissUnknownSettingLink } = await import("@/lib/settingsDeepLink");
 
 beforeEach(() => {
+  pairing.devices = [];
+  scriptSettings.real = false;
+  scriptSettings.step.mockClear();
+  scriptSettings.update.mockReset();
   sessionStore.projects = [{ path: "/repo", name: "Raccoon" }];
   sessionStore.lastProject = "/repo";
   sessionStore.selectedProject = "/repo";
@@ -221,7 +283,10 @@ beforeEach(() => {
   sessionStore.newSessionPreset = { projectPath: "/repo", cwd: "/outside/feature" };
   sessionStore.selectedSessionId = null;
   sessionStore.selectedAutomationId = null;
+  sessionStore.selectedCloudWorkspace = null;
   sessionStore.view = "new";
+  machineConnections.start.mockClear();
+  machineConnections.stop.mockClear();
   setPrefs({ sidebarOpen: true, panelOpen: true, lastProject: "/repo", useWorktree: true });
 });
 
@@ -232,6 +297,70 @@ afterEach(async () => {
   forgetSettingToasts();
   dismissUnknownSettingLink();
   await closeAllEditors("checkout:/outside/feature");
+});
+
+describe("a paired machine in the main slot (PRO-345)", () => {
+  it("keeps machines attached while the window is open and shows the selected machine's view", async () => {
+    sessionStore.selectedCloudWorkspace = "machine:m1";
+    sessionStore.view = "welcome";
+    const { unmount } = render(<AppShell />);
+    expect((await screen.findByTestId("machine-main")).getAttribute("data-key")).toBe("machine:m1");
+    expect(screen.queryByTestId("cloud-workspace-main")).toBeNull();
+    expect(machineConnections.start).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(machineConnections.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("still shows a cloud workspace in the same slot", async () => {
+    sessionStore.selectedCloudWorkspace = "cloud:org:w1";
+    sessionStore.view = "welcome";
+    render(<AppShell />);
+    expect((await screen.findByTestId("cloud-workspace-main")).getAttribute("data-key")).toBe("cloud:org:w1");
+  });
+});
+
+describe("machine sessions (PRO-346)", () => {
+  afterEach(() => {
+    sessionStore.selectedSessionId = null;
+    machineSessions.update.mockClear();
+    machineSessions.archiveLocal.mockClear();
+  });
+
+  it("opens a machine session as a session, not the machine's workspace view (PRO-347)", async () => {
+    sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
+    render(<AppShell />);
+    expect((await screen.findByTestId("machine-session")).getAttribute("data-key")).toBe("machine:m1:P1:s1");
+    expect(screen.queryByTestId("machine-main")).toBeNull();
+  });
+
+  it.each([
+    ["a local session", "5d3f0a8e-4b1c-4f7e-9a2d-1c6b8e0f2a91", "local"],
+    ["a machine session", "machine:m1:P1:s1", "machine"],
+    ["a cloud session", "cloud:org:w1:s1", "none"],
+    ["a machine's project", "machine:m1:P1", "none"],
+  ])("archive %s where it lives, never a machine key on this Mac", (_name, key, where) => {
+    sessionStore.selectedSessionId = key as never;
+    render(<AppShell />);
+    act(() => shortcuts.get("session.archive")!());
+    expect(machineSessions.archiveLocal.mock.calls).toEqual(where === "local" ? [[key, true]] : []);
+    expect(machineSessions.update.mock.calls).toEqual(where === "machine" ? [[key, { archived: true }]] : []);
+  });
+});
+
+it.each([
+  ["cloud:org:w1:s1", "cloud-session"],
+  ["machine:m1:P1:s1", "machine-session"],
+])("shows local phone access while viewing %s with its right panel open", (key, view) => {
+  sessionStore.selectedSessionId = key as never;
+  pairing.devices = [device({ connection: { transport: "relay", since: "2026-11-17T00:00:00Z" } })];
+  render(<AppShell />);
+
+  expect(screen.getByTestId(view)).toBeTruthy();
+  expect(getPrefs().panelOpen).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Device · 1 connected phone" }));
+  const details = screen.getByRole("dialog", { name: "Device" });
+  expect(details.textContent).toContain("Connected phones can see and drive sessions on this Mac.");
+  expect(screen.getByRole("button", { name: "Disconnect Priya's iPhone" })).toBeTruthy();
 });
 
 describe("new-session right panel", () => {
@@ -385,6 +514,77 @@ describe("automation navigation", () => {
   });
 });
 
+describe("the bots' store (PRO-466)", () => {
+  afterEach(() => {
+    runShortcut.bots = false;
+  });
+
+  it("is not booted while Settings → Experimental → Bots is off", () => {
+    botStore.bootBots.mockClear();
+    render(<AppShell />);
+    expect(botStore.bootBots).not.toHaveBeenCalled();
+  });
+
+  it("is booted when the switch is on, and shut when it goes off", () => {
+    botStore.bootBots.mockClear();
+    runShortcut.bots = true;
+    const { rerender } = render(<AppShell />);
+    expect(botStore.bootBots).toHaveBeenCalledTimes(1);
+    botStore.shutBots.mockClear();
+    runShortcut.bots = false;
+    rerender(<AppShell />);
+    expect(botStore.shutBots).toHaveBeenCalledTimes(1);
+    expect(botStore.bootBots).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a bot's view (PRO-468)", () => {
+  const home = { id: "home", kind: "quick", projectPath: "/scratch/home", cwd: "/bots/b1", title: "Home chat", tabs: [], activeTab: null, bot: { id: "b1", home: true } };
+  afterEach(() => {
+    runShortcut.bots = false;
+    botStore.listed = [];
+    sessionStore.sessions = [];
+    sessionStore.selectedSessionId = null;
+    (sessionStore as { selectedBotId?: string | null }).selectedBotId = null;
+    sessionStore.view = "new";
+  });
+
+  it("shows a selected chat of a listed bot in its bot's view", () => {
+    runShortcut.bots = true;
+    botStore.listed = [{ id: "b1" }];
+    sessionStore.sessions = [home as never];
+    sessionStore.selectedSessionId = "home" as never;
+    sessionStore.view = "welcome";
+    render(<AppShell />);
+    expect(screen.getByTestId("bot-view").getAttribute("data-bot")).toBe("b1");
+    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("home");
+    expect(screen.queryByTestId("session")).toBeNull();
+  });
+
+  it("opens a bot's view on its home chat from openBot", () => {
+    runShortcut.bots = true;
+    botStore.listed = [{ id: "b1" }];
+    sessionStore.view = "bot" as never;
+    (sessionStore as { selectedBotId?: string | null }).selectedBotId = "b1";
+    render(<AppShell />);
+    expect(screen.getByTestId("bot-view").getAttribute("data-chat")).toBe("");
+  });
+
+  it("shows the chat as an ordinary session while Bots is off, or when its bot is not listed", () => {
+    sessionStore.sessions = [home as never];
+    sessionStore.selectedSessionId = "home" as never;
+    sessionStore.view = "welcome";
+    const { unmount } = render(<AppShell />);
+    expect(screen.queryByTestId("bot-view")).toBeNull();
+    expect(screen.getByTestId("session")).toBeTruthy();
+    unmount();
+    runShortcut.bots = true;
+    render(<AppShell />);
+    expect(screen.queryByTestId("bot-view")).toBeNull();
+    expect(screen.getByTestId("session")).toBeTruthy();
+  });
+});
+
 describe("the Run view shortcut (PRO-362)", () => {
   const lead = { id: "lead", projectPath: "/repo", cwd: "/repo", title: "Lead", tabs: [], activeTab: null };
   const show = (sessionId: string, runs: boolean, run: unknown) => {
@@ -408,11 +608,16 @@ describe("the Run view shortcut (PRO-362)", () => {
     expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
   });
 
-  it("does nothing for a session that leads no run, or while runs are off", () => {
+  it("opens the page that says how to start a run on a session that leads none (#1404)", () => {
     show("lead", true, null);
+    expect(runShortcut.showRunView).toHaveBeenCalledWith("lead", true);
+  });
+
+  it("does nothing while runs are off", () => {
+    show("lead", false, { id: "run-1", state: "running" });
     expect(runShortcut.showRunView).not.toHaveBeenCalled();
     cleanup();
-    show("lead", false, { id: "run-1", state: "running" });
+    show("lead", false, null);
     expect(runShortcut.showRunView).not.toHaveBeenCalled();
   });
 });
@@ -434,25 +639,25 @@ describe("settings page navigation", () => {
     expect(screen.queryByTestId("settings-page")).toBeNull();
   });
 
-  // PRO-81: the general ways in open Account; an action that names a section gets that section.
+  // PRO-374: the general ways in open General (Account before, PRO-81); an action that names a section gets that section.
   const section = async () => (await screen.findByTestId("settings-page")).dataset.initialTab;
   const close = () => fireEvent.click(screen.getByRole("button", { name: "Back to previous page" }));
   const pressSettingsShortcut = () => act(() => shortcuts.get("app.settings")!());
 
-  it("opens on Account when the sidebar's button hands it the click's event", async () => {
+  it("opens on General when the sidebar's button hands it the click's event", async () => {
     render(<AppShell />);
     // The mocked sidebar wires the button as `onClick={onOpenSettings}`, so the opener receives the event.
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(await section()).toBe("account");
+    expect(await section()).toBe("general");
   });
 
-  it("opens on Account from the Settings shortcut", async () => {
+  it("opens on General from the Settings shortcut", async () => {
     render(<AppShell />);
     pressSettingsShortcut();
-    expect(await section()).toBe("account");
+    expect(await section()).toBe("general");
   });
 
-  it("opens the section an action asks for, and Account again on the next general open", async () => {
+  it("opens the section an action asks for, and General again on the next general open", async () => {
     render(<AppShell />);
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     expect(await section()).toBe("agents");
@@ -461,7 +666,7 @@ describe("settings page navigation", () => {
 
     // The section that was open last does not replace the default: the button…
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(await section()).toBe("account");
+    expect(await section()).toBe("general");
     close();
 
     // …and the shortcut, after another section was asked for by name.
@@ -470,7 +675,7 @@ describe("settings page navigation", () => {
     expect(await section()).toBe("appearance");
     close();
     pressSettingsShortcut();
-    expect(await section()).toBe("account");
+    expect(await section()).toBe("general");
   });
 
   it("opens Storage from the corner's clean-up indicator, wherever the app is", async () => {
@@ -489,22 +694,36 @@ describe("settings page navigation", () => {
     render(<AppShell />);
     pressSettingsShortcut();
     const first = Number((await screen.findByTestId("settings-page")).dataset.openRequest);
-    // Same section as before (Account): only the request count tells Settings to go back to it.
+    // Same section as before (General): only the request count tells Settings to go back to it.
     pressSettingsShortcut();
     await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first + 1));
-    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account");
+    expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("general");
     // An action that names a section counts too (Agent settings stays reachable with Settings open).
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     await waitFor(() => expect(Number(screen.getByTestId("settings-page").dataset.openRequest)).toBe(first + 2));
     expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("agents");
   });
 
-  it("goes from a named section straight to Account when the shortcut is pressed with Settings open", async () => {
+  // PRO-463: Stats & usage is a page of Settings; every way in opens it there.
+  it("opens Stats & usage in Settings from the usage menu, a session's cost, the shortcut and the palette's entry", async () => {
+    render(<AppShell />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Stats & Usage" }));
+    expect(await section()).toBe("stats");
+    close();
+    act(() => openStatsSettings());
+    expect(await section()).toBe("stats");
+    close();
+    // ⌘K's entry runs the same shortcut action.
+    act(() => shortcuts.get("app.stats")!());
+    expect(await section()).toBe("stats");
+  });
+
+  it("goes from a named section straight to General when the shortcut is pressed with Settings open", async () => {
     render(<AppShell />);
     fireEvent.click(screen.getByRole("button", { name: "Agent settings" }));
     expect(await section()).toBe("agents");
     pressSettingsShortcut();
-    await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("account"));
+    await waitFor(() => expect(screen.getByTestId("settings-page").dataset.initialTab).toBe("general"));
   });
 });
 
@@ -526,7 +745,7 @@ describe("setting links (PRO-127)", () => {
     sessionStore.view = "issues";
     render(<AppShell />);
     expect(screen.getByTestId("issues")).toBeTruthy();
-    await waitFor(() => expect(native.listeners.get("settings_link_requested")?.size).toBe(1));
+    await waitFor(() => expect(native.listeners.get("desktop_link_requested")?.size).toBe(1));
 
     native.pending = [{ id: "general.promptMap", enable: false }];
     act(() => pingSettingsLink());
@@ -563,7 +782,7 @@ describe("setting links (PRO-127)", () => {
     const before = getPrefs();
     native.pending = [{ id: "no.such.row", enable: true }];
     render(<AppShell />);
-    expect((await opened()).tab).toBe("account");
+    expect((await opened()).tab).toBe("general");
     expect(await screen.findByRole("status", { name: "No setting matches that link" })).toBeTruthy();
     expect(getPrefs()).toBe(before);
     expect(getSettingToasts()).toEqual([]);
@@ -603,6 +822,18 @@ describe("cloud followers at launch", () => {
 
 
 describe("welcome routing", () => {
+  it.each(["mouse", "keyboard"])("opens Home from a selected session by %s", (input) => {
+    sessionStore.selectedSessionId = "machine:m1:P1:s1" as never;
+    const { rerender } = render(<AppShell />);
+    expect(screen.getByTestId("machine-session")).toBeTruthy();
+    if (input === "mouse") fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    else act(() => shortcuts.get("app.home")!());
+    rerender(<AppShell />);
+    expect(screen.getByTestId("start-screen")).toBeTruthy();
+    expect(screen.queryByTestId("machine-session")).toBeNull();
+  });
+
+
   it("shows all start actions on Home after a project exists, without checkout panels", () => {
     sessionStore.view = "home";
     render(<AppShell />);
@@ -661,4 +892,44 @@ it("boots the account inbox alongside the catalog after data privacy is ready", 
   render(<AppShell />);
   await waitFor(() => expect(bootDesktopInbox).toHaveBeenCalledOnce());
   expect(vi.mocked(bootDesktopInbox).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(bootCloudCatalog).mock.invocationCallOrder[0]);
+});
+
+it.each(["app.nextSession", "app.previousSession", "app.settings"].flatMap((shortcut) =>
+  ["setup", "archive"].map((kind) => ({ shortcut, kind })),
+))("protects focused $kind drafts from the AppShell $shortcut shortcut", async ({ shortcut, kind }) => {
+  scriptSettings.real = true;
+  scriptSettings.setup = "npm ci";
+  scriptSettings.archive = "";
+  sessionStore.projects[0].scripts = { setup: "npm ci", archive: "" };
+  let finishSave: () => void = () => {};
+  scriptSettings.update.mockImplementation(async (_path, patch) => {
+    await new Promise<void>((resolve) => { finishSave = resolve; });
+    sessionStore.projects[0].scripts = patch.scripts;
+    scriptSettings.setup = patch.scripts.setup;
+    scriptSettings.archive = patch.scripts.archive;
+  });
+  render(<AppShell />);
+  act(() => requestProjectSettings("/repo"));
+  const label = kind === "setup" ? "Setup script" : "Archive script";
+  const editor = await screen.findByLabelText(label);
+  act(() => editor.focus());
+  fireEvent.change(editor, { target: { value: "echo preserved" } });
+  expect(document.activeElement).toBe(editor);
+  act(() => shortcuts.get(shortcut)!());
+  expect(screen.getByLabelText(label)).toBe(editor);
+  expect((editor as HTMLTextAreaElement).value).toBe("echo preserved");
+  expect(screen.getByText(/Save your changes before leaving Settings/)).toBeTruthy();
+  expect(scriptSettings.step).not.toHaveBeenCalled();
+  expect(scriptSettings.update).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: `Save ${kind} script` }));
+  act(() => shortcuts.get(shortcut)!());
+  expect(screen.getByLabelText(label)).toBe(editor);
+  expect(scriptSettings.step).not.toHaveBeenCalled();
+  await act(async () => finishSave());
+  await screen.findByText(`${label} saved.`);
+  act(() => shortcuts.get(shortcut)!());
+  await waitFor(() => expect(screen.queryByLabelText(label)).toBeNull());
+  if (shortcut !== "app.settings") expect(scriptSettings.step).toHaveBeenCalledWith(shortcut === "app.nextSession" ? 1 : -1);
+  act(() => requestProjectSettings("/repo"));
+  await waitFor(() => expect((screen.getByLabelText(label) as HTMLTextAreaElement).value).toBe("echo preserved"));
 });

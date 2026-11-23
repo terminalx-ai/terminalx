@@ -435,9 +435,9 @@ pub(crate) fn shown(replacement: &Replacement, status: super::ui::ConnectionStat
         return ConnectionState::Updating { from, to, keeping };
     }
     match status {
-        ConnectionState::Connected { epoch, generation, view, .. } => {
+        ConnectionState::Connected { epoch, generation, view, unproven, .. } => {
             let outdated = replacement.outdated(&epoch);
-            ConnectionState::Connected { epoch, generation, view, outdated }
+            ConnectionState::Connected { epoch, generation, view, outdated, unproven }
         }
         status => status,
     }
@@ -641,7 +641,7 @@ pub(crate) fn hand_over_within(app: &AppHandle, runtime: &Desktop, stop: &[Work]
 
 /// Whether `build` can be handed over to the runtime bundled with this app.
 pub(crate) fn keeps(build: &super::client::Build) -> bool {
-    build.handover.is_some_and(|format| super::handover::FORMATS.contains(&format))
+    build.handover.is_some_and(|format| super::handover_formats().contains(&format))
 }
 
 /// How long the runtime taking over has to answer after a handover: it
@@ -680,7 +680,7 @@ pub(super) fn cut_short(app: &AppHandle, runtime: &Desktop) -> anyhow::Result<(V
 /// short: decided by the runtime under the lock that admits work when it can
 /// (`runtime.stopAllIfIdle`), or, for one too old to, by reading its work
 /// again just before asking it to stop.
-fn stop_if_idle(runtime: &Desktop) -> anyhow::Result<()> {
+pub(super) fn stop_if_idle(runtime: &Desktop) -> anyhow::Result<()> {
     if runtime.stop_all_if_idle()? { return Ok(()); }
     let work = work(runtime)?;
     if !work.is_empty() {
@@ -768,13 +768,14 @@ mod tests {
         Build { version, mobile: Default::default(), handover: None }
     }
 
+    #[cfg(unix)]
     /// A build that writes this app's handover record (#765).
     fn handing(version: &str) -> Build {
         Build { handover: Some(super::super::handover::FORMAT), ..build(Some(version)) }
     }
 
     fn connected(epoch: &str) -> ConnectionState {
-        ConnectionState::Connected { epoch: epoch.into(), generation: 1, view: 0, outdated: None }
+        ConnectionState::Connected { epoch: epoch.into(), generation: 1, view: 0, outdated: None, unproven: None }
     }
 
     /// The test's own version is the app's; one release before it is older.
@@ -887,6 +888,7 @@ mod tests {
     }
 
     impl<'a> Supervisor<'a> {
+        #[cfg(unix)]
         fn new(replacement: &'a Replacement, stop: impl Fn(bool) -> anyhow::Result<()> + 'a) -> Self {
             Self { replacement, stop: Box::new(stop), steps: RefCell::default(), stopped: RefCell::default() }
         }
@@ -1028,6 +1030,7 @@ mod tests {
         assert!(!other.begin("bundled"), "nothing older attached");
     }
 
+    #[cfg(unix)]
     /// #765: a runtime that can be handed over is replaced as soon as
     /// nothing it cannot carry is running, mid-turn or not, with no settling
     /// wait, and keeping what it runs.
@@ -1056,6 +1059,7 @@ mod tests {
         assert_eq!(replacement.next_now(), None, "nothing left to replace");
     }
 
+    #[cfg(unix)]
     /// #765: what a handover cannot carry is named and never stopped by
     /// itself; Restart now hands the rest over, stopping only that.
     #[test]
@@ -1077,6 +1081,7 @@ mod tests {
         assert_eq!(restart.steps.borrow()[1], "hand over, stopping the unkept: updating, keeping");
     }
 
+    #[cfg(unix)]
     /// #765 review: Restart now after a failed handover, or with an agent
     /// started since the window last showed what would stop, stops nothing
     /// it was not shown: the runtime refuses, and what it cannot carry is
@@ -1099,6 +1104,7 @@ mod tests {
         assert_eq!(replacement.next_now(), Some(Due::Check("old".into())), "read again, to be shown");
     }
 
+    #[cfg(unix)]
     /// #960: a prompt may take longer than six checks to settle. The
     /// periodic watcher must still be able to hand over without consent.
     #[test]
@@ -1123,6 +1129,7 @@ mod tests {
         assert_eq!(*retry.stopped.borrow(), [Vec::<Work>::new()]);
     }
 
+    #[cfg(unix)]
     fn refused_manual_retry_wakes_the_waiting_loop(code: &'static str) {
         use std::sync::{mpsc, Arc};
         let replacement = Arc::new(Replacement::default());
@@ -1161,16 +1168,19 @@ mod tests {
         assert!(retry.steps.borrow().iter().all(|step| !step.starts_with("retire")), "no broader stop consent");
     }
 
+    #[cfg(unix)]
     #[test]
     fn manual_busy_retry_wakes_the_paused_watcher() {
         refused_manual_retry_wakes_the_waiting_loop("handover_busy");
     }
 
+    #[cfg(unix)]
     #[test]
     fn manual_unadoptable_retry_wakes_the_paused_watcher() {
         refused_manual_retry_wakes_the_waiting_loop("handover_unadoptable");
     }
 
+    #[cfg(unix)]
     /// #765: a handover refused for something it cannot carry, or for work
     /// still settling, stops nothing and is no failure; one the bundled
     /// runtime cannot take over at all is replaced as before handovers.
@@ -1204,6 +1214,7 @@ mod tests {
         assert_eq!(stop.steps.borrow()[1], "retire: updating");
     }
 
+    #[cfg(unix)]
     /// #765: a handover that failed for any other reason says why, and is
     /// tried again only when asked.
     #[test]
@@ -1226,6 +1237,7 @@ mod tests {
 
     /// An agent driven over its standard input and output, which a handover
     /// cannot carry.
+    #[cfg(unix)]
     fn stdio(session: &str, tab: &str) -> Work {
         Work { kind: WorkKind::Turn, session_id: Some(session.into()), tab_id: Some(tab.into()), harness: Some("gemini".into()), title: None, pane: None }
     }
@@ -1248,6 +1260,7 @@ mod tests {
         assert_eq!(replacement.outdated("bundled"), None, "no notice follows: the bundled runtime is attached");
     }
 
+    #[cfg(unix)]
     /// #765 with #766: Update now chosen for a runtime that can be handed
     /// over hands it over as the app attaches, stopping only what its
     /// handover cannot carry, which is all the update card listed.

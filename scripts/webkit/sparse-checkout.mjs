@@ -126,10 +126,11 @@ try {
       const name = `${width}px ${mode}`;
       const page = await open(browser, server.url, { cloud: true, localProjects: 1 }, { width, height }, { extra: `localStorage.setItem("raccoon.mode", ${JSON.stringify(mode)});\n${fixture}` });
       await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("button", { name: /^Projects \d+$/ }).click();
       const repositories = page.getByRole("group", { name: "Projects", exact: true });
       await repositories.waitFor();
       await repositories.getByRole("button", { name: "local-0", exact: true }).click();
-      await page.getByRole("navigation", { name: "Project settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
+      await page.getByRole("group", { name: "local-0 settings", exact: true }).getByRole("button", { name: "General", exact: true }).click();
       const row = page.locator('[data-setting-id="repositories.sparseCheckout"]');
       await row.waitFor();
       await page.waitForFunction(() => document.querySelector("[data-sparse-choice]")?.textContent === "2 of 19 folders");

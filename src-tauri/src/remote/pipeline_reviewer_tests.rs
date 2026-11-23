@@ -17,7 +17,7 @@ fn session(id: &str, root: &Path) -> index::SessionEntry {
 async fn reviewer_rpc_survives_real_list_limits_replacement_and_history_eviction() {
     let _home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
     let (peer, _events) = Peer::new("desktop".into(), Authority::Manage);
     request(&rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["pipeline/1", "pipeline/2"] })).await;
@@ -35,7 +35,10 @@ async fn reviewer_rpc_survives_real_list_limits_replacement_and_history_eviction
     let listed = request(&rpc, &peer, "pipeline.list", json!({})).await;
     assert_eq!(listed["pipelines"].as_array().unwrap().len(), 50);
     assert_eq!(listed["truncated"], true);
-    assert!(!listed.to_string().contains("r000"));
+    // As a whole JSON string: the project path is in the listing too, and a
+    // temporary directory's name may contain the letters (a macOS runner's
+    // ends in "r0000gn").
+    assert!(!listed.to_string().contains("\"r000\""));
     let identities = request(&rpc, &peer, "pipeline.reviewers", json!({})).await;
     assert_eq!(identities["sessionIds"].as_array().unwrap().len(), 61);
     assert!(identities["sessionIds"].as_array().unwrap().contains(&json!("r000")));
@@ -70,7 +73,7 @@ async fn reviewer_rpc_survives_real_list_limits_replacement_and_history_eviction
 async fn reviewer_rpc_is_paginated_and_requires_its_capability() {
     let _home = crate::store::temp_home();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     let rpc = WorkspaceRpc::new(&root, 1, Arc::new(BroadcastSink::new(64)), Arc::new(Terminals::new()), None).unwrap();
     let ids: Vec<_> = (0..501).map(|n| format!("r{n:03}")).collect();
     index::save(&ids.iter().map(|id| session(id, &root)).collect::<Vec<_>>()).unwrap();

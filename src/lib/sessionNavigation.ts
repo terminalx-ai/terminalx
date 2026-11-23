@@ -7,19 +7,23 @@ import { organizationVisibility } from "./organizationVisibility";
 import { getPrefs } from "./prefs";
 import { getSessionStore, selectSession } from "./sessions";
 import { customSessionOrder, getSidebarOrder, type SidebarOrder } from "./sidebarOrder";
-import { isCloudKey } from "@/types/target";
+import { getMachineDashboard, isMachineDashboardSession, openMachineSession } from "./machineDashboard";
+import { isCloudKey, isLocalKey, isMachineKey } from "@/types/target";
 
 interface SessionDestination extends MessageActivity {
   id: string;
   archived?: boolean;
 }
 
-/** Follow the sidebar ordering preference. Wrap in either direction; skip archives. */
+/**
+ * Follow the sidebar ordering preference. Wrap in either direction; skip archives.
+ * A custom order is this Mac's; cloud and machine sessions follow it by recent activity.
+ */
 export function adjacentSession(sessions: readonly SessionDestination[], current: string | null, direction: 1 | -1, order: SidebarOrder = getSidebarOrder()): string | null {
   const active = sessions.filter((session) => !session.archived);
   const recent = (a: SessionDestination, b: SessionDestination) => compareMessageActivity(a, b, a.id, b.id);
   const visible = order.custom
-    ? [...customSessionOrder(active.filter((s) => !isCloudKey(s.id)), order), ...active.filter((s) => isCloudKey(s.id)).sort(recent)]
+    ? [...customSessionOrder(active.filter((s) => isLocalKey(s.id)), order), ...active.filter((s) => !isLocalKey(s.id)).sort(recent)]
     : active.sort(recent);
   if (!visible.length) return null;
   const index = visible.findIndex((session) => session.id === current);
@@ -34,10 +38,13 @@ export function stepVisibleSession(direction: 1 | -1) {
   const sessions = [
     ...store.sessions.filter((session) => !hiddenProjects.has(session.projectPath)),
     ...getCloudDashboard().filter((session) => visibleIds.has(session.orgId)),
+    // Sessions on paired machines (PRO-346).
+    ...getMachineDashboard(),
   ];
   const next = adjacentSession(sessions, store.selectedSessionId, direction);
   if (next) {
     if (isCloudKey(next)) openCloudSession(next);
+    else if (isMachineKey(next)) openMachineSession(next);
     else selectSession(next);
   }
 }
@@ -55,9 +62,11 @@ export function stepAttentionSession() {
   const next = nextAttentionSession<DashboardSession>([
     ...store.sessions,
     ...getCloudDashboard().filter((session) => visibleIds.has(session.orgId)),
+    ...getMachineDashboard(),
   ], store.selectedSessionId);
   if (!next) return;
   if (isCloudDashboardSession(next)) openCloudSession(next.key, attentionTab(next)?.tabId);
+  else if (isMachineDashboardSession(next)) openMachineSession(next.key);
   else {
     selectSession(next.id);
     const session = store.sessions.find((entry) => entry.id === next.id);

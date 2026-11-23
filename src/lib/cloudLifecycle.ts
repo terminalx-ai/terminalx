@@ -49,6 +49,14 @@ export function resuming(item: Pick<CloudWorkspaceListItem, "latestOperation">):
   return isOpen(item.latestOperation) && item.latestOperation?.action === "resume";
 }
 
+/**
+ * The machine is on its way up as far as the list knows: being provisioned, or
+ * resumed. Not running yet, and not a sign that a connection to it went stale.
+ */
+export function machineStarting(item: CloudWorkspaceListItem): boolean {
+  return item.workspace.state === "provisioning" || resuming(item);
+}
+
 /** The machine runs as far as the list knows: ready, with no stop, archive or delete taking it down. */
 export function machineRunning(item: CloudWorkspaceListItem): boolean {
   const operation = item.latestOperation;
@@ -226,6 +234,9 @@ const MESSAGES: Record<string, string> = {
   // PRO-73: a workspace is managed by its creator and by owners and admins. Offered because the app
   // thought this person was one of them: the role, or the list, changed since.
   cloud_workspace_manager_required: managerRefusedMessage("stop, resume, archive or delete it"),
+  // PRO-410: a change of the idle window the organization's cap does not admit, or one on a preparation workspace.
+  cloud_workspace_policy_denied: "Your organization's compute policy does not allow that. Settings → Organizations, under Cloud compute, shows its limits.",
+  cloud_preparation_workspace_restricted: "A preparation workspace keeps the settings it was created with.",
   cloud_workspace_member_concurrency_exceeded: "You already have as many cloud workspaces running as your organization allows one person. Stop one of yours to start another.",
   // A server from before PRO-73 keeps these for owners and admins.
   organization_admin_required: roleRefusedMessage("stop, resume, archive or delete a cloud workspace"),

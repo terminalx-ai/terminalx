@@ -62,7 +62,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-const { AccountTab } = await import("./AccountTab");
+const { AccountTab, accountInitials } = await import("./AccountTab");
 
 beforeEach(() => {
   mocks.host = { ...host };
@@ -94,21 +94,47 @@ describe("account binding disclosure", () => {
     expect(screen.queryByText("What this Mac shares")).toBeNull();
 
     const section = screen.getByTestId("machine-name-settings");
-    await waitFor(() => expect(within(section).getByTestId("machine-name").textContent).toBe("Studio Mac"));
-    fireEvent.click(within(section).getByRole("button", { name: "Rename" }));
-    const input = within(section).getByRole("textbox", { name: "This Mac’s name" });
+    const input = within(section).getByRole("textbox", { name: "This Mac’s name" }) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("Studio Mac"));
     fireEvent.change(input, { target: { value: "  Desk Mac " } });
-    fireEvent.click(within(section).getByRole("button", { name: "Save" }));
+    fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(mocks.setMachineName).toHaveBeenCalledWith("Desk Mac"));
-    await waitFor(() => expect(within(section).getByTestId("machine-name").textContent).toBe("Desk Mac"));
+    await waitFor(() => expect(input.value).toBe("Desk Mac"));
     expect(section.textContent).toContain("“You · on Desk Mac”");
   });
 
-  it("keeps creation discoverable when an organization already exists", () => {
+  // PRO-375: organisation setup lives under Organizations; Account names the active one and links to its page.
+  it("has no organization setup on Account", () => {
     mocks.organization = "Existing organization";
     render(<AccountTab />);
-    expect(screen.getByRole("button", { name: "Create or switch organization" })).toBeTruthy();
+    expect(screen.queryByText("Organization setup")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create or switch organization" })).toBeNull();
+    expect(within(screen.getByTestId("account-identity")).getByText("Existing organization")).toBeTruthy();
     cleanup();
     mocks.organization = null;
+  });
+
+  it("shows initials, name and email in the identity header, and signs out from a row", () => {
+    render(<AccountTab />);
+    const identity = screen.getByTestId("account-identity");
+    expect(identity.textContent).toContain("P");
+    expect(within(identity).getByText("Paresh")).toBeTruthy();
+    expect(within(identity).getByText("owner@terminalx.ai")).toBeTruthy();
+    const signOutRow = screen.getByTestId("account-sign-out");
+    fireEvent.click(within(signOutRow).getByRole("button", { name: "Sign out" }));
+    // The app's own dialog (PRO-400): the question, what happens, Cancel on the left and a red Sign out on the right.
+    const dialog = screen.getByRole("dialog", { name: "Sign out of TerminalX?" });
+    expect(dialog.textContent).toContain("QR and code pairings keep working");
+    const buttons = within(dialog).getAllByRole("button").map((button) => button.textContent?.trim());
+    expect(buttons).toEqual(["Cancel", "Sign out"]);
+    expect(within(dialog).getByRole("button", { name: "Sign out" }).className).toContain("bg-destructive");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("takes initials from the first and last name, else the email", () => {
+    expect(accountInitials({ name: "Alex Kim", email: "a@b.c", organization: null })).toBe("AK");
+    expect(accountInitials({ name: " ada  de la mare ", email: "a@b.c", organization: null })).toBe("AM");
+    expect(accountInitials({ name: "Paresh", email: "a@b.c", organization: null })).toBe("P");
+    expect(accountInitials({ name: null, email: "zoe@b.c", organization: null })).toBe("Z");
   });
 });

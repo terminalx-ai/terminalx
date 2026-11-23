@@ -4,8 +4,9 @@ import { PrPanel } from "./PrPanel";
 import { BranchAutopilot } from "./BranchAutopilot";
 
 /**
- * Where the work stands, in one scroll: the branch, the one thing to do next,
- * its pull request, then its line of commits. The branch's own step (pull,
+ * The panel's Checks tab (PRO-394): the pull request and its checks first
+ * (or, before there is one, its draft), then the branch, the one thing to do
+ * next and its line of commits. The branch's own step (pull,
  * commit, push…) comes first; the pull request's (open one, mark ready,
  * merge) is offered only once the branch has none. A cloud workspace has no
  * branch picture (it reads this computer's checkout), so only its pull request.
@@ -31,9 +32,8 @@ export function BranchTab({ branch, pr, focusPr = 0 }: {
   return (
     <div className="h-full overflow-y-auto scrollbar-thin" data-testid="branch-tab">
       {branch ? (
-        <BranchPanel {...branch} inline onStep={setHeld}>
+        <BranchPanel {...branch} inline onStep={setHeld} top={section}>
           <BranchAutopilot sessionId={branch.sessionId} offer />
-          {section}
         </BranchPanel>
       ) : (
         <>

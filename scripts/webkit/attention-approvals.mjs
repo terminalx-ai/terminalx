@@ -66,7 +66,7 @@ try {
       await openConversation(page, "Local long session");
       await tab(page, "gemini tab").click();
       const allow = page.getByRole("button", { name: /^Allow/ }).filter({ visible: true });
-      const deny = page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
+      const deny = page.getByRole("button", { name: /^Deny/ }).filter({ visible: true });
       const detail = page.getByTestId("permission-detail").filter({ visible: true });
       await allow.waitFor();
       await allow.focus();
@@ -79,10 +79,11 @@ try {
       await allow.scrollIntoViewIfNeeded();
       await unobscured(allow, "Allow button");
       await unobscured(deny, "Deny button");
-      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
-      assert.ok(await deny.evaluate(el => el === document.activeElement), `Tab reaches Deny: ${await page.evaluate(() => document.activeElement?.outerHTML)}`);
+      // Deny sits before the primary Allow (PRO-382): back from Allow is Deny, and on again is Allow.
       await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
-      assert.ok(await allow.evaluate(el => el === document.activeElement), "Shift+Tab reaches Allow");
+      assert.ok(await deny.evaluate(el => el === document.activeElement), `Shift+Tab reaches Deny: ${await page.evaluate(() => document.activeElement?.outerHTML)}`);
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
+      assert.ok(await allow.evaluate(el => el === document.activeElement), "Tab reaches Allow");
       const label = `${width}x${height}-${zoom}-${order}`;
       if (screenshots) await page.screenshot({ path: `${screenshots}/attention-${label}.png` });
       if (order === "approval-first") await allow.click({ position: { x: 8, y: 3 } });
@@ -142,7 +143,7 @@ try {
       }
       await page.evaluate(() => window.__PW_GUEST_ASK__());
       const allow = page.getByRole("button", { name: /^Allow/ }).filter({ visible: true });
-      const deny = page.getByRole("button", { name: "Deny", exact: true }).filter({ visible: true });
+      const deny = page.getByRole("button", { name: /^Deny/ }).filter({ visible: true });
       await allow.waitFor();
       await allow.focus();
       await raise(page);
@@ -152,9 +153,9 @@ try {
       await unobscured(deny, "guest Deny");
       assert.equal(await notices(page).count(), 0);
       assert.ok(await allow.evaluate(el => el === document.activeElement));
-      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
-      assert.ok(await deny.evaluate(el => el === document.activeElement));
       await page.keyboard.press(process.platform === "darwin" ? "Alt+Shift+Tab" : "Shift+Tab");
+      assert.ok(await deny.evaluate(el => el === document.activeElement));
+      await page.keyboard.press(process.platform === "darwin" ? "Alt+Tab" : "Tab");
       if (order === "approval-first") await allow.click({ position: { x: 8, y: 3 } });
       else await page.keyboard.press("Enter");
       await notices(page).first().waitFor();
@@ -222,10 +223,8 @@ try {
       await raise(page);
       assert.equal(await notices(page).count(), 4);
     }
-    await page.locator("main [data-composer-toolbar]").getByRole("button", { name: "More options" }).focus();
+    await page.locator('main [data-composer-toolbar] [data-testid="permission-mode"]:visible').focus();
     await page.keyboard.press("Enter");
-    await page.getByTestId("permission-mode").focus();
-    await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: /Bypass permissions/ }).focus();
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog");

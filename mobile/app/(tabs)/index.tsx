@@ -5,7 +5,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Keyboard, Plus, QrCode, X } from "lucide-react-native";
 import type { PairingProgress } from "@mobile/pairing/pair";
 import { useApp } from "@mobile/state/AppProvider";
-import type { Machine, MachineTone, PairedMachine } from "@mobile/state/machines";
+import { TERMINAL_PAIRING, type Machine, type MachineTone, type PairedMachine } from "@mobile/state/machines";
 import { useConnectionState, type ConnectionState } from "@mobile/state/connection-view";
 import { ConnectionLine } from "@mobile/ui/ConnectionLine";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
@@ -14,6 +14,7 @@ import { GlassIconButton } from "@mobile/ui/glass";
 import { useTheme, type Palette } from "@mobile/ui/theme";
 import { PairingScanner } from "@mobile/ui/PairingScanner";
 import { DeviceOptionsButton, MachineGlyph, useDeviceMenu } from "@mobile/ui/DeviceMenu";
+import { takePairingRequest } from "@mobile/state/pairing-request";
 
 /**
  * Machines (#987): one list of every machine this phone knows, paired ones
@@ -24,27 +25,31 @@ export default function MachinesScreen() {
   const app = useApp();
   const { palette } = useTheme();
   const router = useRouter();
-  const [pairingOpen, setPairingOpen] = useState(false);
+  const [pairing, setPairing] = useState<"general" | "server" | null>(null);
   const [showHidden, setShowHidden] = useState(false);
-  const { session, refreshMachines } = app;
-  const openPairing = () => { app.clearError(); setPairingOpen(true); };
-  const closePairing = () => { app.clearError(); setPairingOpen(false); };
+  const { session, refreshMachines, clearError } = app;
+  const pairingOpen = pairing !== null;
+  const openPairing = () => { app.clearError(); setPairing("general"); };
+  const openServerPairing = () => { app.clearError(); setPairing("server"); };
+  const closePairing = () => { app.clearError(); setPairing(null); };
 
   const connect = async (machine: PairedMachine) => {
     // Sessions is a sibling tab. dismissTo emits a stack POP_TO action, which
     // the tab navigator cannot handle when Machines is already at the root.
     if (await app.connectHost(machine.host)) router.navigate("/(tabs)/sessions");
   };
-  const menu = useDeviceMenu({ onPairAgain: openPairing, onConnect: (machine) => void connect(machine) });
+  const menu = useDeviceMenu({ onPairAgain: openPairing, onScanServer: openServerPairing, onConnect: (machine) => void connect(machine) });
   const state = useConnectionState(app);
   const pull = usePullRefresh(app.refreshMachines);
   const { paired, available, hidden } = menu.machines;
 
   // Read the account again each time the list comes into view: whether a machine is online must not be stale.
   useFocusEffect(useCallback(() => { if (session) void refreshMachines(); }, [refreshMachines, session]));
+  // Sessions' "Add a machine" and "Pair again" land here with pairing open (PRO-465).
+  useFocusEffect(useCallback(() => { if (takePairingRequest()) { clearError(); setPairing("general"); } }, [clearError]));
 
   const add = <GlassIconButton label="Add a machine" icon={<Plus size={22} color={palette.ink} />} onPress={openPairing} testID="add-machine" />;
-  const sheet = <PairingSheet key={pairingOpen ? "open" : "closed"} visible={pairingOpen} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairingOpen(false); }} />;
+  const sheet = <PairingSheet key={pairing ?? "closed"} visible={pairingOpen} server={pairing === "server"} progress={app.pairingProgress ?? null} error={app.error} onClearError={app.clearError} onClose={closePairing} onPair={async (code) => { await app.pairCode(code); setPairing(null); }} />;
   const retry = () => session ? app.refreshMachines() : app.retryPairing().catch(() => undefined);
   const errorCard = app.error && !pairingOpen ? <Card style={[styles.errorPanel, { borderColor: `${palette.danger}66` }]}><Text style={[styles.errorTitle, { color: palette.ink }]}>Couldn’t finish that</Text><Text style={[styles.detail, { color: palette.muted }]}>{app.error}</Text><Button label="Retry" kind="secondary" onPress={() => void retry()} /></Card> : null;
 
@@ -54,7 +59,7 @@ export default function MachinesScreen() {
       <Screen title="Machines" titleActions={add} contentContainerStyle={styles.signedOut}>
         <View style={[styles.mark, { backgroundColor: palette.accent }]}><Text style={[styles.markText, { color: palette.accentInk }]}>TX</Text></View>
         <Text style={[styles.heroTitle, { color: palette.ink }]}>Your work, away from your desk</Text>
-        <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in with the same TerminalX account as your Mac, or tap + to pair with the QR code TerminalX shows there. Sessions stay on your Mac.</Text>
+        <Text style={[styles.heroDetail, { color: palette.muted }]}>Sign in to see the machines on your TerminalX account, or tap + to pair with a QR code.</Text>
         <Button label="Sign in" onPress={() => void app.signIn()} />
         {errorCard}
       </Screen>
@@ -72,9 +77,13 @@ export default function MachinesScreen() {
       {session && app.installationState === "reauthentication-required" ? <StateCard title="Sign in again to see your account’s machines" detail="For your security, pairing needs a recent sign-in." action="Sign in again" onPress={() => void app.signIn()} /> : null}
       {session && app.installationState === "approval-required" ? <StateCard title="Waiting for approval" detail="Approve this phone from your TerminalX account, then retry." action="Retry" onPress={() => void app.refreshMachines()} /> : null}
       {session && app.loadingMachines && !paired.length && !shownAvailable.length ? <EmptyState title="Loading" detail="Looking for machines on your account." /> : null}
-      {shownAvailable.length ? <><SectionTitle>Available to pair</SectionTitle><Card>{shownAvailable.map((machine, index) => <MachineRow key={machine.id} machine={machine} divided={index > 0} onPress={() => machine.pairBlocked ? menu.open(machine) : void app.pairAvailable(machine.host)} onMenu={() => menu.open(machine)} />)}</Card></> : null}
+      {shownAvailable.length ? <><SectionTitle>Available to pair</SectionTitle><Card>{shownAvailable.map((machine, index) => <MachineRow key={machine.id} machine={machine} divided={index > 0} onPress={() => {
+        if (machine.terminalPairing) openServerPairing();
+        else if (machine.pairBlocked) menu.open(machine);
+        else void app.pairAvailable(machine.host);
+      }} onMenu={() => menu.open(machine)} />)}</Card></> : null}
       {hidden.length ? <Pressable accessibilityRole="button" onPress={() => setShowHidden((value) => !value)} hitSlop={8} style={styles.link}><Text style={[styles.linkText, { color: palette.accent }]}>{showHidden ? "Hide the hidden machines" : `Show ${hidden.length} hidden ${hidden.length === 1 ? "machine" : "machines"}`}</Text></Pressable> : null}
-      {!paired.length && !shownAvailable.length && !(session && app.loadingMachines) ? <EmptyState title="No machines yet" detail="Tap + to pair with the QR code in TerminalX on your Mac. A machine signed in to your account also shows here while TerminalX is open on it." /> : null}
+      {!paired.length && !shownAvailable.length && !(session && app.loadingMachines) ? <EmptyState title="No machines yet" detail="Tap + to pair with the QR code in TerminalX on your Mac or run terminalx-serve pair --phone on your server." /> : null}
       {!session ? <Card style={styles.stateCard}><Text style={[styles.rowTitle, { color: palette.ink }]}>See every machine on your account</Text><Text style={[styles.detail, { color: palette.muted }]}>Sign in with the account you use in TerminalX on your Mac.</Text><Button label="Sign in" kind="secondary" onPress={() => void app.signIn()} /></Card> : null}
 
       {paired.length ? <Text style={[styles.note, { color: palette.muted }]}>The phone talks to one machine at a time. Tap another one to switch.</Text> : null}
@@ -87,24 +96,23 @@ export default function MachinesScreen() {
 /** One machine: tap to use it (or pair it); "…" or a long press for its menu. */
 function MachineRow({ machine, connection, divided, onPress, onMenu }: { machine: Machine; connection?: ConnectionState; divided: boolean; onPress(): void; onMenu(): void }) {
   const { palette } = useTheme();
-  const offline = machine.tone === "offline";
   const active = machine.kind === "paired" && machine.active;
   const pairable = machine.kind === "available" && machine.pairBlocked === null;
   // The row and its buttons are siblings, so each is its own accessibility element (a button inside a pressable row is hidden from VoiceOver).
   return <View style={[styles.hostRow, divided && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: palette.border }]}>
     <Pressable testID={`machine-row-${machine.id}`} accessibilityRole="button" accessibilityLabel={`${machine.name}${active ? ", active" : ""}, ${machine.state}`} accessibilityActions={[{ name: "options", label: "Device options" }]} onAccessibilityAction={(event) => { if (event.nativeEvent.actionName === "options") onMenu(); }} onPress={onPress} onLongPress={onMenu} style={({ pressed }) => [styles.row, styles.hostRowMain, pressed && { backgroundColor: palette.raised }]}>
-      <MachineGlyph icon={machine.icon} color={offline ? palette.faint : palette.ink} />
+      <MachineGlyph icon={machine.icon} color={palette.ink} />
       <View style={styles.rowCopy}>
         <View style={styles.nameLine}>
-          <Text numberOfLines={1} style={[styles.rowTitle, styles.shrink, { color: offline ? palette.muted : palette.ink }]}>{machine.name}</Text>
+          <Text numberOfLines={1} style={[styles.rowTitle, styles.shrink, { color: palette.ink }]}>{machine.name}</Text>
           {active ? <View style={[styles.badge, { backgroundColor: `${palette.success}26` }]}><Text style={[styles.badgeText, { color: palette.success }]}>Active</Text></View> : null}
         </View>
-        {/* The machine this phone is using says its connection in the words every screen uses (#983); disconnected on the Mac keeps its own line and action. */}
-        {active && connection && connection !== "none" && connection !== "held" ? <ConnectionLine state={connection} />
-          : <Text numberOfLines={1} style={[styles.detail, { color: toneColor(machine.tone, palette) }]}>{machine.state}</Text>}
+        {/* The machine this phone is using says its connection in the words every screen uses (#983); disconnected on the Mac keeps its own line and action. Connected reads in green (22.05). */}
+        {active && connection && connection !== "none" && connection !== "held" && connection !== "connected" ? <ConnectionLine state={connection} />
+          : <Text numberOfLines={1} style={[styles.rowDetail, { color: toneColor(machine.tone, palette) }]}>{machine.state}</Text>}
       </View>
     </Pressable>
-    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: `${palette.accent}24`, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
+    {pairable ? <Pressable accessibilityRole="button" accessibilityLabel={`Pair ${machine.name}`} onPress={onPress} style={({ pressed }) => [styles.pairButton, { backgroundColor: palette.raised, opacity: pressed ? 0.7 : 1 }]}><Text style={[styles.pairLabel, { color: palette.accent }]}>Pair</Text></Pressable> : null}
     <DeviceOptionsButton name={machine.name} onPress={onMenu} />
   </View>;
 }
@@ -118,7 +126,7 @@ function StateCard({ title, detail, action, onPress }: { title: string; detail: 
   return <Card style={styles.stateCard}><Text style={[styles.rowTitle, { color: palette.ink }]}>{title}</Text><Text style={[styles.detail, { color: palette.muted }]}>{detail}</Text><Button label={action} kind="secondary" onPress={onPress} /></Card>;
 }
 
-function PairingSheet({ visible, progress, error, onClearError, onClose, onPair }: { visible: boolean; progress: PairingProgress | null; error: string | null; onClearError(): void; onClose(): void; onPair(code: string): Promise<void> }) {
+function PairingSheet({ visible, server, progress, error, onClearError, onClose, onPair }: { visible: boolean; server: boolean; progress: PairingProgress | null; error: string | null; onClearError(): void; onClose(): void; onPair(code: string): Promise<void> }) {
   const { palette } = useTheme();
   const [mode, setMode] = useState<"scan" | "type">("scan");
   const [permission, requestPermission] = useCameraPermissions();
@@ -172,6 +180,7 @@ function PairingSheet({ visible, progress, error, onClearError, onClose, onPair 
         <Text style={[styles.modalTitle, { color: palette.ink }]}>Add a machine</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Close" disabled={busy} onPress={close} hitSlop={12}><X color={palette.ink} /></Pressable>
       </View>
+      {server && !progress ? <Text style={[styles.detail, { color: palette.muted }]}>{TERMINAL_PAIRING}. Scan the QR over Relay or on a network that can reach the server.</Text> : null}
       <View style={[styles.segment, { backgroundColor: palette.raised }]}>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("scan")} style={[styles.segmentItem, mode === "scan" && { backgroundColor: palette.card }]}><QrCode size={16} color={mode === "scan" ? palette.ink : palette.muted} /><Text style={{ color: mode === "scan" ? palette.ink : palette.muted }}>Scan</Text></Pressable>
         <Pressable accessibilityRole="button" disabled={busy} onPress={() => selectMode("type")} style={[styles.segmentItem, mode === "type" && { backgroundColor: palette.card }]}><Keyboard size={16} color={mode === "type" ? palette.ink : palette.muted} /><Text style={{ color: mode === "type" ? palette.ink : palette.muted }}>Type code</Text></Pressable>
@@ -180,7 +189,7 @@ function PairingSheet({ visible, progress, error, onClearError, onClose, onPair 
         <PairingScanner key={cameraGeneration} enabled={!scanned && !busy} onScan={scan} />
         {busy ? <Text style={[styles.detail, { color: palette.muted }]}>QR decoded. Pairing securely…</Text> : null}
         <Button label={scanned ? "Scan again" : "Restart camera"} kind="secondary" disabled={busy} onPress={() => selectMode("scan")} />
-      </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Camera access is requested only to scan a pairing QR shown on your Mac.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
+      </> : <View style={styles.cameraPermission}><Text style={[styles.heroDetail, { color: palette.muted }]}>Allow camera access to scan the pairing QR code on your Mac or server.</Text><Button label="Allow camera" onPress={() => void requestPermission()} /></View> : mode === "type" ? <View style={styles.codeForm}>
         <Text style={[styles.detail, { color: palette.muted }]}>Paste the full pairing link or its code. Pairing grants expire and can be used only once.</Text>
         <TextInput value={code} editable={!busy} onChangeText={(value) => { onClearError(); setCode(value); }} autoCapitalize="none" autoCorrect={false} multiline placeholder="terminalx://pair?code=…" placeholderTextColor={palette.faint} style={[styles.codeInput, { color: palette.ink, backgroundColor: palette.card, borderColor: palette.border }]} />
         <Button label={busy ? "Pairing securely…" : "Pair securely"} disabled={busy || !code.trim()} onPress={() => void submit(code)} />
@@ -194,7 +203,7 @@ function PairingSheet({ visible, progress, error, onClearError, onClose, onPair 
 }
 
 /**
- * After a code is scanned (PRO-314): the Mac holds the pairing until the
+ * After a code is scanned (PRO-314): the host holds the pairing until the
  * person checks that it shows this same fingerprint and approves it there.
  */
 function PairingApproval({ progress }: { progress: PairingProgress }) {
@@ -204,11 +213,11 @@ function PairingApproval({ progress }: { progress: PairingProgress }) {
   const half = Math.ceil(groups.length / 2);
   const lines = [groups.slice(0, half).join("\u00B7"), groups.slice(half).join("\u00B7")].filter(Boolean);
   return <Card style={styles.approval}>
-    <Text accessibilityRole="header" style={[styles.errorTitle, { color: palette.ink }]}>Approve on your Mac</Text>
+    <Text accessibilityRole="header" style={[styles.errorTitle, { color: palette.ink }]}>Approve on the machine</Text>
     <Text testID="pairing-fingerprint" accessibilityLabel={`Fingerprint ${[...groups.join("")].join(" ")}`} style={[styles.fingerprint, { color: palette.ink }]}>{lines.join("\n")}</Text>
     <Text accessibilityLiveRegion="polite" style={[styles.detail, { color: palette.muted }]}>{progress.waitingForApproval
-      ? `Check that your Mac shows ${groups.join(" ")}, then choose Approve there. This phone waits up to 2 minutes.`
-      : "Connecting securely to your Mac. It will show this same fingerprint."}</Text>
+      ? `Check that the machine shows ${groups.join(" ")}, then approve in TerminalX or allow it in the server terminal. This phone waits up to 2 minutes.`
+      : "Connecting securely. The machine will show this same fingerprint."}</Text>
   </Card>;
 }
 
@@ -219,7 +228,8 @@ const styles = StyleSheet.create({
   heroTitle: { fontSize: 32, lineHeight: 37, fontWeight: "700", letterSpacing: -0.8 },
   heroDetail: { fontSize: 16, lineHeight: 23 },
   detail: { fontSize: 14, lineHeight: 19 },
-  row: { minHeight: 68, paddingHorizontal: 15, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
+  rowDetail: { fontSize: 13, lineHeight: 17 },
+  row: { minHeight: 56, paddingHorizontal: 14, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12 },
   rowCopy: { flex: 1, gap: 3 },
   // The row that connects and the options button are siblings, so each is its own accessibility element (a button inside a pressable row is hidden from VoiceOver).
   hostRow: { flexDirection: "row", alignItems: "center", paddingRight: 8 },
@@ -227,10 +237,10 @@ const styles = StyleSheet.create({
   rowTitle: { fontSize: 16, fontWeight: "600" },
   shrink: { flexShrink: 1 },
   nameLine: { flexDirection: "row", alignItems: "center", gap: 8 },
-  badge: { borderRadius: 7, paddingHorizontal: 7, paddingVertical: 2 },
-  badgeText: { fontSize: 12, fontWeight: "700" },
-  pairButton: { borderRadius: 9, paddingHorizontal: 12, paddingVertical: 7, marginRight: 2 },
-  pairLabel: { fontSize: 15, fontWeight: "700" },
+  badge: { borderRadius: 999, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeText: { fontSize: 12, fontWeight: "600" },
+  pairButton: { minHeight: 34, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center", marginRight: 2 },
+  pairLabel: { fontSize: 14, fontWeight: "600" },
   note: { fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
   link: { alignSelf: "flex-start", paddingHorizontal: 4, paddingVertical: 4 },
   linkText: { fontSize: 14, fontWeight: "600" },

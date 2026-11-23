@@ -47,17 +47,30 @@ try {
           const root = [...document.querySelectorAll("[data-chat-scroller]")].find((el) => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility === "visible");
           const readers = [...root.querySelectorAll('[data-testid="reader-message"] > div')];
           const queued = root.querySelector('[data-testid="queued-message"]');
-          const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
+          // A message taken mid-turn keeps its time inside the bubble, after the text (PRO-380).
+          const targets = [...readers.map((bubble) => ({ bubble, content: bubble.lastElementChild.matches("time") ? bubble.lastElementChild.previousElementSibling : bubble.lastElementChild })), { bubble: queued, content: queued.querySelector('.whitespace-pre-wrap') }];
           const messages = targets.map(({ bubble, content }) => {
             const box = content.getBoundingClientRect();
             const range = document.createRange();
             range.selectNodeContents(content);
             const rects = [...range.getClientRects()].filter((r) => r.width > 0);
+            // Containment is asked of what is drawn: every run of non-space characters. A space
+            // that ends a wrapped pre-wrap line hangs past the edge by design and draws nothing,
+            // so the rectangle of a whole line may reach past the box while no glyph does.
+            const inked = [];
+            const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+            for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+              for (const run of node.data.matchAll(/\S+/g)) {
+                const word = document.createRange();
+                word.setStart(node, run.index); word.setEnd(node, run.index + run[0].length);
+                inked.push(...[...word.getClientRects()].filter((r) => r.width > 0));
+              }
+            }
             const selection = window.getSelection();
             selection.removeAllRanges(); selection.addRange(range);
             const selected = selection.toString();
             selection.removeAllRanges();
-            return { exact: content.textContent === text && selected === text, contained: rects.every((r) => r.left >= box.left - 1 && r.right <= box.right + 1), lines: rects.length, overflow: bubble.scrollWidth - bubble.clientWidth, link: content.querySelector('a')?.getAttribute('href') };
+            return { exact: content.textContent === text && selected === text, contained: inked.length > 0 && inked.every((r) => r.left >= box.left - 1 && r.right <= box.right + 1), lines: rects.length, overflow: bubble.scrollWidth - bubble.clientWidth, link: content.querySelector('a')?.getAttribute('href') };
           });
           const queuedText = queued.querySelector('.whitespace-pre-wrap').getBoundingClientRect();
           const queuedBox = queued.getBoundingClientRect();

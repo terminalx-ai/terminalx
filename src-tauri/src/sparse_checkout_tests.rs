@@ -1,6 +1,8 @@
 use super::*;
 use crate::git;
+#[cfg(unix)]
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::path::PathBuf;
 
 fn sh(cwd: &Path, args: &[&str]) -> String { git::run(cwd, args).unwrap() }
@@ -19,6 +21,7 @@ fn init(path: &Path) {
 
 /// README, a/top, a/x/f, a/y/f, b/f, c/f, "q d/f": the brief's layout and a
 /// folder whose name needs quoting.
+#[cfg(unix)]
 fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path();
@@ -31,11 +34,13 @@ fn repo() -> tempfile::TempDir {
     dir
 }
 
+#[cfg(unix)]
 fn choose(project: &Path, folders: serde_json::Value) {
     write(project, ".terminalx/settings.json", &serde_json::to_string(&serde_json::json!({ "sparseCheckout": folders })).unwrap());
 }
 
 /// Every file on disk under `root`, its `.git` and managed worktrees aside.
+#[cfg(unix)]
 fn files(root: &Path) -> BTreeSet<String> {
     fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -50,10 +55,13 @@ fn files(root: &Path) -> BTreeSet<String> {
     out
 }
 
+#[cfg(unix)]
 fn set(paths: &[&str]) -> BTreeSet<String> { paths.iter().map(|path| path.to_string()).collect() }
 
+#[cfg(unix)]
 const EVERYTHING: [&str; 7] = ["README", "a/top", "a/x/f", "a/y/f", "b/f", "c/f", "\"q d/f"];
 
+#[cfg(unix)]
 #[test]
 fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_they_are() {
     let _home = crate::store::temp_home();
@@ -112,6 +120,7 @@ fn a_new_worktree_checks_out_only_the_chosen_folders_and_leaves_the_others_as_th
     assert_eq!(files(Path::new(&again.path)), set(&EVERYTHING));
 }
 
+#[cfg(unix)]
 #[test]
 fn existing_branch_and_pull_request_worktrees_are_narrowed_too() {
     let _home = crate::store::temp_home();
@@ -140,6 +149,7 @@ fn existing_branch_and_pull_request_worktrees_are_narrowed_too() {
     assert_eq!(files(project), set(&EVERYTHING));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_worktree_that_cannot_be_narrowed_is_removed_with_its_branch() {
     let _home = crate::store::temp_home();
@@ -275,6 +285,7 @@ fn the_wire_shape_is_the_one_the_settings_dialog_reads() {
     }));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_partial_clone_missing_its_blobs_still_lists_its_folders() {
     let _home = crate::store::temp_home();
@@ -324,6 +335,7 @@ fn descriptions_take_the_first_line_of_prose() {
     assert!(cut.ends_with('…') && cut.chars().count() <= MAX_DESCRIPTION, "{cut}");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_agent_in_a_sparse_workspace_is_told_which_folders_it_has() {
     let _home = crate::store::temp_home();
@@ -366,11 +378,9 @@ fn an_agent_in_a_sparse_workspace_is_told_which_folders_it_has() {
 }
 
 /// The words of `args`, which hold one flag and its single-quoted value.
-fn flag_and_value(args: &str) -> (String, String) {
-    let (flag, value) = args.trim_start().split_once(' ').unwrap();
-    let value = value.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')).unwrap();
-    assert!(!value.replace("'\\''", "").contains('\''), "one quoted word: {args}");
-    (flag.to_string(), value.replace("'\\''", "'"))
+fn flag_and_value(argv: &[String]) -> (String, String) {
+    assert_eq!(argv.len(), 2, "one flag and one value: {argv:?}");
+    (argv[0].clone(), argv[1].clone())
 }
 
 #[test]
@@ -378,18 +388,19 @@ fn every_note_reaches_the_agent_in_one_appended_prompt() {
     let note = note_text(true, &["apps/web".into()]);
     let vm = crate::container_vm::agent_note("claude");
     assert!(vm.is_some());
-    let claude = crate::cloud_config::prompt_args("claude", &[Some("Org rules."), vm, Some(&note)]);
-    assert_eq!(claude.matches("--append-system-prompt").count(), 1, "Claude Code honours only one: {claude}");
+    let claude = crate::cloud_config::prompt_argv("claude", &[Some("Org rules."), vm, Some(&note)]);
+    assert_eq!(claude.iter().filter(|word| *word == "--append-system-prompt").count(), 1, "Claude Code honours only one: {claude:?}");
     let (flag, value) = flag_and_value(&claude);
     assert_eq!(flag, "--append-system-prompt");
     assert_eq!(value, format!("Org rules.\n\n{}\n\n{note}", vm.unwrap()));
-    let codex = crate::cloud_config::prompt_args("codex", &[Some("Org rules."), crate::container_vm::agent_note("codex"), Some(&note)]);
-    assert_eq!(codex.matches("developer_instructions=").count(), 1, "{codex}");
+    let codex = crate::cloud_config::prompt_argv("codex", &[Some("Org rules."), crate::container_vm::agent_note("codex"), Some(&note)]);
+    assert_eq!(codex.iter().filter(|word| word.starts_with("developer_instructions=")).count(), 1, "{codex:?}");
     let (flag, value) = flag_and_value(&codex);
     assert_eq!(flag, "-c");
     let table: toml::Table = toml::from_str(&value).unwrap();
     assert_eq!(table["developer_instructions"].as_str().unwrap(), format!("Org rules.\n\n{note}"));
     // Nothing to tell, no flag; a harness that takes no prompt gets none.
-    assert_eq!(crate::cloud_config::prompt_args("claude", &[None, None, Some("  ")]), "");
-    assert_eq!(crate::cloud_config::prompt_args("cursor", &[Some(&note)]), "");
+    assert!(crate::cloud_config::prompt_argv("claude", &[None, None, Some("  ")]).is_empty());
+    assert!(crate::cloud_config::prompt_argv("cursor", &[Some(&note)]).is_empty());
+    assert_eq!(crate::cloud_config::prompt_args("cursor", &[Some(&note)]), crate::cloud_config::AppendedPrompt::default());
 }

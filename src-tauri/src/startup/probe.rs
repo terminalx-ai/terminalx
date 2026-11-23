@@ -247,6 +247,7 @@ pub(super) fn export(probe: &Probe) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn late_failure_retains_exact_exit_and_both_streams() {
         let mut command = Command::new("/bin/sh");

@@ -1,66 +1,58 @@
 import { useDataPrivacy } from "@/lib/dataPrivacy";
 import { PrivacyEmptyState } from "./DataPrivacySettings";
-import { RegisteredSetting, settingById } from "./settingsRegistry";
-import { useEffect, useRef, useState } from "react";
+import { RegisteredSetting } from "./settingsRegistry";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { signIn, useAccount } from "@/lib/account";
-import { defaultOrgId, useCloudCatalog } from "@/lib/cloudCatalog";
-import { isMultiOrg } from "@/lib/multiOrg";
+import { useCloudCatalog } from "@/lib/cloudCatalog";
 import { organizationName, organizationRunningCount, setOrganizationHidden, useOrganizationVisibility } from "@/lib/organizationVisibility";
 import { setPrefs, usePrefs } from "@/lib/prefs";
-import { forgetAgentLoginsRequest, onOpenOrganizationSettings, takeOrganizationRequest } from "@/lib/settingsLinks";
-import { OrganizationSettings } from "./OrganizationSettings";
-import { OrganizationOnboarding } from "./OrganizationOnboarding";
+import { forgetAgentLoginsRequest } from "@/lib/settingsLinks";
+import { OrganizationSettings, type OrganizationPage } from "./OrganizationSettings";
+import { openCloudSetup, unfinishedFlow } from "@/lib/cloudSetupFlow";
+import { loadSetups } from "@/lib/organizationSetup";
 
-interface OrganizationsTabProps { initialRow?: string | null; openRequest?: number }
+interface OrganizationsTabProps {
+  /** The organization whose pages are open in the menu; none: the list of organizations. */
+  organizationId?: string;
+  page?: OrganizationPage;
+  /** Open an organization's General page (by hand: no earlier message's request scrolls it), or the list with null. */
+  onOpenOrganization?: (organizationId: string | null) => void;
+}
 
 export function OrganizationsTab(props: OrganizationsTabProps = {}) {
   return useDataPrivacy().enabled ? <PrivacyEmptyState /> : <OrganizationsTabContent {...props} />;
 }
 
-function OrganizationsTabContent({ initialRow, openRequest = 0 }: OrganizationsTabProps) {
+function OrganizationsTabContent({ organizationId, page, onOpenOrganization }: OrganizationsTabProps) {
   const prefs = usePrefs();
   const { status, busy } = useAccount();
   const { all, selectedOrganization, temporaryOrganization } = useOrganizationVisibility();
   const catalog = useCloudCatalog();
-  // The organization whose page is open (PRO-107), chosen here or asked for by a message elsewhere.
-  const [page, setPage] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const activeId = defaultOrgId(status);
-  // Every organization the person belongs to has a page, cloud-enabled or not.
+  // Organizations whose full-window setup was left unfinished on this Mac.
+  const email = status.state === "signed-in" ? (status.identity?.email ?? "") : "";
+  const unfinished = new Set(email ? loadSetups(email).filter(unfinishedFlow).map((record) => record.organizationId!) : []);
+  // Every organization the person belongs to has pages, cloud-enabled or not.
   const memberships = status.state === "signed-in" ? (status.organizations ?? []) : [];
-  const members = useRef(memberships);
-  members.current = memberships;
-  useEffect(() => {
-    const open = () => {
-      const wanted = takeOrganizationRequest();
-      if (wanted === undefined) return;
-      const target = wanted ?? activeId;
-      // No page for it here (not a member, or no default organization): its logins request is dropped with it.
-      if (!target || !members.current.some((org) => org.id === target)) forgetAgentLoginsRequest();
-      setPage(target);
-    };
-    open();
-    return onOpenOrganizationSettings(open);
-  }, [activeId]);
-  // A direct row link uses the active organization unless the existing link
-  // request already chose a specific page. Never replace that explicit choice.
-  useEffect(() => {
-    if (initialRow && settingById(initialRow)?.scope === "organization" && activeId) setPage((current) => current ?? activeId);
-  }, [initialRow, activeId, openRequest]);
-  /** A page opened by hand: no earlier message's request scrolls it. */
-  const openPage = (organizationId: string) => {
+  const organization = organizationId ? memberships.find((org) => org.id === organizationId) : undefined;
+  if (organization) return <OrganizationSettings key={organization.id} organization={organization} page={page} onDeleted={() => onOpenOrganization?.(null)} />;
+  const openPage = (id: string) => {
     forgetAgentLoginsRequest();
-    setPage(organizationId);
+    onOpenOrganization?.(id);
   };
-  const organization = page ? memberships.find((org) => org.id === page) : undefined;
-  if (organization) return <OrganizationSettings key={organization.id} organization={organization} onBack={() => setPage(null)} />;
   const settingsButton = (org: (typeof memberships)[number]) => (
-    // Its own page: agent logins and the organization's other settings (PRO-107).
-    <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => openPage(org.id)}>
-      Settings
-    </Button>
+    <>
+      {/* A setup left with "Finish later" resumes at the same step (PRO-370). */}
+      {unfinished.has(org.id) && (
+        <Button size="xs" aria-label={`Finish setting up ${organizationName(org)}`} onClick={() => openCloudSetup({ kind: "resume", organizationId: org.id })}>
+          Finish setting up
+        </Button>
+      )}
+      {/* Its own pages, opened in the menu: agent logins and the organization's other settings (PRO-107, PRO-464). */}
+      <Button size="xs" variant="outline" aria-label={`Settings for ${organizationName(org)}`} onClick={() => openPage(org.id)}>
+        Settings
+      </Button>
+    </>
   );
   return (
     <div className="flex flex-col">
@@ -78,28 +70,17 @@ function OrganizationsTabContent({ initialRow, openRequest = 0 }: OrganizationsT
       />
       <p className="py-3 text-xs text-muted-foreground">Needs you, notifications, and the dock badge include every organization. Working, Done, the command palette, and sidebar keyboard navigation follow the visible organizations; search can find hidden sessions by name. Opening a hidden session shows its organization while selected. New cloud sessions can use any available organization.</p>
       {prefs.organizationDisplay === "one" && <p className="pb-3 text-xs text-muted-foreground">Show in sidebar toggles apply in All organizations mode. Switching back restores your choices.</p>}
-      {!all.length && (
-        <RegisteredSetting setting="organizations.create"><div className="flex flex-wrap items-center justify-between gap-3 py-3">
-          <p className="text-xs text-muted-foreground">No cloud-enabled organizations.</p>
-          {status.state === "signed-in" && status.identity ? (
-            !creating && <Button size="sm" onClick={() => setCreating(true)}>Create organization</Button>
-          ) : (
-            <Button size="sm" disabled={busy} onClick={() => void signIn()}>Sign in to create an organization</Button>
-          )}
-        </div></RegisteredSetting>
-      )}
-      {creating && status.state === "signed-in" && status.identity && (
-        <OrganizationOnboarding
-          key={status.identity.email}
-          organizationName={status.identity.organization}
-          organizationId={status.identity.organizationId ?? null}
-          accountEmail={status.identity.email}
-          contextRevision={status.context?.revision ?? ""}
-          organizations={memberships}
-          multiOrg={isMultiOrg(status)}
-          startWithCreation
-        />
-      )}
+      {/* Any signed-in person can create another organization, whatever they belong to (PRO-370): the full-window setup does it. */}
+      <RegisteredSetting setting="organizations.create"><div className="flex flex-wrap items-center justify-between gap-3 py-3">
+        <p className="text-xs text-muted-foreground">
+          {all.length ? "Create another organization and set up its GitHub, compute, agent logins, environment and team." : "No cloud-enabled organizations."}
+        </p>
+        {status.state === "signed-in" && status.identity ? (
+          <Button size="sm" onClick={() => openCloudSetup({ kind: "create" })}>Create organization</Button>
+        ) : (
+          <Button size="sm" disabled={busy} onClick={() => void signIn()}>Sign in to create an organization</Button>
+        )}
+      </div></RegisteredSetting>
       {all.map((org) => {
         const running = organizationRunningCount(org.id, catalog);
         return <RegisteredSetting setting="organizations.organization" instance={org.id} key={org.id} label={organizationName(org)} description={`${org.role} · ${running ? `${running} running workspace${running === 1 ? "" : "s"}` : "No running workspaces"}${temporaryOrganization === org.id ? " · Shown while selected" : ""}`} control={
@@ -114,7 +95,7 @@ function OrganizationsTabContent({ initialRow, openRequest = 0 }: OrganizationsT
       })}
       {/* Organizations the sidebar does not list (no cloud there, or a server that does not say) still have their page. */}
       {memberships.filter((org) => !all.some((listed) => listed.id === org.id)).map((org) => (
-        <RegisteredSetting setting="organizations.organization" instance={org.id} key={org.id} label={organizationName(org)} description={org.role} control={settingsButton(org)} />
+        <RegisteredSetting setting="organizations.organization" instance={org.id} key={org.id} label={organizationName(org)} description={org.role} control={<div className="flex items-center gap-2">{settingsButton(org)}</div>} />
       ))}
     </div>
   );

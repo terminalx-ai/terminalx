@@ -199,9 +199,9 @@ try {
   assert.equal(await claudeSession.getByText("5% used", { exact: true }).count(), 0);
   console.log("ok  #772: a replacing runtime's reattachment, events and timer show though it counts from 1 again");
 
-  // Settings → Appearance: the control, laid out at a wide and a narrow window.
+  // Settings → General (PRO-377): the control, laid out at a wide and a narrow window.
   await page.locator('[data-testid="sidebar-rail"]').getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await page.getByRole("button", { name: "General", exact: true }).click();
   const group = page.getByRole("radiogroup", { name: "Usage auto-refresh interval" });
   await group.scrollIntoViewIfNeeded();
   assert.deepEqual(await group.getByRole("radio").allTextContents(), ["Off", "1 min", "2 min", "5 min", "15 min"]);

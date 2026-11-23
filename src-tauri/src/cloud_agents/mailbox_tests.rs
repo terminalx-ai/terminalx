@@ -1,3 +1,4 @@
+use crate::paths::Canonical;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +20,11 @@ struct FakeOps {
     sent: Mutex<Vec<String>>,
     /// The images of each sent message: (media type, base64, name).
     images: Mutex<Vec<Vec<SentImage>>>,
+    /// The files of each sent message (PRO-407), as stored for its session.
+    files: Mutex<Vec<Vec<crate::events::FileRef>>>,
     stops: Mutex<u32>,
+    /// Escapes sent to a running turn (#427).
+    interrupts: Mutex<u32>,
     pending: Mutex<Vec<String>>,
     decisions: Mutex<Vec<(String, String)>>,
     notes: Mutex<Vec<String>>,
@@ -58,6 +63,8 @@ impl AgentOps for FakeOps {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: true,
+            history: None,
+            reset: None,
         }];
         if *self.second_tab.lock().unwrap() {
             let mut second = tabs[0].clone();
@@ -78,10 +85,19 @@ impl AgentOps for FakeOps {
         self.images.lock().unwrap().push(images.into_iter().map(|image| (image.media_type, image.data, image.name)).collect());
         self.send(session_id, tab_id, text)
     }
+    fn send_attached(&self, session_id: &str, tab_id: &str, text: &str, images: Vec<crate::session::ImageInput>, files: Vec<crate::events::FileRef>) -> anyhow::Result<()> {
+        self.files.lock().unwrap().push(files);
+        self.send_with_images(session_id, tab_id, text, images)
+    }
     fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
         *self.stops.lock().unwrap() += 1;
         *self.busy.lock().unwrap() = false;
         Ok(())
+    }
+    /// The turn is told to stop; it settles later, as a real one does.
+    fn interrupt(&self, _: &str, _: &str) -> anyhow::Result<bool> {
+        *self.interrupts.lock().unwrap() += 1;
+        Ok(*self.busy.lock().unwrap())
     }
     fn respond(&self, _: &str, _: &str, request_id: &str, option_id: &str) -> Result<(), DecisionError> {
         let mut pending = self.pending.lock().unwrap();
@@ -1100,7 +1116,7 @@ fn a_command_is_never_steered_into_a_running_turn() {
 
 /// PRO-22: the sender uploads an image first; the message names it.
 fn upload(agents: &CloudAgents, owner: &str, id: &str, bytes: &[u8]) {
-    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), true).unwrap();
+    agents.attach_part(owner, id, 0, bytes, "image/png", Some("shot.png"), false, true).unwrap();
 }
 
 #[test]
@@ -1130,7 +1146,7 @@ fn a_message_carries_the_images_its_sender_uploaded_and_they_are_gone_once_typed
 fn a_message_naming_an_image_that_is_not_there_is_refused_untouched() {
     let h = harness();
     upload(&h.agents, "u-alice", "attach-0001", b"abc");
-    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false).unwrap();
+    h.agents.attach_part("u1", "attach-0002", 0, b"half", "image/png", None, false, false).unwrap();
     // Someone else's upload, one never completed, one never uploaded, a malformed list, and a steer.
     for (id, kind, body) in [
         ("c1", "send", json!({ "v": 1, "text": "look", "images": [{ "id": "attach-0001" }] })),
@@ -1191,6 +1207,81 @@ fn a_queued_message_whose_images_are_gone_is_not_sent_without_them() {
     assert!(h.ops.sent.lock().unwrap().is_empty());
     assert!(h.ops.notes.lock().unwrap().iter().any(|note| note.contains("its images are no longer on the workspace")));
     assert!(h.agents.tab("tab-1").unwrap().follow_ups.is_empty());
+}
+
+/// PRO-407: a file other than an image, uploaded first like an image.
+fn upload_file(agents: &CloudAgents, owner: &str, id: &str, name: &str, bytes: &[u8]) {
+    agents.attach_part(owner, id, 0, bytes, "text/markdown", Some(name), true, true).unwrap();
+}
+
+#[test]
+fn a_message_carries_its_files_stored_in_the_sessions_attachments_folder_here() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload(&h.agents, "u1", "attach-0001", b"abc");
+    upload_file(&h.agents, "u1", "attach-0002", "plan.md", b"# Plan");
+    let body = json!({ "v": 1, "text": "read the plan", "images": [{ "id": "attach-0001" }], "files": [{ "id": "attach-0002", "name": "plan.md" }] });
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", body)).outcome, "applied");
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["read the plan"]);
+    assert_eq!(h.ops.images.lock().unwrap()[0].len(), 1, "the image goes as an image");
+    let files = h.ops.files.lock().unwrap()[0].clone();
+    assert_eq!(files.len(), 1);
+    let folder = crate::store::attachments_dir("s1").unwrap().canonical().unwrap();
+    assert!(std::path::Path::new(&files[0].path).starts_with(&folder), "{:?}", files[0].path);
+    assert_eq!(std::fs::read(&files[0].path).unwrap(), b"# Plan");
+    assert!(h.agents.attachments.check_files("u1", &["attach-0002".into()]).is_err(), "typed: the upload is gone");
+    // Files alone are a message.
+    *h.ops.busy.lock().unwrap() = false;
+    upload_file(&h.agents, "u1", "attach-0003", "notes.txt", b"notes");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c2", "send", json!({ "v": 1, "files": [{ "id": "attach-0003" }] }))).outcome, "applied");
+    assert_eq!(h.ops.sent.lock().unwrap().last().map(String::as_str), Some(""));
+    assert_eq!(h.ops.files.lock().unwrap()[1][0].name, "notes.txt");
+}
+
+#[test]
+fn a_queued_message_takes_its_files_into_the_session_and_types_them_later() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    upload_file(&h.agents, "u1", "attach-0001", "plan.md", b"# Plan");
+    assert_eq!(handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "then this", "files": [{ "id": "attach-0001" }] }))).outcome, "applied");
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    // Stored when it was queued, so a restart or a day's pruning cannot lose it.
+    let queued = h.agents.follow_ups.list("tab-1");
+    assert_eq!(queued[0].files.len(), 1);
+    assert!(std::path::Path::new(&queued[0].files[0].path).is_file());
+    let agents = reopen(&h);
+    *h.ops.busy.lock().unwrap() = false;
+    agents.nudge_follow_ups("tab-1");
+    assert_eq!(agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["then this"]);
+    assert_eq!(h.ops.files.lock().unwrap()[0], queued[0].files);
+}
+
+#[test]
+fn a_message_naming_a_file_that_is_not_there_or_too_many_is_refused_untouched() {
+    let _home = crate::store::temp_home();
+    let h = harness();
+    upload_file(&h.agents, "u-alice", "attach-0001", "plan.md", b"# Plan");
+    upload(&h.agents, "u1", "attach-0002", b"abc");
+    for (id, body) in [
+        ("c1", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] })),
+        ("c2", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-9999" }] })),
+        // An image named as a file is not one.
+        ("c3", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0002" }] })),
+    ] {
+        let lease = lease(&h.agents, id, "send", body);
+        let receipt = handle(&h.agents, &lease);
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(ATTACHMENT_MISSING)), "{id}");
+        assert!(open_receipt(&h.agents, &lease, &receipt)["message"].as_str().unwrap().starts_with("Not sent: a file"));
+    }
+    let eleven: Vec<Value> = (0..11).map(|index| json!({ "id": format!("attach-1{index:03}") })).collect();
+    for (id, kind, body) in [("c4", "send", json!({ "v": 1, "text": "look", "files": eleven })), ("c5", "steer", json!({ "v": 1, "text": "look", "files": [{ "id": "attach-0001" }] }))] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, kind, body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert!(h.ops.sent.lock().unwrap().is_empty());
+    assert!(h.agents.attachments.check_files("u-alice", &["attach-0001".into()]).is_ok(), "its owner can still send it");
 }
 
 /// Review of #309: a refused message must not leave its uploads behind, or
@@ -1289,4 +1380,115 @@ fn phase2_collaboration_v2_required_nullable_actor_source_and_independent_viewer
     assert_eq!(h.ops.decisions.lock().unwrap().len(),1);
     assert!(serde_json::from_value::<Actor>(json!({"userId":"u1","authority":"manage","collaborationRevision":1,"writeSource":null})).is_err());
     assert!(serde_json::from_value::<Actor>(json!({"userId":"u1","authority":"manage","collaborationRevision":"1","writeSource":"future-source"})).is_err());
+}
+
+/// #1328: a held follow-up is edited, released or withdrawn by a
+/// `follow-up` command naming its id; its text is typed as edited.
+#[test]
+fn a_held_follow_up_is_edited_released_and_withdrawn_through_the_mailbox() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    for (id, text) in [("c1", "first"), ("c2", "second"), ("c3", "third")] {
+        assert_eq!(handle(&h.agents, &lease(&h.agents, id, "send", json!({ "v": 1, "text": text }))).outcome, "applied");
+    }
+    let edit = lease(&h.agents, "f1", "follow-up", json!({ "v": 1, "op": "edit", "followUpId": "c2", "text": "second, edited" }));
+    let receipt = handle(&h.agents, &edit);
+    assert_eq!(receipt.outcome, "applied");
+    assert_eq!(open_receipt(&h.agents, &edit, &receipt)["followUpId"], "c2");
+    let withdraw = lease(&h.agents, "f2", "follow-up", json!({ "v": 1, "op": "withdraw", "followUpId": "c1" }));
+    assert_eq!(handle(&h.agents, &withdraw).outcome, "applied");
+    // Released: first in line, and the running turn is interrupted.
+    let release = lease(&h.agents, "f3", "follow-up", json!({ "v": 1, "op": "release", "followUpId": "c3" }));
+    let receipt = handle(&h.agents, &release);
+    assert_eq!(open_receipt(&h.agents, &release, &receipt)["interrupted"], true);
+    assert_eq!(*h.ops.interrupts.lock().unwrap(), 1);
+    let held: Vec<String> = h.agents.tab("tab-1").unwrap().follow_ups.into_iter().map(|follow_up| follow_up.text).collect();
+    assert_eq!(held, vec!["third", "second, edited"]);
+    // The turn settles: they go in the new order, the withdrawn one never.
+    for _ in 0..2 {
+        *h.ops.busy.lock().unwrap() = false;
+        h.agents.nudge_follow_ups("tab-1");
+        assert_eq!(h.agents.dispatch_follow_ups(), 1);
+    }
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["third", "second, edited"]);
+    // Gone by now: refused, and a redelivery is answered from the receipt.
+    let late = lease(&h.agents, "f4", "follow-up", json!({ "v": 1, "op": "edit", "followUpId": "c2", "text": "too late" }));
+    let receipt = handle(&h.agents, &late);
+    assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some(FOLLOW_UP_GONE)));
+    assert_eq!(handle(&h.agents, &edit).outcome, "applied", "answered from its receipt");
+}
+
+#[test]
+fn a_follow_up_command_that_is_malformed_or_empty_changes_nothing() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    handle(&h.agents, &lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "held" })));
+    for (id, body) in [
+        ("f1", json!({ "v": 1, "op": "move", "followUpId": "c1" })),
+        ("f2", json!({ "v": 1, "op": "edit" })),
+        ("f3", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "   " })),
+        ("f4", json!({ "v": 1, "op": "edit", "followUpId": "c1" })),
+    ] {
+        let receipt = handle(&h.agents, &lease(&h.agents, id, "follow-up", body));
+        assert_eq!((receipt.outcome.as_str(), receipt.category.as_deref()), ("rejected", Some("payload-invalid")), "{id}");
+    }
+    assert_eq!(h.agents.tab("tab-1").unwrap().follow_ups[0].text, "held");
+    // An idle tab's released follow-up goes now, with nothing to interrupt.
+    *h.ops.busy.lock().unwrap() = false;
+    let release = lease(&h.agents, "f5", "follow-up", json!({ "v": 1, "op": "release", "followUpId": "c1" }));
+    let receipt = handle(&h.agents, &release);
+    assert_eq!(open_receipt(&h.agents, &release, &receipt)["interrupted"], false);
+    assert_eq!(*h.ops.interrupts.lock().unwrap(), 0);
+    assert_eq!(h.agents.dispatch_follow_ups(), 1);
+    assert_eq!(*h.ops.sent.lock().unwrap(), vec!["held"]);
+}
+
+/// A held follow-up is its sender's, or a manager's, to change; another
+/// driver's change, or a slash command a plain driver may not type, is refused.
+#[test]
+fn only_the_sender_or_a_manager_changes_a_held_follow_up() {
+    let h = harness();
+    shared(&h, json!([{ "userId": "alice", "role": "driver" }, { "userId": "bob", "role": "driver" }, { "userId": "boss", "role": "manager" }]));
+    *h.ops.busy.lock().unwrap() = true;
+    let send = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "alice's" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &send).outcome, "applied");
+    let bob = as_actor(lease(&h.agents, "f1", "follow-up", json!({ "v": 1, "op": "withdraw", "followUpId": "c1" })), "bob", "driver", false);
+    let refused = handle(&h.agents, &bob);
+    assert_eq!(refused.category.as_deref(), Some("forbidden"), "it is alice's");
+    assert_eq!(h.agents.follow_ups.list("tab-1").len(), 1);
+    let slash = as_actor(lease(&h.agents, "f2", "follow-up", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "/model opus" })), "alice", "driver", false);
+    assert_ne!(handle(&h.agents, &slash).outcome, "applied", "a plain driver may not queue that command");
+    assert_eq!(h.agents.follow_ups.list("tab-1")[0].text, "alice's");
+    let alice = as_actor(lease(&h.agents, "f3", "follow-up", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "alice's, edited" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &alice).outcome, "applied");
+    let manager = |id: &str, plaintext: Value| Lease {
+        actor: Actor { collaboration_revision: None, write_source: None, user_id: "boss".into(), authority: "manage".into(), role: Some("manager".into()), can_approve: Some(true) },
+        ..lease(&h.agents, id, "follow-up", plaintext)
+    };
+    // A manager does not put words in alice's message: it is still typed as hers, under her policy.
+    let reword = manager("f4", json!({ "v": 1, "op": "edit", "followUpId": "c1", "text": "the manager's words" }));
+    let refused = handle(&h.agents, &reword);
+    assert_eq!(refused.category.as_deref(), Some("forbidden"));
+    assert_eq!(open_receipt(&h.agents, &reword, &refused)["message"], FOLLOW_UP_EDIT_NOT_YOURS_MESSAGE);
+    let held = &h.agents.follow_ups.list("tab-1")[0];
+    assert_eq!((held.text.as_str(), held.actor_id.as_str()), ("alice's, edited", "alice"));
+    // It may send hers now, or withdraw it.
+    let release = manager("f5", json!({ "v": 1, "op": "release", "followUpId": "c1" }));
+    assert_eq!(handle(&h.agents, &release).outcome, "applied");
+    let withdraw = manager("f6", json!({ "v": 1, "op": "withdraw", "followUpId": "c1" }));
+    assert_eq!(handle(&h.agents, &withdraw).outcome, "applied");
+    assert!(h.agents.follow_ups.list("tab-1").is_empty());
+}
+
+#[test]
+fn another_drivers_held_follow_up_is_refused_as_not_theirs() {
+    let h = harness();
+    *h.ops.busy.lock().unwrap() = true;
+    let send = as_actor(lease(&h.agents, "c1", "send", json!({ "v": 1, "text": "alice's" })), "alice", "driver", false);
+    assert_eq!(handle(&h.agents, &send).outcome, "applied");
+    let bob = as_actor(lease(&h.agents, "f1", "follow-up", json!({ "v": 1, "op": "release", "followUpId": "c1" })), "bob", "driver", false);
+    let refused = handle(&h.agents, &bob);
+    assert_eq!(refused.category.as_deref(), Some("forbidden"));
+    assert_eq!(open_receipt(&h.agents, &bob, &refused)["message"], FOLLOW_UP_NOT_YOURS_MESSAGE);
+    assert_eq!(*h.ops.interrupts.lock().unwrap(), 0, "nothing was interrupted");
 }

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   storage: new Map<string, string>(),
   app: {} as any,
   push: vi.fn(),
+  alert: vi.fn(),
   setParams: vi.fn(),
   sessionListeners: new Map<string, (event: unknown) => void>(),
   sessionReady: new Map<string, () => void>(),
@@ -31,6 +32,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../modules/paste-image", () => ({ addPasteImageListener: (listener: any) => { mocks.pasted.add(listener); return () => { mocks.pasted.delete(listener); }; } }));
 vi.mock("expo-router", () => ({ useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]), Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ push: mocks.push, setParams: mocks.setParams }) }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
+// The Sessions screen reads the cloud catalog for pinned cloud projects (#1469);
+// its provider loads native modules. No cloud account here: the screen as it
+// is drawn without the provider.
+vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => null, useCatalogSnapshot: () => ({ organizations: [], loading: false, error: null, refreshedAt: null, saved: false, titles: {}, deletesOrganizations: false }) }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-crypto", () => ({ randomUUID: () => `uuid-${++mocks.uuids}` }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));
@@ -42,6 +47,9 @@ vi.mock("@react-native-async-storage/async-storage", () => ({ default: {
   getItem: vi.fn(async (key: string) => mocks.storage.get(key) ?? null),
   setItem: vi.fn(async (key: string, value: string) => { mocks.storage.set(key, value); }),
   removeItem: vi.fn(async (key: string) => { mocks.storage.delete(key); }),
+  multiGet: vi.fn(async (keys: string[]) => keys.map((key) => [key, mocks.storage.get(key) ?? null])),
+  multiSet: vi.fn(async (pairs: [string, string][]) => { for (const [key, value] of pairs) mocks.storage.set(key, value); }),
+  multiRemove: vi.fn(async (keys: string[]) => { for (const key of keys) mocks.storage.delete(key); }),
 } }));
 vi.mock("react-native", () => {
   const Box = ({ children, accessibilityRole }: { children?: ReactNode; accessibilityRole?: string }) => <div role={accessibilityRole === "link" ? "link" : undefined}>{children}</div>;
@@ -52,14 +60,18 @@ vi.mock("react-native", () => {
     AccessibilityInfo: { isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove: () => undefined }) },
     Animated: { View: Box, Value: class { setValue() {} interpolate() { return "0deg"; } }, loop: () => ({ start: () => undefined, stop: () => undefined }), timing: () => ({}) },
     Easing: { linear: (value: number) => value },
-    View: Box, Text: Box, ScrollView: Box, KeyboardAvoidingView: Box,
+    View: Box, Text: Box, KeyboardAvoidingView: Box,
+    // A horizontal strip says its frame's style (merged), which is where it clips touches.
+    ScrollView: ({ children, horizontal, style, contentContainerStyle }: any) => <div data-strip={horizontal ? JSON.stringify({ frame: Object.assign({}, ...[style].flat(3).filter(Boolean)), content: Object.assign({}, ...[contentContainerStyle].flat(3).filter(Boolean)) }) : undefined}>{children}</div>,
     Keyboard: { addListener: () => ({ remove: () => undefined }), isVisible: () => false, dismiss: () => mocks.keyboardDismissed() },
     PanResponder: { create: () => ({ panHandlers: {} }) },
     ActivityIndicator: () => null,
+    Alert: { alert: (...args: unknown[]) => mocks.alert(...args) },
     Modal: ({ visible, children }: any) => visible ? <div role="dialog">{children}</div> : null, Image: () => null, RefreshControl: () => null,
     Platform: { OS: "web", select: ({ default: fallback }: any) => fallback },
     StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-    Pressable: ({ children, onPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint }: any) => <button disabled={disabled} aria-label={accessibilityLabel} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress}>{children}</button>,
+    // A long press is a right-click here.
+    Pressable: ({ children, onPress, onLongPress, disabled, accessibilityLabel, accessibilityState, accessibilityHint, hitSlop }: any) => <button disabled={disabled} aria-label={accessibilityLabel} data-hitslop={hitSlop === undefined ? undefined : JSON.stringify(hitSlop)} aria-pressed={accessibilityState?.selected} aria-expanded={accessibilityState?.expanded} aria-description={accessibilityHint} onClick={onPress} onContextMenu={onLongPress ? (event) => { event.preventDefault(); onLongPress(); } : undefined}>{children}</button>,
     TextInput: ({ value, onChangeText, placeholder, onFocus, onBlur, autoFocus }: any) => <input value={value} autoFocus={autoFocus} onInput={(event) => onChangeText(event.currentTarget.value)} onFocus={onFocus} onBlur={onBlur} placeholder={placeholder} />,
     FlatList: (props: any) => {
       mocks.listProps = props;
@@ -208,6 +220,18 @@ it("names the machine in the session subtitle with the name saved on this phone"
   await render();
   expect(container.textContent).toContain("TerminalX · Desk");
   expect(container.textContent).not.toContain("Office iMac");
+});
+
+// 22.07 frame 5: the header names the session by its branch, the notifications sheet by the session's own title, as its notifications do.
+it("titles the session's notification sheet with the session's title, not the branch the header shows", async () => {
+  mocks.app = { ...mocks.app, sessions: mocks.app.sessions.map((session: { id: string }) => session.id === "worktree" ? { ...session, branch: "pro-990-notifications" } : session) };
+  await render();
+  expect(container.textContent).toContain("pro-990-notifications");
+  await act(async () => { [...container.querySelectorAll("button")].find((item) => item.getAttribute("aria-label") === "Notifications for this session")!.click(); });
+  const sheet = container.querySelector("[role='dialog']")!;
+  expect(sheet.textContent).toContain("Create a new issue");
+  expect(sheet.textContent).toContain("Notifications for this session");
+  expect(sheet.textContent).not.toContain("pro-990-notifications");
 });
 
 describe("mobile transcript ordering (#384)", () => {
@@ -1079,7 +1103,12 @@ describe("the phone's terminal view, as on the desktop", () => {
     await vi.waitFor(() => expect(container.textContent).toContain("Wait for Codex to finish this turn"));
     expect(mocks.app.api.subscribeTerminal).not.toHaveBeenCalled();
     expect(button("Escape").disabled).toBe(true);
+    let finish!: (value: { opened: boolean }) => void;
+    mocks.app.api.openTerminal.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await click("Try again");
+    expect(container.textContent).toContain("Opening…");
+    expect(container.textContent).not.toContain("Wait for Codex to finish this turn");
+    await act(async () => finish({ opened: true }));
     await vi.waitFor(() => expect(mocks.terminalListeners.has("claude")).toBe(true));
     expect(mocks.app.api.openTerminal).toHaveBeenCalledTimes(2);
   });
@@ -1345,6 +1374,96 @@ describe("the session screen's status line, keyboard and send feedback (#985)", 
     await click("Stop");
     expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
     expect(mocks.app.api.stop).not.toHaveBeenCalled();
+  });
+
+  it("keeps Send in the composer while the agent works; Stop on the line, held, stops the session after asking (22.03)", async () => {
+    takesControls();
+    mocks.alert.mockReset();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Working · 3 min");
+    expect(() => button("Interrupt")).toThrow();
+    expect(button("Send").disabled).toBe(true);
+    await act(async () => { button("Stop").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    expect(mocks.alert).toHaveBeenCalledTimes(1);
+    const [title, , choices] = mocks.alert.mock.calls[0] as [string, string, { text: string; onPress?: () => void }[]];
+    expect(title).toBe("Stop this session?");
+    expect(mocks.app.api.stop).not.toHaveBeenCalled();
+    await act(async () => { choices.find((choice) => choice.text === "Stop")!.onPress!(); });
+    expect(mocks.app.api.stop).toHaveBeenCalledWith("worktree", "claude");
+    expect(mocks.app.api.interrupt).not.toHaveBeenCalled();
+  });
+
+  it("keeps Stop, and its long press, while a question the phone cannot answer and a permission request are open", async () => {
+    takesControls();
+    // This Mac takes controls but no answers from the phone, and reports the tab as waiting on the reader, not in progress.
+    mocks.app.api.features = async () => ({ sessionControls: 1 });
+    mocks.app.api.tabControls = vi.fn(async () => ({ harness: "claude", model: "opus", effort: "high", permissionMode: "default", status: "waiting" }));
+    mocks.alert.mockReset();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: [...working(), question(3, ago(1))], hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Answer this question from your Mac.");
+    expect(text()).toContain("Needs your answer · 1 min");
+    await click("Stop");
+    expect(mocks.app.api.interrupt).toHaveBeenCalledWith("worktree", "claude");
+    await act(async () => { button("Stop").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); });
+    const [title, , choices] = mocks.alert.mock.calls[0] as [string, string, { text: string; onPress?: () => void }[]];
+    expect(title).toBe("Stop this session?");
+    await act(async () => { choices.find((choice) => choice.text === "Stop")!.onPress!(); });
+    expect(mocks.app.api.stop).toHaveBeenCalledWith("worktree", "claude");
+
+    await publish(at(4, ago(0), { type: "permission_decided", requestId: "q1", allowed: true, label: "Merge now", automatic: false }), permission(5, ago(0)));
+    expect(text()).toContain("Needs approval");
+    await click("Stop");
+    expect(mocks.app.api.interrupt).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives the composer's model, effort and permission mark 44 pt places to tap, which the strip they scroll in does not clip", async () => {
+    takesControls();
+    mocks.app.api.models = vi.fn(async () => [{ id: "opus", label: "Opus", harness: "claude", efforts: ["low", "medium", "high"], defaultEffort: "high", acceptsImages: true, isDefault: true, upgrade: null, description: null }]);
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    // The composer's strip: the last horizontal one, after the chat tabs.
+    const strip = JSON.parse([...container.querySelectorAll("[data-strip]")].at(-1)!.getAttribute("data-strip")!);
+    // The composer's row is 32 pt; the strip reaches 6 pt past it on each side, so its frame is 44 pt and nothing moves.
+    expect(32 - 2 * strip.frame.marginVertical).toBeGreaterThanOrEqual(44);
+    expect(strip.content.minHeight).toBeGreaterThanOrEqual(44);
+    const slop = (label: string | RegExp) => {
+      const found = [...container.querySelectorAll("button")].find((item) => typeof label === "string" ? item.getAttribute("aria-label") === label : label.test(item.getAttribute("aria-label") ?? ""))!;
+      return JSON.parse(found.getAttribute("data-hitslop")!) as { top: number; bottom: number; left: number; right: number };
+    };
+    // Drawn sizes: a 14 pt line of text is 17 pt tall, and the mark is an 18 pt icon; "High" is about 29 pt wide.
+    for (const [label, tall] of [["Opus", 17], ["High", 17], [/^Permission mode/, 18]] as const) {
+      const { top, bottom } = slop(label);
+      expect(tall + top + bottom, String(label)).toBeGreaterThanOrEqual(43);
+      // Never past the strip's frame, where the ScrollView would cut it.
+      expect(top, String(label)).toBeLessThanOrEqual((44 - tall) / 2 + 0.5);
+    }
+    const effort = slop("High");
+    const mode = slop(/^Permission mode/);
+    expect(29 + effort.left + effort.right).toBeGreaterThanOrEqual(42);
+    expect(18 + mode.left + mode.right).toBeGreaterThanOrEqual(44);
+    // Neighbours split their gaps (5 pt and 12 pt) instead of overlapping.
+    expect(slop("Opus").right + effort.left).toBeLessThanOrEqual(5);
+    expect(effort.right + mode.left).toBeLessThanOrEqual(12);
+    expect(mode.right).toBeLessThanOrEqual(strip.content.paddingRight);
+  });
+
+  it("drops the status line while not connected; the composer keeps its buttons (22.01)", async () => {
+    takesControls();
+    mocks.app.api.tail.mockResolvedValueOnce({ events: working(), hasMore: false });
+    await render();
+    await act(async () => { await Promise.resolve(); });
+    expect(text()).toContain("Working · 3 min");
+    mocks.app = { ...mocks.app, connectionStage: "reconnecting" };
+    await render();
+    expect(text()).not.toContain("Working");
+    expect(() => button("Stop")).toThrow();
+    expect(button("Send")).toBeDefined();
+    expect(button("Add attachment")).toBeDefined();
   });
 
   it("offers no Stop to a Mac that takes no controls from the phone", async () => {

@@ -12,7 +12,8 @@ vi.mock("@tauri-apps/api/event", async () => {
   const { backend } = await import("@/test/tabsBackend");
   return { listen: backend.listen };
 });
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(async () => true), message: vi.fn(), open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(), open: vi.fn() }));
+vi.mock("@/lib/confirm", () => ({ confirmInApp: vi.fn(async () => true), chooseInApp: vi.fn(async () => "action") }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ revealItemInDir: vi.fn(async () => undefined), openUrl: vi.fn() }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setBadgeCount: async () => undefined, label: "main" }) }));
@@ -71,7 +72,7 @@ function Main() {
   return (
     <TooltipProvider>
       <nav aria-label="Sidebar">
-        <ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenStats={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />
+        <ProjectRail onHide={() => {}} onOpenSettings={() => {}} onOpenAccount={() => {}} onOpenHome={() => {}} onNewSession={() => {}} onOpenIssues={() => {}} onOpenAgents={() => {}} onOpenAutomations={() => {}} onOpenSkills={() => {}} onSearch={() => {}} />
       </nav>
       {selected ? (
         <div key={selected.id} data-testid="main" data-session={selected.id}>
@@ -87,7 +88,7 @@ function Main() {
 
 /** A session with no tabs open in the project's own checkout, whose conversations were closed: the one #721 could not open. */
 function emptySession(patch: Partial<SessionEntry> = {}): SessionEntry {
-  return sessionEntry("empty", MAIN, [], { title: "Github preparation", pinned: true, ...patch });
+  return sessionEntry("empty", MAIN, [], { title: "Github preparation", pinned: false, ...patch });
 }
 
 async function load(sessions: SessionEntry[]) {
@@ -103,7 +104,7 @@ async function click(row: HTMLElement) {
   await flush();
 }
 
-/** ⌘⌥T, remapped to keys jsdom can press the same way on every platform. */
+/** ⌥⇧⌘T, remapped to keys jsdom can press the same way on every platform. */
 function pressReopen() {
   fireEvent.keyDown(document.body, { key: "y", code: "KeyY", shiftKey: true, metaKey: isMac, ctrlKey: !isMac });
 }
@@ -236,7 +237,7 @@ describe("the page of a session with no tabs", () => {
     await click(sessionRow("Github preparation"));
     const page = screen.getByTestId("empty-session");
     fireEvent.pointerDown(within(page).getByRole("button", { name: "New tab" }), { button: 0, pointerType: "mouse" });
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal on this computer" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Terminal" }));
     await waitFor(() => expect(backend.callsOf("pty_spawn")).toHaveLength(1));
     expect(String(backend.callsOf("pty_spawn")[0].id).startsWith("empty:")).toBe(true);
     expect(store().selectedSessionId).toBe("empty");
@@ -253,7 +254,7 @@ describe("the page of a session with no tabs", () => {
     expect(store().selectedSessionId).toBe("empty");
   });
 
-  it("reopens this session's last closed tab on ⌘⌥T while the page is shown", async () => {
+  it("reopens this session's last closed tab on ⌥⇧⌘T while the page is shown", async () => {
     render(<Main />);
     await click(sessionRow("Github preparation"));
     act(pressReopen);
@@ -308,8 +309,8 @@ describe("a branch's sessions as tabs", () => {
     const c = sessionEntry("c", FEATURE, [], { worktreeName: "feature", branch: "feature", title: "Session c" });
     await load([...backend.sessions.filter((entry) => entry.id !== "other"), c]);
     render(<Main />);
-    // In the sidebar the branch is one row for `a` and `b`, whose tabs share the row of tabs; `c` has a row of its own.
-    await click(within(sidebar()).getByRole("button", { name: "feature, 2 sessions" }));
+    // In the sidebar the branch is one row for `a` and `b` (named by the latest, `a`), whose tabs share the row of tabs; `c` has a row of its own.
+    await click(within(sidebar()).getByRole("button", { name: "feature, Session a" }));
     const opened = store().selectedSessionId;
     expect(["a", "b"]).toContain(opened);
     expect(stripNames()).toEqual(expect.arrayContaining(["Docs", "Review"]));
@@ -412,7 +413,7 @@ describe("closing a session's last running tab", () => {
 
   it("offers nothing when the session keeps an agent tab open", async () => {
     render(<Main />);
-    await click(within(sidebar()).getByRole("button", { name: "feature, 2 sessions" }));
+    await click(within(sidebar()).getByRole("button", { name: "feature, Session a" }));
     // `a` has three agent tabs: closing one leaves two running.
     await click(within(strip()).getByRole("tab", { name: "Review" }));
     expect(store().selectedSessionId).toBe("a");

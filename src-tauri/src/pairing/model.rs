@@ -1,6 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 pub const CAPABILITY: &str = "account-bound-host-pairing.v1";
+/// Advertised beside [`CAPABILITY`] only while "Let other computers operate
+/// this Mac" is on and data privacy mode is off: the account directory then
+/// lists this Mac to the user's other computers, and their `runtime`-scope
+/// grants reach it (terminalx-server `machine-relay-access.md`).
+pub const MACHINE_OPERATING_CAPABILITY: &str = "machine-operating.v1";
+
+/// What the host binding advertises, in its registration and heartbeats.
+pub fn host_capabilities(allow_operating: bool, data_privacy: bool) -> Vec<String> {
+    let mut capabilities = vec![CAPABILITY.to_string()];
+    if allow_operating && !data_privacy {
+        capabilities.push(MACHINE_OPERATING_CAPABILITY.into());
+    }
+    capabilities
+}
 pub const OFFER_TTL_MS: i64 = 5 * 60 * 1000;
 /// How long a scanned code waits for the person to approve it on the Mac.
 pub const APPROVAL_TTL_MS: i64 = 120_000;
@@ -299,6 +313,14 @@ mod tests {
             ]
         );
         assert_eq!(value["capabilities"], json!([CAPABILITY]));
+    }
+
+    #[test]
+    fn machine_operating_is_advertised_only_while_the_switch_is_on_and_privacy_is_off() {
+        assert_eq!(host_capabilities(false, false), vec![CAPABILITY]);
+        assert_eq!(host_capabilities(true, false), vec![CAPABILITY, MACHINE_OPERATING_CAPABILITY]);
+        assert_eq!(host_capabilities(true, true), vec![CAPABILITY], "data privacy mode turns the machine host off");
+        assert_eq!(host_capabilities(false, true), vec![CAPABILITY]);
     }
 
     #[test]

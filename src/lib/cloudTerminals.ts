@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { agentPtyId, type PtyAttachment, type PtyControl, type PtyCursor, type PtyInfo, type PtyRun, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
 import { disposeInstance, getInstance, peekInstance, type TerminalInstance } from "@/lib/terminal";
 import { countTerminalData } from "@/lib/terminalCounters";
 import { acknowledgeTerminalResize, coordinateTerminalResize, followTerminalOutputSize, isOutputResize, reassertTerminalResize, requestTerminalResize, stopTerminalOutput, writeTerminalOutput, type OutputSize } from "@/lib/terminalOutput";
@@ -45,6 +45,10 @@ export interface CloudTerminal {
   sessionId: string | null;
   /** The agent tab whose own terminal this is (PRO-86); null for a shell. */
   tabId: string | null;
+  /** One of its session's script runs on a machine (`machine/7`): shown under the dock's Setup and Run, not as a numbered shell. */
+  run?: PtyRun | null;
+  /** When the runtime opened it (ms since the epoch); absent for an agent tab's terminal. */
+  createdAt?: number;
   /** Its output is streaming to this window now, so `control` and the size are the runtime's word. */
   live: boolean;
 }
@@ -56,6 +60,8 @@ interface WorkspaceTerminals {
   selected: string | null;
   /** The workspace view is showing the selected terminal (not its agent, files or Git view). */
   shown?: boolean;
+  /** The runtime's list of terminals has been read at least once (`syncCloudTerminals`): `terminals` holds every shell there is. */
+  listed?: boolean;
 }
 
 let state: Record<string, WorkspaceTerminals> = {};
@@ -143,6 +149,8 @@ function fromInfo(workspace: string, info: PtyInfo): CloudTerminal {
     inputError: null,
     sessionId: info.sessionId ?? null,
     tabId: null,
+    run: info.run ?? null,
+    createdAt: info.createdAt,
     live: false,
   };
 }
@@ -518,15 +526,20 @@ export async function syncCloudTerminals(
     const known = new Set(current.terminals.map((terminal) => terminal.ptyId));
     const terminals = current.terminals.map((terminal): CloudTerminal => {
       const info = byPty.get(terminal.ptyId);
-      if (info) return unchanged(terminal, { ...fromInfo(workspace, info), number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      if (info) {
+        const next = fromInfo(workspace, info);
+        // The same run as before stays the same object, so a poll that found nothing new re-renders nothing.
+        const run = JSON.stringify(terminal.run ?? null) === JSON.stringify(next.run) ? terminal.run : next.run;
+        return unchanged(terminal, { ...next, run, number: terminal.number, title: terminal.title, inputError: terminal.inputError, live: terminal.live });
+      }
       // Gone already, or opened here after this list was asked for.
       if (terminal.gone || (openedAt.get(terminal.id) ?? 0) > asked) return terminal;
       return { ...terminal, gone: terminal.epoch === listed.epoch ? "closed" : "runtime-restarted" };
     });
     for (const info of listed.terminals) if (!known.has(info.ptyId)) terminals.push(named(fromInfo(workspace, info), terminals));
     const selected = current.selected && terminals.some((terminal) => terminal.id === current.selected) ? current.selected : (terminals[0]?.id ?? null);
-    if (selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
-    return { ...current, terminals, selected };
+    if (current.listed && selected === current.selected && terminals.length === current.terminals.length && terminals.every((terminal, index) => terminal === current.terminals[index])) return current;
+    return { ...current, terminals, selected, listed: true };
   });
   const live = cloudTerminalsOf(workspace).terminals.filter((terminal) => !terminal.gone);
   await Promise.all(live.map((terminal) => attach(workspace, client, terminal, create).catch(() => undefined)));

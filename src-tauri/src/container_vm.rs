@@ -241,6 +241,7 @@ pub fn selected_runtime(target: &Target) -> Result<PathBuf> {
 
 /// Read only, including stopped containers. Absence or a reused name is never
 /// an exit receipt for an earlier exact target.
+#[cfg(unix)]
 pub(crate) fn exit_evidence(target: &Target) -> Result<serde_json::Value> {
     target.require(Capability::AttachedDesktop)?;
     let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
@@ -249,6 +250,7 @@ pub(crate) fn exit_evidence(target: &Target) -> Result<serde_json::Value> {
     parse_exit_evidence(target, &serde_json::from_str(&output)?)
 }
 
+#[cfg(any(unix, test))]
 pub(crate) fn parse_exit_evidence(target: &Target, value: &serde_json::Value) -> Result<serde_json::Value> {
     target.require(Capability::AttachedDesktop)?;
     let Target::LinuxContainer { id, .. } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };
@@ -270,6 +272,7 @@ pub(crate) fn parse_exit_evidence(target: &Target, value: &serde_json::Value) ->
         "pidMode":value["HostConfig"]["PidMode"],"startedAt":state["StartedAt"],"finishedAt":state["FinishedAt"]}))
 }
 
+#[cfg(unix)]
 pub fn selected_status(target: &Target) -> Result<VmStatus> {
     let path = selected_runtime(target)?;
     let Target::LinuxContainer { runtime, id } = target else { bail!("An exact Linux desktop container is required; no OS fallback") };

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { homeShort, useHome } from "@/lib/homePath";
 import type { LucideIcon } from "lucide-react";
 import { Atom, Bot, Check, File, Folder, FolderGit2, GitBranch, Loader2, Lock, Zap } from "@/icons";
 import { Button } from "@/components/ui/button";
@@ -109,7 +110,7 @@ function FailureNote({ failure }: { failure: StartFailure }) {
   return (
     <div role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive" data-failure={failure.code}>
       <div>{summary}</div>
-      {detail.length > 0 && <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[11px] opacity-80">{detail.join("\n")}</pre>}
+      {detail.length > 0 && <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-xs opacity-80">{detail.join("\n")}</pre>}
     </div>
   );
 }
@@ -250,7 +251,7 @@ function GithubProjectDialog() {
                       <FolderGit2 className="size-3.5 shrink-0 text-muted-foreground" />
                       <span className="min-w-0 flex-1 truncate">{repository.nameWithOwner}</span>
                       {repository.isPrivate && <Lock className="size-3 shrink-0 text-faint" aria-label="Private" />}
-                      {repository.pushedAt && <span className="shrink-0 text-[11px] text-faint">{relativeTime(repository.pushedAt)}</span>}
+                      {repository.pushedAt && <span className="shrink-0 text-xs text-faint">{relativeTime(repository.pushedAt)}</span>}
                     </button>
                   );
                 })}
@@ -258,7 +259,7 @@ function GithubProjectDialog() {
                   <div className="px-2 py-3 text-center text-xs text-faint">{searched ? `Not in your list. Clone ${searched} as typed.` : listed.length ? "No repository matches. Paste its URL below." : "No repositories found for your account."}</div>
                 )}
               </div>
-              {repositories.truncated && <p className="mt-1 text-[11px] text-faint">Showing your {listed.length} most recently pushed repositories. Paste a URL for any other.</p>}
+              {repositories.truncated && <p className="mt-1 text-xs text-faint">Showing your {listed.length} most recently pushed repositories. Paste a URL for any other.</p>}
             </div>
           ) : (
             <div role="note" className="rounded-md bg-warning/10 px-3 py-2 text-xs" data-testid="start-gh-unavailable" data-gh={repositories.status}>
@@ -375,23 +376,6 @@ const TEMPLATE_ICONS: Record<string, LucideIcon> = { empty: File, "vite-react": 
 /** Marked new in the Template row until the app has had it for a while. */
 const NEW_TEMPLATES = new Set(["agent-starter"]);
 
-/** The home directory written as `~`, the way the design shows paths. */
-function homeShort(path: string, home: string | null): string {
-  return home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path;
-}
-
-/** The reader's home directory, so paths under it can be written with `~`. Null until known, or outside the app. */
-function useHome(): string | null {
-  const [home, setHome] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
-    void import("@tauri-apps/api/path").then((paths) => paths.homeDir()).then((dir) => live && setHome(dir.replace(/\/+$/, ""))).catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, []);
-  return home;
-}
 
 function TemplateCard({ template, selected, disabled, home, onSelect }: { template: ProjectTemplate; selected: boolean; disabled: boolean; home: string | null; onSelect: () => void }) {
   const Icon = TEMPLATE_ICONS[template.id] ?? Folder;
@@ -418,14 +402,14 @@ function TemplateCard({ template, selected, disabled, home, onSelect }: { templa
           <Check className="size-2.5" strokeWidth={3} />
         </span>
       ) : NEW_TEMPLATES.has(template.id) ? (
-        <span aria-hidden className="absolute right-2 top-2 grid h-4 place-items-center rounded bg-accent px-1.5 text-[9.5px] font-bold tracking-[.08em] text-accent-foreground">NEW</span>
+        <span aria-hidden className="absolute right-2 top-2 grid h-[18px] place-items-center rounded bg-accent px-1.5 text-xs font-bold tracking-[.06em] text-accent-foreground">NEW</span>
       ) : null}
       <span className="grid size-8 place-items-center rounded-md bg-muted" aria-hidden>
         <Icon className="size-4 text-foreground" />
       </span>
       <span className="mt-auto min-w-0">
         <span className="block truncate text-[12.5px] font-medium">{template.name}</span>
-        <span id={`start-template-${template.id}-description`} className={cn("mt-0.5 block text-[11.5px] leading-[15px] text-muted-foreground", template.builtIn || template.problem ? "line-clamp-2" : "truncate font-mono")}>
+        <span id={`start-template-${template.id}-description`} className={cn("mt-0.5 block text-xs leading-[15px] text-muted-foreground", template.builtIn || template.problem ? "line-clamp-2" : "truncate font-mono")}>
           {template.problem ?? (template.builtIn ? template.description : homeShort(template.description, home))}
         </span>
       </span>
@@ -545,7 +529,7 @@ function QuickStartDialog() {
               autoCorrect="off"
               className="h-9 w-full rounded-md border border-border bg-raised px-3 font-mono text-[12.5px] outline-none placeholder:text-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/15"
             />
-            <div className="mt-1.5 flex min-w-0 gap-1 text-[11.5px] text-faint">
+            <div className="mt-1.5 flex min-w-0 gap-1 text-xs text-faint">
               <span id="start-quick-destination-label" className="shrink-0">Folder and repository</span>
               <output aria-labelledby="start-quick-destination-label" className="min-w-0 truncate font-mono text-muted-foreground" title={target ?? undefined} data-testid="start-destination">
                 {target ? homeShort(target, home) : "…"}
@@ -603,18 +587,18 @@ function QuickStartDialog() {
         </div>
 
         <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-hairline px-5 py-4">
-          <button type="button" className="text-left text-[11.5px] text-faint underline-offset-2 outline-none hover:text-muted-foreground hover:underline focus-visible:underline" onClick={() => { close(); requestTemplateSettings(); }}>
-            Add your own templates in Settings › Project templates
+          <button type="button" className="text-left text-xs text-faint underline-offset-2 outline-none hover:text-muted-foreground hover:underline focus-visible:underline" onClick={() => { close(); requestTemplateSettings(); }}>
+            Add your own templates in Settings › Projects
           </button>
           <div className="ml-auto flex gap-2">
             <Button variant="outline" className="text-muted-foreground" onClick={close} aria-keyshortcuts="Escape">
               Cancel
-              <Kbd className="ml-1">esc</Kbd>
+              <Kbd className="ml-1 text-xs">esc</Kbd>
             </Button>
             <Button variant="accent" className="font-semibold" disabled={!ready} onClick={() => void create()} aria-keyshortcuts="Meta+Enter">
               {busy ? <Loader2 className="animate-spin" /> : null}
               Create
-              <Kbd className="ml-1 bg-accent-foreground/15 text-accent-foreground">{bindingText("mod+enter")}</Kbd>
+              <Kbd className="ml-1 bg-accent-foreground/15 text-xs text-accent-foreground">{bindingText("mod+enter")}</Kbd>
             </Button>
           </div>
         </div>

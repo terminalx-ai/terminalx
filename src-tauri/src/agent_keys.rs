@@ -50,6 +50,15 @@
 //! A tab keeps the login it started with until it is restarted: what each
 //! running agent launched with is recorded ([`record_launch`]) so Settings can
 //! say how many keep an older one and restart exactly those.
+//!
+//! Agent accounts (#980, `agent_accounts`): the saved key is one account of
+//! kind `apiKey` (id [`crate::agent_accounts::SAVED_KEY`]), beside This Mac's
+//! login (`local`) and any accounts added since, each with a key of its own
+//! (its own Keychain item, same service) or a directory of its own. The index
+//! keeps them per agent with the default account and the project defaults;
+//! a field this build does not know, at either level, is kept on save. With
+//! no account added and no default chosen, everything here behaves exactly
+//! as before: `mode` decides, and [`launch_grant`] is what it always was.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -58,6 +67,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use crate::agent_route_check::{CredentialHeader, ModelList};
@@ -196,40 +206,69 @@ pub struct ShellSource {
     pub file: Option<String>,
 }
 
+/// A key saved in the Keychain: which item holds it, never any of it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Saved {
-    revision: String,
-    saved_at: String,
+pub(crate) struct Saved {
+    pub(crate) revision: String,
+    pub(crate) saved_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    from_shell: Option<ShellSource>,
+    pub(crate) from_shell: Option<ShellSource>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ShellOffer {
+pub(crate) enum ShellOffer {
     Imported,
     Dismissed,
 }
 
+/// One agent's part of `agent-logins.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Entry {
+pub(crate) struct Entry {
     #[serde(default)]
-    mode: Mode,
+    pub(crate) mode: Mode,
+    /// The PRO-306 key: the account [`crate::agent_accounts::SAVED_KEY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    key: Option<Saved>,
+    pub(crate) key: Option<Saved>,
     /// Codex's "Custom provider": where the key is sent instead of OpenAI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    base_url: Option<String>,
+    pub(crate) base_url: Option<String>,
     /// The login shell's key is offered once: imported, or declined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    shell_offer: Option<ShellOffer>,
+    pub(crate) shell_offer: Option<ShellOffer>,
+    /// The saved key's label, once the person has given it one (#980).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key_label: Option<String>,
+    /// The accounts added besides `local` and the saved key (#980).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) accounts: Vec<crate::agent_accounts::Stored>,
+    /// The account new tabs use, once one was chosen in Settings (#980).
+    /// Without it `mode` decides, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) default_account: Option<String>,
+    /// Project id → the account its new tabs use (#980). Local only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) project_defaults: BTreeMap<String, String>,
+    /// Switching accounts automatically (#981). Off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_switch: Option<crate::agent_accounts::auto_switch::Setting>,
+    /// What a newer build wrote here: kept as it is.
+    #[serde(flatten)]
+    pub(crate) rest: Map<String, Value>,
 }
 
 impl Entry {
     /// What a tab launched now runs with, as far as telling two apart goes.
     fn stamp(&self) -> String {
+        match &self.default_account {
+            Some(_) => self.stamp_on(&crate::agent_accounts::agent_default(self)),
+            None => self.legacy_stamp(),
+        }
+    }
+
+    fn legacy_stamp(&self) -> String {
         match self.mode {
             Mode::ApiKey => format!(
                 "api_key:{}:{}",
@@ -239,8 +278,43 @@ impl Entry {
             mode => mode.name().to_string(),
         }
     }
+
+    /// What a tab launched now on account `id` runs with.
+    fn stamp_on(&self, id: &str) -> String {
+        use crate::agent_accounts::Login;
+        match crate::agent_accounts::login_of(self, id) {
+            Login::Local => local_entry(self).legacy_stamp(),
+            Login::Key { id, saved } if id == crate::agent_accounts::SAVED_KEY => format!("api_key:{}:{}", saved.revision, self.base_url.as_deref().unwrap_or_default()),
+            Login::Key { id, saved } => format!("key:{id}:{}:{}", saved.revision, self.base_url.as_deref().unwrap_or_default()),
+            Login::Subscription { id } => format!("account:{id}"),
+        }
+    }
+
+    /// Every key this agent's accounts have saved, by revision.
+    pub(crate) fn key_revisions(&self) -> impl Iterator<Item = &str> {
+        self.key.iter().chain(self.accounts.iter().filter_map(|account| account.key.as_ref())).map(|saved| saved.revision.as_str())
+    }
+
+    /// A choice made in the PRO-306 settings (key saved or removed, mode
+    /// set): `mode` decides again, as it did before accounts.
+    fn follow_mode(&mut self) {
+        self.default_account = None;
+    }
 }
 
+/// `entry` as This Mac's own login runs: a key chosen as the agent's
+/// default does not follow a tab started on `local` on purpose.
+fn local_entry(entry: &Entry) -> Entry {
+    let mode = if entry.mode == Mode::ApiKey { Mode::Subscription } else { entry.mode };
+    Entry { mode, base_url: entry.base_url.clone(), ..Default::default() }
+}
+
+/// `entry` as a key account runs: its key at the agent's address.
+fn key_entry(entry: &Entry) -> Entry {
+    Entry { mode: Mode::ApiKey, base_url: entry.base_url.clone(), ..Default::default() }
+}
+
+#[cfg(any(unix, test))]
 type Index = BTreeMap<String, Entry>;
 
 fn account(agent: Agent, revision: &str) -> String {
@@ -270,31 +344,51 @@ pub fn masked(key: &str) -> String {
     format!("{prefix}{}{tail}", "•".repeat(24))
 }
 
-struct Store<'a> {
-    root: PathBuf,
-    secrets: &'a dyn SecretStore,
+/// The index and the Keychain, as one agent login store.
+pub(crate) struct Store<'a> {
+    pub(crate) root: PathBuf,
+    pub(crate) secrets: &'a dyn SecretStore,
+}
+
+fn unreadable() -> anyhow::Error {
+    anyhow::anyhow!("Could not read the agent login settings.")
 }
 
 impl<'a> Store<'a> {
-    fn index(&self) -> Result<Index> {
-        // Never the parser's error: a hand-edited file might hold a key.
-        crate::store::read_json(&self.root.join(INDEX))
-            .map(Option::unwrap_or_default)
-            .map_err(|_| anyhow::anyhow!("Could not read the agent login settings."))
+    #[cfg(test)]
+    pub(crate) fn new(root: PathBuf, secrets: &'a dyn SecretStore) -> Self {
+        Self { root, secrets }
     }
 
-    fn entry(&self, agent: Agent) -> Result<Entry> {
-        Ok(self.index()?.remove(agent.id()).unwrap_or_default())
+    /// The file as it is, every key kept: an agent this build does not know,
+    /// or anything else a newer build put at the top, survives a save.
+    fn raw(&self) -> Result<Map<String, Value>> {
+        // Never the parser's error: a hand-edited file might hold a key.
+        crate::store::read_json(&self.root.join(INDEX)).map(Option::unwrap_or_default).map_err(|_| unreadable())
+    }
+
+    fn parse(value: Option<&Value>) -> Result<Entry> {
+        value.map(|value| serde_json::from_value(value.clone()).map_err(|_| unreadable())).transpose().map(Option::unwrap_or_default)
+    }
+
+    #[cfg(any(unix, test))]
+    pub(crate) fn index(&self) -> Result<Index> {
+        let raw = self.raw()?;
+        Agent::ALL.into_iter().filter_map(|agent| raw.get(agent.id()).map(|value| Ok((agent.id().to_string(), Self::parse(Some(value))?)))).collect()
+    }
+
+    pub(crate) fn entry(&self, agent: Agent) -> Result<Entry> {
+        Self::parse(self.raw()?.get(agent.id()))
     }
 
     /// Change one agent's entry under the file lock. `change` may refuse.
-    fn update<T>(&self, agent: Agent, change: impl FnOnce(&mut Entry) -> Result<T>) -> Result<T> {
+    pub(crate) fn update<T>(&self, agent: Agent, change: impl FnOnce(&mut Entry) -> Result<T>) -> Result<T> {
         crate::store::transaction::run(&self.root.join(LOCK), Duration::from_secs(10), || {
-            let mut index = self.index()?;
-            let mut entry = index.remove(agent.id()).unwrap_or_default();
+            let mut raw = self.raw()?;
+            let mut entry = Self::parse(raw.get(agent.id()))?;
             let out = change(&mut entry)?;
-            index.insert(agent.id().to_string(), entry);
-            crate::store::write_json(&self.root.join(INDEX), &index).map_err(|_| anyhow::anyhow!("Could not save the agent login settings. Nothing changed."))?;
+            raw.insert(agent.id().to_string(), serde_json::to_value(&entry).map_err(|_| anyhow::anyhow!("Could not save the agent login settings. Nothing changed."))?);
+            crate::store::write_json(&self.root.join(INDEX), &raw).map_err(|_| anyhow::anyhow!("Could not save the agent login settings. Nothing changed."))?;
             Ok(out)
         })
     }
@@ -311,6 +405,7 @@ impl<'a> Store<'a> {
         let committed = self.update(agent, |entry| {
             let old = entry.key.replace(Saved { revision: revision.clone(), saved_at: chrono::Utc::now().to_rfc3339(), from_shell });
             entry.mode = Mode::ApiKey;
+            entry.follow_mode();
             if imported {
                 entry.shell_offer = Some(ShellOffer::Imported);
             }
@@ -333,9 +428,12 @@ impl<'a> Store<'a> {
     /// Forget the key: new tabs go back to the subscription login, and the
     /// Keychain item is deleted. The index lets go of it first, so a failed
     /// delete leaves an item nothing uses rather than a login that is gone.
-    fn remove_key(&self, agent: Agent) -> Result<()> {
+    pub(crate) fn remove_key(&self, agent: Agent) -> Result<()> {
         let old = self.update(agent, |entry| {
             entry.mode = Mode::Subscription;
+            entry.follow_mode();
+            entry.key_label = None;
+            entry.project_defaults.retain(|_, id| id != crate::agent_accounts::SAVED_KEY);
             Ok(entry.key.take())
         })?;
         if let Some(old) = old {
@@ -349,6 +447,7 @@ impl<'a> Store<'a> {
         self.update(agent, |entry| {
             ensure!(mode != Mode::ApiKey || entry.key.is_some(), "Save a key first.");
             entry.mode = mode;
+            entry.follow_mode();
             Ok(())
         })
     }
@@ -390,21 +489,51 @@ impl<'a> Store<'a> {
         Ok(key)
     }
 
-    /// The key of `revision`, for the runtime, only while it is the current one.
+    /// The key of `revision`, for the runtime, only while one of the
+    /// agent's accounts has it saved.
     fn snapshot(&self, agent: Agent, revision: &str) -> Result<Zeroizing<String>> {
-        let current = self.entry(agent)?.key.map(|saved| saved.revision);
-        ensure!(current.as_deref() == Some(revision), "The key changed.");
+        let current = |store: &Self| store.entry(agent).map(|entry| entry.key_revisions().any(|saved| saved == revision));
+        ensure!(current(self)?, "The key changed.");
         let key = self.item(agent, revision)?;
-        ensure!(self.entry(agent)?.key.map(|saved| saved.revision).as_deref() == Some(revision), "The key changed.");
+        ensure!(current(self)?, "The key changed.");
         Ok(key)
+    }
+
+    /// Store `key` as a new `apiKey` account of `agent`, labelled `label`
+    /// (#980). The Keychain write comes first, outside the lock; the index
+    /// names the account only once the key is stored.
+    pub(crate) fn add_key_account(&self, agent: Agent, key: &str, label: Option<String>) -> Result<String> {
+        validate_key(key)?;
+        let revision = uuid::Uuid::new_v4().to_string();
+        self.secrets.set(SERVICE, &account(agent, &revision), key.as_bytes())
+            .map_err(|_| anyhow::anyhow!("Could not save the key to the Keychain. Nothing changed."))?;
+        let id = crate::agent_accounts::new_id();
+        let stored = crate::agent_accounts::Stored::key(&id, label, Saved { revision: revision.clone(), saved_at: chrono::Utc::now().to_rfc3339(), from_shell: None });
+        match self.update(agent, |entry| {
+            entry.accounts.push(stored);
+            Ok(())
+        }) {
+            Ok(()) => Ok(id),
+            Err(error) => {
+                let _ = self.secrets.delete(SERVICE, &account(agent, &revision));
+                Err(error)
+            }
+        }
+    }
+
+    /// Forget an `apiKey` account's key: the index lets go first, then the
+    /// Keychain item is deleted.
+    pub(crate) fn delete_key_item(&self, agent: Agent, revision: &str) -> Result<()> {
+        self.secrets.delete(SERVICE, &account(agent, revision))
+            .map_err(|_| anyhow::anyhow!("TerminalX no longer uses the key, but could not delete it from the Keychain. Delete the item {SERVICE} in Keychain Access."))
     }
 }
 
-fn store() -> Result<Store<'static>> {
+pub(crate) fn store() -> Result<Store<'static>> {
     Ok(Store { root: crate::store::root()?, secrets: &crate::keychain::Keychain })
 }
 
-fn agent_of(harness: &str) -> Result<Agent> {
+pub(crate) fn agent_of(harness: &str) -> Result<Agent> {
     Agent::of(harness).with_context(|| format!("{harness} does not take an API key in Settings."))
 }
 
@@ -748,10 +877,10 @@ pub(crate) fn desktop_snapshot(harness: &str, revision: &str) -> Result<serde_js
     Ok(serde_json::json!({ "revision": revision, "key": key.as_str() }))
 }
 
-/// The keys a runtime holds in memory, by agent, with their revision.
+/// The keys a runtime holds in memory, by agent and revision.
 #[derive(Default)]
 struct Keys {
-    held: Mutex<HashMap<Agent, (String, Zeroizing<String>)>>,
+    held: Mutex<HashMap<(Agent, String), Zeroizing<String>>>,
     filled: Condvar,
 }
 
@@ -761,24 +890,56 @@ fn keys() -> &'static Keys {
     KEYS.get_or_init(Default::default)
 }
 
+/// Keys a launch asked for by account (#980) that no default names: held
+/// from then on, while their account keeps them.
+fn requested() -> &'static Mutex<std::collections::HashSet<(Agent, String)>> {
+    static REQUESTED: OnceLock<Mutex<std::collections::HashSet<(Agent, String)>>> = OnceLock::new();
+    REQUESTED.get_or_init(Default::default)
+}
+
+/// The keys new tabs may use: each agent's default account's, each project
+/// default's, and those a launch asked for. A key kept for later while
+/// another login is chosen is not among them.
+#[cfg(any(unix, test))]
+fn wanted(index: &Index) -> Vec<(Agent, String)> {
+    let asked = requested().lock().unwrap().clone();
+    let mut wanted = Vec::new();
+    for agent in Agent::ALL {
+        let Some(entry) = index.get(agent.id()) else { continue };
+        let defaults = std::iter::once(crate::agent_accounts::agent_default(entry)).chain(entry.project_defaults.values().cloned());
+        for id in defaults {
+            if let crate::agent_accounts::Login::Key { saved, .. } = crate::agent_accounts::login_of(entry, &id) {
+                wanted.push((agent, saved.revision.clone()));
+            }
+        }
+        for revision in entry.key_revisions() {
+            if asked.contains(&(agent, revision.to_string())) {
+                wanted.push((agent, revision.to_string()));
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+    wanted
+}
+
 impl Keys {
-    /// Bring the keys in line with the index: drop what is no longer current
-    /// or no longer used, fetch what is missing. Only a key new tabs use is
-    /// held: one kept for later while the subscription is chosen stays in
-    /// the Keychain alone. No lock is held while fetching.
+    /// Bring the keys in line with the index: drop what is no longer saved
+    /// or no longer wanted, fetch what is missing. No lock is held while
+    /// fetching.
+    #[cfg(any(unix, test))]
     fn refresh(&self, index: &Index, fetch: impl Fn(Agent, &str) -> Result<Zeroizing<String>>) {
-        let wanted: Vec<(Agent, String)> = Agent::ALL.into_iter()
-            .filter_map(|agent| index.get(agent.id()).filter(|entry| entry.mode == Mode::ApiKey).and_then(|entry| entry.key.as_ref()).map(|saved| (agent, saved.revision.clone())))
-            .collect();
+        requested().lock().unwrap().retain(|(agent, revision)| index.get(agent.id()).is_some_and(|entry| entry.key_revisions().any(|saved| saved == revision)));
+        let wanted = wanted(index);
         let missing: Vec<(Agent, String)> = {
             let mut held = self.held.lock().unwrap();
-            held.retain(|agent, (revision, _)| wanted.iter().any(|(want, current)| want == agent && current == revision));
-            wanted.into_iter().filter(|(agent, _)| !held.contains_key(agent)).collect()
+            held.retain(|key, _| wanted.contains(key));
+            wanted.into_iter().filter(|key| !held.contains_key(key)).collect()
         };
         for (agent, revision) in missing {
             if let Ok(key) = fetch(agent, &revision) {
                 if validate_key(&key).is_ok() {
-                    self.held.lock().unwrap().insert(agent, (revision, key));
+                    self.held.lock().unwrap().insert((agent, revision), key);
                     self.filled.notify_all();
                 }
             }
@@ -790,10 +951,8 @@ impl Keys {
         let deadline = Instant::now() + wait;
         let mut held = self.held.lock().unwrap();
         loop {
-            if let Some((current, key)) = held.get(&agent) {
-                if current == revision {
-                    return Some(key.clone());
-                }
+            if let Some(key) = held.get(&(agent, revision.to_string())) {
+                return Some(key.clone());
             }
             let left = deadline.checked_duration_since(Instant::now())?;
             held = self.filled.wait_timeout(held, left).unwrap().0;
@@ -814,7 +973,7 @@ pub(crate) fn start(lifetime: &std::sync::Arc<crate::local_runtime::Lifetime>) -
             }
             if lifetime.window.available() {
                 if let Ok(index) = store().and_then(|store| store.index()) {
-                    failures.retain(|revision, _| index.values().any(|entry| entry.key.as_ref().is_some_and(|key| &key.revision == revision)));
+                    failures.retain(|revision, _| index.values().any(|entry| entry.key_revisions().any(|saved| saved == revision)));
                     let failed = Mutex::new(Vec::new());
                     keys().refresh(&index, |agent, revision| {
                         if failures.get(revision).is_some_and(|(after, _)| Instant::now() < *after) {
@@ -883,7 +1042,53 @@ fn grant_for(agent: Agent, entry: &Entry, key: Option<Zeroizing<String>>) -> cra
     }
 }
 
+#[cfg(test)]
 fn launch_from(store: &Store<'_>, keys: &Keys, agent: Agent, wait: Duration) -> Result<crate::cloud_grants::LaunchGrant> {
+    launch_on(store, keys, agent, Choice::default(), wait, |_, _| bail!("no account home in this launch"))
+}
+
+/// Which account a launch asks for: a session's own choice, its project's.
+/// Neither, or one this Mac does not know: the agent's default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Choice<'a> {
+    pub account: Option<&'a str>,
+    pub project: Option<&'a str>,
+}
+
+/// What would outrank an added account's own login, removed after the
+/// profile: keys and tokens in the environment, a cloud provider switch,
+/// and Claude Code's override of where its Keychain item is looked up.
+fn account_shadowing(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Claude => &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"],
+        // Codex's built-in provider takes its login from CODEX_HOME alone.
+        Agent::Codex => &[],
+    }
+}
+
+/// The variable that points an agent at an account's directory.
+pub fn home_variable(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Claude => "CLAUDE_CONFIG_DIR",
+        Agent::Codex => "CODEX_HOME",
+    }
+}
+
+/// A tab of `agent` on added subscription account `id`, whose directory
+/// (`CLAUDE_CONFIG_DIR`) or managed home (`CODEX_HOME`) is `home`.
+fn subscription_grant(agent: Agent, id: &str, home: &Path) -> crate::cloud_grants::LaunchGrant {
+    let home = home.to_string_lossy().into_owned();
+    let mut env = vec![(home_variable(agent).to_string(), Some(home.clone()))];
+    env.extend(account_shadowing(agent).iter().map(|name| (name.to_string(), None)));
+    crate::cloud_grants::LaunchGrant::local(env, None).on_account(id, vec![(home_variable(agent).to_string(), home)])
+}
+
+/// The grant for a launch of `agent` that `choice` asks for. `account_home`
+/// builds an added subscription account's home (Claude Code's directory,
+/// with its shared links and MCP servers; Codex's managed home) from its
+/// directory and returns what the agent's variable is set to.
+fn launch_on(store: &Store<'_>, keys: &Keys, agent: Agent, choice: Choice<'_>, wait: Duration, account_home: impl FnOnce(&Path, &str) -> Result<PathBuf>) -> Result<crate::cloud_grants::LaunchGrant> {
+    use crate::agent_accounts::Login;
     let entry = match store.entry(agent) {
         Ok(entry) => entry,
         Err(error) => {
@@ -891,27 +1096,57 @@ fn launch_from(store: &Store<'_>, keys: &Keys, agent: Agent, wait: Duration) -> 
             Entry::default()
         }
     };
-    if entry.mode != Mode::ApiKey {
-        return Ok(grant_for(agent, &entry, None));
+    let id = crate::agent_accounts::choose(&entry, choice.account, choice.project);
+    match crate::agent_accounts::login_of(&entry, &id) {
+        // As before #980 when nothing else was chosen: the mode's own grant.
+        Login::Local => Ok(grant_for(agent, &local_entry(&entry), None).on_account(crate::agent_accounts::LOCAL, Vec::new())),
+        Login::Key { id, saved } => {
+            if choice.account == Some(id.as_str()) {
+                requested().lock().unwrap().insert((agent, saved.revision.clone()));
+            }
+            let key = keys.get(agent, &saved.revision, wait).with_context(|| format!(
+                "{} is set to use an API key, but TerminalX could not read it from the Keychain. Open TerminalX on this Mac (and unlock the Keychain if it asks), then start the tab again, or choose the subscription login in Settings → Agents.",
+                agent.label()
+            ))?;
+            Ok(grant_for(agent, &key_entry(&entry), Some(key)).on_account(&id, Vec::new()))
+        }
+        Login::Subscription { id } => {
+            let dir = crate::agent_accounts::account_dir(&store.root, agent, &id);
+            ensure!(dir.is_dir(), "This {} account's sign-in is no longer on this Mac. Sign in again in Settings → Agents, or choose another account.", agent.label());
+            let home = account_home(&dir, &id)?;
+            Ok(subscription_grant(agent, &id, &home))
+        }
     }
-    let revision = entry.key.as_ref().map(|saved| saved.revision.clone()).unwrap_or_default();
-    let key = keys.get(agent, &revision, wait).with_context(|| format!(
-        "{} is set to use an API key, but TerminalX could not read it from the Keychain. Open TerminalX on this Mac (and unlock the Keychain if it asks), then start the tab again, or choose the subscription login in Settings → Agents.",
-        agent.label()
-    ))?;
-    Ok(grant_for(agent, &entry, Some(key)))
 }
 
 /// Everything a new CLI session of `harness` in `cwd` takes for its login:
 /// a cloud workspace's grant there, this Mac's agent login settings here.
 /// A tab set to use a key that this runtime does not have is refused rather
 /// than started on another login.
-pub fn launch_grant(harness: &str, cwd: &Path) -> Result<crate::cloud_grants::LaunchGrant> {
+///
+/// On the account `choice` asks for (#980): the grant says
+/// which account it resolved to (`account`), sets `CLAUDE_CONFIG_DIR` or
+/// `CODEX_HOME` for an added subscription account (and names it again in
+/// `after_profile`, for a profile that exports its own), and unsets what
+/// would outrank that login. A cloud workspace ignores the choice.
+pub fn launch_grant_on(harness: &str, cwd: &Path, choice: Choice<'_>) -> Result<crate::cloud_grants::LaunchGrant> {
     if crate::cloud_grants::installed().is_some() {
         return Ok(crate::cloud_grants::launch_grant(harness, cwd));
     }
     let Some(agent) = Agent::of(harness) else { return Ok(Default::default()) };
-    launch_from(&store()?, keys(), agent, LAUNCH_WAIT)
+    let store = store()?;
+    let root = store.root.clone();
+    launch_on(&store, keys(), agent, choice, LAUNCH_WAIT, |dir, id| match agent {
+        Agent::Claude => {
+            // Each start: the shared links, and the person's MCP servers.
+            crate::agent_accounts::claude_dir::prepare(dir, &crate::agent_accounts::claude_dir::Person::current()?)?;
+            Ok(dir.to_path_buf())
+        }
+        Agent::Codex => {
+            let exe = std::env::current_exe().context("locate this binary for the CLI's hooks")?;
+            Ok(crate::harness::codex::home::prepare_account(&cwd.to_string_lossy(), &exe, &root, id)?.home)
+        }
+    })
 }
 
 /// What a running agent was launched with.
@@ -919,6 +1154,10 @@ struct Launched {
     agent: Agent,
     session_id: String,
     tab_id: String,
+    /// The account it runs on (#980).
+    account: String,
+    /// Chosen for this tab, rather than the agent's default at the time.
+    chosen: bool,
     stamp: String,
 }
 
@@ -927,22 +1166,38 @@ fn launches() -> &'static Mutex<HashMap<String, Launched>> {
     LAUNCHES.get_or_init(Default::default)
 }
 
+fn current_entry(agent: Agent) -> Entry {
+    store().and_then(|store| store.entry(agent)).unwrap_or_default()
+}
+
 /// Whether new tabs of `harness` use a key saved here: the agent is then
 /// signed in, whatever its own login says. From the index alone, so it
 /// needs no Keychain and works in the runtime as in the desktop.
 pub fn uses_saved_key(harness: &str) -> bool {
     let Some(agent) = Agent::of(harness) else { return false };
-    store().and_then(|store| store.entry(agent)).is_ok_and(|entry| entry.mode == Mode::ApiKey && entry.key.is_some())
+    store().and_then(|store| store.entry(agent)).is_ok_and(|entry| {
+        matches!(crate::agent_accounts::login_of(&entry, &crate::agent_accounts::agent_default(&entry)), crate::agent_accounts::Login::Key { .. })
+    })
 }
 
-fn current_stamp(agent: Agent) -> String {
-    store().and_then(|store| store.entry(agent)).unwrap_or_default().stamp()
-}
-
-/// The agent of tab `session_id`/`tab_id` started under `launch`, now.
+/// The agent of tab `session_id`/`tab_id` started under `launch`, now, on
+/// the agent's default account.
 pub fn record_launch(launch: &str, harness: &str, session_id: &str, tab_id: &str) {
     let Some(agent) = Agent::of(harness) else { return };
-    launches().lock().unwrap().insert(launch.to_string(), Launched { agent, session_id: session_id.into(), tab_id: tab_id.into(), stamp: current_stamp(agent) });
+    let entry = current_entry(agent);
+    let account = crate::agent_accounts::agent_default(&entry);
+    launches().lock().unwrap().insert(launch.to_string(), Launched { agent, session_id: session_id.into(), tab_id: tab_id.into(), account, chosen: false, stamp: entry.stamp() });
+}
+
+/// The agent of tab `session_id`/`tab_id` started under `launch`, now, on
+/// account `account`, as its grant resolved it (#980). The launch piece
+/// calls it where `record_launch` is called today.
+#[allow(dead_code)]
+pub fn record_launch_on(launch: &str, harness: &str, session_id: &str, tab_id: &str, account: &str) {
+    let Some(agent) = Agent::of(harness) else { return };
+    let entry = current_entry(agent);
+    let stamp = entry.stamp_on(account);
+    launches().lock().unwrap().insert(launch.to_string(), Launched { agent, session_id: session_id.into(), tab_id: tab_id.into(), account: account.into(), chosen: true, stamp });
 }
 
 /// The agent under `launch` has ended.
@@ -950,23 +1205,33 @@ pub fn forget_launch(launch: &str) {
     launches().lock().unwrap().remove(launch);
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningTab {
     pub session_id: String,
     pub tab_id: String,
     /// It started with the login new tabs get now.
     pub current: bool,
+    /// The account it runs on (#980).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// The tabs whose `harness` agent is running, and whether each started with
-/// the login new tabs get now.
+/// the login new tabs get now: the agent's default, or for a tab started on
+/// an account of its own, what that account gives now.
 pub fn running(harness: &str) -> Vec<RunningTab> {
     let Some(agent) = Agent::of(harness) else { return Vec::new() };
-    let now = current_stamp(agent);
+    let entry = current_entry(agent);
+    let now = entry.stamp();
     let mut tabs: Vec<RunningTab> = launches().lock().unwrap().values()
         .filter(|launched| launched.agent == agent)
-        .map(|launched| RunningTab { session_id: launched.session_id.clone(), tab_id: launched.tab_id.clone(), current: launched.stamp == now })
+        .map(|launched| RunningTab {
+            session_id: launched.session_id.clone(),
+            tab_id: launched.tab_id.clone(),
+            current: if launched.chosen { launched.stamp == entry.stamp_on(&launched.account) } else { launched.stamp == now },
+            account: Some(launched.account.clone()),
+        })
         .collect();
     tabs.sort_by(|a, b| (&a.session_id, &a.tab_id).cmp(&(&b.session_id, &b.tab_id)));
     tabs.dedup_by(|a, b| a.session_id == b.session_id && a.tab_id == b.tab_id);
@@ -975,7 +1240,7 @@ pub fn running(harness: &str) -> Vec<RunningTab> {
 
 /// Save `key` for `harness` as the desktop does, into `secrets`, and give
 /// this process's runtime memory the current keys, as its desktop would.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn save_for_test(harness: &str, key: &str, secrets: &crate::keychain::testing::MemorySecrets) {
     let store = Store { root: crate::store::root().unwrap(), secrets };
     store.save_key(Agent::of(harness).unwrap(), key, None).unwrap();
@@ -1118,7 +1383,7 @@ mod tests {
     }
 
     fn entry_with_key(mode: Mode, base_url: Option<&str>) -> Entry {
-        Entry { mode, key: Some(Saved { revision: "r1".into(), saved_at: String::new(), from_shell: None }), base_url: base_url.map(str::to_string), shell_offer: None }
+        Entry { mode, key: Some(Saved { revision: "r1".into(), saved_at: String::new(), from_shell: None }), base_url: base_url.map(str::to_string), ..Default::default() }
     }
 
     fn env_of(grant: &crate::cloud_grants::LaunchGrant) -> (Vec<(String, String)>, Vec<String>) {
@@ -1230,6 +1495,91 @@ mod tests {
         store.set_mode(Agent::Claude, Mode::ApiKey).unwrap();
         keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
         assert_eq!(env_of(&launch_from(&store, &keys, Agent::Claude, Duration::ZERO).unwrap()).0, vec![(KEY_ENV.to_string(), KEY.to_string())]);
+    }
+
+    /// An added subscription account in `store`, with its directory made.
+    fn added_account(store: &Store<'_>, agent: Agent, email: &str) -> String {
+        let id = crate::agent_accounts::new_id();
+        let dir = crate::agent_accounts::account_dir(&store.root, agent, &id);
+        crate::agent_accounts::create_private(&dir).unwrap();
+        let identity = crate::agent_accounts::Identity { email: Some(email.into()), plan: Some("Max".into()), ..Default::default() };
+        assert_eq!(crate::agent_accounts::add_signed_in(store, agent, &id, &identity, None, false).unwrap(), crate::agent_accounts::Added::New(id.clone()));
+        id
+    }
+
+    #[test]
+    fn a_launch_on_an_added_account_points_the_agent_at_its_directory_and_unsets_what_outranks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = store(dir.path(), &secrets);
+        let keys = Keys::default();
+        let claude = added_account(&store, Agent::Claude, "bo@example.com");
+        let codex = added_account(&store, Agent::Codex, "bo@example.com");
+        let claude_dir = crate::agent_accounts::account_dir(dir.path(), Agent::Claude, &claude);
+        let codex_home = crate::agent_accounts::account_dir(dir.path(), Agent::Codex, &codex).join("home");
+
+        let built = Mutex::new(Vec::new());
+        let grant = launch_on(&store, &keys, Agent::Claude, Choice { account: Some(&claude), project: None }, Duration::ZERO, |at, id| {
+            built.lock().unwrap().push((at.to_path_buf(), id.to_string()));
+            Ok(at.to_path_buf())
+        }).unwrap();
+        assert_eq!(built.into_inner().unwrap(), vec![(claude_dir.clone(), claude.clone())]);
+        let (set, unset) = env_of(&grant);
+        assert_eq!(set, vec![("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned())]);
+        for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK"] {
+            assert!(unset.contains(&name.to_string()), "{name} is not unset: {unset:?}");
+        }
+        assert_eq!(grant.account.as_deref(), Some(claude.as_str()));
+        assert_eq!(grant.after_profile, vec![("CLAUDE_CONFIG_DIR".to_string(), claude_dir.to_string_lossy().into_owned())], "set again after a profile that exports its own");
+        assert!(grant.route.is_none(), "no key, no helper");
+
+        let grant = launch_on(&store, &keys, Agent::Codex, Choice { account: Some(&codex), project: None }, Duration::ZERO, |_, _| Ok(codex_home.clone())).unwrap();
+        assert_eq!(env_of(&grant).0, vec![("CODEX_HOME".to_string(), codex_home.to_string_lossy().into_owned())]);
+        assert_eq!(grant.account.as_deref(), Some(codex.as_str()));
+
+        // No choice, a project default, an agent default, an unknown id.
+        let none = launch_on(&store, &keys, Agent::Claude, Choice::default(), Duration::ZERO, |_, _| panic!("local needs no account home")).unwrap();
+        assert!(none.env.is_empty() && none.route.is_none(), "with only This Mac's login nothing changes");
+        assert_eq!(none.account.as_deref(), Some(crate::agent_accounts::LOCAL));
+        crate::agent_accounts::set_default_in(&store, Agent::Claude, Some(&claude), Some("project-1")).unwrap();
+        let project = launch_on(&store, &keys, Agent::Claude, Choice { account: None, project: Some("project-1") }, Duration::ZERO, |at, _| Ok(at.to_path_buf())).unwrap();
+        assert_eq!(project.account.as_deref(), Some(claude.as_str()));
+        let other_project = launch_on(&store, &keys, Agent::Claude, Choice { account: None, project: Some("project-2") }, Duration::ZERO, |_, _| panic!("local")).unwrap();
+        assert_eq!(other_project.account.as_deref(), Some(crate::agent_accounts::LOCAL));
+        let unknown = launch_on(&store, &keys, Agent::Claude, Choice { account: Some("gone0000"), project: Some("project-1") }, Duration::ZERO, |at, _| Ok(at.to_path_buf())).unwrap();
+        assert_eq!(unknown.account.as_deref(), Some(claude.as_str()), "an unknown id falls back to the project default");
+
+        // Its directory deleted outside the app: refused, not started on another login.
+        std::fs::remove_dir_all(&claude_dir).unwrap();
+        let error = launch_on(&store, &keys, Agent::Claude, Choice { account: Some(&claude), project: None }, Duration::ZERO, |at, _| Ok(at.to_path_buf())).err().unwrap().to_string();
+        assert!(error.contains("Sign in again"), "{error}");
+    }
+
+    #[test]
+    fn several_keys_are_accounts_of_their_own_and_a_launch_gets_the_one_it_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = MemorySecrets::default();
+        let store = store(dir.path(), &secrets);
+        let keys = Keys::default();
+        store.save_key(Agent::Claude, KEY, None).unwrap();
+        let second = store.add_key_account(Agent::Claude, "sk-ant-api03-a-second-key-0000000000000000000000", Some("Work".into())).unwrap();
+        let entry = store.entry(Agent::Claude).unwrap();
+        let revisions: Vec<&str> = entry.key_revisions().collect();
+        assert_eq!(revisions.len(), 2, "each key its own Keychain item");
+        for revision in &revisions {
+            assert!(secrets.stored(SERVICE, &format!("claude/{revision}")).is_some());
+        }
+        // The saved key is still the default, as before.
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        assert_eq!(env_of(&launch_from(&store, &keys, Agent::Claude, Duration::ZERO).unwrap()).0[0].1, KEY);
+        // A launch asking for the second one gets it once the runtime has it.
+        let refused = launch_on(&store, &keys, Agent::Claude, Choice { account: Some(&second), project: None }, Duration::ZERO, |_, _| unreachable!()).err().unwrap().to_string();
+        assert!(!refused.contains("second-key"));
+        keys.refresh(&store.index().unwrap(), |agent, wanted| store.snapshot(agent, wanted));
+        let grant = launch_on(&store, &keys, Agent::Claude, Choice { account: Some(&second), project: None }, Duration::ZERO, |_, _| unreachable!()).unwrap();
+        assert_eq!(env_of(&grant).0, vec![(KEY_ENV.to_string(), "sk-ant-api03-a-second-key-0000000000000000000000".to_string())]);
+        assert_eq!(grant.account.as_deref(), Some(second.as_str()));
+        assert!(!everything_written(dir.path()).contains("a-second-key"), "the index holds no key");
     }
 
     #[test]

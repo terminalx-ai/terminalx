@@ -11,18 +11,12 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::machine_wire::MachineOs;
+pub use crate::remote::machine_client::MachineRoute;
+use crate::remote::machine_client::{RelayInfo, RouteUsed};
 
 const FILE: &str = "machines.json";
 const LOCK: &str = "machines.lock";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
-
-/// How the operating computer reaches a machine.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum MachineRoute {
-    RelayAndNearby,
-    ThisNetwork,
-}
 
 /// One paired machine (`PairedMachine` in src/types/machines.ts).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +32,18 @@ pub struct PairedMachine {
     pub route: MachineRoute,
     pub paired_at: i64,
     pub last_seen_at: Option<i64>,
+    /// The route that last worked; null before the first connection (PRO-345).
+    #[serde(default)]
+    pub last_route: Option<RouteUsed>,
+    /// Where this computer reaches the machine through the relay, for the
+    /// account in `userId`; null without a relay credential. Never the
+    /// credential, which is in the Keychain (`relay:<machineId>`).
+    #[serde(default)]
+    pub relay: Option<RelayInfo>,
+    /// Renamed on this computer (PRO-350): `name` is this computer's, and
+    /// the name the machine describes itself with no longer replaces it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named_here: bool,
     #[serde(flatten)]
     pub other: serde_json::Map<String, serde_json::Value>,
 }
@@ -124,6 +130,24 @@ impl MachineStore {
         })
     }
 
+    /// Change a machine's record. `None` when it is not paired.
+    pub fn update(&self, machine_id: &str, change: impl FnOnce(&mut PairedMachine)) -> Result<Option<PairedMachine>> {
+        self.rewrite(|file| {
+            let Some(machine) = file.machines.iter_mut().find(|machine| machine.machine_id == machine_id) else { return Ok(None) };
+            change(machine);
+            Ok(Some(machine.clone()))
+        })
+    }
+
+    /// Forget a machine (Settings → Machines → Remove). The record it had,
+    /// or `None` when it was not paired. Its sessions stay on the machine.
+    pub fn remove(&self, machine_id: &str) -> Result<Option<PairedMachine>> {
+        self.rewrite(|file| {
+            let Some(index) = file.machines.iter().position(|machine| machine.machine_id == machine_id) else { return Ok(None) };
+            Ok(Some(file.machines.remove(index)))
+        })
+    }
+
     /// Change how a machine is reached. `None` when it is not paired.
     pub fn set_route(&self, machine_id: &str, route: MachineRoute) -> Result<Option<PairedMachine>> {
         self.rewrite(|file| {
@@ -150,6 +174,9 @@ mod tests {
             route: MachineRoute::RelayAndNearby,
             paired_at: 1,
             last_seen_at: None,
+            last_route: None,
+            relay: None,
+            named_here: false,
             other: Default::default(),
         }
     }
@@ -172,11 +199,24 @@ mod tests {
         assert_eq!(first["route"], "thisNetwork");
         assert_eq!(first["os"], json!({ "family": "macos", "version": "26.1" }));
         assert_eq!(first["lastSeenAt"], serde_json::Value::Null);
+        assert_eq!(first["lastRoute"], serde_json::Value::Null);
+        assert_eq!(first["relay"], serde_json::Value::Null);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(dir.path().join(FILE)).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn removing_a_machine_drops_only_its_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MachineStore::in_dir(dir.path());
+        store.put(machine("m1")).unwrap();
+        store.put(machine("m2")).unwrap();
+        assert_eq!(store.remove("m1").unwrap().unwrap().machine_id, "m1");
+        assert!(store.remove("m1").unwrap().is_none(), "already gone");
+        assert_eq!(store.list().unwrap().iter().map(|machine| machine.machine_id.as_str()).collect::<Vec<_>>(), vec!["m2"]);
     }
 
     #[test]
@@ -192,5 +232,48 @@ mod tests {
         assert_eq!(written["machines"][0]["futureField"], 3);
         std::fs::write(dir.path().join(FILE), json!({ "v": 2 }).to_string()).unwrap();
         assert!(store.list().is_err());
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    pub(crate) use super::tests::machine;
+}
+
+#[cfg(test)]
+mod connection_fields_tests {
+    use super::*;
+    use crate::remote::machine_client::RouteKind;
+    use serde_json::json;
+
+    #[test]
+    fn the_last_route_and_relay_place_are_kept_and_a_pre_pro_345_record_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MachineStore::in_dir(dir.path());
+        // A record PRO-342 wrote has neither field.
+        std::fs::write(
+            dir.path().join(FILE),
+            json!({ "v": 1, "machines": [{ "machineId": "m1", "name": "Mac mini", "os": { "family": "macos", "version": null }, "version": "0.2.33",
+                "publicKeyB64": "AAAA", "directEndpoints": [], "route": "relayAndNearby", "pairedAt": 1, "lastSeenAt": null }] })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(store.get("m1").unwrap().unwrap().last_route, None);
+        let relay = RelayInfo { director_url: "https://d".into(), cell_url: "https://c".into(), assignment_epoch: 2, relay_host_id: "m1".into(), relay_device_id: "computer-1".into(), user_id: "user-1".into() };
+        store
+            .update("m1", |machine| {
+                machine.last_route = Some(RouteUsed { kind: RouteKind::Tailscale, endpoint: Some("ws://100.64.0.2:6768/machine/1".into()) });
+                machine.relay = Some(relay.clone());
+            })
+            .unwrap()
+            .unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(written["machines"][0]["lastRoute"], json!({ "kind": "tailscale", "endpoint": "ws://100.64.0.2:6768/machine/1" }));
+        assert_eq!(
+            written["machines"][0]["relay"],
+            json!({ "directorUrl": "https://d", "cellUrl": "https://c", "assignmentEpoch": 2, "relayHostId": "m1", "relayDeviceId": "computer-1", "userId": "user-1" })
+        );
+        assert!(!String::from_utf8(std::fs::read(dir.path().join(FILE)).unwrap()).unwrap().contains("resume"), "never a credential");
+        assert!(store.update("m2", |_| {}).unwrap().is_none());
     }
 }

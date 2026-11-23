@@ -135,6 +135,7 @@ pub(crate) fn git_verification_output(command: Command, timeout: Duration) -> Re
 
 /// gh checkout delegates transfers to Git. Give those children the same
 /// repository-aware SSH adapter, and retain Git's graceful cancellation window.
+#[cfg_attr(not(unix), allow(unused_mut))]
 pub(crate) fn git_host_output(mut command: Command, cwd: &std::path::Path, timeout: Duration) -> Result<Output> {
     #[cfg(unix)]
     let _transport = {

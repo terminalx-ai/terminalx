@@ -15,7 +15,7 @@ impl Rig {
     pub fn new() -> Self {
         let home = store::temp_home();
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonicalize(dir.path()).unwrap();
         assert!(std::process::Command::new("git").args(["init", "-q", "-b", "main"]).current_dir(&root).status().unwrap().success());
         projects::add(root.to_str().unwrap()).unwrap();
         let manager = SessionManager::new(
@@ -144,7 +144,7 @@ fn an_action_runs_in_a_terminal_tab_with_the_workspace_environment_and_reports_i
     let ports: HashMap<String, String> = store::index::workspace_ports::environment(&entry.cwd).unwrap().into_iter().collect();
     assert!(!ports["TERMINALX_PORT"].is_empty());
     let text = rig.output(&pane);
-    let cwd = std::fs::canonicalize(&entry.cwd).unwrap();
+    let cwd = crate::paths::canonicalize(&entry.cwd).unwrap();
     assert!(text.contains(&format!("cwd={}\r\n", cwd.display())), "{text}");
     assert!(text.contains(&format!("port={}\r\n", ports["TERMINALX_PORT"])), "{text}");
     assert!(text.contains(&format!("ports={}\r\n", ports["TERMINALX_PORTS"])), "{text}");

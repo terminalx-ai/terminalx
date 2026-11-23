@@ -292,7 +292,7 @@ fn found_skill(
     root_path: &Path,
 ) -> Result<FoundSkill> {
     let canonical_dir =
-        fs::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
+        crate::paths::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
     let skill_file = canonical_dir.join("SKILL.md");
     let (frontmatter, _) = parse_frontmatter(&skill_file)?;
     let updated = skill_file
@@ -519,7 +519,7 @@ fn collect_files(dir: &Path, relative: &Path, out: &mut Vec<SkillFile>) -> Resul
 }
 
 pub fn detail(dir: &Path) -> Result<SkillDetail> {
-    let dir = fs::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
+    let dir = crate::paths::canonicalize(dir).with_context(|| format!("resolve {}", dir.display()))?;
     let (_, markdown) = parse_frontmatter(&dir.join("SKILL.md"))?;
     let mut files = Vec::new();
     collect_files(&dir, Path::new(""), &mut files)?;

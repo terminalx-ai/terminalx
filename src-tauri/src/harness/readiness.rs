@@ -128,6 +128,32 @@ pub fn check(id: &str) -> Readiness {
 /// fresh install would read as "login not checked" and its sign-in would
 /// not follow.
 pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
+    check_in(id, path, None)
+}
+
+/// The login of one agent account (#980) of agent `id`: what the agent's own
+/// status says with its configuration directory set to the account's,
+/// `CLAUDE_CONFIG_DIR` for Claude Code, `CODEX_HOME` for Codex. A key the
+/// app's environment or the saved-key setting has does not count: this is
+/// that directory's own sign-in. An account whose directory is gone is
+/// signed out ("Sign in again").
+pub fn check_account(id: &str, dir: &std::path::Path) -> Readiness {
+    let path = super::offered().into_iter().find(|h| h.id == id).and_then(|agent| agent.path);
+    check_account_binary(id, path, dir)
+}
+
+pub fn check_account_binary(id: &str, path: Option<String>, dir: &std::path::Path) -> Readiness {
+    if path.is_some() && !dir.is_dir() {
+        return Readiness { state: State::SignedOut, checked_at: chrono::Utc::now().to_rfc3339(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None };
+    }
+    check_in(id, path, Some(dir))
+}
+
+/// Variables that would make `claude auth status` report something other
+/// than the directory's own login.
+const ACCOUNT_CHECK_UNSET: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+
+fn check_in(id: &str, path: Option<String>, account: Option<&std::path::Path>) -> Readiness {
     static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let mut result = Readiness { state: State::Unknown, checked_at: String::new(), version: None, login_method: None, plan: None, account: None, organization: None, own_login: None };
@@ -136,11 +162,14 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
         version.arg("--version").env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
         if let Ok(text) = crate::git::output_within(version, Duration::from_secs(3)) {
             // Only retain the version token, never arbitrary command output.
-            result.version = text.split_whitespace().find(|s| s.starts_with(|c: char| c.is_ascii_digit()) && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric() || ".-_+".contains(c))).map(str::to_owned);
+            result.version = super::executables::version_token(&text);
         }
         result.state = match id {
             "codex" => {
-                let home = codex_home_for_check(super::codex::home::user_root(), crate::store::root().ok().map(|root| root.join("codex")));
+                let home = match account {
+                    Some(dir) => Some(dir.to_path_buf()),
+                    None => codex_home_for_check(super::codex::home::user_root(), crate::store::root().ok().map(|root| root.join("codex"))),
+                };
                 super::codex::appserver::ask_with_timeout(
                     super::codex::appserver::Where { codex_home: home.as_deref(), cwd: None },
                     "account/read", json!({ "refreshToken": false }), Duration::from_secs(5),
@@ -149,6 +178,12 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
             "claude" => {
                 let mut command = std::process::Command::new(path);
                 command.args(["auth", "status", "--json"]).env("PATH", crate::binpath::login_path()).env("NO_COLOR", "1");
+                if let Some(dir) = account {
+                    command.env("CLAUDE_CONFIG_DIR", dir);
+                    for name in ACCOUNT_CHECK_UNSET {
+                        command.env_remove(name);
+                    }
+                }
                 crate::git::capture_within(command, Duration::from_secs(5)).ok()
                     .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
                     .map(|value| { (result.login_method, result.plan) = account_details("claude", &value); (result.account, result.organization) = account_identity("claude", &value); claude_state(&value) }).unwrap_or(State::Unknown)
@@ -160,7 +195,7 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     // an installed agent in: what New Session, the agent menu and the start
     // screen read must say so, or a person with a key and no subscription
     // could never start one. Its own login is not what tabs will use.
-    if result.state != State::Missing && crate::agent_keys::uses_saved_key(id) {
+    if account.is_none() && result.state != State::Missing && crate::agent_keys::uses_saved_key(id) {
         // Kept apart, so Settings can still say whether the subscription
         // would work before anyone switches back to it.
         result.own_login = Some(OwnLogin {
@@ -176,8 +211,56 @@ pub fn check_binary(id: &str, path: Option<String>) -> Readiness {
     result
 }
 
+/// How long an answer about an agent's latest release is kept (PRO-377).
+const LATEST_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+
+static LATEST: std::sync::Mutex<Vec<(String, std::time::Instant, Option<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// The latest published release of an agent's CLI, from the npm registry,
+/// for the "· up to date" beside its version in Settings (PRO-377). `None`
+/// when the agent has no package, data privacy mode is on, or the registry
+/// does not answer; an answer is kept for six hours.
+pub fn latest_version(harness: &str) -> Option<String> {
+    let package = super::npm_package(harness)?;
+    if let Some((_, _, answer)) = LATEST.lock().unwrap().iter().find(|(id, at, _)| id == harness && at.elapsed() < LATEST_FOR) {
+        return answer.clone();
+    }
+    let agent = crate::data_privacy::http_agent().timeout(Duration::from_secs(5)).build();
+    let answer = agent
+        .get(&format!("https://registry.npmjs.org/{package}/latest"))
+        .call()
+        .ok()
+        .and_then(|response| response.into_json::<Value>().ok())
+        .and_then(|body| release_version(&body));
+    // A failed lookup is asked again next time rather than kept.
+    if answer.is_some() {
+        let mut cache = LATEST.lock().unwrap();
+        cache.retain(|(id, _, _)| id != harness);
+        cache.push((harness.to_owned(), std::time::Instant::now(), answer.clone()));
+    }
+    answer
+}
+
+/// The `version` of a registry `latest` document, when it looks like one.
+fn release_version(body: &Value) -> Option<String> {
+    let version = body.get("version")?.as_str()?;
+    (!version.is_empty() && version.len() <= 40 && version.starts_with(|c: char| c.is_ascii_digit()) && version.chars().all(|c| c.is_ascii_alphanumeric() || ".-_+".contains(c)))
+        .then(|| version.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_a_release_version_from_the_registry() {
+        assert_eq!(super::release_version(&json!({"name": "@anthropic-ai/claude-code", "version": "2.3.41"})).as_deref(), Some("2.3.41"));
+        assert_eq!(super::release_version(&json!({"version": "<script>"})), None);
+        assert_eq!(super::release_version(&json!({"version": ""})), None);
+        assert_eq!(super::release_version(&json!({})), None);
+        assert_eq!(super::super::npm_package("claude"), Some("@anthropic-ai/claude-code"));
+        assert_eq!(super::super::npm_package("codex"), Some("@openai/codex"));
+        assert_eq!(super::latest_version("no-such-agent"), None);
+    }
+
     use super::*;
 
     #[test]
@@ -223,6 +306,33 @@ mod tests {
         crate::agent_keys::set_mode("claude", crate::agent_keys::Mode::Subscription).unwrap();
         let own = check_binary("claude", path);
         assert_eq!((own.state, own.account.as_deref(), own.own_login), (State::Ready, Some("ada@example.com"), None));
+    }
+
+    /// #980: an added account's login is checked in its own directory, and
+    /// a saved key in use does not make it look signed in.
+    #[cfg(unix)]
+    #[test]
+    fn an_account_is_checked_in_its_own_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        // Signed in exactly where CLAUDE_CONFIG_DIR says a marker file is.
+        std::fs::write(&claude, "#!/bin/sh\ncase \"$1\" in\n  --version) echo '2.3.41 (Claude Code)' ;;\n  auth) if [ -n \"$CLAUDE_CONFIG_DIR\" ] && [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ] && [ -z \"$ANTHROPIC_API_KEY\" ]; then echo '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"subscriptionType\":\"pro\",\"email\":\"bo@example.com\"}'; else echo '{\"loggedIn\":false}'; fi ;;\nesac\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = Some(claude.to_string_lossy().into_owned());
+        let (one, two) = (dir.path().join("one"), dir.path().join("two"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(one.join("signed-in"), "").unwrap();
+        let secrets = crate::keychain::testing::MemorySecrets::default();
+        crate::agent_keys::save_for_test("claude", "sk-ant-api03-ReadinessKey0123456789abcdefghijklmnop-test", &secrets);
+        let first = check_account_binary("claude", path.clone(), &one);
+        assert_eq!((first.state, first.account.as_deref(), first.plan.as_deref(), first.own_login), (State::Ready, Some("bo@example.com"), Some("pro"), None));
+        assert_eq!(check_account_binary("claude", path.clone(), &two).state, State::SignedOut);
+        // Deleted outside the app: signed out, so Settings offers "Sign in again".
+        assert_eq!(check_account_binary("claude", path.clone(), &dir.path().join("gone")).state, State::SignedOut);
+        assert_eq!(check_account_binary("claude", None, &one).state, State::Missing);
     }
 
     #[test]

@@ -6,11 +6,52 @@ import { groupSettingsByPage, searchSettings, SETTINGS_SEARCH_LIMIT, settingsSea
 
 const orchestratorRuns = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: on, localVmTasks: false });
 const localVmTasks = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: on });
+const bots = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, opencode: false, bots: on });
+const openCode = (on: boolean) => noteExperimentalSettings({ nativeCodex: false, sessionCost: false, orchestratorRuns: false, localVmTasks: false, opencode: on });
 
 beforeEach(() => orchestratorRuns(false));
 afterEach(() => orchestratorRuns(false));
 
 describe("settings row search", () => {
+  it("uses Appearance for the current section, not as a legacy alias for General", () => {
+    const matches = searchSettings("appearance");
+    expect(matches.map((match) => match.id)).toEqual(expect.arrayContaining(["appearance.theme", "appearance.mode"]));
+    expect(matches.every((match) => match.section === "appearance")).toBe(true);
+  });
+
+  it.each([
+    ["font size", "general.textSize"],
+    ["zoom", "general.textSize"],
+    ["transcript layout", "general.transcriptLayout"],
+    ["reorder", "general.customOrder"],
+    ["tab bar", "general.tabBar"],
+    ["sessions on a branch", "general.branchSessions"],
+    ["status bar", "general.statusBar"],
+    ["usage", "general.usage"],
+    ["resources", "general.resources"],
+    ["usage display", "general.usageDisplay"],
+    ["auto-refresh", "general.usageRefresh"],
+  ])("still finds %s in General after removing the old section alias (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "general", sectionTitle: "General" }),
+    ]));
+  });
+
+  // PRO-463: Stats & usage is a page of Settings, found by its name and by each of its sections.
+  it.each([
+    ["stats", "stats.activity"],
+    ["agents spawned", "stats.activity"],
+    ["prs created", "stats.activity"],
+    ["usage limits", "stats.accountLimits"],
+    ["usage analytics", "stats.analytics"],
+    ["token mix", "stats.analytics"],
+    ["daily intensity", "stats.analytics"],
+  ])("finds %s on Stats & usage (%s)", (query, id) => {
+    expect(searchSettings(query)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id, section: "stats", sectionTitle: "Stats & usage" }),
+    ]));
+  });
+
   it("ranks a title match ahead of a description match ahead of a search term", () => {
     // "When quitting TerminalX" (title), "When a session warns…" (description), and "when" as a search term.
     const ids = searchSettings("when").map((match) => match.id);
@@ -24,9 +65,9 @@ describe("settings row search", () => {
 
   it("finds the font rows for 'font', and only those", () => {
     const ids = searchSettings("font").map((match) => match.id);
-    expect(ids).toContain("appearance.textSize");
+    expect(ids).toContain("general.textSize");
     // Not every row whose description happens to hold an f, an o, an n and a t in order.
-    expect(ids).toEqual(["appearance.textSize"]);
+    expect(ids).toEqual(["general.textSize"]);
   });
 
   it("finds nothing for a mistyped second word, as the empty state expects", () => {
@@ -41,7 +82,7 @@ describe("settings row search", () => {
 
   it("keeps finding what the old section search found, now as rows", () => {
     const first = (query: string) => searchSettings(query)[0]?.id;
-    expect(first("data privacy")).toBe("general.dataPrivacy");
+    expect(first("data privacy")).toBe("account.dataPrivacy");
     expect(first("archive script")).toBe("repositories.scripts");
     expect(first("setup script")).toBe("repositories.scripts");
     expect(first("settings file")).toBe("general.settingsFile");
@@ -130,10 +171,17 @@ describe("settings row search", () => {
 
   it("offers every row behind a switch only while that switch is on, and every other row always", () => {
     const behind = SETTINGS_ROWS.filter((row) => "requires" in row && row.requires);
-    expect(behind.map((row) => row.id)).toEqual(["repositories.orchestrator"]);
+    expect(behind.map((row) => row.id)).toEqual(["agents.opencodeProviders", "repositories.orchestrator", "shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
     expect(behind.every((row) => !settingOffered(row))).toBe(true);
     orchestratorRuns(true);
-    expect(behind.every((row) => settingOffered(row))).toBe(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["repositories.orchestrator"]);
+    openCode(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["agents.opencodeProviders"]);
+    bots(true);
+    expect(behind.filter((row) => settingOffered(row)).map((row) => row.id)).toEqual(["shortcuts.app.bots", "shortcuts.app.pauseAllBots"]);
+    expect(searchSettings("bots").map((match) => match.id)).toContain("shortcuts.app.bots");
+    bots(false);
+    expect(searchSettings("bots").map((match) => match.id)).not.toContain("shortcuts.app.bots");
     orchestratorRuns(false);
     // Off until the switches are read, as for a section.
     expect(SETTINGS_ROWS.filter((row) => !("requires" in row && row.requires) && row.section !== "orchestrator" && row.section !== "localVms" && row.section !== "machines").every((row) => settingOffered(row))).toBe(true);
@@ -149,13 +197,11 @@ describe("settings row search", () => {
     expect(named()).not.toContain("localVms.tasks");
   });
 
-  it("finds Settings → Machines rows only while Experimental → Machines is on", () => {
+  it("finds Settings → Machines rows whatever the Experimental switches say (PRO-360)", () => {
     const named = () => searchSettings("pairing code").map((match) => match.id);
-    expect(named()).not.toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: true });
+    noteExperimentalSettings({ nativeCodex: false, orchestratorRuns: false, localVmTasks: false });
     expect(named()).toContain("machines.pairingCode");
-    noteExperimentalSettings({ nativeCodex: false, machines: false });
-    expect(named()).not.toContain("machines.pairingCode");
+    expect(searchSettings("machines").map((match) => match.id)).not.toContain("experimental.machines");
   });
 
   it("groups matches by page in order of their best match and counts them", () => {

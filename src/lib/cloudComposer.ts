@@ -1,7 +1,8 @@
 import { WorkspaceRpcError, type WorkspaceRpcClient, type WorkspaceYou } from "@terminalx/portable/workspace";
-import type { FileHit, ImageInput, SlashCommand } from "@/lib/api";
-import type { CloudImageRef } from "@/lib/cloudAgentApi";
+import { attachments, type FileHit, type FileInput, type ImageInput, type PullRequest, type SlashCommand } from "@/lib/api";
+import type { CloudFileRef, CloudImageRef } from "@/lib/cloudAgentApi";
 import { mayConfigure } from "@/lib/cloudCollab";
+import { MAX_ATTACHMENT_BYTES, MAX_FILES_PER_MESSAGE } from "@/lib/attachmentRules";
 
 /** The slash commands a composer offers, and why some are not among them (null when all are). */
 export interface ComposerCommandList {
@@ -149,9 +150,12 @@ export const CLOUD_IMAGES_OLD_RUNTIME = "Images need a newer workspace runtime. 
 export const CLOUD_IMAGES_NEED_RUNNING = "Starting the workspace: images are uploaded straight to it. Send again once it is running.";
 /** Not connected for another reason (reconnecting, offline): nothing is started, and the message stays in the composer. */
 export const CLOUD_IMAGES_NEED_CONNECTION = "Not connected to the workspace: images are uploaded straight to it. Send again once it is connected.";
+/** A runtime from before `composer/4` takes images only (#1329). */
+export const CLOUD_FILES_OLD_RUNTIME = "Files other than images need a newer workspace runtime. They can be sent here once this workspace's runtime is updated.";
+/** As images (`CLOUD_IMAGES_NEED_RUNNING`): files are uploaded straight to the workspace, so sending them starts a stopped one. */
+export const CLOUD_FILES_NEED_RUNNING = "Starting the workspace: attached files are uploaded straight to it. Send again once it is running.";
+export const CLOUD_FILES_NEED_CONNECTION = "Not connected to the workspace: attached files are uploaded straight to it. Send again once it is connected.";
 /** As many as the runtime takes with one message. */
-/** A cloud agent takes images only (PRO-290): any other file stays on this computer. */
-export const CLOUD_FILES_REFUSED = "Only images can be sent to a cloud agent. Other files can be attached to a session on this computer.";
 export const CLOUD_MAX_IMAGES = 8;
 export const CLOUD_TOO_MANY_IMAGES = `A message to a cloud agent carries at most ${CLOUD_MAX_IMAGES} images.`;
 
@@ -201,14 +205,83 @@ export async function uploadCloudImages(client: WorkspaceRpcClient, where: { ses
   return refs;
 }
 
-/** The upload id of each image a composer has handed over, for as long as the composer keeps that image. */
-const attachmentIds = new WeakMap<ImageInput, string>();
+/** A machine from before `composer/4` takes images only. */
+export const MACHINE_FILES_OLD_RUNTIME = "This machine runs an older TerminalX that takes images only. Update it to send files from here.";
+export const MACHINE_TOO_MANY_FILES = `A message carries at most ${MAX_FILES_PER_MESSAGE} files, images included.`;
 
-function attachmentId(image: ImageInput): string {
-  const known = attachmentIds.get(image);
+/**
+ * Upload `files` other than images to the runtime of a machine (PRO-407) or
+ * a cloud workspace (#1329) for the message about to be sent to `tabId`:
+ * `session.attach` with `kind: "file"`, in parts, as images go. The runtime
+ * keeps them until the message is typed, then stores them in the session's
+ * attachments folder there and hands the agent those paths. Only a file's
+ * bytes and its last name segment leave this computer, never a path of it: a
+ * picked or dropped file is read here part by part (`attachments.readPart`).
+ * `oldRuntime`: what a runtime from before `composer/4` is told.
+ */
+export async function uploadAgentFiles(
+  client: WorkspaceRpcClient,
+  where: { sessionId: string; tabId: string },
+  files: FileInput[],
+  images = 0,
+  oldRuntime = MACHINE_FILES_OLD_RUNTIME,
+): Promise<CloudFileRef[]> {
+  if (!client.hasCapability("composer/4")) throw new CloudImageError(oldRuntime);
+  if (files.length + images > MAX_FILES_PER_MESSAGE) throw new CloudImageError(MACHINE_TOO_MANY_FILES);
+  const refs: CloudFileRef[] = [];
+  for (const file of files) {
+    const id = attachmentId(file);
+    if (refs.some((ref) => ref.id === id)) continue;
+    const name = baseName(file.name);
+    const mediaType = file.mediaType ?? "";
+    const refuse = (error: unknown): never => {
+      // The machine's own sentence (too large, a reserved name), with the file's name.
+      if (error instanceof WorkspaceRpcError) throw new CloudImageError(`${name} was not sent: ${error.message}.`);
+      throw error;
+    };
+    const send = (offset: number, data: string, last: boolean) =>
+      client.mutate("session.attach", { sessionId: where.sessionId, tabId: where.tabId, attachmentId: id, kind: "file", name, mediaType, offset, data, last }).catch(refuse);
+    if (file.path) {
+      // Read here, one part at a time; the machine is never told where it was.
+      let offset = 0;
+      for (;;) {
+        const part = await attachments.readPart(file.path, offset).catch((error: unknown) => {
+          throw new CloudImageError(`${name} was not sent: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        if (part.size > MAX_ATTACHMENT_BYTES) throw new CloudImageError(`${name} was not sent: it is larger than ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB.`);
+        const next = offset + part.bytes;
+        const last = next >= part.size;
+        // An empty file goes as one empty last part; an empty part before the end means the file shrank while it was read.
+        if (part.bytes === 0 && !last) throw new CloudImageError(`${name} was not sent: it changed while it was read. Attach it again.`);
+        await send(offset, part.data, last);
+        if (last) break;
+        offset = next;
+      }
+    } else if (file.data !== undefined) {
+      const parts = Math.max(1, Math.ceil(file.data.length / PART_CHARS));
+      for (let part = 0; part < parts; part++) {
+        await send((part * PART_CHARS * 3) / 4, file.data.slice(part * PART_CHARS, (part + 1) * PART_CHARS), part === parts - 1);
+      }
+    } else {
+      throw new CloudImageError(`${name} was not sent: it could not be read.`);
+    }
+    refs.push({ id, name, ...(file.mediaType ? { mediaType: file.mediaType } : {}) });
+  }
+  return refs;
+}
+
+function baseName(name: string): string {
+  return name.split(/[\\/]/).pop() || name;
+}
+
+/** The upload id of each image or file a composer has handed over, for as long as the composer keeps it. */
+const attachmentIds = new WeakMap<ImageInput | FileInput, string>();
+
+function attachmentId(item: ImageInput | FileInput): string {
+  const known = attachmentIds.get(item);
   if (known) return known;
   const id = `att-${crypto.randomUUID().replace(/-/g, "")}`;
-  attachmentIds.set(image, id);
+  attachmentIds.set(item, id);
   return id;
 }
 
@@ -220,6 +293,70 @@ function attachmentId(image: ImageInput): string {
 export function cloudImagesBlocked(client: WorkspaceRpcClient | null, asleep: boolean): string | null {
   if (!client || client.connection.state !== "connected") return asleep ? CLOUD_IMAGES_NEED_RUNNING : CLOUD_IMAGES_NEED_CONNECTION;
   return client.hasCapability("composer/3") ? null : CLOUD_IMAGES_OLD_RUNTIME;
+}
+
+/**
+ * Why files other than images cannot go to a cloud workspace's runtime now,
+ * or null when they can: as for images (`cloudImagesBlocked`), and a runtime
+ * from before `composer/4` takes none.
+ */
+export function cloudFilesBlocked(client: WorkspaceRpcClient | null, asleep: boolean): string | null {
+  if (!client || client.connection.state !== "connected") return asleep ? CLOUD_FILES_NEED_RUNNING : CLOUD_FILES_NEED_CONNECTION;
+  return client.hasCapability("composer/4") ? null : CLOUD_FILES_OLD_RUNTIME;
+}
+
+/** What picking a pull request in the composer's `#` list adds to the message. */
+export type PrPick =
+  /** A context file on this computer, mentioned by its path (`@path`) where the `#` token was. */
+  | { mention: string }
+  /** A context file read on the agent's runtime, attached as a file (`composer/4`); the `#` token is removed. */
+  | { file: FileInput };
+
+/**
+ * Where a composer's `#` list comes from. A local tab asks this computer's
+ * `gh` in its directory; a remote tab asks its runtime (`composer/5`), whose
+ * `gh` names the workspace's pull requests.
+ */
+export interface ComposerPrs {
+  /** Names the repository asked: the list is read again whenever this changes. */
+  key: string;
+  search(query: string): Promise<PullRequest[]>;
+  pick(number: number): Promise<PrPick>;
+}
+
+/**
+ * The `#` list of an agent tab on a runtime (a cloud workspace or a
+ * machine): the pull requests of the session's checkout there, read with the
+ * runtime's own `gh` (`session.prs`); picking one reads its context file there
+ * (`session.prContext`) and attaches it as a file, which the runtime stores in
+ * the session's attachments folder on send and hands the agent by path, as a
+ * local tab's PR context is. Only while the runtime is connected and serves
+ * `composer/5` and `composer/4`: a stopped workspace is never woken to list
+ * pull requests, and null then leaves `#` as text.
+ */
+export function cloudComposerPrs(target: { workspaceKey: string; sessionId: string; client: WorkspaceRpcClient | null }): ComposerPrs | null {
+  const { client } = target;
+  if (!client || client.connection.state !== "connected" || !client.hasCapability("composer/5") || !client.hasCapability("composer/4")) return null;
+  return {
+    key: `${target.workspaceKey}|${target.sessionId}`,
+    search: async (query) => {
+      const result = await client.call<{ prs?: unknown }>("session.prs", { sessionId: target.sessionId, query });
+      return (Array.isArray(result.prs) ? result.prs : []).filter((pr): pr is PullRequest => !!pr && typeof (pr as PullRequest).number === "number" && (pr as PullRequest).number > 0);
+    },
+    pick: async (number) => {
+      const result = await client.call<{ name?: unknown; text?: unknown }>("session.prContext", { sessionId: target.sessionId, number });
+      if (typeof result.text !== "string") throw new Error(`Pull request #${number} could not be read on the workspace.`);
+      const name = typeof result.name === "string" && /^pr-\d+\.md$/.test(result.name) ? result.name : `pr-${number}.md`;
+      return { file: { name, data: utf8Base64(result.text), mediaType: "text/markdown" } };
+    },
+  };
+}
+
+function utf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return btoa(binary);
 }
 
 /** Tests only. */

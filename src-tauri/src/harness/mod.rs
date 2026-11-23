@@ -13,6 +13,7 @@ pub mod acp;
 pub mod by_hand;
 pub mod claude;
 pub mod codex;
+pub mod executables;
 pub mod host;
 pub mod opencode;
 pub mod provider_sandbox;
@@ -114,9 +115,25 @@ impl HarnessId {
 /// Agents and the model picker alike. Nothing else knows about the decision.
 pub const HIDDEN_HARNESSES: &[&str] = &["cursor", "opencode"];
 
-/// Whether the UI offers this harness at all.
+/// Whether the UI offers this harness at all. OpenCode is offered again
+/// while Settings → Experimental → OpenCode is on (PRO-157).
 pub fn visible(harness: &str) -> bool {
-    !HIDDEN_HARNESSES.contains(&harness)
+    visible_with(harness, &crate::store::settings::load().experimental)
+}
+
+/// [`visible`] against switches already read, for a list asked about many times.
+pub fn visible_with(harness: &str, experimental: &crate::store::settings::ExperimentalSettings) -> bool {
+    !HIDDEN_HARNESSES.contains(&harness) || (harness == "opencode" && experimental.opencode)
+}
+
+/// The harness whose CLI is called `binary`.
+pub fn id_for_binary(binary: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.binary == binary).map(|spec| spec.id)
+}
+
+/// The CLI a harness runs, by name.
+pub fn binary_of(harness: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.id == harness).map(|spec| spec.binary)
 }
 
 /// Which agents this build knows how to drive, and what each can do.
@@ -190,6 +207,13 @@ struct Setup {
     writes: &'static [&'static str],
     /// The CLI's own sign-in, after the binary.
     login: &'static [&'static str],
+    /// The sign-in for a person at another computer (a machine's page,
+    /// PRO-350), where the CLI has one that needs no browser on this
+    /// computer: its own login would wait for a callback on this
+    /// computer's loopback, which that person's browser cannot reach.
+    /// `None`: `login` works from anywhere (it prints an address and takes
+    /// the code pasted back).
+    login_elsewhere: Option<&'static [&'static str]>,
     /// A page of the provider's that answers when the network does, asked
     /// only after a failure, to tell an outage from a refusal.
     probe: &'static str,
@@ -216,6 +240,7 @@ const REGISTRY: &[Spec] = &[
             runner: &["bash"],
             writes: &[".local/bin", ".local/share/claude", ".claude"],
             login: &["auth", "login"],
+            login_elsewhere: None,
             probe: "https://claude.ai/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: true, at_mentions: true, fork: true, resume: true },
@@ -236,6 +261,8 @@ const REGISTRY: &[Spec] = &[
             runner: &["env", "CODEX_NON_INTERACTIVE=1", "sh"],
             writes: &[".local/bin", ".codex"],
             login: &["login"],
+            // A device code: the address and code open in any browser.
+            login_elsewhere: Some(&["login", "--device-auth"]),
             probe: "https://chatgpt.com/codex/install.sh",
         }),
         caps: Capabilities { images: true, steer: true, permission_modes: true, effort: true, slash_commands: false, at_mentions: false, fork: false, resume: true },
@@ -289,6 +316,11 @@ pub fn display_name(harness: &str) -> &'static str {
     REGISTRY.iter().find(|spec| spec.id == harness).map_or("The agent", |spec| spec.name)
 }
 
+/// The npm package an agent's releases are published as, the first one when it has several.
+pub fn npm_package(harness: &str) -> Option<&'static str> {
+    REGISTRY.iter().find(|spec| spec.id == harness).and_then(|spec| spec.packages.first().copied())
+}
+
 /// Programs that run a script named by their first argument that is not an
 /// option. A CLI installed with a package manager is one of these running the
 /// package's entry file.
@@ -332,22 +364,59 @@ pub fn recognise<'a>(argv: impl IntoIterator<Item = &'a str>) -> Option<&'static
         let named = |word: &str| program_stem(word) == spec.binary;
         let packaged = |word: &str| spec.packages.iter().any(|package| word.contains(&format!("/{package}/")));
         named(program) || script.is_some_and(|script| named(script) || packaged(script))
-    })?;
+    }).or_else(|| chosen_spec(program))?;
     // What is left of the command line is the CLI's own.
     let mut own = argv.peekable();
     let headless = own.peek().is_some_and(|first| spec.headless.commands.contains(first)) || own.any(|word| spec.headless.flags.contains(&word));
     (!headless).then_some(spec.id)
 }
 
+/// The agent whose chosen program (PRO-157) is `program`, under whatever
+/// name the person's build has (`claude-dev`). Asked only when no agent's
+/// name matched, so a plain `vim` costs one settings read at most.
+fn chosen_spec(program: &str) -> Option<&'static Spec> {
+    if !program.contains('/') {
+        return None;
+    }
+    let chosen = crate::store::settings::load().agents.executables;
+    REGISTRY.iter().find(|spec| chosen.get(spec.id).is_some_and(|path| path == program))
+}
+
 /// The agents the UI lists. `catalog` keeps the hidden ones so a tab already
 /// running on one still has its name, its binary and its capabilities.
 pub fn offered() -> Vec<HarnessInfo> {
-    catalog().into_iter().filter(|h| visible(&h.id)).collect()
+    let experimental = crate::store::settings::load().experimental;
+    catalog().into_iter().filter(|h| visible_with(&h.id, &experimental)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PRO-157: OpenCode is offered again only while its Experimental switch is on.
+    #[test]
+    fn opencode_is_offered_only_with_its_experimental_switch() {
+        let off = crate::store::settings::ExperimentalSettings::default();
+        let on = crate::store::settings::ExperimentalSettings { opencode: true, ..Default::default() };
+        assert!(visible_with("claude", &off) && visible_with("codex", &off));
+        assert!(!visible_with("opencode", &off) && !visible_with("cursor", &off));
+        assert!(visible_with("opencode", &on));
+        assert!(!visible_with("cursor", &on), "the switch is OpenCode's alone");
+    }
+
+    /// A chosen program under its own name is still recognised as the agent.
+    #[cfg(unix)]
+    #[test]
+    fn a_chosen_program_is_recognised_by_its_path() {
+        let _home = crate::store::temp_home();
+        assert_eq!(recognise(["/opt/dev/claude-dev"]), None);
+        let mut settings = crate::store::settings::load();
+        settings.agents.executables.insert("claude".into(), "/opt/dev/claude-dev".into());
+        crate::store::settings::save(&settings).unwrap();
+        assert_eq!(recognise(["/opt/dev/claude-dev"]), Some("claude"));
+        assert_eq!(recognise(["/opt/dev/claude-dev", "-p", "hi"]), None, "a headless run is still nobody's session");
+        assert_eq!(recognise(["claude-dev"]), None);
+    }
 
     /// What each CLI drew after a 6 KB bracketed paste and nothing else,
     /// recorded byte for byte. Claude Code moves the cursor around the

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// SOURCE AUTHORED / UNRUN: needs the root's CURRENT 27-file PRO-133/137 UI
-// prerequisite in dist/. Never enables native production transport.
+// PRO-133/137: team presence, Following and reassign over the built app
+// (`pnpm build` first). Never enables native production transport.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { launch, serve, sidebar } from "./harness.mjs";
@@ -33,6 +33,35 @@ async function reachable(locator, why) {
   });
   assert.ok(measured.fits && measured.hit, `${why}: ${JSON.stringify(measured)}`);
 }
+// The minimum window is 760px and zoom is capped at 2, so 380 CSS px is the narrowest real width.
+const WIDTHS = [1360, 390, 380];
+// At 390 and 380 the open sidebar (268px) leaves the main view about 120px: narrower than any single
+// control, in the authored layout as much as today's. The narrow passes therefore
+// measure the main view with the sidebar hidden, as a narrow window is used, and
+// show it again for every step that reads or drives the sidebar.
+const narrow = (page) => page.viewportSize().width < 760;
+async function sidebarShown(page, shown) {
+  if (!narrow(page)) return;
+  const rail = page.locator('[data-testid="sidebar-rail"]');
+  const show = page.locator("main header").getByRole("button", { name: "Show sidebar", exact: true });
+  if (shown) {
+    if (await rail.count() === 0) await show.click();
+    await rail.waitFor();
+  } else {
+    if (await rail.count()) await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
+    await show.waitFor();
+    // The toggle changes before the closing animation gives the sidebar's width back.
+    await page.locator('[data-testid="panel-presence"][data-side="left"]').waitFor({ state: "detached" });
+  }
+}
+// PRO-385: Table/Board moved from the header into the Display menu (02.15).
+// The choice is saved, so a second visit may already show the table.
+async function showTable(page) {
+  await page.getByRole("button", { name: "Display", exact: true }).click();
+  await page.getByRole("menu").getByRole("button", { name: "Table", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await page.getByRole("table", { name: "Sessions" }).waitFor();
+}
 async function menu(page, trigger) {
   await reachable(trigger, "menu trigger");
   await trigger.click();
@@ -45,7 +74,10 @@ async function sameRows(page, expected, ordered = false) {
   await page.waitForFunction(({ expected, ordered }) => {
     const actual = [...document.querySelectorAll('table[aria-label="Sessions"] tbody tr[data-session] [data-session-title]')].map((el) => el.textContent);
     return JSON.stringify(ordered ? actual : actual.sort()) === JSON.stringify(ordered ? expected : [...expected].sort());
-  }, { expected, ordered });
+  }, { expected, ordered }).catch(async (error) => {
+    console.error("Rows diagnostic", { expected, ordered, actual: await titles(page) });
+    throw error;
+  });
   const actual = await titles(page);
   assert.deepEqual(ordered ? actual : actual.sort(), ordered ? expected : [...expected].sort());
 }
@@ -77,17 +109,21 @@ async function fresh(width, options = {}) {
   await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify({ cloud: true, localProjects: 1, dashboardCount: 0, teamOverview: true, ...options })};\n${fixture}`);
   await page.goto(server.url);
   await sidebar(page);
-  await page.getByRole("button", { name: /^Dashboard/ }).click();
-  await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Table", exact: true }).click();
+  await page.getByRole("button", { name: /^Overview/ }).click();
+  await sidebarShown(page, false);
+  // PRO-385: a toolbar row replaced the "Agents" heading; its search field marks the Overview.
+  await page.getByRole("textbox", { name: "Search sessions" }).waitFor();
+  await showTable(page);
   await sameRows(page, names);
   await viewCounts(page, { Everyone: 4, Mine: 2, "Shared with me": 1, Following: 1, "Active now": 1 });
   return page;
 }
 async function reassign(page) {
+  await sidebarShown(page, true);
   const trigger = page.getByRole("button", { name: "Actions for Owned workspace", exact: true });
   await trigger.scrollIntoViewIfNeeded();
-  await trigger.locator("..").hover();
+  // A row's actions (RowActions) stay visually hidden until the row itself is hovered.
+  await trigger.locator('xpath=ancestor::*[contains(concat(" ", @class, " "), " group/row ")][1]').hover();
   const panel = await menu(page, trigger);
   await panel.getByRole("menuitem", { name: "Reassign to…", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Reassign Owned workspace", exact: true });
@@ -97,7 +133,7 @@ async function reassign(page) {
 }
 
 try {
-  for (const width of [1360, 390, 320]) {
+  for (const width of WIDTHS) {
     const page = await fresh(width);
     try {
       await chooseView(page, "Mine", ["Local task", "Owned task"]);
@@ -126,12 +162,12 @@ try {
       await sameRows(page, ["Shared task"]);
       await page.getByRole("button", { name: "Clear search", exact: true }).click();
 
-      panel = await menu(page, page.getByRole("button", { name: /^Filter(?:\s*\d+)?$/ }));
+      panel = await menu(page, page.getByRole("button", { name: /^Filter(?:, \d+ on)?$/ }));
       await panel.getByRole("menuitemcheckbox", { name: "Working", exact: true }).click();
       await page.keyboard.press("Escape");
       await sameRows(page, ["Organization task"]);
       await viewCounts(page, { Everyone: 1, Mine: 0, "Shared with me": 0, Following: 0, "Active now": 0 });
-      panel = await menu(page, page.getByRole("button", { name: /^Filter(?:\s*\d+)?$/ }));
+      panel = await menu(page, page.getByRole("button", { name: /^Filter(?:, \d+ on)?$/ }));
       await panel.getByRole("menuitem", { name: /Clear filters/ }).click();
       await sameRows(page, names);
 
@@ -140,10 +176,14 @@ try {
         ["Status", ["Owned task", "Organization task", "Shared task", "Local task"]],
         ["Last active", ["Shared task", "Local task", "Owned task", "Organization task"]],
       ]) {
+        // PRO-385: the sort chip picks the column and the direction apart, and the
+        // Last active column is headed "Active".
         panel = await menu(page, page.getByRole("button", { name: /^Sort: / }));
-        await panel.getByRole("menuitem", { name: label, exact: true }).click();
+        await panel.getByRole("menuitemradio", { name: label, exact: true }).click();
+        panel = await menu(page, page.getByRole("button", { name: `Sort: ${label}`, exact: true }));
+        await panel.getByRole("menuitemradio", { name: label === "Last active" ? "Descending" : "Ascending", exact: true }).click();
         await sameRows(page, order, true);
-        const header = page.getByRole("columnheader", { name: label, exact: true });
+        const header = page.getByRole("columnheader", { name: label === "Last active" ? "Active" : label, exact: true });
         assert.equal(await header.getAttribute("aria-sort"), label === "Last active" ? "descending" : "ascending");
         await reachable(header.getByRole("button"), `${label}: horizontal scroll reaches sort header`);
         await header.getByRole("button").focus();
@@ -152,7 +192,14 @@ try {
         // Unknown activity stays last in both directions, and gets no invented time.
         if (label === "Last active") {
           await sameRows(page, ["Owned task", "Local task", "Shared task", "Organization task"], true);
-          assert.equal(await rows(page).filter({ hasText: "Organization task" }).locator("time").count(), 1, "only genuine created time, no last-active time");
+          // PRO-385 hides Created by default: show it to count the row's times, then put it back.
+          for (const shown of [true, false]) {
+            panel = await menu(page, page.getByRole("button", { name: "Display", exact: true }));
+            await panel.getByRole("menuitemcheckbox", { name: "Created", exact: true }).click();
+            await page.keyboard.press("Escape");
+            await page.getByRole("columnheader", { name: "Created", exact: true }).waitFor({ state: shown ? "attached" : "detached" });
+            if (shown) assert.equal(await rows(page).filter({ hasText: "Organization task" }).locator("time").count(), 1, "only genuine created time, no last-active time");
+          }
         }
       }
       panel = await menu(page, page.getByRole("button", { name: "Display", exact: true }));
@@ -175,10 +222,12 @@ try {
       assert.equal(await profile.getByTestId("profile-presence").getAttribute("aria-label"), "Online");
       assert.doesNotMatch(await profile.textContent(), /last seen|\d+\s*(seconds?|minutes?|hours?) ago/i);
       await page.keyboard.press("Escape");
+      await sidebarShown(page, true);
       const following = page.getByRole("region", { name: "Following", exact: true });
       await reachable(following, "Following sidebar section");
       assert.equal(await following.getByRole("button", { name: "Organization workspace", exact: true }).count(), 0);
       assert.match(await page.getByTestId("cloud-org-list").textContent(), /cloud · 1 online/, "org count deduplicates people, not devices or local sessions");
+      await sidebarShown(page, false);
 
       // Successful empty reads mean expired/offline. Failed reads are unavailable.
       for (const mode of ["expired", "unavailable"]) {
@@ -204,21 +253,29 @@ try {
     } finally { await page.close(); }
   }
 
-  for (const width of [1360, 390, 320]) {
+  for (const width of WIDTHS) {
     const page = await fresh(width);
     try {
+      await sidebarShown(page, true);
       const following = page.getByRole("region", { name: "Following", exact: true });
       await following.getByRole("button", { name: "Shared workspace", exact: true }).click();
+      await sidebarShown(page, false);
       const unfollow = page.getByRole("button", { name: "Following", exact: true });
       await reachable(unfollow, "Following header control");
       assert.equal(await unfollow.getAttribute("aria-pressed"), "true");
       await unfollow.click();
       const follow = page.getByRole("button", { name: "Follow", exact: true });
       await follow.waitFor();
+      // The sidebar is on screen whenever its Following section is counted.
+      await sidebarShown(page, true);
+      await sidebar(page);
       assert.equal(await following.count(), 0, "unfollow removed authorized sidebar row");
+      await sidebarShown(page, false);
       await follow.click();
       await page.waitForFunction(() => !!window.__PW_TEAM__.followPending);
       assert.equal(await follow.isDisabled(), true);
+      await sidebarShown(page, true);
+      await sidebar(page);
       assert.equal(await following.count(), 0, "pending preference is not optimistic access");
       await page.evaluate(() => window.__PW_TEAM__.followPending());
       await unfollow.waitFor();
@@ -247,10 +304,16 @@ try {
       assert.match(calls[0].input.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       assert.deepEqual({ ...calls[0].input, requestId: undefined }, { targetUserId: "u-bob", expectedOwnerId: "u-me", note: "Private handover note & plain text", requestId: undefined });
       await page.evaluate(() => window.__PW_TEAM__.switchAccount());
-      await dialog.getByText("The account changed. Close and reopen this dialog.", { exact: true }).waitFor();
-      assert.equal(await dialog.getByRole("textbox").count(), 0);
-      assert.doesNotMatch(await dialog.textContent(), /Private handover note|Owned workspace|Bob/);
-      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      // The fenced dialog drops the workspace's name from its title too, so it is no longer "Reassign Owned workspace".
+      const fenced = page.getByRole("dialog", { name: "Reassign workspace", exact: true });
+      await fenced.getByText("The account changed. Close and reopen this dialog.", { exact: true }).waitFor();
+      assert.equal(await dialog.count(), 0, "the named dialog is gone");
+      assert.equal(await page.getByRole("dialog").count(), 1, "the same dialog, fenced");
+      assert.equal(await fenced.getByRole("textbox").count(), 0);
+      assert.doesNotMatch(await fenced.textContent(), /Private handover note|Owned workspace|Bob/);
+      // The footer's Close, not the dialog's corner button of the same name.
+      await fenced.getByRole("button", { name: "Close", exact: true }).filter({ hasText: "Close" }).click();
+      await fenced.waitFor({ state: "detached" });
       console.log(`ok team following/reassign ${width}px: header/sidebar, pending preference, search, refusal, retry and account fence`);
     } finally { await page.close(); }
   }
@@ -276,8 +339,9 @@ try {
     await dialog.getByRole("button", { name: "Done", exact: true }).click();
     const following = success.getByRole("region", { name: "Following", exact: true });
     await following.getByRole("button", { name: "Owned workspace", exact: true }).waitFor();
-    await success.getByRole("button", { name: /^Dashboard/ }).click();
-    await success.getByRole("button", { name: "Table", exact: true }).click();
+    await success.getByRole("button", { name: /^Overview/ }).click();
+    await sidebarShown(success, false);
+    await showTable(success);
     await rows(success).filter({ hasText: "Owned task" }).getByRole("button", { name: "View profile: Bob", exact: true }).waitFor();
     assert.equal(await success.getByRole("button", { name: "Dismiss reassignment", exact: true }).count(), 0, "previous owner receives no target notice");
   } finally { await success.close(); }

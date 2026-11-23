@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentEvent } from "@/types/events";
-import type { AgentProcessState, AgentTabInfo, AgentTabStatus } from "@terminalx/portable/workspace";
+import type { AgentProcessState, AgentTabInfo, AgentTabReset, AgentTabStatus, HeldFollowUpInfo } from "@terminalx/portable/workspace";
 
 export type { AgentProcessState, AgentTabInfo, AgentTabStatus };
 
@@ -16,7 +16,8 @@ export interface CloudAgentScope {
   workspaceId: string;
 }
 
-export type OutboxKind = "send" | "steer" | "stop" | "permission-decision";
+/** `follow-up` (#1328): a change to a follow-up the runtime holds, on a runtime with `follow-ups/1`. */
+export type OutboxKind = "send" | "steer" | "stop" | "permission-decision" | "follow-up";
 export type OutboxState = "unsent" | "queued" | "leased" | "applied" | "rejected" | "cancelled" | "outcome-unknown";
 /** What enqueueing did to the workspace's compute (contract §11.2). */
 export type WakeResult = "not-requested" | "not-needed" | "queued" | "in-progress" | "unavailable";
@@ -31,6 +32,8 @@ export interface OutboxEntry {
   text?: string | null;
   /** How many images the message carries (PRO-22); absent when none. */
   images?: number;
+  /** How many other files it carries (#1329); absent when none. */
+  files?: number;
   requestId?: string | null;
   state: OutboxState;
   wake?: WakeResult | null;
@@ -51,12 +54,30 @@ export interface CloudImageRef {
   name?: string;
 }
 
+/** A file other than an image the runtime already holds (`session.attach` with `kind: "file"`), as a message names it. */
+export interface CloudFileRef {
+  id: string;
+  name: string;
+  mediaType?: string;
+}
+
 /** The plaintext of a command, without its `v`. */
 export type OutboxPayload =
-  | { text: string; model?: string; effort?: string | null; mode?: string; images?: CloudImageRef[] }
+  | { text: string; model?: string; effort?: string | null; mode?: string; images?: CloudImageRef[]; files?: CloudFileRef[] }
   | { requestId: string; optionId: string }
   | { requestId: string; answers: Record<string, string> }
+  | FollowUpChange
   | Record<string, never>;
+
+/**
+ * A change to a held follow-up (#1328), named by the id of the command that
+ * sent it: new text, out of the queue unsent, or first in line with the
+ * running turn interrupted.
+ */
+export type FollowUpChange =
+  | { op: "edit"; followUpId: string; text: string }
+  | { op: "withdraw"; followUpId: string }
+  | { op: "release"; followUpId: string };
 
 export interface CheckpointMeta {
   tabId: string;
@@ -94,8 +115,12 @@ export interface Projection {
   process: AgentProcessState;
   events: AgentEvent[];
   truncated: boolean;
-  followUps: { clientCommandId: string; text: string }[];
+  followUps: HeldFollowUpInfo[];
   updatedAt: number;
+  /** Which history `events` are of, after a reset rewrote it (#1326); absent before the tab's first. */
+  history?: string | null;
+  /** What the tab's last reset did (#1326). */
+  reset?: AgentTabReset | null;
   /** The tab's session, from runtimes with CS-12; sealed with the rest of the projection. */
   session?: { title: string; branch: string | null };
 }

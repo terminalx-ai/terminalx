@@ -1,6 +1,6 @@
 [package]
 name = "raccoon"
-version = "0.2.32"
+version = "0.2.39"
 description = "TerminalX — a desktop workbench for coding agents"
 authors = ["Paresh Dudhat"]
 edition = "2021"
@@ -19,6 +19,7 @@ local-ui = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:notif
 desktop = [
     "dep:tauri",
     "dep:tauri-build",
+    "dep:serde_json",
     "dep:tauri-plugin-opener",
     "dep:tauri-plugin-deep-link",
     "dep:tauri-plugin-dialog",
@@ -52,6 +53,8 @@ members = ["serve"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
+# Reads the merged Tauri config to place its resources where the app looks.
+serde_json = { version = "1", optional = true }
 
 [dependencies]
 tempfile = "3"
@@ -110,10 +113,18 @@ ureq = { version = "2", features = ["json"] }
 tauri-plugin-updater = { version = "2.11.0", optional = true }
 cpal = { version = "0.17", optional = true }
 sha2 = "0.10"
+# P-256 ECDSA for the account installation key (PRO-349), already in the tree.
+ring = "0.17"
 subtle = "2.6"
 zeroize = "1.8"
 toml = "0.9"
+# Edits ~/.codex/config.toml in place, comments and all (PRO-153); already in the tree.
+toml_edit = "0.25"
+# Keeps ~/.claude.json's key order when a server is added (PRO-153); already in the tree.
+indexmap = { version = "2", features = ["serde"] }
 url = "2"
+# The phone pairing QR `terminalx-serve pair --phone` prints (PRO-359); no image support.
+qrcode = { version = "0.14.1", default-features = false }
 # Already in the tree through `url`: Unicode normalisation, for names that are one file on this disk.
 icu_normalizer = "2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -123,6 +134,34 @@ tauri-plugin-global-shortcut = { version = "~2.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Owner-only access, process identity and lifetime, and per-user secret
+# sealing: what file modes, uids, signals and the Keychain are on Unix.
+[target.'cfg(windows)'.dependencies]
+# Resolved paths without the verbatim `\\?\` prefix that git and CLIs do not read.
+dunce = "1"
+windows-sys = { version = "0.61", features = [
+  "Wdk_System_Threading",
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Cryptography",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Kernel",
+  "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
+  "Win32_System_RestartManager",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 notify-rust = { version = "4", optional = true }

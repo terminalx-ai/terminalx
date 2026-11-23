@@ -109,7 +109,14 @@ pub(crate) struct Sources<'a> {
 }
 
 fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Why a sessionless worktree stays while a pull request created from it is
+/// unconfirmed (#1382), as bulk cleanup keeps one (#1367). Unknown is never
+/// read as none.
+fn pending_pr_creation(path: &Path) -> Option<String> {
+    crate::worktree_cleanup::pending_pr_creation(&canonical(path))
 }
 
 /// Whether any session runs in `dir` or below it.
@@ -153,6 +160,8 @@ fn worktree_leftovers(project: &Project, base: &Base, sessions: &[SessionEntry],
         let state = landed::check(project_path, &path, if base.fresh { Fetch::JustFetched } else { Fetch::Skip });
         let kept_because = if !state.checked {
             Some("Not a working git checkout of this project, so it cannot be checked for unsaved work. Delete it by hand if it is not needed.".to_string())
+        } else if let Some(why) = pending_pr_creation(&path) {
+            Some(why)
         } else if let Some(reason) = base.not_verified.as_ref().or(state.not_verified.as_ref()) {
             Some(format!("Not verified: {reason}"))
         } else if !state.safe {
@@ -260,8 +269,45 @@ fn children(dir: &Path) -> Vec<PathBuf> {
 /// one managed worktree that is gone, and no session holds or has forked
 /// from any of them. A folder with a transcript that says anything else, or
 /// nothing, is left alone entirely: whose it is cannot be told.
-fn claude_leftovers(root: &Path, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
-    let Ok(root) = std::fs::canonicalize(root) else { return };
+/// The `projects` folders of added Claude Code accounts that are folders of
+/// their own rather than the link to the person's (#980), by account id.
+/// The linked ones lead to the person's folder, which is scanned already.
+fn claude_account_roots() -> Vec<(String, PathBuf)> {
+    agent_data::claude_account_projects_roots()
+        .into_iter()
+        .filter_map(|projects| Some((projects.parent()?.file_name()?.to_str()?.to_string(), projects)))
+        .collect()
+}
+
+/// The prefix of a Claude leftover's id: `claude:` in the person's folder,
+/// `claude@<account>:` in an account's own (#980).
+fn claude_prefix(account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("claude@{account}:"),
+        None => "claude:".to_string(),
+    }
+}
+
+/// The Claude projects folder a leftover id names and the folder in it:
+/// the person's (`claude:<folder>`), or the account's own
+/// (`claude@<account>:<folder>`), canonical.
+fn claude_root_of<'i>(id: &'i str, sources: &Sources<'_>) -> std::result::Result<(PathBuf, &'i str), String> {
+    match id.strip_prefix("claude@").and_then(|rest| rest.split_once(':')) {
+        Some((account, folder)) => claude_account_roots()
+            .into_iter()
+            .find(|(id, _)| id == account)
+            .and_then(|(_, root)| crate::paths::canonicalize(root).ok())
+            .map(|root| (root, folder))
+            .ok_or_else(|| "That account's Claude data folder is not there".to_string()),
+        None => sources.claude_root
+            .and_then(|root| crate::paths::canonicalize(root).ok())
+            .map(|root| (root, id.strip_prefix("claude:").unwrap_or_default()))
+            .ok_or_else(|| "Claude's data folder is not there".to_string()),
+    }
+}
+
+fn claude_leftovers(root: &Path, account: Option<&str>, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
+    let Ok(root) = crate::paths::canonicalize(root) else { return };
     let referenced = agent_data::referenced_conversations(sessions);
     let names: Vec<String> = children(&root).iter().filter_map(|path| path.file_name()?.to_str().map(String::from)).collect();
     for folder_name in names {
@@ -290,7 +336,7 @@ fn claude_leftovers(root: &Path, projects: &[Project], sessions: &[SessionEntry]
             }
         }
         out.push(Leftover {
-            id: format!("claude:{folder_name}"),
+            id: format!("{}{folder_name}", claude_prefix(account)),
             kind: LeftoverKind::AgentData,
             project_path: project.path.clone(),
             project_name: project.name.clone(),
@@ -316,7 +362,7 @@ fn rollout_meta(rollout: &Path) -> Option<(String, String)> {
 }
 
 fn codex_leftovers(home: &Path, projects: &[Project], sessions: &[SessionEntry], out: &mut Vec<Leftover>) {
-    let Ok(sessions_root) = std::fs::canonicalize(home.join("sessions")) else { return };
+    let Ok(sessions_root) = crate::paths::canonicalize(home.join("sessions")) else { return };
     let referenced = agent_data::referenced_conversations(sessions);
     let mut found: Vec<Leftover> = Vec::new();
     for year in children(&sessions_root) {
@@ -378,7 +424,12 @@ pub(crate) fn scan_sources(sources: &Sources<'_>) -> Vec<Leftover> {
         branch_leftovers(project, &base, sources.sessions, &mut out);
     }
     if let Some(root) = sources.claude_root {
-        claude_leftovers(root, sources.projects, sources.sessions, &mut out);
+        claude_leftovers(root, None, sources.projects, sources.sessions, &mut out);
+        // What added accounts wrote where their `projects` is not the link
+        // to the person's folder (#980).
+        for (account, root) in claude_account_roots() {
+            claude_leftovers(&root, Some(&account), sources.projects, sources.sessions, &mut out);
+        }
     }
     if let Some(home) = sources.codex_home {
         codex_leftovers(home, sources.projects, sources.sessions, &mut out);
@@ -407,10 +458,13 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
                 Ok(())
             };
             unused()?;
+            if let Some(why) = pending_pr_creation(&path) { return Err(why) }
             let before = landed::check(project, &path, Fetch::JustFetched);
             if !before.safe { return Err("It is no longer clean and merged; it was not deleted.".into()) }
             crate::archive_script::before_removal(project, &path, &[], None, None, runner, &|| {}).map_err(|e| e.to_string())?;
             unused()?;
+            // A pull request created while the archive hook ran keeps it too.
+            if let Some(why) = pending_pr_creation(&path) { return Err(why) }
             let state = landed::check(project, &path, Fetch::JustFetched);
             let Some(head) = state.head.as_deref().filter(|_| state.safe && state.head == before.head && state.branch == before.branch) else {
                 return Err("It is no longer clean and merged, or changed during its archive script; it was not deleted.".into());
@@ -433,14 +487,13 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(0)
         }
         LeftoverKind::AgentData if leftover.agent.as_deref() == Some("Claude") => {
-            let root = sources.claude_root.and_then(|root| std::fs::canonicalize(root).ok()).ok_or("Claude's data folder is not there")?;
-            let folder_name = leftover.id.strip_prefix("claude:").unwrap_or_default();
+            let (root, folder_name) = claude_root_of(&leftover.id, sources)?;
             let folder = agent_data::real_child_dir(&root, folder_name).ok_or("refusing to delete: not a folder under Claude's projects")?;
             let mut freed = 0;
             // Only the conversations the scan listed: a transcript and its
             // side folder, each a real entry directly in this folder.
             for path in leftover.paths.iter().map(Path::new) {
-                if path.parent() != Some(folder.as_path()) {
+                if !path.parent().is_some_and(|parent| crate::paths::same(parent, &folder)) {
                     continue;
                 }
                 match std::fs::symlink_metadata(path) {
@@ -455,7 +508,7 @@ fn remove_one(leftover: &Leftover, sources: &Sources<'_>, runner: Option<crate::
             Ok(freed)
         }
         LeftoverKind::AgentData => {
-            let sessions_root = sources.codex_home.and_then(|home| std::fs::canonicalize(home.join("sessions")).ok()).ok_or("Codex's data folder is not there")?;
+            let sessions_root = sources.codex_home.and_then(|home| crate::paths::canonicalize(home.join("sessions")).ok()).ok_or("Codex's data folder is not there")?;
             let mut freed = 0;
             for path in leftover.paths.iter().map(Path::new) {
                 if agent_data::rollout_inside(&sessions_root, path) {
@@ -560,7 +613,7 @@ mod tests {
         fn new() -> Self {
             let home = crate::store::temp_home();
             let dir = tempfile::tempdir().unwrap();
-            let base = std::fs::canonicalize(dir.path()).unwrap();
+            let base = crate::paths::canonicalize(dir.path()).unwrap();
             // A bare remote, so "pushed" means something.
             let remote = base.join("remote.git");
             std::fs::create_dir_all(&remote).unwrap();
@@ -740,6 +793,80 @@ mod tests {
         assert!(!wt.exists());
         assert!(!git::worktree_branch_names(f.path()).contains(&"quiet-amber-fox".to_string()));
         assert!(f.scan(&[]).is_empty());
+    }
+
+    /// A pending record for a pull request created from `tree` (#1382), as a
+    /// create whose read-back failed leaves it.
+    fn pending_record(tree: &Path, url: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!([{
+            "session": "gone-session",
+            "checkout": { "path": canonical(tree), "git_dir": tree.join(".git"), "directory": [0, 0], "admin": [0, 0] },
+            "branch": "feature/pr", "base": "main", "head": "0000000", "url": url,
+        }])).unwrap()
+    }
+
+    #[test]
+    fn a_sessionless_worktree_with_an_unconfirmed_pull_request_is_kept() {
+        let f = Fixture::new();
+        let wt = f.worktree("pending-pr");
+        let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+        let url = "https://github.test/octo/repo/pull/3";
+        std::fs::write(&record, pending_record(&wt, url)).unwrap();
+        let why = format!("Verify the pull request at {url} before removing this workspace.");
+        let leftover = find(&f.scan(&[]), LeftoverKind::Worktree, "pending-pr").cloned().expect("listed");
+        assert_eq!(leftover.kept_because.as_deref(), Some(why.as_str()), "the preview says why");
+        let removal = f.remove(&[], &[&leftover.id]);
+        assert!(removal.removed.is_empty());
+        assert_eq!(removal.failed[0].error, why);
+        // Asked directly, as a stale preview would, the removal refuses too.
+        assert_eq!(remove_one(&leftover, &f.sources(std::slice::from_ref(&f.project), &[]), None), Err(why.clone()));
+        let options = crate::workspaces::DeleteOptions { delete_branch: true, direct: git::DirectDelete::Never, verified_head: None };
+        assert_eq!(crate::workspaces::delete(f.path(), &wt, options).unwrap_err().to_string(), why);
+        assert!(wt.join("a.txt").exists());
+        assert!(git::worktree_branch_names(f.path()).contains(&"pending-pr".to_string()));
+        // An unreadable record is not read as none.
+        std::fs::write(&record, b"not json").unwrap();
+        let kept = find(&f.scan(&[]), LeftoverKind::Worktree, "pending-pr").cloned().unwrap();
+        assert!(kept.kept_because.as_deref().unwrap().starts_with("Pull requests created from it could not be checked"), "{kept:?}");
+        assert!(f.remove(&[], &[&kept.id]).removed.is_empty());
+        assert!(wt.exists());
+        // Once reconciliation settles it, ordinary cleanup removes it.
+        std::fs::remove_file(&record).unwrap();
+        assert_eq!(f.remove(&[], &[&kept.id]).removed, vec![kept.id.clone()]);
+        assert!(!wt.exists());
+        assert!(!git::worktree_branch_names(f.path()).contains(&"pending-pr".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pull_request_created_during_a_leftovers_archive_hook_keeps_it() {
+        use std::sync::Arc;
+        let f = Fixture::new();
+        let wt = f.worktree("hook-pr");
+        let url = "https://github.test/octo/repo/pull/4";
+        let staged = f.dir.path().join("pending.json");
+        std::fs::write(&staged, pending_record(&wt, url)).unwrap();
+        let record = crate::store::root().unwrap().join("pending-machine-pr-creations.json");
+        let marker = f.dir.path().join("hook-ran");
+        let project = crate::store::projects::add(f.project.path.as_str()).unwrap();
+        crate::store::projects::update(&project.path, crate::store::projects::ProjectPatch {
+            scripts: Some(crate::store::projects::RepositoryScripts {
+                setup: String::new(),
+                archive: format!("cp '{}' '{}' && touch '{}'", staged.display(), record.display(), marker.display()),
+                archive_timeout_minutes: None,
+            }), ..Default::default()
+        }).unwrap();
+        let id = format!("worktree:{}:hook-pr", f.project.path);
+        let terminals = Arc::new(crate::pty::Terminals::new());
+        let sink: Arc<dyn crate::sink::EventSink> = Arc::new(crate::sink::BroadcastSink::new(64));
+        let runner = crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false };
+        let result = remove_from_sources_with_runner(&f.sources(std::slice::from_ref(&f.project), &[]), std::slice::from_ref(&id), &|_| {}, Some(runner));
+        terminals.kill_all();
+        assert!(marker.exists(), "the archive hook ran");
+        assert!(result.removed.is_empty());
+        assert_eq!(result.failed[0].error, format!("Verify the pull request at {url} before removing this workspace."));
+        assert!(wt.join("a.txt").exists());
+        assert!(git::worktree_branch_names(f.path()).contains(&"hook-pr".to_string()));
     }
 
     #[test]
@@ -1034,6 +1161,61 @@ mod tests {
         for kept in [&claude_live, &claude_project, &claude_unmanaged, &codex_unmanaged] {
             assert!(kept.exists(), "{}", kept.display());
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_accounts_own_claude_folder_is_scanned_and_a_linked_one_is_not_listed_twice() {
+        // No remote and no repository: only the agents' data is looked at.
+        let _home = crate::store::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
+        let path = base.join("project");
+        std::fs::create_dir_all(&path).unwrap();
+        let project: Project = serde_json::from_value(serde_json::json!({ "path": path, "name": "project" })).unwrap();
+        let claude_root = base.join("home/.claude/projects");
+        let codex_home = base.join("codex");
+        std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
+        let sources = Sources { projects: std::slice::from_ref(&project), sessions: &[], claude_root: Some(&claude_root), codex_home: Some(&codex_home), fetch: Fetch::Fresh };
+        let gone = git::worktree_path(&path, "gone");
+        let named = encoded_cwd(&gone.to_string_lossy());
+        let transcript_in = |projects: &Path, conversation: &str| {
+            let folder = projects.join(&named);
+            std::fs::create_dir_all(&folder).unwrap();
+            let file = folder.join(format!("{conversation}.jsonl"));
+            std::fs::write(&file, format!("{}\n", serde_json::json!({ "type": "user", "cwd": gone }))).unwrap();
+            file
+        };
+        let accounts = crate::store::root().unwrap().join(crate::agent_accounts::DIRECTORY).join("claude");
+        // An account whose `projects` is a folder of its own (#980).
+        let own = accounts.join("0123456789abcdef/projects");
+        let transcript = transcript_in(&own, CONV_A);
+        // One whose `projects` is the link to the person's folder.
+        std::fs::create_dir_all(&claude_root).unwrap();
+        std::fs::create_dir_all(accounts.join("fedcba9876543210")).unwrap();
+        std::os::unix::fs::symlink(&claude_root, accounts.join("fedcba9876543210/projects")).unwrap();
+        let person = transcript_in(&claude_root, CONV_B);
+
+        let leftovers = scan_sources(&sources);
+        let mut ids: Vec<&str> = leftovers.iter().filter(|l| l.agent.as_deref() == Some("Claude")).map(|l| l.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, [format!("claude:{named}"), format!("claude@0123456789abcdef:{named}")]);
+
+        // A made-up account or folder names nothing.
+        let hostile: Vec<String> = [format!("claude@ffffffffffffffff:{named}"), "claude@0123456789abcdef:..".into(), "claude@..:x".into(), "claude@0123456789abcdef:".into()].into();
+        let removal = remove_from_sources(&sources, &hostile, &|_| {});
+        assert!(removal.removed.is_empty() && transcript.exists() && person.exists());
+
+        let removal = remove_from_sources(&sources, &[format!("claude@0123456789abcdef:{named}")], &|_| {});
+        assert_eq!(removal.failed, vec![]);
+        assert!(!transcript.exists(), "the account's own copy is removed");
+        assert!(person.exists(), "the person's is a leftover of its own");
+        assert!(own.exists() && accounts.join("fedcba9876543210/projects").exists());
+
+        // Without Claude's data in the scan, no account's is scanned either.
+        let without = Sources { claude_root: None, ..sources };
+        transcript_in(&own, CONV_A);
+        assert!(scan_sources(&without).iter().all(|l| l.agent.as_deref() != Some("Claude")));
     }
 
     #[test]

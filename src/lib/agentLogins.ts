@@ -29,7 +29,8 @@ export interface AgentLoginStatus {
   baseUrl?: string;
   verified?: AgentKeyVerified;
   /** The saved key could not be read back from the Keychain. */
-  problem?: string;  /** The agent's own settings file, `~`-relative (Codex's `config.toml`). */
+  problem?: string;
+  /** The agent's own settings file, `~`-relative (Codex's `config.toml`). */
   config?: string;
 }
 
@@ -44,6 +45,8 @@ export interface AgentLoginTab {
   tabId: string;
   /** It started with the login new tabs get now. */
   current: boolean;
+  /** The agent account it started on (#980), when the runtime records one. */
+  account?: string;
 }
 
 /** The agents this version lets people give an API key. */
@@ -135,7 +138,8 @@ export function useAgentLogin(harness: string) {
 export interface AgentLoginNotice {
   id: number;
   harness: string;
-  kind: "saved" | "removed" | "imported";
+  /** `account`: an agent account was added, removed or made the default (#980). */
+  kind: "saved" | "removed" | "imported" | "account";
   title: string;
   body: string;
   /** The running tabs of the agent that keep their older login. */

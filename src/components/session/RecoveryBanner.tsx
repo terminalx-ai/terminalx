@@ -7,6 +7,7 @@ import type { ModelInfo } from "@/lib/api";
 import { modelOptionText } from "@/lib/models";
 import { formatResetCountdown, useCountdownNow } from "@/lib/statusTime";
 import { inputOf, type ActionInput } from "@/lib/recoveryReports";
+import type { AgentAccount } from "@/lib/agentAccounts";
 
 /** The plan window a refused request ran out of, and when it refills. */
 export type UsageLimit = { status?: string; resetsAt?: number; window?: string };
@@ -22,7 +23,7 @@ export function usageLimitText(limit: UsageLimit, now: number): string | null {
   return `${name} · resets ${when}${countdown === "now" ? " (now)" : countdown ? ` (in ${countdown})` : ""}`;
 }
 
-export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, signInPending = false, onResend, onPressed }: {
+export function RecoveryBanner({ placement = "top", kind, limit = null, waiting, native = false, asks, busy, answering = false, answerBlockedReason = null, askDetail = true, models, onOpenModels, onPermission, onQuestions, onRetry, onStop, onContinue, onSendContinue, onSignIn, signInPending = false, onResend, onPressed, accounts = null }: {
   /** Above the composer in the chat, or across the top of a terminal. */
   placement?: "top" | "composer";
   kind: RecoveryKind | null;
@@ -56,6 +57,12 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
   onResend?: () => void;
   /** How a control here was pressed, told before its handler runs, for the tab's recovery incidents (#815). */
   onPressed?: (input: ActionInput) => void;
+  /**
+   * The agent's other accounts to continue on (#980): at a usage limit, those
+   * whose windows have room; signed out, every other signed-in one. Each is
+   * "Continue with <label>", the person's click; none with one account.
+   */
+  accounts?: { choices: AgentAccount[]; switching: string | null; error?: string | null; onSwitch: (account: AgentAccount) => void } | null;
 }) {
   // A button pressed with a key fires a click with no count; a choice made in the model list is not told how.
   const pressed = (run: () => void) => (event: { detail?: number }) => {
@@ -90,10 +97,17 @@ export function RecoveryBanner({ placement = "top", kind, limit = null, waiting,
     <p className="font-medium">{offer.title}</p>
     <p className="mt-1">{signInPending && kind === "signed_out" ? "Finish signing in in the terminal. After sign-in is verified, the interrupted turn will retry once." : offer.message}</p>
     {reset && <p className="mt-1 text-muted-foreground" data-testid="usage-limit-reset">{reset}</p>}
+    {accounts?.error && (kind === "usage_limit" || kind === "signed_out") && <p className="mt-1 text-warning" data-testid="account-switch-error">{accounts.error}</p>}
     {asks.map(ask => <div key={ask.requestId} className="mt-2">{ask.kind === "permission"
       ? <PermissionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} showDetail={askDetail} onAnswer={option => onPermission(ask.requestId, option)} />
       : <QuestionCard ask={ask} busy={busy || answering} blockedReason={answerBlockedReason} onAnswer={answers => onQuestions(ask.requestId, answers)} />}</div>)}
     <div className="mt-2 flex flex-wrap gap-2">
+      {(kind === "usage_limit" || kind === "signed_out") && accounts?.choices.map(account => (
+        <Button key={account.id} size="sm" disabled={busy || !!accounts.switching} data-testid="continue-with-account"
+          title={`Restart the agent on ${account.label} and resume this conversation`} onClick={pressed(() => accounts.onSwitch(account))}>
+          {accounts.switching === account.id ? `Switching to ${account.label}…` : `Continue with ${account.label}`}
+        </Button>
+      ))}
       {offer.signIn && onSignIn && <Button size="sm" disabled={busy || signInPending} onClick={pressed(onSignIn)}>Sign in</Button>}
       {offer.resend && onResend && <Button size="sm" disabled={busy} onClick={pressed(onResend)}>Resend last prompt</Button>}
       {offer.retry && <Button size="sm" variant={kind === "signed_out" ? "outline" : undefined} disabled={busy} onClick={pressed(() => onRetry())}>{offer.retry}</Button>}

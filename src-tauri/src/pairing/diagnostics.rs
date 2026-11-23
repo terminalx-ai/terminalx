@@ -59,6 +59,16 @@ pub(super) enum Category {
     Woke,
     /// The local runtime refused or did not answer a paired-device call.
     LocalRuntime,
+    /// The phone did not read its messages as fast as the Mac sent them,
+    /// and its outbound queue filled (#1282).
+    FellBehind,
+    /// The Mac closed the phone's stream: its terminal output failed or the
+    /// owner let the connection go.
+    HostClosed,
+    /// The account binding changed under the connection.
+    AccountChanged,
+    /// The phone sent more requests than the Mac holds unanswered.
+    TooManyRequests,
     Unknown,
 }
 
@@ -94,6 +104,17 @@ impl Failure {
             }
         } else if let Some(category) = error.downcast_ref::<Category>() {
             *category
+        } else if let Some(fault) = error.downcast_ref::<crate::phone::Fault>() {
+            use crate::phone::Fault;
+            match fault {
+                Fault::FellBehind => Category::FellBehind,
+                Fault::Closed => Category::HostClosed,
+                Fault::Changed => Category::AccountChanged,
+                Fault::Unreadable => Category::Protocol,
+                Fault::TooManyRequests => Category::TooManyRequests,
+            }
+        } else if error.downcast_ref::<crate::phone::RuntimeUnanswered>().is_some() {
+            Category::LocalRuntime
         } else if stage == Stage::LocalIdentity {
             Category::LocalStorage
         } else if error.chain().any(|cause| {
@@ -167,6 +188,14 @@ impl Failure {
                 "This Mac woke from sleep. Reconnecting to Relay automatically.",
             Category::LocalRuntime =>
                 "TerminalX's local runtime did not answer. Retrying automatically. If this continues, quit and reopen TerminalX.",
+            Category::FellBehind =>
+                "A phone fell behind this Mac's updates and was reconnected.",
+            Category::HostClosed =>
+                "This Mac closed a phone's connection. It reconnects automatically.",
+            Category::AccountChanged =>
+                "This Mac's account changed while a phone was connected.",
+            Category::TooManyRequests =>
+                "A phone sent more requests than this Mac answers at once and was reconnected.",
             Category::Unknown =>
                 "Relay connection ended unexpectedly. Retrying automatically. You can use LAN meanwhile.",
         }
@@ -186,7 +215,10 @@ pub(super) enum Event {
     PhoneRequested,
     PhoneAttached,
     PhoneAuthenticated,
-    PhoneClosed,
+    /// A phone's session ended without a fault; `ended` says how (#1282).
+    /// Earlier versions wrote it as `phone-closed` whatever ended it.
+    #[serde(alias = "phone-closed")]
+    PhoneEnded,
     PhoneFailed,
 }
 
@@ -197,7 +229,7 @@ impl Event {
             Self::PhoneRequested
                 | Self::PhoneAttached
                 | Self::PhoneAuthenticated
-                | Self::PhoneClosed
+                | Self::PhoneEnded
                 | Self::PhoneFailed
         )
     }
@@ -212,6 +244,12 @@ struct Record {
     #[serde(default)]
     retry_count: u32,
     failure: Option<Failure>,
+    /// How a phone's session ended without a fault (#1282).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ended: Option<crate::phone::EndReason>,
+    /// The code of the close frame that ended it, the phone's or the relay's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    close_code: Option<u16>,
 }
 
 #[derive(Default)]
@@ -243,12 +281,25 @@ impl DiagnosticLog {
         attempt: u32,
         failure: Option<Failure>,
     ) -> std::io::Result<()> {
+        self.record_end(event, attempt, failure, None)
+    }
+
+    /// `record`, with how a phone's session ended.
+    pub fn record_end(
+        &mut self,
+        event: Event,
+        attempt: u32,
+        failure: Option<Failure>,
+        ended: Option<crate::phone::Ended>,
+    ) -> std::io::Result<()> {
         self.records.push_back(Record {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
             event,
             attempt,
             retry_count: attempt.saturating_sub(1),
             failure,
+            ended: ended.map(|ended| ended.reason),
+            close_code: ended.and_then(|ended| ended.close_code),
         });
         if event.is_phone()
             && self.records.iter().filter(|record| record.event.is_phone()).count()
@@ -399,6 +450,52 @@ mod tests {
         assert_eq!(control.last().unwrap().attempt, 10);
         assert!(matches!(records.last().unwrap().event, Event::PhoneFailed));
         assert!(String::from_utf8(bytes).unwrap().contains("\"stage\":\"phone-handshake\""));
+    }
+
+    /// #1282: a phone session's end says why, not `unknown`.
+    #[test]
+    fn a_phone_session_records_why_it_ended() {
+        use crate::phone::{EndReason, Ended, Fault};
+        for (fault, expected) in [
+            (Fault::FellBehind, Category::FellBehind),
+            (Fault::Closed, Category::HostClosed),
+            (Fault::Changed, Category::AccountChanged),
+            (Fault::Unreadable, Category::Protocol),
+            (Fault::TooManyRequests, Category::TooManyRequests),
+        ] {
+            let error = anyhow::Error::new(fault).context(Stage::PhoneSession);
+            assert_eq!(Failure::from_error(&error), Failure { stage: Stage::PhoneSession, category: expected, http_status: None });
+            // Through a context too, as an unreadable frame comes.
+            let wrapped = anyhow::anyhow!("detail").context(fault).context(Stage::PhoneSession);
+            assert_eq!(Failure::from_error(&wrapped).category, expected);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let mut log = DiagnosticLog::default();
+        log.configure(directory.path().to_owned()).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4000)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4001)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(Some(4408)))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::closed_with(None))).unwrap();
+        log.record_end(Event::PhoneEnded, 0, None, Some(Ended::by(EndReason::StreamEnded))).unwrap();
+        log.record(Event::PhoneFailed, 0, Some(Failure::from_error(&anyhow::Error::new(Fault::FellBehind).context(Stage::PhoneSession)))).unwrap();
+        let bytes = std::fs::read_to_string(directory.path().join(FILE_NAME)).unwrap();
+        assert!(bytes.contains(r#""event":"phone-ended","attempt":0,"retryCount":0,"failure":null,"ended":"phone-closed","closeCode":4000"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"probe-timeout","closeCode":4001"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"relay-closed","closeCode":4408"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"unknown"}"#), "{bytes}");
+        assert!(bytes.contains(r#""ended":"stream-ended"}"#), "{bytes}");
+        assert!(bytes.contains(r#""category":"fell-behind""#), "{bytes}");
+        // Records without an end, as earlier versions wrote them, still read.
+        let mut relaunched = DiagnosticLog::default();
+        relaunched.configure(directory.path().to_owned()).unwrap();
+        assert_eq!(relaunched.records.len(), 8);
+        // So do the `phone-closed` events they wrote for every end.
+        let earlier = br#"[{"timestampMs":0,"event":"phone-closed","attempt":0,"failure":null,"ended":"phone-closed","closeCode":1000}]"#;
+        std::fs::write(directory.path().join(FILE_NAME), earlier).unwrap();
+        let mut upgraded = DiagnosticLog::default();
+        upgraded.configure(directory.path().to_owned()).unwrap();
+        assert!(matches!(upgraded.records[0].event, Event::PhoneEnded));
+        assert_eq!(upgraded.records[0].ended, Some(EndReason::PhoneClosed));
     }
 
     #[test]

@@ -75,8 +75,9 @@ export function watchTranscript(
   let unsubscribe = () => {};
   const current = () => active && epoch === cacheEpoch(host);
 
-  const save = async () => {
-    await writeCache(host, session, tab, state, epoch);
+  // `appended`: only the last that many events are new since the last save (#1283).
+  const save = async (appended?: number) => {
+    await writeCache(host, session, tab, state, epoch, appended);
   };
   // Every read that can break the connection goes through here, so a lost
   // connection is counted against the read that was in flight.
@@ -158,13 +159,14 @@ export function watchTranscript(
           return;
         }
         if (page.reset && ++resets > 2) throw new Error("Transcript changed repeatedly during sync; retrying later");
+        const appended = page.reset ? undefined : appendedCount(state.events, page.events);
         const merged = page.reset ? page.events : mergeEvents(state.events, page.events);
         state = {
           events: merged.slice(-500), cursor: page.cursor,
           hasEarlier: page.reset ? page.hasEarlier : state.hasEarlier || merged.length > 500,
         };
         update(state, page.reset, "page");
-        await save();
+        await save(appended);
         dirty ||= page.hasMore;
       }
       // Read to the end of the Mac's history, with the subscription confirmed before that read: caught up. Not
@@ -185,6 +187,8 @@ export function watchTranscript(
     if (!timer) timer = setTimeout(() => { timer = undefined; void drain(); }, 100);
   };
 
+  const watched = lossKey(host, session, tab);
+  openTranscripts.set(watched, (openTranscripts.get(watched) ?? 0) + 1);
   void (async () => {
     state = await readCache(host, session, tab);
     if (!current()) return;
@@ -196,7 +200,38 @@ export function watchTranscript(
 
   // Also repairs missed stream notifications and host-side reconciliations.
   const poll = connected ? setInterval(() => { if (incremental !== false) invalidate(); }, 15_000) : undefined;
-  return () => { active = false; unsubscribe(); clearTimeout(timer); clearInterval(poll); };
+  return () => {
+    if (active) {
+      const count = (openTranscripts.get(watched) ?? 1) - 1;
+      if (count > 0) openTranscripts.set(watched, count); else openTranscripts.delete(watched);
+    }
+    active = false; unsubscribe(); clearTimeout(timer); clearInterval(poll);
+  };
+}
+
+/** Conversations open on screen, which read for themselves: a prefetch leaves them alone (#1283). */
+const openTranscripts = new Map<string, number>();
+export const transcriptOpen = (host: string, session: string, tab: string) => openTranscripts.has(lossKey(host, session, tab));
+/** The conversations open on screen for a Mac: a prefetch is asked not to send them (#1337). */
+export function openTranscriptsOf(host: string): { sessionId: string; tabId: string }[] {
+  return [...openTranscripts.keys()].flatMap((key) => {
+    const [owner, sessionId, tabId] = JSON.parse(key) as [string, string, string];
+    return owner === host ? [{ sessionId, tabId }] : [];
+  });
+}
+
+/**
+ * How many of `incoming` only add to `existing`: all of them when each comes
+ * after the last one there, in order; undefined when merging changes or
+ * reorders anything, and the whole transcript must be saved.
+ */
+export function appendedCount(existing: readonly AgentEvent[], incoming: readonly AgentEvent[]): number | undefined {
+  let last = existing.at(-1)?.seq ?? -Infinity;
+  for (const event of incoming) {
+    if (event.seq <= last) return undefined;
+    last = event.seq;
+  }
+  return incoming.length;
 }
 
 function hasUnchangedOverlap(existing: AgentEvent[], incoming: AgentEvent[]): boolean {

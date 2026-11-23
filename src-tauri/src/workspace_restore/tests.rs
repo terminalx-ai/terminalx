@@ -11,7 +11,7 @@ fn fixture() -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
 /// With `sparse`, the workspace checks out only those folders of keep/ and drop/.
 fn fixture_with(sparse: Option<&[&str]>) -> (tempfile::TempDir, SessionEntry, RemovedWorkspace) {
     let repo = tempfile::tempdir().unwrap();
-    let project = std::fs::canonicalize(repo.path()).unwrap();
+    let project = crate::paths::canonicalize(repo.path()).unwrap();
     for args in [vec!["init", "-q", "-b", "main"], vec!["config", "user.name", "Test"], vec!["config", "user.email", "test@example.com"]] {
         git::run(&project, &args).unwrap();
     }
@@ -53,7 +53,7 @@ fn fixture_with(sparse: Option<&[&str]>) -> (tempfile::TempDir, SessionEntry, Re
 }
 
 fn restore_preview(preview: &Preview, branch: Option<&str>) -> Result<Vec<SessionEntry>> {
-    restore(&BroadcastSink::new(16), "retained", preview, branch, &|_| Ok(()))
+    restore(&BroadcastSink::new(16), "retained", preview, branch, false, &|_| Ok(()))
 }
 
 fn assert_absent(project: &Path, path: &str, branch: &str) {
@@ -76,7 +76,7 @@ fn records_actual_head_and_branch_and_restores_all_retained_tabs() {
     assert!(plan.needs_branch.is_none());
     assert_eq!(plan.session_ids.len(), 2);
     let stopped = std::cell::RefCell::new(Vec::new());
-    let restored = restore(&BroadcastSink::new(16), "retained", &plan, None, &|entry| {
+    let restored = restore(&BroadcastSink::new(16), "retained", &plan, None, false, &|entry| {
         stopped.borrow_mut().push(entry.id.clone());
         Ok(())
     })
@@ -188,7 +188,7 @@ fn rejects_invalid_taken_names_and_stop_failures_before_creating_files() {
         assert!(restore_preview(&plan, Some(branch)).is_err(), "{branch}");
         assert!(!Path::new(&plan.path).exists());
     }
-    assert!(restore(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), &|_| anyhow::bail!("cannot stop")).is_err());
+    assert!(restore(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), false, &|_| anyhow::bail!("cannot stop")).is_err());
     assert_absent(repo.path(), &plan.path, "new-branch");
 }
 
@@ -222,7 +222,7 @@ fn a_session_changed_during_stop_is_not_restored() {
     let (repo, _, _) = fixture();
     let plan = preview("retained").unwrap();
     // The second preview catches this without creating either Git resource.
-    assert!(restore(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), &|_| {
+    assert!(restore(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), false, &|_| {
         index::update_session("retained", |entry| {
             entry.worktree_removed = false;
             Ok(())
@@ -248,16 +248,17 @@ fn index_failure_after_checkout_rolls_back_the_checkout_and_branch() {
     let _home = crate::store::temp_home();
     let (repo, session, _) = fixture();
     let plan = preview("retained").unwrap();
-    let failure = |expected: &Preview, _: &RemovedWorkspace, _: &str| {
+    let failure = |expected: &Preview, _: &RemovedWorkspace, _: Option<&str>| {
         assert!(Path::new(&expected.path).join("tracked.txt").exists());
         anyhow::bail!("index write failed")
     };
-    let error = restore_with(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), &|_| Ok(()), &failure).unwrap_err();
+    let error = restore_with(&BroadcastSink::new(16), "retained", &plan, Some("new-branch"), false, &|_| Ok(()), &failure).unwrap_err();
     assert!(error.to_string().contains("index write failed"));
     assert_absent(repo.path(), &plan.path, "new-branch");
     assert_eq!(index::get("retained").unwrap(), session);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sparse_workspace_comes_back_with_its_folders_and_no_checkout_hook_runs() {
     let _home = crate::store::temp_home();
@@ -287,4 +288,44 @@ fn a_full_workspace_comes_back_full() {
     let plan = preview("retained").unwrap();
     restore_preview(&plan, None).unwrap();
     assert!(Path::new(&plan.path).join("drop/f").exists());
+}
+
+#[test]
+fn a_deleted_branch_restores_detached_at_the_recorded_commit() {
+    let _home = crate::store::temp_home();
+    let (repo, session, removed) = fixture();
+    let mut sibling = session.clone();
+    sibling.id = "sibling".into();
+    index::save(&[session, sibling]).unwrap();
+    git::run(repo.path(), &["branch", "-D", "topic"]).unwrap();
+    let plan = preview("retained").unwrap();
+    assert!(plan.needs_branch.is_some());
+    let before: Vec<_> = git::run(repo.path(), &["for-each-ref", "--format=%(refname)", "refs/heads/"]).unwrap().lines().map(str::to_owned).collect();
+    // A new branch passed alongside is ignored: detached creates no branch.
+    let restored = restore(&BroadcastSink::new(16), "retained", &plan, Some(&plan.suggested_branch), true, &|_| Ok(())).unwrap();
+    let path = Path::new(&plan.path);
+    assert_eq!(git::head_commit(path), removed.commit);
+    assert_eq!(git::current_branch(path), None, "HEAD is detached");
+    let after: Vec<_> = git::run(repo.path(), &["for-each-ref", "--format=%(refname)", "refs/heads/"]).unwrap().lines().map(str::to_owned).collect();
+    assert_eq!(before, after);
+    assert_eq!(restored.len(), 2);
+    for entry in restored {
+        assert!(!entry.worktree_removed && !entry.archived && entry.removed_workspace.is_none());
+        assert_eq!(entry.cwd, plan.path);
+        assert_eq!(entry.branch, None);
+        assert_eq!(entry.tabs[0].provider_session_id.as_deref(), Some("native-conversation"));
+        assert_eq!(index::get(&entry.id).unwrap(), entry);
+    }
+}
+
+#[test]
+fn a_sparse_workspace_restores_detached_with_its_folders() {
+    let _home = crate::store::temp_home();
+    let (_repo, _session, removed) = fixture_with(Some(&["keep"]));
+    let plan = preview("retained").unwrap();
+    restore(&BroadcastSink::new(16), "retained", &plan, None, true, &|_| Ok(())).unwrap();
+    let path = Path::new(&plan.path);
+    assert_eq!(git::head_commit(path), removed.commit);
+    assert_eq!(git::current_branch(path), None);
+    assert!(path.join("keep/f").exists() && !path.join("drop").exists());
 }

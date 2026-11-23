@@ -15,9 +15,7 @@ use serde_json::{json, Value};
 
 use crate::control::ControlError;
 
-#[cfg(unix)]
 pub mod stream;
-#[cfg(unix)]
 pub(crate) mod window;
 pub mod calls;
 pub(crate) mod history;
@@ -36,31 +34,26 @@ pub(crate) mod workspaces;
 pub(crate) mod permissions;
 pub(crate) mod scrollback;
 pub(crate) mod idle;
-#[cfg(unix)]
 pub mod client;
-#[cfg(unix)]
 pub mod sessions;
-#[cfg(unix)]
 pub mod launch;
 #[cfg(unix)]
 pub mod handover;
-#[cfg(unix)]
 pub mod log_file;
-#[cfg(unix)]
 pub mod bridge;
-#[cfg(unix)]
 pub mod desktop;
-#[cfg(unix)]
 pub mod terminals;
 pub mod typing;
-#[cfg(all(unix, feature = "desktop"))]
+#[cfg(feature = "desktop")]
 pub(crate) mod supervisor;
-#[cfg(all(unix, feature = "desktop"))]
+#[cfg(feature = "desktop")]
 pub mod ui;
-#[cfg(all(unix, feature = "desktop"))]
+#[cfg(feature = "desktop")]
 pub(crate) mod replace;
-#[cfg(all(unix, feature = "desktop"))]
+#[cfg(feature = "desktop")]
 pub(crate) mod update_plan;
+#[cfg(all(unix, feature = "desktop"))]
+pub(crate) mod window_consent;
 
 pub const PROTOCOL: u64 = 1;
 
@@ -86,6 +79,15 @@ fn handover_format() -> Option<u32> {
     #[cfg(not(unix))]
     { None }
 }
+/// The handover record formats this build's runtime reads: none where a
+/// runtime cannot be handed over.
+pub(crate) fn handover_formats() -> &'static [u32] {
+    #[cfg(unix)]
+    { handover::FORMATS }
+    #[cfg(not(unix))]
+    { &[] }
+}
+
 /// What the event socket understands within [`PROTOCOL`], so a desktop and a
 /// runtime of different builds still attach. 2 (#716): a hello names the one
 /// stream its connection carries, and the runtime says when a terminal view
@@ -164,9 +166,26 @@ impl Owner {
         self._file.as_raw_fd()
     }
 
-    #[cfg(not(unix))]
-    pub fn acquire(_root: &Path) -> Result<Self> {
-        bail!("local background runtime ownership is not supported on this platform yet")
+    /// The Windows ownership lock: `run/` owner-only, the lock a private
+    /// regular file with one name, held exclusively while this owner lives.
+    #[cfg(windows)]
+    pub fn acquire(root: &Path) -> Result<Self> {
+        let run = root.join("run");
+        crate::private_fs::create_dir(&run, "local runtime directory")?;
+        let path = run.join("local-runtime.lock");
+        let file = crate::private_fs::create_file(&path, false).context("open local runtime ownership lock")?;
+        drop(crate::private_fs::open_file(&path, "local runtime lock")?);
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => bail!("another local runtime owns this data directory"),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error).context("lock the local runtime ownership file"),
+        }
+        // An older desktop does not hold our new lock. Never reset its stores
+        // or rotate its credentials while it is serving this home.
+        if crate::ipc::connect(&crate::ipc::published(root)).is_ok() {
+            bail!("another TerminalX process is serving this data directory; attach to it or close it first");
+        }
+        Ok(Self { _file: file })
     }
 }
 
@@ -220,7 +239,6 @@ impl Attachment {
 }
 
 pub struct Lifetime {
-    #[cfg(unix)]
     pub(crate) window: window::Registry,
     epoch: String,
     stream_socket: std::sync::OnceLock<std::path::PathBuf>,
@@ -248,7 +266,6 @@ fn unavailable() -> ControlError {
 impl Lifetime {
     pub fn new(grace: Duration) -> Arc<Self> {
         Arc::new(Self {
-            #[cfg(unix)]
             window: window::Registry::default(),
             epoch: uuid::Uuid::new_v4().to_string(),
             stream_socket: std::sync::OnceLock::new(),
@@ -321,6 +338,40 @@ impl Lifetime {
             .ok_or_else(|| anyhow::anyhow!("The runtime attachment expired or disconnected."))
     }
 
+    /// An attachment the runtime holds for the phones it serves itself
+    /// (PRO-359), as a window holds one for the phones it serves: their
+    /// grants belong to it. It needs no heartbeat. It ends with
+    /// [`Self::release`], Stop all or shutdown, and while it is held the
+    /// runtime is not idle. Answers its lease.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn hold(&self) -> anyhow::Result<String> {
+        /// Far enough that it never lapses, near enough not to overflow.
+        const HELD: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+        let mut state = self.state.lock().unwrap();
+        if state.starting || state.exiting || state.stop_requested {
+            bail!("The local runtime is not accepting attachments now.");
+        }
+        if state.leases.len() >= MAX_CLIENTS {
+            bail!("Too many attached local clients.");
+        }
+        let lease = uuid::Uuid::new_v4().to_string();
+        state.leases.insert(lease.clone(), Arc::new(Attachment(Mutex::new(Some(Instant::now() + HELD)))));
+        state.idle_since = None;
+        Ok(lease)
+    }
+
+    /// Let a lease from [`Self::hold`] go: every grant under it ends.
+    #[cfg(unix)]
+    pub(crate) fn release(&self, lease: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(attachment) = state.leases.remove(lease) {
+            attachment.revoke();
+        }
+        if state.leases.is_empty() && state.idle_since.is_none() {
+            state.idle_since = Some(Instant::now());
+        }
+    }
+
     /// Signal/logout closes owner admission before any blocking child cleanup.
     pub(crate) fn begin_shutdown(&self) {
         let mut state=self.state.lock().unwrap();
@@ -333,7 +384,6 @@ impl Lifetime {
         state.stop_requested || state.exiting
     }
 
-    #[cfg(unix)]
     pub fn set_stream_socket(&self, path: std::path::PathBuf) {
         let _ = self.stream_socket.set(path);
     }

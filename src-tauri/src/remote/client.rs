@@ -117,7 +117,16 @@ pub enum ClientState {
     /// Below `connect`: nothing touches the network.
     Idle,
     Opening,
-    WaitingForRuntime,
+    /// The runtime is not reachable yet: the API says it has not answered
+    /// the attachment, or the relay turned a first dial away because the
+    /// runtime is not on it yet (still booting, or restarted while it booted).
+    /// Nothing was lost: a connection that never came up is waited for.
+    WaitingForRuntime {
+        /// The relay close code of the dial that found it not there yet, for
+        /// the desktop's own diagnostics.
+        #[serde(skip_serializing)]
+        close_code: Option<u16>,
+    },
     Suspended,
     Connecting { attempt: u32 },
     Connected {
@@ -130,7 +139,15 @@ pub enum ClientState {
         /// The person's collaboration role when `collab/1` was granted
         /// (`{ userId, role, canApprove }`, saas contract §21.5).
         you: Option<Value>,
+        /// A machine connection's link number (PRO-345): a new one while
+        /// connected means the connection moved to another route, and the
+        /// web view resubscribes from its cursors. Never set for a cloud
+        /// workspace, whose state keeps exactly its old shape.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        link: Option<u64>,
     },
+    /// A connection that was up is gone, and it is being made again. Only
+    /// ever after a connection reached `Connected`.
     Reconnecting {
         attempt: u32,
         reason: String,
@@ -150,7 +167,7 @@ pub enum ClientEvent {
     Message(Value),
 }
 
-enum Credential {
+pub(super) enum Credential {
     Invite(String),
     Resume(String),
 }
@@ -163,26 +180,28 @@ pub struct Closed {
 }
 
 impl Closed {
-    fn other(error: impl std::fmt::Display) -> Self {
+    pub(super) fn other(error: impl std::fmt::Display) -> Self {
         Self { code: None, reason: protocol::redact(&format!("{error:#}")) }
     }
 }
 
 type Socket = crate::data_privacy::Socket;
 
-struct Connection {
-    socket: Socket,
-    session: E2eeSession,
+/// One E2EE connection to a runtime, on any route: the cloud relay attach
+/// here, a machine's direct and relay routes in `machine_client`.
+pub(super) struct Connection {
+    pub(super) socket: Socket,
+    pub(super) session: E2eeSession,
 }
 
 impl Connection {
-    async fn send(&mut self, value: &Value) -> Result<()> {
+    pub(super) async fn send(&mut self, value: &Value) -> Result<()> {
         let frame = self.session.seal(value.to_string().as_bytes(), PayloadKind::Text)?;
         self.socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await?;
         Ok(())
     }
 
-    async fn next(&mut self) -> Result<Value, Closed> {
+    pub(super) async fn next(&mut self) -> Result<Value, Closed> {
         loop {
             match self.socket.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -208,9 +227,14 @@ impl Connection {
 
     /// One request before the app takes over the channel.
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, Closed> {
+        self.call_within(method, params, HANDSHAKE_TIMEOUT).await
+    }
+
+    /// One request before the app takes over the channel, answered within `limit`.
+    pub(super) async fn call_within(&mut self, method: &str, params: Value, limit: Duration) -> Result<Value, Closed> {
         let id = format!("supervisor-{}", uuid::Uuid::new_v4().simple());
         self.send(&json!({ "id": id, "method": method, "params": params })).await.map_err(Closed::other)?;
-        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + limit;
         loop {
             let value = tokio::time::timeout_at(deadline, self.next()).await.map_err(|_| Closed::other(format!("{method} timed out")))??;
             if value["id"] == id {
@@ -227,15 +251,37 @@ impl Connection {
 /// Relay attach (v2 with a ticket, else v1), then the E2EE handshake and
 /// the device-token proof.
 async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&AttachTicket>) -> Result<Connection, Closed> {
-    let url = websocket_url(&offer.relay.cell_url, &format!("/v1/connect/{}", offer.relay.relay_host_id)).map_err(Closed::other)?;
+    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    let relay = RelayRoute { cell_url: &offer.relay.cell_url, relay_host_id: &offer.relay.relay_host_id, public_key_b64: &offer.public_key_b64, client_secret: None };
+    let mut connection = relay_connect(&relay, credential, ticket, deadline).await?;
+    let auth = json!({ "deviceToken": offer.device_token });
+    match authenticate(&mut connection, auth, deadline).await? {
+        Authenticated::Yes => Ok(connection),
+        Authenticated::Refused(_) => Err(Closed::other("the runtime did not authenticate this device")),
+    }
+}
+
+/// Where a relay connection goes and with which keys.
+pub(super) struct RelayRoute<'a> {
+    pub cell_url: &'a str,
+    pub relay_host_id: &'a str,
+    /// The runtime's host key, which the handshake is pinned to.
+    pub public_key_b64: &'a str,
+    /// This installation's long-lived client key (a machine pins it); a
+    /// fresh one per connection when absent (a cloud attachment).
+    pub client_secret: Option<[u8; 32]>,
+}
+
+/// Through the relay with `credential` (relay-auth v2 with a ticket, else
+/// v1), then the E2EE handshake as the initiator, by `deadline`. A relay
+/// refusal is a [`Closed`] with the relay's code.
+pub(super) async fn relay_connect(route: &RelayRoute<'_>, credential: &Credential, ticket: Option<&AttachTicket>, deadline: tokio::time::Instant) -> Result<Connection, Closed> {
+    let url = websocket_url(route.cell_url, &format!("/v1/connect/{}", route.relay_host_id)).map_err(Closed::other)?;
     let request = url.into_client_request().map_err(Closed::other)?;
-    let (mut socket, _) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        crate::data_privacy::connect(request, Some(websocket_config()), false),
-    )
-    .await
-    .map_err(|_| Closed::other("relay connect timed out"))?
-    .map_err(Closed::other)?;
+    let (mut socket, _) = tokio::time::timeout_at(deadline, crate::data_privacy::connect(request, Some(websocket_config()), false))
+        .await
+        .map_err(|_| Closed::other("relay connect timed out"))?
+        .map_err(Closed::other)?;
     let (token, kind) = match credential {
         Credential::Invite(token) => (token, "invite"),
         Credential::Resume(token) => (token, "resume"),
@@ -245,7 +291,6 @@ async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&
         None => json!({ "type": "relay-auth", "v": 1, "mode": "connect", "credential": token }),
     };
     socket.send(Message::Text(auth.to_string().into())).await.map_err(Closed::other)?;
-    let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
     let hello = plaintext(&mut socket, deadline).await?;
     let hello: Value = serde_json::from_str(&hello).map_err(Closed::other)?;
     if hello["type"] != "relay-hello" {
@@ -257,24 +302,42 @@ async fn connect(offer: &PairingOffer, credential: &Credential, ticket: Option<&
     if hello["credentialKind"] != kind {
         return Err(Closed::other("relay accepted a different credential kind"));
     }
-    let handshake = E2eeClientHandshake::new(&offer.public_key_b64, "relay", Some(&offer.relay.relay_host_id)).map_err(Closed::other)?;
+    let handshake = match route.client_secret {
+        Some(secret) => E2eeClientHandshake::with_secret(secret, route.public_key_b64, "relay", Some(route.relay_host_id)),
+        None => E2eeClientHandshake::new(route.public_key_b64, "relay", Some(route.relay_host_id)),
+    }
+    .map_err(Closed::other)?;
     socket.send(Message::Text(serde_json::to_string(handshake.hello()).map_err(Closed::other)?.into())).await.map_err(Closed::other)?;
     let ready = plaintext(&mut socket, deadline).await?;
     let session = handshake.accept_ready(&ready).map_err(Closed::other)?;
-    let mut connection = Connection { socket, session };
-    let transcript = connection.session.transcript_hash_b64.clone();
-    connection
-        .send(&json!({ "type": "e2ee_auth", "v": 2, "transcriptHashB64": transcript, "deviceToken": offer.device_token }))
-        .await
-        .map_err(Closed::other)?;
-    let authenticated = tokio::time::timeout_at(deadline, connection.next()).await.map_err(|_| Closed::other("E2EE authentication timed out"))??;
-    if authenticated["type"] != "e2ee_authenticated" || authenticated["transcriptHashB64"] != transcript.as_str() {
-        return Err(Closed::other("the runtime did not authenticate this device"));
-    }
-    Ok(connection)
+    Ok(Connection { socket, session })
 }
 
-async fn plaintext(socket: &mut Socket, deadline: tokio::time::Instant) -> Result<String, Closed> {
+/// How the runtime answered `e2ee_auth`.
+pub(super) enum Authenticated {
+    Yes,
+    /// A machine's sealed `pairing_refused`, with its reason.
+    Refused(String),
+}
+
+/// Prove the device token inside E2EE: `auth` holds `deviceToken` and any
+/// fields the route adds (a machine's `label` and `platform`). The token is
+/// never anywhere but inside the sealed frame.
+pub(super) async fn authenticate(connection: &mut Connection, mut auth: Value, deadline: tokio::time::Instant) -> Result<Authenticated, Closed> {
+    let transcript = connection.session.transcript_hash_b64.clone();
+    auth["type"] = json!("e2ee_auth");
+    auth["v"] = json!(2);
+    auth["transcriptHashB64"] = json!(transcript);
+    connection.send(&auth).await.map_err(Closed::other)?;
+    let answer = tokio::time::timeout_at(deadline, connection.next()).await.map_err(|_| Closed::other("E2EE authentication timed out"))??;
+    match answer["type"].as_str() {
+        Some("e2ee_authenticated") if answer["transcriptHashB64"] == transcript.as_str() => Ok(Authenticated::Yes),
+        Some("pairing_refused") => Ok(Authenticated::Refused(answer["reason"].as_str().unwrap_or_default().to_string())),
+        _ => Err(Closed::other("the runtime did not authenticate this device")),
+    }
+}
+
+pub(super) async fn plaintext(socket: &mut Socket, deadline: tokio::time::Instant) -> Result<String, Closed> {
     loop {
         match tokio::time::timeout_at(deadline, socket.next()).await.map_err(|_| Closed::other("relay handshake timed out"))? {
             Some(Ok(Message::Text(text))) => return Ok(text.to_string()),
@@ -406,6 +469,11 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
     let mut resume: Option<(String, String)> = None;
     let mut refresh_pairing = false;
     let mut attempt = 0u32;
+    // A connection reached `Connected` since this supervisor started or last
+    // parked. Until one has, a dial the relay turns away (the runtime still
+    // booting, or restarted while it booted) is waited out as
+    // `WaitingForRuntime`, not shown as a lost connection (#1288).
+    let mut was_live = false;
     'supervise: loop {
         if *stopped.borrow() {
             break;
@@ -446,7 +514,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     attached = Some(Attached { grant: *grant, invite_used });
                 }
                 Ok(OpenOutcome::WaitingForRuntime) => {
-                    emit(ClientState::WaitingForRuntime);
+                    emit(ClientState::WaitingForRuntime { close_code: None });
                     attempt += 1;
                     if sleep_or_stop(&mut stopped, protocol::backoff(attempt, jitter()).max(Duration::from_secs(1))).await {
                         break;
@@ -454,6 +522,11 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
                     continue;
                 }
                 Ok(OpenOutcome::Suspended) => {
+                    // Parked: whatever was attached belonged to the runtime
+                    // that stopped, and a wake brings up a new one. Until it
+                    // is up again, nothing was live to lose.
+                    attached = None;
+                    was_live = false;
                     emit(ClientState::Suspended);
                     tokio::select! {
                         _ = activation.changed() => continue,
@@ -492,6 +565,7 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
         }
         let lived = dial.live(current, &credential, was_invite, Link { shared: &shared, events: &events, stopped: &mut stopped }).await;
         if lived.established {
+            was_live = true;
             if let Some(token) = lived.installed {
                 resume = Some((current.grant.attachment_id.clone(), token));
             }
@@ -535,12 +609,21 @@ async fn run(shared: Arc<Shared>, source: Arc<dyn AttachSource>, events: mpsc::U
             CloseAction::Reconnect => {}
         }
         attempt += 1;
-        let delay = protocol::backoff(attempt, jitter());
         let reason = match closed.code {
             Some(code) => format!("{code} {}", closed.reason),
             None => closed.reason,
         };
-        emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64, close_code: closed.code });
+        let delay = if was_live {
+            let delay = protocol::backoff(attempt, jitter());
+            emit(ClientState::Reconnecting { attempt, reason, retry_in_ms: delay.as_millis() as u64, close_code: closed.code });
+            delay
+        } else {
+            // Never up yet: the runtime is still on its way. Waited for at
+            // the pace of the API's own waiting-for-runtime answers.
+            log::info!("cloud workspace: runtime not reachable yet (attempt {attempt}): {reason}");
+            emit(ClientState::WaitingForRuntime { close_code: closed.code });
+            protocol::backoff(attempt, jitter()).max(Duration::from_secs(1))
+        };
         if sleep_or_stop(&mut stopped, delay).await {
             break;
         }
@@ -595,19 +678,36 @@ async fn establish(connection: &mut Connection, attached: &Attached, was_invite:
             capabilities: serde_json::from_value(hello["capabilities"].clone()).unwrap_or_default(),
             authority: hello["authority"].as_str().unwrap_or_default().to_string(),
             you: hello.get("you").filter(|you| you.is_object()).cloned(),
+            link: None,
         },
         installed,
     ))
 }
 
 async fn pump(
-    mut connection: Connection,
+    connection: Connection,
     shared: &Shared,
     events: &mpsc::UnboundedSender<ClientEvent>,
     stopped: &mut watch::Receiver<bool>,
 ) -> Closed {
     let (outbound, mut frames) = mpsc::unbounded_channel();
     *shared.outbound.lock().unwrap() = Some(outbound);
+    pump_frames(connection, &mut frames, |value| {
+        let _ = events.send(ClientEvent::Message(value));
+    }, stopped)
+    .await
+}
+
+/// Frames both ways on an established connection until it ends: `frames`
+/// go out sealed as they come (none left means stop), and every message the
+/// runtime sends goes to `deliver`. Pings keep a quiet link checked; one
+/// silent for a minute is over. Shared by every route of every runtime.
+pub(super) async fn pump_frames(
+    mut connection: Connection,
+    frames: &mut mpsc::UnboundedReceiver<Value>,
+    mut deliver: impl FnMut(Value),
+    stopped: &mut watch::Receiver<bool>,
+) -> Closed {
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut last_seen = tokio::time::Instant::now();
     loop {
@@ -656,9 +756,7 @@ async fn pump(
                     None => return Closed { code: None, reason: "connection closed".into() },
                 };
                 match value {
-                    Ok(value) => {
-                        let _ = events.send(ClientEvent::Message(value));
-                    }
+                    Ok(value) => deliver(value),
                     // A frame that fails authentication ends the session: the
                     // counters can no longer agree.
                     Err(error) => return Closed::other(error),
@@ -675,7 +773,7 @@ async fn sleep_or_stop(stopped: &mut watch::Receiver<bool>, delay: Duration) -> 
     }
 }
 
-fn random_token() -> String {
+pub(super) fn random_token() -> String {
     use rand_core::RngCore;
     let mut bytes = [0u8; 32];
     rand_core::OsRng.fill_bytes(&mut bytes);
@@ -748,12 +846,16 @@ mod tests {
 
     /// A pairing whose invite is still good, so the supervisor dials with it.
     fn live_grant() -> AttachGrant {
+        grant_with_invite(&"c".repeat(43))
+    }
+
+    fn grant_with_invite(invite: &str) -> AttachGrant {
         let code = general_purpose::URL_SAFE_NO_PAD.encode(
             json!({
                 "v": 2, "endpoint": "relay:abcdefghijklmnop", "deviceToken": "device-token-0123456789", "publicKeyB64": general_purpose::STANDARD.encode([1u8; 32]),
                 "scope": "runtime", "identityMode": "authenticate",
                 "relay": { "v": 1, "directorUrl": "https://relay.example", "cellUrl": "https://cell.example", "assignmentEpoch": 3,
-                    "relayHostId": "abcdefghijklmnop", "inviteToken": "c".repeat(43), "inviteExpiresAt": now_ms() + 600_000, "e2eeFraming": 2 }
+                    "relayHostId": "abcdefghijklmnop", "inviteToken": invite, "inviteExpiresAt": now_ms() + 600_000, "e2eeFraming": 2 }
             })
             .to_string(),
         );
@@ -798,6 +900,7 @@ mod tests {
                     capabilities: Vec::new(),
                     authority: "manage".into(),
                     you: None,
+                    link: None,
                 }));
                 let mut closes = self.closes.lock().await;
                 let closed = tokio::select! {
@@ -839,15 +942,115 @@ mod tests {
         close.send(Closed { code: Some(4100), reason: "runtime gone".into() }).unwrap();
 
         // It finds the workspace stopped and parks. It does not wait for a runtime it resumed.
-        let after = state_where(&mut states, |state| matches!(state, ClientState::Suspended | ClientState::WaitingForRuntime)).await;
+        let after = state_where(&mut states, |state| matches!(state, ClientState::Suspended | ClientState::WaitingForRuntime { .. })).await;
         assert_eq!(after, ClientState::Suspended, "the reconnect after a stop must not resume the workspace");
         assert_eq!(workspace.resumes.load(Ordering::SeqCst), 0, "no resume");
         assert_eq!(*workspace.opens.lock().unwrap(), vec![Activation::Connect, Activation::Connect], "the reconnect opened with connect");
 
         // A wake asked for now, after the stop, is a new interactive action: it resumes, once.
         supervisor.set_activation(Activation::Wake);
-        state_where(&mut states, |state| matches!(state, ClientState::WaitingForRuntime)).await;
+        state_where(&mut states, |state| matches!(state, ClientState::WaitingForRuntime { .. })).await;
         assert_eq!(workspace.resumes.load(Ordering::SeqCst), 1);
+        supervisor.stop();
+    }
+
+    /// A relay that turns each dial away with the next scripted close code
+    /// (the runtime not on it yet, or restarted while it booted), then
+    /// connects and holds the connection until the test closes it.
+    struct BootingRelay {
+        refusals: Mutex<std::collections::VecDeque<u16>>,
+        relay: FakeRelay,
+    }
+
+    impl Dial for BootingRelay {
+        fn live<'a>(&'a self, attached: &'a Attached, credential: &'a Credential, was_invite: bool, link: Link<'a>) -> Pin<Box<dyn Future<Output = Lived> + Send + 'a>> {
+            let refusal = self.refusals.lock().unwrap().pop_front();
+            match refusal {
+                Some(code) => Box::pin(async move { Lived { closed: Closed { code: Some(code), reason: "not yet".into() }, established: false, installed: None } }),
+                None => self.relay.live(attached, credential, was_invite, link),
+            }
+        }
+    }
+
+    /// The API's `open` over a running workspace: each answer is a fresh
+    /// pairing, as the API mints one for every attachment it re-checks.
+    struct MintingWorkspace {
+        opens: Mutex<Vec<Activation>>,
+    }
+
+    impl AttachSource for MintingWorkspace {
+        fn open(&self, _refresh_pairing: bool, activation: Activation) -> Result<OpenOutcome> {
+            let mut opens = self.opens.lock().unwrap();
+            opens.push(activation);
+            let n = opens.len().to_string();
+            Ok(OpenOutcome::Ready(Box::new(grant_with_invite(&format!("{n}{}", "c".repeat(43 - n.len()))))))
+        }
+    }
+
+    /// Every state up to and including the first for which `last` holds.
+    async fn states_until(events: &mut mpsc::UnboundedReceiver<ClientEvent>, last: impl Fn(&ClientState) -> bool) -> Vec<ClientState> {
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let ClientEvent::State(state) = events.recv().await.expect("the supervisor is running") {
+                    let done = last(&state);
+                    seen.push(state);
+                    if done {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the supervisor reached the state");
+        seen
+    }
+
+    fn tag(state: &ClientState) -> String {
+        match state {
+            ClientState::WaitingForRuntime { close_code: Some(code) } => format!("waitingForRuntime({code})"),
+            ClientState::Reconnecting { close_code, .. } => format!("reconnecting({close_code:?})"),
+            other => serde_json::to_value(other).unwrap()["state"].as_str().unwrap().to_string(),
+        }
+    }
+
+    // #1288: a runtime that is still booting is waited for. The dials the
+    // relay turns away before the first connect never read as a lost
+    // connection; only one that was up and ended does.
+    #[tokio::test]
+    async fn dials_turned_away_while_the_runtime_boots_are_waited_out_and_only_a_lost_connection_reconnects() {
+        let workspace = Arc::new(MintingWorkspace { opens: Mutex::new(Vec::new()) });
+        let (close, closes) = mpsc::unbounded_channel();
+        let (events, mut states) = mpsc::unbounded_channel();
+        let relay = BootingRelay { refusals: Mutex::new([4100, 4404, 4101].into()), relay: FakeRelay { closes: tokio::sync::Mutex::new(closes) } };
+        let supervisor = Supervisor::start_with(workspace.clone(), Activation::Connect, events, Arc::new(relay));
+
+        let boot = states_until(&mut states, |state| matches!(state, ClientState::Connected { .. })).await;
+        assert_eq!(
+            boot.iter().map(tag).collect::<Vec<_>>(),
+            [
+                "opening",
+                "connecting",
+                "waitingForRuntime(4100)",
+                "opening",
+                "connecting",
+                "waitingForRuntime(4404)",
+                "opening",
+                "connecting",
+                "waitingForRuntime(4101)",
+                "opening",
+                "connecting",
+                "connected"
+            ],
+            "the boot never reads as reconnecting"
+        );
+        // Readiness was checked through `open` after each turn-away, always with `connect`.
+        assert_eq!(*workspace.opens.lock().unwrap(), vec![Activation::Connect; 4]);
+
+        // The live connection is lost: that is a reconnect.
+        close.send(Closed { code: None, reason: "relay gone".into() }).unwrap();
+        let lost = states_until(&mut states, |state| matches!(state, ClientState::Reconnecting { .. })).await;
+        assert_eq!(lost.iter().map(tag).collect::<Vec<_>>(), ["reconnecting(None)"]);
         supervisor.stop();
     }
 

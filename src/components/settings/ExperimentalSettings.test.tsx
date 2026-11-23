@@ -7,14 +7,20 @@ const mocks = vi.hoisted(() => ({
   setNativeCodex: vi.fn(),
   setSessionCost: vi.fn(),
   setOrchestratorRuns: vi.fn(),
-  setMachines: vi.fn(),
+  setOpenCode: vi.fn(),
+  setBots: vi.fn(),
+  refreshHarnesses: vi.fn(async () => {}),
+  refreshModels: vi.fn(async () => {}),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@/lib/api", () => ({
-  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setMachines: mocks.setMachines },
+  experimental: { settings: mocks.settings, setNativeCodex: mocks.setNativeCodex, setSessionCost: mocks.setSessionCost, setOrchestratorRuns: mocks.setOrchestratorRuns, setOpenCode: mocks.setOpenCode, setBots: mocks.setBots },
   errorMessage: (error: unknown) => (error instanceof Error ? error.message : String(error)),
 }));
+
+vi.mock("@/lib/sessions", () => ({ refreshHarnesses: mocks.refreshHarnesses }));
+vi.mock("@/lib/models", () => ({ refreshModels: mocks.refreshModels }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (event: string, handler: (event: { payload: unknown }) => void) => {
@@ -30,7 +36,10 @@ beforeEach(() => {
   mocks.setNativeCodex.mockReset();
   mocks.setSessionCost.mockReset();
   mocks.setOrchestratorRuns.mockReset();
-  mocks.setMachines.mockReset();
+  mocks.setOpenCode.mockReset();
+  mocks.setBots.mockReset();
+  mocks.refreshHarnesses.mockClear();
+  mocks.refreshModels.mockClear();
 });
 afterEach(cleanup);
 
@@ -52,20 +61,12 @@ describe("Settings → Experimental: session cost (PRO-273)", () => {
   });
 });
 
-describe("Settings → Experimental: Machines (PRO-342)", () => {
-  const machines = () => screen.getByRole("switch", { name: "Machines" });
-
-  it("is off by default, says what it shows, and saves only its own switch", async () => {
-    mocks.setMachines.mockResolvedValue({ nativeCodex: false, machines: true });
+describe("Settings → Experimental: no Machines switch (PRO-360)", () => {
+  it("offers no Machines switch: Machines is on for everyone, in Settings → Machines", async () => {
     render(<ExperimentalTab />);
-    await waitFor(() => expect(machines().hasAttribute("disabled")).toBe(false));
-    expect(machines().getAttribute("aria-checked")).toBe("false");
-    expect(screen.getByTestId("experimental-settings").textContent).toContain("Settings → Machines");
-    fireEvent.click(machines());
-    await waitFor(() => expect(mocks.setMachines).toHaveBeenCalledWith(true));
-    await waitFor(() => expect(machines().getAttribute("aria-checked")).toBe("true"));
-    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
-    expect(mocks.setOrchestratorRuns).not.toHaveBeenCalled();
+    await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
+    expect(screen.queryByRole("switch", { name: "Machines" })).toBeNull();
+    expect(screen.getByTestId("experimental-settings").textContent).not.toContain("Settings → Machines");
   });
 });
 
@@ -75,7 +76,7 @@ describe("Settings → Experimental (#644)", () => {
     await waitFor(() => expect(toggle().hasAttribute("disabled")).toBe(false));
     expect(toggle().getAttribute("aria-checked")).toBe("false");
     const text = screen.getByTestId("experimental-settings").textContent ?? "";
-    for (const said of ["compacting its context", "The chat is the main view", "Codex's own terminal for good", "Codex 0.164.0 or newer", "Existing sessions and other agents are not changed"]) {
+    for (const said of ["connect to Codex directly", "shows when it compacts", "Codex 0.164.0 or newer", "Codex’s own terminal"]) {
       expect(text).toContain(said);
     }
   });
@@ -118,7 +119,7 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     await waitFor(() => expect(runs().hasAttribute("disabled")).toBe(false));
     expect(runs().getAttribute("aria-checked")).toBe("false");
     const text = screen.getByTestId("experimental-settings").textContent ?? "";
-    for (const said of ["each piece goes to a worker session on its own branch", "you approve the lead's plan before any worker starts", "Settings → Orchestrator", "The terminalx runs commands work either way"]) {
+    for (const said of ["splitting one goal into pieces for worker sessions", "the Run view", "Settings → Orchestrator"]) {
       expect(text).toContain(said);
     }
   });
@@ -149,5 +150,76 @@ describe("Settings → Experimental: orchestration runs (PRO-274)", () => {
     fireEvent.click(runs());
     await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
     expect(runs().getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("Settings → Experimental: Bots (PRO-466)", () => {
+  const bots = () => screen.getByRole("switch", { name: "Bots" });
+
+  it("is off by default and says what it turns on", async () => {
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    expect(bots().getAttribute("aria-checked")).toBe("false");
+    const text = screen.getByTestId("experimental-settings").textContent ?? "";
+    for (const said of ["AI employees with standing roles", "the terminalx bots commands"]) expect(text).toContain(said);
+  });
+
+  it("saves only its own switch and tells the rest of the app at once", async () => {
+    mocks.settings.mockResolvedValue({ nativeCodex: true, bots: false });
+    mocks.setBots.mockResolvedValue({ nativeCodex: true, bots: true });
+    const { useExperimentalSettings, resetExperimentalSettingsForTests } = await import("@/lib/experimentalSettings");
+    resetExperimentalSettingsForTests();
+    const Shown = () => <output data-testid="bots-on">{String(useExperimentalSettings()?.bots === true)}</output>;
+    render(<><ExperimentalTab /><Shown /></>);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    expect(screen.getByTestId("bots-on").textContent).toBe("false");
+    fireEvent.click(bots());
+    await waitFor(() => expect(mocks.setBots).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(bots().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    expect(mocks.setOrchestratorRuns).not.toHaveBeenCalled();
+    expect(toggle().getAttribute("aria-checked")).toBe("true");
+    await waitFor(() => expect(screen.getByTestId("bots-on").textContent).toBe("true"));
+    resetExperimentalSettingsForTests();
+  });
+
+  it("follows a change made elsewhere, and goes back with the reason when saving fails", async () => {
+    mocks.setBots.mockRejectedValue(new Error("settings.json is not writable"));
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(bots().hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(mocks.listeners.has("experimental_settings_changed")).toBe(true));
+    mocks.listeners.get("experimental_settings_changed")!({ payload: { nativeCodex: false, bots: true } });
+    await waitFor(() => expect(bots().getAttribute("aria-checked")).toBe("true"));
+    fireEvent.click(bots());
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("settings.json is not writable"));
+    expect(bots().getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+describe("Settings → Experimental: OpenCode (PRO-157)", () => {
+  const openCode = () => screen.getByRole("switch", { name: "OpenCode" });
+
+  it("is off until turned on, then offers OpenCode in the agent and model pickers at once", async () => {
+    mocks.setOpenCode.mockResolvedValue({ nativeCodex: false, opencode: true });
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(openCode().hasAttribute("disabled")).toBe(false));
+    expect(openCode().getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTestId("experimental-settings").textContent).toContain("Tabs already on OpenCode run either way.");
+    fireEvent.click(openCode());
+    await waitFor(() => expect(openCode().getAttribute("aria-checked")).toBe("true"));
+    expect(mocks.setOpenCode).toHaveBeenCalledWith(true);
+    expect(mocks.setNativeCodex).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.refreshHarnesses).toHaveBeenCalledTimes(1));
+    expect(mocks.refreshModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("puts the switch back and says why when saving fails", async () => {
+    mocks.setOpenCode.mockRejectedValue(new Error("The settings file has a problem."));
+    render(<ExperimentalTab />);
+    await waitFor(() => expect(openCode().hasAttribute("disabled")).toBe(false));
+    fireEvent.click(openCode());
+    expect((await screen.findByRole("alert")).textContent).toBe("The settings file has a problem.");
+    expect(openCode().getAttribute("aria-checked")).toBe("false");
+    expect(mocks.refreshHarnesses).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { launch, serve } from "./harness.mjs";
 
+/** The overview's view is chosen in its Display menu (02.15). */
+async function showView(page, name) {
+  await page.getByRole("button", { name: "Display", exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).click();
+  await page.keyboard.press("Escape");
+}
+
 const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8")}\n${await readFile(new URL("./dashboard-stub.js", import.meta.url), "utf8")}`;
 const server = await serve();
 const browser = await launch();
@@ -19,19 +26,18 @@ try {
       for (const entry of Object.values(answers.cloud_catalog_load.orgs["org-a"].sessions)) entry.sessions = entry.sessions.slice(0, 2);
     `);
     await page.goto(server.url, { waitUntil: "domcontentloaded", timeout: 120_000 });
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
-    await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
+    await page.getByRole("button", { name: /^Overview/ }).click();
     const search = page.getByRole("textbox", { name: "Search sessions" });
     await search.fill("Local working");
-    await page.getByRole("button", { name: "Table", exact: true }).click();
+    await showView(page, "Table");
     const table = page.getByRole("table", { name: "Sessions", exact: true });
     const rows = table.locator("tbody tr[data-session]");
     assert.equal(await table.getAttribute("aria-rowcount"), "121", "table keeps the board's search");
     assert.ok(await rows.count() < 40, "large lists render only a window of rows");
     assert.equal(await search.inputValue(), "Local working");
-    await table.getByRole("button", { name: "Name", exact: true }).click();
+    await table.getByRole("button", { name: "Session", exact: true }).click();
     assert.equal(await rows.first().locator("[data-session-title]").textContent(), "Local working session 01");
-    await table.getByRole("button", { name: "Name", exact: true }).click();
+    await table.getByRole("button", { name: "Session", exact: true }).click();
     assert.equal(await rows.first().locator("[data-session-title]").textContent(), "Local working session 120");
     await rows.first().focus();
     await page.keyboard.press("ArrowDown");
@@ -46,18 +52,18 @@ try {
     const first = await rows.first().boundingBox();
     const heading = await table.locator("thead").boundingBox();
     assert.ok(first.y >= heading.y + heading.height - 1, "upward navigation keeps the selected row below the sticky header");
-    await page.getByRole("button", { name: "Columns", exact: true }).click();
+    await page.getByRole("button", { name: "Display", exact: true }).click();
     await page.getByRole("menuitemcheckbox", { name: "Branch", exact: true }).click();
     await page.keyboard.press("Escape");
     assert.equal(await table.getByRole("columnheader", { name: "Branch", exact: true }).count(), 0);
-    await page.getByRole("button", { name: "Board", exact: true }).click();
+    await showView(page, "Board");
     assert.equal(await search.inputValue(), "Local working");
-    await page.getByRole("button", { name: "Table", exact: true }).click();
+    await showView(page, "Table");
     await page.reload();
-    await page.getByRole("button", { name: /^Dashboard/ }).click();
+    await page.getByRole("button", { name: /^Overview/ }).click();
     await table.waitFor();
     assert.equal(await table.getByRole("columnheader", { name: "Branch", exact: true }).count(), 0, "hidden column survives reload");
-    assert.equal(await table.getByRole("columnheader", { name: "Name", exact: true }).getAttribute("aria-sort"), "descending");
+    assert.equal(await table.getByRole("columnheader", { name: "Session", exact: true }).getAttribute("aria-sort"), "descending");
     const fits = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
     assert.ok(fits, "wide tables scroll inside the dashboard rather than overflowing the window");
     if (process.env.SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.SCREENSHOT_DIR}/session-table-${width}.png` });

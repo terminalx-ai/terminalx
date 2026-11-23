@@ -4,6 +4,7 @@
 //! secrets, or the Keychain switch was off) live in the index's `plain` map.
 //! A transaction switches the index only after the new item is safely stored.
 //! No repository file is evaluated or trusted implicitly.
+use crate::paths::Canonical;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -50,12 +51,6 @@ impl Launch {
     pub(crate) fn require_available(&self) -> Result<()> {
         ensure!(!self.stamp.unavailable, "Environment overrides are unavailable. Open TerminalX Settings → Environment, restore Keychain access, then retry.");
         Ok(())
-    }
-
-    pub fn inject(&self, command: &mut portable_pty::CommandBuilder) {
-        for (name, value) in &self.values {
-            command.env(name, value);
-        }
     }
 }
 
@@ -172,10 +167,10 @@ fn repository(cwd: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let path = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+    let path = PathBuf::from(crate::git::path_line(&String::from_utf8(output.stdout).ok()?));
     Some(format!(
         "repository:{}",
-        path.canonicalize().ok()?.to_str()?
+        path.canonical().ok()?.to_str()?
     ))
 }
 
@@ -383,6 +378,7 @@ impl Stamp {
 
     /// A pane handed over by a runtime predating environment overrides never
     /// received any. Keep its repository identity so later edits still warn.
+    #[cfg(unix)]
     pub fn unconfigured(cwd: &str) -> Self {
         Self {
             repository: repository(Path::new(cwd)),
@@ -409,6 +405,7 @@ struct Cache {
 }
 
 impl Cache {
+    #[cfg(any(unix, test))]
     fn install(&mut self, key: &str, snapshot: Snapshot, index: &Index) -> Result<()> {
         let scope = index.get(key).context("Unknown environment scope.")?;
         ensure!(snapshot.revision == scope.revision, "Environment changed.");
@@ -487,11 +484,13 @@ pub(crate) fn desktop_snapshot(key: &str, revision: &str) -> Result<Snapshot> {
     store()?.snapshot(key, revision)
 }
 
+#[cfg(any(unix, test))]
 struct Retry {
     after: std::time::Instant,
     delay: Duration,
 }
 
+#[cfg(any(unix, test))]
 impl Retry {
     fn failed(previous: Option<&Self>, now: std::time::Instant) -> Self {
         let delay = previous.map_or(Duration::from_secs(5), |retry| {
@@ -501,6 +500,7 @@ impl Retry {
     }
 }
 
+#[cfg(any(unix, test))]
 fn refresh_cache(
     cache: &std::sync::Mutex<Cache>,
     store: &Store<'_>,
@@ -600,6 +600,12 @@ pub fn launch(cwd: &str) -> Result<Launch> {
 #[cfg(test)]
 thread_local! {
     static TEST_LAUNCH: std::cell::RefCell<Option<Launch>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The next `launch` on this thread resolves to `values` (tests only).
+#[cfg(test)]
+pub(crate) fn set_test_launch(values: BTreeMap<String, String>) {
+    TEST_LAUNCH.with(|slot| *slot.borrow_mut() = Some(Launch { values, stamp: Stamp::default() }));
 }
 
 #[cfg(test)]
@@ -820,10 +826,10 @@ pub fn delete(project: Option<&str>, name: &str) -> Result<()> {
 pub fn read_env_file(project: &str, path: &str) -> Result<String> {
     scope_key(Some(project))?;
     let root = Path::new(project)
-        .canonicalize()
+        .canonical()
         .context("Choose a local repository.")?;
     let path = Path::new(path)
-        .canonicalize()
+        .canonical()
         .context("Choose an existing .env file.")?;
     ensure!(
         path.starts_with(&root)
@@ -1481,5 +1487,14 @@ mod tests {
         assert!(!started.get());
         assert!(!dir.path().join("archive-ran").exists());
         assert!(terminals.panes().is_empty());
+    }
+
+    #[test]
+    fn a_git_dir_whose_name_ends_in_a_space_names_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        use crate::paths::Canonical;
+        assert_eq!(super::repository(&work), Some(format!("repository:{}", git_dir.canonical().unwrap().display())));
     }
 }

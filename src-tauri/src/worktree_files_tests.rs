@@ -46,6 +46,7 @@ fn globs_are_relative_and_distinguish_direct_and_recursive_matches() {
     assert!(validate_patterns(&vec![".env".into(); MAX_PATTERNS + 1]).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn preview_only_lists_ignored_files_and_excludes_managed_workspaces() {
     let _home = crate::store::temp_home();
@@ -79,6 +80,8 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert!(result.from_include_file);
     assert_eq!(result.patterns.len(), 1);
     assert_eq!(result.patterns[0].matches, patterns(&["config/local/app.json"]));
+    // Settings says how many ignored files the patterns were checked against (PRO-387).
+    assert!(result.ignored_checked >= 2, "{}", result.ignored_checked);
     let created = git::create_worktree(repo.path(), "included", Some("main")).unwrap();
     assert!(Path::new(&created.path).join("config/local/app.json").is_file());
     assert!(!Path::new(&created.path).join(".env").exists());
@@ -90,6 +93,25 @@ fn include_file_replaces_stored_and_draft_patterns_even_when_empty() {
     assert_eq!(projects::list().unwrap().0[0].repository_settings.files_to_copy, patterns(&[".env*"]));
     // The same serialized Project is returned by `terminalx projects list`.
     assert_eq!(serde_json::to_value(&projects::list().unwrap().0[0]).unwrap()["repositorySettings"]["filesToCopy"], serde_json::json!([".env*"]));
+}
+
+#[test]
+fn workspace_creation_uses_committed_policy_while_a_broader_draft_is_previewed() {
+    let _home = crate::store::temp_home();
+    let repo = repo();
+    let project = projects::add(repo.path().to_str().unwrap()).unwrap();
+    projects::update(&project.path, projects::ProjectPatch {
+        repository_settings: Some(projects::RepositorySettings { files_to_copy: patterns(&[".env.local"]) }),
+        ..Default::default()
+    }).unwrap();
+    write(repo.path(), ".env.local", "local");
+    write(repo.path(), ".env.production", "production");
+    let draft = preview(repo.path(), Some(&patterns(&["*"])), None).unwrap();
+    assert_eq!(draft.patterns[0].matches, patterns(&[".env.local", ".env.production"]));
+    let created = git::create_worktree(repo.path(), "during-edit", Some("main")).unwrap();
+    assert!(Path::new(&created.path).join(".env.local").is_file());
+    assert!(!Path::new(&created.path).join(".env.production").exists());
+    assert_eq!(projects::repository_settings(repo.path()).unwrap().files_to_copy, patterns(&[".env.local"]));
 }
 
 #[test]
@@ -319,14 +341,14 @@ fn scan_limits_discard_partial_names_without_corrupting_utf8() {
     write(repo.path(), ".env.a", "a");
     write(repo.path(), ".env.é", "b");
     let args = ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"];
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 1, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 1, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
     // Seven bytes for the first name + NUL, then stop inside the second é.
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 13).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 13).unwrap();
     assert_eq!(names, patterns(&[".env.a"]));
     assert!(limited);
-    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&fs::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 100).unwrap();
+    let (names, limited) = git::file_names_bounded(safe_open::Directory::open_resolved(&crate::paths::canonicalize(repo.path()).unwrap()).unwrap().command().unwrap(), &args, 10, 100).unwrap();
     assert_eq!(names, patterns(&[".env.a", ".env.é"]));
     assert!(!limited);
 }
@@ -481,7 +503,8 @@ fn copy_batch_keeps_validated_source_after_ancestor_swap() {
 }
 
 fn copy_path(project: &Path, destination: &Path, relative: &Path, remaining_bytes: u64) -> Result<(u64, Option<String>)> {
-    copy_one(&safe_open::Directory::open_resolved(&fs::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+    copy_one(&safe_open::Directory::open_resolved(&crate::paths::canonicalize(project)?)?, &CopyDestination::open(destination)?, relative, remaining_bytes)
+        .map(|(bytes, warning, _, _, _)| (bytes, warning))
 }
 
 #[cfg(unix)]
@@ -521,7 +544,7 @@ fn git_eligibility_uses_the_bound_source_after_an_ancestor_swap() {
     let source = parent.join("repo");
     init_repo(&source);
     write(&source, ".env.original", "private");
-    let resolved = fs::canonicalize(&source).unwrap();
+    let resolved = crate::paths::canonicalize(&source).unwrap();
     let root = safe_open::Directory::open_resolved(&resolved).unwrap();
     let outside = tempfile::tempdir().unwrap();
     init_repo(&outside.path().join("repo"));

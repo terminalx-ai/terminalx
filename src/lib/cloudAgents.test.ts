@@ -2,6 +2,7 @@ import { configureCloudReadMarkers, reconcileCloudReadMarker } from "./cloudRead
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent, Payload } from "@/types/events";
 import { WorkspaceRpcError, type AgentTabInfo, type WorkspaceConnectionState, type WorkspaceRpcClient } from "@terminalx/portable/workspace";
+import { CLOUD_FILES_NEED_CONNECTION, CLOUD_FILES_OLD_RUNTIME } from "@/lib/cloudComposer";
 import type { CachedTab, Checkpoint, OutboxEntry } from "@/lib/cloudAgentApi";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -10,7 +11,12 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/notify", () => ({ noteStatusChange: vi.fn() }));
 
 import {
+  applyLiveTab,
   applyLiveTabs,
+  changeCloudFollowUp,
+  changesFollowUps,
+  FOLLOW_UPS_OLD_RUNTIME,
+  FOLLOW_UPS_OLD_SERVICE,
   settledStatus,
   attachCloudAgentTab,
   configureCloudAgentTab,
@@ -132,6 +138,7 @@ class FakeBackend {
           kind: args.kind as OutboxEntry["kind"],
           text: (payload.text as string) ?? null,
           ...(Array.isArray(payload.images) && payload.images.length ? { images: payload.images.length } : {}),
+          ...(Array.isArray(payload.files) && payload.files.length ? { files: payload.files.length } : {}),
           requestId: (payload.requestId as string) ?? null,
           state: "queued",
           wake: "not-needed",
@@ -167,6 +174,8 @@ function fakeClient(connected = true, connection: Record<string, unknown> = {}) 
     configureAgentTab: vi.fn(async (params: Record<string, unknown>) => tabInfo({ model: String(params.model ?? "") })),
     listAgentTabs: vi.fn(async () => [] as AgentTabInfo[]),
     onNotification: vi.fn(() => () => undefined),
+    // What the runtime granted: `connection.capabilities`, none unless a test says so.
+    hasCapability: (capability: string) => ((client.connection as { capabilities?: string[] }).capabilities ?? []).includes(capability),
     // As the workspace client does: the state now, then every change.
     onState: vi.fn((listener: (state: WorkspaceConnectionState) => void): (() => void) => {
       states.add(listener);
@@ -403,6 +412,106 @@ describe("cloud agent tabs store", () => {
     onCursor("8:3");
     expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 3]);
     expect(getCloudAgents(scope).tabs[0]!.cursor).toBe("8:3");
+  });
+
+  it("drops the turns a reset cut off and replays the tab's new history from its first event (#1326)", async () => {
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 })]);
+    const client = fakeClient();
+    const stopped: number[] = [];
+    client.subscribeSession.mockImplementation(async () => {
+      const n = client.subscribeSession.mock.calls.length;
+      return () => void stopped.push(n);
+    });
+    await attachCloudAgentTab(scope, "t-1", client);
+    const first = client.subscribeSession.mock.calls[0]!;
+    for (const seq of [1, 2, 3, 4, 5]) first[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    (first[3] as { onCursor: (cursor?: string) => void }).onCursor("8:5");
+    // Another tab of the session says nothing new: nothing is dropped.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 }), tabInfo({ tabId: "t-2", sessionId: "s-1" })]);
+    expect(getTabLog("s-1", "t-1").events).toHaveLength(5);
+    expect(client.subscribeSession).toHaveBeenCalledOnce();
+    // Reset to the turn that ended at seq 2: the runtime names a new history.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 2, history: "generation-2", reset: { turn: 1, undoable: true } }), tabInfo({ tabId: "t-2", sessionId: "s-1" })]);
+    expect(getTabLog("s-1", "t-1").events).toEqual([]);
+    const tab = getCloudAgents(scope).tabs.find((candidate) => candidate.tabId === "t-1")!;
+    expect(tab.cursor).toBeNull();
+    expect(tab.info.history).toBe("generation-2");
+    expect(tab.info.reset).toEqual({ turn: 1, undoable: true });
+    // The old feed ends and a new one replays from the start, with no cursor.
+    expect(stopped).toEqual([1]);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(2));
+    expect((client.subscribeSession.mock.calls[1]![3] as { sinceCursor?: string }).sinceCursor).toBeUndefined();
+    const second = client.subscribeSession.mock.calls[1]!;
+    for (const seq of [1, 2]) second[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    second[2](ev(6, { type: "user_message", text: "after the reset", queued: false }));
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 6]);
+    // Told again of the same history (the reset's own answer, then `session.tabs`): nothing more is dropped.
+    applyLiveTab(scope, tabInfo({ lastSeq: 6, history: "generation-2", reset: { turn: 1, undoable: true } }));
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 6]);
+    expect(client.subscribeSession).toHaveBeenCalledTimes(2);
+    // One tab described alone removes no other tab.
+    expect(getCloudAgents(scope).tabs.map((candidate) => candidate.tabId).sort()).toEqual(["t-1", "t-2"]);
+  });
+
+  it("a reset while the first subscription is still answered replays the new history from its first event (#1398)", async () => {
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 5 })]);
+    const client = fakeClient();
+    // A first attach leaves the old history cached up to its cursor.
+    const detach = await attachCloudAgentTab(scope, "t-1", client);
+    const first = client.subscribeSession.mock.calls[0]!;
+    for (const seq of [1, 2, 3, 4, 5]) first[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    (first[3] as { onCursor: (cursor?: string) => void }).onCursor("8:5");
+    detach();
+    // The next attach's subscription is held open.
+    const stopped: number[] = [];
+    let answer!: () => void;
+    client.subscribeSession.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (answer = resolve));
+      return () => void stopped.push(2);
+    });
+    client.subscribeSession.mockImplementation(async () => () => void stopped.push(3));
+    const attaching = attachCloudAgentTab(scope, "t-1", client);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(2));
+    const held = client.subscribeSession.mock.calls[1]!;
+    expect((held[3] as { sinceCursor?: string }).sinceCursor).toBe("8:5");
+    // Meanwhile a reset to the turn that ended at seq 2 names a new history.
+    applyLiveTabs(scope, [tabInfo({ lastSeq: 2, history: "generation-2" })]);
+    expect(getTabLog("s-1", "t-1").events).toEqual([]);
+    await vi.waitFor(() => expect(client.subscribeSession).toHaveBeenCalledTimes(3));
+    const fresh = client.subscribeSession.mock.calls[2]!;
+    expect((fresh[3] as { sinceCursor?: string }).sinceCursor).toBeUndefined();
+    // What the retired subscription still delivers is not taken.
+    held[2](ev(4, { type: "assistant_text", text: "line 4" }));
+    (held[3] as { onCursor: (cursor?: string) => void }).onCursor("8:9");
+    for (const seq of [1, 2]) fresh[2](ev(seq, { type: "assistant_text", text: `line ${seq}` }));
+    answer();
+    const stop = await attaching;
+    // The retired subscription is stopped once it is answered, and the tab is read only from the new replay.
+    expect(stopped).toEqual([2]);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2]);
+    const tab = getCloudAgents(scope).tabs[0]!;
+    expect(tab.cursor).toBeNull();
+    expect(tab.historyRead).toBe(true);
+    stop();
+    expect(stopped).toEqual([2, 3]);
+  });
+
+  it("a newer checkpoint of a rewritten history replaces what a stopped workspace's reader kept (#1326)", async () => {
+    backend.metas = [{ tabId: "t-1", epoch: 1, version: 1 }];
+    const old = [1, 2, 3, 4].map((seq) => ev(seq, { type: "assistant_text", text: `old ${seq}` }));
+    backend.checkpoints["t-1"] = { epoch: 1, version: 1, projection: { ...tabInfo({ lastSeq: 4 }), v: 1, events: old, truncated: false, followUps: [], updatedAt: 10 } };
+    await loadCloudAgents(scope);
+    expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2, 3, 4]);
+    backend.checkpoints["t-1"] = { epoch: 1, version: 2, projection: {
+      ...tabInfo({ lastSeq: 2 }), v: 1, events: old.slice(0, 2), truncated: false, followUps: [], updatedAt: 20,
+      history: "generation-2", reset: { turn: 1, filesRestored: 3, undoable: true },
+    } };
+    expect(await refreshFromCheckpoint(scope, "t-1")).toBe(true);
+    expect(getTabLog("s-1", "t-1").events.map((e) => e.seq)).toEqual([1, 2]);
+    const tab = getCloudAgents(scope).tabs[0]!;
+    expect(tab.info.history).toBe("generation-2");
+    expect(tab.info.reset).toEqual({ turn: 1, filesRestored: 3, undoable: true });
   });
 
   it("treats the runtime's tab list as authoritative and marks a finished tab unread", () => {
@@ -832,7 +941,7 @@ describe("cloud agent tabs store", () => {
     applyLiveTabs(dev, [tabInfo()]);
     const client = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})) });
     const entry = await sendToCloudAgent(dev, "t-1", "hello", client);
-    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" });
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello" }, expect.stringMatching(/^send-[0-9a-f]{32}$/));
     expect(entry.state).toBe("applied");
     // What the runtime refused to type or to queue is said in its own words, not as a bare code (PRO-88).
     const refusals = [
@@ -852,6 +961,178 @@ describe("cloud agent tabs store", () => {
     await expect(decideCloudAgent(dev, "t-1", { requestId: "r", optionId: "allow" }, client)).rejects.toThrow(DEV_SCOPE_NOTICE);
     await flushCloudAgentCache(dev);
     expect(backend.calls).toEqual([]);
+  });
+
+  it("steers, stops and answers on a machine live, with one request id per decision (PRO-347)", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m1" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+    expect((await steerCloudAgent(machine, "t-1", "use the cursor", client)).state).toBe("applied");
+    expect(client.mutate).toHaveBeenLastCalledWith("session.steer", { sessionId: "s-1", tabId: "t-1", text: "use the cursor" });
+    expect((await stopCloudAgent(machine, "t-1", client)).state).toBe("applied");
+    expect(client.mutate).toHaveBeenLastCalledWith("session.stop", { sessionId: "s-1", tabId: "t-1" });
+
+    // A decision that may have landed before the link dropped is sent again with the same id, so the machine applies it once.
+    client.mutate.mockRejectedValueOnce(new Error("connection lost"));
+    await expect(decideCloudAgent(machine, "t-1", { requestId: "r-1", optionId: "allow" }, client)).rejects.toThrow();
+    await decideCloudAgent(machine, "t-1", { requestId: "r-1", optionId: "allow" }, client);
+    const decides = client.mutate.mock.calls.filter(([method]) => method === "session.decide");
+    expect(decides).toHaveLength(2);
+    expect(decides[0]![1]).toEqual({ sessionId: "s-1", tabId: "t-1", requestId: "r-1", optionId: "allow" });
+    expect(typeof decides[0]![2]).toBe("string");
+    expect(decides[1]![2]).toBe(decides[0]![2]);
+    // Another request gets its own.
+    await decideCloudAgent(machine, "t-1", { requestId: "r-2", answers: { q: "yes" } }, client);
+    expect(client.mutate.mock.calls.at(-1)![2]).not.toBe(decides[0]![2]);
+
+    // Already answered elsewhere: said in words, not as a code.
+    client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("conflict", "conflict", "session.decide", { reason: "request-not-pending" }));
+    expect(await decideCloudAgent(machine, "t-1", { requestId: "r-3", optionId: "allow" }, client).catch((error: unknown) => errorText(error))).toMatch(/already answered/);
+
+    // Away: nothing is queued on this computer.
+    client.moveTo("reconnecting");
+    await expect(steerCloudAgent(machine, "t-1", "x", client)).rejects.toThrow(/Not connected/);
+    await flushCloudAgentCache(machine);
+    expect(backend.calls).toEqual([]);
+  });
+
+  // #1328: a held follow-up is changed by its sending command's id, on the runtime that holds it.
+  describe("changing a held follow-up", () => {
+    it("goes through the mailbox and waits for the runtime's receipt", async () => {
+      vi.useFakeTimers();
+      applyLiveTabs(scope, [tabInfo()]);
+      const client = fakeClient(true, { capabilities: ["session/1", "follow-ups/1"] });
+      expect(changesFollowUps(scope, client)).toBe(true);
+      let done = false;
+      const edited = changeCloudFollowUp(scope, "t-1", { op: "edit", followUpId: "cmd-held", text: "use tabs" }, client).then(() => (done = true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(backend.calls.find((call) => call.cmd === "cloud_agent_enqueue")!.args).toMatchObject({ tabId: "t-1", kind: "follow-up", payload: { op: "edit", followUpId: "cmd-held", text: "use tabs" } });
+      expect(client.nudgeMailbox).toHaveBeenCalled();
+      expect(done).toBe(false);
+      const [entry] = backend.outbox;
+      backend.syncs = [[{ ...entry!, state: "applied", updatedAt: 50 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      await edited;
+      expect(done).toBe(true);
+    });
+
+    it("throws the runtime's refusal, in its words", async () => {
+      vi.useFakeTimers();
+      applyLiveTabs(scope, [tabInfo()]);
+      const client = fakeClient(true, { capabilities: ["session/1", "follow-ups/1"] });
+      const released = changeCloudFollowUp(scope, "t-1", { op: "release", followUpId: "cmd-gone" }, client);
+      const failed = released.catch((error: unknown) => errorText(error));
+      await vi.advanceTimersByTimeAsync(0);
+      const [entry] = backend.outbox;
+      const message = "That message is no longer held: it went to the agent, or was withdrawn.";
+      backend.syncs = [[{ ...entry!, state: "rejected", category: "follow-up-gone", receipt: { v: 1, outcome: "rejected", message }, updatedAt: 50 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await failed).toBe(message);
+      // Never sent twice: the change is made again from the queue as it is then.
+      expect(() => sendAgain(scope, entry!, client)).toThrow(/never sent twice/);
+      // A cloud service from before the command refuses it as malformed: said as that.
+      const refused = changeCloudFollowUp(scope, "t-1", { op: "withdraw", followUpId: "cmd-held" }, client).catch((error: unknown) => errorText(error));
+      await vi.advanceTimersByTimeAsync(0);
+      const last = backend.outbox.at(-1)!;
+      backend.syncs = [[{ ...last, state: "rejected", category: "cloud_workspace_request_invalid", updatedAt: 60 }]];
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await refused).toBe(FOLLOW_UPS_OLD_SERVICE);
+    });
+
+    it("is live on a machine, by its request id, and refused by one that cannot take it", async () => {
+      const machine = { organizationId: "", workspaceId: "machine:m4" };
+      await loadCloudAgents(machine);
+      applyLiveTabs(machine, [tabInfo()]);
+      const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1", "follow-ups/1"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+      // The send's request id is what names the follow-up it became.
+      const sent = await sendToCloudAgent(machine, "t-1", "after this", client);
+      expect(sent.clientCommandId).toBe(client.mutate.mock.calls[0]![2]);
+      await changeCloudFollowUp(machine, "t-1", { op: "withdraw", followUpId: sent.clientCommandId }, client);
+      expect(client.mutate).toHaveBeenLastCalledWith("session.followUp", { sessionId: "s-1", tabId: "t-1", op: "withdraw", followUpId: sent.clientCommandId });
+      client.mutate.mockRejectedValueOnce(new WorkspaceRpcError("conflict", "That message is no longer held: it went to the agent, or was withdrawn.", "session.followUp", { reason: "follow-up-gone" }));
+      expect(await changeCloudFollowUp(machine, "t-1", { op: "release", followUpId: "x" }, client).catch((error: unknown) => errorText(error))).toMatch(/no longer held/);
+      const old = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn() });
+      expect(changesFollowUps(machine, old)).toBe(false);
+      await expect(changeCloudFollowUp(machine, "t-1", { op: "withdraw", followUpId: "x" }, old)).rejects.toThrow(FOLLOW_UPS_OLD_RUNTIME);
+      expect(old.mutate).not.toHaveBeenCalled();
+      await flushCloudAgentCache(machine);
+      expect(backend.calls).toEqual([]);
+    });
+  });
+
+  it("sends the settings chosen while away with a machine's next prompt", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m2" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn(async () => ({ settingsIgnored: false })) });
+    await configureCloudAgentTab(machine, "t-1", { model: "opus" }, Object.assign(fakeClient(false, { capabilities: ["session/1", "agent-commands/1"] }), { mutate: vi.fn() })).catch(() => undefined);
+    expect(getCloudAgents(machine).tabs[0]!.pendingConfig).toEqual({ model: "opus" });
+    await sendToCloudAgent(machine, "t-1", "hello", client);
+    expect(client.mutate).toHaveBeenCalledWith("session.send", { sessionId: "s-1", tabId: "t-1", text: "hello", model: "opus" }, expect.stringMatching(/^send-/));
+    expect(getCloudAgents(machine).tabs[0]!.pendingConfig ?? null).toBeNull();
+  });
+
+  it("PRO-407: uploads a machine message's files first, then names them in session.send", async () => {
+    const machine = { organizationId: "", workspaceId: "machine:m3" };
+    await loadCloudAgents(machine);
+    applyLiveTabs(machine, [tabInfo()]);
+    const client = Object.assign(fakeClient(true, { capabilities: ["session/1", "agent-commands/1", "composer/3", "composer/4"] }), { mutate: vi.fn(async (..._args: unknown[]) => ({})) });
+    await sendToCloudAgent(machine, "t-1", "read this", client, [], { files: [{ name: "plan.md", data: "IyBQbGFu", mediaType: "text/markdown" }] });
+    const [attach, send] = client.mutate.mock.calls;
+    expect(attach![0]).toBe("session.attach");
+    expect(attach![1]).toEqual({ sessionId: "s-1", tabId: "t-1", attachmentId: expect.stringMatching(/^att-/), kind: "file", name: "plan.md", mediaType: "text/markdown", offset: 0, data: "IyBQbGFu", last: true });
+    const id = (attach![1] as { attachmentId: string }).attachmentId;
+    expect(send![0]).toBe("session.send");
+    expect(send![1]).toEqual({ sessionId: "s-1", tabId: "t-1", text: "read this", files: [{ id, name: "plan.md", mediaType: "text/markdown" }] });
+    // The file itself never rides in the message.
+    expect(JSON.stringify(send![1])).not.toContain("IyBQbGFu");
+
+  });
+
+  it("#1329: uploads a cloud message's files to the runtime first, then names them in the mailbox command", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const order: string[] = [];
+    const mutate = vi.fn(async (method: string, _params: Record<string, unknown>) => {
+      order.push(method);
+      return {};
+    });
+    mocks.invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      order.push(cmd);
+      return backend.handle(cmd, args);
+    });
+    const client = Object.assign(fakeClient(), { mutate, hasCapability: (capability: string) => capability === "composer/3" || capability === "composer/4" });
+    const file = { name: "plan.md", data: "IyBQbGFu", mediaType: "text/markdown" };
+    const entry = await sendToCloudAgent(scope, "t-1", "read this", client, [{ mediaType: "image/png", data: "YWJj", name: "shot.png" }], { files: [file] });
+    const [attachFile, attachImage] = mutate.mock.calls;
+    expect(attachFile![1]).toEqual({ sessionId: "s-1", tabId: "t-1", attachmentId: expect.stringMatching(/^att-/), kind: "file", name: "plan.md", mediaType: "text/markdown", offset: 0, data: "IyBQbGFu", last: true });
+    expect(attachImage![1]).toMatchObject({ attachmentId: expect.stringMatching(/^att-/), data: "YWJj" });
+    const payload = backend.calls.find((c) => c.cmd === "cloud_agent_enqueue")!.args.payload as { text: string; files: { id: string }[] };
+    expect(payload).toEqual({
+      text: "read this",
+      images: [{ id: (attachImage![1] as { attachmentId: string }).attachmentId, mediaType: "image/png", name: "shot.png" }],
+      files: [{ id: (attachFile![1] as { attachmentId: string }).attachmentId, name: "plan.md", mediaType: "text/markdown" }],
+    });
+    expect(order.lastIndexOf("session.attach")).toBeLessThan(order.indexOf("cloud_agent_enqueue"));
+    // The file itself never rides in the command.
+    expect(JSON.stringify(payload)).not.toContain("IyBQbGFu");
+    expect(entry.files).toBe(1);
+
+    // Send again carries the same file again, under the same upload id.
+    await sendAgain(scope, { ...entry, state: "outcome-unknown" }, client);
+    const again = backend.calls.filter((c) => c.cmd === "cloud_agent_enqueue")[1]!.args.payload as { files: { id: string }[] };
+    expect(again.files).toEqual(payload.files);
+  });
+
+  it("#1329: sends nothing when a cloud message's files cannot reach the runtime", async () => {
+    applyLiveTabs(scope, [tabInfo()]);
+    const files = [{ name: "plan.md", data: "IyBQbGFu" }];
+    await expect(sendToCloudAgent(scope, "t-1", "read this", null, [], { files })).rejects.toThrow(CLOUD_FILES_NEED_CONNECTION);
+    // A runtime from before `composer/4` takes images only.
+    const old = Object.assign(fakeClient(), { mutate: vi.fn(async () => ({})), hasCapability: (capability: string) => capability === "composer/3" });
+    await expect(sendToCloudAgent(scope, "t-1", "read this", old, [], { files })).rejects.toThrow(CLOUD_FILES_OLD_RUNTIME);
+    expect(old.mutate).not.toHaveBeenCalled();
+    expect(backend.calls.some((call) => call.cmd === "cloud_agent_enqueue")).toBe(false);
   });
 
   // Found in a live two-user test: a pane kept "chunk 98 of 150 / Working" long after the turn had finished.

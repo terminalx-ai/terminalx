@@ -1,5 +1,7 @@
 //! Process-bounded owner lifecycle regressions. Shell children exercise Host
 //! drain and cancellation only; they are not provider compatibility evidence.
+#[cfg(unix)]
+use crate::paths::Canonical;
 use super::*;
 use std::sync::mpsc;
 use serde_json::json;
@@ -49,6 +51,7 @@ pub(super) fn before_version_probe() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn empty_write_retries_revalidate_mobile_and_shared_authority() {
     for mobile in [true, false] {
@@ -288,12 +291,14 @@ fn codex_stdout_renews_activity_and_clears_only_watcher_timeouts() {
     assert_eq!(rt.lock().unwrap().recovery, Some(RecoveryKind::SignedOut));
 }
 
+#[cfg(unix)]
 struct GateSink {
     sink: StdioSink,
     entered: mpsc::Sender<()>,
     release: Mutex<mpsc::Receiver<()>>,
     settled: mpsc::Sender<()>,
 }
+#[cfg(unix)]
 impl Sink for GateSink {
     fn stdout_line(&self, line: String) {
         self.entered.send(()).unwrap();
@@ -315,6 +320,7 @@ impl Sink for GateSink {
 /// for each frame, makes it exit after `initialize` (`die`) or never answer
 /// the thread request (`hang`). Shell built-ins keep helper-process startup
 /// out of the protocol's existing deadlines.
+#[cfg(unix)]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
 here=${0%/*}
@@ -347,6 +353,80 @@ while IFS= read -r line; do
 done
 "#;
 
+/// PRO-478: native Codex runs no hooks, so a bot's gate meets its approval
+/// requests. At Read and report a `git push` is refused: the card says why and
+/// Codex is told no at once. At Ask before outward actions it waits on the card,
+/// which says why it asks.
+#[cfg(unix)]
+#[test]
+fn a_bots_gate_answers_native_codex_approvals() {
+    for case in ["bot-approval-refused", "bot-approval-asked"] {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+            .env(CASE, case).output().unwrap();
+        assert!(out.status.success(), "{case}\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[cfg(unix)]
+fn bot_approval_fixture(case: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _home = store::temp_home();
+    let root = store::root().unwrap().canonicalize().unwrap();
+    let mut settings = store::settings::load();
+    settings.experimental.bots = true;
+    store::settings::save(&settings).unwrap();
+    let sink = Arc::new(crate::sink::BroadcastSink::new(256));
+    let bot = crate::bots::create(sink.as_ref(), "cto", "Atlas").unwrap();
+    let access = if case == "bot-approval-refused" { crate::bots::BotAccess::ReadReport } else { crate::bots::BotAccess::AskOutward };
+    crate::bots::update(sink.as_ref(), &bot.id, crate::bots::BotPatch { access: Some(access), harness: Some("codex".into()), ..Default::default() }).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = RESUMING_CODEX.replace("      printf '{\"method\":\"item/agentMessage/delta\"", "      printf '{\"id\":\"approval\",\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-%s\",\"itemId\":\"tool\",\"command\":\"git push origin main\"}}\\n' \"$id\"\n      continue\n      printf '{\"method\":\"item/agentMessage/delta\"");
+    assert_ne!(script, RESUMING_CODEX);
+    std::fs::write(bin.join("codex"), script).unwrap();
+    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(bin.join("answer"), "thread-1").unwrap();
+    assert!(crate::binpath::set_priority_dir(&bin));
+    let session: index::SessionEntry = serde_json::from_value(json!({
+        "id":"stdio-owner", "projectPath":root, "cwd":root, "title":"fixture",
+        "created":index::now(), "modified":index::now(), "bot": {"id": bot.id},
+        "tabs":[{"id":"tab", "harness":"codex", "transport":"experimentalCodexStdio", "permissionMode":"plan", "providerSessionId":"thread-1", "created":index::now()}]
+    })).unwrap();
+    index::save(&[session]).unwrap();
+    let manager = SessionManager::new(sink, Arc::new(crate::sink::NoObserver), Arc::new(Host::new()), Arc::new(pty::Terminals::new()),
+        Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap());
+    struct Owner(SessionManager);
+    impl Drop for Owner { fn drop(&mut self) { let _ = self.0.stop("stdio-owner", "tab"); } }
+    let _owner = Owner(manager.clone());
+    let events = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap_or_default();
+    let frames = || std::fs::read_to_string(bin.join("received")).unwrap_or_default().lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    let wait = |why: &str, done: &dyn Fn() -> bool| {
+        let until = Instant::now() + Duration::from_secs(8);
+        while !done() {
+            assert!(Instant::now() < until, "{why}: {:?}; provider received: {:?}", events().iter().map(|event| &event.payload).collect::<Vec<_>>(), frames());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    manager.send("stdio-owner", "tab", "ship it".into(), Vec::new()).unwrap();
+    wait("the card", &|| events().iter().any(|event| matches!(event.payload, Payload::PermissionRequested { .. })));
+    let reason = events().iter().find_map(|event| match &event.payload { Payload::PermissionRequested { reason, .. } => reason.clone(), _ => None }).unwrap_or_default();
+    let rt = manager.runtime("stdio-owner", "tab").unwrap();
+    if case == "bot-approval-refused" {
+        assert!(reason.contains("Read and report") && reason.contains("`git push origin main`"), "{reason}");
+        wait("Codex told no", &|| frames().iter().any(|frame| frame["id"] == "approval" && frame["result"]["decision"] == "decline"));
+        wait("the card settled", &|| rt.lock().unwrap().pending.is_empty());
+        assert!(events().iter().any(|event| matches!(event.payload, Payload::PermissionDecided { allowed: false, .. })));
+    } else {
+        assert!(reason.contains("asks before it changes anything") && reason.contains("`git push origin main`"), "{reason}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(rt.lock().unwrap().pending.len(), 1, "it waits for the owner");
+        assert!(!frames().iter().any(|frame| frame["id"] == "approval"), "nothing answered for them");
+    }
+}
+
+#[cfg(unix)]
 /// A tab whose connection ended (app restart, Stop) keeps its thread: the next
 /// send resumes that thread in a new connection, and a reply naming any other
 /// thread gets no prompt.
@@ -456,6 +536,7 @@ fn resume_fixture(case: &str) {
 /// Model and effort reach a live connection with its next turn. A permission
 /// mode is only taken between turns: the connection stops, and the next send
 /// resumes the thread under the new approval policy and sandbox.
+#[cfg(unix)]
 fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::Value]) {
     let frames = || -> Vec<serde_json::Value> { std::fs::read_to_string(bin.join("received")).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect() };
     let turns = || store::read_lines::<AgentEvent>(&store::log_path("stdio-owner", "tab").unwrap()).unwrap().iter().filter(|event| matches!(event.payload, Payload::TurnCompleted { .. })).count();
@@ -499,6 +580,7 @@ fn settings_fixture(manager: &SessionManager, bin: &Path, first: &[serde_json::V
 /// Opening the terminal view hands the thread to Codex's own terminal: never
 /// mid-turn: the request waits without fencing its writer. Once idle it moves
 /// only after the connection has exited, and for good.
+#[cfg(unix)]
 fn to_terminal_fixture(manager: &SessionManager) {
     let rt = manager.runtime("stdio-owner", "tab").unwrap();
     let local_move = |defer| {
@@ -573,6 +655,7 @@ fn to_terminal_fixture(manager: &SessionManager) {
     assert!(!serde_json::to_string(&trace).unwrap().contains("carry on"), "no conversation content in diagnostics");
 }
 
+#[cfg(unix)]
 /// Continue in New Session into an experimental tab: confirmed once Codex
 /// takes the turn, refused (and offered back, never replayed) when Codex goes
 /// before it does or Stop comes first, and sent again by "Resend last prompt"
@@ -689,6 +772,7 @@ fn continuation_fixture(case: &str) {
     assert!(!bin.join("unexpected-helper").exists(), "the protocol fixture must not launch dirname, sed or cat");
 }
 
+#[cfg(unix)]
 /// A phone, a share's guest and the host of a shared session reach a native
 /// tab as they reach a PTY one. Each prompt is delivered under a permit that
 /// is still current when its frame is written; one that is not is withdrawn
@@ -698,7 +782,7 @@ fn continuation_fixture(case: &str) {
 fn remote_input_fixture(case: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _home = store::temp_home();
-    let root = store::root().unwrap().canonicalize().unwrap();
+    let root = store::root().unwrap().canonical().unwrap();
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("codex"), RESUMING_CODEX).unwrap();
@@ -845,6 +929,7 @@ fn remote_input_fixture(case: &str) {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+#[cfg(unix)]
 fn rt_bound(manager: &SessionManager) -> bool {
     manager.runtime("stdio-owner", "tab").unwrap().lock().unwrap().stdio_compaction.is_some()
 }
@@ -920,6 +1005,7 @@ fn a_sparse_workspace_note_joins_the_workspace_prompts_in_one_developer_instruct
 /// variables it was started with, starts a thread and plays one turn. Like
 /// Codex, it makes `$CODEX_HOME/tmp` at every start, `--version` included,
 /// and it records the home each version probe ran in.
+#[cfg(unix)]
 const CLOUD_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 [ -n "${CODEX_HOME-}" ] && mkdir -p "$CODEX_HOME/tmp/arg0"
@@ -940,6 +1026,7 @@ while read -r line; do
 done
 "#;
 
+#[cfg(unix)]
 /// Native Codex in a cloud workspace (#644): started with the workspace's
 /// route, configuration and credential in a hook-free home, the variable the
 /// grant clears cleared, and the route's model; its thread is then picked up
@@ -1008,6 +1095,7 @@ fn cloud_launch_fixture() {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+#[cfg(unix)]
 const FIRST_LAUNCH_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
@@ -1019,6 +1107,7 @@ esac
 exec sleep 10
 "#;
 
+#[cfg(unix)]
 /// Native Codex is tried, not required (#644): a tab that has not started its
 /// thread runs on the terminal engine when this Codex is older than the app
 /// server's minimum, decided when it is first shown or sent to, with no error.
@@ -1078,6 +1167,7 @@ fn first_launch_fixture(case: &str) {
 /// on a usage limit instead. An `ask` file makes the next turn ask to run a
 /// command first, and goes too. While a `hold` file exists, a turn that has
 /// started does not end. Each app server it starts is counted in `launches`.
+#[cfg(unix)]
 const SIGNED_OUT_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
@@ -1113,6 +1203,7 @@ done
 /// Stands in for Codex replying in pieces: answers the handshake, then for a
 /// `turn/start` plays the frames written to `streamed` and, if there is one,
 /// those in `finished`.
+#[cfg(unix)]
 const STREAMING_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
@@ -1132,6 +1223,7 @@ done
 /// The cloud mailbox over the tabs of `root`, as `terminalx-serve` runs it in
 /// a workspace, with a server that leases nothing itself: each command is
 /// handed to [`mailbox_send`] instead.
+#[cfg(unix)]
 fn cloud_agents(manager: &SessionManager, root: &Path, sink: Arc<dyn crate::sink::EventSink>) -> Arc<crate::cloud_agents::CloudAgents> {
     use crate::cloud_agents::api::{Ack, AckOutcome, CallError, Checkpoint, Leased, MailboxApi, PutOutcome};
     struct Server;
@@ -1148,6 +1240,7 @@ fn cloud_agents(manager: &SessionManager, root: &Path, sink: Arc<dyn crate::sink
 
 /// A message sent to the tab from the CLI, a phone or another member, applied
 /// as the mailbox applies a leased one: its outcome and its receipt's body.
+#[cfg(unix)]
 fn mailbox_send(agents: &crate::cloud_agents::CloudAgents, id: &str, text: &str) -> (String, serde_json::Value) {
     use crate::cloud_agents::{api, crypto};
     let (key_id, key) = agents.keys.current().unwrap();
@@ -1164,6 +1257,7 @@ fn mailbox_send(agents: &crate::cloud_agents::CloudAgents, id: &str, text: &str)
     (receipt.outcome, serde_json::from_slice(&body).unwrap())
 }
 
+#[cfg(unix)]
 /// A message from the cloud mailbox to a tab whose turn failed (#644). A
 /// native tab waits on that failure, which no turn end will lift: what was
 /// queued behind the failed turn goes once it has ended, and a message sent
@@ -1335,6 +1429,7 @@ fn mailbox_fixture(case: &str) {
     manager.stop("stdio-owner", "tab").unwrap();
 }
 
+#[cfg(unix)]
 /// #644: Codex streams a reply in many pieces, each shown live as a preview.
 /// The chat records the reply once, whole, at the time its first piece came:
 /// when its item completes, or when its turn ends without that (here, Stop).
@@ -1434,6 +1529,7 @@ fn streamed_fixture(case: &str) {
 /// it answers and completes. `turn/interrupt` ends the turn it names as
 /// interrupted once `hold-interrupt` is gone. Turns are named by their
 /// request's id, so a late frame of an interrupted turn is never another's.
+#[cfg(unix)]
 const WORKING_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 if [ "$1" = "--version" ]; then echo "codex-cli 0.166.0"; exit 0; fi
@@ -1468,6 +1564,7 @@ while read -r line; do
 done
 "#;
 
+#[cfg(unix)]
 /// #815: native Codex at work for longer than the watcher's stall limit is
 /// not stalled, and a compact command sent while it works (or right after
 /// an interrupt, before Codex has ended the turn) is refused as a request: no
@@ -1744,6 +1841,7 @@ fn a_busy_refusal_says_the_words_the_window_knows_it_by() {
     assert!(window.contains(&format!("\"{BUSY_WORDS}\"")), "the window's copy of the words drifted");
 }
 
+#[cfg(unix)]
 #[test]
 fn child_fixture() {
     let Ok(case) = std::env::var(CASE) else { return };
@@ -1757,6 +1855,7 @@ fn child_fixture() {
     if matches!(case.as_str(), "continuation-delivered" | "continuation-undelivered" | "continuation-stopped" | "resend-after-restart" | "resend-no-helper-tools") { return continuation_fixture(&case); }
     if matches!(case.as_str(), "native-fallback-send" | "native-fallback-start" | "native-supported-start") { return first_launch_fixture(&case); }
     if case == "cloud-launch" { return cloud_launch_fixture(); }
+    if case.starts_with("bot-approval-") { return bot_approval_fixture(&case); }
     if matches!(case.as_str(), "mailbox-after-refusal" | "mailbox-cli-waiting") { return mailbox_fixture(&case); }
     if matches!(case.as_str(), "streamed-reply" | "streamed-stopped") { return streamed_fixture(&case); }
     if matches!(case.as_str(), "busy-while-working" | "queued-while-working" | "queued-stop" | "queued-interrupt" | "queued-share-ended" | "queued-overflow") { return busy_fixture(); }
@@ -1973,6 +2072,14 @@ fn privacy_review3_revoked_approval_codex_stays_answerable() {
 }
 
 #[test]
+fn a_revoked_phone_cannot_deliver_a_queued_codex_approval() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "session::codex_stdio::tests::child_fixture", "--nocapture"])
+        .env(CASE, "native3-approval-phone").output().unwrap();
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn privacy_native3_codex_followup_delivery() {
     native3_delivery_cases("followup");
 }
@@ -1987,6 +2094,7 @@ fn native3_delivery_cases(action: &str) {
     }
 }
 
+#[cfg(unix)]
 fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path) {
     if case == "native3-resolved" { return native3_resolved_fixture(manager, bin); }
     use crate::remote::{protocol::{Authority as RemoteAuthority, PROTOCOL}, server::{Peer, WorkspaceRpc}};
@@ -2092,15 +2200,24 @@ fn native3_fixture(case: &str, manager: &SessionManager, root: &Path, bin: &Path
         let request = rt.lock().unwrap().pending.keys().next().unwrap().clone();
         let (entered, arrived) = mpsc::channel(); let (release, released) = mpsc::channel();
         *APPROVAL_QUEUED.lock().unwrap() = Some(Box::new(move || { entered.send(()).unwrap(); released.recv_timeout(Duration::from_secs(8)).unwrap(); }));
-        // Same remote admission used by relay permission RPC; the physical
-        // writer is a different thread and must retain this original ticket.
-        { let ticket = crate::data_privacy::Ticket::default(); let _scope = ticket.scope().unwrap();
-          manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap(); }
+        let phone = case.ends_with("-phone").then(|| crate::local_runtime::mobile::ApprovalPhone::register(manager));
+        if let Some(phone) = &phone {
+            phone.answer(manager, "stdio-owner", "tab", &request, "allow");
+        } else {
+            let ticket = crate::data_privacy::Ticket::default();
+            let _scope = ticket.scope().unwrap();
+            manager.respond_permission("stdio-owner", "tab", &request, "allow").unwrap();
+        }
         arrived.recv_timeout(WAIT).unwrap();
         assert!(rt.lock().unwrap().pending.contains_key(&request), "enqueueing must retain the card while the provider awaits delivery");
         assert!(manager.respond_permission("stdio-owner", "tab", &request, "deny").unwrap_err().to_string().contains("still being delivered"));
         assert!(!events().iter().any(|e| matches!(e.payload, Payload::PermissionDecided { .. })));
-        policy(true); if case.ends_with("cycle") { policy(false); }
+        if let Some(phone) = phone {
+            phone.revoke(manager);
+        } else {
+            policy(true);
+            if case.ends_with("cycle") { policy(false); }
+        }
         release.send(()).unwrap();
         // A writer fence proves the rejected answer was processed, without
         // inventing a provider response or sleeping to guess queue progress.
@@ -2125,6 +2242,7 @@ fn privacy_native3_codex_provider_resolution_retires_queued_answer_once() {
     assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
 }
 
+#[cfg(unix)]
 fn native3_resolved_fixture(manager: &SessionManager, bin: &Path) {
     struct Owner(SessionManager);
     impl Drop for Owner { fn drop(&mut self) { let _ = self.0.stop("stdio-owner", "tab"); } }
@@ -2192,6 +2310,7 @@ fn native3_resolved_fixture(manager: &SessionManager, bin: &Path) {
     assert_eq!(events().iter().filter(|e| matches!(e.payload, Payload::PermissionDecided { .. })).count(), 2);
 }
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_native_writer_rechecks_original_policy_and_mode_after_empty_attempt() {
     use crate::remote::collab::{v2::{Snapshot, Permit, Action}};
@@ -2322,6 +2441,7 @@ fn phase2_native_start_fixture() {
 }
 
 
+#[cfg(unix)]
 fn phase2_reported_engine(root: &Path, mut report: Value) -> (Stdio, Outbound) {
     let mut engine = Stdio::new(root.to_string_lossy().into_owned(),String::new(),None,"auto".into(),None);
     let request = |actions: Vec<StdioAction>, method: &str| actions.into_iter().find_map(|action| match action {
@@ -2336,6 +2456,7 @@ fn phase2_reported_engine(root: &Path, mut report: Value) -> (Stdio, Outbound) {
     (engine,frame)
 }
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with_known_approval_stance() {
     use crate::remote::collab::{Collaboration,v2::{Snapshot,Permit,Action}};
@@ -2372,7 +2493,7 @@ fn phase2_collaboration_v2_native_provider_reports_reach_actual_writer_only_with
 #[test]
 fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_only_original_launch() {
     use crate::remote::collab::v2::{Snapshot, Permit, Action};
-    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "valid", "explicit-valid", "implicit-valid", "v1"] {
+    for change in ["revision", "source", "generation", "pending", "mode", "attachment", "stop", "replacement", "mobile", "valid", "explicit-valid", "implicit-valid", "v1"] {
         let _home = store::temp_home();
         let root = store::root().unwrap();
         let entry: index::SessionEntry = serde_json::from_value(json!({"id":"stdio-owner","projectPath":root,"cwd":root,"title":"fixture","created":index::now(),"modified":index::now(),
@@ -2405,7 +2526,9 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
         if change != "v1" { policy.install_v2(snapshot("1", if change == "explicit-valid" { "explicit" } else if change == "implicit-valid" { "implicit" } else { "everyone" })).unwrap(); }
         let (peer, _notifications) = crate::remote::server::Peer::for_user("partial".into(), crate::remote::protocol::Authority::Manage, Some("guest".into()));
         let permit = Permit::new(policy.clone(), "guest", policy.runtime_policy.stamp_for_peer("guest", &peer), Action::Drive).for_peer(&peer);
-        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile: None, shared: None, privacy: None };
+        let phone = (change == "mobile").then(|| crate::local_runtime::mobile::ApprovalPhone::register(&manager));
+        let mobile = phone.as_ref().map(|phone| phone.permit(&manager, "stdio-owner", "tab"));
+        let authority = Authority { collaboration: Some(permit), session: "stdio-owner".into(), tab: "tab".into(), seq: Some(seq), mobile, shared: None, privacy: None };
         let attached_peer = peer.clone();
         let (writer, runtime, work) = (manager.clone(), rt_arc.clone(), root.clone());
         let observed = Arc::new(std::sync::atomic::AtomicBool::new(false)); let saw_wait = observed.clone();
@@ -2434,6 +2557,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
                     "source" => { policy.install_v2(snapshot("2", "explicit")).unwrap(); }
                     "generation" => { let _guard = policy.enter_admission(); policy.runtime_policy.set_generation(2); }
                     "attachment" => rpc.disconnect(&attached_peer),
+                    "mobile" => phone.unwrap().revoke(&writer),
                     "pending" => { index::update_tab("stdio-owner", "tab", |tab| { tab.requested_permission_mode = Some("bypassPermissions".into()); Ok(()) }).unwrap(); }
                     "mode" => { if let Engine::CodexStdio(engine) = &mut runtime.lock().unwrap().engine { engine.actual_stance = None; } }
                     "stop" => writer.stop("stdio-owner", "tab").unwrap(),
@@ -2465,7 +2589,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
             });
             completed.recv_timeout(WAIT).expect("policy/Stop/replacement blocked behind partial frame admission");
             updater.join().unwrap();
-            if matches!(change, "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
+            if matches!(change, "mobile" | "valid" | "explicit-valid" | "implicit-valid" | "v1") { std::fs::write(release_path, "").unwrap(); }
         })));
         WRITTEN.with(|written| written.set(0));
         let result = manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, frame, Some(authority), None, None);
@@ -2507,6 +2631,7 @@ fn phase2_collaboration_v2_native_partial_capacity_wait_rechecks_and_retires_onl
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn phase2_collaboration_v2_native_queued_local_frame_does_not_borrow_dispatcher_tls() {
     use crate::remote::collab::{Collaboration, v2::{Snapshot, Permit, Action}};
@@ -2538,4 +2663,54 @@ fn phase2_collaboration_v2_native_queued_local_frame_does_not_borrow_dispatcher_
     stale.with(|| manager.write_codex_frame(&Arc::downgrade(&rt_arc), &launch, delivery.line, delivery.sender, delivery.privacy, delivery.collaboration)).unwrap();
     assert!(WRITTEN.with(|written| written.get()) > 0, "physical writer borrowed unrelated stale TLS");
     manager.stop("stdio-owner", "tab").unwrap();
+}
+
+/// #980: native Codex on an added account runs in the account's hook-free
+/// native home, never the terminal tabs' home, whose hooks it cannot answer.
+#[cfg(unix)]
+#[test]
+fn native_codex_on_an_added_account_runs_in_its_hook_free_native_home() {
+    let _home = store::temp_home();
+    let root = store::root().unwrap();
+    let id = "0123456789abcdef";
+    let (account, terminal_home) = codex::home::account_paths(&root, id);
+    std::fs::create_dir_all(&terminal_home).unwrap();
+    std::fs::write(account.join("auth.json"), "{}").unwrap();
+    std::fs::write(terminal_home.join("hooks.json"), serde_json::to_vec(&json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"raccoon hook"}]}]}})).unwrap()).unwrap();
+    let grant = crate::cloud_grants::LaunchGrant::local(vec![("CODEX_HOME".into(), Some(terminal_home.to_string_lossy().into_owned())), ("OPENAI_API_KEY".into(), None)], None).on_account(id, Vec::new());
+    let native = native_launch(&grant, &Default::default(), &Default::default(), None);
+    let mut env = native.env;
+    native_account_home(&mut env, &grant, "/work/repo").unwrap();
+    let homes: Vec<_> = env.iter().filter(|(key, _)| key == "CODEX_HOME").map(|(_, value)| PathBuf::from(value)).collect();
+    assert_eq!(homes, vec![account.join("native")]);
+    let hooks: serde_json::Value = serde_json::from_slice(&std::fs::read(account.join("native/hooks.json")).unwrap()).unwrap();
+    assert_eq!(hooks, json!({"hooks":{}}), "no hook a native tab would have to answer");
+    assert_eq!(std::fs::read_link(account.join("native/auth.json")).unwrap(), account.join("auth.json"));
+    assert!(native.unset.contains(&"OPENAI_API_KEY".to_string()), "what the grant unsets stays unset");
+
+    // This Mac's login names no account home: the native home is the reader's, as before.
+    let local = crate::cloud_grants::LaunchGrant::local(Vec::new(), None).on_account("local", Vec::new());
+    let mut env = vec![("A".to_string(), "1".to_string())];
+    native_account_home(&mut env, &local, "/work/repo").unwrap();
+    assert_eq!(env, vec![("A".to_string(), "1".to_string())]);
+}
+
+/// #980: a native thread continued on another login is brought into the
+/// home Codex resumes it in, the one the launch's `CODEX_HOME` names.
+#[cfg(unix)]
+#[test]
+fn a_switched_native_thread_is_brought_into_the_home_it_resumes_in() {
+    let _home = store::temp_home();
+    let thread = "019a0000-0000-7000-8000-0000000000aa";
+    // Written by native Codex on an added account: under the shared native sessions.
+    let day = codex::home::native_root().unwrap().join("sessions/2026/11/16");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join(format!("rollout-2026-11-16T08-00-00-{thread}.jsonl")), "{\"turn\":1}\n").unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let env = vec![("A".to_string(), "1".to_string()), ("CODEX_HOME".to_string(), target.path().to_string_lossy().into_owned())];
+    bring_native_thread(&env, thread).unwrap();
+    let brought = codex::home::find_rollout(target.path(), thread).expect("the thread is in the home it resumes in");
+    assert_eq!(std::fs::read_to_string(brought).unwrap(), "{\"turn\":1}\n");
+    // A thread no home has is left for Codex to report.
+    bring_native_thread(&env, "019a0000-0000-7000-8000-0000000000bb").unwrap();
 }

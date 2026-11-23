@@ -250,6 +250,7 @@ pub struct Incident {
 /// What a runtime hands the next one of a tab's incidents (`session_handover`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any(unix, test))]
 pub struct Handed {
     pub turn: Option<u64>,
     pub open: Option<Incident>,
@@ -377,8 +378,10 @@ impl Tracker {
     }
 
     /// What the runtime that had the tab before handed over.
+    #[cfg(any(unix, test))]
     pub fn handed(&self) -> Handed { Handed { turn: self.turn.filter(|_| self.turn_open), open: self.open.clone(), last: self.last.clone() } }
 
+    #[cfg(any(unix, test))]
     pub fn adopt(&mut self, ctx: &Ctx, handed: Option<Handed>) {
         let Some(handed) = handed else { return };
         self.turn = handed.turn;

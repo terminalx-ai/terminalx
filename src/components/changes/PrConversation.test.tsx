@@ -41,11 +41,27 @@ it("requests, re-requests and removes reviewers by refreshing only the conversat
   expect(access.act).toHaveBeenCalledWith({ kind: "request", login: "ada", team: false });
   fireEvent.click(screen.getByRole("button", { name: "Remove reviewer ada" }));
   await waitFor(() => expect(screen.queryByRole("button", { name: "Remove reviewer ada" })).toBeNull());
+  expect(screen.queryByLabelText("Search reviewers")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Request" }));
   fireEvent.change(screen.getByLabelText("Search reviewers"), { target: { value: "ben" } });
   fireEvent.click(await screen.findByRole("button", { name: "Request ben" }));
   await screen.findByRole("button", { name: "Remove reviewer ben" });
   expect(screen.queryByRole("button", { name: "Request author" })).toBeNull();
-  expect(screen.getByText("2 unresolved threads")).toBeTruthy();
+  expect(screen.getByText("0 approved · 1 waiting · 2 unresolved")).toBeTruthy();
+});
+
+it("shows reviewers with avatars, names, states and ages, and the review summary", async () => {
+  vi.useFakeTimers({ now: Date.parse("2026-11-16T12:00:00Z"), shouldAdvanceTime: true });
+  data.reviewers = [
+    { login: "aisha-khan", name: "Aisha Khan", kind: "user", state: "APPROVED", requested: false, at: "2026-11-16T11:00:00Z" },
+    { login: "sam", kind: "user", state: "PENDING", requested: true, at: "2026-11-15T18:00:00Z" },
+  ];
+  render(view());
+  await screen.findByText("1 approved · 1 waiting · 2 unresolved");
+  const rows = screen.getAllByTestId("pr-reviewer");
+  expect(rows[0].textContent).toBe("AKAisha KhanApproved · 1hRe-request");
+  expect(rows[1].textContent).toBe("SAsamRequested · 18hRemove");
+  expect(screen.getByRole("heading", { name: "Review" })).toBeTruthy();
 });
 
 it("edits title and body, preserves unsaved drafts on refresh, and updates the card", async () => {
@@ -90,11 +106,11 @@ it("offers approval to a non-author and prevents writes on a read-only source", 
   await waitFor(() => expect(access.act).toHaveBeenCalledWith({ kind: "approve", viewer: "reviewer" }));
   data.viewer = "AUTHOR";
   rendered.rerender(view(true, "author"));
-  await screen.findByText("2 unresolved threads");
+  await screen.findByText(/2 unresolved/);
   expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   source = { ...source, canWrite: false };
   rendered.rerender(view(true, "readonly"));
-  await screen.findByText("2 unresolved threads");
+  await screen.findByText(/2 unresolved/);
   expect(screen.queryByRole("button", { name: "Edit title and description" })).toBeNull();
   expect(screen.queryByLabelText("Search reviewers")).toBeNull();
 });
@@ -103,7 +119,7 @@ it.each([[true, "app[bot]"], [true, "personal-looking-login"], [false, "app[bot]
   source = { ...source, cloud };
   data.viewer = viewer;
   render(view());
-  await screen.findByText("2 unresolved threads");
+  await screen.findByText(/2 unresolved/);
   expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   expect(access.act).not.toHaveBeenCalled();
 });
@@ -111,30 +127,34 @@ it.each([[true, "app[bot]"], [true, "personal-looking-login"], [false, "app[bot]
 it("does not approve a cloud association through a personal-looking source", async () => {
   const associated: SessionPr = { ...row, association: { url: row.identity, number: 1, head: "feature", scope: { kind: "cloud", workspace: "workspace", repo: "app" } } };
   render(<PrConversation source={source} row={associated} active refresh={0} onEdited={onEdited} />);
-  await screen.findByText("2 unresolved threads");
+  await screen.findByText(/2 unresolved/);
   expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
 });
 
-it("shows 200 activities, folds long comments, and persists sort across remounts", async () => {
+it("shows 200 activities as one line each, opens and folds long comments, and persists sort across remounts", async () => {
   data.activity = Array.from({ length: 200 }, (_, i) => ({ id: String(i), kind: "comment", author: `person-${i}`, body: i === 199 ? "x".repeat(1800) : `comment-${i}`, at: "2026-11-07T00:00:00Z", url: null, state: null, before: null, after: null }));
   const rendered = render(view());
-  await screen.findByText("Activity · 200");
+  await screen.findByRole("heading", { name: "Activity" });
   expect(screen.getAllByTestId("pr-activity-item")).toHaveLength(200);
+  // Only the description is rendered as markdown until a row is opened.
+  expect(screen.getAllByTestId("markdown")).toHaveLength(1);
+  expect(screen.getAllByTestId("pr-activity-item")[0].textContent).toContain("person-199 commented");
+  expect(screen.queryByText("x".repeat(1800))).toBeNull();
+  fireEvent.click(within(screen.getAllByTestId("pr-activity-item")[0]).getByRole("button", { expanded: false }));
   for (const markdown of screen.getAllByTestId("markdown")) {
     expect(markdown.dataset.remoteImages).toBe("false");
     expect(markdown.dataset.webLinksOnly).toBe("true");
   }
-  expect(screen.getAllByTestId("pr-activity-item")[0].textContent).toContain("person-199");
   expect(screen.queryByText("x".repeat(1800))).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Show more" }));
   expect(screen.getByText("x".repeat(1800))).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Show less" }));
-  fireEvent.change(screen.getByLabelText("Activity order"), { target: { value: "oldest" } });
+  fireEvent.click(screen.getByRole("button", { name: "Activity order" }));
   expect(screen.getAllByTestId("pr-activity-item")[0].textContent).toContain("person-0");
   expect(getPrefs().prActivityOrder).toBe("oldest");
   expect(JSON.parse(localStorage.getItem("raccoon.prefs")!).prActivityOrder).toBe("oldest");
   rendered.rerender(view(true, "remount"));
-  await screen.findByText("Activity · 200");
+  await screen.findByRole("heading", { name: "Activity" });
   expect(screen.getAllByTestId("pr-activity-item")[0].textContent).toContain("person-0");
 });
 
@@ -171,7 +191,7 @@ describe("visibility and late responses", () => {
     });
     const associated = (workspace: string): SessionPr => ({ ...row, association: { url: row.identity, number: 1, head: "feature", scope: { kind: "cloud", workspace, repo: "app" } } });
     const rendered = render(<PrConversation source={source} row={associated("first")} active refresh={0} onEdited={onEdited} />);
-    await screen.findByText("2 unresolved threads");
+    await screen.findByText(/2 unresolved/);
     rendered.rerender(<PrConversation source={source} row={associated("second")} active refresh={0} onEdited={onEdited} />);
     expect(screen.getByRole("alert").textContent).toContain("Reconnect this PR's workspace");
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
@@ -231,7 +251,7 @@ describe("visibility and late responses", () => {
     vi.mocked(access.read).mockImplementationOnce(() => new Promise((resolve) => { finishRead = resolve; }));
     const rendered = render(view());
     rendered.rerender(view(true, "second"));
-    await screen.findByText("2 unresolved threads");
+    await screen.findByText(/2 unresolved/);
     await act(async () => finishRead({ ...initial(), body: "Stale old PR body" }));
     expect(screen.queryByText("Stale old PR body")).toBeNull();
     let finishAction!: () => void;
@@ -248,7 +268,8 @@ describe("visibility and late responses", () => {
     let finish!: (value: string[]) => void;
     vi.mocked(access.search).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     render(view());
-    fireEvent.change(await screen.findByLabelText("Search reviewers"), { target: { value: "alice" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Request" }));
+    fireEvent.change(screen.getByLabelText("Search reviewers"), { target: { value: "alice" } });
     await waitFor(() => expect(access.search).toHaveBeenCalledWith("alice"));
     fireEvent.change(screen.getByLabelText("Search reviewers"), { target: { value: "ben" } });
     await screen.findByRole("button", { name: "Request ben" });

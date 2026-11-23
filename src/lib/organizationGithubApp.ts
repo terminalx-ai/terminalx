@@ -124,16 +124,72 @@ export function attemptErrorMessage(code: string | undefined): string {
   return githubAppErrorMessage({ code: code ?? "" });
 }
 
+const EXPIRED =
+  "The connection attempt expired before it was confirmed. Connect again, then finish on GitHub and confirm on the TerminalX page within 15 minutes.";
+
+/** How a connect attempt ended, as the settings card and setup wizard show it. */
+export type AttemptOutcome =
+  | { kind: "connected"; message: string }
+  | { kind: "notice"; message: string }
+  | { kind: "error"; message: string }
+  /** The desktop stopped checking before the server said how the attempt ended; the caller re-reads its installations. */
+  | { kind: "unsettled"; message: string };
+
+/** The desktop gave up waiting on its own clock: the attempt may still have connected. */
+export function unsettledOutcome(): AttemptOutcome {
+  return {
+    kind: "unsettled",
+    message:
+      "TerminalX stopped waiting for the account service to confirm the connection. The installations were read again: if the one you installed is not listed, connect again.",
+  };
+}
+
+/**
+ * What to tell the admin about an attempt that is no longer waiting. `source`
+ * says who ended it: "cancel" is the desktop's own Cancel, "poll" is the
+ * account service settling it after GitHub sent the browser back. The service
+ * records `canceled` from the poll only when Cancel was chosen on its
+ * confirmation page in the browser, so that is what the card says.
+ */
+export function attemptOutcome(attempt: Pick<ConnectAttempt, "state" | "errorCode" | "installation">, source: "poll" | "cancel"): AttemptOutcome | null {
+  switch (attempt.state) {
+    case "connected":
+      return {
+        kind: "connected",
+        message: `Connected ${attempt.installation?.accountLogin ?? "the installation"}. Choose which repositories cloud workspaces can use.`,
+      };
+    case "failed":
+      return { kind: "error", message: attemptErrorMessage(attempt.errorCode) };
+    case "expired":
+      return { kind: "error", message: EXPIRED };
+    case "canceled":
+      return source === "cancel"
+        ? { kind: "notice", message: "Connection canceled." }
+        : {
+            kind: "notice",
+            message:
+              "Cancel was chosen on the TerminalX confirmation page in your browser, so nothing was connected. To connect, start again and choose Connect on that page.",
+          };
+    case "waiting":
+      // The desktop asked to cancel and the attempt is gone from its view.
+      return source === "cancel" ? { kind: "notice", message: "Connection canceled." } : null;
+    default:
+      return { kind: "error", message: githubAppErrorMessage({ code: "" }) };
+  }
+}
+
 export function githubAppErrorMessage(error: unknown): string {
   switch (githubAppErrorCode(error)) {
     case "github_app_not_configured":
       return "The GitHub App is not configured on this server.";
     case "github_installation_unverified":
-      return "GitHub did not confirm that you can see this installation. Install the app while signed in to GitHub as an owner of the account, then try again.";
+      return "GitHub did not confirm that the account signed in to GitHub in your browser can manage this installation. Sign in to GitHub as an owner of the organization (or as the user) you are installing on, then connect again.";
     case "github_installation_already_connected":
       return ALREADY_CONNECTED;
     case "github_installation_pending_approval":
-      return "The installation is waiting for an owner of the GitHub organization to approve it. Connect again once it is approved.";
+      return "GitHub sent the installation to an owner of the GitHub organization for approval, because the account signed in to GitHub is not an owner. Connect again once an owner approves it, or ask an owner to connect it.";
+    case "github_connect_attempt_expired":
+      return EXPIRED;
     case "github_app_unavailable":
       return "GitHub could not be reached. Try again in a moment.";
     case "github_installation_suspended":

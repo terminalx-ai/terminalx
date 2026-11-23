@@ -1,0 +1,58 @@
+# 22.01 Connection state: each state launched afresh, as the phone meets it.
+appId: com.terminalx.phone.fixture
+name: Connection state (22.01)
+---
+- launchApp:
+    arguments: { fixtureScenario: connecting }
+- tapOn:
+    id: sessions-tab
+- assertVisible: ".*Connecting….*"
+- takeScreenshot: 22.01-5-sessions-while-connecting
+- runFlow: steps/open-chat.yaml
+- assertVisible: ".*Connecting….*"
+- takeScreenshot: 22.01-1-connecting
+- launchApp:
+    arguments: { fixtureScenario: connecting }
+- tapOn:
+    id: machines-tab
+- takeScreenshot: 22.01-7-machines
+- launchApp:
+    arguments: { fixtureScenario: updating }
+- runFlow: steps/open-chat.yaml
+- assertVisible: ".*Updating….*"
+- takeScreenshot: 22.01-2-updating
+- launchApp:
+    arguments: { fixtureScenario: connected }
+- runFlow: steps/open-chat.yaml
+- takeScreenshot: 22.01-3-connected
+- launchApp:
+    arguments: { fixtureScenario: waiting }
+- runFlow: steps/open-chat.yaml
+- assertVisible: ".*Waiting for Mac….*"
+- takeScreenshot: 22.01-4-still-not-connected
+- launchApp:
+    arguments: { fixtureScenario: offline }
+- runFlow: steps/open-chat.yaml
+- assertVisible: ".*No internet.*"
+- takeScreenshot: 22.01-x-offline-session
+- launchApp:
+    arguments: { fixtureScenario: offline }
+- tapOn:
+    id: sessions-tab
+- takeScreenshot: 22.01-x-offline-sessions
+- launchApp:
+    arguments: { fixtureScenario: held }
+- tapOn:
+    id: sessions-tab
+- takeScreenshot: 22.01-x-disconnected-sessions
+- runFlow: steps/open-chat.yaml
+- takeScreenshot: 22.01-x-disconnected-session
+- launchApp:
+    arguments: { fixtureScenario: slow-refresh }
+- tapOn:
+    id: sessions-tab
+- swipe:
+    start: 50%, 30%
+    end: 50%, 70%
+    duration: 900
+- takeScreenshot: 22.01-6-pull-to-refresh

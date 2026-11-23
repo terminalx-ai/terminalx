@@ -33,7 +33,16 @@ pub struct Sources {
 impl Sources {
     /// The real machine. `transcript_path` is what Claude's hook reported:
     /// `<config>/projects/<project>/<conversation>.jsonl`.
+    #[cfg(all(test, unix))]
     pub fn from_env(transcript_path: Option<&str>) -> Self {
+        Self::from_env_on(transcript_path, None, None)
+    }
+
+    /// [`Self::from_env`] for a tab on an added agent account (#980): its
+    /// Claude Code directory (`CLAUDE_CONFIG_DIR`) is read first, and Codex's
+    /// settings are those of the account's managed home (`CODEX_HOME`).
+    /// `None` for either is This Mac's login, as before.
+    pub fn from_env_on(transcript_path: Option<&str>, claude_account: Option<&Path>, codex_account_home: Option<PathBuf>) -> Self {
         let reported = transcript_path
             .map(Path::new)
             .filter(|path| path.is_absolute())
@@ -41,14 +50,15 @@ impl Sources {
             .filter(|projects| projects.file_name().is_some_and(|name| name == "projects"))
             .and_then(Path::parent)
             .map(Path::to_path_buf);
-        let claude_config = reported
-            .into_iter()
+        let mut claude_config: Vec<PathBuf> = claude_account.map(Path::to_path_buf).into_iter()
+            .chain(reported)
             .chain(std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from))
             .chain(dirs::home_dir().map(|home| home.join(".claude")))
             .collect();
+        claude_config.dedup();
         Self {
             claude_config,
-            codex_home: crate::store::root().ok().map(|root| root.join("codex")),
+            codex_home: codex_account_home.or_else(|| crate::store::root().ok().map(|root| root.join("codex"))),
             system: PathBuf::from("/"),
             user: std::env::var("USER").ok().filter(|user| !user.is_empty()),
         }
@@ -222,6 +232,7 @@ mod tests {
         assert!(claude_may_restrict(&[&m.project], &m.sources), "a managed profile is not decoded, so it could");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_config_directory_claude_reports_is_consulted_first() {
         let sources = Sources::from_env(Some("/tab/config/projects/-w-app/conversation.jsonl"));

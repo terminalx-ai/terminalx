@@ -22,7 +22,96 @@ fn main() {
     // `terminalx-serve` builds without the desktop feature: no Tauri context,
     // bundle resources or sidecars to check.
     #[cfg(feature = "desktop")]
-    tauri_build::build()
+    {
+        tauri_build::build();
+        place_tauri_outputs();
+    }
+}
+
+/// Put the resources and sidecars tauri-build copied where the app looks for
+/// them: beside its executable. tauri-build finds that directory three levels
+/// above `OUT_DIR`, which is right for Cargo's `build/<pkg>-<hash>/out` but one
+/// level short of the `build/<pkg>/<hash>/out` layout newer Cargo uses, where
+/// they land in `build/` instead. Only what the merged config names is moved
+/// across; under the older layout this does nothing.
+#[cfg(feature = "desktop")]
+fn place_tauri_outputs() {
+    use std::path::{Path, PathBuf};
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let Some(build) = out.parent().and_then(Path::parent) else { return };
+    if build.file_name().and_then(|name| name.to_str()) != Some(package.as_str()) { return; }
+    let (Some(copied), Some(profile)) = (build.parent(), build.parent().and_then(Path::parent)) else { return };
+    let config = merged_tauri_config();
+    let mut names: Vec<PathBuf> = Vec::new();
+    match &config["bundle"]["resources"] {
+        serde_json::Value::Object(map) => names.extend(map.values().filter_map(|to| to.as_str()).map(PathBuf::from)),
+        // A list keeps each source's own path (`../` as `_up_`), which this
+        // does not reproduce; the config uses the map form.
+        serde_json::Value::Array(_) => println!("cargo:warning=bundle.resources is a list: its resources are not placed beside the app under this Cargo's build layout"),
+        _ => {}
+    }
+    let ext = if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") { ".exe" } else { "" };
+    if let Some(bins) = config["bundle"]["externalBin"].as_array() {
+        names.extend(bins.iter().filter_map(|bin| Path::new(bin.as_str()?).file_name()).map(|name| PathBuf::from(format!("{}{ext}", name.to_string_lossy()))));
+    }
+    for name in names {
+        let name = PathBuf::from(name.to_string_lossy().trim_end_matches(['/', '\\']));
+        let from = copied.join(&name);
+        if from.exists() {
+            if let Err(error) = mirror(&from, &profile.join(&name)) {
+                println!("cargo:warning=could not place {} beside the app: {error}", name.display());
+            }
+        }
+    }
+}
+
+/// `tauri.conf.json`, then the platform's own, then what the CLI passed in
+/// `TAURI_CONFIG`, merged as JSON merge patches the way the CLI merges them.
+#[cfg(feature = "desktop")]
+fn merged_tauri_config() -> serde_json::Value {
+    fn patch(base: &mut serde_json::Value, with: serde_json::Value) {
+        match (base, with) {
+            (serde_json::Value::Object(base), serde_json::Value::Object(with)) => {
+                for (key, value) in with {
+                    if value.is_null() { base.remove(&key); } else { patch(base.entry(key).or_insert(serde_json::Value::Null), value); }
+                }
+            }
+            (base, with) => *base = with,
+        }
+    }
+    let read = |path: &str| std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let mut config = read("tauri.conf.json").unwrap_or_default();
+    let platform = match std::env::var("CARGO_CFG_TARGET_OS").as_deref() { Ok("windows") => "windows", Ok("macos") => "macos", _ => "linux" };
+    if let Some(overlay) = read(&format!("tauri.{platform}.conf.json")) { patch(&mut config, overlay); }
+    if let Some(cli) = std::env::var("TAURI_CONFIG").ok().and_then(|text| serde_json::from_str(&text).ok()) { patch(&mut config, cli); }
+    config
+}
+
+/// Copy `from` (a file or a directory tree) to `to`, replacing what is there.
+#[cfg(feature = "desktop")]
+fn mirror(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    // A link is copied as a link (an app bundle has them), never followed.
+    if kind.is_symlink() {
+        let _ = std::fs::remove_file(to);
+        if let Some(parent) = to.parent() { std::fs::create_dir_all(parent)?; }
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(std::fs::read_link(from)?, to);
+        #[cfg(not(unix))]
+        return Ok(());
+    }
+    if kind.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            mirror(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        if let Some(parent) = to.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::copy(from, to).map(drop)
+    }
 }
 
 /// `bundle.resources` names the computer-use helper app, and tauri-build

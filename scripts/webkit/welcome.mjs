@@ -40,16 +40,22 @@ try {
     }
   }
   const first = await open(browser, server.url, { cloud: false, localProjects: 0 }, { width: 420, height: 650 }, {
-    extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));`,
+    extra: `window.__PW_STUB__.answers['plugin:app|name'] = 'TerminalX Legacy'; localStorage.setItem('raccoon.prefs', JSON.stringify({sidebarOpen: false}));
+      // The fixture's agent is installed; its login is found, so step 1 reads as done.
+      window.__PW_STUB__.answers.check_agent_readiness = () => ({ state: 'ready', checkedAt: null, version: '2.1.318' });`,
   });
   const start = first.getByTestId("start-screen");
-  await start.getByRole("heading", { name: "TerminalX Legacy" }).waitFor();
+  await start.getByRole("heading", { name: "Welcome to TerminalX Legacy" }).waitFor();
+  for (const name of ["Agents ready", "Open a project", "Choose how much the agent may do alone"]) {
+    await start.getByRole("heading", { name, exact: true }).waitFor();
+  }
   for (const name of ["Open local project", "Open GitHub project", "Quick start"]) {
     await start.getByRole("button", { name, exact: true }).waitFor();
   }
+  await start.getByRole("button", { name: "Permissions: Ask every time" }).waitFor();
   assert.equal(await start.evaluate((element) => element.scrollWidth <= element.clientWidth), true);
   await first.close();
-  console.log("ok first-run: shared branding and all three project actions");
+  console.log("ok first-run: the build's name, the three steps and all three project actions");
 } finally {
   await browser.close();
   server.close();

@@ -90,7 +90,7 @@ pub(crate) fn fingerprint(path: &Path, script: &str) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn canonical(path: &Path) -> PathBuf { std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) }
+fn canonical(path: &Path) -> PathBuf { crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()) }
 fn checkout_identity(path: &Path) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
     #[cfg(unix)]
@@ -116,6 +116,14 @@ impl RemovalLease {
 }
 impl Drop for RemovalLease {
     fn drop(&mut self) { removing().lock().unwrap().remove(&self.0); }
+}
+
+const RUNNER_REQUIRED: &str = "This repository has an archive script. Open the workspace dialog on the host that owns this worktree to remove it and run the script.";
+
+/// Check before stopping sessions when the caller cannot run archive scripts.
+pub(crate) fn require_no_script(project: &Path) -> Result<()> {
+    anyhow::ensure!(configuration::archive_script(project)?.script.trim().is_empty(), RUNNER_REQUIRED);
+    Ok(())
 }
 
 /// Called inside the removal fence, before the final Git/session checks.
@@ -156,7 +164,7 @@ pub fn before_removal(project: &Path, path: &Path, sessions: &[SessionEntry], co
             "The archive failure confirmation expired or the script changed. Run removal again.");
         if confirmed.is_some() { return Ok(true) }
     }
-    let runner = runner.context("This repository has an archive script. Remove the workspace from this computer's workspace dialog to run it first.")?;
+    let runner = runner.context(RUNNER_REQUIRED)?;
     if runner.unattended {
         anyhow::ensure!(crate::merged_cleanup::archive_attempt_matches(&project, &path, &script)?, "The workspace or script changed before its automatic archive run. Nothing was run.");
     }
@@ -236,10 +244,14 @@ impl<'a> ScriptRun<'a> {
                 if exit.id == watched { let _ = send.send(exit.code); }
             }
         }));
+        #[cfg(unix)]
+        let sh = std::path::PathBuf::from("/bin/sh");
+        #[cfg(windows)]
+        let sh = crate::binpath::posix_sh().ok_or_else(|| anyhow::anyhow!(crate::binpath::POSIX_SH_MISSING))?;
         let run = Self { privacy, _privacy_lease: privacy_lease, runner, id: id.into(), _file: file, listener, exits };
         runner.terminals.spawn_program(runner.sink.clone(), id,
             PaneSpec { cwd: &path.to_string_lossy(), cols: 100, rows: 24, command: None, env },
-            std::ffi::OsStr::new("/bin/sh"), &[run._file.path().as_os_str()], started)?;
+            sh.as_os_str(), &[run._file.path().as_os_str()], started)?;
         Ok(run)
     }
 

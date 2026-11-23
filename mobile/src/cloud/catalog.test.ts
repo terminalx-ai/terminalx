@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CloudApiError } from "./api";
-import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle } from "./catalog";
+import { CloudApiError, SUPPORTED_PROVIDERS } from "./api";
+import { CHANGING_POLL_LIMIT_MS, CHANGING_POLL_MS, CloudCatalog, SAVED_LIST, WATCH_POLL_MS, workspaceTitle, type CloudLog } from "./catalog";
 import { keyItemName } from "./keys";
+import { resumeFailure, ResumeUnconfirmed } from "./resume";
+import { cloudSections, emptyOrganizationsLabel } from "./list";
 
 const item = (id: string, fields: Record<string, unknown> = {}) => ({ workspace: { id, orgId: "org-1", name: id, provider: "box", state: "suspended", you: { role: "driver", canApprove: false }, lastActivityAt: 1, ...fields }, latestOperation: null });
 
@@ -9,7 +11,7 @@ const HELD = "terminalx.cloud.held.v1";
 const TITLES = "terminalx.cloud.titles.v1";
 
 /** A phone's storage, kept across runs of the app when passed to the next harness. */
-function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, string> } = {}) {
+function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, string>; log?: CloudLog } = {}) {
   const secrets = phone.secrets ?? new Map<string, string>();
   const blobs = phone.blobs ?? new Map<string, string>();
   const api = {
@@ -30,6 +32,7 @@ function harness(phone: { secrets?: Map<string, string>; blobs?: Map<string, str
     clientInstallationId: "mobile-1",
     appVersion: "0.1.0",
     now: () => 42,
+    ...(phone.log ? { log: phone.log } : {}),
   });
   /** As if this phone had connected to the workspace before. */
   const keep = (orgId: string, workspaceId: string) => {
@@ -74,6 +77,27 @@ describe("the phone's cloud catalog", () => {
     h.catalog.release("org-1", "ws-new");
     expect(h.catalog.session("org-1", "ws-new")).not.toBe(session);
     h.catalog.close();
+  });
+
+  it("lists an unfamiliar provider under its organization and opens its running workspace", async () => {
+    const h = harness();
+    const workspace = item("ws-new-provider", { provider: "new-compute", state: "ready" });
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [workspace] : [], tombstones: [] }));
+    h.api.open.mockResolvedValue({ id: "a1", workspaceId: "ws-new-provider", state: "waiting-for-runtime", authority: "participate", expiresAt: Date.now() + 60_000 });
+
+    await h.catalog.refresh();
+    const { sections } = cloudSections(h.catalog.getSnapshot().organizations);
+    expect(sections).toEqual([{ key: "org-1", title: "Acme", error: null, data: [workspace] }]);
+    expect(h.api.open).not.toHaveBeenCalled();
+
+    const listed = sections[0].data[0].workspace;
+    const release = h.catalog.retain(listed.orgId, listed.id);
+    try {
+      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-1", "ws-new-provider", "mobile-1", expect.anything()));
+    } finally {
+      release();
+      h.catalog.close();
+    }
   });
 
   it("keeps what it showed for an organization whose list could not be read, and forgets nothing because of it", async () => {
@@ -123,6 +147,55 @@ describe("the phone's cloud catalog", () => {
     await h.catalog.refresh();
     expect(h.keys()).toEqual([]);
     expect(h.kept().some((name) => name.includes("ws-x"))).toBe(false);
+  });
+
+  it("deletes an organization: it leaves the list at once and what the phone kept for it goes (#1292)", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.keep("org-2", "ws-x");
+    const deleteOrganization = vi.fn(async () => { h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]); });
+    Object.assign(h.api, { deleteOrganization });
+    await h.catalog.deleteOrganization("org-2", "Beta");
+    expect(deleteOrganization).toHaveBeenCalledExactlyOnceWith("org-2", "Beta");
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]);
+    expect(h.keys()).toEqual([]);
+    expect(h.kept().some((name) => name.includes("ws-x"))).toBe(false);
+  });
+
+  it("does not bring a deleted organization back from a list read that started before the deletion", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    let answer!: (value: { orgId: string; name: string; role: string }[]) => void;
+    // A read in flight that will still list it, as the server answered before the deletion.
+    h.api.organizations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const stale = h.catalog.refresh();
+    Object.assign(h.api, { deleteOrganization: vi.fn(async () => {}) });
+    h.api.organizations.mockResolvedValue([{ orgId: "org-1", name: "Acme", role: "member" }]);
+    const deleting = h.catalog.deleteOrganization("org-2", "Beta");
+    await vi.waitFor(() => expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]));
+    answer([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "owner" }]);
+    await stale;
+    await deleting;
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1"]);
+  });
+
+  it("says whether the server takes deletion from this phone, as read with the organizations", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(false);
+    Object.assign(h.api, { deletesOrganizations: () => true });
+    await h.catalog.refresh();
+    expect(h.catalog.getSnapshot().deletesOrganizations).toBe(true);
+  });
+
+  it("changes nothing when the server refuses the deletion", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.keep("org-2", "ws-x");
+    Object.assign(h.api, { deleteOrganization: vi.fn(async () => { throw new CloudApiError("organization_delete_blocked", 409, null, ["cloud_cleanup_required"]); }) });
+    await expect(h.catalog.deleteOrganization("org-2", "Beta")).rejects.toMatchObject({ code: "organization_delete_blocked" });
+    expect(h.catalog.getSnapshot().organizations.map((entry) => entry.organization.orgId)).toEqual(["org-1", "org-2"]);
+    expect(h.keys()).not.toEqual([]);
   });
 
   it("leaves nothing on the phone after sign-out", async () => {
@@ -426,7 +499,7 @@ describe("what the phone keeps of the list between runs (#988)", () => {
   });
 
   it("does not put an old list over one already read, and keeps none it cannot read", async () => {
-    const blobs = new Map([[SAVED_LIST, JSON.stringify({ v: 1, organizations: [{ organization: { orgId: "org-9", name: "Old", role: "member" }, workspaces: [] }] })]]);
+    const blobs = new Map([[SAVED_LIST, JSON.stringify({ v: 1, providers: SUPPORTED_PROVIDERS, organizations: [{ organization: { orgId: "org-9", name: "Old", role: "member" }, workspaces: [] }] })]]);
     const h = harness({ blobs });
     await h.catalog.refresh();
     await h.catalog.restored;
@@ -434,6 +507,113 @@ describe("what the phone keeps of the list between runs (#988)", () => {
     const broken = harness({ blobs: new Map([[SAVED_LIST, "{not json"]]) });
     await broken.catalog.restored;
     expect(broken.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [] });
+  });
+
+  describe("an organization with a workspace from a provider the old build did not ask for (PRO-456)", () => {
+    const AGENT37 = { orgId: "org-37", name: "Agent37 Demo", role: "owner" };
+    const others = Array.from({ length: 10 }, (_, index) => ({ orgId: `org-e${index}`, name: `Empty ${index}`, role: "member" }));
+    const workspace = (state: string) => ({
+      workspace: { id: "ws-37", orgId: "org-37", name: "Check the latest commits of this", provider: "agent37", state, accessMode: "private", you: { role: "manager", canApprove: true }, lastActivityAt: 7, repositories: [{ fullName: "Cassini-Research/landing-page", primary: true }], launch: { workBranch: "terminalx/check-the-latest-commits" } },
+      latestOperation: null,
+    });
+    /** The list the reporter's phone kept: written before `described` was asked for, Agent37 Demo among the empty ones. */
+    const keptByOldBuild = () => new Map([[SAVED_LIST, JSON.stringify({ v: 1, organizations: [AGENT37, ...others].map((organization) => ({ organization, workspaces: [] })) })]]);
+    const answering = (h: ReturnType<typeof harness>, state: () => string) => {
+      h.api.organizations.mockImplementation(async () => [AGENT37, ...others]);
+      h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-37" ? [workspace(state())] : [], tombstones: [] }));
+    };
+
+    it("does not show the old build's list, and lists the workspace once under its organization after the refresh", async () => {
+      const h = harness({ blobs: keptByOldBuild() });
+      await h.catalog.restored;
+      // A list read for fewer providers says nothing about the others': it is not shown as "no workspaces".
+      expect(h.catalog.getSnapshot()).toMatchObject({ saved: false, organizations: [] });
+      expect(cloudSections(h.catalog.getSnapshot().organizations).empty).toEqual([]);
+
+      answering(h, () => "suspended");
+      await h.catalog.refresh();
+      const { sections, empty } = cloudSections(h.catalog.getSnapshot().organizations);
+      expect(sections).toEqual([{ key: "org-37", title: "Agent37 Demo", error: null, data: [workspace("suspended")] }]);
+      expect(empty.map((organization) => organization.orgId)).not.toContain("org-37");
+      expect(emptyOrganizationsLabel(empty.length)).toBe("10 organizations with no workspaces");
+      expect(h.catalog.access("org-37", "ws-37")).toBe("ok");
+      // What it keeps now is this list, for the providers it asked for.
+      const kept = JSON.parse(h.blobs.get(SAVED_LIST)!);
+      expect(kept.providers).toBe(SUPPORTED_PROVIDERS);
+      expect(kept.organizations.find((entry: { organization: { orgId: string } }) => entry.organization.orgId === "org-37").workspaces).toHaveLength(1);
+      h.catalog.close();
+    });
+
+    it("reports the workspace's state as it changes, and listing or opening it changes no lifecycle", async () => {
+      const h = harness();
+      let state = "suspended";
+      answering(h, () => state);
+      await h.catalog.refresh();
+      expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "suspended" });
+      // The stopped detail: its session reads checkpoints and asks for no attachment.
+      const release = h.catalog.retain("org-37", "ws-37");
+      await vi.waitFor(() => expect(h.api.checkpoints).toHaveBeenCalledWith("org-37", "ws-37"));
+      await h.catalog.refresh();
+      expect(h.api.open).not.toHaveBeenCalled();
+
+      // Started from elsewhere: the next read says so, and the open screen connects to this workspace.
+      state = "ready";
+      h.api.open.mockResolvedValue({ id: "a1", workspaceId: "ws-37", state: "waiting-for-runtime", authority: "participate", expiresAt: Date.now() + 60_000 });
+      await h.catalog.refresh();
+      expect(h.catalog.workspace("org-37", "ws-37")).toMatchObject({ state: "ready" });
+      expect(cloudSections(h.catalog.getSnapshot().organizations).sections[0].data[0].workspace.state).toBe("ready");
+      await vi.waitFor(() => expect(h.api.open).toHaveBeenCalledWith("org-37", "ws-37", "mobile-1", expect.anything()));
+      // Nothing here asked the server to start, stop or queue anything.
+      expect(h.api.resume).not.toHaveBeenCalled();
+      expect(h.api.enqueue).not.toHaveBeenCalled();
+      release();
+      h.catalog.close();
+    });
+  });
+
+  it("keeps an organization never read as not read, not as one with no workspaces, and recovers on the next read", async () => {
+    const first = harness();
+    first.api.workspaces.mockImplementation(async (orgId: string) => {
+      if (orgId === "org-2") throw new CloudApiError("cloud_workspace_unavailable", 503);
+      return { workspaces: [item("ws-new")], tombstones: [] };
+    });
+    await first.catalog.refresh();
+    // This run: shown as a section that could not be read, with a reason, not in the footer.
+    const live = cloudSections(first.catalog.getSnapshot().organizations);
+    expect(live.sections.map((section) => [section.key, section.error])).toEqual([["org-1", null], ["org-2", "cloud_workspace_unavailable"]]);
+    expect(live.empty).toEqual([]);
+
+    // The next cold launch shows the same, before the list is read again.
+    const next = harness({ secrets: first.secrets, blobs: first.blobs });
+    let answer: (value: unknown) => void = () => undefined;
+    next.api.organizations.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve as never; }));
+    const reading = next.catalog.refresh();
+    await next.catalog.restored;
+    const restored = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(restored.sections.map((section) => [section.key, section.error])).toEqual([["org-1", null], ["org-2", "cloud_workspace_unavailable"]]);
+    expect(restored.empty).toEqual([]);
+
+    // A read that succeeds: org-2 has a workspace now, and an organization truly empty goes to the footer.
+    next.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-2" ? [item("ws-b", { orgId: "org-2" })] : [], tombstones: [] }));
+    answer([{ orgId: "org-1", name: "Acme", role: "member" }, { orgId: "org-2", name: "Beta", role: "admin" }]);
+    await reading;
+    const read = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(read.sections.map((section) => [section.key, section.error, section.data.map((entry) => entry.workspace.id)])).toEqual([["org-2", null, ["ws-b"]]]);
+    expect(read.empty.map((organization) => organization.orgId)).toEqual(["org-1"]);
+    next.catalog.close();
+  });
+
+  it("keeps a read organization's list when a later read fails, and its truly empty organizations in the footer", async () => {
+    const first = harness();
+    await first.catalog.refresh();
+    first.api.workspaces.mockRejectedValue(new CloudApiError("cloud_workspace_unavailable", null));
+    await first.catalog.refresh();
+    const next = harness({ secrets: first.secrets, blobs: first.blobs });
+    await next.catalog.restored;
+    const restored = cloudSections(next.catalog.getSnapshot().organizations);
+    expect(restored.sections.map((section) => [section.key, section.error, section.data.length])).toEqual([["org-1", null, 2]]);
+    expect(restored.empty.map((organization) => organization.orgId)).toEqual(["org-2"]);
+    next.catalog.close();
   });
 
   it("learns a workspace's generated title from its agent tab, keeps it beside the keys, and forgets it with the workspace", async () => {
@@ -517,3 +697,80 @@ describe("starting a stopped workspace from the phone (#988)", () => {
     expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("suspended");
   });
 });
+
+describe("a resume that fails or gets no answer (#1290)", () => {
+  const listing = (h: ReturnType<typeof harness>, fields: Record<string, unknown>, operation: Record<string, unknown> | null = null) =>
+    h.api.workspaces.mockImplementation(async (orgId: string) => ({ workspaces: orgId === "org-1" ? [{ ...item("ws-new", fields), latestOperation: operation as never }, item("ws-old")] : [], tombstones: [] }));
+
+  it("shows a resume that timed out as under way when the list shows it starting, and logs it as unconfirmed", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    listing(h, { state: "resuming" }, { id: "op-9", state: "running", action: "resume" });
+    await expect(h.catalog.start("org-1", "ws-new")).resolves.toBe("in-progress");
+    expect(h.api.resume).toHaveBeenCalledTimes(1);
+    expect(h.catalog.workspace("org-1", "ws-new")?.state).toBe("resuming");
+    expect(log).toHaveBeenCalledWith("warning", "Cloud workspace resume not confirmed, but under way", "workspace ws-new · stage request · code timeout");
+  });
+
+  it("takes 'another action is running' as under way when the list says the resume runs", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_operation_in_progress", 409));
+    listing(h, { state: "suspended" }, { id: "op-9", state: "queued", action: "resume" });
+    await expect(h.catalog.start("org-1", "ws-new")).resolves.toBe("in-progress");
+  });
+
+  it("fails a timed-out resume the list does not show starting, logs its stage and code, and reads the list again", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ reason: "timeout", listChecked: true });
+    expect(log).toHaveBeenCalledWith("error", "Cloud workspace resume failed", "workspace ws-new · stage request · code timeout");
+  });
+
+  it("says a timed-out resume was not checked against the list when the list could not be read either", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "timeout"));
+    h.api.organizations.mockRejectedValueOnce(new CloudApiError("cloud_workspace_unavailable", null, "network"));
+    const error = await h.catalog.start("org-1", "ws-new").catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ResumeUnconfirmed);
+    expect(error).toMatchObject({ code: "cloud_workspace_unavailable", reason: "timeout", listChecked: false });
+    expect(resumeFailure(error).text).toMatch(/list could not be read to check/);
+  });
+
+  it("leaves a refusal as the service's own error: nothing was asked of the list", async () => {
+    const h = harness();
+    await h.catalog.refresh();
+    const refusal = new CloudApiError("cloud_workspace_forbidden", 403);
+    h.api.resume.mockRejectedValueOnce(refusal);
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toBe(refusal);
+  });
+
+  it("logs a refusal at once, without asking the list whether it is starting", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    h.api.workspaces.mockClear();
+    h.api.resume.mockRejectedValueOnce(new CloudApiError("cloud_workspace_manager_required", 403));
+    await expect(h.catalog.start("org-1", "ws-new")).rejects.toMatchObject({ code: "cloud_workspace_manager_required" });
+    expect(log).toHaveBeenCalledWith("error", "Cloud workspace resume failed", "workspace ws-new · stage request · code cloud_workspace_manager_required · HTTP 403");
+  });
+
+  it("logs a resume this phone asked for once the list shows it failed on the service, with its code", async () => {
+    const log = vi.fn<CloudLog>();
+    const h = harness({ log });
+    await h.catalog.refresh();
+    await h.catalog.start("org-1", "ws-new");
+    listing(h, { state: "attention-required" }, { id: "op-1", state: "failed", action: "resume", errorCode: "cloud_provider_state_conflict" });
+    await h.catalog.refresh();
+    await h.catalog.refresh();
+    expect(log.mock.calls.filter(([, message]) => message === "Cloud workspace resume failed")).toEqual([
+      ["error", "Cloud workspace resume failed", "workspace ws-new · stage operation · code cloud_provider_state_conflict"],
+    ]);
+  });
+});
+

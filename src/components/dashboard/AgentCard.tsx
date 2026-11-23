@@ -1,4 +1,5 @@
 import { sessionStatus as detailedStatus } from "@terminalx/portable/sessionStatus";
+import { archiveWithUndo } from "@/lib/archiveNotices";
 import { StatusBadge, SessionStatus } from "@/components/ui/SessionStatus";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Archive, CircleDot, Cloud, FolderGit2, FolderOpen, GitBranch, MessageCircle, MessageSquare, PanelsTopLeft, Square } from "@/icons";
@@ -14,6 +15,9 @@ import { cn } from "@/lib/cn";
 import { workspaceName, type DashboardState } from "@/lib/dashboard";
 import { isQuickChat, quickChatPlace, sessionProjectName } from "@/lib/quickChats";
 import type { CloudDashboardSession } from "@/lib/cloudDashboard";
+import type { MachineDashboardSession } from "@/lib/machineDashboard";
+import { MachineIcon } from "@/components/machines/connectionStatus";
+import type { PairedMachine } from "@/types/machines";
 import type { Project, SessionEntry } from "@/types/session";
 
 /**
@@ -166,7 +170,7 @@ export function AgentCard({
           </DropdownMenuItem>
         )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => void archiveSession(session.id, !session.archived)}>
+        <DropdownMenuItem onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(() => {})}>
           <Archive /> {session.archived ? "Unarchive" : "Archive"}
         </DropdownMenuItem>
       </DropdownMenuContent>
@@ -280,6 +284,121 @@ export function CloudAgentCard({
           <FolderGit2 className="size-3 shrink-0" />
           <span className="min-w-0 truncate">{session.projectName}</span>
           <span className="shrink-0">· {session.orgName}</span>
+          {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
+        </div>
+      </div>
+
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={onOpen}>
+          <PanelsTopLeft /> Open
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * A session on a paired machine (PRO-346): the same card as a cloud one, with
+ * the machine in place of the workspace. Opening it shows the machine's view.
+ */
+export function MachineAgentCard({
+  session,
+  machine,
+  column,
+  agentName,
+  focused,
+  onFocus,
+  onOpen,
+}: {
+  session: MachineDashboardSession;
+  machine: PairedMachine | null;
+  column: DashboardState;
+  agentName: string;
+  focused: boolean;
+  onFocus: () => void;
+  onOpen: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const harnesses = [...new Set(session.tabs.map((t) => t.harness))];
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView({ block: "nearest" });
+  }, [focused]);
+  const state = column === "needs" ? "Waiting for your decision" : null;
+
+  return (
+    <DropdownMenu>
+      <div
+        ref={ref}
+        role="button"
+        tabIndex={-1}
+        aria-label={`${session.title}, ${harnesses.map(agentDisplayName).join(", ")}, on ${session.machineName}`}
+        data-testid="machine-agent-card"
+        data-session={session.key}
+        onClick={() => {
+          onFocus();
+          onOpen();
+        }}
+        onFocus={onFocus}
+        onKeyDown={(e) => e.key === "Enter" && onOpen()}
+        className={cn(
+          "group relative flex shrink-0 cursor-default flex-col gap-1.5 overflow-hidden rounded-lg bg-card p-2.5 pl-3 text-left shadow-card outline-none transition-colors hover:bg-selected/50",
+          focused ? "ring-2 ring-inset ring-ring/50" : "hairline",
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "absolute left-0 top-2 bottom-2 w-0.5 rounded-full",
+            column === "needs" && "bg-warning",
+            column === "working" && "bg-info animate-pulse-soft",
+            column === "done" && "bg-add",
+            (column === "not-started" || column === "archived") && "bg-faint",
+          )}
+        />
+
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex shrink-0 -space-x-1 text-muted-foreground">
+            {harnesses.map((h) => (
+              <AgentMark key={h} id={h} className="size-4 rounded-full bg-background" decorative />
+            ))}
+          </div>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{session.title}</span>
+          <span className="shrink-0 text-[11px] tabular-nums text-faint group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0">
+            {relativeTime(session.modified)}
+          </span>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Session menu"
+              className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <span className="text-[13px] leading-none">…</span>
+            </Button>
+          </DropdownMenuTrigger>
+        </div>
+
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
+          {(session.worktreeName || session.branch) && (
+            <span className="flex min-w-0 max-w-full items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              <GitBranch className="size-2.5 shrink-0" />
+              <span className="truncate font-mono">{workspaceName(session)}</span>
+            </span>
+          )}
+          <span className="flex min-w-0 shrink items-center gap-1 rounded-sm bg-veil-raised px-1.5 py-0.5 text-[10px] text-muted-foreground" title={`Runs on ${session.machineName}, not on this Mac`}>
+            <MachineIcon machine={machine} className="size-2.5 shrink-0" />
+            <span className="truncate">{session.machineName}</span>
+          </span>
+        </div>
+
+        <StatusBadge status={detailedStatus(session.rowStatus ?? session)} detail />
+        {state && <Snippet who={agentName} text={state} tone="warning" />}
+        {!session.connected && <Snippet who={session.machineName} text="Not connected · last known state" />}
+
+        <div className="flex min-w-0 items-center gap-1.5 pt-0.5 text-[11px] text-faint">
+          <FolderGit2 className="size-3 shrink-0" />
+          <span className="min-w-0 truncate">{session.projectName}</span>
           {session.tabs.length > 1 && <span className="shrink-0">· {session.tabs.length} tabs</span>}
         </div>
       </div>

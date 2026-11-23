@@ -1,0 +1,12 @@
+# Fresh state, then the Ember theme the 22.0x boards are drawn in, chosen in Settings as a person would.
+appId: com.terminalx.phone.fixture
+name: Setup (Ember theme)
+---
+- launchApp:
+    clearState: true
+    arguments:
+      fixtureScenario: connected
+- tapOn: "Settings"
+- scrollUntilVisible:
+    element: "Ember theme"
+- tapOn: "Ember theme"

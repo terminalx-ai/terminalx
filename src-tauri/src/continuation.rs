@@ -1,5 +1,6 @@
 //! Read-only context preparation. Never starts or loads a source runtime, and
 //! never reads an entire transcript just to open the continuation dialog.
+use crate::paths::Canonical;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -32,10 +33,13 @@ pub struct Context {
     pub partial_capture: Option<String>,
 }
 
-pub fn prepare(session_id: &str, tab_id: &str, tracked: Option<PathBuf>) -> Result<Context> {
+/// `portable` (PRO-348): the context goes to another computer, where no path
+/// of this one can be read. The saved transcript is not named; the bounded
+/// recent capture from this Mac's own history carries the conversation.
+pub fn prepare(session_id: &str, tab_id: &str, tracked: Option<PathBuf>, portable: bool) -> Result<Context> {
     let entry = index::get(session_id)?;
     let tab = entry.tab(tab_id).ok_or_else(|| anyhow!("Source conversation no longer exists."))?;
-    let native = tracked.filter(|p| !p.as_os_str().is_empty()).or_else(|| resolve(&entry.cwd, tab));
+    let native = if portable { None } else { tracked.filter(|p| !p.as_os_str().is_empty()).or_else(|| resolve(&entry.cwd, tab)) };
     let log = store::log_path(session_id, tab_id)?;
     prepare_from_paths(&entry, tab, native.as_deref(), &log)
 }
@@ -45,8 +49,10 @@ fn resolve(cwd: &str, tab: &index::TabEntry) -> Option<PathBuf> {
     // Index ids are provider identities, never relative filesystem paths.
     if id.contains(['/', '\\']) || id == "." || id == ".." { return None; }
     match tab.harness.as_str() {
-        "claude" => claude::transcript::locate(cwd, id),
-        "codex" => codex::home::managed_root().ok().and_then(|home| codex::home::find_rollout(&home, id))
+        // Where the account the tab runs on wrote it, then the shared places (#980).
+        "claude" => crate::agent_data::locate_claude(tab, cwd, id),
+        "codex" => crate::agent_data::codex_account_home_of(tab).and_then(|home| codex::home::find_rollout(&home, id))
+            .or_else(|| codex::home::managed_root().ok().and_then(|home| codex::home::find_rollout(&home, id)))
             .or_else(|| codex::home::user_root().and_then(|home| codex::home::find_rollout(&home, id))),
         _ => None,
     }
@@ -75,7 +81,7 @@ fn readable_transcript(path: &Path) -> Result<PathBuf> {
     let mut tail = Vec::new();
     file.take(8192).read_to_end(&mut tail)?;
     if tail.contains(&0) { bail!("The saved transcript is not readable text."); }
-    Ok(path.canonicalize()?)
+    Ok(path.canonical()?)
 }
 
 fn prepare_from_paths(entry: &index::SessionEntry, tab: &index::TabEntry, native: Option<&Path>, log: &Path) -> Result<Context> {

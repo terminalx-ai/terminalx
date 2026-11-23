@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build, notarize, verify, scan and publish a TerminalX macOS release.
 
-Run from the repository root, on main, after the version bump and changelog commit:
+Cut the release branch, then run the rest from its worktree after the version bump and changelog commit:
 
+    python3 -I scripts/release/release.py cut <version>  # release/<version> from origin/main, in its own worktree
     python3 -I scripts/release/release.py prepare
-    python3 -I scripts/release/release.py all            # check → … → verify-live, stops at the first failure
+    python3 -I scripts/release/release.py all            # check → … → verify-live → merge-back, stops at the first failure
     python3 -I scripts/release/release.py publish --dry-run
 
 Each step reads the records the earlier ones left in .raccoon/release-<version>/ and refuses to run
@@ -27,7 +28,7 @@ from txrelease import assets, build, config, credentials, notarize, publish, sec
 from txrelease.config import ReleaseError  # noqa: E402
 from txrelease.proc import Runner  # noqa: E402
 
-PIPELINE = ['check', 'build', 'notarize', 'verify', 'assemble', 'scan', 'publish', 'verify-live']
+PIPELINE = ['check', 'build', 'notarize', 'verify', 'assemble', 'scan', 'publish', 'verify-live', 'merge-back']
 
 
 def repository_root() -> Path:
@@ -61,6 +62,8 @@ def run_step(name: str, release: config.Release, runner: Runner, args: argparse.
         return publish.publish(release, runner)
     if name == 'verify-live':
         return publish.verify_live(release, runner)
+    if name == 'merge-back':
+        return publish.merge_back(release, runner)
     raise ReleaseError(f'unknown step {name}')
 
 
@@ -80,8 +83,9 @@ def check_dmg(path: Path, runner: Runner) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('step', choices=['prepare', *PIPELINE, 'all', 'check-dmg'])
-    parser.add_argument('path', nargs='?', type=Path, help='check-dmg: the DMG to assess')
+    parser.add_argument('step', choices=['cut', 'prepare', *PIPELINE, 'all', 'check-dmg'])
+    parser.add_argument('target', nargs='?', help='cut: the version to release; check-dmg: the DMG to assess')
+    parser.add_argument('--worktree', type=Path, help='cut: where to put the release worktree (default .raccoon/worktrees/release-<version>)')
     parser.add_argument('--dry-run', action='store_true', help='publish: run every gate, print what would be pushed and uploaded')
     parser.add_argument('--notes', help='assemble: the one-line notes latest.json carries (default "TerminalX <version>")')
     parser.add_argument('--base', help='scan: scan commits from this revision (default: the main commit prepare recorded)')
@@ -93,9 +97,17 @@ def main(argv: list[str] | None = None) -> int:
             # Building and notarizing have no dry run: they submit to Apple. publish is the step a dry run is for.
             raise ReleaseError('--dry-run applies to the publish step only')
         if args.step == 'check-dmg':
-            if not args.path:
+            if not args.target:
                 raise ReleaseError('check-dmg needs the path of a DMG')
-            print(json.dumps(check_dmg(args.path, runner), indent=2))
+            print(json.dumps(check_dmg(Path(args.target), runner), indent=2))
+            return 0
+        if args.step == 'cut':
+            if not args.target:
+                raise ReleaseError('cut needs the version to release, like 1.2.3')
+            cut = source.cut(repository_root(), runner, args.target, args.worktree)
+            print(json.dumps(cut, indent=2))
+            print(f'Next, in {cut["worktree"]}: bump the version, write the changelog section, commit '
+                  f'"Prepare TerminalX {args.target} release", then run prepare.', flush=True)
             return 0
         release = config.load(repository_root())
         steps = PIPELINE if args.step == 'all' else [args.step]
@@ -104,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         for name in steps:
             print(f'== {name}', flush=True)
             result = run_step(name, release, runner, args)
-            if name in ('publish', 'verify-live', 'notarize') and isinstance(result, dict):
+            if name in ('publish', 'verify-live', 'notarize', 'merge-back') and isinstance(result, dict):
                 print(json.dumps(result, indent=2))
         return 0
     except ReleaseError as error:

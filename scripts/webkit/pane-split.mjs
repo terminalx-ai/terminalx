@@ -73,7 +73,7 @@ try {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width: 1440, height: 900 }, { extra, colorScheme });
     const errors = [];
     page.on("pageerror", (error) => errors.push(String(error)));
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await page.getByTestId("workspace-panes").waitFor();
     const host = page.getByTestId("workspace-panes");
     const bounds = await host.boundingBox();
@@ -108,7 +108,7 @@ try {
 
     // A browser restart re-reads the backend's persisted layout and active tabs.
     await page.reload();
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await page.getByTestId("workspace-panes").waitFor();
     await panel(page, "a2").waitFor({ state: "visible" });
     await panel(page, "b1").waitFor({ state: "visible" });
@@ -119,9 +119,9 @@ try {
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor({ state: "detached" });
     assert.equal(await page.getByRole("tab", { name: "Agent a2", exact: true }).count(), 1);
 
-    // Menu split and last-tab close use the same model as a drag.
+    // The menu's move to the other pane (PRO-381: "Move to the right pane", with its key on macOS) and last-tab close use the same model as a drag.
     await page.getByRole("tab", { name: "Agent a2", exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Split right", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Move to the right pane(\s*⌘\s*\\)?$/ }).click();
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor();
     await strip(page, "right").getByRole("button", { name: "Close Agent a2", exact: true }).click();
     await page.getByRole("separator", { name: "Resize tab panes" }).waitFor({ state: "detached" });
@@ -129,7 +129,7 @@ try {
     // Two actual xterms, with backend resize requests from each ResizeObserver.
     await page.getByRole("tab", { name: "Terminal 1", exact: true }).click();
     await page.getByRole("tab", { name: "Terminal 2", exact: true }).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Split right", exact: true }).click();
+    await page.getByRole("menuitem", { name: /^Move to the right pane(\s*⌘\s*\\)?$/ }).click();
     const separator = page.getByRole("separator", { name: "Resize tab panes" });
     await separator.waitFor();
     await page.waitForFunction(() => ["s-a:one", "s-a:two"].every((id) => window.__RESIZES__.some((entry) => entry.id === id && entry.cols > 0)));
@@ -146,7 +146,7 @@ try {
     assert(Number(ratio) > 50);
     if (shots) await page.screenshot({ path: join(shots, `${colorScheme}-terminals.png`) });
     await page.reload();
-    await page.getByTestId("conversation-list").getByRole("button", { name: "main, 2 sessions", exact: true }).click();
+    await page.getByTestId("conversation-list").getByRole("button", { name: /^main, / }).click();
     await separator.waitFor();
     assert.equal(await separator.getAttribute("aria-valuenow"), ratio);
     await page.locator('[id="session-terminal-panel-s-a%3Aone"][aria-hidden="false"]').waitFor({ state: "visible" });

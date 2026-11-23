@@ -3,7 +3,8 @@ import nacl from "tweetnacl";
 import { deriveKeySchedule } from "./e2ee-session";
 import { encodeBase64, encodeHandshakeTranscript, validateHandshake, type MobileE2EEHello } from "./e2ee-contract";
 import { openFrame, sealFrame } from "./e2ee-framing";
-import { PAIRING_APPROVAL_WAIT_MS, PairingNotApprovedError, RelayClient, RelayOuterError } from "./relay-client";
+import { CredentialRefusedError, PAIRING_APPROVAL_WAIT_MS, PairingNotApprovedError, RelayClient, RelayOuterError } from "./relay-client";
+import { PHONE_CLOSE } from "./phone-close";
 import { MAC_NEEDS_UPDATE } from "./refusal";
 import { encodeFragments, RELAY_MESSAGE_BYTES_LIMIT, textPlaintextLimit } from "./wire";
 
@@ -17,9 +18,11 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   onclose: ((event: { code: number; reason?: string; wasClean?: boolean }) => void) | null = null;
   sent: unknown[] = [];
+  /** The code this side closed with. */
+  closedWith?: number;
 
   send(value: unknown) { this.sent.push(value); }
-  close() { this.readyState = 3; }
+  close(code?: number) { this.readyState = 3; this.closedWith = code; }
 }
 
 describe("direct E2EE transport", () => {
@@ -45,6 +48,43 @@ describe("direct E2EE transport", () => {
 
     client.close();
     await expect(connecting).rejects.toThrow("Relay connection closed");
+    expect(socket.closedWith).toBe(PHONE_CLOSE.closed);
+  });
+});
+
+// #1282: the Mac records why a phone's session ended from the code it closed with.
+describe("the code the phone closes with", () => {
+  const open = () => {
+    const socket = new FakeSocket();
+    const client = new RelayClient({
+      transport: "direct",
+      endpoint: "ws://192.0.2.10:4040",
+      deviceToken: "device-token",
+      desktopPublicKeyB64: btoa(String.fromCharCode(...new Uint8Array(32).fill(4))),
+      createSocket: () => socket as unknown as WebSocket,
+    });
+    const connecting = client.connect().catch((error: unknown) => error);
+    socket.onopen?.();
+    return { socket, client, connecting };
+  };
+
+  it("says why it closed on purpose", async () => {
+    const { socket, client, connecting } = open();
+    client.close(PHONE_CLOSE.probeTimeout);
+    await connecting;
+    expect(socket.closedWith).toBe(4001);
+  });
+
+  it("says a failure on this side was one", async () => {
+    const { socket, connecting } = open();
+    // Not the Mac's handshake reply: the phone gives up on the connection.
+    socket.onmessage?.({ data: "not a handshake" });
+    await expect(connecting).resolves.toBeInstanceOf(Error);
+    expect(socket.closedWith).toBe(4002);
+  });
+
+  it("matches the codes the Mac reads (src-tauri/src/phone/mod.rs)", () => {
+    expect(PHONE_CLOSE).toEqual({ closed: 4000, probeTimeout: 4001, failed: 4002 });
   });
 });
 
@@ -197,6 +237,73 @@ it("rejects a refused invite before sending the inner device credential", async 
   await expect(connecting).rejects.toMatchObject({ code: 4001 });
   expect(socket.sent).toHaveLength(1);
   expect(String(socket.sent[0])).not.toContain("test-device-token");
+});
+
+// #1315: only a refusal from a party entitled to make it ends the pairing's report authorization.
+describe("a refused credential", () => {
+  const relayHello = async (credentialKind: "invite" | "resume", code: number) => {
+    const socket = new FakeSocket();
+    const client = new RelayClient({ relay: relayEndpoint, credential: `test-${credentialKind}`, credentialKind, deviceToken: "test-device-token",
+      desktopPublicKeyB64: encodeBase64(new Uint8Array(32).fill(4)), createSocket: () => socket as unknown as WebSocket });
+    const connecting = client.connect();
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: "relay-hello", ok: false, code }) });
+    return connecting.catch((cause: unknown) => cause);
+  };
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const direct = (socket: FakeSocket, key: Uint8Array) => new RelayClient({ transport: "direct", endpoint: "ws://example.test", deviceToken: "test-device-token",
+    desktopPublicKeyB64: encodeBase64(key), createSocket: () => socket as unknown as WebSocket });
+
+  it("is the relay refusing the resume credential", async () => {
+    const error = await relayHello("resume", 4401);
+    expect(error).toBeInstanceOf(CredentialRefusedError);
+    expect(error).toMatchObject({ code: 4401, message: "relay_outer_4401" });
+  });
+
+  it("is not a refused pairing invite, nor another relay refusal", async () => {
+    const invite = await relayHello("invite", 4401);
+    expect(invite).toBeInstanceOf(RelayOuterError);
+    expect(invite).not.toBeInstanceOf(CredentialRefusedError);
+    expect(await relayHello("resume", 4404)).not.toBeInstanceOf(CredentialRefusedError);
+  });
+
+  it("is the relay closing a live resumed connection with 4401, and not with a network close", async () => {
+    for (const [code, refused] of [[4401, true], [1006, false]] as const) {
+      const socket = new EncryptedPeer({ unanswered: "session.sync" });
+      const client = new RelayClient({ relay: relayEndpoint, credential: "test-resume", credentialKind: "resume", credentialVersion: 1, deviceToken: "test-device-token",
+        desktopPublicKeyB64: encodeBase64(socket.key.publicKey), createSocket: () => socket as unknown as WebSocket });
+      const connected = client.connect();
+      socket.onopen?.();
+      await connected;
+      const states: (Error | undefined)[] = [];
+      client.subscribeState((_state, cause) => states.push(cause));
+      const pending = client.request("session.sync");
+      socket.onclose?.({ code, reason: "Access removed", wasClean: true });
+      const error = await pending.catch((cause: unknown) => cause);
+      expect(error instanceof CredentialRefusedError).toBe(refused);
+      expect(error).toMatchObject({ code, reason: "Access removed" });
+      expect(states.at(-1)).toBe(error);
+    }
+  });
+
+  it("is the pinned Mac closing with 4401 after it proved its key, not an unverified peer before that", async () => {
+    const unverified = new FakeSocket();
+    const early = direct(unverified, new Uint8Array(32).fill(4)).connect();
+    unverified.onopen?.();
+    unverified.onclose?.({ code: 4401, reason: "credential refused" });
+    const before = await early.catch((cause: unknown) => cause);
+    expect(before).toBeInstanceOf(RelayOuterError);
+    expect(before).not.toBeInstanceOf(CredentialRefusedError);
+
+    // The Mac answers the handshake with the pinned key, reads e2ee_auth, and refuses the device token
+    // with 4401, as `phone::close_refused` does (src-tauri pairing/mod.rs and machine_host/phones.rs).
+    const mac = new EncryptedPeer({ gate: true });
+    const connecting = direct(mac, mac.key.publicKey).connect();
+    mac.onopen?.(); await flush();
+    expect(mac.waiting).toBe(true);
+    mac.onclose?.({ code: 4401, reason: "credential refused" });
+    expect(await connecting.catch((cause: unknown) => cause)).toBeInstanceOf(CredentialRefusedError);
+  });
 });
 
 // #669/#670: the close code alone cannot tell a relay close from iOS ending the stream.

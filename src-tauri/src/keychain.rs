@@ -24,8 +24,9 @@ pub(crate) trait SecretStore: Send + Sync {
     fn delete(&self, service: &str, account: &str) -> Result<()>;
 }
 
-/// The login Keychain. Elsewhere than macOS nothing is stored: reads find
-/// nothing and writes fail.
+/// The login Keychain on macOS, and a DPAPI-sealed store of this account's
+/// own on Windows. Elsewhere nothing is stored: reads find nothing and writes
+/// fail.
 pub(crate) struct Keychain;
 
 impl SecretStore for Keychain {
@@ -82,8 +83,133 @@ mod imp {
     }
 }
 
+/// Windows: each secret sealed with DPAPI for this account on this machine,
+/// in an owner-only folder of its own (see [`windows_store`]).
+#[cfg(all(windows, not(test)))]
+mod imp {
+    use anyhow::{Context, Result};
+
+    fn store() -> Result<std::path::PathBuf> {
+        Ok(dirs::data_local_dir().context("this account has no local application data folder")?.join("TerminalX").join("secrets"))
+    }
+
+    pub fn get(service: &str, account: &str) -> Result<Option<Vec<u8>>> {
+        super::windows_store::get(&store()?, service, account)
+    }
+
+    pub fn set(service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        super::windows_store::set(&store()?, service, account, secret)
+    }
+
+    pub fn delete(service: &str, account: &str) -> Result<()> {
+        super::windows_store::delete(&store()?, service, account)
+    }
+}
+
+/// The Windows secret store, in a folder given by the caller (tests use their
+/// own). The Keychain's generic passwords are per user and keyed by service
+/// and account; so is this:
+///
+/// - each secret is one file, named by a SHA-256 of its service and account,
+///   so the names say nothing about what is kept;
+/// - its content is the secret sealed with DPAPI for this Windows account on
+///   this machine, with the service and account as the sealing's entropy, so
+///   a sealed secret moved to another entry's file does not open there;
+/// - the folder and every file are owner-only (`win::fs`), files are replaced
+///   in one rename, and a link or a file another account can open is refused.
+#[cfg(windows)]
+mod windows_store {
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, PoisonError};
+
+    use anyhow::{Context, Result};
+    use sha2::{Digest, Sha256};
+
+    /// One call at a time, as on macOS: a read never sees half of a replace.
+    static GATE: Mutex<()> = Mutex::new(());
+
+    fn entropy(service: &str, account: &str) -> Vec<u8> {
+        format!("terminalx secret v1\0{service}\0{account}").into_bytes()
+    }
+
+    fn file(store: &Path, service: &str, account: &str) -> PathBuf {
+        let digest = Sha256::digest(format!("{service}\0{account}").as_bytes());
+        store.join(format!("{digest:x}.secret"))
+    }
+
+    pub fn get(store: &Path, service: &str, account: &str) -> Result<Option<Vec<u8>>> {
+        let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        let path = file(store, service, account);
+        if std::fs::symlink_metadata(&path).is_err() {
+            return Ok(None);
+        }
+        let mut sealed = Vec::new();
+        crate::win::fs::open_private(&path).context("read a stored secret")?.read_to_end(&mut sealed)?;
+        let secret = crate::win::dpapi::unprotect(&sealed, &entropy(service, account)).context("open a stored secret")?;
+        Ok(Some(secret))
+    }
+
+    pub fn set(store: &Path, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        crate::win::fs::create_private_dir_all(store).context("create the secret store")?;
+        let sealed = crate::win::dpapi::protect(secret, &entropy(service, account)).context("seal a secret")?;
+        let path = file(store, service, account);
+        let staged = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()));
+        let written = (|| -> Result<()> {
+            let mut out = crate::win::fs::create_private(&staged, true)?;
+            out.write_all(&sealed)?;
+            out.sync_all()?;
+            drop(out);
+            std::fs::rename(&staged, &path)?;
+            Ok(())
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+        written.context("store a secret")
+    }
+
+    pub fn delete(store: &Path, service: &str, account: &str) -> Result<()> {
+        let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::fs::remove_file(file(store, service, account)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).context("remove a stored secret"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_secret_is_kept_sealed_private_and_only_for_its_own_entry() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = dir.path().join("secrets");
+            assert_eq!(get(&store, "svc", "acct").unwrap(), None);
+            set(&store, "svc", "acct", b"refresh-token-1").unwrap();
+            set(&store, "svc", "acct", b"refresh-token-2").unwrap();
+            assert_eq!(get(&store, "svc", "acct").unwrap().as_deref(), Some(&b"refresh-token-2"[..]));
+            assert_eq!(get(&store, "svc", "other").unwrap(), None);
+            crate::win::security::verify_private(&store).unwrap();
+            let path = file(&store, "svc", "acct");
+            crate::win::security::verify_private(&path).unwrap();
+            let raw = std::fs::read(&path).unwrap();
+            assert!(!raw.windows(15).any(|window| window == b"refresh-token-2"), "sealed, not plain");
+            assert_eq!(std::fs::read_dir(&store).unwrap().count(), 1, "no staged file is left behind");
+            // Sealed for one entry, it does not open as another.
+            std::fs::copy(&path, file(&store, "svc", "moved")).unwrap();
+            assert!(get(&store, "svc", "moved").is_err());
+            delete(&store, "svc", "acct").unwrap();
+            delete(&store, "svc", "acct").unwrap();
+            assert_eq!(get(&store, "svc", "acct").unwrap(), None);
+        }
+    }
+}
+
 /// Tests never reach the real login Keychain: they use an in-memory store.
-#[cfg(any(not(target_os = "macos"), test))]
+#[cfg(any(not(any(target_os = "macos", windows)), test))]
 mod imp {
     use anyhow::{anyhow, Result};
 
@@ -92,7 +218,7 @@ mod imp {
     }
 
     pub fn set(_service: &str, _account: &str, _secret: &[u8]) -> Result<()> {
-        Err(anyhow!("macOS Keychain is unavailable"))
+        Err(anyhow!("no secret store is available on this system"))
     }
 
     pub fn delete(_service: &str, _account: &str) -> Result<()> {
@@ -143,6 +269,8 @@ pub(crate) mod testing {
         /// How many calls are waiting inside the store right now.
         waiting: usize,
         fail_writes: bool,
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        fail_reads: bool,
     }
 
     type Check = Box<dyn Fn() + Send>;
@@ -162,6 +290,11 @@ pub(crate) mod testing {
         pub fn release(&self) {
             self.state.0.lock().unwrap().blocked = false;
             self.state.1.notify_all();
+        }
+
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        pub fn fail_reads(&self, fail: bool) {
+            self.state.0.lock().unwrap().fail_reads = fail;
         }
 
         pub fn fail_writes(&self, fail: bool) {
@@ -210,7 +343,12 @@ pub(crate) mod testing {
 
     impl SecretStore for MemorySecrets {
         fn get(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>> {
-            Ok(self.enter(Call::Get, false).secrets.get(&(service.to_string(), account.to_string())).cloned())
+            let state = self.enter(Call::Get, false);
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if state.fail_reads {
+                anyhow::bail!("the store refused the read");
+            }
+            Ok(state.secrets.get(&(service.to_string(), account.to_string())).cloned())
         }
 
         fn set(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {
@@ -249,6 +387,7 @@ mod tests {
             "account_sign_out",
             "organization_create",
             "organization_select",
+            "organization_computer_save",
             "pairing_status",
             "pairing_generate",
             "pairing_revoke",

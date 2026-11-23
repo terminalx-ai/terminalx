@@ -453,7 +453,7 @@ class PublishGateTests(TempCase):
         self.assertEqual(runner.mutations, [])
 
     def test_refuses_a_branch_other_than_main_or_a_dirty_tree(self):
-        for responses, fragment in [(git_responses(branch='feature'), 'releases are built from main'),
+        for responses, fragment in [(git_responses(branch='feature'), 'releases are built from release/9.8.7 (cut it with the cut step) or main'),
                                     (git_responses(status=' M README.md'), 'uncommitted changes')]:
             runner = FakeRunner(responses)
             with self.assertRaises(ReleaseError) as raised:
@@ -866,6 +866,226 @@ class SourceTests(TempCase):
                              (['git', 'merge-base'], Result(0, ''))])
         context = source.prepare(release, runner)
         self.assertEqual((context['baseMainCommit'], context['sourceCommit']), (BASE, HEAD))
+
+
+def git(cwd: Path, *args: str) -> str:
+    return subprocess.run([*GIT, *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class ReleaseBranchCase(TempCase):
+    """A bare origin with a main that has a release and a changelog, a clone to release from, and a
+    second clone that keeps merging to main while the release runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.origin = self.directory / 'origin.git'
+        subprocess.run([*GIT, 'init', '-q', '--bare', str(self.origin)], check=True)
+        self.root = self.directory / 'repo'
+        self.root.mkdir()
+        write_repo(self.root, versions=('9.8.6', '9.8.6', '9.8.6'))
+        (self.root / 'CHANGELOG.md').write_text('# TerminalX changelog\n\n## Unreleased\n\n## 9.8.6\n\n- Older things.\n')
+        (self.root / '.gitignore').write_text('.raccoon/\n')
+        (self.root / 'app.txt').write_text('one\n')
+        git(self.root, 'init', '-q')
+        self.configure(self.root)
+        git(self.root, 'add', '-A')
+        git(self.root, 'commit', '-qm', 'initial')
+        git(self.root, 'remote', 'add', 'origin', str(self.origin))
+        git(self.root, 'push', '-q', 'origin', 'main')
+        self.other = self.directory / 'other'
+        subprocess.run([*GIT, 'clone', '-q', str(self.origin), str(self.other)], check=True)
+        self.configure(self.other)
+
+    @staticmethod
+    def configure(repo: Path) -> None:
+        for key, value in [('user.name', 'Release Test'), ('user.email', 'release-test@example.invalid'),
+                           ('commit.gpgsign', 'false'), ('core.hooksPath', '/dev/null')]:
+            git(repo, 'config', key, value)
+
+    def merge_to_main(self, path: str, text: str, message: str) -> str:
+        """Another PR lands on main: edit a file in the other clone and push it."""
+        git(self.other, 'pull', '-q', '--ff-only', 'origin', 'main')
+        target = self.other / path
+        target.write_text(text(target.read_text()) if callable(text) else text)
+        git(self.other, 'commit', '-qam', message)
+        git(self.other, 'push', '-q', 'origin', 'main')
+        return git(self.other, 'rev-parse', 'HEAD')
+
+    def cut_and_prepare_commit(self) -> Path:
+        """cut release/9.8.7, then bump and changelog in its worktree, as docs/RELEASING.md says."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            cut = source.cut(self.root, GitRunner(), VERSION)
+        worktree = Path(cut['worktree'])
+        self.assertEqual(git(worktree, 'branch', '--show-current'), 'release/9.8.7')
+        self.cut_base = cut['baseMainCommit']
+        write_repo(worktree)
+        (worktree / '.gitignore').write_text('.raccoon/\n')
+        (worktree / 'CHANGELOG.md').write_text(
+            f'# TerminalX changelog\n\n## Unreleased\n\n## {VERSION}\n\n- New things.\n\n## 9.8.6\n\n- Older things.\n')
+        git(worktree, 'commit', '-qam', f'Prepare TerminalX {VERSION} release')
+        return worktree
+
+    def release_for(self, worktree: Path) -> config.Release:
+        return config.load(worktree, env={'TERMINALX_RELEASE_TARGET_DIR': str(self.directory / 'target')})
+
+
+class CutAndPrepareTests(ReleaseBranchCase):
+    def test_prepare_on_a_release_branch_pins_the_cut_while_main_moves_on(self):
+        worktree = self.cut_and_prepare_commit()
+        self.merge_to_main('app.txt', 'two\n', 'A PR merged after the cut')
+        release = self.release_for(worktree)
+        context = source.prepare(release, GitRunner())
+        self.assertEqual(context['branch'], 'release/9.8.7')
+        self.assertEqual(context['baseMainCommit'], self.cut_base)
+        self.assertEqual(context['sourceCommit'], git(worktree, 'rev-parse', 'HEAD'))
+        self.assertEqual(source.pinned_source(release, GitRunner()), context['sourceCommit'])
+
+    def test_later_steps_refuse_a_branch_head_that_moved_or_another_branch(self):
+        worktree = self.cut_and_prepare_commit()
+        release = self.release_for(worktree)
+        source.prepare(release, GitRunner())
+        (worktree / 'app.txt').write_text('changed on the branch\n')
+        git(worktree, 'commit', '-qam', 'A commit after prepare')
+        with self.assertRaises(ReleaseError) as raised:
+            source.pinned_source(release, GitRunner())
+        self.assertIn('HEAD moved', raised.exception.code)
+        git(worktree, 'switch', '-q', '-c', 'release-copy')
+        with self.assertRaises(ReleaseError) as raised:
+            source.pinned_source(release, GitRunner())
+        self.assertIn('this checkout is on release-copy', raised.exception.code)
+
+    def test_cut_refuses_a_branch_that_already_exists(self):
+        self.cut_and_prepare_commit()
+        with self.assertRaises(ReleaseError) as raised:
+            source.cut(self.root, GitRunner(), VERSION, self.directory / 'second')
+        self.assertIn('release/9.8.7 already exists here', raised.exception.code)
+        with self.assertRaises(ReleaseError):
+            source.cut(self.root, GitRunner(), '9.8', self.directory / 'third')
+
+
+class PublishFromBranchTests(ReleaseBranchCase):
+    def published(self, worktree: Path, main_moves) -> tuple[config.Release, dict]:
+        """Every step's record for the pinned branch head, then main moves, then publish runs: git for
+        real against the bare origin, gh and the signature check answered by fakes."""
+        release = self.release_for(worktree)
+        context = source.prepare(release, GitRunner())
+        fixture = Fixture(self.directory / 'records')
+        shutil.copytree(fixture.release.out, release.out, dirs_exist_ok=True)
+        write_json(release.record('release-context.json'), context)
+        shutil.copytree(fixture.release.target_dir, release.target_dir, dirs_exist_ok=True)
+        head, base = context['sourceCommit'], context['baseMainCommit']
+        for record in release.out.glob('*.json'):
+            value = json.loads(record.read_text())
+            if record.name == 'release-context.json':
+                continue
+            for key in ('sourceCommit', 'head'):
+                if key in value:
+                    value[key] = head
+            if 'base' in value:
+                value['base'] = base
+            write_json(record, value)
+        os.utime(release.record('secret-scan.json'))
+        main_moves()
+        downloaded = release.record('downloaded')
+
+        def fake_download(argv):
+            shutil.copytree(release.assets, downloaded)
+            return Result(0, '')
+        runner = GitRunner([
+            (['gh', 'release', 'view', release.tag, '--repo', config.REPO, '--json', 'isDraft,assets'], Result(1, 'release not found')),
+            (['gh', 'release', 'download'], fake_download),
+            (['node'], Result(0, json.dumps({'signatureVerified': True, 'sha256': 'x'}))),
+            (['gh', 'release', 'view'], Result(0, 'https://github.com/terminalx-ai/terminalx/releases/tag/v9.8.7')),
+            (['gh', 'release', 'create'], Result(0, '')), (['gh', 'release', 'edit'], Result(0, '')),
+        ])
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = publish.publish(release, runner)
+        return release, result
+
+    def test_publish_pushes_the_branch_and_tag_after_main_moved(self):
+        worktree = self.cut_and_prepare_commit()
+        moved = []
+        release, result = self.published(worktree, lambda: moved.append(self.merge_to_main('app.txt', 'two\n', 'A PR merged mid-release')))
+        head = result['sourceCommit']
+        self.assertEqual(result['branch'], 'release/9.8.7')
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/release/9.8.7'), head)
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/tags/v9.8.7^{}'), head)
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/main'), moved[0], 'publish leaves main to merge-back')
+
+    def merged_back(self, main_change) -> tuple[config.Release, dict, str]:
+        worktree = self.cut_and_prepare_commit()
+        release, result = self.published(worktree, main_change)
+        runner = GitRunner([
+            (['gh', 'pr', 'list'], Result(0, '')),
+            (['gh', 'pr', 'create'], Result(0, 'https://github.com/terminalx-ai/terminalx/pull/1')),
+        ])
+        with contextlib.redirect_stdout(io.StringIO()):
+            report = publish.merge_back(release, runner)
+        self.runner = runner
+        return release, report, result['sourceCommit']
+
+    def test_merge_back_merges_into_a_main_that_moved(self):
+        release, report, head = self.merged_back(lambda: self.merge_to_main('app.txt', 'two\n', 'A PR merged mid-release'))
+        self.assertEqual(report['method'], 'merge')
+        main = git(self.origin, 'rev-parse', 'refs/heads/main')
+        self.assertEqual(main, report['mainCommit'])
+        self.assertEqual(git(self.origin, 'rev-parse', f'{main}^2'), head, 'the tagged commit is merged, not rebased')
+        self.assertEqual(git(self.origin, 'show', f'{main}:app.txt'), 'two')
+        self.assertIn('version = "9.8.7"', git(self.origin, 'show', f'{main}:src-tauri/Cargo.toml'))
+        self.assertTrue(release.record('merge-back.json').is_file())
+        self.assertFalse(release.record('merge-back').exists(), 'the scratch worktree is removed')
+
+    def test_merge_back_keeps_later_main_entries_under_unreleased(self):
+        def unreleased_entry():
+            self.merge_to_main('CHANGELOG.md', lambda text: text.replace('## Unreleased\n', '## Unreleased\n\n- Merged after the cut.\n'),
+                               'A PR with a changelog line')
+        release, report, head = self.merged_back(unreleased_entry)
+        self.assertEqual(report['method'], 'merge')
+        self.assertTrue(report['attempts'][-1]['changelogResolved'])
+        changelog = git(self.origin, 'show', 'refs/heads/main:CHANGELOG.md')
+        self.assertEqual(changelog, '# TerminalX changelog\n\n## Unreleased\n\n- Merged after the cut.\n\n'
+                                    f'## {VERSION}\n\n- New things.\n\n## 9.8.6\n\n- Older things.')
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/main^2'), head)
+
+    def test_merge_back_opens_a_pull_request_for_any_other_conflict(self):
+        def conflicting():
+            git(self.root, 'fetch', '-q', 'origin')
+            self.merge_to_main('src-tauri/Cargo.toml', lambda text: text.replace('version = "9.8.6"', 'version = "9.9.0"'), 'Someone else bumped')
+        before = []
+        release, report, head = self.merged_back(lambda: (conflicting(), before.append(git(self.origin, 'rev-parse', 'refs/heads/main'))))
+        self.assertEqual(report['method'], 'pull-request')
+        self.assertEqual(report['pullRequest'], 'https://github.com/terminalx-ai/terminalx/pull/1')
+        self.assertIn('src-tauri/Cargo.toml', report['reason'])
+        create = next(call for call in self.runner.calls if call[:3] == ['gh', 'pr', 'create'])
+        self.assertEqual(create[create.index('--head') + 1], 'release/9.8.7')
+        self.assertEqual(create[create.index('--title') + 1], 'Release TerminalX 9.8.7')
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/main'), before[0], 'main is left alone')
+
+    def test_merge_back_tries_again_when_main_moves_during_the_merge(self):
+        worktree = self.cut_and_prepare_commit()
+        release, result = self.published(worktree, lambda: None)
+        pushes = []
+
+        class Racing(GitRunner):
+            def execute(inner, argv, *, cwd, env, log):
+                if argv[:2] == ['git', 'push'] and not pushes:
+                    pushes.append(argv)
+                    self.merge_to_main('app.txt', 'raced\n', 'A PR merged during merge-back')
+                return GitRunner.execute(inner, argv, cwd=cwd, env=env, log=log)
+        with contextlib.redirect_stdout(io.StringIO()):
+            report = publish.merge_back(release, Racing())
+        self.assertEqual(report['method'], 'merge')
+        self.assertEqual(len(report['attempts']), 2)
+        self.assertEqual(git(self.origin, 'show', 'refs/heads/main:app.txt'), 'raced')
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/main^2'), result['sourceCommit'])
+
+    def test_merge_back_needs_a_published_release(self):
+        worktree = self.cut_and_prepare_commit()
+        release = self.release_for(worktree)
+        source.prepare(release, GitRunner())
+        with self.assertRaises(ReleaseError) as raised:
+            publish.merge_back(release, GitRunner())
+        self.assertIn('release-result.json is missing', raised.exception.code)
 
 
 class CommandLineTests(unittest.TestCase):

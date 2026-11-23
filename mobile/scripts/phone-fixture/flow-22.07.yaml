@@ -1,0 +1,86 @@
+# 22.07 Notification settings: the Settings row, the page, a session's own choice, and what
+# reaches the lock screen at "Everything" and at "Nothing". iOS notifications off is flow-22.07-off.yaml.
+appId: com.terminalx.phone.fixture
+name: Notification settings (22.07)
+---
+# Opened on its Settings tab, as a tap on the tab would (no tap on "Settings" to meet another app's link back).
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, openRoute: /settings }
+- assertVisible: "Notifications, Questions, approvals, finished, failed"
+- takeScreenshot: 22.07-1-settings-entry
+- tapOn: "Notifications, Questions, approvals, finished, failed"
+# iOS has not been asked on a fresh install, and nothing reaches the phone until it has: the page's
+# switch off, then on, asks it (Maestro allows). The row's words share the switch's name, so by position.
+- tapOn: { point: "84%,17%" }
+- waitForAnimationToEnd
+- tapOn: { point: "84%,17%" }
+- waitForAnimationToEnd
+- tapOn:
+    text: "Allow"
+    optional: true
+- assertVisible: "Asks a question"
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-2-what-to-notify
+- scrollUntilVisible:
+    element: "Sound, Default"
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-3-where-and-when
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureTabs: states }
+- tapOn:
+    id: sessions-tab
+- tapOn: "Review and merge,.*"
+- tapOn: "Review and merge, Working.*"
+- waitForAnimationToEnd
+- tapOn: "Notifications for this session"
+- assertVisible: "Use my settings"
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-5-one-session
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLockScreen: everything }
+- extendedWaitUntil:
+    visible: "Settings"
+    timeout: 10000
+- pressKey: home
+# The banners go before the list opens: iOS shows each for a few seconds, outside what Maestro can
+# see, so this waits the time out on something never on screen.
+- extendedWaitUntil:
+    visible: "fixture: banners gone"
+    timeout: 12000
+    optional: true
+- swipe:
+    start: 15%, 0%
+    end: 15%, 60%
+    duration: 600
+- waitForAnimationToEnd
+# iOS draws the lock screen's notifications as one stack until its "+N from …" line is tapped
+# (outside what Maestro can see, so by position).
+- tapOn: { point: "50%,83%" }
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-6-lock-screen-full-detail
+- launchApp:
+    stopApp: true
+    arguments: { fixtureScenario: connected, fixtureLockScreen: nothing }
+- extendedWaitUntil:
+    visible: "Settings"
+    timeout: 10000
+- pressKey: home
+# The banners go before the list opens: iOS shows each for a few seconds, outside what Maestro can
+# see, so this waits the time out on something never on screen.
+- extendedWaitUntil:
+    visible: "fixture: banners gone"
+    timeout: 12000
+    optional: true
+- swipe:
+    start: 15%, 0%
+    end: 15%, 60%
+    duration: 600
+- waitForAnimationToEnd
+# iOS draws the lock screen's notifications as one stack until its "+N from …" line is tapped
+# (outside what Maestro can see, so by position).
+- tapOn: { point: "50%,83%" }
+- waitForAnimationToEnd
+- takeScreenshot: 22.07-7-lock-screen-details-hidden

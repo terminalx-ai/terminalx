@@ -50,8 +50,26 @@ export interface TabEntry {
   contextMax?: number | null;
   /** Tokens and estimated cost of every conversation the tab holds or held, by model, as of its last turn end (PRO-273). */
   usage?: TabUsage | null;
-  /** A cloud tab whose conversation has not been read yet: the chat says it is loading, not that it is empty. */
+  /**
+   * A machine session's tab (PRO-408): the account it runs on as the machine
+   * names it, only when its agent has several there; `null` with one. Absent
+   * on a tab of this computer, whose account is read from its own list.
+   */
+  accountLabel?: string | null;
+  /**
+   * A cloud tab whose conversation has not been read yet and is on its way:
+   * the chat says it is loading, not that it is empty. False for a stopped
+   * workspace, which shows what was saved, even before that is read.
+   */
   loadingHistory?: boolean;
+  /**
+   * A cloud tab's conversation has been read (this desktop's cache, a
+   * checkpoint, the live replay), or it has none (#1341). Unlike
+   * `loadingHistory`, a stopped workspace's tab is not read until its saved
+   * history has merged: only then is its newest event the one a message on
+   * its way comes after. Absent on a local tab, whose log is its own.
+   */
+  historyRead?: boolean;
   /**
    * What is in the tab's terminal (#437). Absent, or `agent`, is the tab's
    * agent run by the app. `by_hand` is that agent started by hand in the
@@ -179,6 +197,12 @@ export interface SessionParent {
   tabId?: string | null;
 }
 
+/** Which bot a session belongs to: its id only, since a bot's name and slug can change. */
+export interface SessionBotRef {
+  id: string;
+  home?: boolean;
+}
+
 export interface SessionEntry {
   /** Live presentation facts supplied by the owning runtime. */
   rowStatus?: import("@terminalx/portable/sessionStatus").SessionStatusInput;
@@ -188,6 +212,16 @@ export interface SessionEntry {
   kind?: SessionKind;
   /** Absent for a session no other session started. */
   parent?: SessionParent | null;
+  /** The bot this session is a chat of (PRO-468): its id, and whether it is the bot's home chat. */
+  bot?: SessionBotRef | null;
+  /** A session that works for a bot without being its chat (PRO-468): one its chats started, or what those started in turn. */
+  botStarted?: { id: string } | null;
+  /** Started as an orchestration run's worker (`store::index::RUN_WORKER`). Never unmarked: its limits outlive the run. */
+  runWorker?: boolean;
+  /** A run of one of its bot's duties (PRO-471): the duty's automation id. Listed under its bot apart from its chats. */
+  botDuty?: { id: string } | null;
+  /** A chat of its bot that a mention on GitHub or Linear started (PRO-480): where it came from. */
+  botChannel?: import("@/types/botChannels").SessionBotChannel | null;
   /** Started with Orchestrate (PRO-337): a run this session leads waits for the person's Approve, whatever the project's setting. */
   orchestrateStart?: boolean;
   /**
@@ -244,10 +278,12 @@ export interface Project {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  /** Hidden from the sidebar; its sessions keep running. Absent is shown. */
+  hidden?: boolean;
   archived?: boolean;
   /** Absent while every setting is the default. */
   issuePipeline?: IssuePipelineSettings | null;
-  /** Agents may comment on issues and move their status without asking. Absent is off. */
+  /** Legacy persisted preference; issue approval is always deletion-only. */
   agentIssueUpdates?: boolean;
   /** What the reader calls a branch in the sidebar, by branch name; a branch with none goes by its own name. */
   branchLabels?: Record<string, string>;
@@ -266,6 +302,7 @@ export interface ProjectPatch {
   mascot?: string | null;
   logo?: string | null;
   pinned?: boolean;
+  hidden?: boolean;
   archived?: boolean;
   issuePipeline?: IssuePipelineSettings;
   agentIssueUpdates?: boolean;
@@ -494,6 +531,10 @@ export interface BranchInfo {
   name: string;
   current: boolean;
   remote: boolean;
+  /** When its tip was committed (RFC 3339). Absent on older runtimes. */
+  updated?: string;
+  /** Who wrote its tip commit. Absent on older runtimes. */
+  author?: string;
 }
 
 export type ChangeStatus = "added" | "modified" | "deleted" | "renamed";

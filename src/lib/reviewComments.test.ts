@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => []) }));
 vi.mock("@/lib/api", () => ({ invoke }));
-import { addReviewsToChat, captureReviewSend, markReviewsSent, moveReviewRanges, restoreReviewSend, reviewDraft, reviewEntry, type ReviewComment } from "./reviewComments";
+import { addReviewsToChat, captureReviewSend, markReviewsSent, moveReviewRanges, pendingReviewCount, restoreReviewSend, reviewDraft, reviewEntry, type ReviewComment } from "./reviewComments";
 import { getDraft, setDraft } from "./drafts";
 const comment = (props: Partial<ReviewComment> = {}): ReviewComment => ({ id: "c1", revision: 1, path: "src/a.ts", side: "after", startLine: 2, endLine: 3, lineText: "const old = 1;\nold++;", note: "Rename old.\nKeep the increment.", sent: false, outdated: false, ...props });
 beforeEach(() => { invoke.mockClear(); setDraft("tab", ""); });
@@ -88,4 +88,18 @@ it("caps long quotes by lines and characters while retaining the location and no
   expect(minified.length).toBeLessThan(4200);
   expect(minified).toContain("remaining text omitted");
   expect(minified).toContain("Rename old.");
+});
+
+describe("ready to send (PRO-392)", () => {
+  it("counts the comments the composer draft still carries", () => {
+    setDraft("ready", "");
+    addReviewsToChat("local:/repo", "ready", [comment({ id: "a" }), comment({ id: "b", path: "src/b.ts" })]);
+    expect(pendingReviewCount("ready", getDraft("ready"))).toBe(2);
+    const text = getDraft("ready");
+    const second = text.indexOf("src/b.ts");
+    setDraft("ready", text.slice(0, second).trimEnd());
+    expect(pendingReviewCount("ready", getDraft("ready"))).toBe(1);
+    setDraft("ready", "");
+    expect(pendingReviewCount("ready", "")).toBe(0);
+  });
 });

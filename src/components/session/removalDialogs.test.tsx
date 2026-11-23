@@ -11,7 +11,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/components/terminal/TerminalView", () => ({ TerminalView: ({ id }: { id: string }) => <div data-testid="archive-log">{id}</div> }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: mocks.ask, message: mocks.message }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: mocks.message }));
+// The second confirmation is the app's own dialog (PRO-400): one request object, answered true or false.
+vi.mock("@/lib/confirm", () => ({ confirmInApp: mocks.ask }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("@/lib/api", () => ({
   api: { workspaceDisposition: mocks.workspaceDisposition },
@@ -86,20 +88,25 @@ describe("WorkspaceRemoveDialog", () => {
     expect(removeButton().disabled).toBe(false);
   });
 
-  it("reads and removes a cloud worktree on the host that owns it, with the same check and the sessions named (#411)", async () => {
+  it.each([
+    { projectKey: "cloud:org-1:ws-1", bulkCleanupAvailable: true },
+    { projectKey: "machine:mini:project", bulkCleanupAvailable: false },
+  ])("reads and removes worktrees on $projectKey and offers bulk cleanup only when it reaches the host", async ({ projectKey, bulkCleanupAvailable }) => {
     const host = {
-      key: "cloud:org-1:ws-1|s1",
-      keepConversationsUnavailable: "Use Clean up worktrees to keep cloud conversations.",
+      key: `${projectKey}|s1`,
+      keepConversationsUnavailable: "This action cannot keep conversations.",
+      bulkCleanupAvailable,
       disposition: vi.fn(async () => workspace(dirty)),
       remove: vi.fn(async () => ({ keptBranch: null, rescuedBranch: null })),
       turnRunning: () => false,
     };
     mocks.ask.mockResolvedValue(true);
     render(<WorkspaceRemoveDialog />);
-    act(() => openWorkspaceDelete("cloud:org-1:ws-1", "/home/user/app/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox", host));
+    act(() => openWorkspaceDelete(projectKey, "/home/user/app/.raccoon/worktrees/quiet-amber-fox", "quiet-amber-fox", host));
     await screen.findByText("Removing it now needs a second confirmation.");
     expect(host.disposition).toHaveBeenCalledWith({ fetch: true });
     expect(within(screen.getByRole("list", { name: "Sessions in this workspace" })).getByText("Review the fix")).toBeTruthy();
+    expect(!!screen.queryByRole("button", { name: "Clean up worktrees…" })).toBe(bulkCleanupAvailable);
 
     expect(removeButton().disabled).toBe(true);
     fireEvent.click(screen.getByLabelText("Permanently delete conversations too"));
@@ -150,13 +157,13 @@ describe("WorkspaceRemoveDialog", () => {
       // Declining the second confirmation removes nothing.
       fireEvent.click(removeButton());
       await waitFor(() => expect(mocks.ask).toHaveBeenCalledTimes(1));
-      expect(mocks.ask.mock.calls[0][0]).toContain(path);
-      expect(mocks.ask.mock.calls[0][0]).toContain(line);
+      expect(mocks.ask.mock.calls[0][0].body).toContain(path);
+      expect(mocks.ask.mock.calls[0][0].body).toContain(line);
       expect(mocks.removeWorkspace).not.toHaveBeenCalled();
 
       // The branch is not deleted by default with a workspace that is not
       // safe, and the confirmation says what really happens to it.
-      expect(mocks.ask.mock.calls[0][0]).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
+      expect(mocks.ask.mock.calls[0][0].body).toContain("Its branch is kept if it holds commits that no other branch, remote or tag has");
       expect((screen.getByRole("switch") as HTMLButtonElement).getAttribute("aria-checked")).toBe("false");
 
       fireEvent.click(removeButton());

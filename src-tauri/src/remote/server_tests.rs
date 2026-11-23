@@ -22,7 +22,7 @@ impl Drop for Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap().join("workspace");
+    let root = crate::paths::canonicalize(dir.path()).unwrap().join("workspace");
     std::fs::create_dir(&root).unwrap();
     let terminals = Arc::new(Terminals::new());
     let sink = Arc::new(BroadcastSink::new(64));
@@ -183,6 +183,7 @@ async fn output_until(events: &mut Notifications, marker: &str) -> (String, u64)
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn terminals_stream_with_offsets_replay_and_drop_resent_writes() {
     let f = fixture();
@@ -274,6 +275,7 @@ async fn next_event(events: &mut Notifications, event: &str) -> Value {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn terminals_are_listed_with_their_identity_and_survive_a_new_connection() {
     let f = fixture();
@@ -348,6 +350,7 @@ async fn input_is_applied_once_in_order_and_backpressure_keeps_it() {
     assert_eq!(call(&f.rpc, &peer, "pty.write", write(2, "w1")).await.unwrap()["applied"], true);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn one_controller_owns_input_and_size_and_viewers_follow() {
     let f = fixture();
@@ -390,6 +393,7 @@ async fn one_controller_owns_input_and_size_and_viewers_follow() {
     output_until(&mut laptop_events, "30 100").await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn silent_resizes_and_returning_viewers_receive_ordered_size_completions() {
     let f = fixture();
@@ -413,6 +417,7 @@ async fn silent_resizes_and_returning_viewers_receive_ordered_size_completions()
     assert_eq!(next_event(&mut viewing, "pty.resize-complete").await["size"], json!({"cols":18,"rows":8}));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_and_close_are_reported_and_nothing_targets_a_closed_terminal() {
     let f = fixture();
@@ -612,7 +617,7 @@ async fn a_manager_rotates_the_key_and_nudges_the_mailbox() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rotation_tells_key_holders_to_fetch_the_new_key() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = crate::paths::canonicalize(dir.path()).unwrap();
     let sink = Arc::new(BroadcastSink::new(64));
     let terminals = Arc::new(Terminals::new());
     let rpc = WorkspaceRpc::new(&root, 7, sink.clone(), terminals, None).unwrap();
@@ -658,6 +663,10 @@ async fn participants_read_git_and_disposition_facts_but_never_publish() {
         ("git.fetch", json!({})),
         ("git.push", json!({})),
         ("git.prCreate", json!({ "title": "t" })),
+        ("git.prCreateForSession", json!({ "title": "t" })),
+        ("git.prReconcileCreation", json!({ "url": "https://github.com/o/r/pull/1" })),
+        ("git.prLinkBranch", json!({})),
+        ("git.prUnlink", json!({})),
         ("git.prMerge", json!({ "number": 1 })),
     ] {
         let mut params = params;
@@ -708,6 +717,8 @@ impl crate::cloud_agents::AgentOps for OneTab {
             session_created: None,
             session_last_message_at: None,
             session_has_messages: false,
+            history: None,
+            reset: None,
         }]
     }
     fn busy(&self, _: &str, _: &str) -> bool {
@@ -1186,6 +1197,7 @@ async fn a_key_holder_removed_while_the_runtime_was_down_triggers_a_rotation() {
     assert_eq!(reopened.keys.current().unwrap().0, current);
 }
 
+#[cfg(unix)]
 /// PRO-88: a shell is arbitrary code as the workspace's user, so typing into
 /// one needs what changing the agent's settings needs. A plain driver
 /// watches; an approving viewer still only watches; and a driver whose
@@ -1251,6 +1263,7 @@ async fn a_shell_needs_the_approval_right_and_loses_its_controller_when_it_is_wi
     assert!(tokio::time::timeout(Duration::from_millis(50), erin.closed()).await.is_err(), "a driver stays connected");
 }
 
+#[cfg(unix)]
 /// PRO-88: the live `session.send` applies the mailbox's slash command rule.
 /// (The fixture runs no agents: a send that passed every check is
 /// `unavailable`.)
@@ -1461,6 +1474,52 @@ async fn an_image_is_uploaded_in_parts_by_someone_who_may_send_and_named_by_thei
     assert_eq!((refused["error"]["code"].clone(), refused["error"]["data"]["reason"].clone()), (json!("invalid_params"), json!("attachment-missing")));
     assert_eq!(send(&alice, "request-image-send-2").await["error"]["code"], "unavailable");
     assert!(agents.attachments.load("alice", &["attach-0001".into()]).is_err());
+}
+
+/// PRO-407: `session.attach` with `kind: "file"` takes any file in parts
+/// (`composer/4`), named by its last segment; the live send stores it in the
+/// session's attachments folder on this computer before the agent gets it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_is_uploaded_and_the_live_send_stores_it_in_the_sessions_attachments_folder() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    let agents = with_tab(&f);
+    let session = seed_session(&f.root, "Fix login", None);
+    let tab_id = session.tabs[0].id.clone();
+    let (peer, _events) = Peer::for_user("device-files".into(), Authority::Manage, person_for(Authority::Manage));
+    let hello = call(&f.rpc, &peer, "rpc.hello", json!({ "protocol": PROTOCOL, "want": ["session/1", "composer/3", "composer/4"] })).await.unwrap();
+    assert!(hello["capabilities"].as_array().unwrap().iter().any(|name| name == "composer/4"), "{hello}");
+    let requests = AtomicUsize::new(0);
+    let part = |id: &str, name: &str, offset: u64, bytes: &[u8], last: bool| {
+        let (rpc, peer) = (f.rpc.clone(), peer.clone());
+        let params = json!({
+            "sessionId": session.id, "tabId": tab_id, "attachmentId": id, "kind": "file", "mediaType": "text/markdown", "name": name,
+            "offset": offset, "data": STANDARD.encode(bytes), "last": last,
+            "clientRequestId": format!("request-file-{}", requests.fetch_add(1, Ordering::SeqCst)),
+        });
+        async move { rpc.handle(&peer, &json!({ "id": "1", "method": "session.attach", "params": params })).await }
+    };
+    assert_eq!(part("attach-0001", "/Users/alice/secret/plan.md", 0, b"# Plan\n", false).await["result"]["size"], 7);
+    assert_eq!(part("attach-0001", "/Users/alice/secret/plan.md", 7, b"- ship\n", true).await["result"]["complete"], true);
+    // A name TerminalX uses for its own files is refused in words.
+    let reserved = part("attach-0002", "terminalx.json", 0, b"{}", true).await;
+    assert_eq!((reserved["error"]["code"].clone(), reserved["error"]["data"]["reason"].clone()), (json!("invalid_params"), json!("file-refused")));
+    assert!(reserved["error"]["message"].as_str().unwrap().contains("Rename it"));
+    // A file is never typed as an image.
+    let as_image = json!({ "sessionId": session.id, "tabId": tab_id, "text": "look", "images": [{ "id": "attach-0001" }], "clientRequestId": "request-file-send-1" });
+    assert_eq!(f.rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": as_image })).await["error"]["data"]["reason"], "attachment-missing");
+
+    let send = json!({ "sessionId": session.id, "tabId": tab_id, "text": "read the plan", "files": [{ "id": "attach-0001", "name": "plan.md" }], "clientRequestId": "request-file-send-2" });
+    // The fixture runs no agent, so the send ends `unavailable` once the file is stored.
+    assert_eq!(f.rpc.handle(&peer, &json!({ "id": "1", "method": "session.send", "params": send })).await["error"]["code"], "unavailable");
+    assert!(agents.attachments.check_files(&attachment_owner(&peer), &["attach-0001".into()]).is_err(), "the upload is done with");
+    let folder = crate::store::attachments_dir(&session.id).unwrap();
+    let stored: Vec<PathBuf> = std::fs::read_dir(&folder).unwrap().flatten().flat_map(|entry| std::fs::read_dir(entry.path()).unwrap().flatten().map(|file| file.path())).collect();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].file_name().unwrap(), "plan.md");
+    assert_eq!(std::fs::read(&stored[0]).unwrap(), b"# Plan\n- ship\n");
+    // Never in the session's own tree.
+    assert!(!walk_names(&f.root).iter().any(|name| name == "plan.md"));
 }
 
 /// Every file name under `root`.
@@ -1882,7 +1941,7 @@ async fn a_session_1_desktop_is_served_as_before_and_never_sees_the_additions() 
     let pty = call(&f.rpc, &old, "pty.create", json!({ "clientRequestId": "request-old-5" })).await.unwrap();
     assert!(pty.get("sessionId").is_none());
     // Another client's session/2 change does not reach it as session.sessions.
-    let (new, _new_events) = hello_with(&f.rpc, "device-new", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (new, _new_events) = hello_with(&f.rpc, "device-new", Authority::Manage, protocol::CAPABILITIES).await;
     call(&f.rpc, &new, "session.update", json!({ "sessionId": session.id, "pinned": true, "clientRequestId": "request-new-1" })).await.unwrap();
     no_event(&mut events, "session.sessions").await;
     assert_eq!(call(&f.rpc, &old, "session.list", json!({})).await.unwrap()["sessions"][0]["pinned"], true);
@@ -1895,7 +1954,7 @@ async fn participants_are_refused_every_session_2_write_and_see_only_shared_sess
     listed(&f.rpc);
     f.rpc.set_offered_for_tests(installed_agents());
     let session = seed_session(&f.root, "Fix login", None);
-    let (participant, _events) = hello_with(&f.rpc, "device-phone", Authority::Participate, &protocol::CAPABILITIES).await;
+    let (participant, _events) = hello_with(&f.rpc, "device-phone", Authority::Participate, protocol::CAPABILITIES).await;
     for (method, params) in [
         ("session.update", json!({ "sessionId": session.id, "title": "x", "clientRequestId": "request-part-1" })),
         ("session.addTab", json!({ "sessionId": session.id, "agent": "claude", "clientRequestId": "request-part-2" })),
@@ -1968,7 +2027,7 @@ async fn a_manager_updates_adds_tabs_and_deletes_sessions_and_is_told_the_list()
     let other_dir = f._dir.path().join("elsewhere");
     std::fs::create_dir(&other_dir).unwrap();
     let elsewhere = seed_session(&other_dir, "Another project", None);
-    let (manager, mut events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, mut events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
 
     // update: title, pin and archive, one at a time or together.
     let updated = call(
@@ -2073,7 +2132,7 @@ async fn a_terminal_opened_for_a_session_carries_its_id_and_closes_with_it() {
     std::fs::create_dir(&checkout).unwrap();
     let session = seed_session(&f.root, "Fix login", Some(&checkout));
     let outside = seed_session(&f.root, "Elsewhere", Some(f._dir.path()));
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
 
     let pty = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-pty-1" })).await.unwrap();
     assert_eq!(pty["sessionId"], session.id.as_str());
@@ -2126,7 +2185,7 @@ async fn a_terminal_names_its_session_only_to_pty_2_peers_that_may_see_it() {
     let f = fixture();
     listed(&f.rpc);
     let session = seed_session(&f.root, "Fix login", None);
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     let created = call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session.id, "clientRequestId": "request-scope-1" })).await.unwrap();
     let pty_id = created["ptyId"].as_str().unwrap().to_string();
 
@@ -2168,7 +2227,7 @@ async fn closing_a_session_leaves_its_idle_tabs_alone() {
     let session = seed_session(&f.root, "Read later", None);
     let tab_id = session.tabs[0].id.clone();
     manager.set_status_for_test(&session.id, &tab_id, crate::store::index::TabStatus::Completed);
-    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (peer, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     call(&f.rpc, &peer, "session.close", json!({ "sessionId": session.id, "tabId": tab_id, "clientRequestId": "close-idle" })).await.unwrap();
     assert_eq!(manager.status_for_test(&session.id, &tab_id), crate::store::index::TabStatus::Completed, "an unread reply stays unread");
     let closed = manager.load_events(&session.id, &tab_id).unwrap().into_iter()
@@ -2182,7 +2241,7 @@ async fn closing_a_sessions_last_tab_with_remove_closes_its_terminals() {
     let f = fixture();
     let session = seed_session(&f.root, "Fix login", None);
     let kept = seed_session(&f.root, "Keep me", None);
-    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-desk", Authority::Manage, protocol::CAPABILITIES).await;
     for (session_id, request) in [(&session.id, "request-close-1"), (&kept.id, "request-close-2")] {
         call(&f.rpc, &manager, "pty.create", json!({ "sessionId": session_id, "clientRequestId": request })).await.unwrap();
     }
@@ -2218,6 +2277,7 @@ async fn agent_person(rpc: &Arc<WorkspaceRpc>, device: &str, authority: Authorit
 }
 
 /// Everything under the fixture's directory, with sizes: what the runtime has on disk.
+#[cfg(unix)]
 fn files_on_disk(dir: &Path) -> Vec<(String, u64)> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -2283,6 +2343,7 @@ async fn an_agent_terminal_needs_its_capability_and_is_never_a_shell() {
     assert_eq!(code(call(&f.rpc, &desk, "pty.attach", json!({ "ptyId": "tab:" })).await), "not_found");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_the_cli() {
     let f = fixture();
@@ -2326,6 +2387,7 @@ async fn attaching_to_an_agent_terminal_replays_its_screen_and_never_restarts_th
 
 /// Stands in for Codex for `session.toTerminal`: an app server whose turn
 /// never ends, a terminal-capable CLI, and a record of how it was started.
+#[cfg(unix)]
 const NATIVE_TERMINAL_CODEX: &str = r#"#!/bin/sh
 here=$(dirname "$0")
 printf '%s\n' "$*" >> "$here/launches"
@@ -2368,6 +2430,7 @@ fn a_driver_who_may_start_its_terminal_moves_native_codex_there() {
     assert!(status.success(), "{}", std::fs::read_to_string(dir.path().join("child.log")).unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn native_terminal_child() {
     use crate::store::index::AgentTransport::{ExperimentalCodexStdio as Native, Pty};
@@ -2472,6 +2535,7 @@ async fn native_terminal_child() {
     manager.stop(&session, &tab).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_lease_holder_types_into_an_agent_terminal_and_a_manager_takes_it_over() {
     let f = fixture();
@@ -2556,6 +2620,7 @@ fn controller_of(f: &Fixture, pty_id: &str) -> Option<String> {
     f.rpc.ptys.lock().unwrap()[pty_id].controller.clone()
 }
 
+#[cfg(unix)]
 /// A stop revokes every attachment and a wake issues the same installation a
 /// new attachment and device. On a runtime that kept running underneath (a
 /// frozen container), the terminal is still that person's: they control it
@@ -2652,6 +2717,7 @@ async fn a_returning_device_waits_for_every_connection_of_the_old_one_to_end() {
     assert_eq!(call(&f.rpc, &after, "pty.write", write).await.unwrap()["applied"], true);
 }
 
+#[cfg(unix)]
 /// Control moves by itself only to the same person on the same installation
 /// whose old device is gone. Anyone else, and the same person from another
 /// installation, watches until they ask (`pty.control`), and asking is still
@@ -2776,6 +2842,7 @@ async fn a_terminal_does_not_come_back_to_someone_who_may_not_type() {
     assert_eq!(call(&f.rpc, &back, "pty.control", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["control"], "you");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_viewer_never_resizes_the_controllers_agent_terminal() {
     let f = fixture();
@@ -2801,6 +2868,7 @@ async fn a_second_viewer_never_resizes_the_controllers_agent_terminal() {
     assert_eq!((resized["cols"].as_u64(), resized["rows"].as_u64()), (Some(90), Some(30)));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_access_ends_an_agent_terminal_stream() {
     let f = fixture();
@@ -2846,6 +2914,7 @@ async fn revoked_access_ends_an_agent_terminal_stream() {
     assert_eq!(code(call(&f.rpc, &alice, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await), "forbidden");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn an_agent_terminal_outlives_its_cli_and_keeps_nothing_on_disk() {
     let f = fixture();
@@ -2895,6 +2964,7 @@ async fn an_agent_terminal_outlives_its_cli_and_keeps_nothing_on_disk() {
 
 // ---- review of PRO-86 -----------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_terminals_own_reports_reach_the_program_without_driving_or_counting_as_use() {
     let f = fixture();
@@ -2987,6 +3057,7 @@ async fn a_refused_take_of_an_agent_terminal_moves_nothing() {
     assert_eq!((seen["control"].as_str(), seen["controllerId"].as_str()), (Some("other"), Some("alice")));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn closing_a_tab_drops_its_terminal_and_what_it_kept() {
     let f = fixture();
@@ -3041,6 +3112,7 @@ async fn a_manage_attachment_the_workspace_is_not_shared_with_reaches_no_agent_t
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_viewer_added_later_is_replayed_what_the_terminal_kept() {
     let f = fixture();
@@ -3089,6 +3161,27 @@ async fn application() -> (tokio::net::TcpListener, u16) {
     (listener, port)
 }
 
+/// A loopback port bound but never listened on, on both addresses
+/// `ports.open` tries: a connect there is refused, and while the sockets are
+/// held no other socket can bind that port (they leave out SO_REUSEADDR,
+/// which a second bind of the same port needs on both sockets).
+fn unlistened_port() -> (Vec<tokio::net::TcpSocket>, u16) {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    for _ in 0..64 {
+        let v4 = tokio::net::TcpSocket::new_v4().unwrap();
+        v4.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let port = v4.local_addr().unwrap().port();
+        // Without IPv6 loopback nothing can listen on ::1 either.
+        let Ok(v6) = tokio::net::TcpSocket::new_v6() else { return (vec![v4], port) };
+        match v6.bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))) {
+            Ok(()) => return (vec![v4, v6], port),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(_) => return (vec![v4], port),
+        }
+    }
+    panic!("no loopback port was free on both 127.0.0.1 and ::1");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
     let f = fixture();
@@ -3122,9 +3215,10 @@ async fn a_port_stream_carries_bytes_both_ways_and_ends_with_the_application() {
 async fn a_port_stream_reaches_only_the_workspace_loopback_and_only_what_listens() {
     let f = fixture();
     let (peer, _events) = ports_peer(&f.rpc, "d-1", Authority::Manage, None).await;
-    // A port nothing listens on.
-    let (listener, port) = application().await;
-    drop(listener);
+    // A port nothing listens on, held for the whole test (#1298): a dropped
+    // listener's port went back to the pool, and another test running at the
+    // same time could get it and listen there, so `ports.open` reached it.
+    let (_held, port) = unlistened_port();
     assert_eq!(code(call(&f.rpc, &peer, "ports.open", json!({ "port": port })).await), "port_unreachable");
     // There is no way to name a host: only a port number is read.
     for params in [json!({ "port": 0 }), json!({ "port": 70000 }), json!({ "port": "3000" }), json!({ "host": "169.254.169.254", "port": -1 }), json!({})] {
@@ -3345,6 +3439,7 @@ async fn an_application_that_speaks_first_is_never_heard_before_the_open_answer(
 
 // ---- the open app comes back as a new device (a stop and a wake) ---------------
 
+#[cfg(unix)]
 /// A stop revokes every attachment, and the wake issues the app that stayed
 /// open a new attachment and a new device. To a runtime process that
 /// survived the stop (a frozen container) that is another device: it watches
@@ -3404,6 +3499,7 @@ async fn a_returning_app_is_a_new_device_that_takes_control_and_types_from_one()
     assert_eq!(f.rpc.input_activity.load(Ordering::SeqCst), typed + 2);
 }
 
+#[cfg(unix)]
 /// Another person coming back after a stop never finds the terminal theirs,
 /// whoever they are: taking it is the explicit call, decided by the rules for typing.
 #[tokio::test(flavor = "multi_thread")]
@@ -3438,6 +3534,7 @@ async fn nobody_elses_terminal_is_ever_taken_without_asking() {
     assert_eq!(call(&f.rpc, &bob, "pty.attach", json!({ "ptyId": AGENT_TERMINAL })).await.unwrap()["controllerId"], "alice");
 }
 
+#[cfg(unix)]
 /// A provider that boots the machine cold restarts the runtime: the new
 /// process knows no controller and no writer, and says so instead of typing.
 #[tokio::test(flavor = "multi_thread")]
@@ -3539,7 +3636,7 @@ async fn escape_interrupts_a_running_turn_for_whoever_may_stop_it_and_stops_noth
     let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), ops.clone(), None, None, 7).unwrap();
     f.rpc.set_agents(agents.clone());
     // A message someone queued behind the running turn.
-    let queued = crate::cloud_agents::FollowUp { policy_stamp: None, client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new() };
+    let queued = crate::cloud_agents::FollowUp { policy_stamp: None, client_command_id: "cmd-1".into(), session_id: session.id.clone(), text: "then run the tests".into(), actor_id: "alice".into(), images: Vec::new(), files: Vec::new() };
     agents.follow_ups.push(&tab_id, queued).unwrap();
     f.rpc.set_collaboration(members(json!([
         { "userId": "admin", "role": "manager" },
@@ -3601,7 +3698,7 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     let session = seed_session(&f.root, "Fix login", None);
     let tab_id = session.tabs[0].id.clone();
     let params = json!({ "sessionId": session.id, "tabId": tab_id });
-    let (manager, _events) = hello_with(&f.rpc, "device-manage", Authority::Manage, &protocol::CAPABILITIES).await;
+    let (manager, _events) = hello_with(&f.rpc, "device-manage", Authority::Manage, protocol::CAPABILITIES).await;
     // No agents in this runtime: nothing to interrupt, said as such.
     assert_eq!(code(call(&f.rpc, &manager, "session.interrupt", params.clone()).await), "unavailable");
 
@@ -3611,6 +3708,7 @@ async fn an_interrupt_needs_no_member_list_and_a_runtime_without_agents_says_so(
     assert_eq!(ops.interrupts.lock().unwrap().len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn privacy_raw_pty_queues_and_partial_writes_retain_authority() {
     for kind in ["personal", "managed"] {
@@ -3727,6 +3825,7 @@ fn privacy_raw_pty_child() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
     for method in ["session.delete", "session.close"] {
@@ -3734,7 +3833,7 @@ async fn remote_session_removal_preserves_unconfirmed_terminal_and_retries() {
         let f = fixture();
         let session = seed_session(&f.root, "retained", None);
         let other = seed_session(&f.root, "unrelated", None);
-        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "retention-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"retention-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         let _attached = call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
@@ -3770,7 +3869,7 @@ async fn remote_stop_completion_refuses_a_replaced_pane_before_closing_metadata(
         let _home = crate::store::temp_home();
         let f = fixture();
         let session = seed_session(&f.root, "replacement", None);
-        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "replacement-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"replacement-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
@@ -3815,7 +3914,7 @@ async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
         let _home = crate::store::temp_home();
         let f = fixture();
         let session = seed_session(&f.root, "exit retention", None);
-        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, &protocol::CAPABILITIES).await;
+        let (manager, _events) = hello_with(&f.rpc, "exit-manager", Authority::Manage, protocol::CAPABILITIES).await;
         let opened = call(&f.rpc, &manager, "pty.create", json!({"sessionId":session.id,"clientRequestId":"exit-open"})).await.unwrap();
         let id = opened["ptyId"].as_str().unwrap();
         call(&f.rpc, &manager, "pty.attach", json!({"ptyId":id})).await.unwrap();
@@ -3841,3 +3940,239 @@ async fn waiting_cleanup_retains_closed_metadata_until_confirmation() {
 
 #[path = "agent_commands_server_tests.rs"]
 mod agent_commands;
+
+// ---- turn checkpoints, Reset and Fork (`checkpoints/1`, #1326) --------------
+
+/// Every tab of the stored sessions, as a runtime's agents list them.
+struct StoredTabs;
+
+impl crate::cloud_agents::AgentOps for StoredTabs {
+    fn tabs(&self) -> Vec<crate::cloud_agents::AgentTabInfo> {
+        let sessions = crate::store::index::load().unwrap_or_default();
+        sessions.iter().flat_map(|session| session.tabs.iter().map(move |tab| crate::cloud_agents::AgentTabInfo {
+            session_id: session.id.clone(),
+            tab_id: tab.id.clone(),
+            title: None,
+            harness: tab.harness.clone(),
+            transport: Default::default(),
+            model: tab.model.clone(),
+            effort: None, requested_model: None, requested_effort: None, requested_permission_mode: None,
+            permission_mode: "default".into(),
+            status: crate::store::index::TabStatus::Idle,
+            process: "exited",
+            pending_permissions: Vec::new(),
+            follow_ups: Vec::new(),
+            lease: None,
+            sign_in: None,
+            last_seq: 0,
+            created: String::new(),
+            modified: String::new(),
+            last_message_at: None,
+            has_messages: false,
+            session_created: None,
+            session_last_message_at: None,
+            session_has_messages: false,
+            history: tab.unknown.get("resetLogId").and_then(Value::as_str).map(str::to_owned),
+            reset: crate::cloud_agents::ResetNotice::of(tab),
+        })).collect()
+    }
+    fn busy(&self, _: &str, _: &str) -> bool {
+        false
+    }
+    fn send(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
+        panic!("a fork or a checkpoint read never sends to the agent")
+    }
+    fn stop(&self, _: &str, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn respond(&self, _: &str, _: &str, _: &str, _: &str) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn answer(&self, _: &str, _: &str, _: &str, _: HashMap<String, String>) -> Result<(), crate::cloud_agents::DecisionError> {
+        Err(crate::cloud_agents::DecisionError::NotPending)
+    }
+    fn configure(&self, _: &str, _: &str, _: &crate::cloud_agents::Settings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn note(&self, _: &str, _: &str, _: &str) {}
+    fn events(&self, _: &str, _: &str) -> anyhow::Result<Vec<Value>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A Claude chat of three events, one finished turn, with its saved conversation.
+fn seed_chat(root: &Path) -> (SessionEntry, String) {
+    let session = seed_session(root, "Fork me", None);
+    let tab = session.tabs[0].id.clone();
+    // The fixture's own conversation id: a transcript of another conversation is refused.
+    let provider = "32610000-0000-4000-8000-000000000001";
+    crate::store::index::update_session(&session.id, |entry| {
+        entry.tab_mut(&tab).unwrap().provider_session_id = Some(provider.into());
+        Ok(())
+    })
+    .unwrap();
+    let native = crate::session::fork_conversation_destination("claude", &session.cwd, provider).unwrap();
+    std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+    std::fs::write(native, include_str!("../harness/fixtures/claude-reset.jsonl")).unwrap();
+    let log = crate::store::log_path(&session.id, &tab).unwrap();
+    for (seq, payload) in [
+        (1, json!({"type":"turn_started"})),
+        (2, json!({"type":"assistant_text","text":"FIRST_RESET_MARKER"})),
+        (3, json!({"type":"turn_completed","status":"ok"})),
+    ] {
+        crate::store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":session.id,"tabId":tab,"harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+    }
+    (crate::store::index::get(&session.id).unwrap(), tab)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_forks_a_turn_into_a_tab_or_a_session_and_a_viewer_only_reads_its_checkpoint() {
+    let _home = crate::store::temp_home();
+    let f = fixture();
+    listed(&f.rpc);
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(StoredTabs), None, None, 7).unwrap();
+    f.rpc.set_agents(agents.clone());
+    let (session, tab) = seed_chat(&f.root);
+    let want = json!({ "protocol": PROTOCOL, "want": ["session/1", protocol::CHECKPOINTS] });
+    let (admin, _admin_events) = Peer::for_user("d-admin".into(), Authority::Manage, Some("admin".into()));
+    assert_eq!(call(&f.rpc, &admin, "rpc.hello", want.clone()).await.unwrap()["capabilities"], json!(["session/1", "checkpoints/1"]));
+    let (viewer, _viewer_events) = Peer::for_user("d-viewer".into(), Authority::Participate, Some("viewer".into()));
+    call(&f.rpc, &viewer, "rpc.hello", want).await.unwrap();
+
+    // Reading what a turn changed is the conversation's: a checkout that is not Git kept none.
+    let read = json!({ "sessionId": session.id, "tabId": tab, "seq": 3 });
+    assert_eq!(call(&f.rpc, &viewer, "session.turnCheckpoint", read.clone()).await.unwrap(), json!({ "checkpoint": null }));
+    assert_eq!(call(&f.rpc, &admin, "session.turnCheckpoint", read).await.unwrap(), json!({ "checkpoint": null }));
+    // Changing the workspace's files or sessions is a manager's.
+    let fork = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "tab", "clientRequestId": "request-fork-1" });
+    assert_eq!(code(call(&f.rpc, &viewer, "session.fork", fork.clone()).await), "forbidden");
+    for method in ["session.reset", "session.undoTurn", "session.keepTurn", "session.restoreUndo"] {
+        let params = json!({ "sessionId": session.id, "tabId": tab, "seq": 3, "endSeq": 3, "clientRequestId": "request-viewer-1" });
+        assert_eq!(code(call(&f.rpc, &viewer, method, params).await), "forbidden", "{method}");
+    }
+    assert_eq!(code(call(&f.rpc, &admin, "session.fork", json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "elsewhere", "clientRequestId": "request-fork-0" })).await), "invalid_params");
+
+    // Into a tab beside the source: the conversation up to the turn, owned by the new tab.
+    let forked = call(&f.rpc, &admin, "session.fork", fork.clone()).await.unwrap();
+    assert_eq!(forked["sessionId"], session.id.as_str());
+    let new_tab = forked["tabId"].as_str().unwrap().to_string();
+    assert_ne!(new_tab, tab);
+    assert_eq!(forked["tab"]["tabId"], new_tab.as_str(), "the runtime lists the fork at once");
+    let stored = crate::store::index::get(&session.id).unwrap();
+    assert_eq!(stored.tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), [tab.as_str(), new_tab.as_str()]);
+    let copied = std::fs::read_to_string(crate::store::log_path(&session.id, &new_tab).unwrap()).unwrap();
+    assert_eq!(copied.lines().count(), 3);
+    assert!(copied.lines().all(|line| serde_json::from_str::<Value>(line).unwrap()["tabId"] == new_tab.as_str()));
+    // A resend is answered from the cache: one fork, not two.
+    assert_eq!(call(&f.rpc, &admin, "session.fork", fork).await.unwrap()["tabId"], new_tab.as_str());
+    assert_eq!(crate::store::index::get(&session.id).unwrap().tabs.len(), 2);
+
+    // Into a session of its own; a checkout that is not a worktree is shared, and the note says so.
+    let into_session = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "into": "session", "clientRequestId": "request-fork-2" });
+    let forked = call(&f.rpc, &admin, "session.fork", into_session).await.unwrap();
+    let new_session = crate::store::index::get(forked["sessionId"].as_str().unwrap()).unwrap();
+    assert_ne!(new_session.id, session.id);
+    assert_eq!(new_session.title, "Fork me (fork)");
+    assert_eq!(new_session.active_tab.as_deref(), forked["tabId"].as_str());
+    assert!(forked["note"].as_str().unwrap().contains("shares this checkout"), "{forked}");
+
+    // Reset runs the tab's agent: a runtime with no session manager says so instead of resetting.
+    let reset = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 1, "resetFiles": false, "clientRequestId": "request-reset-1" });
+    assert_eq!(code(call(&f.rpc, &admin, "session.reset", reset).await), "unavailable");
+}
+
+/// #1399: a manager resets a chat to its first turn through `checkpoints/1`,
+/// and the same call with `endSeq: null` undoes it. A stand-in `claude` that
+/// exits at once is all the restart runs, so no provider is ever called.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_manager_resets_a_chat_over_rpc_and_undoes_it() {
+    let _home = crate::store::temp_home();
+    let program = crate::store::root().unwrap().join("claude");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let _program = crate::harness::claude::pty::claude_program_for_tests(program);
+    let mut f = fixture();
+    let manager = SessionManager::new(
+        f.sink.clone(), Arc::new(crate::sink::NoObserver), Arc::new(crate::harness::host::Host::new()),
+        f.terminals.clone(), Arc::new(Default::default()), Arc::new(Default::default()), crate::hooks::prepare_control().unwrap(),
+    );
+    f.rpc = WorkspaceRpc::new(&f.root, 7, f.sink.clone(), f.terminals.clone(), Some(manager.clone())).unwrap();
+    listed(&f.rpc);
+    let ops = crate::cloud_agents::ManagerOps { manager: manager.clone(), root: Some(f.root.to_string_lossy().into_owned()) };
+    let agents = crate::cloud_agents::CloudAgents::open(&f._dir.path().join("agents"), Arc::new(ops), None, None, 7).unwrap();
+    f.rpc.set_agents(agents);
+    // Two finished turns; the second is the one a reset to the first takes away.
+    let (session, tab) = seed_chat(&f.root);
+    let log = crate::store::log_path(&session.id, &tab).unwrap();
+    for (seq, payload) in [
+        (4, json!({"type":"user_message","text":"LATER_RESET_SECRET","images":[],"queued":false})),
+        (5, json!({"type":"turn_completed","status":"ok"})),
+    ] {
+        crate::store::append_line(&log, &json!({"id":format!("e{seq}"),"sessionId":session.id,"tabId":tab,"harness":"claude","seq":seq,"ts":"2026-11-07T10:56:21.941Z","payload":payload}).to_string()).unwrap();
+    }
+    let original_provider = session.tabs[0].provider_session_id.clone();
+    let want = json!({ "protocol": PROTOCOL, "want": ["session/1", protocol::CHECKPOINTS] });
+    let (admin, _admin_events) = Peer::for_user("d-admin".into(), Authority::Manage, Some("admin".into()));
+    call(&f.rpc, &admin, "rpc.hello", want.clone()).await.unwrap();
+    let (viewer, _viewer_events) = Peer::for_user("d-viewer".into(), Authority::Participate, Some("viewer".into()));
+    call(&f.rpc, &viewer, "rpc.hello", want).await.unwrap();
+    let history = |tab_id: &str| std::fs::read_to_string(crate::store::log_path(&session.id, tab_id).unwrap()).unwrap();
+
+    // A viewer may not reset; nothing changes.
+    let reset = json!({ "sessionId": session.id, "tabId": tab, "endSeq": 3, "resetFiles": false, "clientRequestId": "request-reset-1" });
+    assert_eq!(code(call(&f.rpc, &viewer, "session.reset", reset.clone()).await), "forbidden");
+    assert_eq!(crate::store::log_path(&session.id, &tab).unwrap(), log);
+
+    // The manager's reset: a new history with the first turn only, under a new conversation id.
+    let done = call(&f.rpc, &admin, "session.reset", reset).await.unwrap();
+    let stored = crate::store::index::get(&session.id).unwrap();
+    let generation = stored.tabs[0].unknown["resetLogId"].as_str().unwrap().to_string();
+    assert_eq!(done["tab"]["tabId"], tab.as_str(), "{done}");
+    assert_eq!(done["tab"]["history"], generation.as_str(), "the returned tab names its new history: {done}");
+    assert_eq!(done["tab"]["reset"], json!({ "turn": 1, "undoable": true }), "{done}");
+    assert_ne!(stored.tabs[0].provider_session_id, original_provider);
+    let new_log = crate::store::log_path(&session.id, &tab).unwrap();
+    assert_ne!(new_log, log);
+    let kept = history(&tab);
+    assert!(kept.contains("FIRST_RESET_MARKER"), "the first turn is retained");
+    assert!(!kept.contains("LATER_RESET_SECRET"), "the later turn is removed");
+    assert!(std::fs::read_to_string(&log).unwrap().contains("LATER_RESET_SECRET"), "the old history is kept for Undo");
+
+    // Undo: `endSeq: null` brings back the history before the reset, once.
+    let undo = json!({ "sessionId": session.id, "tabId": tab, "endSeq": null, "clientRequestId": "request-reset-2" });
+    let undone = call(&f.rpc, &admin, "session.reset", undo).await.unwrap();
+    let restored = crate::store::index::get(&session.id).unwrap();
+    let undo_generation = restored.tabs[0].unknown["resetLogId"].as_str().unwrap();
+    assert_ne!(undo_generation, generation, "Undo is another history again");
+    assert_eq!(undone["tab"]["history"], undo_generation, "{undone}");
+    assert_eq!(undone["tab"]["reset"], json!({ "undoable": false }), "{undone}");
+    assert!(!restored.tabs[0].unknown.contains_key("resetBackupId"));
+    let back = history(&tab);
+    assert!(back.contains("FIRST_RESET_MARKER") && back.contains("LATER_RESET_SECRET"), "both turns are back");
+    // Nothing more to undo.
+    let again = json!({ "sessionId": session.id, "tabId": tab, "endSeq": null, "clientRequestId": "request-reset-3" });
+    assert_eq!(code(call(&f.rpc, &admin, "session.reset", again).await), "refused");
+    manager.closing();
+    f.terminals.kill_all();
+}
+
+#[test]
+fn a_reset_tab_names_its_history_and_what_its_reset_did() {
+    let mut tab: crate::store::index::TabEntry = serde_json::from_value(json!({ "id": "t", "harness": "claude", "created": "now" })).unwrap();
+    assert_eq!(crate::cloud_agents::ResetNotice::of(&tab), None, "no reset yet");
+    tab.unknown.insert("resetLogId".into(), json!("generation-2"));
+    tab.unknown.insert("resetBackupId".into(), json!("generation-2"));
+    tab.unknown.insert("resetTurn".into(), json!(2));
+    tab.unknown.insert("resetFilesRestored".into(), json!(3));
+    let notice = crate::cloud_agents::ResetNotice::of(&tab).unwrap();
+    assert_eq!(serde_json::to_value(&notice).unwrap(), json!({ "turn": 2, "filesRestored": 3, "undoable": true }));
+    // After an Undo: the backup is used up and no turn is named.
+    for key in ["resetBackupId", "resetTurn", "resetFilesRestored"] {
+        tab.unknown.remove(key);
+    }
+    assert_eq!(serde_json::to_value(crate::cloud_agents::ResetNotice::of(&tab).unwrap()).unwrap(), json!({ "undoable": false }));
+}

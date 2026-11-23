@@ -128,6 +128,9 @@ fn inherit_run_limits(entry: &mut SessionEntry) {
     if crate::orchestration::guard::limited(entry) {
         entry.mark_run_worker();
     }
+    // So does one started by a session that works for a bot: it works for
+    // the bot too, held to its access (PRO-468).
+    crate::bots::chat::inherit(entry);
 }
 
 pub(crate) fn validate_session_target(req: &NewSession) -> Result<()> {
@@ -235,12 +238,125 @@ pub(crate) fn new_tab_entry(t: &NewTab) -> TabEntry {
     }
 }
 
+// ------------------------------------------------------- agent accounts (#980)
+
+/// The account a tab was asked to start on (`docs/AGENT-ACCOUNTS.md`): kept
+/// on the tab entry, so every start and restart of its agent uses it until
+/// it is restarted on another. A tab without one starts on its project's
+/// default, then its agent's, then This Mac's login, as before accounts.
+/// Kept among the entry's unknown fields, which a build that knows nothing
+/// of accounts carries along unchanged.
+pub const TAB_ACCOUNT: &str = "account";
+/// The account the tab's agent last started on, as its launch resolved it.
+/// Written only once it is something other than This Mac's login, so with
+/// one login nothing about a tab entry changes.
+pub const TAB_LAUNCHED_ACCOUNT: &str = "launchedAccount";
+/// In a desktop's reply only, never saved: the tab asked for an account and
+/// the runtime it runs in is too old to know accounts, so it starts on This
+/// Mac's login. The value says why (`olderRuntime`).
+pub const TAB_ACCOUNT_FALLBACK: &str = "accountFallback";
+
+/// A launch request with the account it asks for: `account` beside the
+/// request's own fields, which an older runtime reads as the request alone.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OnAccount<T> {
+    #[serde(flatten)]
+    pub req: T,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// An account id a request may carry: one `agent_accounts` could have made.
+/// Blank is none. Whether the agent lists it is the launch's to decide.
+pub(crate) fn requested_account(account: Option<&str>) -> std::result::Result<Option<String>, String> {
+    match account.map(str::trim).filter(|id| !id.is_empty()) {
+        None => Ok(None),
+        Some(id) if crate::agent_accounts::valid_id(id) => Ok(Some(id.to_string())),
+        Some(_) => Err("That is not an agent account id.".into()),
+    }
+}
+
+/// The account `tab` asks for, if it asks for one.
+pub fn tab_account(tab: &TabEntry) -> Option<&str> {
+    tab.unknown.get(TAB_ACCOUNT).and_then(|value| value.as_str()).filter(|id| crate::agent_accounts::valid_id(id))
+}
+
+/// The account `tab`'s agent runs on, or last ran on: what it asks for, what
+/// its last launch resolved, or `None` when neither says (This Mac's login,
+/// or whatever the defaults give it next).
+pub fn tab_running_account(tab: &TabEntry) -> Option<&str> {
+    tab.unknown.get(TAB_LAUNCHED_ACCOUNT).and_then(|value| value.as_str()).filter(|id| crate::agent_accounts::valid_id(id)).or_else(|| tab_account(tab))
+}
+
+pub(crate) fn set_tab_account(tab: &mut TabEntry, account: Option<&str>) {
+    match account {
+        Some(id) => { tab.unknown.insert(TAB_ACCOUNT.into(), serde_json::Value::String(id.into())); }
+        None => { tab.unknown.remove(TAB_ACCOUNT); }
+    }
+}
+
+/// Record that `tab`'s agent started on `account`. This Mac's login is left
+/// unwritten on a tab that never ran on anything else.
+pub(crate) fn set_launched_account(tab: &mut TabEntry, account: &str) -> bool {
+    let current = tab.unknown.get(TAB_LAUNCHED_ACCOUNT).and_then(|value| value.as_str());
+    if current == Some(account) || (current.is_none() && account == crate::agent_accounts::LOCAL) {
+        return false;
+    }
+    tab.unknown.insert(TAB_LAUNCHED_ACCOUNT.into(), serde_json::Value::String(account.into()));
+    true
+}
+
+/// The key a session's project default is stored under in
+/// `agent-logins.json`: the project's path, which is what names a project
+/// in this app. A quick chat has no project.
+pub fn project_key(entry: &SessionEntry) -> Option<&str> {
+    (!entry.is_quick() && !entry.project_path.is_empty()).then_some(entry.project_path.as_str())
+}
+
+/// What a new tab of `harness` in `session` starts on when it is not asked:
+/// the account another tab of the same agent there asked for, so a session
+/// stays on the account it was started on.
+fn inherited_account<'s>(session: &'s SessionEntry, harness: &str) -> Option<&'s str> {
+    session.tabs.iter().filter(|tab| tab.harness == harness).find_map(tab_account)
+}
+
+/// The variables a terminal tab of `entry` carries (#980), so `claude` or
+/// `codex` typed there uses the session's account: `CLAUDE_CONFIG_DIR` and
+/// `CODEX_HOME` of the added subscription accounts its agents run on, or
+/// would start on now. Nothing for This Mac's login or a key: with one
+/// login a terminal is what it always was. A key is never put in a shell.
+pub fn session_account_env(entry: &SessionEntry) -> Vec<(String, String)> {
+    let Ok(store) = crate::agent_keys::store() else { return Vec::new() };
+    let mut env = Vec::new();
+    for agent in crate::agent_keys::Agent::ALL {
+        let Ok(accounts) = store.entry(agent) else { continue };
+        let asked = entry.tabs.iter().filter(|tab| tab.harness == agent.id()).find_map(tab_running_account);
+        let id = crate::agent_accounts::choose(&accounts, asked, project_key(entry));
+        if !matches!(crate::agent_accounts::login_of(&accounts, &id), crate::agent_accounts::Login::Subscription { .. }) {
+            continue;
+        }
+        // The same home the agent's own launch builds, so a hand-typed CLI
+        // finds the shared settings and history there too.
+        match crate::agent_keys::launch_grant_on(agent.id(), Path::new(&entry.cwd), crate::agent_keys::Choice { account: Some(&id), project: None }) {
+            Ok(grant) => env.extend(grant.after_profile),
+            Err(error) => log::warn!("a terminal of session {} starts without its {} account: {error:#}", entry.id, agent.label()),
+        }
+    }
+    env
+}
+
 /// Create a session: an index entry around an existing checkout, or a new
 /// worktree and its first tab. The index entry lands before anything else can
 /// fail after it, so a session whose agent never starts is still visible and
 /// deletable.
 pub(crate) fn create_session_blocking(sink: &dyn EventSink, req: NewSession) -> Result<SessionEntry> {
-    let (entry, workspace_created) = create_session_workspace(req, None).map_err(err)?;
+    create_session_blocking_on(sink, req, None)
+}
+
+/// [`create_session_blocking`], its first tab on `account` (#980).
+pub(crate) fn create_session_blocking_on(sink: &dyn EventSink, req: NewSession, account: Option<&str>) -> Result<SessionEntry> {
+    let account = requested_account(account)?;
+    let (entry, workspace_created) = create_session_workspace(req, None, account.as_deref()).map_err(err)?;
     emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
@@ -253,7 +369,13 @@ pub(crate) fn create_session_entry(req: NewSession) -> Result<SessionEntry> {
 /// CLI creation keeps an explicit `--name` distinct from the automatically
 /// uniquified worktree-name hints used by the issue view and automations.
 pub(crate) fn create_named_session_blocking(sink: &dyn EventSink, req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    let (entry, workspace_created) = create_session_workspace(req, name)?;
+    create_named_session_blocking_on(sink, req, name, None)
+}
+
+/// [`create_named_session_blocking`], its first tab on `account` (#980).
+pub(crate) fn create_named_session_blocking_on(sink: &dyn EventSink, req: NewSession, name: Option<&str>, account: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
+    let account = requested_account(account).map_err(WorkspaceError::InvalidArguments)?;
+    let (entry, workspace_created) = create_session_workspace(req, name, account.as_deref())?;
     emit_created(sink, &entry, workspace_created);
     Ok(entry)
 }
@@ -265,10 +387,10 @@ fn emit_created(sink: &dyn EventSink, entry: &SessionEntry, workspace_created: b
 
 #[cfg(test)]
 fn create_session_entry_with_name(req: NewSession, name: Option<&str>) -> std::result::Result<SessionEntry, WorkspaceError> {
-    create_session_workspace(req, name).map(|(entry, _)| entry)
+    create_session_workspace(req, name, None).map(|(entry, _)| entry)
 }
 
-fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
+fn create_session_workspace(req: NewSession, name: Option<&str>, account: Option<&str>) -> std::result::Result<(SessionEntry, bool), WorkspaceError> {
     let _request = crate::github_process::scope();
     if crate::git::is_repo(Path::new(&req.project_path)) {
         crate::store::configuration::view(Some(&req.project_path)).and_then(|r| r.require_trust())
@@ -287,7 +409,10 @@ fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result:
     let now = index::now();
     let requested_title = req.title.clone().filter(|t| !t.trim().is_empty())
         .or_else(|| req.issue.as_ref().map(|issue| format!("{} {}", issue.identifier, issue.title)));
-    let first_tab = req.tab.as_ref().map(new_tab_entry);
+    let first_tab = req.tab.as_ref().map(new_tab_entry).map(|mut tab| {
+        set_tab_account(&mut tab, account);
+        tab
+    });
     let has_agent = first_tab.is_some();
     let explicit_name = name.map(|name| {
         if !has_agent || !req.use_worktree || req.on_main || req.cwd.is_some() || !git::is_repo(project_path) {
@@ -352,6 +477,7 @@ fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result:
                 None => git::create_worktree(project_path, &name, req.base_ref.as_deref()).map_err(err)?,
             }
         };
+        entry.bind_checkout_root(&wt.path);
         entry.cwd = wt.path;
         entry.worktree_name = Some(wt.name);
         entry.branch = Some(wt.branch);
@@ -389,18 +515,19 @@ fn create_session_workspace(req: NewSession, name: Option<&str>) -> std::result:
 /// project. Resolve the checkout root before comparing: a cwd may be a
 /// subdirectory, and a worktree may live anywhere on disk.
 fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str) -> Result<bool> {
-    let Ok(cwd) = std::fs::canonicalize(cwd) else { return Ok(false) };
+    let Ok(cwd) = crate::paths::canonicalize(cwd) else { return Ok(false) };
     if cwd == project {
         entry.cwd = cwd.to_string_lossy().into_owned();
         entry.branch = git::current_branch(&cwd);
         return Ok(true);
     }
     let Some(top) = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
-        .and_then(|top| std::fs::canonicalize(top.trim()).ok()) else { return Ok(false) };
+        .and_then(|top| crate::paths::canonicalize(crate::git::path_line(&top)).ok()) else { return Ok(false) };
     if !git::is_worktree_of(project, &top) {
         return Ok(false);
     }
     entry.cwd = cwd.to_string_lossy().into_owned();
+    entry.bind_checkout_root(&top.to_string_lossy());
     entry.branch = git::current_branch(&cwd);
     if top != project {
         entry.worktree_name = top.file_name().map(|name| name.to_string_lossy().into_owned());
@@ -450,19 +577,48 @@ fn quick_chat_folder(path: &str) -> Result<String> {
 
 /// Create a quick chat and tell listeners. Like any session, its index entry
 /// is written before an agent is started in it.
+#[cfg(unix)]
 pub(crate) fn create_quick_chat_blocking(sink: &dyn EventSink, req: NewQuickChat) -> Result<SessionEntry> {
-    let entry = create_quick_chat_entry(req)?;
+    create_quick_chat_blocking_on(sink, req, None)
+}
+
+/// Create a quick chat, its first tab on `account` (#980; none: the agent's
+/// default), and tell listeners. Like any session, its index entry is
+/// written before an agent is started in it.
+pub(crate) fn create_quick_chat_blocking_on(sink: &dyn EventSink, req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
+    let account = requested_account(account)?;
+    let entry = create_quick_chat_entry_on(req, account.as_deref())?;
     sink.emit("session_created", &entry);
     Ok(entry)
 }
 
+#[cfg(test)]
 pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry> {
+    create_quick_chat_entry_on(req, None)
+}
+
+/// Create a quick chat whose entry `mark` finishes before it is first saved
+/// (a bot's chat, PRO-468, carries its bot from its first moment), and tell listeners.
+pub(crate) fn create_quick_chat_marked(sink: &dyn EventSink, req: NewQuickChat, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
+    let entry = create_quick_chat_entry_marked(req, None, mark)?;
+    sink.emit("session_created", &entry);
+    Ok(entry)
+}
+
+fn create_quick_chat_entry_on(req: NewQuickChat, account: Option<&str>) -> Result<SessionEntry> {
+    create_quick_chat_entry_marked(req, account, |_| {})
+}
+
+fn create_quick_chat_entry_marked(req: NewQuickChat, account: Option<&str>, mark: impl FnOnce(&mut SessionEntry)) -> Result<SessionEntry> {
     if let Some(tab) = &req.tab { validate_transport(tab)?; }
     let id = uuid::Uuid::now_v7().to_string();
     let scratch = store::quick::create(&id).map_err(err)?;
     let created = (|| {
         let chosen = req.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()).map(quick_chat_folder).transpose()?;
-        let first_tab = req.tab.as_ref().map(new_tab_entry);
+        let first_tab = req.tab.as_ref().map(new_tab_entry).map(|mut tab| {
+            set_tab_account(&mut tab, account);
+            tab
+        });
         let now = index::now();
         let entry = SessionEntry {
             id: id.clone(),
@@ -495,6 +651,7 @@ pub(crate) fn create_quick_chat_entry(req: NewQuickChat) -> Result<SessionEntry>
         };
         let mut entry = entry;
         inherit_run_limits(&mut entry);
+        mark(&mut entry);
         index::local_sections::insert_session(&entry, req.section_id.as_deref()).map_err(err)?;
         Ok(entry)
     })();
@@ -569,7 +726,7 @@ fn carry_conversations(entry: &SessionEntry, to: &str, preserve_source: bool) {
 /// when `cwd` is `None`. The folder is used as it is and is not registered as
 /// a project. `stop` ends what the session's tabs run: they start again, in
 /// the new directory, the next time they are opened.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn set_quick_chat_cwd(sink: &dyn EventSink, session_id: &str, cwd: Option<&str>, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     set_quick_chat_cwd_fallible(sink, session_id, cwd, &|entry| { stop(entry); Ok(()) })
 }
@@ -592,6 +749,7 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
     let branch = if scratch { None } else { git::current_branch(Path::new(&target)) };
     let updated = index::update_session(session_id, |session| {
         session.cwd = target.clone();
+        session.set_checkout_root(None);
         session.branch = branch.clone();
         session.worktree_name = None;
         session.worktree_removed = false;
@@ -613,7 +771,7 @@ pub(crate) fn set_quick_chat_cwd_fallible(sink: &dyn EventSink, session_id: &str
 /// attached it yet. An empty scratch directory goes; one that holds files is
 /// kept until the session is deleted, since the conversation may refer to
 /// them.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn move_quick_chat_to_project(sink: &dyn EventSink, session_id: &str, project_path: &str, stop: &dyn Fn(&SessionEntry)) -> Result<SessionEntry> {
     move_quick_chat_to_project_fallible(sink, session_id, project_path, &|entry| { stop(entry); Ok(()) })
 }
@@ -629,6 +787,7 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
     workspace.cwd = project.clone();
     workspace.branch = git::current_branch(Path::new(&project));
     workspace.worktree_name = None;
+    workspace.set_checkout_root(None);
     workspace.base_ref = None;
     workspace.worktree_base = None;
     adopt_existing_workspace(&mut workspace, Path::new(&project), &entry.cwd)?;
@@ -637,6 +796,11 @@ pub(crate) fn move_quick_chat_to_project_fallible(sink: &dyn EventSink, session_
         session.kind = SessionKind::Project;
         session.project_path = project.clone();
         session.cwd = workspace.cwd.clone();
+        if let Some(root) = workspace.checkout_root() {
+            session.bind_checkout_root(root);
+        } else {
+            session.set_checkout_root(None);
+        }
         session.branch = workspace.branch.clone();
         session.worktree_name = workspace.worktree_name.clone();
         session.worktree_removed = false;
@@ -668,7 +832,7 @@ pub(crate) fn has_shell_in_use(session: &SessionEntry, live: &[&str], running: i
 /// purpose) unless it was the idle sweep that archived it (#718), and so is
 /// one `busy` says is running. `stop` ends what an idle
 /// one still has open. Returns what was deleted.
-#[cfg_attr(not(test), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
+#[cfg_attr(not(all(test, unix)), expect(dead_code, reason = "Preserve the infallible caller API; owner mutations use the fallible variant."))]
 pub(crate) fn sweep_idle_quick_chats(sink: &dyn EventSink, days: u32, busy: &dyn Fn(&SessionEntry) -> bool, stop: &dyn Fn(&SessionEntry)) -> Result<Vec<SessionEntry>> {
     sweep_idle_quick_chats_fallible(sink, days, busy, &|entry| { stop(entry); Ok(()) })
 }
@@ -685,7 +849,9 @@ pub(crate) fn sweep_idle_quick_chats_fallible(sink: &dyn EventSink, days: u32, b
         let last = chrono::DateTime::parse_from_rfc3339(&session.modified).ok();
         // Archived by the idle sweep (#718) is not set aside on purpose.
         let set_aside = session.archived && !session.archive.auto_archived;
-        session.is_quick() && !session.pinned && !set_aside && !working && last.is_some_and(|last| last < cutoff)
+        // A bot's chat (PRO-468) stands as long as its bot does: retention never takes it.
+        let bot = crate::bots::chat::session_bot(session).is_some();
+        session.is_quick() && !session.pinned && !bot && !set_aside && !working && last.is_some_and(|last| last < cutoff)
     };
     let candidates: Vec<SessionEntry> = index::load().map_err(err)?.into_iter().filter(|session| idle(session) && !busy(session)).collect();
     if candidates.is_empty() {
@@ -731,7 +897,7 @@ pub struct WorkspaceRename {
 pub(crate) fn rename_workspace_entries(project_path: &str, path: &str, requested: &str) -> std::result::Result<WorkspaceRename, WorkspaceError> {
     let _naming = WORKSPACE_NAMING.lock();
     let project = projects::canonical(project_path).map_err(err)?;
-    let target = std::fs::canonicalize(path).map_err(err)?;
+    let target = crate::paths::canonicalize(path).map_err(err)?;
     let old_name = target
         .file_name()
         .and_then(|part| part.to_str())
@@ -747,9 +913,11 @@ pub(crate) fn rename_workspace_entries(project_path: &str, path: &str, requested
             // The old folder no longer exists after `git worktree move`, so
             // compare its canonical path lexically instead of canonicalising
             // the session cwd after the move.
-            let matches = Path::new(&session.cwd) == target || session.cwd == path;
+            let matches = Path::new(&session.cwd) == target || session.cwd == path || session.checkout_root() == target.to_str();
             if matches {
-                session.cwd = new_path.clone();
+                let relative = Path::new(&session.cwd).strip_prefix(&target).unwrap_or(Path::new(""));
+                session.cwd = if relative.as_os_str().is_empty() { new_path.clone() } else { Path::new(&new_path).join(relative).to_string_lossy().into_owned() };
+                session.set_checkout_root(Some(&new_path));
                 session.worktree_name = Some(name.clone());
                 session.branch = Some(new_branch.clone());
                 session.modified = index::now();
@@ -818,7 +986,9 @@ pub(crate) fn rename_branch_entries(project_path: &str, from: &str, to: &str) ->
 }
 
 pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
-    index::load().map(|sessions| sessions_within(sessions, path)).map_err(err)
+    let sessions = index::load().map_err(err)?;
+    ensure_workspace_identity(&sessions, path)?;
+    Ok(sessions_within(sessions, path))
 }
 
 /// What deleting a workspace would cost: the git state of its tree plus the
@@ -834,6 +1004,9 @@ pub(crate) fn sessions_in_workspace(path: &Path) -> Result<Vec<SessionEntry>> {
 /// than wave it through.
 pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) -> Result<crate::workspaces::WorkspaceDisposition> {
     let _request = crate::github_process::scope();
+    let path = checkout_root(project, path);
+    let path = path.as_path();
+    require_resolved_pr_creation(path)?;
     let mut disposition = crate::workspaces::disposition(project, path);
     if fetch && !disposition.is_main {
         disposition.landed = Some(crate::landed::check(project, path, crate::landed::Fetch::Fresh));
@@ -845,26 +1018,221 @@ pub(crate) fn workspace_disposition(project: &Path, path: &Path, fetch: bool) ->
     Ok(disposition)
 }
 
+/// The pull request a create left unverified in the checkout `path` belongs
+/// to, which keeps it from being removed until `git.prReconcileCreation` or a
+/// retried create settles it.
+pub(crate) fn pending_pr_creation_for(project: &Path, path: &Path) -> Result<Option<String>> {
+    let project = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    crate::remote::git::pending_pr_creation_in(&checkout_root(&project, path)).map_err(|error| error.message)
+}
+
+/// Saved checkout evidence for sessions recorded before it was kept (#1228).
+/// A fork of a session whose worktree later disappears is verified against
+/// its `checkoutIdentity`; a session saved before that existed has none, and
+/// once the directory is gone nothing can establish it. So, once per run,
+/// each such session whose checkout is still here, a linked worktree of its
+/// project on its stored branch and at its recorded root when one is
+/// recorded, has it captured now, as a new session's is when it is created.
+/// Any doubt leaves the session as it was; a checkout already missing stays
+/// unrecoverable.
+pub fn backfill_checkout_identities() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // Off the caller's thread: it runs Git for each such session, and nothing waits for it.
+    ONCE.call_once(|| {
+        std::thread::spawn(|| {
+            if let Err(error) = backfill_checkout_identities_now() {
+                log::warn!("record checkout identities of older sessions: {error:#}");
+            }
+        });
+    });
+}
+
+pub(crate) fn backfill_checkout_identities_now() -> anyhow::Result<usize> {
+    let sessions = index::load()?;
+    let found: Vec<(String, String, String, serde_json::Value)> = sessions.iter().filter_map(|session| {
+        if session.worktree_removed || session.worktree_name.is_none() || session.unknown.contains_key("checkoutIdentity") {
+            return None;
+        }
+        let branch = session.branch.as_deref().filter(|branch| !branch.is_empty())?;
+        let cwd = crate::paths::canonicalize(&session.cwd).ok()?;
+        let top = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()?;
+        let root = crate::paths::canonicalize(crate::git::path_line(&top)).ok()?;
+        if let Some(recorded) = session.checkout_root() {
+            if crate::paths::canonicalize(recorded).ok()? != root {
+                return None;
+            }
+        }
+        if git::current_branch(&root).as_deref() != Some(branch) {
+            return None;
+        }
+        let identity = git::worktree_identity::WorktreeIdentity::capture(Path::new(&session.project_path), &root)?;
+        Some((session.id.clone(), session.cwd.clone(), root.to_string_lossy().into_owned(), serde_json::to_value(identity).ok()?))
+    }).collect();
+    if found.is_empty() {
+        return Ok(0);
+    }
+    index::update(|sessions| {
+        let mut bound = 0;
+        for (id, cwd, root, identity) in found {
+            // Only a session still as it was read: one moved or bound meanwhile is left alone.
+            let Some(session) = sessions.iter_mut().find(|session| session.id == id && session.cwd == cwd && !session.worktree_removed
+                && session.worktree_name.is_some() && !session.unknown.contains_key("checkoutIdentity")) else { continue };
+            session.set_checkout_root(Some(&root));
+            session.unknown.insert("checkoutIdentity".into(), identity);
+            bound += 1;
+        }
+        Ok(bound)
+    })
+}
+
+fn require_resolved_pr_creation(path: &Path) -> Result<()> {
+    if let Some(url) = crate::remote::git::pending_pr_creation_in(path).map_err(|error| error.message)? {
+        return Err(format!("Verify the pull request at {url} before removing this workspace."));
+    }
+    Ok(())
+}
+
+// A missing descendant may have belonged to a pruned nested checkout. No
+// surviving ancestor can prove otherwise, even if Git still registers it.
+fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
+        ancestor = parent;
+    }
+    let normalized = crate::paths::canonicalize(ancestor).ok()
+        .and_then(|base| path.strip_prefix(ancestor).ok().map(|tail| base.join(tail)))
+        .unwrap_or_else(|| path.to_path_buf());
+    let project_root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let git_root = git::run(ancestor, &["rev-parse", "--show-toplevel"]).ok()
+        .and_then(|top| crate::paths::canonicalize(crate::git::path_line(&top)).ok());
+    let resolved = git::list_worktrees(project).unwrap_or_default().into_iter()
+        .map(|(root, _)| { let root = PathBuf::from(root); crate::paths::canonicalize(&root).unwrap_or(root) })
+        .chain(git_root)
+        .filter(|root| normalized.starts_with(root) && (path.exists() || *root == normalized))
+        .max_by_key(|root| root.components().count());
+    // Git may have removed the worktree registration and .git file before a
+    // failed deletion left the directory behind. Preserve that exact recorded
+    // path for a retry; the ordinary direct-removal guard still checks it.
+    if resolved.as_ref() == Some(&project_root) && normalized != project_root
+        && index::load().unwrap_or_default().iter().any(|entry| entry.worktree_name.is_some() && !entry.worktree_removed
+            && crate::paths::canonicalize(&entry.cwd).unwrap_or_else(|_| PathBuf::from(&entry.cwd)) == normalized) {
+        return normalized;
+    }
+    resolved.unwrap_or(normalized)
+}
+
+fn session_checkout_root(session: &SessionEntry) -> PathBuf {
+    let cwd = Path::new(&session.cwd);
+    let project = Path::new(&session.project_path);
+    if !cwd.exists() && !session.worktree_removed {
+        if let Some(root) = session.checkout_root().map(PathBuf::from).filter(|root| identity_path(cwd).starts_with(identity_path(root))) {
+            return crate::paths::canonicalize(&root).unwrap_or(root);
+        }
+        // Older entries did not record the root. Their worktree name is the
+        // checkout directory's name; use it only when it identifies one
+        // registered ancestor and does not also name a missing descendant.
+        if let Some(name) = session.worktree_name.as_deref() {
+            let matches: Vec<PathBuf> = git::list_worktrees(project).unwrap_or_default().into_iter()
+                .map(|(root, _)| PathBuf::from(root))
+                .filter(|root| root.file_name().is_some_and(|part| part == name) && cwd.starts_with(root))
+                .filter(|root| cwd.strip_prefix(root).is_ok_and(|tail| !tail.components().any(|part| part.as_os_str() == name)))
+                .collect();
+            if matches.len() == 1 {
+                return crate::paths::canonicalize(&matches[0]).unwrap_or_else(|_| matches[0].clone());
+            }
+        }
+    }
+    checkout_root_path(project, cwd)
+}
+
+fn checkout_root(project: &Path, path: &Path) -> PathBuf {
+    if !path.exists() {
+        let roots: std::collections::BTreeSet<_> = index::load().unwrap_or_default().iter()
+            .filter(|session| identity_path(Path::new(&session.cwd)) == identity_path(path))
+            .map(|session| identity_path(&session_checkout_root(session))).collect();
+        if roots.len() == 1 { return roots.into_iter().next().unwrap(); }
+    }
+    checkout_root_path(project, path)
+}
+
+// Canonicalize the existing prefix of a missing path, then normalize its tail.
+fn identity_path(path: &Path) -> PathBuf {
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let Some(parent) = ancestor.parent().filter(|parent| *parent != ancestor) else { break };
+        ancestor = parent;
+    }
+    let mut result = crate::paths::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+    if let Ok(tail) = path.strip_prefix(ancestor) {
+        for component in tail.components() {
+            match component {
+                std::path::Component::ParentDir => { result.pop(); }
+                std::path::Component::CurDir => {},
+                other => result.push(other.as_os_str()),
+            }
+        }
+    }
+    result
+}
+
+/// Refuse to act on an overlapping legacy cwd when its checkout can no
+/// longer be verified. A missing path can hide a pruned nested checkout, so
+/// neither a surviving ancestor nor a directory name proves its identity.
+pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) -> Result<()> {
+    let target = identity_path(path);
+    for session in sessions {
+        let cwd = Path::new(&session.cwd);
+        if session.worktree_removed {
+            continue;
+        }
+        let normalized = identity_path(cwd);
+        if !normalized.starts_with(&target) && !target.starts_with(&normalized) {
+            continue;
+        }
+        if cwd.exists() {
+            let top = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
+                .map(|top| identity_path(Path::new(crate::git::path_line(&top))));
+            let recorded = session.checkout_root().map(|root| identity_path(Path::new(root))).filter(|root| normalized.starts_with(root));
+            // A failed removal can leave the exact recorded checkout behind
+            // after Git has removed its .git file. A retry of that exact path
+            // remains possible when the project is still a readable repo.
+            let project = Path::new(&session.project_path);
+            let exact_retry = target == normalized && recorded.as_ref() == Some(&normalized)
+                && top.as_ref().is_none_or(|top| *top == identity_path(project))
+                && git::list_worktrees(project).is_ok();
+            // Git can walk through recreated directories to a surviving
+            // parent after a nested worktree was pruned. A legacy descendant
+            // cannot prove that parent was its checkout.
+            if !exact_retry && top.as_ref().is_none_or(|top| recorded.as_ref().map_or(*top != normalized, |root| root != top)) {
+                return Err(format!("Cannot establish the checkout for session ‘{}’ at {}. Nothing was removed.", session.title, cwd.display()));
+            }
+            continue;
+        }
+        let records = git::list_worktrees(Path::new(&session.project_path))
+            .map_err(|error| format!("Cannot verify the checkout for session ‘{}’: {error}. Nothing was removed.", session.title))?;
+        if session.checkout_root().is_some_and(|root| normalized.starts_with(identity_path(Path::new(root)))) {
+            continue;
+        }
+        let root = session_checkout_root(session);
+        // An ancestor record cannot rule out an unregistered nested checkout
+        // anywhere in the missing suffix, even if its name matches.
+        let registered = identity_path(&root) == normalized && records.into_iter().any(|(record, _)| {
+            identity_path(Path::new(&record)) == normalized
+        });
+        if !registered {
+            return Err(format!("Cannot establish the checkout for session ‘{}’ at {}. Nothing was removed.", session.title, cwd.display()));
+        }
+    }
+    Ok(())
+}
+
 /// The sessions among `sessions` that run in the checkout at `path`.
 pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<SessionEntry> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = identity_path(path);
     sessions
         .into_iter()
-        .filter(|session| {
-            let cwd = Path::new(&session.cwd);
-            match std::fs::canonicalize(cwd) {
-                Ok(cwd) if cwd == target => true,
-                // A session started in a subdirectory belongs to the
-                // checkout that directory is part of. Another
-                // worktree nested below this one (the project's own
-                // worktree folder is) is its own workspace.
-                Ok(cwd) if cwd.starts_with(&target) => {
-                    git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| std::fs::canonicalize(top.trim()).ok()).is_some_and(|top| top == target)
-                }
-                Ok(_) => false,
-                Err(_) => cwd == target,
-            }
-        })
+        .filter(|session| identity_path(&session_checkout_root(session)) == target)
         .collect()
 }
 
@@ -874,10 +1242,14 @@ pub(crate) fn sessions_within(sessions: Vec<SessionEntry>, path: &Path) -> Vec<S
 /// has no worktree to remove.
 pub(crate) fn sessions_sharing_worktree(session_id: &str) -> Result<Vec<SessionEntry>> {
     let entry = index::get(session_id).map_err(err)?;
+    if !entry.worktree_removed {
+        ensure_workspace_identity(&index::load().map_err(err)?, Path::new(&entry.cwd))?;
+    }
     if entry.worktree_name.is_none() || entry.worktree_removed {
         return Ok(Vec::new());
     }
-    Ok(sessions_in_workspace(Path::new(&entry.cwd))?.into_iter().filter(|session| session.id != entry.id).collect())
+    let root = session_checkout_root(&entry);
+    Ok(sessions_in_workspace(&root)?.into_iter().filter(|session| session.id != entry.id).collect())
 }
 
 /// What becomes of the sessions in a workspace that is removed.
@@ -996,12 +1368,13 @@ pub(crate) fn remove_workspace(sink: &dyn EventSink, request: &WorkspaceRemoval<
 /// A stop error leaves the workspace and conversation records intact.
 pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &WorkspaceRemoval<'_>, stop: &dyn Fn(&SessionEntry) -> Result<()>) -> Result<WorkspaceRemoved> {
     let _github_request = crate::github_process::scope();
-    let project = std::fs::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
-    let target = std::fs::canonicalize(request.path).unwrap_or_else(|_| PathBuf::from(request.path));
+    let project = crate::paths::canonicalize(request.project_path).unwrap_or_else(|_| PathBuf::from(request.project_path));
+    let target = checkout_root(&project, Path::new(request.path));
     if target == project {
         return Err("A project's own checkout cannot be removed.".into());
     }
     let _lease = crate::archive_script::RemovalLease::acquire(&target).map_err(err)?;
+    require_resolved_pr_creation(&target)?;
     let affected = sessions_in_workspace(&target)?;
     if let Some(expected) = request.expected_sessions {
         let now: std::collections::BTreeSet<&str> = affected.iter().map(|session| session.id.as_str()).collect();
@@ -1015,6 +1388,9 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     let before = crate::landed::check(&project, &target, request.fetch);
     if !permitted(&before, &request.confirmation) {
         return Err(needs_confirmation(&before, &request.confirmation, "Nothing was removed."));
+    }
+    if request.archive.is_none() && target.exists() {
+        crate::archive_script::require_no_script(&project).map_err(err)?;
     }
     // From the stop to the end nothing starts in the workspace: a prompt to
     // one of its sessions is refused, and every other session's is admitted
@@ -1043,6 +1419,7 @@ pub(crate) fn remove_workspace_fallible(sink: &dyn EventSink, request: &Workspac
     if let Some(guard) = request.guard {
         guard()?;
     }
+    require_resolved_pr_creation(&target)?;
     let on_disk = std::fs::symlink_metadata(&target).is_ok();
     // What the sessions' tools let go of would run on from a deleted directory.
     let strays = if on_disk { crate::stray_processes::stop_in(&target) } else { Vec::new() };
@@ -1186,7 +1563,8 @@ pub(crate) fn adopt_agent_title(session_id: &str) -> Result<Option<SessionEntry>
     }
     let transcript = session.tabs.iter()
         .filter(|tab| tab.harness == "claude")
-        .filter_map(|tab| crate::harness::claude::transcript::locate(&session.cwd, tab.provider_session_id.as_deref()?))
+        // Where the account the tab runs on wrote it (#980).
+        .filter_map(|tab| crate::agent_data::locate_claude(tab, &session.cwd, tab.provider_session_id.as_deref()?))
         .find(|path| path.is_file());
     // The app's own log holds the prompt as it was typed, for every agent.
     let first = store::conversation_titles::first_request(&session)
@@ -1286,16 +1664,28 @@ pub(crate) fn update_session_meta(session_id: &str, patch: &SessionPatch) -> Res
 
 /// Add an agent tab to a session and make it the active one.
 pub(crate) fn add_tab_entry(session_id: &str, tab: &NewTab) -> Result<TabEntry> {
+    add_tab_entry_on(session_id, tab, None)
+}
+
+/// [`add_tab_entry`] on `account` (#980). Not asked, the tab starts on the
+/// account another tab of its agent in the session asked for.
+pub(crate) fn add_tab_entry_on(session_id: &str, tab: &NewTab, account: Option<&str>) -> Result<TabEntry> {
     validate_transport(tab)?;
-    let t = new_tab_entry(tab);
-    let out = t.clone();
+    let account = requested_account(account)?;
+    let mut t = new_tab_entry(tab);
     index::update_session(session_id, |s| {
-        s.tabs.push(t);
-        s.active_tab = Some(out.id.clone());
+        // A new tab of a session that works for a bot starts within its access (PRO-468).
+        if let Some(limit) = crate::bots::chat::tab_limit(s, &t) {
+            t.permission_mode = limit.clamp(&t.permission_mode);
+        }
+        let harness = t.harness.clone();
+        set_tab_account(&mut t, account.as_deref().or_else(|| inherited_account(s, &harness)));
+        s.tabs.push(t.clone());
+        s.active_tab = Some(t.id.clone());
         Ok(())
     })
     .map_err(err)?;
-    Ok(out)
+    Ok(t)
 }
 
 /// Close an agent tab: it leaves its session, and nothing of a conversation
@@ -1363,18 +1753,24 @@ pub(crate) fn delete_session_blocking_fallible(sink: &dyn EventSink, session_id:
 /// other sessions use it.
 pub(crate) fn sole_workspace_of(session_id: &str) -> Result<Option<String>> {
     let entry = index::get(session_id).map_err(err)?;
+    if !entry.worktree_removed {
+        ensure_workspace_identity(&index::load().map_err(err)?, Path::new(&entry.cwd))?;
+    }
     if entry.worktree_name.is_none() || entry.worktree_removed {
         return Ok(None);
     }
-    let same = |a: &str, b: &str| std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).map(|(a, b)| a == b).unwrap_or(a == b);
-    if same(&entry.cwd, &entry.project_path) {
+    let root = session_checkout_root(&entry);
+    let project = crate::paths::canonicalize(&entry.project_path).unwrap_or_else(|_| PathBuf::from(&entry.project_path));
+    if root == project {
         return Ok(None);
     }
-    Ok(sessions_sharing_worktree(session_id)?.is_empty().then_some(entry.cwd))
+    Ok(sessions_sharing_worktree(session_id)?.is_empty().then(|| root.to_string_lossy().into_owned()))
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
+    use crate::paths::Canonical;
     #[test]
     fn pull_request_sessions_require_an_isolated_target() {
         let valid = serde_json::json!({ "projectPath": "/repo", "useWorktree": true, "checkoutPr": 12, "tab": { "harness": "claude" } });
@@ -1716,7 +2112,7 @@ mod tests {
         assert_eq!(entry.title, "#203 fix");
         assert_eq!(entry.worktree_name.as_deref(), Some("fix-203"));
         assert_eq!(entry.branch.as_deref(), Some("raccoon/fix-203"));
-        assert_eq!(Path::new(&entry.cwd), git::worktree_path(dir.path(), "fix-203").canonicalize().unwrap());
+        assert_eq!(Path::new(&entry.cwd), git::worktree_path(dir.path(), "fix-203").canonical().unwrap());
         assert_eq!(index::get(&entry.id).unwrap(), entry);
 
         for expected in ["203-fix", "203-fix-2"] {
@@ -1942,8 +2338,9 @@ mod tests {
         let terminals = Arc::new(crate::pty::Terminals::new());
         let sink: Arc<dyn EventSink> = Arc::new(sink());
         let mut removal = request(&session, SessionsFate::Keep, Confirmation::Forced, git::DirectDelete::Allowed);
-        // A caller without a runner cannot bypass a configured hook.
-        assert!(remove_workspace(&*sink, &removal, &|_| {}).unwrap_err().contains("archive script"));
+        // A caller without a runner cannot bypass a configured hook or stop the session.
+        let refusal = remove_workspace(&*sink, &removal, &|_| panic!("archive refusal stopped the session")).unwrap_err();
+        assert!(refusal.contains("archive script"), "{refusal}");
         removal.archive = Some(crate::archive_script::Runner { terminals: &terminals, sink: &sink, unattended: false });
         let error = remove_workspace(&*sink, &removal, &|_| {}).unwrap_err();
         let failure = crate::archive_script::Failure::from_error(&error).unwrap();
@@ -2074,7 +2471,7 @@ mod tests {
     }
 
     fn scratch_root() -> PathBuf {
-        store::quick::root().unwrap().canonicalize().unwrap()
+        store::quick::root().unwrap().canonical().unwrap()
     }
 
     #[test]
@@ -2116,7 +2513,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let folder = tempfile::tempdir().unwrap();
         let chat = quick_chat(Some(folder.path()));
-        assert_eq!(Path::new(&chat.cwd), folder.path().canonicalize().unwrap());
+        assert_eq!(Path::new(&chat.cwd), folder.path().canonical().unwrap());
         assert!(chat.is_quick() && chat.branch.is_none());
         // It still has a scratch directory to go back to, named for it.
         assert_eq!(Path::new(&chat.project_path), scratch_root().join(&chat.id));
@@ -2136,7 +2533,7 @@ mod tests {
         let _home = crate::store::temp_home();
         let missing = tempfile::tempdir().unwrap().path().join("gone");
         let error = create_quick_chat_entry(NewQuickChat { parent: None, section_id: None, title: None, cwd: Some(missing.to_string_lossy().into_owned()), tab: None }).unwrap_err();
-        assert!(error.contains("resolve"), "{error}");
+        assert!(error.contains("No folder at"), "{error}");
         assert!(index::load().unwrap().is_empty());
         assert_eq!(std::fs::read_dir(store::quick::root().unwrap()).unwrap().count(), 0);
     }
@@ -2168,7 +2565,7 @@ mod tests {
         let chat = quick_chat(None);
         let began = claude_transcript(&chat, CONVERSATION);
         let folder = tempfile::tempdir().unwrap();
-        let target = folder.path().canonicalize().unwrap();
+        let target = folder.path().canonical().unwrap();
         let stopped = std::cell::Cell::new(0);
         let stop = |_: &SessionEntry| stopped.set(stopped.get() + 1);
         let sink = sink();
@@ -2234,7 +2631,7 @@ mod tests {
         let stopped = std::cell::Cell::new(0);
 
         let moved = move_quick_chat_to_project(&sink, &chat.id, project.path().to_str().unwrap(), &|_| stopped.set(stopped.get() + 1)).unwrap();
-        let project_path = project.path().canonicalize().unwrap();
+        let project_path = project.path().canonical().unwrap();
         assert_eq!(stopped.get(), 1);
         assert_eq!(moved.kind, SessionKind::Project);
         assert_eq!(moved.project(), Some(project_path.to_str().unwrap()));
@@ -2286,7 +2683,7 @@ mod tests {
 
         for cwd in [PathBuf::from(&source.cwd), subdir] {
             let continued = session_in(project.path(), cwd.to_str().unwrap(), "Continuation");
-            assert_eq!(Path::new(&continued.cwd), cwd.canonicalize().unwrap());
+            assert_eq!(Path::new(&continued.cwd), cwd.canonical().unwrap());
             assert_eq!(continued.worktree_name, source.worktree_name);
             assert_eq!(continued.branch, branch);
             assert_eq!(continued.base_ref, source.base_ref);
@@ -2388,7 +2785,7 @@ mod tests {
         for cwd in [other.path(), foreign.as_path(), boundary.as_path()] {
             let chat = quick_chat(Some(cwd));
             let moved = move_quick_chat_to_project(&sink(), &chat.id, project.path().to_str().unwrap(), &|_| {}).unwrap();
-            assert_eq!(Path::new(&moved.cwd), project.path().canonicalize().unwrap());
+            assert_eq!(Path::new(&moved.cwd), project.path().canonical().unwrap());
             assert_eq!(moved.branch.as_deref(), Some("main"));
             assert!(moved.worktree_name.is_none() && moved.base_ref.is_none() && moved.worktree_base.is_none());
             let explicit = session_in(project.path(), cwd.to_str().unwrap(), "Explicit unrelated cwd");
@@ -2461,6 +2858,34 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// A bot's chats stand as long as their bot (PRO-468): retention takes
+    /// none, archived by the idle sweep or not, however long it was quiet.
+    #[test]
+    fn retention_never_takes_a_bots_chat() {
+        let _home = crate::store::temp_home();
+        let home = quick_chat(None);
+        let swept = quick_chat(None);
+        let plain = quick_chat(None);
+        for session in [&home, &swept, &plain] {
+            aged(session, 45);
+        }
+        index::update(|sessions| {
+            for session in sessions.iter_mut().filter(|session| session.id != plain.id) {
+                crate::bots::chat::set_session_bot(session, &crate::bots::chat::BotRef { id: "b".into(), home: session.id == home.id });
+            }
+            let by_the_sweep = sessions.iter_mut().find(|s| s.id == swept.id).unwrap();
+            by_the_sweep.archived = true;
+            by_the_sweep.archive.auto_archived = true;
+            Ok(())
+        })
+        .unwrap();
+        let removed = sweep_idle_quick_chats(&sink(), 30, &|_| false, &|_| {}).unwrap();
+        assert_eq!(removed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [plain.id.as_str()]);
+        let kept: Vec<String> = index::load().unwrap().into_iter().map(|s| s.id).collect();
+        assert!(kept.contains(&home.id) && kept.contains(&swept.id));
+        assert!(Path::new(&home.cwd).exists());
     }
 
     #[test]
@@ -2624,6 +3049,168 @@ mod tests {
         // A session at the project root has no workspace of its own to take.
         let at_root = session_in(dir.path(), &dir.path().to_string_lossy(), "Root");
         assert_eq!(sole_workspace_of(&at_root.id).unwrap(), None);
+    }
+
+    #[test]
+    fn subdirectory_workspace_identity_handles_missing_paths_and_nested_worktrees() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let mut session = worktree_session(dir.path());
+        let root = PathBuf::from(&session.cwd);
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        session.cwd = sub.to_string_lossy().into_owned();
+        index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
+        let companion = session_in(dir.path(), root.to_str().unwrap(), "Root companion");
+        assert_eq!(sessions_sharing_worktree(&session.id).unwrap()[0].id, companion.id);
+        assert_eq!(sole_workspace_of(&session.id).unwrap(), None);
+        assert_eq!(workspace_disposition(dir.path(), &sub, false).unwrap().sessions, 2);
+
+        // A session retains its checkout identity when its cwd disappears.
+        std::fs::remove_dir(&sub).unwrap();
+        assert_eq!(sessions_sharing_worktree(&session.id).unwrap()[0].id, companion.id);
+        assert_eq!(sessions_in_workspace(&root).unwrap().len(), 2);
+        index::update_session(&session.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        assert!(sessions_sharing_worktree(&session.id).is_err(), "a missing legacy descendant may be a nested checkout");
+        index::update_session(&session.id, |entry| { entry.set_checkout_root(root.to_str()); Ok(()) }).unwrap();
+        delete_session_blocking(&sink(), &companion.id, &|_| {}).unwrap();
+        assert_eq!(sole_workspace_of(&session.id).unwrap().as_deref(), Some(root.to_str().unwrap()));
+        std::fs::create_dir(&sub).unwrap();
+
+        let nested = root.join("nested");
+        git::run(dir.path(), &["worktree", "add", "-q", "-b", "nested-test", nested.to_str().unwrap()]).unwrap();
+        let nested_sub = nested.join("sub");
+        std::fs::create_dir(&nested_sub).unwrap();
+        let nested_session = session_in(dir.path(), nested_sub.to_str().unwrap(), "Nested");
+        let transcript = said(&nested_session.id, "nested-tab", "keep this conversation");
+        assert!(sessions_sharing_worktree(&session.id).unwrap().is_empty());
+        assert_eq!(sessions_in_workspace(&root).unwrap().len(), 1);
+        std::fs::remove_dir_all(&nested).unwrap();
+        assert!(sessions_sharing_worktree(&session.id).unwrap().is_empty());
+        assert_eq!(sessions_in_workspace(&nested).unwrap()[0].id, nested_session.id);
+        git::run(dir.path(), &["worktree", "prune"]).unwrap();
+        assert_eq!(sessions_in_workspace(&root).unwrap().iter().map(|s| &s.id).collect::<Vec<_>>(), vec![&session.id]);
+        index::update_session(&nested_session.id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        assert!(sessions_in_workspace(&root).unwrap_err().contains("Cannot establish the checkout"));
+        assert!(workspace_disposition(dir.path(), &root, false).is_err());
+        assert!(remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).is_err());
+        assert!(root.exists());
+        assert!(index::get(&nested_session.id).is_ok());
+        // Once its identity is known, it is kept separate from the parent.
+        index::update_session(&nested_session.id, |entry| { entry.set_checkout_root(nested.to_str()); Ok(()) }).unwrap();
+        remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
+        assert!(!root.exists());
+        assert!(index::get(&session.id).is_err());
+        assert!(index::get(&nested_session.id).is_ok());
+        assert!(transcript.exists());
+    }
+
+    #[test]
+    fn pruned_legacy_shared_checkout_is_not_removed_without_identity() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let mut fork = worktree_session(dir.path());
+        let root = PathBuf::from(&fork.cwd);
+        let sub = root.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let companion = session_in(dir.path(), root.to_str().unwrap(), "Root companion");
+        fork.cwd = sub.to_string_lossy().into_owned();
+        fork.set_checkout_root(None);
+        index::update_session(&fork.id, |entry| { *entry = fork.clone(); Ok(()) }).unwrap();
+        index::update_session(&companion.id, |entry| { entry.set_checkout_root(None); entry.worktree_name = None; Ok(()) }).unwrap();
+        let transcript = said(&fork.id, "legacy", "preserve me");
+        assert!(workspace_disposition(dir.path(), &root, false).unwrap_err().contains("Cannot establish the checkout"));
+        std::fs::remove_dir_all(&root).unwrap();
+        git::run(dir.path(), &["worktree", "prune"]).unwrap();
+        for path in [&root, &sub] {
+            assert!(workspace_disposition(dir.path(), path, false).unwrap_err().contains("Cannot establish the checkout"));
+            for fate in [SessionsFate::Delete, SessionsFate::Keep] {
+                let mut removal = request(&fork, fate, Confirmation::Forced, git::DirectDelete::Allowed);
+                removal.path = path.to_str().unwrap();
+                assert!(remove_workspace(&sink(), &removal, &|_| panic!("must not stop sessions")).is_err());
+            }
+        }
+        assert!(sessions_sharing_worktree(&fork.id).is_err());
+        assert!(sole_workspace_of(&fork.id).is_err());
+        assert!(sessions_sharing_worktree(&companion.id).is_err());
+        assert!(sole_workspace_of(&companion.id).is_err());
+        assert!(index::get(&fork.id).is_ok());
+        assert!(index::get(&companion.id).is_ok());
+        assert!(transcript.exists());
+
+        // Once both records have a verified root, either spelling accounts
+        // for both sessions even after Git has pruned the worktree.
+        for id in [&fork.id, &companion.id] {
+            index::update_session(id, |entry| { entry.set_checkout_root(root.to_str()); Ok(()) }).unwrap();
+        }
+        // A remembered path is insufficient if its repository cannot be read.
+        index::update_session(&fork.id, |entry| { entry.project_path = dir.path().join("unavailable").to_string_lossy().into_owned(); Ok(()) }).unwrap();
+        assert!(workspace_disposition(dir.path(), &root, false).unwrap_err().contains("Cannot verify the checkout"));
+        index::update_session(&fork.id, |entry| { entry.project_path = dir.path().to_string_lossy().into_owned(); Ok(()) }).unwrap();
+        for path in [&root, &sub] {
+            let disposition = workspace_disposition(dir.path(), path, false).unwrap();
+            assert_eq!(disposition.sessions, 2);
+            assert!(disposition.session_ids.contains(&fork.id));
+            assert!(disposition.session_ids.contains(&companion.id));
+        }
+        let removed = remove(&fork, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
+        assert_eq!(removed.sessions.len(), 2);
+        assert!(index::get(&fork.id).is_err());
+        assert!(index::get(&companion.id).is_err());
+    }
+
+    #[test]
+    fn recreated_pruned_nested_checkout_does_not_belong_to_parent() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let parent = worktree_session(dir.path());
+        let root = PathBuf::from(&parent.cwd);
+        let nested = root.join("nested");
+        git::run(dir.path(), &["worktree", "add", "-q", "-b", "recreated-nested", nested.to_str().unwrap()]).unwrap();
+        let sub = nested.join("src");
+        std::fs::create_dir(&sub).unwrap();
+        let legacy = session_in(dir.path(), sub.to_str().unwrap(), "Legacy nested");
+        let companion = session_in(dir.path(), nested.to_str().unwrap(), "Nested companion");
+        for id in [&legacy.id, &companion.id] {
+            index::update_session(id, |entry| { entry.set_checkout_root(None); Ok(()) }).unwrap();
+        }
+        let transcript = said(&legacy.id, "nested", "keep this conversation");
+        std::fs::remove_dir_all(&nested).unwrap();
+        git::run(dir.path(), &["worktree", "prune"]).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(git::run(&sub, &["rev-parse", "--show-toplevel"]).unwrap().trim(), root.to_str().unwrap());
+        for path in [&root, &nested, &sub] {
+            assert!(workspace_disposition(dir.path(), path, false).unwrap_err().contains("Cannot establish the checkout"));
+            for fate in [SessionsFate::Delete, SessionsFate::Keep] {
+                let mut removal = request(&parent, fate, Confirmation::Forced, git::DirectDelete::Allowed);
+                removal.path = path.to_str().unwrap();
+                assert!(remove_workspace(&sink(), &removal, &|_| panic!("must not stop sessions")).is_err());
+            }
+        }
+        assert!(sessions_sharing_worktree(&legacy.id).is_err());
+        assert!(sole_workspace_of(&legacy.id).is_err());
+        assert!(root.exists());
+        assert!(index::get(&legacy.id).is_ok());
+        assert!(index::get(&companion.id).is_ok());
+        assert!(transcript.exists());
+    }
+
+    #[test]
+    fn removing_a_session_with_a_missing_cwd_removes_its_checkout() {
+        let _home = crate::store::temp_home();
+        let dir = repo();
+        let mut session = worktree_session(dir.path());
+        let root = PathBuf::from(&session.cwd);
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        session.cwd = sub.to_string_lossy().into_owned();
+        index::update_session(&session.id, |entry| { *entry = session.clone(); Ok(()) }).unwrap();
+        std::fs::remove_dir(&sub).unwrap();
+        assert_eq!(sole_workspace_of(&session.id).unwrap().as_deref(), root.to_str());
+        let removed = remove(&session, SessionsFate::Delete, git::DirectDelete::Allowed, &|_| {}).unwrap();
+        assert_eq!(removed.sessions.len(), 1);
+        assert!(!root.exists());
+        assert!(index::get(&session.id).is_err());
     }
 
     #[test]

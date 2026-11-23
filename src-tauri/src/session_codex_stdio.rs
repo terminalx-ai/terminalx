@@ -3,6 +3,7 @@
 //! No PTY tail, second subscription, automatic reconnect, or prompt replay: a
 //! tab whose connection ended resumes its thread only for the next explicit send.
 use super::*;
+use std::path::PathBuf;
 use std::time::Duration;
 use crate::harness::codex::owned_transport::{Observation, TurnOutcome};
 use crate::harness::codex::stdio::{Action as StdioAction, Outbound, Stdio};
@@ -111,11 +112,12 @@ struct NativeLaunch {
 }
 
 /// The workspace's grant snapshot and configuration for a launch under `key`.
-fn cloud_launch(key: &str, cwd: &str) -> Result<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
+fn cloud_launch(key: &str, cwd: &str, choice: crate::agent_keys::Choice<'_>) -> Result<(crate::cloud_grants::LaunchGrant, crate::cloud_config::LaunchConfig)> {
     #[cfg(test)]
     if let Some(stand_in) = tests::cloud_stand_in() { return Ok(stand_in); }
-    // On a Mac, the API key saved for Codex in Settings, if it uses one (PRO-306).
-    Ok((crate::agent_keys::launch_grant("codex", Path::new(cwd))?, crate::cloud_config::launch_config("codex", key)))
+    // On a Mac, the API key saved for Codex in Settings, if it uses one
+    // (PRO-306), or the agent account the tab runs on (#980).
+    Ok((crate::agent_keys::launch_grant_on("codex", Path::new(cwd), choice)?, crate::cloud_config::launch_config("codex", key)))
 }
 
 /// `computer` is the Local VM's arguments; `note` what else the agent is
@@ -126,7 +128,7 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
     let mut args = route.map(|route| shell_words(&route.codex_args)).unwrap_or_default();
     args.extend(shell_words(&config.args));
     args.extend(shell_words(&computer.args));
-    args.extend(shell_words(&crate::cloud_config::prompt_args("codex", &[config.prompt.as_deref(), computer.note, note])));
+    args.extend(crate::cloud_config::prompt_argv("codex", &[config.prompt.as_deref(), computer.note, note]));
     args.extend(["app-server".into(), "--listen".into(), "stdio://".into()]);
     let mut env = config.env.clone();
     let mut unset = Vec::new();
@@ -137,6 +139,31 @@ fn native_launch(grant: &crate::cloud_grants::LaunchGrant, config: &crate::cloud
         }
     }
     NativeLaunch { args, env, unset, model: route.and_then(|route| route.model.clone()), notice: route.and_then(|route| route.notice.clone()) }
+}
+
+/// Point `env`'s `CODEX_HOME` at the native home of the added Codex account
+/// `grant` runs on (#980), in place of the terminal home the grant names. This
+/// Mac's login, a saved key and a cloud workspace name no account home, and
+/// `env` is left as it is.
+fn native_account_home(env: &mut Vec<(String, String)>, grant: &crate::cloud_grants::LaunchGrant, cwd: &str) -> Result<()> {
+    let names_home = grant.env.iter().any(|(name, value)| name == "CODEX_HOME" && value.is_some());
+    let Some(id) = grant.account.as_deref().filter(|_| names_home && grant.codex_auth.is_none()) else { return Ok(()) };
+    let home = codex::home::prepare_native_account(cwd, &crate::store::root()?, id).context("prepare the account's native Codex home")?;
+    env.retain(|(key, _)| key != "CODEX_HOME");
+    env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+    Ok(())
+}
+
+/// Bring native thread `thread` into the home `env` runs Codex in (its
+/// `CODEX_HOME`, else the reader's own), from This Mac's native home or the
+/// native homes of added accounts, whose `sessions` are one (#980).
+fn bring_native_thread(env: &[(String, String)], thread: &str) -> Result<()> {
+    let target = env.iter().rev().find(|(key, _)| key == "CODEX_HOME").map(|(_, home)| PathBuf::from(home)).or_else(codex::home::user_root);
+    let Some(target) = target else { return Ok(()) };
+    let homes: Vec<PathBuf> = [codex::home::user_root(), codex::home::native_root_if_made()].into_iter().flatten().collect();
+    codex::home::bring_rollout(&target, &homes, thread)
+        .context("Codex's saved conversation could not be brought to this account. No prompt was sent.")?;
+    Ok(())
 }
 
 /// Whether native Codex runs in a cloud workspace's home of its own: where
@@ -240,7 +267,7 @@ impl SessionManager {
         let result = (|| {
             self.accepting_work()?;
             let rt_arc = self.runtime(session_id, tab_id)?;
-            let (running, resume, _switching) = {
+            let (running, resume, account_home, _switching) = {
                 // Inspect before fencing, under the same admission as sends and
                 // protocol writes. Fencing an active connection can reject its
                 // next approval/interrupt/start frame and falsely fail its turn.
@@ -257,7 +284,9 @@ impl SessionManager {
                     record(&rt, tab.transport, &report(Stage::WaitingForTurn, None));
                     return Ok(false);
                 }
-                (running, tab.provider_session_id.clone(), fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
+                // The managed home of the added account it runs on (#980).
+                let account_home = crate::agent_data::codex_account_home_of(tab);
+                (running, tab.provider_session_id.clone(), account_home, fence(Kind::Hold, [Scope::Tab(session_id.into(), tab_id.into())]))
             };
             #[cfg(test)]
             tests::handoff_fenced();
@@ -267,9 +296,14 @@ impl SessionManager {
             category = ErrorCategory::ConversationUnavailable;
             let saved = if let Some(id) = resume {
                 let managed = codex::home::managed_root()?;
-                let source = [codex::home::native_root_if_made(), codex::home::user_root()]
-                    .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
-                    .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?;
+                // On an added account Codex wrote it in that account's home,
+                // whose `sessions` is the managed home's: nothing to copy.
+                let shared = account_home.as_deref().is_some_and(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()));
+                let source = if shared { managed.clone() } else {
+                    [codex::home::native_root_if_made(), codex::home::user_root()]
+                        .into_iter().flatten().find(|home| codex::home::find_rollout(home, &id).is_some_and(|path| path.is_file()))
+                        .context("Codex's saved conversation is not available for Terminal view. Keep using Chat and try again once Codex has saved it.")?
+                };
                 Some((id, managed, source))
             } else { None };
             if running {
@@ -327,9 +361,9 @@ impl SessionManager {
             anyhow::ensure!(matches!(&rt.engine, Engine::CodexStdio(engine) if !engine.failed() && !engine.exited && !engine.blocked),
                 "Codex's connection ended. Stop the session before sending again; this message was not queued.");
             if rt.queued.len() >= 32 { return Err(QueueFull.into()); }
-            let event = self.publish(rt, Payload::UserMessage {
+            let event = self.publish_prompt(rt, Payload::UserMessage {
                 author: prompt.author, text: prompt.display, images, files: prompt.files, baseline: None, queued: true, cwd: Some(entry.cwd.clone()),
-            }, None);
+            }, prompt.request_id);
             let privacy = crate::data_privacy::remote_ticket();
             if privacy.is_some() || prompt.mobile.is_some() || prompt.shared_connection.is_some() || prompt.collaboration.is_some() {
                 rt.stdio_followups.authorities.insert(event.seq, Authority {
@@ -356,9 +390,9 @@ impl SessionManager {
         // No user message or user turn for manual compaction (#524/#566).
         let events = if manual { Vec::new() } else {
             let baseline = rt.baseline_for(&entry.cwd);
-            vec![self.publish(rt, Payload::UserMessage {
+            vec![self.publish_prompt(rt, Payload::UserMessage {
                 author: prompt.author, text: prompt.display, images, files: prompt.files, baseline, queued: true, cwd: Some(entry.cwd.clone()),
-            }, None)]
+            }, prompt.request_id)]
         };
         // Even a send just after completion is pending until Codex's RPC
         // response or turn/started acknowledges it. The send outcome below
@@ -429,7 +463,10 @@ impl SessionManager {
 
     fn start_codex_stdio(&self, rt: &mut TabRuntime, rt_arc: &Arc<Mutex<TabRuntime>>, entry: &index::SessionEntry, tab: &TabEntry) -> Result<()> {
         self.accepting_work()?;
-        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), tab.permission_mode.clone(), tab.provider_session_id.clone());
+        // Held to the bot the session works for, as a terminal launch is (PRO-468).
+        self.hold_to_bot(rt, entry)?;
+        let mode = index::get(&rt.session_id)?.tab(&rt.tab_id).map(|held| held.permission_mode.clone()).unwrap_or_else(|| tab.permission_mode.clone());
+        let engine = Stdio::new(entry.cwd.clone(), tab.model.clone(), tab.effort.clone(), mode, tab.provider_session_id.clone());
         let launch = engine.launch.clone();
         let (tx, rx) = std::sync::mpsc::sync_channel(32);
         rt.stdio_launch_permit = collaboration_v2::current();
@@ -502,9 +539,17 @@ impl SessionManager {
         current()?;
         let environment = crate::store::environment::launch(cwd)?;
         let mut env: Vec<_> = environment.values.into_iter().collect();
+        // Kept by the engine, so a `terminalx` call from this tab can be told
+        // from one that only names it (`SessionManager::authenticates_cli`).
+        let token = crate::hooks::mint_token();
+        if let Engine::CodexStdio(engine) = &mut rt_arc.lock().unwrap().engine {
+            if Arc::ptr_eq(&engine.launch, launch) {
+                engine.hook_token = token.clone();
+            }
+        }
         env.extend([
             ("RACCOON_SESSION_ID".into(), session.to_owned()), ("RACCOON_TAB_ID".into(), tab.to_owned()),
-            ("RACCOON_HOOK_TOKEN".into(), uuid::Uuid::now_v7().to_string()),
+            ("RACCOON_HOOK_TOKEN".into(), token),
             (crate::hooks::CONTROL_SOCKET_ENV.into(), self.control.socket.to_string_lossy().into_owned()),
             (crate::hooks::CONTROL_TOKEN_ENV.into(), self.control.token.clone()),
         ]);
@@ -512,15 +557,29 @@ impl SessionManager {
         // grant snapshot like a terminal launch's; read here, off every lock,
         // because the first grant sync may still be on its way.
         let key = key_of(session, tab);
-        let (grant, config) = cloud_launch(&key, cwd)?;
+        // The account the tab asked for, or its project's default (#980).
+        let entry = index::get(session).ok();
+        let asked = entry.as_ref().and_then(|entry| entry.tab(tab)).and_then(crate::session_ops::tab_account).map(str::to_owned);
+        let project = entry.as_ref().and_then(crate::session_ops::project_key).map(str::to_owned);
+        // Another account when automatic switching finds this one full (#981).
+        let title = entry.as_ref().map(|entry| entry.title.clone()).unwrap_or_default();
+        let (asked, moved) = self.launch_account(session, tab, "codex", project.as_deref(), &title, asked);
+        if let Some(text) = moved {
+            self.publish(&mut rt_arc.lock().unwrap(), Payload::Status { text }, None);
+        }
+        let (grant, config) = cloud_launch(&key, cwd, crate::agent_keys::Choice { account: asked.as_deref(), project: project.as_deref() })?;
         let sparse = crate::sparse_checkout::agent_note(Path::new(cwd));
-        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`).
-        let computer = {
+        // Its desktop tools, as a terminal Codex tab's (`computer_targets.rs`),
+        // and in a bot's chat the bot's rules, role and memory (`bots::chat`).
+        let (computer, bot, chat) = {
             let entry = index::get(session)?;
             let retained = entry.tab(tab).context("This tab no longer exists")?;
-            crate::computer_targets::launch_args(session, retained)?
+            crate::bots::chat::look_before_launch(self.sink().as_ref(), &entry);
+            let computer = crate::computer_targets::launch_args(session, retained)?;
+            (computer, crate::bots::chat::launch_note(&entry, retained), entry)
         };
-        let mut native = native_launch(&grant, &config, &computer, sparse.as_deref());
+        let note = crate::bots::chat::join_notes(&[sparse.as_deref(), bot.as_deref()]);
+        let mut native = native_launch(&grant, &config, &computer, note.as_deref());
         // In a workspace Codex signs in with the workspace's credential, in a
         // home of its own with no Raccoon hooks; on a Mac, the reader's home.
         if grant.codex_auth.is_some() {
@@ -528,6 +587,17 @@ impl SessionManager {
             env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
         }
         env.extend(native.env);
+        // An added account's grant names its terminal home, whose hooks a
+        // native tab cannot answer: native Codex runs in the account's
+        // hook-free native home instead (#980).
+        native_account_home(&mut env, &grant, cwd)?;
+        // A thread switched between This Mac's login and an added account is
+        // in the other one's home: bring its newest copy here first (#980).
+        if grant.codex_auth.is_none() {
+            if let Some(thread) = entry.as_ref().and_then(|entry| entry.tab(tab)).and_then(|t| t.provider_session_id.clone()) {
+                bring_native_thread(&env, &thread)?;
+            }
+        }
         env.retain(|(key, _)| !matches!(key.as_str(), "TERMINALX_PORT" | "TERMINALX_PORTS"));
         env.extend(index::workspace_ports::environment(cwd)?);
         native.unset.extend(["TERMINALX_PORT".into(), "TERMINALX_PORTS".into()]);
@@ -538,14 +608,25 @@ impl SessionManager {
             if let (Some(model), Engine::CodexStdio(engine)) = (native.model, &mut rt.engine) { engine.route_model(model); }
         }
         crate::cloud_grants::record_launch(&key, &grant);
-        crate::agent_keys::record_launch(&key, "codex", session, tab);
+        super::AccountLaunch::of(CliKind::Codex, &grant).record(&key, "codex", session, tab, asked.is_some());
+        if let Some(account) = grant.account.as_deref() {
+            if let Err(error) = index::update_tab(session, tab, |t| {
+                crate::session_ops::set_launched_account(t, account);
+                Ok(())
+            }) {
+                log::warn!("record the account {session}/{tab} started on: {error:#}");
+            }
+        }
         let sink = Arc::new(StdioSink { manager: self.clone(), rt: rt_arc.clone(), launch: launch.clone(), startup_stderr_bytes: Mutex::new(0), startup_stderr: Mutex::new(String::new()) });
         #[cfg(test)]
         tests::before_native_spawn();
         let policy = collaboration_v2::current();
         let _policy = policy.as_ref().map(|permit| permit.collaboration.enter_admission());
         if let Some(permit) = &policy { Self::check_collaboration_permit(permit, &rt_arc.lock().unwrap())?; }
-        let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink)?;
+        let child = self.host.spawn(&key, SpawnSpec { program: &program, args: &native.args, cwd: Path::new(cwd), env: &env, unset: &native.unset }, sink);
+        let Ok(child) = child else {
+            return child.map(|_| ());
+        };
         let cancelled = {
             let mut rt = rt_arc.lock().unwrap();
             // Stop retains the launch until startup has settled. Even a late
@@ -554,9 +635,11 @@ impl SessionManager {
             let cancelled = !same_launch(&rt, launch) || rt.stopping || matches!(&rt.engine, Engine::CodexStdio(e) if e.exited || e.blocked);
             rt.environment = environment.stamp;
             rt.child_pid = Some(child.pid);
+            self.note_child(&rt);
             rt.child = Some(child.clone());
             cancelled
         };
+        crate::bots::chat::launched(self, &chat, tab, !cancelled);
         if cancelled {
             crate::harness::host::terminate(child.pid);
             bail!("Codex startup cancelled; no input was sent");
@@ -606,10 +689,9 @@ impl SessionManager {
             {
                 let _policy = collaboration.as_ref().map(|permit| permit.collaboration.enter_admission());
                 let _admission = crate::issue_pipeline::admission::lock();
-                // Mobile/share barriers retain their existing first-byte semantics.
-                // Collaboration is independently checked at EVERY physical
-                // attempt, including after a partial frame and capacity wait.
-                let sender = if offset == 0 { sender.as_ref() } else { None };
+                // A partial mobile frame still needs its original grant.
+                // Collaboration is independently checked on every attempt.
+                let sender = sender.as_ref().filter(|sender| offset == 0 || sender.mobile.is_some());
                 let mut sharing = sender.is_some().then(|| self.sharing.lock().unwrap());
                 let mut owner_attachment = None;
                 let admitted = privacy.as_ref().map_err(|error| anyhow::anyhow!("{error}")).and_then(|_| match sender {
@@ -642,8 +724,9 @@ impl SessionManager {
                 let (_mobile, _owner) = match (admitted, owner) {
                     (Ok(mobile), Ok(owner)) => (mobile, owner),
                     (Err(error), _) | (_, Err(error)) => {
+                        if offset > 0 { return Err(error).context("Codex authority changed during a partial frame"); }
                         engine.withdraw(&frame);
-                        log::warn!("[{}] withdrew a Codex prompt before delivery: {error:#}", rt.key());
+                        log::warn!("[{}] withdrew a Codex frame before delivery: {error:#}", rt.key());
                         if frame.delivers_prompt() { self.withdraw_codex_prompt(&mut rt, sender.as_ref().and_then(|sender| sender.seq))?; }
                         return Ok(());
                     }
@@ -725,6 +808,11 @@ impl SessionManager {
     }
 
     pub(super) fn apply_codex_actions(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>) -> Result<()> {
+        self.apply_codex_actions_with_approval(rt, actions, None)
+    }
+
+    pub(super) fn apply_codex_actions_with_approval(&self, rt: &mut TabRuntime, actions: Vec<StdioAction>,
+        approval: Option<&crate::local_runtime::mobile::WritePermit>) -> Result<()> {
         // Approval cancellation can apply nested actions while a completion
         // is still settling. Only the outer boundary may start the next turn.
         let boundary = actions.iter().any(|action| matches!(action,
@@ -735,7 +823,16 @@ impl SessionManager {
                     anyhow::ensure!(!rt.stopping && matches!(&rt.engine, Engine::CodexStdio(e) if !e.exited && !e.blocked), "Codex connection is no longer writable");
                     // The frame carries its sender, so the writer can check
                     // the sender's permits without holding this runtime.
-                    let sender = if line.delivers_prompt() { rt.stdio_authority.take() } else { None };
+                    let sender = if line.delivers_prompt() {
+                        rt.stdio_authority.take()
+                    } else if line.approval().is_some() {
+                        approval.map(|permit| Authority {
+                            session: rt.session_id.clone(), tab: rt.tab_id.clone(), seq: None,
+                            privacy: None, collaboration: None, mobile: Some(permit.clone()), shared: None,
+                        })
+                    } else {
+                        None
+                    };
                     // A prompt owns its original sender, even when a different
                     // caller's completion dispatches a queued local prompt.
                     let collaboration = if line.delivers_prompt() {
@@ -785,8 +882,28 @@ impl SessionManager {
                     if let Payload::TurnStarted { prompt_seq, .. } = &mut payload {
                         *prompt_seq = rt.stdio_followups.active.take().map(|(seq, _)| seq);
                     }
+                    // A bot's session (PRO-478): native Codex runs no hooks, so its approval
+                    // requests are where the bot's gate meets its calls. The card says why it
+                    // asks; one the gate refuses is shown with the reason and denied at once.
+                    let mut refused = None;
+                    if let Payload::PermissionRequested { request_id, tool_name, input, cwd, reason, .. } = &mut payload {
+                        match crate::bots::builtins::approval_gate(rt.bot_builtin.as_ref(), rt.acting_bot.as_deref(), tool_name, input, cwd.as_deref()) {
+                            crate::bots::access::Gate::Leave => {}
+                            crate::bots::access::Gate::Ask(why) => *reason = Some(why),
+                            crate::bots::access::Gate::Refuse(why) => {
+                                log::info!("bot session {}/{}: {why}", rt.session_id, rt.tab_id);
+                                *reason = Some(why);
+                                refused = Some(request_id.clone());
+                            }
+                        }
+                    }
                     let turn_end = matches!(payload, Payload::TurnCompleted { .. });
                     self.apply(rt, payload, None);
+                    if let Some(request) = refused {
+                        let Engine::CodexStdio(engine) = &mut rt.engine else { bail!("Codex owner was replaced") };
+                        let actions = engine.answer(&request, "deny")?;
+                        self.apply_codex_actions_with_approval(rt, actions, None)?;
+                    }
                     if turn_end && !rt.turn_open && rt.recovery == Some(RecoveryKind::SignedOut) { self.retire_codex_stdio_later(rt); }
                 }
                 StdioAction::Accepted => {
@@ -993,6 +1110,7 @@ impl SessionManager {
         if manual { rt.turn_open = false; }
         else { self.close_open_turn(&mut rt, TurnStatus::Aborted, None); }
         rt.child = None; rt.child_pid = None; rt.stdio_compaction = None; rt.stdio_authority = None;
+        self.note_child(&rt);
         crate::cloud_grants::forget_launch(&rt.key());
         rt.engine = Engine::None;
         rt.stop_in_flight = false; rt.stopping = false;
@@ -1012,6 +1130,7 @@ impl SessionManager {
         if !ended || !gone || rt.stdio_starting || rt.stopping { return; }
         rt.stdio_writer = None; rt.stdio_receipt = None; rt.stdio_authority = None; rt.stdio_compaction = None;
         rt.child = None; rt.child_pid = None;
+        self.note_child(rt);
         rt.engine = Engine::None;
     }
 }

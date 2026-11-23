@@ -61,9 +61,11 @@ export async function launch(options) {
  * `colorScheme` the system appearance the page sees, and `reducedMotion`
  * ("reduce") the system's Reduce motion.
  */
-export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale, reducedMotion, waitUntil = "load", navigationTimeout } = {}) {
+export async function open(browser, url, fixture, viewport, { extra = "", colorScheme, locale, reducedMotion, waitUntil = "load", navigationTimeout, now } = {}) {
   const page = await browser.newPage({ viewport, ...(colorScheme ? { colorScheme } : {}), ...(locale ? { locale } : {}), ...(reducedMotion ? { reducedMotion } : {}) });
   if (process.env.WEBKIT_TIMEOUT_MS) page.setDefaultTimeout(Number(process.env.WEBKIT_TIMEOUT_MS));
+  // `now`: the page's Date reads this one instant (timers still run), before the fixture's script asks it the time.
+  if (now) await page.clock.setFixedTime(now);
   await page.addInitScript(`window.__PW_FIXTURE__ = ${JSON.stringify(fixture)};\n${stub}\n${extra}`);
   await page.goto(url, { waitUntil, timeout: navigationTimeout });
   return page;
@@ -89,6 +91,20 @@ export async function sidebar(page) {
   const rail = page.locator('[data-testid="sidebar-rail"]');
   await rail.waitFor();
   return rail;
+}
+
+/**
+ * Open session `sessionId` as the native menu does (`open_session`) and resolve with its view, `main` named `name`.
+ * The app sets its listener only once its sessions are listed (`bootSessions`), and drops the event before that
+ * (`openTarget`), so this waits for the listener and then sends the event once. It is never sent again: an app that
+ * needed it twice would fail here rather than be hidden by a retry (PRO-498).
+ */
+export async function openSession(page, sessionId, name, { timeout = 30_000 } = {}) {
+  await page.waitForFunction(() => window.__PW_STUB__.listeners("open_session") > 0, null, { timeout });
+  await page.evaluate((id) => window.__PW_STUB__.emit("open_session", { sessionId: id }), sessionId);
+  const view = page.getByRole("main", { name });
+  await view.waitFor({ timeout });
+  return view;
 }
 
 /**

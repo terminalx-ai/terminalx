@@ -7,6 +7,8 @@
 //!   whole under a process-wide lock and lands via write-temp + rename.
 
 pub mod automations;
+pub mod cloud_pins;
+pub mod bots;
 pub mod activity;
 pub mod message_activity;
 pub mod index;
@@ -36,11 +38,38 @@ static WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// `~/.raccoon`, created on first use with owner-only permissions so the
 /// transcripts and the orchestration socket in it are private to this user.
 pub fn root() -> Result<PathBuf> {
-    if let Some(p) = state_home_env() {
-        return ensure_dir(PathBuf::from(p));
+    let root = match state_home_env() {
+        Some(p) => PathBuf::from(p),
+        None => dirs::home_dir().context("no home directory")?.join(".raccoon"),
+    };
+    #[cfg(windows)]
+    harden_root(&root)?;
+    ensure_dir(root)
+}
+
+/// On Windows a new home is created owner-only, as `ensure_dir` makes one
+/// `0o700` on Unix. An existing home, which may be a folder the person chose,
+/// is only checked, never changed: one another account owns or can open is
+/// refused, with how to fix it, before anything is stored in it.
+#[cfg(windows)]
+fn harden_root(root: &Path) -> Result<()> {
+    static CHECKED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut checked = CHECKED.lock().unwrap_or_else(|e| e.into_inner());
+    if checked.iter().any(|done| done == root) {
+        return Ok(());
     }
-    let home = dirs::home_dir().context("no home directory")?;
-    ensure_dir(home.join(".raccoon"))
+    if root.exists() {
+        if let Err(error) = crate::win::security::verify_private(root) {
+            anyhow::bail!(
+                "{} is not private to this Windows account ({error}). TerminalX keeps credentials and transcripts there, so it was left unchanged and not used. Make it private, for example with `icacls \"{}\" /inheritance:r /grant:r \"%USERNAME%\":(OI)(CI)F`, or choose another folder.",
+                root.display(), root.display()
+            );
+        }
+    } else {
+        crate::win::fs::create_private_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    }
+    checked.push(root.to_owned());
+    Ok(())
 }
 
 
@@ -111,16 +140,50 @@ pub(crate) fn log_path_in(root: &Path, session_id: &str, tab_id: &str) -> Result
 /// target already exists its mode is carried over: `~/.claude.json` is the
 /// CLI's file, not ours, and a rewrite is no place to change what its owner
 /// chose.
+///
+/// The temp file is created new, never opened through a link: in a folder
+/// another program can write to (a bot's home), a file or a link planted at
+/// its name is removed (the link itself, never what it points to) and the
+/// create tried once more, so the write never goes through it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_unless(path, bytes, || false).map(|_| ())
+}
+
+/// [`write_atomic`], asking `abandon` once the new bytes are written and
+/// fsynced beside `path`, right before the rename swaps them in. When it
+/// says so, the temp file is removed, `path` is left untouched and
+/// `Ok(false)` is returned. This narrows, but cannot close, the window in
+/// which another program's write to `path` is lost: one landing after
+/// `abandon` answered and before the rename is still replaced.
+pub fn write_atomic_unless(path: &Path, bytes: &[u8], abandon: impl FnOnce() -> bool) -> Result<bool> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = create_private(&tmp, mode_of(path)).with_context(|| format!("create {}", tmp.display()))?;
+    let written = (|| -> Result<()> {
+        let mut f = match create_private(&tmp, mode_of(path)) {
+            Err(error) if matches!(fs::symlink_metadata(&tmp), Ok(meta) if !meta.is_dir()) => {
+                fs::remove_file(&tmp).with_context(|| format!("create {}: {error}", tmp.display()))?;
+                create_private(&tmp, mode_of(path))
+            }
+            created => created,
+        }
+        .with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
-    fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
-    Ok(())
+    if abandon() {
+        let _ = fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    if let Err(error) = fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display())) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 /// The mode `path` already has, if it is there to have one.
@@ -138,12 +201,13 @@ fn mode_of(_path: &Path) -> Option<u32> {
 #[cfg(unix)]
 fn create_private(path: &Path, keep: Option<u32>) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::OpenOptions::new().write(true).create(true).truncate(true).mode(keep.unwrap_or(0o600)).open(path)
+    fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(keep.unwrap_or(0o600)).open(path)
 }
 
 #[cfg(not(unix))]
 fn create_private(path: &Path, _keep: Option<u32>) -> std::io::Result<fs::File> {
-    fs::File::create(path)
+    // Created new, as on Unix, and owner-only.
+    crate::win::fs::create_new_private(path)
 }
 
 pub fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -238,6 +302,21 @@ pub(crate) fn temp_home() -> TempHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write whose rename fails (a folder holding a file is in the way)
+    /// leaves no temporary file beside it.
+    #[test]
+    fn a_failed_rename_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.json");
+        fs::create_dir(&p).unwrap();
+        fs::write(p.join("keep"), "mine").unwrap();
+        let error = write_atomic(&p, b"{}").unwrap_err();
+        assert!(format!("{error:#}").starts_with("rename into "), "{error:#}");
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names, ["x.json"]);
+        assert_eq!(fs::read(p.join("keep")).unwrap(), b"mine");
+    }
 
     #[test]
     fn atomic_write_roundtrip() {

@@ -44,7 +44,7 @@ fn opt(params: &Value, name: &str) -> Option<String> {
 }
 
 pub fn canonical(path: &str) -> String {
-    std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
+    crate::paths::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)).to_string_lossy().into_owned()
 }
 
 /// Every checkout of every attached project, for `--worktree` selectors.
@@ -98,7 +98,7 @@ pub fn workspace_for_cwd(cwd: &str) -> Result<String, ControlError> {
         return Ok(found);
     }
     if let Ok(top) = crate::git::run(Path::new(&here), &["rev-parse", "--show-toplevel"]) {
-        let top = top.trim();
+        let top = crate::git::path_line(&top);
         if !top.is_empty() {
             return Ok(canonical(top));
         }

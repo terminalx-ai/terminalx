@@ -94,7 +94,7 @@ describe("worktree deletion events", () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     await sessions.restoreWorkspace(attached.id, preview, null);
-    expect(mocks.invoke).toHaveBeenCalledWith("restore_workspace", { sessionId: attached.id, expected: preview, newBranch: null });
+    expect(mocks.invoke).toHaveBeenCalledWith("restore_workspace", { sessionId: attached.id, expected: preview, newBranch: null, detached: false });
     expect(sessions.getSessionStore().selectedSessionId).toBe(attached.id);
     expect(sessions.getSessionStore().sessions).toEqual([attached]);
     expect(mocks.invoke.mock.calls.some(([command]) => command === "send_message")).toBe(false);
@@ -319,6 +319,21 @@ describe("new chat", () => {
     expect(mocks.invoke.mock.calls.some(([command]) => command === "create_quick_chat" || command === "add_project")).toBe(false);
   });
 
+  it("starts an ordinary chat on the agent account chosen for it (#980), and names none when none was", async () => {
+    const chatsPath = "/Users/me/.raccoon/Chats";
+    const chat = { ...attached, projectPath: chatsPath, cwd: chatsPath };
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "chats_dir" ? Promise.resolve(chatsPath)
+      : command === "create_session" ? Promise.resolve(chat) : original(command, args));
+    const tab = { harness: "claude", model: "opus", permissionMode: "manual" };
+    await sessions.createChat({ title: "On work", tab, account: "0123456789abcdef" });
+    expect(mocks.invoke).toHaveBeenCalledWith("create_session", { req: {
+      projectPath: chatsPath, cwd: chatsPath, title: "On work", useWorktree: false, tab, account: "0123456789abcdef",
+    } });
+    await sessions.createChat({ title: "As before", tab, account: null });
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === "create_session").at(-1)![1]).not.toHaveProperty("req.account");
+  });
+
   it("resolves a removed conversation's project before opening its branch composer", async () => {
     const removed = "/repos/removed";
     const original = mocks.invoke.getMockImplementation()!;
@@ -450,6 +465,31 @@ it.each([true, false])("retains boot backfill activity across a stale list (veri
   // The same listener continues normal updates after initialization.
   mocks.listeners.get("session_updated")!({ payload: { ...initial, title: "Synthetic rename" } });
   expect(sessions.getSessionStore().sessions[0]).toMatchObject({ title: "Synthetic rename", lastMessageAt: newer.lastMessageAt, hasMessages: true });
+});
+
+describe("projects changed outside the window", () => {
+  it("lists a project added by the CLI and keeps the reader's project", async () => {
+    const added = { path: "/repos/other", name: "Other" };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_projects") return { projects: [{ path: projectPath, name: "Raccoon" }, added], lastSelected: projectPath };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    mocks.listeners.get("projects_changed")!({ payload: null });
+    await vi.waitFor(() => expect(sessions.getSessionStore().projects.map((project) => project.path)).toEqual([projectPath, added.path]));
+    expect(sessions.getSessionStore().lastProject).toBe(projectPath);
+  });
+
+  it("stops starting New Session in a project the CLI removed", async () => {
+    const other = { path: "/repos/other", name: "Other" };
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_projects") return { projects: [other], lastSelected: other.path };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    expect(sessions.getSessionStore().lastProject).toBe(projectPath);
+    mocks.listeners.get("projects_changed")!({ payload: null });
+    await vi.waitFor(() => expect(sessions.getSessionStore().projects).toEqual([other]));
+    expect(sessions.getSessionStore().lastProject).toBe(other.path);
+  });
 });
 
 describe("a new live connection", () => {

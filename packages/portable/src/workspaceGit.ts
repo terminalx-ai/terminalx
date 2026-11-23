@@ -8,7 +8,7 @@
 // - A resend after a dropped connection keeps its `clientRequestId`, so the
 //   runtime answers it from its cache. Trying again after a refusal is a new
 //   request, and the runtime checks the remote before repeating anything.
-import { WorkspaceRpcError, type WorkspaceRpcClient } from "./workspace";
+import { WorkspaceRpcError, type WorkspaceConnectionState, type WorkspaceRpcClient } from "./workspace";
 
 export interface GitAuthor {
   name: string;
@@ -84,6 +84,8 @@ export interface RemotePullRequest {
   isDraft: boolean;
   base: string;
   head: string;
+  /** The head commit GitHub has for the pull request. Empty or absent on older runtimes. */
+  headSha?: string;
   additions: number;
   deletions: number;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
@@ -107,6 +109,27 @@ export interface PrReviewer {
   kind: "user" | "team" | "bot";
   state: string;
   requested: boolean;
+  /** Display name, when the account has one. Absent on older runtimes. */
+  name?: string;
+  /** When the latest review was submitted, or a pending request made. */
+  at?: string;
+}
+/** How a merged pull request merged. Absent on older runtimes. */
+export interface PrMerged {
+  at: string | null;
+  by: string | null;
+  commit: string | null;
+  /** It merged with a merge commit (two parents), not squash or rebase. */
+  mergeCommit: boolean;
+  /** GitHub no longer has the head branch. */
+  branchDeleted: boolean;
+}
+/** The repository's merge methods for this viewer. */
+export interface PrMergeMethods {
+  default: "MERGE" | "SQUASH" | "REBASE" | null;
+  merge: boolean;
+  squash: boolean;
+  rebase: boolean;
 }
 export interface PrActivity {
   id: string;
@@ -130,6 +153,10 @@ export interface PrConversation {
   reviewers: PrReviewer[];
   unresolvedThreads: number;
   activity: PrActivity[];
+  base?: string;
+  commits?: number | null;
+  merged?: PrMerged | null;
+  mergeMethods?: PrMergeMethods | null;
 }
 export type PrConversationAction =
   | { kind: "edit"; title: string; body: string; expectedTitle: string; expectedBody: string }
@@ -157,13 +184,25 @@ export interface RemotePushResult {
   reconciled: boolean;
 }
 
+export interface RemotePrCreateInput {
+  title: string;
+  body: string;
+  base: string | null;
+  draft: boolean;
+  branch?: string;
+  sessionId?: string;
+  associateExisting?: boolean;
+}
+
 export interface RemotePrCreateResult {
   repo: string;
   pr: RemotePullRequest;
   created: boolean;
-  /** An open pull request for the branch already existed; it is linked, not duplicated. */
+  /** An open pull request for the branch already existed. */
   existing: boolean;
   reconciled?: boolean;
+  /** The machine saved this pull request to the named session. */
+  sessionAssociated?: boolean;
 }
 
 export interface RepositoryFacts {
@@ -194,8 +233,8 @@ export function hasUnpublishedWork(facts: RepositoryFacts): boolean {
 }
 
 /** The repositories of a cloud workspace. */
-export async function listRepositories(client: WorkspaceRpcClient): Promise<RemoteRepository[]> {
-  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories");
+export async function listRepositories(client: WorkspaceRpcClient, preferredRepo?: string): Promise<RemoteRepository[]> {
+  const listed = await client.call<{ repositories: RemoteRepository[] }>("git.repositories", preferredRepo ? { preferredRepo } : undefined);
   return listed.repositories;
 }
 
@@ -216,6 +255,12 @@ export interface RuntimeResources {
   memory: { totalBytes: number; availableBytes: number } | null;
   /** The disk that holds the workspace; null when it could not be asked. */
   storage: { totalBytes: number; availableBytes: number; totalInodes: number; availableInodes: number } | null;
+  /**
+   * The processor (PRO-350): its logical cores, and how busy all of them
+   * were, 0 to 1, since the previous call (null on the first, which has
+   * nothing to compare with). Absent from an older runtime.
+   */
+  cpu?: { cores: number; usage: number | null } | null;
   observedAt: number;
 }
 
@@ -237,12 +282,21 @@ export class RemoteGit {
     return this.client.call<T>(method, { ...params, repo: this.repo });
   }
 
-  private write<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    return this.client.mutate<T>(method, { ...params, repo: this.repo });
+  private write<T>(method: string, params: Record<string, unknown> = {}, connection?: WorkspaceConnectionState): Promise<T> {
+    const request = { ...params, repo: this.repo };
+    return connection ? this.client.mutate<T>(method, request, undefined, connection) : this.client.mutate<T>(method, request);
   }
 
   status(): Promise<RemoteGitStatus> {
     return this.read("git.status");
+  }
+
+  branchBase(base: string): Promise<{ aheadOfBase: number; head: string | null }> {
+    return this.read("git.branchBase", { base });
+  }
+
+  branchDiffSize(base: string): Promise<{ additions: number; deletions: number; head: string | null }> {
+    return this.read("git.branchDiffSize", { base });
   }
 
   workingChanges(hideWhitespace = false): Promise<{ head: string; files: RemoteChangedFile[]; truncated: boolean }> {
@@ -257,7 +311,7 @@ export class RemoteGit {
     return this.read("git.changesBetween", { base, ...(head ? { head } : {}), ...(hideWhitespace ? { hideWhitespace } : {}) });
   }
 
-  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null }> {
+  fileContents(path: string, base: string, head: string | null): Promise<{ before: string | null; after: string | null; beforeSize?: number | null; afterSize?: number | null }> {
     return this.read("git.fileContents", head ? { path, base, head } : { path, base });
   }
 
@@ -274,10 +328,14 @@ export class RemoteGit {
     return this.read("git.branches");
   }
 
-  /** With `number`, refresh one retained PR independently of its old branch.
-   * Older runtimes use `branch`; callers still verify the returned identity. */
-  prs(branch?: string, number?: number): Promise<{ branch: string; prs: RemotePullRequest[] }> {
-    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}) });
+  get supportsPrUrl(): boolean {
+    return this.client.hasCapability?.("git-pr-target/1") ?? false;
+  }
+
+  /** Refresh a retained PR by URL where supported, with a number and branch for older runtimes.
+   * Callers still verify the returned identity. */
+  prs(branch?: string, number?: number, url?: string): Promise<{ branch: string; prs: RemotePullRequest[] }> {
+    return this.read("git.prs", { ...(branch ? { branch } : {}), ...(number ? { number } : {}), ...(url ? { url } : {}) });
   }
 
   prConversation(url: string): PrConversationAccess {
@@ -288,8 +346,25 @@ export class RemoteGit {
     };
   }
 
-  prAssociations(sessionId: string): Promise<{ associations: { url: string; number: number; head: string; repo: string | null }[] }> {
+  prAssociations(sessionId: string): Promise<{ pendingCreation?: boolean; pendingCreationUrls?: string[]; branchPrLinks?: boolean; associations: { url: string; number: number; head: string; repo: string | null; linked?: boolean }[] }> {
     return this.read("git.prAssociations", { sessionId });
+  }
+
+  linkBranchPr(sessionId: string, url: string, branch: string): Promise<{ sessionAssociated: boolean }> {
+    return this.write("git.prLinkBranch", { sessionId, url, branch });
+  }
+
+  unlinkPr(sessionId: string, url: string): Promise<unknown> {
+    return this.write("git.prUnlink", { sessionId, url });
+  }
+
+  /**
+   * Settle a pull request a create left unverified, by its URL alone: the
+   * machine clears its cleanup guard once GitHub shows it merged or closed.
+   * Not routed by repository, since its checkout or branch may be gone.
+   */
+  reconcilePrCreation(url: string): Promise<{ url: string; state?: string; cleared: number }> {
+    return this.client.mutate("git.prReconcileCreation", { url });
   }
 
   prLanded(): Promise<{ safe: boolean; head: string | null; branch: string | null }> {
@@ -305,8 +380,12 @@ export class RemoteGit {
   }
 
   /** Stages everything (or only `paths`) and commits it as `author`. */
-  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean } = {}): Promise<{ commit: string; branch: string | null }> {
+  commit(message: string, author: GitAuthor, options: { paths?: string[]; staged?: boolean; expectedBranch?: string; expectedHead?: string } = {}): Promise<{ commit: string; branch: string | null }> {
     return this.write("git.commit", { message, author, ...options });
+  }
+
+  commitForPush(message: string, author: GitAuthor, expectedBranch: string, expectedHead: string): Promise<{ commit: string; branch: string }> {
+    return this.write("git.commitForPush", { message, author, expectedBranch, expectedHead });
   }
 
   checkout(branch: string, options: { create?: boolean; from?: string } = {}): Promise<unknown> {
@@ -321,21 +400,32 @@ export class RemoteGit {
     return this.write("git.pull");
   }
 
-  push(branch?: string): Promise<RemotePushResult> {
+  push(branch?: string, head?: string): Promise<RemotePushResult> {
+    if (head !== undefined) return this.write("git.pushHead", { branch, head });
     return this.write("git.push", branch ? { branch } : {});
   }
 
-  createPr(input: { title: string; body: string; base: string | null; draft: boolean; branch?: string }): Promise<RemotePrCreateResult> {
+  createPr(input: RemotePrCreateInput): Promise<RemotePrCreateResult> {
     const { base, ...rest } = input;
     return this.write("git.prCreate", base ? { ...rest, base } : rest);
   }
 
-  readyPr(number: number): Promise<unknown> {
-    return this.write("git.prReady", { number });
+  createSessionPr(input: Omit<RemotePrCreateInput, "associateExisting"> & { sessionId: string }, pushHead?: string): Promise<RemotePrCreateResult> {
+    const { base, ...rest } = input;
+    return this.write("git.prCreateForSession", { ...rest, ...(base ? { base } : {}), ...(pushHead === undefined ? {} : { pushHead }) });
   }
 
-  mergePr(number: number, method: "merge" | "squash" | "rebase" | "queue"): Promise<unknown> {
-    return this.write("git.prMerge", { number, method });
+  readyPr(pr: number | string, url?: string, connection?: WorkspaceConnectionState): Promise<unknown> {
+    return this.write("git.prReady", typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) }, connection);
+  }
+
+  /**
+   * `head` pins the merge to the commit the person saw: GitHub refuses it
+   * (`conflict`) once the head has moved. A runtime before PRO-404 ignores it.
+   */
+  mergePr(pr: number | string, method: "merge" | "squash" | "rebase" | "queue", head?: string, url?: string, connection?: WorkspaceConnectionState): Promise<unknown> {
+    const target = typeof pr === "string" ? { url: pr } : { number: pr, ...(url ? { url } : {}) };
+    return this.write("git.prMerge", head ? { ...target, method, head } : { ...target, method }, connection);
   }
 }
 

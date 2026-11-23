@@ -10,31 +10,41 @@ mod direct;
 use crate::pairing_fingerprint as fingerprint;
 mod guest;
 mod host_poll;
+mod machine_grants;
 mod machine_route;
-mod mobile;
+use crate::phone::rpc as mobile;
 use crate::local_runtime::mobile::model;
-use crate::machine_name::{computer_name, presentable_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+use crate::machine_name::{computer_name, recent_computer_name, resolve_machine_name, PLACEHOLDER_HOST_NAME};
+#[cfg(test)]
+use crate::machine_name::presentable_name;
 #[cfg(test)]
 use crate::machine_name::{COMPUTER_NAME_MAX_CHARS, UNNAMED_HOST};
 mod registry;
 mod relay;
-mod send_ids;
 pub(crate) mod sharing;
-mod wire;
+use crate::phone::wire;
+use crate::phone::{
+    allowed_method, decode_canonical_base64, error_response, host_description, pairing_refused,
+    pairing_websocket_config, request_id, send_encrypted_text, static_rpc_response, ConnectionSignal, E2eeAuth,
+    PhoneHost,
+};
+#[cfg(test)]
+use crate::phone::disconnected_notification;
+#[cfg(test)]
+use self::crypto::PayloadKind;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Context, Result};
-use base64::{engine::general_purpose, Engine};
 use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::Message,
     WebSocketStream,
 };
 use uuid::Uuid;
@@ -45,20 +55,37 @@ use crate::sink::EventSink;
 
 use self::crypto::{
     begin_e2ee_session, encode_pairing_offer, random_token, seal_account_offer, token_hash,
-    E2eeHello, HostKeypair, PayloadKind,
+    E2eeHello, HostKeypair,
 };
 use self::model::{
     AccountMirror, AccountPairingGrant, DeviceEntry, DeviceProvenance, DeviceScope,
     HostBindingPayload, HostMetadata, PairedDeviceConnection, PairingApprovalRequest, PairingCode,
-    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, CAPABILITY, OFFER_TTL_MS,
+    PairingOffer, PairingTransport, RelayStatus, APPROVAL_TTL_MS, OFFER_TTL_MS,
 };
 pub use self::model::{MachineName, PairingConnectionMode, PairingStatus, RelayPhase};
 use self::registry::{DeviceRegistry, PairingSecrets};
-use crate::direct_endpoints::advertised_endpoints;
+/// The direct endpoints a phone is given: only addresses the listen setting
+/// binds (PRO-487). Empty under "Relay only". Addresses, not the listener's
+/// state, so an offer regains its LAN route when a busy port frees.
+fn advertised_endpoints() -> Vec<String> {
+    crate::direct_endpoints::listening_endpoints(crate::direct_endpoints::DIRECT_PORT, "")
+}
+
+/// An offer's required `endpoint`: the first direct one, or the stand-in
+/// when nothing listens.
+fn first_endpoint(endpoints: &[String]) -> String {
+    endpoints.first().cloned().unwrap_or_else(|| crate::direct_endpoints::NO_DIRECT_ENDPOINT.into())
+}
+
+/// Refused public callers of the window's listener, for one log line an hour.
+static DIRECT_REFUSALS: std::sync::LazyLock<crate::listen::Refusals> = std::sync::LazyLock::new(Default::default);
+
+/// How often the window checks that its listener still matches the listen
+/// setting and this Mac's addresses.
+const LISTEN_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 use self::relay::{ConnectionOpen, DeviceCredentialInstallAuthorization, RelayLive};
 
 pub const STATUS_EVENT: &str = "pairing_status";
-const PAIRING_MESSAGE_BYTES_LIMIT: usize = 10 * 1024 * 1024;
 
 #[derive(Default)]
 struct Inner {
@@ -78,8 +105,12 @@ struct Inner {
     /// so they come back when the runtime gives the port up again.
     direct_wanted: bool,
     direct_via_runtime: bool,
-    /// The window's own listener on the port.
+    /// The window's own listeners on the port: one per bound address.
     direct_accept: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// The addresses those listeners are bound to (PRO-487).
+    direct_bound: Vec<std::net::Ipv4Addr>,
+    /// The watcher that keeps them in step with the listen setting runs.
+    direct_watching: bool,
     last_error: Option<String>,
 }
 
@@ -118,7 +149,10 @@ pub struct PairingManager {
     /// manager is taken, as `keep_awake` is.
     connections: Mutex<HashMap<String, Vec<LiveConnection>>>,
     connection_serial: AtomicU64,
-    mobile: Arc<mobile::MobileRuntime>,
+    /// Every socket open on the window's own phone listeners (PRO-495).
+    direct_callers: direct::Callers,
+    /// The phone protocol this window serves (`crate::phone`).
+    phone: Arc<PhoneHost>,
     /// `APPROVAL_TTL_MS` in the app; fixtures wait less.
     approval_ttl_ms: i64,
     /// This Mac's public key once it was read, so a status can show the
@@ -148,14 +182,6 @@ struct PendingApproval {
     outcome: tokio::sync::watch::Sender<Approval>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConnectionSignal {
-    /// Revoked, signed out or stopping: close at once.
-    Cancel,
-    /// Disconnected on the Mac: tell the phone, then close; the pairing stays.
-    Disconnect,
-}
-
 struct LiveConnection {
     serial: u64,
     signal: mpsc::UnboundedSender<ConnectionSignal>,
@@ -183,15 +209,11 @@ struct KeepAwake {
     assertion: Option<crate::power::Assertion>,
 }
 
-/// What a phone is sent on each of its connections before the Mac closes them.
-fn disconnected_notification() -> serde_json::Value {
-    serde_json::json!({ "method": "pairing.disconnected", "params": { "reason": "disconnected-on-mac" } })
-}
-
 #[derive(Clone, Debug)]
 enum PairingConnectionContext {
     Direct {
         direct_auth_id: String,
+        forwarded_id: Option<String>,
     },
     Relay {
         relay_host_id: String,
@@ -202,12 +224,16 @@ enum PairingConnectionContext {
 
 impl PairingManager {
     pub fn new(account: Arc<AccountManager>) -> Self {
+        let phone = Arc::new(PhoneHost::new({
+            let account = account.clone();
+            move || account.current_generation()
+        }));
         Self {
             guest: guest::GuestClient::default(),
             account,
             diagnostics: Mutex::new(diagnostics::DiagnosticLog::default()),
             secrets: PairingSecrets::default(),
-            registry: DeviceRegistry::default(),
+            registry: DeviceRegistry,
             direct_port: direct::PORT,
             sink: OnceLock::new(),
             sessions: OnceLock::new(),
@@ -220,7 +246,8 @@ impl PairingManager {
             suspended_account_token: Mutex::new(None),
             connections: Mutex::new(HashMap::new()),
             connection_serial: AtomicU64::new(1),
-            mobile: Arc::new(mobile::MobileRuntime::new()),
+            direct_callers: direct::Callers::default(),
+            phone,
             approval_ttl_ms: APPROVAL_TTL_MS,
             host_public: Mutex::new(None),
             keep_awake: Mutex::new(KeepAwake::default()),
@@ -254,10 +281,10 @@ impl PairingManager {
         self.sink
             .set(sink.clone())
             .map_err(|_| anyhow!("pairing manager was already configured"))?;
-        self.mobile.configure(sink.clone())?;
+        self.phone.configure(sink.clone())?;
         let settings = self.clone();
         sink.listen("settings_file_changed", Box::new(move |_| {
-            settings.mobile.broadcast_settings_changed();
+            settings.phone.mobile.broadcast_settings_changed();
             settings.reload_keep_awake();
         }));
         let machine = Arc::downgrade(self);
@@ -269,11 +296,15 @@ impl PairingManager {
                 }
             }),
         );
-        let events = self.clone();
+        // The relay's hint on the runtime's registration (PRO-368), as on the
+        // window's own: the account pairing grants changed.
+        let hinted = Arc::downgrade(self);
         sink.listen(
-            "agent_event",
-            Box::new(move |payload| {
-                events.mobile.capture_agent_event(&events, payload);
+            crate::machine_wire::RELAY_HINT_EVENT,
+            Box::new(move |_| {
+                if let Some(relay) = hinted.upgrade().and_then(|manager| manager.current_relay()) {
+                    relay.signals.hint_pairing_changed();
+                }
             }),
         );
         if !self.registry.list()?.is_empty() {
@@ -302,14 +333,14 @@ impl PairingManager {
 
     /// A phone starting a session chooses from the models the desktop offers.
     pub fn attach_models(&self, cache: Arc<crate::harness::codex::models::Cache>) {
-        self.mobile.attach_models(cache);
+        self.phone.mobile.attach_models(cache);
     }
 
     pub(crate) fn attach_runtime(self: &Arc<Self>, runtime: Arc<crate::local_runtime::desktop::Desktop>) {
-        *self.runtime.lock().unwrap() = Some(runtime);
+        *self.runtime.lock().unwrap() = Some(runtime.clone());
         // What a phone may be offered is the attached runtime's (#730), and
         // the connections the previous attachment admitted are done.
-        self.mobile.broadcast_capabilities_changed();
+        self.phone.set_owner(Some(runtime));
         // A runtime that hosts operating computers owns the port (PRO-341).
         self.reconcile_machine_soon();
     }
@@ -440,7 +471,7 @@ impl PairingManager {
         let direct_endpoints = advertised_endpoints();
         let offer = PairingOffer {
             v: 2,
-            endpoint: direct_endpoints[0].clone(),
+            endpoint: first_endpoint(&direct_endpoints),
             direct_endpoints,
             device_token: token,
             public_key_b64: keypair.public_key_b64(),
@@ -561,6 +592,7 @@ impl PairingManager {
 
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+        self.release_direct_port();
         self.leave_guest();
         self.clear_runtime_sharing();
         if let Some(sessions) = self.sessions.get() {
@@ -603,7 +635,7 @@ impl PairingManager {
                 display_name: named.name.clone(),
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities: self.host_capabilities(),
             };
             tokio::task::spawn_blocking(move || cloud::register_host(&context, &payload)).await??;
         }
@@ -667,6 +699,47 @@ impl PairingManager {
         resolve_machine_name(crate::store::settings::load().machine_name, saved, recent_computer_name())
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_secrets_for_test(identifier: &str, store: Arc<dyn crate::keychain::SecretStore>) -> Arc<Self> {
+        let mut manager = Self::new(Arc::new(AccountManager::default()));
+        manager.secrets = PairingSecrets::with_store(store);
+        manager.secrets.configure(identifier).unwrap();
+        Arc::new(manager)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_phone_owner_for_test(&self, owner: Arc<dyn crate::phone::Owner>) {
+        self.phone.set_owner(Some(owner));
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn set_phone_port_for_test(self: &mut Arc<Self>, port: u16) {
+        Arc::get_mut(self).unwrap().direct_port = port;
+    }
+
+    /// The window's signing key for runtime consent. Reading it can block
+    /// on the Keychain. A runtime launch may create it if absent.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
+        self.secrets.window_consent_key(create)
+            .map_err(|_| anyhow!(crate::serve_cli::consent::KEYCHAIN_DENIED))?
+            .ok_or_else(|| anyhow::Error::new(crate::serve_cli::consent::WindowKeyMissing))
+    }
+
+    /// Windows' consent (`consent_windows.rs`) has no `WindowKeyMissing` or
+    /// `KEYCHAIN_DENIED`: those belong to the macOS relaunch repair
+    /// (`local_runtime::window_consent`, PRO-486), which Windows lacks.
+    #[cfg(windows)]
+    pub(crate) fn consent_key(&self, create: bool) -> Result<ring::signature::Ed25519KeyPair> {
+        self.secrets.window_consent_key(create)
+            .map_err(|_| {
+                anyhow!("TerminalX couldn’t access the window consent key in Keychain. Unlock your login Keychain, allow TerminalX access if prompted, then try again.")
+            })?
+            .ok_or_else(|| {
+                anyhow!("The window consent key is missing from Keychain. Restart the local runtime from TerminalX and try again.")
+            })
+    }
+
     pub(super) fn host_key(&self, create: bool) -> Result<HostKeypair> {
         let keypair = self
             .secrets
@@ -682,6 +755,17 @@ impl PairingManager {
         attempt: u32,
         failure: Option<diagnostics::Failure>,
     ) {
+        self.record_phone_end(event, attempt, failure, None)
+    }
+
+    /// `record_relay_diagnostic`, with how a phone's session ended (#1282).
+    fn record_phone_end(
+        &self,
+        event: diagnostics::Event,
+        attempt: u32,
+        failure: Option<diagnostics::Failure>,
+        ended: Option<crate::phone::Ended>,
+    ) {
         // Only typed allowlisted data reaches either sink. A disk error must not
         // stop connection recovery or reveal the user's filesystem path.
         if let Some(failure) = failure {
@@ -694,7 +778,7 @@ impl PairingManager {
             .diagnostics
             .lock()
             .unwrap()
-            .record(event, attempt, failure)
+            .record_end(event, attempt, failure, ended)
             .is_err()
         {
             log::warn!("relay diagnostics write failed (category=local-storage)");
@@ -817,6 +901,7 @@ impl PairingManager {
             self.set_error(format!("Could not save host binding fence: {error:#}"));
             return;
         }
+        let capabilities = self.host_capabilities();
         let payload = HostBindingPayload {
             host_id: keypair.host_id(),
             host_public_key_b64: keypair.public_key_b64(),
@@ -824,7 +909,7 @@ impl PairingManager {
             display_name: display_name.clone(),
             platform: "darwin".into(),
             environment_kind: "native".into(),
-            capabilities: vec![CAPABILITY.into()],
+            capabilities: capabilities.clone(),
         };
         let context_for_bind = context.clone();
         let bind =
@@ -845,7 +930,7 @@ impl PairingManager {
                 display_name,
                 platform: "darwin".into(),
                 environment_kind: "native".into(),
-                capabilities: vec![CAPABILITY.into()],
+                capabilities,
                 app_version: env!("CARGO_PKG_VERSION").into(),
                 last_seen_at: Some(Utc::now().to_rfc3339()),
             });
@@ -866,7 +951,7 @@ impl PairingManager {
         generation: u64,
         grant: AccountPairingGrant,
     ) {
-        if !valid_grant(&grant, context, &relay.relay_host_id, generation) {
+        if !valid_grant(&grant, context, &relay.relay_host_id, generation, "mobile") {
             return;
         }
         let result = self
@@ -950,7 +1035,7 @@ impl PairingManager {
             let direct_endpoints = advertised_endpoints();
             let offer = PairingOffer {
                 v: 2,
-                endpoint: direct_endpoints[0].clone(),
+                endpoint: first_endpoint(&direct_endpoints),
                 direct_endpoints,
                 device_token: token,
                 public_key_b64: keypair.public_key_b64(),
@@ -1017,49 +1102,196 @@ impl PairingManager {
         // Serialize binding; only listener lifetime is cached, never interface addresses.
         let mut inner = self.inner.lock().unwrap();
         inner.direct_wanted = true;
+        // Follow the listen setting from now on, whoever holds the port
+        // (PRO-487): offers name the addresses it chooses, so a change made
+        // by another computer, `terminalx-serve hosting` or an edited file
+        // reaches them while the runtime owns the port too.
+        if !inner.direct_watching {
+            inner.direct_watching = true;
+            self.watch_listen_setting();
+        }
         if inner.direct_listener_started {
             return Ok(());
         }
+        let plan = crate::listen::Plan::current();
+        crate::listen::remember(plan);
+        self.direct_callers.answer_public(plan.allow_public);
         if self.runtime_owns_direct() {
             // The runtime holds the port and passes phones here (PRO-341).
             drop(inner);
             return self.take_phones_from_runtime();
         }
-        let listener = direct::bind(self.direct_port)?;
+        // Where the listen setting says (PRO-487): one listener per address,
+        // none under "Relay only".
+        let addresses = plan.binds(&crate::listen::interfaces());
+        let listeners = direct::bind_each(&addresses, self.direct_port)?;
         inner.direct_listener_started = true;
+        inner.direct_bound = addresses;
         let manager = self.clone();
         inner.direct_accept = Some(tauri::async_runtime::spawn(async move {
+            // Aborting this task drops the set, which ends every listener.
+            let mut accepting = tokio::task::JoinSet::new();
+            for listener in listeners {
+                accepting.spawn(manager.clone().accept_direct(listener));
+            }
+            while accepting.join_next().await.is_some() {}
+        }));
+        Ok(())
+    }
+
+    /// Check the window's own listeners against the listen setting and this
+    /// Mac's addresses, and bind again when they differ: the setting
+    /// changed, Tailscale came up, the Mac joined another network.
+    ///
+    /// Callers already in are held to the setting too (PRO-495): turning
+    /// public callers off closes the sockets from public addresses on the
+    /// window's own listeners here, even when the listeners stay where they
+    /// are, as the runtime's `close_refused_callers` does for its own.
+    /// Blocking: reads `settings.json`.
+    pub fn listen_setting_changed(self: &Arc<Self>) {
+        let plan = crate::listen::Plan::current();
+        crate::listen::remember(plan);
+        let closed = self.direct_callers.answer_public(plan.allow_public);
+        if closed > 0 {
+            log::info!("phone listener: public callers are not answered now; closed {closed} open connection(s) from public addresses");
+        }
+        let wanted = plan.binds(&crate::listen::interfaces());
+        let (own, bound, wants) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.direct_listener_started && !inner.direct_via_runtime, inner.direct_bound.clone(), inner.direct_wanted)
+        };
+        if self.is_stopped() || !wants || self.runtime_owns_direct() || (own && bound == wanted) {
+            return;
+        }
+        if own {
+            self.close_direct_listener();
+            log::info!("the listen setting or this Mac's addresses changed: the phone listener moves");
+        } else if wanted.is_empty() {
+            return;
+        }
+        if let Err(error) = self.ensure_direct_listener() {
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                self.retry_direct_listener();
+            } else {
+                log::debug!("the phone listener is closed: {error}");
+            }
+        }
+        self.emit();
+    }
+
+    /// Which of `sources` the window's own listener closes when public
+    /// callers are withdrawn: each is noted as an accepted socket while they
+    /// are answered, then the setting turns off.
+    #[cfg(test)]
+    pub(crate) fn callers_closed_when_public_callers_are_withdrawn_for_test(&self, sources: &[std::net::IpAddr]) -> Vec<std::net::IpAddr> {
+        self.direct_callers.answer_public(true);
+        let mut open: Vec<_> = sources.iter().map(|source| (*source, self.direct_callers.open(*source).expect("answered while public callers are"))).collect();
+        assert_eq!(self.direct_callers.answer_public(true), 0, "nobody is closed while they are answered");
+        self.direct_callers.answer_public(false);
+        open.iter_mut().filter_map(|(source, (_, closed))| closed.try_recv().is_ok().then_some(*source)).collect()
+    }
+
+    /// The addresses the window's own phone listener is bound to, as
+    /// `192.168.1.20:6768` (`0.0.0.0:6768` for every interface); none while
+    /// the runtime holds the port or nothing listens.
+    pub fn window_listening(&self) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        if !inner.direct_listener_started || inner.direct_via_runtime {
+            return Vec::new();
+        }
+        inner.direct_bound.iter().map(|ip| std::net::SocketAddr::from((*ip, self.direct_port)).to_string()).collect()
+    }
+
+    /// Whether any phone is paired with this Mac.
+    pub fn has_paired_phones(&self) -> bool {
+        // Unreadable: count as paired, so nothing it relies on is changed.
+        self.registry.list().map_or(true, |devices| !devices.is_empty())
+    }
+
+    /// Whether phones reach this Mac directly now, on the window's listener
+    /// or the runtime's.
+    pub fn direct_listening(&self) -> bool {
+        self.inner.lock().unwrap().direct_listener_started
+    }
+
+    /// Follow the listen setting for the life of the manager.
+    fn watch_listen_setting(self: &Arc<Self>) {
+        let manager = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                tokio::time::sleep(LISTEN_CHECK_EVERY).await;
+                let Some(manager) = manager.upgrade() else { return };
+                if manager.is_stopped() {
+                    return;
+                }
+                let _ = tauri::async_runtime::spawn_blocking(move || manager.listen_setting_changed()).await;
+            }
+        });
+    }
+
+    /// Take phones on one of the window's listeners until it is closed.
+    async fn accept_direct(self: Arc<Self>, listener: tokio::net::TcpListener) {
+        let manager = self;
+        {
+            loop {
+                let Ok((mut stream, peer)) = listener.accept().await else {
                     return;
                 };
+                // Before a byte is read: a caller from a public address is
+                // not answered unless the person allowed it (PRO-487).
+                if !crate::listen::admit(peer, crate::listen::remembered().allow_public, &DIRECT_REFUSALS, "phone listener") {
+                    drop(stream);
+                    continue;
+                }
                 let manager = manager.clone();
                 tauri::async_runtime::spawn(async move {
-                    let result = async {
-                        let socket = tokio_tungstenite::accept_async_with_config(
-                            crate::data_privacy::NetworkIo::new(stream),
-                            Some(pairing_websocket_config()),
-                        )
-                        .await?;
-                        manager
-                            .handle_e2ee_socket(
-                                socket,
-                                PairingConnectionContext::Direct {
-                                    direct_auth_id: Uuid::new_v4().simple().to_string(),
-                                },
-                                None,
-                                None,
-                            )
-                            .await
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        log::debug!("direct paired-device connection ended: {error:#}");
+                    manager.serve_direct_caller(&mut stream, peer).await;
+                    if manager.is_stopped() || manager.runtime_owns_direct() {
+                        // Let the runtime bind this same port when the window
+                        // closes. A normal server-side FIN leaves TIME_WAIT.
+                        let _ = stream.set_zero_linger();
                     }
                 });
             }
-        }));
-        Ok(())
+        }
+    }
+
+    /// One caller on the window's own listener, from `peer`: served until it
+    /// ends, its listener closes, or the listen setting stops answering its
+    /// address (PRO-495). The caller closes `stream` after.
+    async fn serve_direct_caller<S>(self: &Arc<Self>, stream: &mut S, peer: std::net::SocketAddr)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        // Judged again as it is noted: the setting may have changed since
+        // the listener admitted it.
+        let Some((_open, mut closed)) = self.direct_callers.open(peer.ip()) else { return };
+        let served = async {
+            let socket = tokio_tungstenite::accept_async_with_config(
+                crate::data_privacy::NetworkIo::new(&mut *stream),
+                Some(pairing_websocket_config()),
+            )
+            .await?;
+            self.handle_e2ee_socket(
+                socket,
+                PairingConnectionContext::Direct {
+                    direct_auth_id: Uuid::new_v4().simple().to_string(),
+                    forwarded_id: None,
+                },
+                None,
+                None,
+            )
+            .await
+        };
+        let result = tokio::select! {
+            result = served => result.map(drop),
+            // Dropping the handler ends the phone's session as a closed
+            // socket does; the phone reconnects and is judged at the door.
+            _ = closed.recv() => Ok(()),
+        };
+        if let Err(error) = result {
+            log::debug!("direct paired-device connection ended: {error:#}");
+        }
     }
 
     pub(super) async fn handle_relay_connection(
@@ -1069,7 +1301,7 @@ impl PairingManager {
         generation: u64,
         keypair: HostKeypair,
         connection: ConnectionOpen,
-    ) -> Result<()> {
+    ) -> Result<crate::phone::Ended> {
         if keypair.host_id() != relay_host_id {
             return Err(anyhow!("relay connection named a different host key")
                 .context(diagnostics::Stage::PhoneAttach));
@@ -1106,7 +1338,7 @@ impl PairingManager {
         connection: PairingConnectionContext,
         expected_device_id: Option<String>,
         logged_in: Option<&AtomicBool>,
-    ) -> Result<()>
+    ) -> Result<crate::phone::Ended>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1133,15 +1365,7 @@ impl PairingManager {
             .next()
             .await
             .ok_or_else(|| anyhow!("device closed before E2EE authentication"))??;
-        let frame = text_frame_bytes(auth_frame)?;
-        let auth_plaintext = session.open(&frame, PayloadKind::Text)?;
-        let auth: E2eeAuth = serde_json::from_slice(&auth_plaintext)?;
-        if auth.kind != "e2ee_auth"
-            || auth.v != Some(2)
-            || auth.transcript_hash_b64.as_deref() != Some(&session.transcript_hash_b64)
-        {
-            bail!("E2EE authentication was not bound to the handshake");
-        }
+        let auth = E2eeAuth::open(auth_frame, &mut session)?;
         let generation = registry::load_account_mirror()
             .ok()
             .flatten()
@@ -1153,18 +1377,16 @@ impl PairingManager {
             }
         };
         if let Some((session_id, link_id)) = self.share_for_token(&auth.device_token, expected_device_id.as_deref()) {
-            let authenticated = serde_json::json!({ "type": "e2ee_authenticated", "v": 2, "transcriptHashB64": session.transcript_hash_b64 });
-            send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
+            crate::phone::send_authenticated(&mut socket, &mut session).await?;
             mark_logged_in();
-            return self.share_socket(socket, session, session_id, link_id).await;
+            self.share_socket(socket, session, session_id, link_id).await?;
+            return Ok(crate::phone::Ended::by(crate::phone::EndReason::ShareEnded));
         }
-        let device = self
-            .registry
-            .find_by_token(&auth.device_token, generation)?
-            .ok_or_else(|| {
-                anyhow!(diagnostics::Category::Authentication)
-                    .context("paired-device credential was refused")
-            })?;
+        let Some(device) = self.registry.find_by_token(&auth.device_token, generation)? else {
+            // Closed as refused, not dropped: the phone stops using this pairing (#1315).
+            crate::phone::close_refused(&mut socket).await;
+            return Err(anyhow!(diagnostics::Category::Authentication).context("paired-device credential was refused"));
+        };
         // Session invitations are process-local and must never subscribe to
         // the mobile runtime's host-wide broadcasts, even via a disk entry.
         if device.scope == DeviceScope::Session {
@@ -1189,14 +1411,17 @@ impl PairingManager {
         {
             // Said in so many words, so the phone can tell a refusal from a
             // dropped connection it should retry (docs/PAIRING-APPROVAL.md).
-            let refused = serde_json::json!({ "type": "pairing_refused", "v": 1, "reason": reason });
-            let _ = send_encrypted_text(&mut socket, &mut session, &refused.to_string()).await;
+            let _ = send_encrypted_text(&mut socket, &mut session, &pairing_refused(reason).to_string()).await;
             let _ = socket.close(None).await;
             return Err(anyhow!(diagnostics::Category::Authentication)
                 .context(format!("the pairing was refused on this Mac ({reason})")));
         }
         self.registry
             .touch(&device.id, &session.client_public_key_b64, &fingerprint, transport)?;
+        if device.last_seen_at.is_none() && device.scope != DeviceScope::Session {
+            let manager = self.clone();
+            let _ = tokio::task::spawn_blocking(move || manager.keep_new_phone_available()).await;
+        }
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.pending_pairing_device.as_deref() == Some(&device.id) {
@@ -1204,87 +1429,26 @@ impl PairingManager {
                 inner.active_pairing = None;
             }
         }
-        let authenticated = serde_json::json!({
-            "type": "e2ee_authenticated",
-            "v": 2,
-            "transcriptHashB64": session.transcript_hash_b64,
-        });
-        send_encrypted_text(&mut socket, &mut session, &authenticated.to_string()).await?;
-        mark_logged_in();
         // Tracked before the runtime registers it, so a revoke meanwhile is not missed.
-        let (_tracked, mut signal_rx) = self.track_connection(&device.id, transport);
-        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let (_tracked, signal_rx) = self.track_connection(&device.id, transport);
+        let (outbound_tx, outbound_rx) = mpsc::channel(crate::phone::OUTBOUND_QUEUE);
+        let forwarded_id = match &connection {
+            PairingConnectionContext::Direct { forwarded_id, .. } => forwarded_id.clone(),
+            PairingConnectionContext::Relay { .. } => None,
+        };
         let mobile_connection = Arc::new(
-            mobile::MobileConnection::open(self, &device, outbound_tx, wire_transport)
+            mobile::MobileConnection::open(&self.phone, &device, outbound_tx, wire_transport, forwarded_id)
                 .await
                 .context(diagnostics::Category::LocalRuntime)?,
         );
-        let mut reassembly = wire::Reassembly::default();
-        let mut stream_health = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _ = stream_health.tick() => { mobile_connection.check_buffer()?; }
-                signal = signal_rx.recv() => {
-                    if signal == Some(ConnectionSignal::Disconnect) {
-                        let _ = send_message(&mut socket, &mut session, &disconnected_notification(), mobile_connection.wire()).await;
-                    }
-                    mobile_connection.close(self);
-                    let _ = socket.close(None).await;
-                    return Ok(());
-                }
-                outgoing = outbound_rx.recv() => {
-                    let Some(outgoing) = outgoing else {
-                        mobile_connection.close(self);
-                        return Ok(());
-                    };
-                    mobile_connection.check_off_runtime(self).await?;
-                    send_message(&mut socket, &mut session, &outgoing, mobile_connection.wire()).await?;
-                }
-                incoming = socket.next() => {
-                    let Some(incoming) = incoming else {
-                        mobile_connection.close(self);
-                        return Ok(());
-                    };
-                    let plaintext = match incoming? {
-                        Message::Text(text) => {
-                            let bytes = decode_canonical_base64(&text)?;
-                            session.open(&bytes, PayloadKind::Text)?
-                        }
-                        Message::Binary(bytes) => {
-                            // Binary frames carry only the fragments of a request too
-                            // large for one frame (#669). Other binary application streams
-                            // are deliberately not attached to a workspace in this
-                            // foundation; authentication and framing still fail closed.
-                            let frame = session.open(&bytes, PayloadKind::Binary)?;
-                            match reassembly.push(&frame)? {
-                                Some(message) => message,
-                                None => continue,
-                            }
-                        }
-                        Message::Close(_) => {
-                            mobile_connection.close(self);
-                            return Ok(());
-                        },
-                        Message::Ping(bytes) => {
-                            socket.send(Message::Pong(bytes)).await?;
-                            continue;
-                        }
-                        Message::Pong(_) | Message::Frame(_) => continue,
-                    };
-                    let request: serde_json::Value = serde_json::from_slice(&plaintext)?;
-                    mobile_connection.check_off_runtime(self).await?;
-                    let response = self.rpc_response(&request, &device, &connection, &mobile_connection).await;
-                    // Revalidate after asynchronous work: queued replies must not
-                    // disclose session data after revocation or account replacement.
-                    // Successful self-unpairing deliberately revokes this connection;
-                    // its acknowledgement contains no session data.
-                    let forgot_self = request["method"] == "pairing.forget"
-                        && response["ok"] == true;
-                    if !forgot_self { mobile_connection.check_off_runtime(self).await?; }
-                    send_message(&mut socket, &mut session, &response, mobile_connection.wire()).await?;
-                }
-            }
-        }
+        crate::phone::send_with_grant(&self.phone, &mobile_connection,
+            crate::phone::send_authenticated(&mut socket, &mut session)).await?;
+        mark_logged_in();
+        crate::phone::serve_connection(&mut socket, &mut session, &self.phone, &mobile_connection, outbound_rx, signal_rx, |request| {
+            let (connection, device, mobile_connection) = (&connection, &device, &mobile_connection);
+            async move { self.rpc_response(&request, device, connection, mobile_connection).await }
+        })
+        .await
     }
 
     async fn rpc_response(
@@ -1297,11 +1461,7 @@ impl PairingManager {
         if device.scope == DeviceScope::Session {
             return serde_json::json!({ "id": request["id"], "ok": false, "error": { "code": "forbidden", "message": "Session credentials require the scoped session router." } });
         }
-        let id = request
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let id = request_id(request);
         let method = request
             .get("method")
             .and_then(serde_json::Value::as_str)
@@ -1318,7 +1478,7 @@ impl PairingManager {
             // What the phone calls this computer (PRO-87). Asked on every
             // connection, so a computer renamed in System Settings, and a
             // phone paired before names were sent, both catch up.
-            "host.describe" if allowed_method(device.scope, method) => Ok(serde_json::json!({ "name": computer_name() })),
+            "host.describe" if allowed_method(device.scope, method) => Ok(host_description(computer_name(), true)),
             // The phone unpairs itself: only ever the device this connection
             // authenticated as, so it is removed from this computer's paired
             // devices too instead of lingering after the phone forgot it.
@@ -1334,7 +1494,7 @@ impl PairingManager {
                 let dispatched = mobile::off_runtime({
                     let (manager, connection) = (self.clone(), mobile_connection.clone());
                     let (request, device) = (request.clone(), device.clone());
-                    move || Ok(mobile::dispatch(&manager, &connection, &request, &device))
+                    move || Ok(mobile::dispatch(&manager.phone, &connection, &request, &device))
                 })
                 .await;
                 match dispatched {
@@ -1347,12 +1507,7 @@ impl PairingManager {
         };
         match result {
             Ok(result) => mobile::success_response(&id, result),
-            Err(error) => serde_json::json!({
-                "id": id,
-                "ok": false,
-                "error": { "code": "unavailable", "message": error.to_string() },
-                "_meta": { "runtimeId": "desktop" }
-            }),
+            Err(error) => error_response(&id, &error),
         }
     }
 
@@ -1374,7 +1529,7 @@ impl PairingManager {
             .current_relay()
             .ok_or_else(|| anyhow!("relay control is not active"))?;
         let authorization = match connection {
-            PairingConnectionContext::Direct { direct_auth_id } => {
+            PairingConnectionContext::Direct { direct_auth_id, .. } => {
                 DeviceCredentialInstallAuthorization::AuthenticatedDirect {
                     direct_auth_id: direct_auth_id.clone(),
                 }
@@ -1477,6 +1632,7 @@ impl PairingManager {
     fn revoke_local(&self, device_id: &str) -> Result<()> {
         self.fence_runtime_mobile("revoke", serde_json::json!({"deviceId":device_id}))?;
         let _ = self.registry.revoke(device_id)?;
+        self.account.sync_runtime_copy();
         self.secrets.delete_device_token(device_id)?;
         self.cancel_connections(device_id);
         self.inner.lock().unwrap().forget_pending(device_id);
@@ -1484,17 +1640,20 @@ impl PairingManager {
     }
 
     fn discard_unclaimed_pairing(&self, device_id: &str) -> Result<()> {
-        let _ = self.registry.discard_unclaimed(device_id)?;
+        if self.registry.discard_unclaimed(device_id)? {
+            self.account.sync_runtime_copy();
+        }
         self.secrets.delete_device_token(device_id)?;
         self.inner.lock().unwrap().forget_pending(device_id);
         Ok(())
     }
 
+    /// Close a revoked phone's connections, as refused (#1315).
     fn cancel_connections(&self, device_id: &str) {
         let removed = self.connections.lock().unwrap().remove(device_id);
         if let Some(connections) = removed {
             for connection in connections {
-                let _ = connection.signal.send(ConnectionSignal::Cancel);
+                let _ = connection.signal.send(ConnectionSignal::Revoke);
             }
             self.refresh_keep_awake();
         }
@@ -1884,15 +2043,8 @@ impl PairingManager {
     /// `device.describe`: what the phone calls itself, cleaned as a name
     /// shown on another device is.
     fn describe_device(&self, device: &DeviceEntry, params: Option<&serde_json::Value>) -> Result<serde_json::Value> {
-        let params: DeviceDescribeParams =
-            serde_json::from_value(params.cloned().unwrap_or_else(|| serde_json::json!({})))
-                .context("invalid device.describe params")?;
-        let label = presentable_name(&params.label)
-            .ok_or_else(|| anyhow!("device.describe label must contain 1 to 64 visible characters"))?;
-        if !matches!(params.platform.as_str(), "ios" | "android") {
-            bail!("device.describe platform must be \"ios\" or \"android\"");
-        }
-        self.registry.describe(&device.id, &label, &params.platform)?;
+        let (label, platform) = crate::phone::device_description(params)?;
+        self.registry.describe(&device.id, &label, &platform)?;
         self.emit();
         Ok(serde_json::json!({ "ok": true }))
     }
@@ -1908,24 +2060,6 @@ impl PairingManager {
 
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct E2eeAuth {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    v: Option<u8>,
-    #[serde(default)]
-    transcript_hash_b64: Option<String>,
-    device_token: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceDescribeParams {
-    label: String,
-    platform: String,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1950,13 +2084,14 @@ fn valid_grant(
     context: &AccountContext,
     host_id: &str,
     generation: u64,
+    scope: &str,
 ) -> bool {
     grant.user_id == context.user_id
         && grant.host_id == host_id
         && grant.binding_generation == generation
         && grant.installation_generation > 0
         && grant.associated_data_version == 1
-        && grant.requested_scope == "mobile"
+        && grant.requested_scope == scope
         && grant.state == "pending"
         && DateTime::parse_from_rfc3339(&grant.expires_at).is_ok_and(|expiry| expiry > Utc::now())
 }
@@ -1983,33 +2118,6 @@ fn chosen_host_name(name: &str) -> Result<String> {
 }
 
 
-pub(super) fn pairing_websocket_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .read_buffer_size(64 * 1024)
-        .write_buffer_size(64 * 1024)
-        // A 5 MB image is base64 encoded in JSON, then the encrypted frame is
-        // base64 encoded for the text websocket. Keep the authenticated
-        // pairing channel bounded while leaving room for that expansion.
-        .max_write_buffer_size(PAIRING_MESSAGE_BYTES_LIMIT)
-        .max_message_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
-        .max_frame_size(Some(PAIRING_MESSAGE_BYTES_LIMIT))
-}
-
-fn text_frame_bytes(message: Message) -> Result<Vec<u8>> {
-    match message {
-        Message::Text(text) => decode_canonical_base64(&text),
-        _ => bail!("encrypted authentication frame was not text"),
-    }
-}
-
-fn decode_canonical_base64(value: &str) -> Result<Vec<u8>> {
-    let bytes = general_purpose::STANDARD.decode(value)?;
-    if general_purpose::STANDARD.encode(&bytes) != value {
-        bail!("encrypted text frame was not canonical base64");
-    }
-    Ok(bytes)
-}
-
 fn validate_opaque_id(value: &str) -> Result<()> {
     if value.is_empty() || value.len() > 128 {
         bail!("request id must contain 1 to 128 characters");
@@ -2028,176 +2136,20 @@ fn validate_base64url_32(value: &str) -> Result<()> {
     Ok(())
 }
 
-async fn send_encrypted_text<S>(
-    socket: &mut WebSocketStream<S>,
-    session: &mut crypto::E2eeSession,
-    plaintext: &str,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let frame = session.seal(plaintext.as_bytes(), PayloadKind::Text)?;
-    socket
-        .send(Message::Text(
-            general_purpose::STANDARD.encode(frame).into(),
-        ))
-        .await?;
-    Ok(())
-}
-
-/// One application message to the phone: one encrypted text frame, or binary
-/// fragments when it is too large for the transport and the phone reassembles
-/// them. A message neither can carry never reaches the socket, where it would
-/// close the connection (#669): a reply becomes its request's error, and a
-/// notification, which the phone can read again, is dropped.
-async fn send_message<S>(
-    socket: &mut WebSocketStream<S>,
-    session: &mut crypto::E2eeSession,
-    message: &serde_json::Value,
-    wire: &wire::Wire,
-) -> Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let text = message.to_string();
-    match wire.delivery(text.len()) {
-        wire::Delivery::Frame => send_encrypted_text(socket, session, &text).await,
-        wire::Delivery::Fragments => {
-            for fragment in wire.fragments_of(text.as_bytes()) {
-                let frame = session.seal(&fragment, PayloadKind::Binary)?;
-                socket.send(Message::Binary(frame.into())).await?;
-            }
-            Ok(())
-        }
-        wire::Delivery::TooLarge => {
-            let Some(id) = message.get("id").and_then(serde_json::Value::as_str) else {
-                return Ok(());
-            };
-            let refusal = wire.too_large_response(id, text.len());
-            send_encrypted_text(socket, session, &refusal.to_string()).await
-        }
-    }
-}
-
-fn static_rpc_response(request: &serde_json::Value, scope: DeviceScope) -> serde_json::Value {
-    let id = request
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let method = request
-        .get("method")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    if method == "status.get" && allowed_method(scope, method) {
-        return serde_json::json!({
-            "id": id,
-            "ok": true,
-            "result": { "protocolVersion": 2, "product": "TerminalX", "deviceScope": scope },
-            "_meta": { "runtimeId": "desktop" }
-        });
-    }
-    let (code, message) = if allowed_method(scope, method) {
-        (
-            "unavailable",
-            "This paired-device method is not connected to a workspace yet".into(),
-        )
-    } else {
-        (
-            "forbidden",
-            format!("Method '{method}' is not available to this paired device"),
-        )
-    };
-    serde_json::json!({
-        "id": id,
-        "ok": false,
-        "error": { "code": code, "message": message },
-        "_meta": { "runtimeId": "desktop" }
-    })
-}
-
-fn allowed_method(scope: DeviceScope, method: &str) -> bool {
-    if scope == DeviceScope::Session {
-        return crate::local_sharing::scoped_method(method);
-    }
-    const VIEWER: &[&str] = &[
-        "status.get",
-        "presence.join",
-        "presence.leave",
-        "presence.heartbeat",
-        "presence.list",
-        "chat.post",
-        "chat.list",
-        "sessions.summaries",
-        "session.tail",
-        // A prompt's image, from the session's own attachments.
-        "session.image",
-        "session.sync",
-        "sync.capabilities",
-        "transport.negotiate",
-        "session.subscribe",
-        "session.unsubscribe",
-        "session.status",
-        "session.roster",
-        "session.tabs.list",
-        "terminal.read",
-        "terminal.subscribe",
-        "terminal.unsubscribe",
-        // What a tab runs, the models to pick from, and the context a
-        // continuation would carry: reads, as the transcript is.
-        "session.markRead",
-        "session.tab",
-        "models.list",
-        "session.prepareContinuation",
-        "notifications.missedSince",
-        "notifications.subscribe",
-        "notifications.unsubscribe",
-        "host.describe",
-        "pairing.forget",
-        // What a new session can be started with, and this Mac's phone-visible settings.
-        "sessions.options",
-        "mac.settings",
-    ];
-    const DRIVER: &[&str] = &[
-        // What the phone calls itself (PRO-314).
-        "device.describe",
-        "pairing.getEndpoints",
-        "pairing.provisionRelay",
-        "terminal.send",
-        // Starts the tab's agent, and moves a native Codex tab to its terminal.
-        "terminal.open",
-        "terminal.control.get",
-        "terminal.control.acquire",
-        "terminal.control.release",
-        "steerLease.get",
-        "steerLease.acquire",
-        "steerLease.release",
-        "steerLease.queueInput",
-        "chat.promoteToAgent",
-        "session.send",
-        "permission.respond",
-        // Answering an agent's question, as the desktop's question card does (#979).
-        "questions.respond",
-        "sessions.create",
-        "mac.setSettings",
-        // The session controls a phone has as the desktop does (#706).
-        "session.stop",
-        "session.interrupt",
-        "session.resendUnsent",
-        "session.setModel",
-        "session.setEffort",
-        "session.setMode",
-        "session.continue",
-        // Closing a tab as the desktop's tab strip does.
-        "session.closeTab",
-    ];
-    VIEWER.contains(&method) || (scope == DeviceScope::Driver && DRIVER.contains(&method))
-}
-
 #[cfg(test)]
 mod startup_tests;
 
 #[cfg(test)]
 mod approval_tests;
+
+/// The category the relay diagnostics record a phone session's error under,
+/// as written there (`fell-behind`, `timeout`, …): what a phone test asserts
+/// its connection ended as (#1334).
+#[cfg(test)]
+pub(crate) fn phone_session_category(error: anyhow::Error) -> String {
+    let failure = diagnostics::Failure::from_error(&error.context(diagnostics::Stage::PhoneSession));
+    serde_json::to_value(failure.category).unwrap().as_str().unwrap().to_owned()
+}
 
 #[cfg(test)]
 mod tests {
@@ -2260,6 +2212,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     /// Through the router a phone actually reaches, with a real local runtime
     /// as owner: a viewer may read the new-session choices and the settings but
     /// neither start a session nor change one, a driver may do all four, and a
@@ -2291,6 +2244,7 @@ mod tests {
         assert!(result.success(), "{}", std::fs::read_to_string(root.path().join("router.log")).unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn phone_router_child_fixture() {
         if std::env::var("TERMINALX_TEST_PHONE_ROUTER").as_deref() != Ok("1") { return; }
@@ -2338,11 +2292,11 @@ mod tests {
             let pairing = pairing.clone();
             async move {
                 let (outbound, inbound) = mpsc::channel(64);
-                (Arc::new(mobile::MobileConnection::open(&pairing, &device, outbound, wire::Transport::Direct).await.unwrap()), inbound)
+                (Arc::new(mobile::MobileConnection::open(&pairing.phone, &device, outbound, wire::Transport::Direct, None).await.unwrap()), inbound)
             }
         };
         let ((phone, _phone_inbound), (tablet, _tablet_inbound)) = (connect(driver.clone()).await, connect(viewer.clone()).await);
-        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into() };
+        let context = PairingConnectionContext::Direct { direct_auth_id: "fixture".into(), forwarded_id: None };
         let ask = |device: &DeviceEntry, connection: &Arc<mobile::MobileConnection>, method: &str, params: serde_json::Value| {
             let request = json!({"id": method, "method": method, "params": params});
             let (pairing, device, connection, context) = (pairing.clone(), device.clone(), connection.clone(), context.clone());
@@ -2373,6 +2327,33 @@ mod tests {
         assert!(crate::store::index::get(&session).unwrap().is_quick());
         assert_eq!(ask(&driver, &phone, "sessions.create", create.clone()).await["result"]["sessionId"], session.as_str());
         assert_eq!(crate::store::index::load().unwrap().len(), 1);
+
+        // PRO-510: the calls built for the phone after the gate's lists were
+        // written reach their handlers, one of each group, and an acting one
+        // only as a driver. Each was refused as `forbidden` before its handler.
+        let mut settings = crate::store::settings::load();
+        settings.experimental.bots = true;
+        crate::store::settings::save(&settings).unwrap();
+        let answered = |response: serde_json::Value| { assert_eq!(response["ok"], true, "{response}"); response["result"].clone() };
+        // The phone's prefetch, and the configuration its form shows: reads.
+        let targets = answered(ask(&viewer, &tablet, "sync.prefetchTargets", json!({})).await);
+        assert!(targets["targets"].as_array().unwrap().iter().any(|target| target["sessionId"] == session.as_str()), "{targets}");
+        assert_eq!(answered(ask(&viewer, &tablet, "sync.prefetch", json!({"enabled": true})).await)["enabled"], true);
+        assert_eq!(answered(ask(&viewer, &tablet, "sync.prefetch", json!({"enabled": false})).await)["enabled"], false);
+        assert!(answered(ask(&viewer, &tablet, "configuration.resolve", json!({})).await).is_object());
+        // The Bots tab: a viewer reads it, only a driver pauses the bots.
+        assert!(answered(ask(&viewer, &tablet, "bots.list", json!({})).await)["bots"].is_object());
+        assert_eq!(refused(&ask(&viewer, &tablet, "bots.pauseAll", json!({})).await), (json!(false), json!("forbidden")));
+        answered(ask(&driver, &phone, "bots.pauseAll", json!({})).await);
+        // Pins: a viewer reads the cloud pins, only a driver pins a session or a cloud project.
+        assert_eq!(refused(&ask(&viewer, &tablet, "sessions.pin", json!({"sessionId": session, "pinned": true})).await), (json!(false), json!("forbidden")));
+        assert_eq!(refused(&ask(&viewer, &tablet, "cloud.pin", json!({"orgId": "org-1", "identity": "github.com/acme/web", "pinned": true})).await), (json!(false), json!("forbidden")));
+        assert!(!crate::store::index::get(&session).unwrap().pinned);
+        assert_eq!(answered(ask(&viewer, &tablet, "cloud.pins", json!({})).await), json!({"orgs": {}}));
+        assert_eq!(answered(ask(&driver, &phone, "sessions.pin", json!({"sessionId": session, "pinned": true})).await)["pinned"], true);
+        assert!(crate::store::index::get(&session).unwrap().pinned);
+        answered(ask(&driver, &phone, "cloud.pin", json!({"orgId": "org-1", "identity": "github.com/acme/web", "pinned": true})).await);
+        assert_eq!(answered(ask(&viewer, &tablet, "cloud.pins", json!({})).await), json!({"orgs": {"org-1": ["github.com/acme/web"]}}));
 
         // A revoked phone reads and changes nothing, and starts nothing.
         pairing.fence_runtime_mobile("revoke", json!({"deviceId": "driver"})).unwrap();
@@ -2520,6 +2501,32 @@ mod tests {
         assert_eq!(named, MachineName { name: own_name.clone(), chosen: false, computer_name: computer });
         assert_eq!(PairingManager::host_name("u1"), own_name);
         assert_eq!(crate::store::settings::load().machine_name, None);
+    }
+
+    #[test]
+    fn removing_the_last_phone_with_the_window_open_removes_the_runtime_session() {
+        use crate::keychain::testing::MemorySecrets;
+        use serde_json::json;
+
+        let _home = crate::store::temp_home();
+        let root = crate::store::root().unwrap();
+        let manager = PairingManager::with_secrets_for_test("com.terminalx.fixture", Arc::new(MemorySecrets::default()));
+        manager.account.set_context_for_test(Some(AccountContext {
+            access_token: "fixture-token".into(), user_id: "u1".into(), email: "u1@example.invalid".into(),
+            display_name: "U1".into(), profile_id: "profile".into(), organization_id: "org".into(),
+            relay_entitled: true, generation: 1,
+        }));
+        assert!(!crate::store::settings::load().machines.allow_operating);
+        let devices = json!({"devices":[{
+            "id":"phone", "label":"Phone", "platform":"ios", "token":"fixture-hash",
+            "scope":"driver", "provenance":"explicit", "bindingGeneration":0,
+            "createdAt":"2026-11-01T00:00:00Z", "approvedAt":"2026-11-01T00:00:00Z",
+        }]});
+        crate::store::write_json(&root.join("devices.json"), &devices).unwrap();
+        manager.account.sync_runtime_copy();
+        assert!(crate::machine_account::load(&root).unwrap().is_some());
+        manager.revoke_local("phone").unwrap();
+        assert!(crate::machine_account::load(&root).unwrap().is_none());
     }
 
     #[test]

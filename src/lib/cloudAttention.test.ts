@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CloudWorkspaceListItem } from "@/lib/api";
 import { reconcileCloudAttention, resolveCloudAttention, type CloudAttentionInput } from "./cloudAttention";
 import { deriveCloudActivity } from "./cloudRowState";
+import { learnDescriptors } from "@/test/cloudProviderDescriptors";
 
 function item(fields: Record<string, unknown> = {}, operation: unknown = null): CloudWorkspaceListItem {
   return { workspace: { id: "w", orgId: "o", provider: "box", state: "ready", ...fields }, latestOperation: operation } as CloudWorkspaceListItem;
@@ -79,6 +80,18 @@ describe("shared attention and recovery", () => {
     expect(resolveCloudAttention(item({}, { state: "failed", action: "delete", detailCode: "box_deleted_sandbox_present" }))?.recovery.action).toBe("contact-provider");
     expect(resolveCloudAttention(item({}, { state: "failed", action: "delete", errorCode: "cloud_provider_credential_invalid" }))?.recovery.action).toBe("open-provider-settings");
     expect(resolveCloudAttention(item({ state: "attention-required", launch: { phase: "failed", state: "failed" } }, { state: "failed", action: null, errorCode: "cloud_workspace_provisioning_timeout" }))?.recovery.action).toBe("create-workspace");
+  });
+
+  // PRO-452: a provider TerminalX itself provides has no key of the organization's to repair in Settings.
+  it("sends a credential failure on a platform provider to TerminalX, not to a provider connection", () => {
+    learnDescriptors();
+    for (const errorCode of ["cloud_provider_credential_invalid", "cloud_provider_connection_attention_required"]) {
+      const platform = resolveCloudAttention(item({ provider: "terminalx-cloud" }, { state: "failed", action: "delete", errorCode }))!;
+      expect(platform.recovery).toMatchObject({ action: "contact-provider", label: "Contact TerminalX support" });
+      expect(platform.recovery.instructions).toContain("TerminalX Cloud is provided by TerminalX");
+      // An organization's provider is still repaired in Settings.
+      expect(resolveCloudAttention(item({ provider: "hetzner" }, { state: "failed", action: "delete", errorCode }))?.recovery.action).toBe("open-provider-settings");
+    }
   });
 
   it("exposes failed deletions in the archive, including when only the provider can finish", () => {

@@ -7,6 +7,8 @@ import { AgentMark } from "@/components/AgentMark";
 import { Button } from "@/components/ui/button";
 import { Segmented, Switch } from "@/components/ui/controls";
 import { IssueListItem } from "@/components/issues/IssueListItem";
+import { AutomationSourceFields, defaultLinearTrigger, defaultPullRequestTrigger, eventTriggerReady, RunsPerDayField, runsPerDayValid } from "@/components/automations/AutomationSourceFields";
+import { PrecheckSection, precheckReady } from "@/components/automations/PrecheckSection";
 import { automationsApi, errorMessage, issues as issuesApi, type Issue } from "@/lib/api";
 import { createAutomation, updateAutomation } from "@/lib/automations";
 import { BYPASS_MODE, DEFAULT_AUTOMATION_MODE, bypassEffect, useModels } from "@/lib/models";
@@ -26,6 +28,8 @@ function localTimezone(): string {
 function splitLabels(value: string): string[] {
   return value.split(",").map((label) => label.trim()).filter(Boolean);
 }
+
+type TriggerKind = "schedule" | "issues" | "linear" | "pullRequests";
 
 export interface AutomationEditorPrefill {
   projectPath: string;
@@ -80,6 +84,7 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
       missedRunGraceMinutes: automation.missedRunGraceMinutes,
       runTimeoutMinutes: automation.runTimeoutMinutes ?? null,
       issueTrigger: automation.issueTrigger ?? null,
+      eventTrigger: automation.eventTrigger ?? null,
       pipeline: automation.pipeline,
     };
   }
@@ -114,6 +119,7 @@ function initialInput(automation: Automation | null, projectPath: string, harnes
     missedRunGraceMinutes: 60,
     runTimeoutMinutes: null,
     issueTrigger: prefill ? defaultIssueTrigger(prefill.repo, prefill.query) : null,
+    eventTrigger: null,
   };
 }
 
@@ -173,10 +179,12 @@ export function AutomationEditor({
   );
   const isGit = store.projects.find((project) => project.path === input.projectPath)?.kind !== "folder";
   useEffect(() => {
-    if (!isGit && (input.workspace !== "session" || input.issueTrigger)) {
-      setInput((current) => ({ ...current, workspace: "session", sessionId: null, issueTrigger: null, reuseSession: false }));
+    if (!isGit && (input.workspace !== "session" || input.issueTrigger || input.eventTrigger)) {
+      setInput((current) => ({ ...current, workspace: "session", sessionId: null, issueTrigger: null, eventTrigger: null, reuseSession: false }));
     }
-  }, [isGit, input.workspace, input.issueTrigger]);
+  }, [isGit, input.workspace, input.issueTrigger, input.eventTrigger]);
+  const polled = !!input.issueTrigger || !!input.eventTrigger;
+  const triggerKind: TriggerKind = input.issueTrigger ? "issues" : input.eventTrigger?.source.kind === "linearIssue" ? "linear" : input.eventTrigger ? "pullRequests" : "schedule";
   const patch = (next: Partial<AutomationInput>) => setInput((current) => ({ ...current, ...next }));
   const pipelineProject = store.projects.find((project) => project.path === input.projectPath);
   const defaults = pipelineSettings(pipelineProject);
@@ -243,9 +251,13 @@ export function AutomationEditor({
 
   // Switching trigger only touches trigger-shaped fields. The permission mode
   // is the reader's choice and is never reset here.
-  const setTriggerKind = (kind: "schedule" | "issues") => {
-    if (kind === "schedule") patch({ issueTrigger: null });
-    else patch({ issueTrigger: defaultIssueTrigger(), workspace: "newWorktree", sessionId: null, reuseSession: false });
+  const setTriggerKind = (kind: TriggerKind) => {
+    if (kind === triggerKind) return;
+    const polledRun = { workspace: "newWorktree" as const, sessionId: null, reuseSession: false };
+    if (kind === "schedule") patch({ issueTrigger: null, eventTrigger: null });
+    else if (kind === "issues") patch({ ...polledRun, issueTrigger: defaultIssueTrigger(), eventTrigger: null });
+    else if (kind === "linear") patch({ ...polledRun, issueTrigger: null, eventTrigger: defaultLinearTrigger() });
+    else patch({ ...polledRun, issueTrigger: null, eventTrigger: defaultPullRequestTrigger() });
   };
 
   const setScheduleKind = (kind: ScheduleKind) => {
@@ -285,7 +297,14 @@ export function AutomationEditor({
     && selection.harness?.id === input.harness
     && !selection.unavailableModel
     && (input.workspace === "newWorktree" || !!input.sessionId)
-    && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim()));
+    && precheckReady(input.precheck)
+    && (!input.issueTrigger || (!!input.issueTrigger.repo.trim() && !!input.issueTrigger.query.trim() && runsPerDayValid(input.issueTrigger.maxRunsPerDay)))
+    && (!input.eventTrigger || eventTriggerReady(input.eventTrigger));
+
+  const triggerOptions: { value: TriggerKind; label: string }[] = isGit
+    ? [{ value: "schedule", label: "Schedule" }, { value: "issues", label: "GitHub issues" }, { value: "linear", label: "Linear issue" }, { value: "pullRequests", label: "GitHub pull request" }]
+    : [{ value: "schedule", label: "Schedule" }];
+  const pollMinutes = (input.eventTrigger ?? input.issueTrigger)?.pollIntervalMinutes ?? 5;
 
   if (!open) return null;
 
@@ -314,6 +333,7 @@ export function AutomationEditor({
             <select value={input.projectPath} onChange={(event) => {
               patch({ projectPath: event.target.value, sessionId: null });
               if (input.issueTrigger) patchIssueTrigger({ repo: "" });
+              if (input.eventTrigger?.source.kind === "githubPullRequest") patch({ eventTrigger: { ...input.eventTrigger, source: { ...input.eventTrigger.source, repo: "" } } });
             }} className={INPUT}>
               {store.projects.map((project) => <option key={project.path} value={project.path}>{project.name}</option>)}
             </select>
@@ -347,15 +367,18 @@ export function AutomationEditor({
 
           <div className="col-span-2 border-t border-hairline pt-3">
             <div className="mb-2 text-xs font-medium">Trigger</div>
-            <Segmented<"schedule" | "issues">
-              aria-label="Automation trigger"
-              value={input.issueTrigger ? "issues" : "schedule"}
-              onChange={setTriggerKind}
-              options={isGit ? [{ value: "schedule", label: "Schedule" }, { value: "issues", label: "GitHub issues" }] : [{ value: "schedule", label: "Schedule" }]}
-            />
+            {/* Four choices outgrow a narrow editor: there they are a list. */}
+            <div className="@max-lg:hidden">
+              <Segmented<TriggerKind> aria-label="Automation trigger" value={triggerKind} onChange={setTriggerKind} options={triggerOptions} />
+            </div>
+            <select aria-label="Automation trigger" value={triggerKind} onChange={(event) => setTriggerKind(event.target.value as TriggerKind)} className={`${INPUT} hidden @max-lg:block`}>
+              {triggerOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
           </div>
 
-          {input.issueTrigger ? (
+          {input.eventTrigger ? (
+            <AutomationSourceFields projectPath={input.projectPath} trigger={input.eventTrigger} onChange={(eventTrigger) => patch({ eventTrigger })} />
+          ) : input.issueTrigger ? (
             <>
               <label className={LABEL}>
                 Repository
@@ -373,6 +396,8 @@ export function AutomationEditor({
                 New runs per tick
                 <input type="number" min={1} max={50} value={input.issueTrigger.maxRunsPerTick} onChange={(event) => patchIssueTrigger({ maxRunsPerTick: Math.max(1, Number(event.target.value)) })} className={INPUT} />
               </label>
+              {/* A run that files an issue its search matches wakes another: the day bounds that chain (PRO-490 review). */}
+              <RunsPerDayField value={input.issueTrigger.maxRunsPerDay} onChange={(maxRunsPerDay) => patchIssueTrigger({ maxRunsPerDay })} />
               <div className={WARNING_NOTE}>
                 Issue titles and descriptions can be untrusted. Descriptions are quoted as context, not followed as instructions, and each run uses the Permissions mode chosen above.
               </div>
@@ -443,9 +468,9 @@ export function AutomationEditor({
             </>
           )}
 
-          {input.issueTrigger ? (
+          {polled ? (
             <div className="col-span-2 border-t border-hairline pt-3 text-xs text-muted-foreground">
-              Each matching issue gets its own worktree and linked session.
+              {input.eventTrigger?.source.kind === "githubPullRequest" ? "Each pull request event gets its own worktree and session." : "Each matching issue gets its own worktree and linked session."}
             </div>
           ) : (
             <div className="col-span-2 border-t border-hairline pt-3">
@@ -458,7 +483,7 @@ export function AutomationEditor({
               />
             </div>
           )}
-          {!input.issueTrigger && input.workspace === "session" && (
+          {!polled && input.workspace === "session" && (
             <label className={`${LABEL} col-span-2`}>
               Session
               <select value={input.sessionId ?? ""} onChange={(event) => patch({ sessionId: event.target.value || null })} className={INPUT}>
@@ -467,6 +492,8 @@ export function AutomationEditor({
               </select>
             </label>
           )}
+
+          <PrecheckSection input={input} onChange={(precheck) => patch({ precheck })} />
 
           {input.reuseSession ? (
             <div className="col-span-2 rounded-lg bg-well px-3 py-2.5 text-xs text-faint">Every run goes on in the one session, so there is nothing to archive.</div>
@@ -494,7 +521,7 @@ export function AutomationEditor({
           <label className="col-span-2 flex items-center justify-between rounded-lg bg-well px-3 py-2.5 text-xs">
             <span>
               <span className="block font-medium">Enabled</span>
-              <span className="text-faint">{input.issueTrigger ? `GitHub is checked every ${input.issueTrigger.pollIntervalMinutes} minute${input.issueTrigger.pollIntervalMinutes === 1 ? "" : "s"}.` : "The scheduler checks this automation every 30 seconds."}</span>
+              <span className="text-faint">{input.issueTrigger || input.eventTrigger ? `${input.eventTrigger?.source.kind === "linearIssue" ? "Linear" : "GitHub"} is checked every ${pollMinutes} minute${pollMinutes === 1 ? "" : "s"}.` : "The scheduler checks this automation every 30 seconds."}</span>
             </span>
             <Switch checked={input.enabled} onCheckedChange={(enabled) => patch({ enabled })} />
           </label>

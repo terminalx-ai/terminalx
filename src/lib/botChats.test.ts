@@ -1,0 +1,120 @@
+import { describe, expect, it, vi } from "vitest";
+import type { SessionEntry } from "@/types/session";
+
+vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
+
+const { actingBotOf, botAfterChatClosed, botChats, botOf, botViewFor, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
+
+const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
+  id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
+  archived: false, pinned: false, tabs: [], activeTab: null, ...extra,
+} as SessionEntry);
+
+describe("a bot's chats (PRO-468)", () => {
+  it("are the sessions that name the bot, the home chat first, and the sessions they started", () => {
+    const home = session("home", { bot: { id: "b1", home: true }, modified: "2026-11-20T08:00:00Z" });
+    const older = session("older", { bot: { id: "b1" }, modified: "2026-11-20T09:00:00Z" });
+    const newer = session("newer", { bot: { id: "b1" }, modified: "2026-11-20T10:00:00Z" });
+    const archived = session("archived", { bot: { id: "b1" }, archived: true });
+    const other = session("other", { bot: { id: "b2", home: true } });
+    const started = session("started", { kind: undefined, projectPath: "/repo", parent: { sessionId: "newer" } });
+    const unrelated = session("unrelated", { kind: undefined, projectPath: "/repo", parent: { sessionId: "elsewhere" } });
+    const { chats, startedBy } = botChats([older, archived, other, started, home, newer, unrelated], "b1");
+    expect(chats.map((chat) => chat.id)).toEqual(["home", "newer", "older"]);
+    expect(startedBy.map((chat) => chat.id)).toEqual(["started"]);
+    expect(botOf(home)).toBe("b1");
+    expect(botOf(started)).toBeNull();
+  });
+
+  it("leave the sidebar only for a bot that is listed", () => {
+    const chat = session("home", { bot: { id: "b1", home: true } });
+    expect(listedUnderBot(chat, [{ id: "b1" }])).toBe(true);
+    expect(listedUnderBot(chat, [{ id: "b2" }])).toBe(false);
+    expect(listedUnderBot(chat, [])).toBe(false);
+    expect(listedUnderBot(session("plain"), [{ id: "b1" }])).toBe(false);
+  });
+
+  it("open in their bot's view while Bots is on", () => {
+    const chat = session("home", { bot: { id: "b1", home: true } });
+    const view = { view: "welcome", selectedBotId: null };
+    expect(botViewFor(true, [{ id: "b1" }], chat, view)).toEqual({ botId: "b1", chatId: "home" });
+    expect(botViewFor(false, [{ id: "b1" }], chat, view)).toBeNull();
+    expect(botViewFor(true, [], chat, view)).toBeNull();
+    expect(botViewFor(true, [{ id: "b1" }], session("plain"), { view: "bot", selectedBotId: "b1" })).toBeNull();
+    expect(botViewFor(true, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toEqual({ botId: "b1", chatId: null });
+    expect(botViewFor(false, [{ id: "b1" }], null, { view: "bot", selectedBotId: "b1" })).toBeNull();
+  });
+
+  it("leave the reader on their bot when the open chat is archived or deleted, and nowhere else (PRO-521)", () => {
+    const shown = { botId: "b1", chatId: "chat" };
+    const home = { id: "home", archived: false };
+    const gone = { view: "welcome", selectedSessionId: null, sessions: [home] };
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], gone)).toBe("b1");
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, sessions: [home, { id: "chat", archived: true }] })).toBe("b1");
+    // The chat is still open: the reader went to Welcome themselves.
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, sessions: [home, { id: "chat", archived: false }] })).toBeNull();
+    // Another session or view was chosen since, no bot chat was open, or its bot is gone.
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, selectedSessionId: "home" })).toBeNull();
+    expect(botAfterChatClosed(shown, [{ id: "b1" }], { ...gone, view: "agents" })).toBeNull();
+    expect(botAfterChatClosed(null, [{ id: "b1" }], gone)).toBeNull();
+    expect(botAfterChatClosed(shown, [{ id: "b2" }], gone)).toBeNull();
+  });
+
+  it("show what the bot spent today, read again whenever its sessions record usage", () => {
+    expect(spentTodayLabel(null)).toBe("— today");
+    expect(spentTodayLabel(0)).toBe("$0.00 today");
+    expect(spentTodayLabel(11.2)).toBe("$11.20 today");
+    const usage = (costUsd: number | null) => ({ models: [{ model: "m", inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd }], updated: "" });
+    const tab = (id: string, value?: ReturnType<typeof usage>) => ({ id, harness: "claude", model: "", permissionMode: "plan", status: "idle", created: "", modified: "", usage: value });
+    const before = [session("a", { tabs: [tab("t1", usage(1.5)), tab("t2")] as never })];
+    const after = [session("a", { tabs: [tab("t1", usage(1.75)), tab("t2")] as never })];
+    expect(usageKey(before)).not.toBe(usageKey(after));
+    expect(usageKey(before)).toBe(usageKey([...before]));
+  });
+
+  it("list every session that works for the bot under it, however far from its chat, and keep them out of the project lists", () => {
+    const chat = session("chat", { bot: { id: "b1" } });
+    const child = session("child", { kind: undefined, projectPath: "/repo", parent: { sessionId: "chat" }, botStarted: { id: "b1" } });
+    const grandchild = session("grandchild", { kind: undefined, projectPath: "/repo", parent: { sessionId: "child" }, botStarted: { id: "b1" }, modified: "2026-11-20T10:00:00Z" });
+    const other = session("other", { kind: undefined, projectPath: "/repo", botStarted: { id: "b2" } });
+    expect(botChats([chat, child, grandchild, other], "b1").startedBy.map((entry) => entry.id)).toEqual(["grandchild", "child"]);
+    expect(actingBotOf(grandchild)).toBe("b1");
+    expect(listedUnderBot(grandchild, [{ id: "b1" }])).toBe(true);
+    expect(listedUnderBot(grandchild, [])).toBe(false);
+    // A session the bot started opens as itself, not in the bot's view.
+    expect(botViewFor(true, [{ id: "b1" }], grandchild, { view: "welcome", selectedBotId: null })).toBeNull();
+  });
+
+  it("put the newest made home chat first, as the app answers", () => {
+    const older = session("older", { bot: { id: "b1", home: true }, created: "2026-11-01T00:00:00Z", modified: "2026-11-20T12:00:00Z" });
+    const newer = session("newer", { bot: { id: "b1", home: true }, created: "2026-11-10T00:00:00Z", modified: "2026-11-10T00:00:00Z" });
+    expect(botChats([older, newer], "b1").chats.map((chat) => chat.id)).toEqual(["newer", "older"]);
+  });
+});
+
+describe("a bot's duty runs (PRO-471)", () => {
+  it("are its sessions too, listed apart from its chats, newest first", () => {
+    const home = session("home", { bot: { id: "b1", home: true } });
+    const chat = session("chat", { bot: { id: "b1" } });
+    const early = session("early", { bot: { id: "b1" }, botDuty: { id: "d1" }, modified: "2026-11-20T08:00:00Z" });
+    const late = session("late", { bot: { id: "b1" }, botDuty: { id: "d2" }, modified: "2026-11-20T11:00:00Z" });
+    const elsewhere = session("elsewhere", { bot: { id: "b2" }, botDuty: { id: "d3" } });
+    const { chats, dutyRuns } = botChats([early, home, chat, late, elsewhere], "b1");
+    expect(chats.map((entry) => entry.id)).toEqual(["home", "chat"]);
+    expect(dutyRuns.map((entry) => entry.id)).toEqual(["late", "early"]);
+    // Still the bot's: the sidebar leaves them to its view.
+    expect(listedUnderBot(late, [{ id: "b1" }])).toBe(true);
+  });
+});
+
+describe("a chat a mention started (PRO-480)", () => {
+  it("says where it came from, and nothing for any other chat", () => {
+    expect(chatSource(session("a", { botChannel: { kind: "github", label: "acme/app#7", url: "u" } }))).toBe("GitHub · acme/app#7");
+    expect(chatSource(session("b", { botChannel: { kind: "linear", label: "PRO-9", url: "u" } }))).toBe("Linear · PRO-9");
+    expect(chatSource(session("c", { botChannel: { kind: "slack", label: "#eng", url: "" } }))).toBe("Slack · #eng");
+    expect(chatSource(session("d", { botChannel: { kind: "telegram", label: "Kestrel team", url: "" } }))).toBe("Telegram · Kestrel team");
+    expect(chatSource(session("x", { botChannel: { kind: "jira", label: "OPS-4", url: "u" } }))).toBe("jira · OPS-4");
+    expect(chatSource(session("d"))).toBeNull();
+    expect(chatSource(session("e", { botChannel: { kind: "github" } as never }))).toBeNull();
+  });
+});

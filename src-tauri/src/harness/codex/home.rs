@@ -27,6 +27,15 @@
 //! but with no hooks at all ([`prepare_native`]); its threads' rollouts live
 //! there. On a Mac it uses the reader's own home, which has no Raccoon hooks.
 //!
+//! An added Codex account (#980, `agent_accounts`) gets a managed home of its
+//! own, `$TERMINALX_HOME/agent-accounts/codex/<id>/home` ([`prepare_account`]):
+//! built the same way, but with `auth.json` linked to that account's own
+//! login (`agent-accounts/codex/<id>/auth.json`, which Codex wrote there when
+//! it signed in) and `sessions` linked to the default managed home's, so a
+//! conversation's rollout is found whichever account wrote it. This Mac's
+//! login (`local`) keeps the default home and its link to the reader's
+//! `auth.json`.
+//!
 //! Raccoon itself never writes into the reader's home — it is read, and
 //! linked to. What the links mean is that Codex keeps its own house: a
 //! refreshed token lands in the reader's `auth.json`, a plugin cache in their
@@ -118,7 +127,14 @@ fn digest(bytes: &[u8]) -> String {
 ///
 /// Trust is per checkout and additive: a home that already trusts three
 /// worktrees keeps all three when a fourth tab opens.
+#[cfg(test)]
 pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>) -> Result<String> {
+    mirrored_config_for(user_toml, previous, cwd, trust, false)
+}
+
+/// `mirrored_config`, and for an agent account's home (`file_store`) the
+/// login kept in its `auth.json`, whatever the reader's own config says.
+fn mirrored_config_for(user_toml: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool) -> Result<String> {
     let user: toml::Table = toml::from_str(user_toml).unwrap_or_default();
     let old: toml::Table = toml::from_str(previous).unwrap_or_default();
     let mut out = toml::Table::new();
@@ -126,6 +142,10 @@ pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
         if let Some(v) = user.get(*key) {
             out.insert((*key).to_string(), v.clone());
         }
+    }
+
+    if file_store {
+        out.insert("cli_auth_credentials_store".into(), toml::Value::String("file".into()));
     }
 
     let mut projects = old.get("projects").and_then(|p| p.as_table()).cloned().unwrap_or_default();
@@ -147,8 +167,8 @@ pub fn mirrored_config(user_toml: &str, previous: &str, cwd: &str, trust: &BTree
     Ok(format!("# Written by TerminalX. Edit ~/.codex/config.toml instead.\n\n{}", toml::to_string_pretty(&out)?))
 }
 
-fn write_config(path: &Path, user: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>) -> Result<()> {
-    let config = mirrored_config(user, previous, cwd, trust)?;
+fn write_config(path: &Path, user: &str, previous: &str, cwd: &str, trust: &BTreeMap<String, String>, file_store: bool) -> Result<()> {
+    let config = mirrored_config_for(user, previous, cwd, trust, file_store)?;
     #[cfg(target_os = "macos")]
     let config = super::browser_use_macos::configure(&config, path.parent().context("Codex config has no home")?, std::env::var_os("PYTHONPATH").as_deref())?;
     crate::store::write_atomic(path, config.as_bytes())
@@ -184,7 +204,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
     let real = |p: &Path| {
         let dir = p.parent().unwrap_or(Path::new(""));
-        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).join(p.file_name().unwrap_or_default())
+        crate::paths::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()).join(p.file_name().unwrap_or_default())
     };
     real(a) == real(b)
 }
@@ -252,6 +272,26 @@ pub fn copy_rollout(managed: &Path, user: &Path, session_id: &str) -> Result<boo
     if copied.is_err() { let _ = std::fs::remove_file(&temporary); }
     copied.with_context(|| format!("copy {} into the managed Codex home", source.display()))?;
     Ok(true)
+}
+
+/// Make the newest copy of conversation `session_id` among `homes` the one in
+/// `target` before a native Codex resumes it there (#980). This Mac's login
+/// runs native Codex in the reader's own home and an added account in its
+/// native home, so a thread switched between them is in the other one, or an
+/// older copy is left from the last switch. `true` when a copy was made;
+/// `false` when `target` already has the newest, or no home has it.
+pub fn bring_rollout(target: &Path, homes: &[PathBuf], session_id: &str) -> Result<bool> {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let real = |path: &Path| crate::paths::canonicalize(path).ok();
+    let here = find_rollout(target, session_id).filter(|path| path.is_file());
+    let newest = homes.iter()
+        .filter_map(|home| find_rollout(home, session_id).filter(|path| path.is_file()).map(|path| (home, path)))
+        .max_by_key(|(_, path)| modified(path));
+    let Some((home, source)) = newest else { return Ok(false) };
+    if let Some(here) = &here {
+        if real(here) == real(&source) || modified(here) >= modified(&source) { return Ok(false) }
+    }
+    copy_rollout(target, home, session_id)
 }
 
 // -------------------------------------------------------------------- linking
@@ -367,6 +407,80 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
             log::warn!("codex home: {e:#}");
         }
     }
+    finish_home(managed, user, cwd, exe, false)
+}
+
+/// Where added Codex account `id`'s login and managed home live, under
+/// `$TERMINALX_HOME` (`root`): `agent-accounts/codex/<id>` (its `CODEX_HOME`
+/// while it signs in, holding `auth.json`) and `…/<id>/home`.
+pub fn account_paths(root: &Path, id: &str) -> (PathBuf, PathBuf) {
+    let account = root.join(crate::agent_accounts::DIRECTORY).join("codex").join(id);
+    let home = account.join("home");
+    (account, home)
+}
+
+/// Build (or refresh) the managed home of added Codex account `id` for a tab
+/// about to run in `cwd`, and return the path to put in `CODEX_HOME`: the
+/// reader's settings and content as [`prepare`] gives them, `auth.json`
+/// linked to the account's own login, and `sessions` shared with the default
+/// managed home. `root` is `$TERMINALX_HOME`.
+pub fn prepare_account(cwd: &str, exe: &Path, root: &Path, id: &str) -> Result<Prepared> {
+    anyhow::ensure!(crate::agent_accounts::valid_id(id) && id != crate::agent_accounts::LOCAL, "not an added Codex account");
+    let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let (account, home) = account_paths(root, id);
+    anyhow::ensure!(account.is_dir(), "This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents.");
+    let shared = crate::store::ensure_dir(root.join("codex"))?;
+    let hooks_live = prepare_account_in(&home, &account, user_root(), &shared, cwd, exe)?;
+    Ok(Prepared { home, hooks_live })
+}
+
+fn prepare_account_in(home: &Path, account: &Path, user: Option<PathBuf>, shared: &Path, cwd: &str, exe: &Path) -> Result<bool> {
+    crate::agent_accounts::create_private(home)?;
+    let user = user.filter(|u| u.is_dir());
+    if let Some(user) = &user {
+        for name in LINKED.iter().filter(|name| **name != "auth.json") {
+            if let Err(e) = link(home, user, name) {
+                log::warn!("codex account home: {e:#}");
+            }
+        }
+    }
+    // The account's own login, linked even before it exists, so a sign-in
+    // again is picked up by the tabs that start after it.
+    force_link(&account.join("auth.json"), &home.join("auth.json")).context("link the account's auth.json into its Codex home")?;
+    let sessions = crate::store::ensure_dir(shared.join("sessions"))?;
+    force_link(&sessions, &home.join("sessions")).context("share the Codex sessions with the account's home")?;
+    finish_home(home, user, cwd, exe, true)
+}
+
+/// Make `target` a link to `source`, whether or not `source` exists yet. A
+/// link already pointing there is left; a link elsewhere or an empty file is
+/// replaced; a real directory with files in it (which only Codex could have
+/// made) is refused rather than deleted.
+#[cfg(unix)]
+fn force_link(source: &Path, target: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if std::fs::read_link(target).is_ok_and(|current| current == source) {
+                return Ok(());
+            }
+            std::fs::remove_file(target)?;
+        }
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir(target).context("a folder with files in it is in the way")?,
+        Ok(_) => std::fs::remove_file(target)?,
+        Err(_) => {}
+    }
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn force_link(_source: &Path, _target: &Path) -> Result<()> {
+    anyhow::bail!("agent accounts need a unix host")
+}
+
+/// The rest of a home for terminal tabs: hooks, the mirrored config and the
+/// hook trust Codex asked for.
+fn finish_home(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, file_store: bool) -> Result<bool> {
 
     let hooks_path = managed.join("hooks.json");
     let hooks = serde_json::to_vec_pretty(&super::pty::hooks_json(exe))?;
@@ -383,7 +497,7 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
     let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     // The config has to exist before Codex is asked about the home, because
     // discovery reads it; the hook trust is filled in on the second write.
-    write_config(&config_path, &user_toml, &previous, cwd, &state.trust)?;
+    write_config(&config_path, &user_toml, &previous, cwd, &state.trust, file_store)?;
 
     if state.hooks_digest != want || state.trust.is_empty() {
         state = State::default();
@@ -403,7 +517,7 @@ fn prepare_in(managed: &Path, user: Option<PathBuf>, cwd: &str, exe: &Path, clou
             Err(e) => log::warn!("could not trust the Codex hooks: {e:#}"),
         }
         let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
-        write_config(&config_path, &user_toml, &previous, cwd, &state.trust)?;
+        write_config(&config_path, &user_toml, &previous, cwd, &state.trust, file_store)?;
         let _ = crate::store::write_json(&state_path, &state);
     }
 
@@ -456,8 +570,51 @@ fn prepare_native_in(native: &Path, user: Option<PathBuf>, cwd: &str, cloud_auth
     let config_path = native.join("config.toml");
     let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
     let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    write_config(&config_path, &user_toml, &previous, cwd, &BTreeMap::new())?;
+    write_config(&config_path, &user_toml, &previous, cwd, &BTreeMap::new(), false)?;
     dismiss_update_prompt(native);
+    Ok(())
+}
+
+/// The native home of added Codex account `id` (#980): what [`prepare_native`]
+/// gives This Mac's login — the reader's settings and content, no hooks and
+/// none trusted, since a native tab answers its tools itself — with
+/// `auth.json` linked to the account's own login (kept in that file, as every
+/// account's is) and `sessions` shared with the native home, so a thread goes
+/// on after a switch between accounts. `root` is `$TERMINALX_HOME`.
+pub fn prepare_native_account(cwd: &str, root: &Path, id: &str) -> Result<PathBuf> {
+    anyhow::ensure!(crate::agent_accounts::valid_id(id) && id != crate::agent_accounts::LOCAL, "not an added Codex account");
+    let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let (account, _) = account_paths(root, id);
+    anyhow::ensure!(account.is_dir(), "This Codex account's sign-in is no longer on this Mac. Sign in again in Settings → Agents.");
+    let home = account.join("native");
+    let shared = crate::store::ensure_dir(root.join(NATIVE_HOME))?;
+    prepare_native_account_in(&home, &account, user_root(), &shared, cwd)?;
+    Ok(home)
+}
+
+fn prepare_native_account_in(home: &Path, account: &Path, user: Option<PathBuf>, shared: &Path, cwd: &str) -> Result<()> {
+    crate::agent_accounts::create_private(home)?;
+    let user = user.filter(|u| u.is_dir());
+    if let Some(user) = &user {
+        for name in LINKED.iter().filter(|name| **name != "auth.json") {
+            if let Err(e) = link(home, user, name) {
+                log::warn!("native codex account home: {e:#}");
+            }
+        }
+    }
+    force_link(&account.join("auth.json"), &home.join("auth.json")).context("link the account's auth.json into its native Codex home")?;
+    let sessions = crate::store::ensure_dir(shared.join("sessions"))?;
+    force_link(&sessions, &home.join("sessions")).context("share the native Codex sessions with the account's native home")?;
+    let hooks_path = home.join("hooks.json");
+    let hooks = serde_json::to_vec_pretty(&no_hooks())?;
+    if std::fs::read(&hooks_path).ok().as_deref() != Some(hooks.as_slice()) {
+        crate::store::write_atomic(&hooks_path, &hooks)?;
+    }
+    let config_path = home.join("config.toml");
+    let previous = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let user_toml = user.map(|u| u.join("config.toml")).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    write_config(&config_path, &user_toml, &previous, cwd, &BTreeMap::new(), true)?;
+    dismiss_update_prompt(home);
     Ok(())
 }
 
@@ -497,6 +654,59 @@ mod tests {
         // A workspace with no Codex credential has none here either.
         prepare_native_in(&native, Some(user), "/work/repo", Some(None)).unwrap();
         assert!(native.join("auth.json").symlink_metadata().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_accounts_native_home_has_its_login_and_the_native_threads_but_no_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, account, shared) = (dir.path().join("user"), dir.path().join("account"), dir.path().join("codex-native"));
+        let home = account.join("native");
+        for d in [&user, &account, &shared] { std::fs::create_dir_all(d).unwrap(); }
+        std::fs::write(user.join("auth.json"), "{\"reader\":true}").unwrap();
+        std::fs::write(user.join("AGENTS.md"), "be brief").unwrap();
+        std::fs::write(user.join("config.toml"), "model = \"gpt-5.6-sol\"\n").unwrap();
+        std::fs::write(account.join("auth.json"), "{\"account\":true}").unwrap();
+        // The account's terminal home has Raccoon's hooks; none follow here.
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hooks.json"), "{\"hooks\":{\"PreToolUse\":[]}}").unwrap();
+
+        prepare_native_account_in(&home, &account, Some(user.clone()), &shared, "/work/repo").unwrap();
+        assert_eq!(std::fs::read_link(home.join("auth.json")).unwrap(), account.join("auth.json"), "the account's login, never the reader's");
+        assert_eq!(std::fs::read_link(home.join("sessions")).unwrap(), shared.join("sessions"), "the native threads, whatever account runs them");
+        assert_eq!(std::fs::read_link(home.join("AGENTS.md")).unwrap(), user.join("AGENTS.md"));
+        let hooks: Value = serde_json::from_slice(&std::fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks, no_hooks());
+        let config: toml::Table = toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"), "the account's login is its auth.json");
+        assert!(config["hooks"]["state"].as_table().is_some_and(|state| state.is_empty()), "no hook is trusted");
+    }
+
+    #[test]
+    fn a_native_thread_follows_a_switch_between_homes_with_its_newest_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mac, account) = (dir.path().join("mac"), dir.path().join("account"));
+        let id = "019a0000-0000-7000-8000-000000000001";
+        let write = |home: &Path, text: &str| {
+            let day = home.join("sessions/2026/11/16");
+            std::fs::create_dir_all(&day).unwrap();
+            std::fs::write(day.join(format!("rollout-2026-11-16T08-00-00-{id}.jsonl")), text).unwrap();
+        };
+        let read = |home: &Path| std::fs::read_to_string(find_rollout(home, id).unwrap()).unwrap();
+        let homes = [mac.clone(), account.clone()];
+        write(&mac, "turn 1\n");
+        // On This Mac's login, then Switch account: the account's home gets the thread.
+        assert!(bring_rollout(&account, &homes, id).unwrap());
+        assert_eq!(read(&account), "turn 1\n");
+        assert!(!bring_rollout(&account, &homes, id).unwrap(), "nothing newer to bring");
+        // A turn on the account, then back to This Mac's login: the newer copy replaces the old.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write(&account, "turn 1\nturn 2\n");
+        assert!(bring_rollout(&mac, &homes, id).unwrap());
+        assert_eq!(read(&mac), "turn 1\nturn 2\n");
+        // A thread no home has is left to Codex.
+        assert!(!bring_rollout(&mac, &homes, "019a0000-0000-7000-8000-00000000ffff").unwrap());
     }
 
     #[test]
@@ -562,7 +772,7 @@ url = "https://example.test/mcp"
         let ours = real.path().join("hooks.json");
         std::fs::write(&ours, "{}").unwrap();
         // What Codex reports: the directory resolved, the leaf as written.
-        let reported = std::fs::canonicalize(real.path()).unwrap().join("hooks.json");
+        let reported = crate::paths::canonicalize(real.path()).unwrap().join("hooks.json");
         let result = json!({"data": [{"hooks": [
             {"key": "k", "currentHash": "sha256:aa", "sourcePath": reported.to_string_lossy()}
         ]}]});
@@ -676,6 +886,58 @@ url = "https://example.test/mcp"
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["dismissed_version"], "0.152.1");
         assert_eq!(v["last_checked_at"], "x");
+    }
+
+    /// #980: the home of account X has X's login, the reader's settings and
+    /// content, and the same `sessions` as the default home.
+    #[cfg(unix)]
+    #[test]
+    fn an_account_home_links_its_own_login_and_shares_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (user, shared) = (dir.path().join("user"), dir.path().join("codex"));
+        let (x, x_home) = account_paths(dir.path(), "aaaa1111");
+        let (y, y_home) = account_paths(dir.path(), "bbbb2222");
+        for path in [&user, &shared, &x, &y] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(user.join("auth.json"), "{\"reader\":true}").unwrap();
+        std::fs::write(user.join("AGENTS.md"), "be brief").unwrap();
+        std::fs::create_dir_all(user.join("skills")).unwrap();
+        std::fs::write(user.join("config.toml"), "model = \"gpt-5.6-sol\"\ncli_auth_credentials_store = \"keyring\"\nnotify = [\"helper\"]\n").unwrap();
+        std::fs::write(x.join("auth.json"), "{\"account\":\"x\"}").unwrap();
+
+        prepare_account_in(&x_home, &x, Some(user.clone()), &shared, "/work/repo", Path::new("/opt/raccoon")).unwrap();
+        assert_eq!(std::fs::read_link(x_home.join("auth.json")).unwrap(), x.join("auth.json"), "X's own login, never the reader's");
+        assert_eq!(std::fs::read_to_string(x_home.join("auth.json")).unwrap(), "{\"account\":\"x\"}");
+        assert_eq!(std::fs::read_link(x_home.join("sessions")).unwrap(), shared.join("sessions"));
+        assert!(shared.join("sessions").is_dir(), "the shared sessions exist for the first write");
+        assert_eq!(std::fs::read_link(x_home.join("AGENTS.md")).unwrap(), user.join("AGENTS.md"));
+        assert_eq!(std::fs::read_link(x_home.join("skills")).unwrap(), user.join("skills"));
+        let config: toml::Table = toml::from_str(&std::fs::read_to_string(x_home.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(config["model"].as_str(), Some("gpt-5.6-sol"));
+        assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"), "the account's login is its auth.json");
+        assert!(config.get("notify").is_none());
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&x_home).unwrap().permissions().mode() & 0o777, 0o700);
+
+        // A rollout written by X is where the default home and Y look too.
+        let day = x_home.join("sessions/2026/11/15");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-11-15T10-00-00-thread-1.jsonl"), "{}\n").unwrap();
+        assert!(find_rollout(&shared, "thread-1").is_some());
+        // Y has not signed in yet: its link waits for its auth.json.
+        prepare_account_in(&y_home, &y, Some(user.clone()), &shared, "/work/repo", Path::new("/opt/raccoon")).unwrap();
+        assert_eq!(std::fs::read_link(y_home.join("auth.json")).unwrap(), y.join("auth.json"));
+        assert!(!y_home.join("auth.json").exists());
+        assert!(find_rollout(&y_home, "thread-1").is_some());
+        // Built again: the same links, and the reader's files untouched.
+        prepare_account_in(&x_home, &x, Some(user.clone()), &shared, "/work/repo", Path::new("/opt/raccoon")).unwrap();
+        assert_eq!(std::fs::read_link(x_home.join("auth.json")).unwrap(), x.join("auth.json"));
+        assert_eq!(std::fs::read_to_string(user.join("auth.json")).unwrap(), "{\"reader\":true}");
+        assert!(!user.join("hooks.json").exists() && !user.join("sessions").exists());
+        // `local` and ids that are not safe in a path are not accounts here.
+        assert!(prepare_account("/work/repo", Path::new("/opt/raccoon"), dir.path(), "local").is_err());
+        assert!(prepare_account("/work/repo", Path::new("/opt/raccoon"), dir.path(), "../codex").is_err());
     }
 
     #[cfg(unix)]

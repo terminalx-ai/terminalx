@@ -109,12 +109,19 @@ pub(super) static TEMPLATE: LazyLock<Value> = LazyLock::new(|| {
     for key in ["linearApiKey", "linearViewer", "machineName"] {
         value[key] = Value::Null;
     }
+    // Optional keys the defaults leave unset (PRO-487). They must be in the
+    // template: a key that is not is kept from the file as one this build
+    // does not know, so a changed choice would never reach the disk.
+    for key in ["listen", "allowPublic"] {
+        value["machines"][key] = Value::Null;
+    }
     value["preferences"] = PREFERENCE_DEFAULTS.clone();
     value
 });
 
 // These object keys are user-defined, rather than settings field names.
 pub(super) static DYNAMIC_MAPS: LazyLock<BTreeMap<&str, Value>> = LazyLock::new(|| BTreeMap::from([
+    ("agents.executables", Value::String(String::new())),
     ("mergedCleanup.projects", Value::Bool(false)),
     ("orchestrator.projects", serde_json::json!({"requireApproval": false, "pieceLimit": 0, "workerMode": "", "reviewDiffLines": 0, "triesPerPiece": 0, "effortCeiling": "", "budgetDollars": 0.5, "budgetPoints": 0.5, "windowCeiling": 0.5})),
     ("preferences.shortcuts", serde_json::json!([""])),
@@ -348,7 +355,11 @@ fn write(path: &Path, state: &mut FileState, settings: &Settings) -> Result<()> 
 
 /// `absent` top-level keys are left out of the file so they inherit from the
 /// layers below the user layer (defaults) rather than pinning today's value.
+/// Counts this process's settings writes, so a cached reading (`bots::enabled_cached`) knows to read again.
+pub(crate) static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_without(path: &Path, state: &mut FileState, settings: &Settings, absent: &[&str]) -> Result<()> {
+    WRITES.fetch_add(1, std::sync::atomic::Ordering::Release);
     refuse_while_invalid(path, state)?;
     let mut next = serde_json::to_value(settings)?;
     if let Some(object) = next.as_object_mut() { for key in absent { object.remove(*key); } }

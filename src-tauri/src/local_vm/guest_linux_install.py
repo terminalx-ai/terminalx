@@ -1,10 +1,12 @@
 """TerminalX-owned installer protocol, delivered by exact-ID Docker/Podman exec.
 
-No account creation, shell, subprocess, daemon, provider login or service start.
+Account provisioning is restricted to the explicit installation account action.
 The immutable lock inode and terminal receipt prove mutation completion; a PID
 or elapsed time is never installation evidence. Fixture entrypoints are supplied
 by tests, never by production stdin, argv or environment.
 """
+import grp
+import subprocess
 import fcntl
 import hashlib
 import json
@@ -32,20 +34,96 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def account():
-    entry = pwd.getpwnam("cua")
-    home = pathlib.Path("/home/cua")
-    info = home.lstat()
+OWNER = "terminalx-owner"
+OWNER_HOME = pathlib.Path("/var/lib/terminalx-owner")
+
+
+def safe_owner_ancestors():
+    for path in (pathlib.Path("/"), pathlib.Path("/var"), pathlib.Path("/var/lib")):
+        info = path.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                "Unsafe owner home ancestor: " + str(path))
+
+
+def locked_owner_login():
+    fd = os.open("/etc/shadow", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+                "Unsafe shadow database")
+        entries = [line.rstrip("\n").split(":") for line in stream if line.startswith(OWNER + ":")]
+    require(len(entries) == 1 and len(entries[0]) == 9 and entries[0][1].startswith(("!", "*")),
+            "Owner login must remain locked")
+
+
+def account(provision=False):
     require(platform.system() == "Linux", "Linux guest required")
-    require(entry.pw_dir == str(home) and os.getuid() == os.geteuid() == entry.pw_uid != 0,
-            "Dedicated nonroot cua account required")
-    require(os.getgid() == os.getegid() == entry.pw_gid and info.st_uid == entry.pw_uid,
-            "Dedicated account ownership changed")
-    require(stat.S_ISDIR(info.st_mode) and not info.st_mode & 0o022, "Unsafe account home")
+    safe_owner_ancestors()
+    for name in ("identity.json", "account-binding.json", "runtime", "bin/terminalx-serve"):
+        require(not os.path.lexists(pathlib.Path("/home/cua/.terminalx-local") / name),
+                "Shared-account installation requires a new isolated container")
+    require(not os.path.lexists("/home/cua/.terminalx-installs"),
+            "Shared-account installation history requires a new isolated container")
+    worker = pwd.getpwnam("cua")
+    require(worker.pw_uid != 0 and worker.pw_gid != 0, "Nonroot worker required")
+    try:
+        entry = pwd.getpwnam(OWNER)
+    except KeyError:
+        require(provision and os.geteuid() == 0, "Dedicated owner account is unavailable")
+        require(not os.path.lexists(OWNER_HOME), "Refusing to adopt an existing owner home")
+        try:
+            grp.getgrnam(OWNER)
+        except KeyError:
+            pass
+        else:
+            raise ValueError("Refusing to adopt an existing owner group")
+        subprocess.run(["/usr/sbin/useradd", "--system", "--user-group", "--no-create-home",
+                        "--home-dir", str(OWNER_HOME), "--shell", "/usr/sbin/nologin", OWNER],
+                       check=True, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, close_fds=True,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        entry = pwd.getpwnam(OWNER)
+        OWNER_HOME.mkdir(mode=0o700)
+        os.chown(OWNER_HOME, entry.pw_uid, entry.pw_gid)
+        sync_directory(OWNER_HOME.parent)
+    require(entry.pw_uid not in (0, worker.pw_uid) and entry.pw_gid not in (0, worker.pw_gid)
+            and entry.pw_dir == str(OWNER_HOME) and entry.pw_shell == "/usr/sbin/nologin",
+            "Dedicated nonroot owner identity required")
+    locked_owner_login()
+    require(sum(p.pw_name == OWNER for p in pwd.getpwall()) == 1, "Owner name is ambiguous")
+    require([p.pw_name for p in pwd.getpwall() if p.pw_uid == entry.pw_uid] == [OWNER],
+            "Owner UID is shared")
+    require(not any(p.pw_name != OWNER and p.pw_gid == entry.pw_gid for p in pwd.getpwall()),
+            "Owner primary group is shared")
+    groups = grp.getgrall()
+    require(sum(g.gr_name == OWNER for g in groups) == 1, "Owner group name is ambiguous")
+    primary = [g for g in groups if g.gr_gid == entry.pw_gid]
+    require(len(primary) == 1 and primary[0].gr_name == OWNER and not primary[0].gr_mem,
+            "Owner group is shared or changed")
+    require(not any(OWNER in g.gr_mem for g in groups), "Owner supplementary groups are forbidden")
+    info = OWNER_HOME.lstat()
+    require(stat.S_ISDIR(info.st_mode) and info.st_uid == entry.pw_uid
+            and info.st_gid == entry.pw_gid and stat.S_IMODE(info.st_mode) == 0o700,
+            "Private owner home required")
     architecture = {"x86_64": "x64", "aarch64": "arm64"}.get(platform.machine())
     require(architecture is not None, "Unsupported guest architecture")
-    return {"name": "cua", "uid": entry.pw_uid, "gid": entry.pw_gid, "home": str(home),
+    return {"name": OWNER, "uid": entry.pw_uid, "gid": entry.pw_gid, "home": str(OWNER_HOME),
             "homeDevice": info.st_dev, "homeInode": info.st_ino, "architecture": architecture}
+
+
+def drop_to_account():
+    require(os.getuid() == os.geteuid() == 0, "Root owner launcher required")
+    observed = account()
+    os.setgroups([])
+    os.setgid(observed["gid"])
+    os.setuid(observed["uid"])
+    require(os.getuid() == os.geteuid() == observed["uid"]
+            and os.getgid() == os.getegid() == observed["gid"] and not os.getgroups(),
+            "Owner privilege drop failed")
+    try:
+        os.setuid(0)
+    except PermissionError:
+        return pwd.getpwnam(OWNER)
+    raise ValueError("Privilege drop is reversible")
 
 
 def private_directory(path, create=False):
@@ -118,10 +196,10 @@ def open_sealed(expected):
     """Descriptor of the sealed runtime, proven to hold the host's verified artifact."""
     for directory in sealed_directories():
         check_sealed_directory(directory)
-    fd = os.open(SEALED, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(SEALED, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
-        require(stat.S_ISREG(info.st_mode) and info.st_uid == SEALED_OWNER and not info.st_mode & 0o222,
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == SEALED_OWNER and stat.S_IMODE(info.st_mode) == 0o555,
                 "Sealed runtime is not a root-owned read-only file")
         hasher = hashlib.sha256()
         while True:
@@ -267,10 +345,12 @@ def main():
     line = sys.stdin.buffer.readline(16 * 1024 + 1)
     require(len(line) <= 16 * 1024 and line.endswith(b"\n"), "Bounded installer header required")
     header = json.loads(line)
-    observed = account()
+    require(os.getuid() == os.geteuid() == 0, "Root installer required")
     if header == {"action": "account"}:
         require(not sys.stdin.buffer.read(1), "Unexpected account input")
-        return observed
+        return account(provision=True)
+    observed = account()
+    drop_to_account()
     intent = validate(header, observed)
     data = None
     if header["action"] == "install":
@@ -278,7 +358,7 @@ def main():
         require(len(data) == intent["bytes"], "Incomplete or oversized artifact input")
     else:
         require(not sys.stdin.buffer.read(1), "Unexpected receipt input")
-    return transact(pathlib.Path("/home/cua"), observed, header, data)
+    return transact(OWNER_HOME, observed, header, data)
 
 
 if __name__ == "__main__":

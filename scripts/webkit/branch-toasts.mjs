@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // PRO-295 (screen 05.20): the two branch toasts, in WebKit, light and dark.
-// On a detached HEAD, Rename… on the branch row raises "Check out a branch
+// On a detached HEAD, Rename branch… on the branch row raises "Check out a branch
 // before renaming" naming the short commit, with "Create a branch here"
 // filled in and no Copy error; the button makes the branch and the header
 // then names it. A comparison branch that cannot be used raises "Couldn't
@@ -61,10 +61,10 @@ try {
     const header = page.locator("main header").first();
     await header.getByText("detached at 3f2a91c").waitFor();
 
-    // Rename on the detached branch row.
+    // Rename branch on the detached branch row.
     const row = page.locator('[data-testid="conversation-list"]').getByRole("button", { name: /^detached at 3f2a91c/ }).first();
     await row.click({ button: "right" });
-    await page.getByRole("menu").getByRole("menuitem", { name: /^Rename/ }).click();
+    await page.getByRole("menu").getByRole("menuitem", { name: "Rename branch…", exact: true }).click();
     const alerts = page.locator('[role="alert"][data-error-toast]');
     const rename = alerts.filter({ hasText: "Check out a branch before renaming" });
     await rename.waitFor();
@@ -73,10 +73,12 @@ try {
     const dialog = await page.getByRole("dialog").count();
 
     // A comparison branch that is gone.
-    await page.getByRole("tab", { name: "Changes", exact: true }).click();
-    await page.getByText(/Against origin\/main/).waitFor();
-    await page.getByLabel("Comparison target").fill(GONE);
-    await page.getByRole("button", { name: "Apply", exact: true }).click();
+    await page.getByRole("button", { name: /^Changes\s*\d*$/ }).click();
+    const target = page.getByRole("button", { name: "Comparison target", exact: true });
+    await target.filter({ hasText: "vs main" }).waitFor();
+    await target.click();
+    await page.getByLabel("Branch to compare against").fill(GONE);
+    await page.getByLabel("Branch to compare against").press("Enter");
     const failedSwitch = alerts.filter({ hasText: `Couldn't switch to ${GONE}` });
     await failedSwitch.waitFor();
     const switchText = (await failedSwitch.textContent()) ?? "";
@@ -84,7 +86,7 @@ try {
     const line = failedSwitch.locator("[data-error-detail]");
     const lineText = await line.textContent();
     const lineFont = await line.evaluate((node) => getComputedStyle(node).fontFamily);
-    const stayed = await page.getByText(/Against origin\/main/).count();
+    const stayed = await target.filter({ hasText: "vs main" }).count();
     const layout = await page.evaluate(() => {
       const cards = [...document.querySelectorAll('[role="alert"][data-error-toast]')];
       const boxes = cards.map((node) => node.getBoundingClientRect());
@@ -116,7 +118,7 @@ try {
     if (shots) await page.screenshot({ path: join(shots, `branch-created-${colorScheme}.png`) });
 
     failed += report(`branch toasts, ${colorScheme}`, {
-      "Rename… on a detached HEAD opens no dialog and raises the toast with the short commit": dialog === 0 && renameText.includes("This worktree is on a detached HEAD at 3f2a91c, so there's no branch to rename."),
+      "Rename branch… on a detached HEAD opens no dialog and raises the toast with the short commit": dialog === 0 && renameText.includes("This worktree is on a detached HEAD at 3f2a91c, so there's no branch to rename."),
       "the rename toast offers Create a branch here, and no Copy error": renameButtons.join("|") === "Create a branch here|",
       "a gone comparison branch raises Couldn't switch with a reason and what is still compared": switchText.includes("The branch may have been deleted on its remote, or not fetched here yet. Changes still compare against origin/main."),
       "git's line is shown alone, in monospace": lineText === "fatal: Needed a single revision" && /mono/i.test(lineFont),
@@ -124,7 +126,7 @@ try {
       "the comparison stayed on its target": stayed > 0,
       "each toast has its tone's edge, inside the window, not overlapping, clipping nothing": layout.tones.join() === "warning,error" && layout.edges[0] !== layout.edges[1] && layout.inView && !layout.overlap && !layout.clipped,
       "Copy error copies git's error": typeof copied === "string" && copied.includes("fatal: Needed a single revision"),
-      "Choose another branch focuses the comparison target and closes the toast": focused === "Comparison target" && switchClosed,
+      "Choose another branch focuses the comparison target and closes the toast": focused === "Branch to compare against" && switchClosed,
       "Create a branch here makes the branch in this checkout and the header names it": branchHere.length === 1 && branchHere[0].cwd.endsWith("/.raccoon/worktrees/approval-diff") && branchHere[0].name === "Show the diff inside edit approvals" && renameClosed,
       "no browser errors": errors.length === 0,
     }, { renameText, renameButtons, switchText, switchButtons, lineText, lineFont, layout, copied, focused, branchHere, errors });

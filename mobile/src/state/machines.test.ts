@@ -1,6 +1,6 @@
 import type { ConnectionState } from "./connection-view";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ACCOUNT_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
+import { ACCOUNT_PAIRING_CAPABILITY, HEADLESS_PHONE_PAIRING_CAPABILITY, hostIdForPublicKey } from "../pairing/contracts";
 import type { AccountHost } from "../pairing/account-client";
 import type { StoredHost } from "../store/hosts";
 import { ago, isGenericName, kindName, machineList, OFFLINE_REASON, UNREACHABLE_REASON, type MachineInput } from "./machines";
@@ -65,6 +65,37 @@ describe("machine states", () => {
       ["Machine 12", "Not seen recently · last seen 3 hours ago", UNREACHABLE_REASON],
     ]);
     expect(list.available[0]!.icon).toBe("server");
+  });
+
+  it("lists a headless server paired from its terminal with a server mark (PRO-359)", () => {
+    const list = machineList(input({
+      hosts: [
+        // Paired by `terminalx-serve pair --phone`: direct only, no account entry, no window.
+        stored("server", { hostName: "build-01", headless: true, platform: "linux", lastConnectedAt: NOW - 3_600_000 }),
+        // A Mac serving with `terminalx-serve` and no TerminalX app is a server too.
+        stored("mac-mini", { hostName: "Mac mini", headless: true, platform: "macos" }),
+        stored("desk", { hostName: "Studio MacBook", headless: false, platform: "macos" }),
+        // Paired before PRO-359: nothing said, the name decides.
+        stored("older", { hostName: "Office iMac" }),
+      ],
+      activeHostId: "server",
+      connection: "connected",
+    }));
+    expect(list.paired.map((machine) => [machine.name, machine.icon, machine.state])).toEqual([
+      ["build-01", "server", "Connected"],
+      ["Mac mini", "server", "Last connected 1 day ago"],
+      ["Studio MacBook", "laptop", "Last connected 1 day ago"],
+      ["Office iMac", "desktop", "Last connected 1 day ago"],
+    ]);
+  });
+
+  it("shows a discovered headless Mac as a server before and after QR pairing", () => {
+    const server = account(21, { displayName: "Build Mac", capabilities: [HEADLESS_PHONE_PAIRING_CAPABILITY] });
+    const available = machineList(input({ accountHosts: [server] })).available;
+    expect(available).toMatchObject([{ id: server.hostId, icon: "server", terminalPairing: true, pairBlocked: null }]);
+    const list = machineList(input({ hosts: [stored(server.hostId, { publicKeyB64: server.hostPublicKeyB64 })], accountHosts: [server] }));
+    expect(list.available).toEqual([]);
+    expect(list.paired).toMatchObject([{ id: server.hostId, icon: "server", account: server }]);
   });
 
   it("uses names typed on this phone, keeps hidden machines apart, and tells twins apart", () => {

@@ -68,8 +68,24 @@ failure stage/category/HTTP status. Control-channel events are `started`,
 `failed`, `connected` and `retry-requested`; host-binding rounds add `recovered` (below). Each phone
 connection through Relay adds
 `phone-requested` (the cell's `conn-open`), `phone-attached` (host data leg open),
-`phone-authenticated` (device login accepted), and `phone-closed` or `phone-failed`
-with its stage and category. Phone events use at most half the 128 records, so a
+`phone-authenticated` (device login accepted), and `phone-ended` or `phone-failed`
+with its stage and category. A `phone-ended` record says how the session ended in
+`ended`, with the close frame's `closeCode` (#1282):
+
+| `ended` | Close code | Meaning |
+| --- | --- | --- |
+| `phone-closed` | 4000 (1000 from older apps, direct only) | The phone app closed it on purpose: the person left, it reconnected, another path won. |
+| `probe-timeout` | 4001 | The phone's liveness probe (`pairing.getEndpoints`, every 30 s and on return from the background) went unanswered. |
+| `phone-failed` | 4002 | Something failed on the phone's side: a handshake that timed out, a frame it could not read. |
+| `relay-closed` | the relay's own (4408, 4413, 4101, …) | The relay closed the leg. 4408 means the phone's leg dropped, or closed without a code of its own (apps before #1282), or the relay fell behind. |
+| `unknown` | none, or any other | A close frame whose origin cannot be told, such as 1001 when iOS ends a direct stream. |
+| `stream-ended` | — | The socket ended with no close frame. |
+
+The phone's codes are in 4000–4999 because the relay passes those through to
+the Mac's leg unchanged and turns any other into 4408; they are defined in
+`mobile/src/transport/phone-close.ts` and `src-tauri/src/phone/mod.rs`.
+Earlier versions wrote `phone-closed` as the event for every end; those records
+still read. Phone events use at most half the 128 records, so a
 phone retrying in a loop cannot push out the control channel's history. Attempt 1 is
 the initial connection, retry count 0. A control-session failure after a successful
 connection has attempt/retry count 0, before the next connection attempt starts.
