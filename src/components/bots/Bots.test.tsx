@@ -23,7 +23,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 vi.mock("@/lib/experimentalSettings", () => ({ useExperimentalSettings: () => mocks.switches, getExperimentalSettings: () => mocks.switches }));
 
 const { bootBots, resetBotsForTests } = await import("@/lib/bots");
-const { resetBotsPageForTests, showHireBot, showBotsTeam } = await import("@/lib/botsPage");
+const { getBotsPage, resetBotsPageForTests, showHireBot, showBotsTeam } = await import("@/lib/botsPage");
 const { getSessionStore, openAgents, upsertSession, patchTab, removeSessions } = await import("@/lib/sessions");
 const { useLeaveBotsWhenOff } = await import("@/lib/botsPage");
 const { conflictOf, resolveKeymap } = await import("@/lib/shortcuts");
@@ -392,6 +392,22 @@ describe("Bots: the team table (23.02)", () => {
     ]);
     expect(sidebar().getAllByTestId("bot-row")).toHaveLength(3);
     expect(sidebar().getByRole("button", { name: /Ghost, Future role, Paused, runs on cloudWorkspace/ })).toBeTruthy();
+  });
+
+  it("a Hand-offs button beside Calendar opens the Hand-offs page, and its Bots goes back to the team (PRO-540)", async () => {
+    await boot(listOf(1, [bot("1", "Atlas")]));
+    render(<Screen />);
+    const calendar = await main().findByTestId("bots-calendar");
+    const handoffs = main().getByTestId("bots-handoffs-open");
+    expect(calendar.nextElementSibling).toBe(handoffs);
+    expect(handoffs.textContent?.trim()).toBe("Hand-offs");
+    fireEvent.click(handoffs);
+    expect(getBotsPage()).toEqual({ page: "handoffs" });
+    expect(main().getByTestId("bots-handoffs")).toBeTruthy();
+    expect(main().getByRole("heading", { name: "Hand-offs" })).toBeTruthy();
+    expect(main().queryByTestId("bots-team")).toBeNull();
+    fireEvent.click(main().getByTestId("bots-handoffs-back"));
+    expect(main().getByTestId("bots-team")).toBeTruthy();
   });
 
   it("Pause all pauses every bot and then offers Resume all", async () => {

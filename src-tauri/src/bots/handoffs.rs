@@ -208,6 +208,12 @@ pub struct Handoff {
     pub retry_of: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub attempt: u32,
+    /// The hand-off this one was handed on from, by number (PRO-540): recorded when it is made and only where that
+    /// is known, which is when it was sent from the chat of an open hand-off given to its sender. Never worked out
+    /// afterwards, and not what `depth` counts: one with no parent may still be deeper than 1. A retry has none;
+    /// its line is `retry_of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
     /// Where the answer goes: the session it was handed from (the sender's home chat when there is none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_session: Option<String>,
@@ -315,6 +321,8 @@ pub struct Store {
     pub messages: Vec<Message>,
     /// Records this build cannot read: kept, never shown.
     pub unreadable: usize,
+    /// How many of those are hand-offs; the rest are messages.
+    pub unreadable_handoffs: usize,
 }
 
 fn path() -> Result<PathBuf> {
@@ -348,7 +356,7 @@ pub fn read() -> Result<Store> {
     let file = read_file()?;
     let (handoffs, lost_handoffs) = split::<Handoff>(file.handoffs);
     let (messages, lost_messages) = split::<Message>(file.messages);
-    Ok(Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: lost_handoffs.len() + lost_messages.len() })
+    Ok(Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: lost_handoffs.len() + lost_messages.len(), unreadable_handoffs: lost_handoffs.len() })
 }
 
 #[cfg(test)]
@@ -375,7 +383,7 @@ fn change<T>(sink: Option<&dyn EventSink>, limit: usize, f: impl FnOnce(&mut Sto
     let mut file = read_file()?;
     let (handoffs, lost_handoffs) = split::<Handoff>(std::mem::take(&mut file.handoffs));
     let (messages, lost_messages) = split::<Message>(std::mem::take(&mut file.messages));
-    let mut store = Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: 0 };
+    let mut store = Store { revision: file.revision, next: file.next, handoffs, messages, unreadable: 0, unreadable_handoffs: 0 };
     let out = f(&mut store)?;
     trim(&mut store);
     file.next = store.next;
@@ -564,6 +572,13 @@ fn open_to<'a>(store: &'a Store, bot: &'a str) -> impl Iterator<Item = &'a Hando
 /// How deep a new hand-off from `from` is: one deeper than the deepest open one it was given.
 fn depth_from(store: &Store, from: &str) -> u32 {
     open_to(store, from).map(|handoff| handoff.depth.max(1)).max().unwrap_or(0) + 1
+}
+
+/// The hand-off a new one from `from` is handed on from, when it is sent from `session`: the open one given to `from`
+/// whose chat that is. `None` from any other chat (a home chat, say), where what it carries on is not known.
+fn parent_of(store: &Store, from: &str, session: Option<&str>) -> Option<u64> {
+    let session = session?;
+    open_to(store, from).find(|handoff| handoff.to_session.as_deref() == Some(session)).map(|handoff| handoff.number)
 }
 
 /// Every bot that handed open work, directly or down a chain, to `bot`.
@@ -846,6 +861,8 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             return Err(refused(format!("The bots already have {MAX_OPEN} hand-offs open. Wait for some to be answered.")));
         }
         refuse_full_inbox(store, to)?;
+        // A retry's line is the hand-off it tries again, wherever it is sent from.
+        let parent = if retry_of.is_some() { None } else { parent_of(store, &from.id, session.as_deref()) };
         let now = index::now();
         let handoff = Handoff {
             number: store.next,
@@ -861,6 +878,7 @@ fn create(manager: &SessionManager, from: &Bot, to: &Bot, session: Option<String
             hops,
             retry_of,
             attempt,
+            parent,
             from_session: session,
             from_item: None,
             to_session: None,
@@ -1017,6 +1035,7 @@ pub fn hand_item(manager: &SessionManager, from: &Bot, number: u64, to: &Bot, no
             hops: 0,
             retry_of: None,
             attempt: 0,
+            parent: None,
             from_session: None,
             from_item: Some(number),
             to_session: None,
@@ -1844,6 +1863,8 @@ fn shown(handoff: &Handoff, store: &Store) -> Value {
 }
 
 /// The hand-offs bot `id` gave or was given, newest first (every bot's with `None`), and what waits for it.
+/// `unreadable` counts every record this build cannot read; `unreadableHandoffs` and `unreadableMessages` say which
+/// (PRO-540). `maxDepth` and `maxRetries` are the bounds a hand-off's `depth` and `attempt` are counted against.
 pub fn listing(id: Option<&str>) -> Result<Value> {
     let store = read()?;
     let mut handoffs: Vec<&Handoff> = store.handoffs.iter().filter(|handoff| id.is_none_or(|id| handoff.from == id || handoff.to == id)).collect();
@@ -1862,6 +1883,10 @@ pub fn listing(id: Option<&str>) -> Result<Value> {
         "waitingMessages": waiting,
         "undelivered": undelivered,
         "unreadable": store.unreadable,
+        "unreadableHandoffs": store.unreadable_handoffs,
+        "unreadableMessages": store.unreadable - store.unreadable_handoffs,
+        "maxDepth": MAX_DEPTH,
+        "maxRetries": MAX_RETRIES,
     }))
 }
 

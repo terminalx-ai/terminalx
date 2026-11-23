@@ -1086,3 +1086,52 @@ fn what_is_sent_to_a_closed_chat_reaches_the_bots_home_chat() {
     assert!(messages[0].1.contains("Status two"));
     assert!(team.window("handoffs", json!({"id": team.atlas})).unwrap()["undelivered"].as_array().unwrap().is_empty(), "nothing waits or was dropped");
 }
+
+/// PRO-540: a hand-off records the one it was handed on from only where that is known: when it is sent from the chat
+/// of an open hand-off given to its sender. From a home chat it records none, however deep the limit counts it; a
+/// retry's line is the hand-off it tries again; and the window's listing carries all of it.
+#[test]
+fn a_hand_off_records_its_parent_only_from_the_chat_of_the_work_it_hands_on() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let kestrel = team.ask("bots.create", json!({"role": "qa-engineer", "name": "Kestrel"})).unwrap()["bot"]["id"].as_str().unwrap().to_owned();
+    crate::bots::update(team.service.sink.as_ref(), &kestrel, crate::bots::BotPatch { reports_to: Some(team.sentry.clone()), ..Default::default() }).unwrap();
+    let kestrel_chat = home_chat(&kestrel);
+    team.service.manager.install_review_test_cli(&kestrel_chat.id, &kestrel_chat.tabs[0].id, "kestrel-secret");
+
+    // 1: Atlas hands Sentry work from its home chat. Nothing was handed on to make it.
+    let first = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Audit the release"})).unwrap();
+    assert_eq!((first["handoff"]["depth"].clone(), first["handoff"].get("parent")), (json!(1), None));
+    let work = index::get(team.handoff(1).to_session.as_deref().unwrap()).unwrap();
+    team.service.manager.install_review_test_cli(&work.id, &work.tabs[0].id, "sentry-work-secret");
+
+    // 2: Sentry hands part of it on from its chat for hand-off 1.
+    let second = team.as_chat(&work, "sentry-work-secret", "bots.handoff", json!({"to": "kestrel", "title": "Test the release"})).unwrap();
+    assert_eq!((second["handoff"]["number"].clone(), second["handoff"]["depth"].clone(), second["handoff"]["parent"].clone()), (json!(2), json!(2), json!(1)));
+    assert_eq!(team.handoff(2).parent, Some(1));
+
+    // 3: Sentry hands other work on from its home chat. The limit counts it as deep as 2, and it has no parent.
+    let third = team.as_home(&team.sentry, "bots.handoff", json!({"to": "kestrel", "title": "List the flaky tests"})).unwrap();
+    assert_eq!((third["handoff"]["number"].clone(), third["handoff"]["depth"].clone(), third["handoff"].get("parent")), (json!(3), json!(2), None));
+    assert_eq!(team.handoff(3).parent, None);
+
+    // 4: hand-off 2 fails and Sentry hands it again, from the same chat: its line is the one it tries again.
+    team.as_chat(&kestrel_chat, "kestrel-secret", "bots.tell", json!({"to": "sentry", "about": 2, "failed": true, "text": "There is no build to test."})).unwrap();
+    let again = team.as_chat(&work, "sentry-work-secret", "bots.handoff", json!({"retry": 2})).unwrap();
+    assert_eq!((again["handoff"]["number"].clone(), again["handoff"]["retryOf"].clone(), again["handoff"]["attempt"].clone(), again["handoff"].get("parent")), (json!(4), json!(2), json!(1), None));
+
+    // The window reads every bot's hand-offs in one call, with each one's parent and the bounds they are counted by.
+    let listed = team.window("handoffs", json!({})).unwrap();
+    let by_number = |number: u64| listed["handoffs"].as_array().unwrap().iter().find(|handoff| handoff["number"] == number).unwrap().clone();
+    assert_eq!(listed["handoffs"].as_array().unwrap().len(), 4);
+    assert_eq!((by_number(2)["parent"].clone(), by_number(1).get("parent").cloned(), by_number(3).get("parent").cloned()), (json!(1), None, None));
+    assert_eq!((listed["maxDepth"].clone(), listed["maxRetries"].clone()), (json!(handoffs::MAX_DEPTH), json!(handoffs::MAX_RETRIES)));
+    assert_eq!((listed["unreadable"].clone(), listed["unreadableHandoffs"].clone(), listed["unreadableMessages"].clone()), (json!(0), json!(0), json!(0)));
+
+    // Once hand-off 1 is answered, what its chat sends is no longer handed on from open work.
+    team.as_chat(&work, "sentry-work-secret", "bots.tell", json!({"to": "atlas", "about": 1, "text": "The release is sound but for its tests."})).unwrap();
+    if let Ok(late) = team.as_chat(&work, "sentry-work-secret", "bots.handoff", json!({"to": "kestrel", "title": "Read the changelog"})) {
+        assert!(late["handoff"].get("parent").is_none(), "{late}");
+    }
+}

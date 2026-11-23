@@ -7,7 +7,7 @@ import { openBots, openWelcome, useSessionStore } from "@/lib/sessions";
  * or Hire a bot (23.03) with a role picked, or one bot's Role and memory (23.06). Kept apart from the session store so the view union stays one value.
  * `focus` asks the team page to take the keyboard focus when it shows (after a hire, whose page is gone).
  */
-export type BotsPage = { page: "team"; focus?: boolean } | { page: "hire"; roleId: string | null } | { page: "settings"; botId: string } | { page: "roleMemory"; botId: string } | { page: "duties" };
+export type BotsPage = { page: "team"; focus?: boolean } | { page: "hire"; roleId: string | null } | { page: "settings"; botId: string } | { page: "roleMemory"; botId: string } | { page: "duties" } | { page: "handoffs"; number?: number };
 
 let current: BotsPage = { page: "team" };
 const listeners = new Set<() => void>();
@@ -59,6 +59,16 @@ export function showBotRoleMemory(botId: string) {
 /** Every bot's duties, as the week's calendar or a list (PRO-473, 23.13). */
 export function showBotsDuties() {
   set({ page: "duties" });
+  openBots();
+}
+
+/**
+ * The Hand-offs page (PRO-540, 23.16): every chain of hand-offs between bots, one thread at a time. With `number` it
+ * opens the thread that holds that hand-off, at that step. Each call is a new request, so asking for the same number
+ * twice opens it twice.
+ */
+export function showBotsHandoffs(number?: number) {
+  set(number === undefined ? { page: "handoffs" } : { page: "handoffs", number });
   openBots();
 }
 
