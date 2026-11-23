@@ -1717,8 +1717,17 @@ pub async fn cloud_schedule_create(
     input: crate::cloud_workspaces::CloudScheduleCreateInput,
     state: tauri::State<'_, crate::AppState>,
     org_id: Option<String>,
-) -> Result<crate::cloud_workspaces::CloudSchedule, crate::cloud_workspaces::CloudWorkspaceClientError> {
+) -> Result<crate::cloud_workspaces::CloudScheduleWriteResult, crate::cloud_workspaces::CloudWorkspaceClientError> {
     cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_create(org_id.as_deref(), &input))
+}
+
+#[tauri::command]
+pub async fn cloud_schedule_webhook_rotate(
+    schedule_id: String,
+    org_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::cloud_workspaces::CloudScheduleWriteResult, crate::cloud_workspaces::CloudWorkspaceClientError> {
+    cloud_command!(state, crate::cloud_workspaces::RequestRisk::Mutation, move |service: std::sync::Arc<crate::cloud_workspaces::CloudWorkspaceService>| service.schedule_webhook_rotate(Some(&org_id), &schedule_id))
 }
 
 /// Pause a scheduled task (`active: false`) or resume a paused one.

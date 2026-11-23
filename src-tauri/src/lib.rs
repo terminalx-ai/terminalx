@@ -732,6 +732,7 @@ pub fn run() {
             commands::cloud_schedule,
             commands::cloud_schedule_estimate,
             commands::cloud_schedule_create,
+            commands::cloud_schedule_webhook_rotate,
             commands::cloud_schedule_set_active,
             commands::cloud_schedule_delete,
             commands::cloud_schedules_pause_all,
