@@ -68,7 +68,9 @@ const DIFF = [{ kind: "removed", text: "You are a CTO." }, { kind: "added", text
 
 /** Answer the screen's calls: the view, kept texts by hash, the template's changes; a change for anything else. */
 function serve(shown: BotRoleMemory) {
-  mocks.invoke.mockImplementation(async (_command: string, args: { operation: string; params: { hash?: string } }) => {
+  mocks.invoke.mockImplementation(async (command: string, args: { operation: string; params: { hash?: string } }) => {
+    // The team page's Hand-offs button reads every bot's hand-offs (PRO-540): none here.
+    if (command === "bot_handoffs") return { revision: 0, handoffs: [], waitingMessages: 0, unreadable: 0 };
     switch (args.operation) {
       case "memoryView":
         return shown;
