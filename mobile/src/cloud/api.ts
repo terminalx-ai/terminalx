@@ -323,6 +323,8 @@ const providerSchema = z.object({
   availability: z.string(),
   canManage: z.boolean(),
   connection: z.object({ state: z.string(), connectedAt: millis, lastValidatedAt: millis.optional(), credentialFingerprint: z.string().optional() }).optional(),
+  /** What becomes of a machine the provider releases (`archived` or `destroyed`); the descriptor does not say. */
+  capabilities: z.object({ releaseDisposition: z.string() }).optional().catch(undefined),
   descriptor: providerDescriptorSchema,
 });
 export type CloudProvider = z.infer<typeof providerSchema>;
