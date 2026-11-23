@@ -522,7 +522,7 @@ fn adopt_existing_workspace(entry: &mut SessionEntry, project: &Path, cwd: &str)
         return Ok(true);
     }
     let Some(top) = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()
-        .and_then(|top| crate::paths::canonicalize(top.trim()).ok()) else { return Ok(false) };
+        .and_then(|top| crate::paths::canonicalize(crate::git::path_line(&top)).ok()) else { return Ok(false) };
     if !git::is_worktree_of(project, &top) {
         return Ok(false);
     }
@@ -1056,7 +1056,7 @@ pub(crate) fn backfill_checkout_identities_now() -> anyhow::Result<usize> {
         let branch = session.branch.as_deref().filter(|branch| !branch.is_empty())?;
         let cwd = crate::paths::canonicalize(&session.cwd).ok()?;
         let top = git::run(&cwd, &["rev-parse", "--show-toplevel"]).ok()?;
-        let root = crate::paths::canonicalize(top.trim()).ok()?;
+        let root = crate::paths::canonicalize(crate::git::path_line(&top)).ok()?;
         if let Some(recorded) = session.checkout_root() {
             if crate::paths::canonicalize(recorded).ok()? != root {
                 return None;
@@ -1105,7 +1105,7 @@ fn checkout_root_path(project: &Path, path: &Path) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf());
     let project_root = crate::paths::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
     let git_root = git::run(ancestor, &["rev-parse", "--show-toplevel"]).ok()
-        .and_then(|top| crate::paths::canonicalize(top.trim()).ok());
+        .and_then(|top| crate::paths::canonicalize(crate::git::path_line(&top)).ok());
     let resolved = git::list_worktrees(project).unwrap_or_default().into_iter()
         .map(|(root, _)| { let root = PathBuf::from(root); crate::paths::canonicalize(&root).unwrap_or(root) })
         .chain(git_root)
@@ -1192,7 +1192,7 @@ pub(crate) fn ensure_workspace_identity(sessions: &[SessionEntry], path: &Path) 
         }
         if cwd.exists() {
             let top = git::run(cwd, &["rev-parse", "--show-toplevel"]).ok()
-                .map(|top| identity_path(Path::new(top.trim())));
+                .map(|top| identity_path(Path::new(crate::git::path_line(&top))));
             let recorded = session.checkout_root().map(|root| identity_path(Path::new(root))).filter(|root| normalized.starts_with(root));
             // A failed removal can leave the exact recorded checkout behind
             // after Git has removed its .git file. A retry of that exact path

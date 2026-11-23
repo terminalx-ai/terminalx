@@ -283,7 +283,7 @@ pub fn write_codex_rules(cwd: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path.parent().expect("the rules file has a directory"))?;
     crate::store::write_atomic(&path, codex_rules().as_bytes())?;
     let common = crate::git::run(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-    let info = Path::new(common.trim()).join("info");
+    let info = Path::new(crate::git::path_line(&common)).join("info");
     let exclude = info.join("exclude");
     let line = format!("/{CODEX_RULES_FILE}");
     let mut existing = std::fs::read_to_string(&exclude).unwrap_or_default();
@@ -1092,5 +1092,16 @@ mod tests {
         std::fs::write(crate::store::root().unwrap().join("orchestration-runs.json"), "{ not json").unwrap();
         assert!(limited(&session("child", Some("lead"))));
         assert!(!limited(&session("anyone", None)));
+    }
+
+    #[test]
+    fn codex_rules_are_excluded_in_a_git_dir_whose_name_ends_in_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        super::write_codex_rules(&work).unwrap();
+        let exclude = std::fs::read_to_string(git_dir.join("info/exclude")).unwrap();
+        assert!(exclude.lines().any(|line| line == format!("/{}", super::CODEX_RULES_FILE)), "{exclude}");
+        assert!(!dir.path().join("git dir").exists());
     }
 }

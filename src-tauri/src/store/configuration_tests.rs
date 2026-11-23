@@ -558,3 +558,13 @@ fn the_repository_schema_says_what_the_resolver_accepts() {
     assert_eq!(keys, registered);
     assert_eq!(schema["additionalProperties"], false);
 }
+
+#[test]
+fn a_checkout_name_that_ends_in_a_space_is_a_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work ");
+    crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
+    let found = repository(&work).unwrap();
+    assert_eq!(found.root, work.canonical().unwrap());
+    assert_eq!(found.identity, work.join(".git").canonical().unwrap().to_string_lossy());
+}

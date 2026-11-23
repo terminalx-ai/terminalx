@@ -124,16 +124,23 @@ pub struct Repository {
 /// No hooks, fsmonitor, inherited Git discovery variables or shell are used to
 /// discover the checkout. All workspaces inherit the primary checkout's files.
 fn git(root: &Path, args: &[&str]) -> Result<String> {
+    Ok(git_output(root, args)?.trim().into())
+}
+/// A path Git printed, without only its line ending (see `git::path_line`).
+fn git_path(root: &Path, args: &[&str]) -> Result<PathBuf> {
+    Ok(PathBuf::from(crate::git::path_line(&git_output(root, args)?)))
+}
+fn git_output(root: &Path, args: &[&str]) -> Result<String> {
     let output = std::process::Command::new(crate::binpath::resolve("git").unwrap_or_else(|| PathBuf::from("git")))
         .env("GIT_NO_LAZY_FETCH", "1").current_dir(root).env_remove("GIT_DIR").env_remove("GIT_COMMON_DIR").env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE").env_remove("GIT_OBJECT_DIRECTORY").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .args(["-c", "core.fsmonitor=false"]).args(args).output()?;
     ensure!(output.status.success(), "Cannot read repository configuration metadata.");
-    Ok(String::from_utf8(output.stdout)?.trim().into())
+    Ok(String::from_utf8(output.stdout)?)
 }
 pub fn repository(path: &Path) -> Result<Repository> {
-    let checkout = PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?).canonical()?;
-    let common = PathBuf::from(git(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).canonical()?;
+    let checkout = git_path(path, &["rev-parse", "--show-toplevel"])?.canonical()?;
+    let common = git_path(&checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.canonical()?;
     // Configuration belongs to the primary checkout, including local overrides.
     // A linked workspace must not silently lose ignored local values or adopt
     // executable settings from an arbitrary branch it checks out.

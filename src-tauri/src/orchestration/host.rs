@@ -172,7 +172,7 @@ fn base_checkout(repo: &Path, root: &Path, project: &str, base: &str, commit: &s
     let dir = base_dir(root, project);
     let ours = crate::git::run(&dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
     let theirs = crate::git::run(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).context("read the project's repository")?;
-    if ours.as_deref().map(str::trim) != Some(theirs.trim()) {
+    if ours.as_deref().map(crate::git::path_line) != Some(crate::git::path_line(&theirs)) {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
         }

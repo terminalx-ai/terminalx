@@ -1576,7 +1576,7 @@ fn apply_patch(journal: &Journal, params: &Value) -> Result<Value> {
         b"",
         BUDGET,
     )?;
-    if crate::paths::canonicalize(String::from_utf8(top)?.trim())? != destination {
+    if crate::paths::canonicalize(crate::git::path_line(&String::from_utf8(top)?))? != destination {
         bail!("Select the repository root");
     }
     let bytes = field(&result, "content")?.as_bytes();
