@@ -510,6 +510,7 @@ jobs:
         run: swift test --package-path native/computer-use-macos
 
       - name: build the computer-use helper app
+        id: helper
         run: node scripts/build-computer-macos.mjs
 
       # One compiler working on this crate holds over 5 GB, and this runner has
@@ -520,32 +521,40 @@ jobs:
       # test because that checks the library as --all-targets will, with the
       # test-only dependency features on.
       #
-      # clippy stays ahead of the tests. The first compile after the frontend
-      # changes writes the embedded assets, and the next cargo command then
-      # repeats that one compile: here that is a one-minute check, not the
-      # library's test build.
+      # clippy stays ahead of the tests, on a pull request too. The first
+      # compile after the frontend changes writes the embedded assets, and the
+      # next cargo command then repeats that one compile: here that is a
+      # one-minute check. On #1518's first run, with clippy left out of pull
+      # requests, the repeat fell on the library's test build instead: 34
+      # minutes, then 28 more. And a lint in an Apple-only function has no
+      # other check before merge.
+      #
+      # A clippy failure fails the job and does not stop the tests: the build
+      # and the suite below run whenever the steps before clippy passed, so a
+      # lint on main does not hide what the suite would have said. No step
+      # here may continue on error.
       - name: clippy (the library by itself)
-        if: github.event_name != 'pull_request'
         working-directory: src-tauri
         run: cargo clippy --locked --test serde_field_naming -- -D warnings
 
       - name: clippy
-        if: github.event_name != 'pull_request'
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: build the library's tests by themselves
         id: build
+        if: ${{ !cancelled() && steps.helper.outcome == 'success' }}
         working-directory: src-tauri
         run: cargo test --locked --lib --no-run
 
       - name: cargo test (a pull request, the Apple-only and system-dependent modules)
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}
         working-directory: src-tauri
         run: cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)
 
       - name: cargo test (main, nightly and manual runs, the full macOS suite)
-        if: github.event_name != 'pull_request'
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}
         working-directory: src-tauri
         run: cargo test --locked
 

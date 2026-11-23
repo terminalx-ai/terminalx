@@ -229,10 +229,20 @@ def validate(workflow):
     native = jobs["macos-native"]
     for steps in [rust, tests["steps"], native["steps"], jobs["serve-tests"]["steps"]]:
         assert any("command -v rg && command -v zsh" in s.get("run", "") for s in steps), "security fixtures must not skip missing tools"
-    assert any(s.get("run") == "cargo test --locked" and s.get("if") == "github.event_name != 'pull_request'" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
-    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "github.event_name == 'pull_request'" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
-    assert any(s.get("run") == "cargo test --locked --lib --no-run" and "if" not in s for s in native["steps"]), "macOS builds the library's tests whenever it runs"
-    assert sum(s.get("run", "").startswith("cargo clippy") and s.get("if") == "github.event_name != 'pull_request'" for s in native["steps"]) == 2, "macOS Clippy on main, nightly and manual runs"
+    assert any(s.get("run") == "cargo test --locked" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name != 'pull_request' }}" for s in native["steps"]), "macOS full suite on main, nightly and manual runs"
+    assert any(s.get("run") == "cargo test --locked --lib -- $(python3 ../infra/ci-runners/macos-rust.py --filters)" and s.get("if") == "${{ !cancelled() && steps.build.outcome == 'success' && github.event_name == 'pull_request' }}" for s in native["steps"]), "the Apple-only and system-dependent tests on a selected pull request"
+    # Clippy on every run of the job, a pull request's too, ahead of the tests; and a Clippy failure does not stop
+    # the build or the suite: they wait only on the last step before Clippy, and nothing continues on error.
+    after_helper = "${{ !cancelled() && steps.helper.outcome == 'success' }}"
+    names = [s.get("run", "") for s in native["steps"]]
+    clippy = [i for i, run in enumerate(names) if run.startswith("cargo clippy")]
+    build = names.index("cargo test --locked --lib --no-run")
+    assert [names[i] for i in clippy] == ["cargo clippy --locked --test serde_field_naming -- -D warnings", "cargo clippy --locked --all-targets -- -D warnings"] and max(clippy) < build, "both macOS Clippy runs, ahead of the tests"
+    assert "if" not in native["steps"][clippy[0]] and native["steps"][clippy[1]].get("if") == after_helper, "macOS Clippy on a pull request too"
+    assert native["steps"][build].get("if") == after_helper and native["steps"][build].get("id") == "build", "macOS builds the library's tests whenever it runs, also after a lint"
+    assert any(s.get("id") == "helper" and s.get("run") == "node scripts/build-computer-macos.mjs" for s in native["steps"][: clippy[0]]), "the step the build waits on"
+    for name, job in jobs.items():
+        assert "continue-on-error" not in job and all("continue-on-error" not in s for s in job["steps"]), f"{name} hides a failure"
     for check in ("swift test --package-path native/computer-use-macos", "node scripts/build-computer-macos.mjs"):
         assert any(s.get("run") == check and "if" not in s for s in native["steps"]), "the Swift tests and the helper build whenever macOS runs"
     # Every serve test binary runs somewhere: here, or in the job named for it.
@@ -476,6 +486,15 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name == 'schedule'"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"run": "cargo test --locked --lib"}))
         self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").update({"if": "github.event_name != 'pull_request'"}))
+
+    def test_macos_clippy_left_off_pull_requests_or_stopping_the_suite_is_rejected(self):
+        for name in ("clippy (the library", "clippy"):
+            self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"if": "github.event_name != 'pull_request'"}))
+            self.rejects(lambda w, name=name: self.step(w, "macos-native", name=name).update({"continue-on-error": True}))
+        # Without its condition the build is skipped after a failed Clippy, and the suite with it.
+        self.rejects(lambda w: self.step(w, "macos-native", run="cargo test --locked --lib --no-run").pop("if"))
+        self.rejects(lambda w: self.step(w, "macos-native", name="cargo test (main").update({"if": "github.event_name != 'pull_request'"}))
+        self.rejects(lambda w: self.step(w, "macos-native", name="clippy (the library").update({"run": "true"}))
         self.rejects(lambda w: self.step(w, "macos-native", name="clippy").update({"if": "false"}))
         self.rejects(lambda w: self.step(w, "macos-native", run="swift test").update({"if": "github.event_name != 'pull_request'"}))
 
