@@ -408,18 +408,31 @@ list:
 | `machine-session` | 4 | an assertion after the light theme's header checks |
 | `finished-toast` | 4 | `locator.waitFor`, 10 s |
 
-### WebKit on macOS getting slower within a run (#1515, run 45260136134)
+### WebKit on macOS: one slow run that did not repeat (#1515)
 
-With `agent-dashboard` back at seven layouts as three entries, the job hit its
-50 minutes: the same 109 checks took 7,344 s against 3,208 s on the run above,
-1.2 times as long in the first ten minutes and about 3.6 times from the
-twentieth on. The three entries had run together for five minutes just before.
-Run alone on a Mac, a part, a Vite check, `machine-page` and `run-all` itself
-each left no process behind; one part's WebKit processes peak at about 1.1 GB.
-Memory pressure on the runner is a guess: nothing in that log measures it.
-Since then the parts of a split check take turns, and each check's start line
-says the load average, free memory, swap and the number of WebKit and node
-processes.
+| Run | Runner | Checks | Wall time | Check time |
+| --- | --- | --- | --- | --- |
+| `main`, fast runner | 4 at once | 124 | 596 s | 2,183 s |
+| #1515 round 1 | 4 at once | 125 | 503 s | 1,897 s |
+| `main`, slow runners | 3 at once | 124 | 1,650 to 1,940 s | |
+| #1518 round 1 (the code of #1515 round 1) | 3 at once | 125 | 1,225 s | 3,631 s |
+| #1515 round 2 | 3 at once | 123 of 128 ended | cut off at 50 minutes | over 8,319 s |
+| #1515 round 3 | 3 at once | 128 | 1,888 s | 5,604 s |
+
+Runner speed moves this job more than the pooling does: do not set the fast
+run's 11 min 46 s against `main`'s median.
+
+Round 2 is one bad run whose cause is not shown. The same 109 checks took
+7,344 s against 3,208 s on #1518's round, 1.2 times as long in the first ten
+minutes and about 3.6 times from the twentieth on; `agent-dashboard`'s three
+entries had run together for five minutes just before. Run alone on a Mac, a
+part, a Vite check, `machine-page` and `run-all` itself each left no process
+behind. Round 3, with the parts of a split check taking turns (228 s, 103 s,
+129 s) and each start line saying the host's state, read: no swap in use at
+any start, 8 WebKit and 4 node processes throughout, 0.6 to 2 GB free, and a
+load average of 10 to 33 on three cores. So nothing is left behind and the
+runner is short of processor, not of memory. The bound stays because it is
+cheap; it is not known to have fixed anything.
 
 ### Flaky tests seen on these runs
 
@@ -427,4 +440,5 @@ processes.
 | --- | --- | --- |
 | `machine_host::security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed` | #1515, Linux | `EOF while parsing a value` at `security_tests.rs:362`: the refusal file read while still empty (read from the log, not reproduced). PRO-513. |
 | `pairing::tests::a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows` (child `phone_router_child_fixture`) | #1515, Linux | the child's call refused with `person_required` at `pairing/mod.rs:2337`. Cause not known. |
+| `finished-toast` (WebKit check, new with #1499) | `main`, #1515 rounds 2 and 3, #1517, the Linux trial | 10 s waiting for the notice at `finished-toast.mjs:61`. The fixture listed the tab as idle and the list read again on focus undid `in_progress`. Fixed in #1515. |
 | `remote::git::tests::mention_lookups_read_the_workspaces_pull_requests_with_its_gh` | #1515, Linux | `gh: Text file busy`. Fixed in #1520. |
