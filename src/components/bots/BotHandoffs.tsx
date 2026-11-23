@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { ArrowRight, BookOpen, FileText, Loader2, Square, TriangleAlert } from "@/icons";
+import { ArrowRight, BookOpen, FileText, Hourglass, Loader2, Square, TriangleAlert } from "@/icons";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
@@ -16,9 +16,10 @@ import type { Handoff, UndeliveredMessage } from "@/types/botHandoffs";
 import { BotAvatar } from "./BotAvatar";
 
 /**
- * Bots as a team (PRO-475, designs 23.04, 23.01 and 23.09): the hand-off cards in a bot's chat, the team brief under
- * "Every bot reads", "Reports to" on a bot's Home, and "Hand to another bot" on an item's page. Shown only inside the
- * Bots views, which exist only while the experimental Bots setting is on.
+ * Bots as a team (PRO-475, designs 23.01 and 23.09): the strip of open hand-offs above a bot's chat (PRO-520 and
+ * PRO-517 decision 2, in place of design 23.04's cards), the team brief under "Every bot reads", "Reports to" on a
+ * bot's Home, and "Hand to another bot" on an item's page. Shown only inside the Bots views, which exist only while
+ * the experimental Bots setting is on.
  */
 
 function nameOf(bots: Bot[], id: string): string {
@@ -36,22 +37,36 @@ function useTicking(on: boolean): number {
   return now;
 }
 
-/** The hand-offs made from or worked in chat `chatId`: the open ones, and the last few closed. */
+/** The open hand-offs made from or worked in chat `chatId`. A finished one (answered, failed, stopped) is not listed. */
 export function chatHandoffs(handoffs: Handoff[], chatId: string): Handoff[] {
-  const here = handoffs.filter((handoff) => handoff.fromSession === chatId || handoff.toSession === chatId);
-  const open = here.filter(handoffOpen);
-  const closed = here.filter((handoff) => !handoffOpen(handoff)).slice(0, Math.max(0, 3 - open.length));
-  return [...open, ...closed];
+  return handoffs.filter((handoff) => (handoff.fromSession === chatId || handoff.toSession === chatId) && handoffOpen(handoff));
 }
 
-/** Above a bot's open chat: a card for each hand-off it made or works on there (design 23.04). */
-export function HandoffCards({ bot, chatId }: { bot: Bot; chatId: string }) {
+/**
+ * Above a bot's open chat (PRO-520, PRO-517 decision 2; it replaces design 23.04's cards): one slim line for each
+ * hand-off still open that the bot made or works on there, and under them every message that did not reach its chat.
+ * A finished hand-off shows nothing here. The lines scroll after about three, and so do the messages, so the strip
+ * stays small; a failed Stop is said under the lines, outside their scroll.
+ */
+export function HandoffStrip({ bot, chatId }: { bot: Bot; chatId: string }) {
   const { list, error, reload } = useBotHandoffs(bot.id);
-  const shown = chatHandoffs(list?.handoffs ?? [], chatId);
-  const now = useTicking(shown.some((handoff) => handoff.state === "working"));
+  const open = chatHandoffs(list?.handoffs ?? [], chatId);
+  const now = useTicking(open.some((handoff) => handoff.state === "working"));
+  // Every undelivered message shows, whichever hand-off it is about: one about a finished hand-off has no line to sit by.
   const undelivered = list?.undelivered ?? [];
-  // Messages that are about no hand-off shown here: kept in a strip of their own, so none is lost from view.
-  const loose = undelivered.filter((message) => !shown.some((handoff) => handoff.number === message.handoff));
+  const [stopping, setStopping] = useState<number[]>([]);
+  // Why a Stop failed, by hand-off number, kept until it is tried again.
+  const [stopErrors, setStopErrors] = useState<Record<number, string>>({});
+  const setStopError = (number: number, message: string | null) => setStopErrors((errors) => {
+    const rest = { ...errors };
+    delete rest[number];
+    return message === null ? rest : { ...rest, [number]: message };
+  });
+  const stop = (number: number) => {
+    setStopping((numbers) => [...numbers, number]);
+    setStopError(number, null);
+    botHandoffsApi.stop(number).then(() => undefined, (cause) => setStopError(number, errorMessage(cause))).finally(() => setStopping((numbers) => numbers.filter((value) => value !== number)));
+  };
   // A failed read is said, never shown as no hand-offs.
   if (error) {
     return (
@@ -60,11 +75,22 @@ export function HandoffCards({ bot, chatId }: { bot: Bot; chatId: string }) {
       </div>
     );
   }
-  if (shown.length === 0 && loose.length === 0) return null;
+  if (open.length === 0 && undelivered.length === 0) return null;
+  // A Stop that failed on a hand-off that has closed since has nothing left to say.
+  const failedStops = open.filter((handoff) => stopErrors[handoff.number] !== undefined);
+  // Never so tall that the chat below loses its header and composer (15rem, as the run plan cards allow): in a window
+  // that short the whole strip scrolls.
   return (
-    <div className="flex max-h-[40%] shrink-0 flex-col gap-2 overflow-y-auto border-b border-hairline px-4 py-2 scrollbar-thin" aria-label="Hand-offs" data-testid="bot-handoff-cards">
-      {shown.map((handoff) => <HandoffCard key={handoff.number} handoff={handoff} now={now} undelivered={undelivered.filter((message) => message.handoff === handoff.number)} onResent={reload} />)}
-      {loose.length > 0 && <Undelivered messages={loose} onResent={reload} />}
+    <div className="@container/handoffs flex max-h-[calc(100%-15rem)] shrink-0 flex-col gap-1 overflow-y-auto border-b border-hairline px-4 py-1.5 scrollbar-thin" aria-label="Hand-offs" data-testid="bot-handoff-cards">
+      {open.length > 0 && (
+        <ul className="flex max-h-[5.75rem] shrink-0 flex-col gap-1 overflow-y-auto scrollbar-thin" aria-label="Open hand-offs">
+          {open.map((handoff) => <HandoffLine key={handoff.number} handoff={handoff} now={now} busy={stopping.includes(handoff.number)} onStop={() => stop(handoff.number)} />)}
+        </ul>
+      )}
+      {failedStops.map((handoff) => (
+        <MachineHostError key={handoff.number} error={stopErrors[handoff.number]} onRestarted={() => stop(handoff.number)} onFailed={(message) => setStopError(handoff.number, message)} />
+      ))}
+      {undelivered.length > 0 && <Undelivered messages={undelivered} onResent={reload} />}
     </div>
   );
 }
@@ -93,11 +119,12 @@ function Undelivered({ messages, onResent }: { messages: UndeliveredMessage[]; o
     botHandoffsApi.resend(id).then((answer) => { if (answer.delivery.error) setError(answer.delivery.error); onResent(); }, (cause) => setError(errorMessage(cause))).finally(() => setBusy(null));
   };
   return (
-    <div className="flex min-w-0 flex-col gap-1" data-testid="bot-handoff-undelivered">
+    <div className="flex min-w-0 shrink-0 flex-col gap-1" data-testid="bot-handoff-undelivered">
+      <div className="flex max-h-[6.5rem] min-w-0 flex-col gap-1 overflow-y-auto scrollbar-thin">
       {messages.map((message) => (
-        <p key={message.id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-warning/10 px-2 py-1 text-[11.5px] text-warning" data-testid="bot-handoff-undelivered-message">
+        <p key={message.id} className="flex min-w-0 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-warning/10 px-2 py-1 text-[11.5px] text-warning" data-testid="bot-handoff-undelivered-message">
           <TriangleAlert className="size-3 shrink-0" />
-          <span className="min-w-0 flex-1 basis-[10rem] truncate" title={message.error}>
+          <span className="min-w-0 flex-1 basis-[6rem] truncate" title={message.error}>
             {KIND_WORD[message.kind] ?? "A message"} from {message.from === "terminalx" ? "TerminalX" : nameOf(bots, message.from)} to {nameOf(bots, message.to)} is not delivered{message.held ? " · it goes when that bot's chat starts" : ""}: {message.error}
           </span>
           <Button size="xs" variant="outline" className="shrink-0" disabled={busy !== null} onClick={() => resend(message.id)} data-testid="bot-handoff-resend">
@@ -105,58 +132,46 @@ function Undelivered({ messages, onResent }: { messages: UndeliveredMessage[]; o
           </Button>
         </p>
       ))}
+      </div>
       {error && <MachineHostError error={error} onRestarted={onResent} onFailed={setError} />}
     </div>
   );
 }
 
-function HandoffCard({ handoff, now, undelivered, onResent }: { handoff: Handoff; now: number; undelivered: UndeliveredMessage[]; onResent: () => void }) {
+/**
+ * One open hand-off, in one line: who to whom, its title, its state, and a Stop for the receiving bot's work. Its scope
+ * and its "asked, due" line are not here. Messages still waiting for its chat are a count beside the state, said in
+ * full in the count's and the state's tooltips. In a narrow strip the state keeps its room before the title does, and
+ * Stop is its icon alone, with its label and tooltip saying whose work it stops.
+ */
+function HandoffLine({ handoff, now, busy, onStop }: { handoff: Handoff; now: number; busy: boolean; onStop: () => void }) {
   const { bots } = useBotStore();
   const from = bots.find((bot) => bot.id === handoff.from);
   const to = bots.find((bot) => bot.id === handoff.to);
   const toName = to?.name ?? "a bot no longer here";
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const open = handoffOpen(handoff);
-  const stop = () => {
-    setBusy(true);
-    setError(null);
-    botHandoffsApi.stop(handoff.number).then(() => setError(null), (cause) => setError(errorMessage(cause))).finally(() => setBusy(false));
-  };
-  const tone = handoff.state === "working" ? "text-warning" : handoff.state === "failed" ? "text-destructive" : handoff.state === "answered" ? "text-add" : "text-muted-foreground";
+  const state = handoffStateLabel(handoff, toName, now, !!to?.paused);
+  const waits = handoff.waitingMessages > 0 ? `${handoff.waitingMessages === 1 ? "1 message waits" : `${handoff.waitingMessages} messages wait`} for its chat to start` : null;
   return (
-    <article className="flex min-w-0 flex-col gap-1.5 rounded-lg border border-hairline bg-card px-3 py-2" aria-label={`Hand-off ${handoff.number}: ${handoff.title}`} data-testid="bot-handoff-card" data-state={handoff.state}>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="flex shrink-0 items-center gap-1" aria-label={`${from?.name ?? "A bot"} to ${toName}`}>
-          <BotAvatar roleTemplateId={from?.roleTemplateId ?? ""} size="xs" paused={!!from?.paused} />
-          <ArrowRight className="size-3 text-faint" />
-          <BotAvatar roleTemplateId={to?.roleTemplateId ?? ""} size="xs" paused={!!to?.paused} />
+    <li className="flex h-7 min-w-0 shrink-0 items-center gap-2 @max-[26rem]/handoffs:gap-1.5" aria-label={`Hand-off ${handoff.number}: ${handoff.title}`} data-testid="bot-handoff-line" data-state={handoff.state}>
+      <span className="flex shrink-0 items-center gap-1" aria-label={`${from?.name ?? "A bot"} to ${toName}`}>
+        <BotAvatar roleTemplateId={from?.roleTemplateId ?? ""} size="xs" paused={!!from?.paused} />
+        <ArrowRight className="size-3 text-faint" />
+        <BotAvatar roleTemplateId={to?.roleTemplateId ?? ""} size="xs" paused={!!to?.paused} />
+      </span>
+      <span className="min-w-[2.5rem] flex-1 basis-[7rem] truncate text-[12.5px] font-medium text-foreground @max-[26rem]/handoffs:basis-0" title={handoff.title}>{handoff.title}</span>
+      <Chip className={cn("min-w-0 shrink whitespace-nowrap", handoff.state === "working" ? "text-warning" : "text-muted-foreground")} data-testid="bot-handoff-state" title={waits ? `${state} · ${waits}` : state}>
+        {handoff.state === "working" && <Loader2 className="size-3 shrink-0 animate-spin" />}
+        <span className="truncate">{state}</span>
+      </Chip>
+      {waits && (
+        <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-faint tabular-nums" role="img" aria-label={waits} title={`${waits}.`} data-testid="bot-handoff-waiting">
+          <Hourglass className="size-3" /> {handoff.waitingMessages}
         </span>
-        <span className="min-w-0 flex-1 basis-[7rem] truncate text-[12.5px] font-medium text-foreground" title={handoff.title}>{handoff.title}</span>
-        <Chip className={cn("min-w-0 max-w-full", tone)} data-testid="bot-handoff-state" title={handoffStateLabel(handoff, toName, now, !!to?.paused)}>
-          {handoff.state === "working" && <Loader2 className="size-3 shrink-0 animate-spin" />}
-          <span className="truncate">{handoffStateLabel(handoff, toName, now, !!to?.paused)}</span>
-        </Chip>
-        {open && (
-          <Button size="xs" variant="outline" className="min-w-0 max-w-full" disabled={busy} onClick={stop} data-testid="bot-handoff-stop" aria-label={`Stop ${toName}'s work on hand-off ${handoff.number}`} title={`Stop ${toName}'s work on this hand-off`}>
-            {busy ? <Loader2 className="animate-spin" /> : <Square />} <span className="truncate">Stop {toName}</span>
-          </Button>
-        )}
-      </div>
-      <p className="min-w-0 truncate text-[11.5px] text-faint">
-        #{handoff.number} · {handoff.by === "owner" ? `you handed ${from?.name ?? "a bot"}'s item to ${toName}` : `${from?.name ?? "A bot"} asked ${toName}`}
-        {handoff.due ? ` · answer due ${handoff.due}` : ""} · {relativeTime(handoff.created)}
-      </p>
-      {handoff.scope && <p className="line-clamp-2 min-w-0 text-[12px] whitespace-pre-wrap break-words text-muted-foreground" data-testid="bot-handoff-scope">{handoff.scope}</p>}
-      {handoff.answer && (
-        <p className={cn("line-clamp-3 min-w-0 border-l-2 pl-2 text-[12px] whitespace-pre-wrap break-words", handoff.answer.failed ? "border-destructive/60 text-destructive" : "border-hairline-strong text-muted-foreground")} data-testid="bot-handoff-answer">
-          <span className="font-medium">{handoff.answer.by === "terminalx" ? "TerminalX" : nameOf(bots, handoff.answer.by)} · a bot's words, not an approval:</span> {handoff.answer.text}
-        </p>
       )}
-      {handoff.waitingMessages > 0 && <p className="text-[11.5px] text-faint">{handoff.waitingMessages === 1 ? "1 message waits" : `${handoff.waitingMessages} messages wait`} for its chat to start.</p>}
-      {undelivered.length > 0 && <Undelivered messages={undelivered} onResent={onResent} />}
-      {error && <MachineHostError error={error} onRestarted={stop} onFailed={setError} />}
-    </article>
+      <Button size="xs" variant="outline" className="min-w-0 max-w-[40%] shrink-0" disabled={busy} onClick={onStop} data-testid="bot-handoff-stop" aria-label={`Stop ${toName}'s work on hand-off ${handoff.number}`} title={`Stop ${toName}'s work on this hand-off`}>
+        {busy ? <Loader2 className="animate-spin" /> : <Square />} <span className="truncate @max-[26rem]/handoffs:hidden">Stop {toName}</span>
+      </Button>
+    </li>
   );
 }
 

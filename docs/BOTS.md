@@ -617,11 +617,17 @@ in `src-tauri/src/bots/wakes.rs` (`kind`: `githubMention`,
   it: sent at once, or once after the chat's next successful launch
   (`chat::launched`), three automatic tries; then a hand-off it carried fails
   and its sender is told. A message or an answer is never given up: after
-  its tries it is held, shown on the card (or in a strip above the chat)
+  its tries it is held, shown in the strip above the bot's chat
   as not delivered with why and a Resend (`handoffResend`, open: it sends
   only what was recorded), and sent after the bot's next launch. Pending
   messages are never put in a launch note.
-- **Stop.** The card's Stop (`handoffStop`, which narrows and needs no
+- **Above the chat (PRO-520).** A bot's open chat shows one slim line for
+  each hand-off still open that it made or works on there: both bots, the
+  title, the state, how many messages still wait for its chat, and Stop.
+  A finished hand-off (answered, failed, stopped) shows nothing there. The
+  lines scroll after about three. Every undelivered message shows under
+  them with its Resend, whether its hand-off is open or finished.
+- **Stop.** The Stop on an open hand-off's line (`handoffStop`, which narrows and needs no
   proof) is recorded first, under the store's lock and only while the
   hand-off is open, then stops the receiving bot's chat for that hand-off
   and the sessions it started for its item, drops the item, and tells the

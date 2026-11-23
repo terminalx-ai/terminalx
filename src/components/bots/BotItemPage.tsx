@@ -129,7 +129,7 @@ export function BotItemPage({ bot, number, onBack }: { bot: Bot; number: number;
           </div>
 
           {handing && !closed && <HandToBot bot={bot} item={item} onClose={() => setHanding(false)} onHanded={(handoff) => { setHanding(false); setHanded(handoff.number); }} />}
-          {handed !== null && <p className="text-[12.5px] text-muted-foreground" role="status" data-testid="bot-item-handed">Handed on as hand-off {handed}. Its card shows in the receiving bot's chat; the answer comes back to {bot.name}.</p>}
+          {handed !== null && <p className="text-[12.5px] text-muted-foreground" role="status" data-testid="bot-item-handed">Handed on as hand-off {handed}. While it is open it shows as a line above the receiving bot's chat; the answer comes back to {bot.name}.</p>}
 
           <div className="flex min-w-0 flex-col gap-2">
             <h1 className="text-[19px] font-semibold break-words text-foreground">{item.title}</h1>

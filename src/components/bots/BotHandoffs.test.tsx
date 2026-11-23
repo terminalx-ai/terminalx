@@ -30,7 +30,7 @@ vi.mock("@/components/machines/MachineHostError", () => ({
   ),
 }));
 
-const { HandoffCards, TeamBriefEditor, TeamBriefRow, BotReportsTo, HandToBot, chatHandoffs } = await import("./BotHandoffs");
+const { HandoffStrip, TeamBriefEditor, TeamBriefRow, BotReportsTo, HandToBot, chatHandoffs } = await import("./BotHandoffs");
 const { handoffStateLabel } = await import("@/lib/botHandoffs");
 
 const base: Bot = {
@@ -82,26 +82,37 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-describe("hand-off cards in a bot's chat (23.04)", () => {
-  it("show the scope, when the answer is due, both bots, the live state, and a Stop for the receiving bot only", async () => {
+describe("the strip of open hand-offs above a bot's chat (PRO-520)", () => {
+  it("show an open hand-off as one line: both bots, the title, the live state and a Stop for the receiving bot only; never its scope, when it is due or an answer", async () => {
     list.handoffs = [
       handoff(3, { title: "Check the runner's secrets", scope: "Read only.", due: "before the run merges" }),
-      handoff(2, { state: "answered", answer: { at: "2026-11-21T10:00:00Z", text: "No secret reaches the logs.", by: "b2" }, closed: "2026-11-21T10:00:00Z" }),
+      handoff(2, { state: "answered", title: "Look at the relay token", answer: { at: "2026-11-21T10:00:00Z", text: "No secret reaches the logs.", by: "b2" }, closed: "2026-11-21T10:00:00Z" }),
       handoff(1, { fromSession: "elsewhere", toSession: "elsewhere-too", title: "Not in this chat" }),
     ];
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
-    const cards = await screen.findAllByTestId("bot-handoff-card");
-    expect(cards).toHaveLength(2);
-    const [open, answered] = cards;
-    expect(within(open).getByText("Check the runner's secrets")).toBeTruthy();
-    expect(within(open).getByTestId("bot-handoff-scope").textContent).toBe("Read only.");
-    expect(open.textContent).toContain("answer due before the run merges");
-    expect(open.textContent).toContain("Atlas asked Sentry");
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    const lines = await screen.findAllByTestId("bot-handoff-line");
+    expect(lines).toHaveLength(1);
+    const [open] = lines;
+    const title = within(open).getByText("Check the runner's secrets");
+    expect(title.title).toBe("Check the runner's secrets");
+    expect(title.className).toContain("truncate");
     expect(within(open).getAllByTestId("bot-avatar").map((avatar) => avatar.dataset.role)).toEqual(["cto", "security-auditor"]);
     expect(within(open).getByTestId("bot-handoff-state").textContent).toMatch(/^Working · 4\ds$/);
-    // The answer is labelled as a bot's words; a closed card has no Stop.
-    expect(within(answered).getByTestId("bot-handoff-answer").textContent).toBe("Sentry · a bot's words, not an approval: No secret reaches the logs.");
-    expect(within(answered).queryByTestId("bot-handoff-stop")).toBeNull();
+    expect(within(open).getByTestId("bot-handoff-state").querySelector(".animate-spin")).toBeTruthy();
+    // The line is the avatars, the title, the state and Stop, and nothing else: no scope, no "#N · asked · due" line.
+    expect(open.textContent).toMatch(/^Check the runner's secretsWorking · 4\ds\s*Stop Sentry$/);
+    const strip = screen.getByTestId("bot-handoff-cards");
+    expect(screen.queryByTestId("bot-handoff-scope")).toBeNull();
+    expect(strip.textContent).not.toContain("Read only.");
+    expect(strip.textContent).not.toContain("before the run merges");
+    expect(strip.textContent).not.toContain("Atlas asked Sentry");
+    expect(strip.textContent).not.toContain("#3");
+    // The answered one is not listed at all: no line, no answer, no Stop of its own.
+    expect(screen.queryByTestId("bot-handoff-answer")).toBeNull();
+    expect(strip.textContent).not.toContain("Look at the relay token");
+    expect(strip.textContent).not.toContain("No secret reaches the logs.");
+    expect(strip.textContent).not.toContain("Answered");
+    expect(screen.getAllByTestId("bot-handoff-stop")).toHaveLength(1);
     expect(screen.queryByText("Not in this chat")).toBeNull();
 
     fireEvent.click(within(open).getByTestId("bot-handoff-stop"));
@@ -109,81 +120,151 @@ describe("hand-off cards in a bot's chat (23.04)", () => {
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoff_stop", { number: 3 }));
   });
 
+  it("show nothing above the chat for an answered, a failed and a stopped hand-off", async () => {
+    list.handoffs = [
+      handoff(4, { state: "answered", title: "Answered work", scope: "Its scope.", answer: { at: "2026-11-21T10:00:00Z", text: "Done.", by: "b2" }, closed: "2026-11-21T10:00:00Z" }),
+      handoff(3, { state: "failed", title: "Failed work", answer: { at: "2026-11-21T10:00:00Z", text: "Could not start.", by: "terminalx", failed: true }, closed: "2026-11-21T10:00:00Z" }),
+      handoff(2, { state: "stopped", title: "Stopped work", stoppedBy: "owner", closed: "2026-11-21T10:00:00Z" }),
+    ];
+    const { container } = render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoffs", { id: "b1" }));
+    await act(async () => {});
+    expect(container.textContent).toBe("");
+    expect(container.childElementCount).toBe(0);
+    expect(screen.queryByTestId("bot-handoff-cards")).toBeNull();
+    expect(screen.queryByTestId("bot-handoff-line")).toBeNull();
+    // One still open beside them is the only line.
+    list = { ...list, handoffs: [handoff(5, { title: "Open work" }), ...list.handoffs] };
+    await act(async () => mocks.listeners.get("bot_handoffs_changed")!({ payload: { revision: 2 } }));
+    expect((await screen.findAllByTestId("bot-handoff-line")).map((line) => line.dataset.state)).toEqual(["working"]);
+    expect(screen.getByTestId("bot-handoff-cards").textContent).not.toMatch(/Answered|Failed|Stopped|Done\.|Could not start\./);
+  });
+
   it("show a waiting hand-off for a paused bot, and a state a newer app wrote as itself, still stoppable", async () => {
     list.handoffs = [handoff(5, { to: "b3", state: "waiting", toSession: undefined }), handoff(4, { state: "escalated" })];
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
     const states = (await screen.findAllByTestId("bot-handoff-state")).map((state) => state.textContent);
     expect(states).toEqual(["Waiting · Iris is paused", "escalated"]);
     expect(screen.getAllByTestId("bot-handoff-stop")).toHaveLength(2);
+    // Only a working one spins.
+    expect(screen.getByTestId("bot-handoff-cards").querySelector("[data-testid=bot-handoff-state] .animate-spin")).toBeNull();
+    expect(screen.queryByTestId("bot-handoff-waiting")).toBeNull();
+  });
+
+  it("say the messages waiting for an open hand-off's chat as a count beside its state, in full in the tooltips", async () => {
+    list.handoffs = [handoff(5, { to: "b3", state: "waiting", toSession: undefined, waitingMessages: 2 }), handoff(4, { waitingMessages: 1 }), handoff(3)];
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    const [paused, one, none] = await screen.findAllByTestId("bot-handoff-line");
+    const count = within(paused).getByTestId("bot-handoff-waiting");
+    expect(count.textContent?.trim()).toBe("2");
+    expect(count.getAttribute("aria-label")).toBe("2 messages wait for its chat to start");
+    expect(count.title).toBe("2 messages wait for its chat to start.");
+    // The state's own words stay as they were; its tooltip says the wait too.
+    expect(within(paused).getByTestId("bot-handoff-state").textContent).toBe("Waiting · Iris is paused");
+    expect(within(paused).getByTestId("bot-handoff-state").title).toBe("Waiting · Iris is paused · 2 messages wait for its chat to start");
+    expect(within(one).getByTestId("bot-handoff-waiting").getAttribute("aria-label")).toBe("1 message waits for its chat to start");
+    expect(within(none).queryByTestId("bot-handoff-waiting")).toBeNull();
+    expect(within(none).getByTestId("bot-handoff-state").title).toMatch(/^Working · 4\ds$/);
   });
 
   it("a failed Stop says why, and tries again after the runtime restarts", async () => {
-    list.handoffs = [handoff(3)];
+    list.handoffs = [handoff(3), handoff(2)];
     mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoff_stop" ? Promise.reject(new Error("restart_required")) : route(command, args));
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
-    fireEvent.click(await screen.findByTestId("bot-handoff-stop"));
-    expect((await screen.findByRole("alert")).textContent).toContain("restart_required");
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    fireEvent.click((await screen.findAllByTestId("bot-handoff-stop"))[1]);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("restart_required");
+    // Said in the strip, outside the lines that scroll, so it is never under their fold.
+    expect(screen.getByTestId("bot-handoff-cards").contains(alert)).toBe(true);
+    expect(screen.getByRole("list", { name: "Open hand-offs" }).contains(alert)).toBe(false);
     mocks.invoke.mockImplementation(route);
     fireEvent.click(screen.getByText("Restart runtime"));
-    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_handoff_stop")).toHaveLength(2));
+    await waitFor(() => expect(mocks.invoke.mock.calls.filter(([command]) => command === "bot_handoff_stop")).toEqual([["bot_handoff_stop", { number: 2 }], ["bot_handoff_stop", { number: 2 }]]));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("read again when the hand-offs change, and stop listening once gone", async () => {
-    const { unmount } = render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    const { unmount } = render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
     await waitFor(() => expect(mocks.listeners.has("bot_handoffs_changed")).toBe(true));
     expect(screen.queryByTestId("bot-handoff-cards")).toBeNull();
     list = { ...list, handoffs: [handoff(6)] };
     await act(async () => mocks.listeners.get("bot_handoffs_changed")!({ payload: { revision: 2 } }));
-    expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
+    expect(await screen.findByTestId("bot-handoff-line")).toBeTruthy();
+    // Once it is answered its line leaves, and the strip with it.
+    list = { ...list, handoffs: [handoff(6, { state: "answered", answer: { at: "2026-11-21T10:00:00Z", text: "Done.", by: "b2" } })] };
+    await act(async () => mocks.listeners.get("bot_handoffs_changed")!({ payload: { revision: 3 } }));
+    await waitFor(() => expect(screen.queryByTestId("bot-handoff-cards")).toBeNull());
     unmount();
     await waitFor(() => expect(mocks.listeners.has("bot_handoffs_changed")).toBe(false));
   });
 
   it("say a failed read, never showing it as no hand-offs, and read again after the runtime restarts (lead review 1)", async () => {
     mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_unavailable")) : route(command, args));
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't read Atlas's hand-offs: runtime_unavailable");
+    expect(screen.getByTestId("bot-handoff-cards-error")).toBeTruthy();
     expect(screen.queryByText("Restart runtime")).toBeNull();
     list.handoffs = [handoff(3)];
     mocks.invoke.mockImplementation(route);
     fireEvent.click(screen.getByTestId("bot-handoffs-retry"));
-    expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
+    expect(await screen.findByTestId("bot-handoff-line")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("offer Restart runtime, not Retry, for a read only a restart helps (lead review 2)", async () => {
     mocks.invoke.mockImplementation((command: string, args: Record<string, unknown>) => command === "bot_handoffs" ? Promise.reject(new Error("runtime_restart_required:e1: Restarting stops 2 agents.")) : route(command, args));
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
     expect((await screen.findByRole("alert")).textContent).toContain("runtime_restart_required:e1");
     expect(screen.queryByTestId("bot-handoffs-retry")).toBeNull();
     list.handoffs = [handoff(3)];
     mocks.invoke.mockImplementation(route);
     fireEvent.click(screen.getByText("Restart runtime"));
-    expect(await screen.findByTestId("bot-handoff-card")).toBeTruthy();
+    expect(await screen.findByTestId("bot-handoff-line")).toBeTruthy();
   });
 
-  it("show an answer or a message that did not reach its chat, with a Resend (lead review 1)", async () => {
+  it("show an answer or a message that did not reach its chat, with a Resend, though the hand-off it is about is finished and not listed (lead review 1)", async () => {
     list.handoffs = [handoff(3, { state: "answered", answer: { at: "2026-11-21T10:00:00Z", text: "Done.", by: "b2" } })];
     list.undelivered = [
       { id: "m1", at: "2026-11-21T10:00:00Z", from: "b2", to: "b1", kind: "answer", handoff: 3, tries: 3, error: "the chat could not take the message", held: true },
       { id: "m2", at: "2026-11-21T10:01:00Z", from: "b2", to: "b1", kind: "tell", handoff: null, tries: 1, error: "the tab is gone", held: false },
     ];
-    render(<HandoffCards bot={atlas} chatId="atlas-home" />);
-    const card = await screen.findByTestId("bot-handoff-card");
-    const onCard = within(card).getByTestId("bot-handoff-undelivered-message");
-    expect(onCard.textContent).toContain("An answer from Sentry to Atlas is not delivered · it goes when that bot's chat starts: the chat could not take the message");
-    const loose = screen.getAllByTestId("bot-handoff-undelivered-message").find((row) => !card.contains(row))!;
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    const [answer, loose] = await screen.findAllByTestId("bot-handoff-undelivered-message");
+    // The answered hand-off has no line; its undelivered answer shows as a loose message, never its text.
+    expect(screen.queryByTestId("bot-handoff-line")).toBeNull();
+    expect(screen.getByTestId("bot-handoff-cards").textContent).not.toContain("Done.");
+    expect(answer.textContent).toContain("An answer from Sentry to Atlas is not delivered · it goes when that bot's chat starts: the chat could not take the message");
     expect(loose.textContent).toContain("A message from Sentry to Atlas is not delivered: the tab is gone");
-    fireEvent.click(within(onCard).getByTestId("bot-handoff-resend"));
+    expect(screen.getAllByTestId("bot-handoff-resend")).toHaveLength(2);
+    fireEvent.click(within(answer).getByTestId("bot-handoff-resend"));
     await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith("bot_handoff_resend", { message: "m1" }));
     await waitFor(() => expect(screen.getAllByTestId("bot-handoff-undelivered-message")).toHaveLength(1));
   });
 
-  it("keep the open ones and only the last few closed", () => {
+  it("show a message not delivered about an open hand-off under the lines, with its Resend", async () => {
+    list.handoffs = [handoff(3)];
+    list.undelivered = [{ id: "m1", at: "2026-11-21T10:00:00Z", from: "b1", to: "b2", kind: "handoff", handoff: 3, tries: 3, error: "the chat could not take the message", held: true }];
+    render(<HandoffStrip bot={atlas} chatId="atlas-home" />);
+    const line = await screen.findByTestId("bot-handoff-line");
+    const message = screen.getByTestId("bot-handoff-undelivered-message");
+    expect(line.contains(message)).toBe(false);
+    expect(message.textContent).toContain("The hand-off from Atlas to Sentry is not delivered · it goes when that bot's chat starts: the chat could not take the message");
+    expect(within(message).getByTestId("bot-handoff-resend")).toBeTruthy();
+  });
+
+  it("keep only the open ones", () => {
     expect(handoffStateLabel(handoff(1, { state: "waiting" }), "Sentry", Date.now(), false)).toBe("Waiting to start");
     expect(handoffStateLabel(handoff(1, { state: "stopped", stoppedBy: "deleted" }), "Sentry")).toBe("Stopped · its sender was deleted");
     const many = [handoff(9), ...Array.from({ length: 5 }, (_, n) => handoff(n + 1, { state: "answered" }))];
-    expect(chatHandoffs(many, "atlas-home").map((value) => value.number)).toEqual([9, 1, 2]);
+    expect(chatHandoffs(many, "atlas-home").map((value) => value.number)).toEqual([9]);
+    // Every open one is kept, however many, with a state a newer app wrote; none that is finished, and none of another chat.
+    const mixed = [
+      handoff(8, { state: "waiting" }), handoff(7), handoff(6, { state: "escalated" }), handoff(5), handoff(4, { state: "failed" }), handoff(3, { state: "stopped" }),
+      handoff(2, { state: "answered" }), handoff(1, { fromSession: "elsewhere", toSession: "elsewhere-too" }),
+    ];
+    expect(chatHandoffs(mixed, "atlas-home").map((value) => value.number)).toEqual([8, 7, 6, 5]);
+    expect(chatHandoffs(mixed, "sentry-work-7").map((value) => value.number)).toEqual([7]);
+    expect(chatHandoffs(many.slice(1), "atlas-home")).toEqual([]);
     expect(handoffStateLabel(handoff(1, { state: "failed", answer: { at: "", text: "x", by: "terminalx", failed: true } }), "Sentry")).toBe("Failed · not started");
     expect(handoffStateLabel(handoff(1, { state: "stopped", stoppedBy: "owner" }), "Sentry")).toBe("Stopped by you");
     expect(handoffStateLabel(handoff(1, { state: "failed", stoppedBy: "deleted", answer: { at: "", text: "x", by: "terminalx", failed: true } }), "a bot no longer here")).toBe("Failed · its bot was deleted");
