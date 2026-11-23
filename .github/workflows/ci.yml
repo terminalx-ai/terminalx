@@ -82,20 +82,21 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Verify portable source icons and CI policy
+      # First, and on every pull request: these need nothing installed but Python.
+      - name: Verify the CI policy
         run: |
           python3 -m pip install Pillow==11.1.0 PyYAML==6.0.2
-          python3 scripts/test_icons.py
           python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
+      # The icon check asks Expo for the phone app's configuration (`pnpm exec
+      # expo config`), so the packages are installed on every pull request too.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        if: needs.macos-rust-changes.outputs.frontend == 'true'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: needs.macos-rust-changes.outputs.frontend == 'true'
         with:
           node-version-file: .nvmrc
       - name: Install npm dependencies
-        if: needs.macos-rust-changes.outputs.frontend == 'true'
         run: pnpm install --frozen-lockfile
+      - name: Verify portable source icons
+        run: python3 scripts/test_icons.py
       - name: tsc
         if: needs.macos-rust-changes.outputs.frontend == 'true'
         run: pnpm exec tsc --noEmit
@@ -150,7 +151,7 @@ jobs:
       # installed: once, with retries and a time limit.
       - name: Install shells used by the tests
         timeout-minutes: 5
-        run: sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y zsh && command -v zsh
+        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh && command -v zsh
       - name: vitest
         run: pnpm vitest run --shard=${{ matrix.part }}/4
 
@@ -162,10 +163,10 @@ jobs:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.frontend == 'true'
     runs-on: macos-latest
-    # The whole job took 11 min 46 s on its first run after the checks were
-    # pooled (#1515); before that the checks alone took about 30. One run is not
-    # a slow runner: the limit leaves room for one check hung to run-all's own
-    # ten minutes on a runner twice as slow.
+    # The whole job took 11 min 46 s and 22 min 2 s on its first two runs after
+    # the checks were pooled (#1515); before that the checks alone took about
+    # 30. The limit leaves room for one check hung to run-all's own ten minutes
+    # on the slower of those runners.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -226,7 +227,7 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.environment == 'github-hosted'
         timeout-minutes: 10
-        run: sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -296,7 +297,7 @@ jobs:
           persist-credentials: false
       - name: Install Linux build dependencies
         timeout-minutes: 10
-        run: sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
+        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libasound2-dev patchelf clang cmake zsh ripgrep
       # tauri-build needs the folder the frontend builds into; no Rust test
       # reads what is in it, so these jobs do not install or build the frontend.
       - name: Stand in for the frontend build
@@ -662,7 +663,7 @@ jobs:
           persist-credentials: false
       - name: Install the tools the tests run
         timeout-minutes: 5
-        run: sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y zsh ripgrep
+        run: sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120 install -y zsh ripgrep
       - name: Show the Rust toolchain
         id: toolchain
         run: |

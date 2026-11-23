@@ -113,7 +113,9 @@ def validate_common(workflow):
             assert "secrets." not in str(step), "secret expression"
             assert "continue-on-error" not in step, "required step failure ignored"
             if re.search(r"apt-get\b.*\binstall\b", step.get("run", "")):
-                assert step["run"].count("Acquire::Retries=3") == 2 and "timeout-minutes" in step, "a package install without retries and a time limit"
+                # A stalled download is no error to apt without a timeout, so retries alone never fire: every apt-get call has both.
+                calls = step["run"].count("apt-get ")
+                assert calls and all(step["run"].count(option) == calls for option in ("Acquire::Retries=5", "Acquire::http::Timeout=30", "Acquire::https::Timeout=30")) and "timeout-minutes" in step, "a package install without retries, a stall limit and a time limit"
 
 
 def validate(workflow):
@@ -180,6 +182,10 @@ def validate(workflow):
     # frontend is never skipped: the policy and selector tests run whatever changed.
     frontend = jobs["frontend"]
     assert any("python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'" in s.get("run", "") and "if" not in s for s in frontend["steps"]), "the CI policy tests run on every pull request"
+    # The icon check calls `pnpm exec expo config`: it and every step before it (the install it needs) run whatever changed.
+    icons = next((i for i, s in enumerate(frontend["steps"]) if "python3 scripts/test_icons.py" in s.get("run", "")), None)
+    assert icons is not None and all("if" not in s for s in frontend["steps"][: icons + 1]), "the icon check and the install it needs run on every pull request"
+    assert any("pnpm install --frozen-lockfile" in s.get("run", "") for s in frontend["steps"][:icons]), "the icon check runs after the packages are installed"
     assert any(s.get("run") == "pnpm exec tsc --noEmit" and s.get("if") == "needs.macos-rust-changes.outputs.frontend == 'true'" for s in frontend["steps"]), "tsc when the frontend changed"
     assert "pnpm --dir mobile test" in runs(jobs["phone-app"]) and "pnpm --dir mobile exec tsc --noEmit" in runs(jobs["phone-app"]), "the phone app's checks"
     rust = jobs["linux-rust"]["steps"]
@@ -428,7 +434,10 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["machines-e2e"].update({"if": "needs.macos-rust-changes.outputs.machines == 'true'"}))
 
     def test_policy_tests_that_could_be_skipped_are_rejected(self):
-        self.rejects(lambda w: self.step(w, "frontend", name="Verify portable source icons and CI policy").update({"if": "needs.macos-rust-changes.outputs.frontend == 'true'"}))
+        for name in ("Verify the CI policy", "Verify portable source icons", "Install npm dependencies"):
+            self.rejects(lambda w, name=name: self.step(w, "frontend", name=name).update({"if": "needs.macos-rust-changes.outputs.frontend == 'true'"}))
+        # The first run of this shape failed here: the icon check ran before pnpm was there.
+        self.rejects(lambda w: w["jobs"]["frontend"]["steps"].insert(1, w["jobs"]["frontend"]["steps"].pop(next(i for i, s in enumerate(w["jobs"]["frontend"]["steps"]) if s.get("name") == "Verify portable source icons"))))
 
     def test_a_second_tsc_is_rejected(self):
         self.rejects(lambda w: self.step(w, "webkit-layout", name="Build the frontend").update({"run": "pnpm build"}))
