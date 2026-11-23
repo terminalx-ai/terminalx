@@ -107,12 +107,15 @@ pub const PROTOCOL: &str = "terminalx-workspace-rpc/1";
 ///   `session.followUp` with the receipts of `agent-commands/1`, and does not
 ///   serve that method without them.
 ///
+/// - `bots/1` (PRO-482): the bots that live on the runtime, for the person
+///   each belongs to, and moving one here or back (`super::bots`).
+///
 /// `machine/1` ([`super::machine::MACHINE`], PRO-340) is offered only by a
 /// runtime that serves every project of its machine, so it is not in this
 /// list, which every runtime of this build knows: see [`served`].
 pub const CAPABILITIES: &[&str] = &[
     "pty/1", "pty/2", "fs/1", "git/1", "session/1", "session/2", "session/3", "session-status/1", "session-repository/1", "session-base/1", "keys/1", "lifecycle/1", "agents/1", "collab/1", "agent-pty/1", "composer/1", "composer/2", "composer/3", "composer/4", "composer/5", "ports/1",
-    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1",
+    "mirror/1", "cleanup/1", "workspace/1", "workspace/2", "pipeline/1", "pipeline/2", "agent-commands/1", "environment/1", "git-pr-target/1", "checkpoints/1", "handoff/1", "follow-ups/1", "bots/1",
 ];
 
 /// The runtime edits, withdraws and releases its held follow-ups (#1328; spelled out in [`CAPABILITIES`]).
@@ -237,6 +240,15 @@ pub const METHODS: &[Method] = &[
     // Its context is read for that handoff only, so by the same manager.
     method("session.handoff", "handoff/1", Manage, true),
     method("session.handoffContext", "handoff/1", Manage, false),
+    // PRO-482: the bots that live here, for the person they belong to (`remote::bots`).
+    method("bots.list", "bots/1", Participate, false),
+    method("bots.home", "bots/1", Participate, false),
+    method("bots.answer", "bots/1", Participate, true),
+    method("bots.importPart", "bots/1", Manage, false),
+    method("bots.import", "bots/1", Manage, true),
+    method("bots.export", "bots/1", Manage, false),
+    method("bots.exportPart", "bots/1", Manage, false),
+    method("bots.remove", "bots/1", Manage, true),
     // PRO-343: the mailbox's steer, stop and permission decision as live
     // calls, on a runtime with no mailbox. Each is decided by the mailbox's
     // own rules (a driver steers and stops, an approver decides) and
@@ -436,6 +448,8 @@ pub fn namespace_prefixes(capability: &str) -> &'static [&'static str] {
         // `agents/1` describes the runtime's agents: `runtime.agents`.
         "agents/1" => &["runtime.agents"],
         "environment/1" => &["environment."],
+        // The bots that live on the runtime (PRO-482, `remote::bots`).
+        "bots/1" => &["bots."],
         "keys/1" => &["keys."],
         "lifecycle/1" => &["lifecycle."],
         "mirror/1" => &["mirror."],

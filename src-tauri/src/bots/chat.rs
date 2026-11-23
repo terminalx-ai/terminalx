@@ -193,6 +193,8 @@ pub fn bot_limit(id: &str, what: &str) -> Option<ModeLimit> {
     }
     match bot_store::get(id) {
         Ok(Some(bot)) if bot.paused.is_some() => Some(ModeLimit { mode: "plan", why: format!("{} is paused", bot.name) }),
+        // A bot that moved away (PRO-482) works where it lives; a session of it left here only reads.
+        Ok(Some(bot)) if !bot.runs_on.here() => Some(ModeLimit { mode: "plan", why: format!("{} runs on {} now", bot.name, bot.runs_on.label()) }),
         Ok(Some(bot)) => {
             let mode = permission_mode(&bot.access);
             Some(ModeLimit { mode, why: format!("{} has {}", bot.name, access_label(&bot.access)) })
@@ -315,6 +317,9 @@ fn create_chat_marked(sink: &dyn EventSink, bot: &Bot, home: bool, title: Option
     let org = chat_org(bot, org)?;
     if !takes_bot_instructions(&bot.harness) {
         return Err(super::refused(unheld_agent(&bot.name, &bot.harness)));
+    }
+    if !bot.runs_on.here() {
+        return Err(super::refused(format!("{} runs on {} now: talk to it there, or bring it back in its settings.", bot.name, bot.runs_on.label())));
     }
     let folder = super::home(bot).filter(|folder| folder.is_dir()).with_context(|| format!("{}'s home folder is missing", bot.name))?;
     let req = crate::session_ops::NewQuickChat {

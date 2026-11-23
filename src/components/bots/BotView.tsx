@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
 import { BotDuties } from "@/components/bots/BotDuties";
-import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, Laptop, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
+import { Bot as BotIcon, Brain, CircleDot, Home, LayoutGrid, ListChecks, Loader2, MessageSquare, MessageSquarePlus, PanelLeft, Pause, Play, ShieldOff, Settings2, Sparkles } from "@/icons";
 import { SessionView } from "@/components/session/SessionView";
 import { BotRoleMemory } from "@/components/bots/BotRoleMemory";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -22,6 +22,8 @@ import { relativeTime } from "@/lib/time";
 import { effectiveAccess, type Bot, type PauseHeld } from "@/types/bots";
 import type { SessionEntry } from "@/types/session";
 import { ChatRow } from "./BotChatRow";
+import { RunsOnIcon } from "./BotAvatar";
+import { usePlaceName } from "./useBotPlace";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
 import { HandoffStrip, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
@@ -49,10 +51,6 @@ function accessLabel(bot: Bot): string {
   const known = effectiveAccess(bot.access);
   // A level a newer app wrote is shown as it is, and acted on as read and report.
   return known === bot.access ? ACCESS_LABEL[known] : `${bot.access} (read and report here)`;
-}
-
-function runsOnLabel(bot: Bot): string {
-  return bot.runsOn === "thisMac" ? "This Mac" : bot.runsOn;
 }
 
 /**
@@ -256,6 +254,7 @@ function pausedWorkLine(bot: Bot, held: PauseHeld | null): string {
 function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, onResume }: { bot: Bot; working: number; asking: number; spent: string; busy: boolean; harnessName: string; onPause: () => void; onResume: () => void }) {
   const full = effectiveAccess(bot.access) === "full";
   const held = usePauseHeld();
+  const placeName = usePlaceName(bot.runsOn);
   return (
     <div data-tauri-drag-region="deep" className="flex shrink-0 flex-wrap items-center gap-3 px-5 pt-4 pb-3">
       <span aria-hidden className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-well text-primary hairline"><BotIcon className="size-5" /></span>
@@ -271,7 +270,7 @@ function BotHeader({ bot, working, asking, spent, busy, harnessName, onPause, on
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <Chip title="Agent and model"><Sparkles className="size-3" /> {harnessName}{bot.model ? ` · ${bot.model}` : ""}</Chip>
-        <Chip title="Where it runs"><Laptop className="size-3" /> {runsOnLabel(bot)}</Chip>
+        <Chip title="Where it runs"><RunsOnIcon runsOn={bot.runsOn} className="size-3" /> {placeName}</Chip>
         <Chip title="What it may do without asking" className={cn(full && "text-warning")}><ShieldOff className="size-3" /> {accessLabel(bot)}</Chip>
         <Chip title="What its sessions spent today, at Stats' prices, for information: bots have no budget">{spent}</Chip>
         {bot.paused ? (

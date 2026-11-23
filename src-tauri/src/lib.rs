@@ -28,6 +28,7 @@ mod cleanup;
 #[cfg(feature = "desktop")]
 mod cloud_catalog;
 mod cloud_activity;
+mod cloud_wake;
 #[cfg(feature = "desktop")]
 mod cloud_mirror;
 mod mirror_rules;
@@ -882,6 +883,7 @@ pub fn run() {
             commands::bot_item_resend,
             commands::bot_item_reopen,
             commands::bot_spent_today,
+            commands::bot_move,
             commands::bot_suggestions,
             commands::bot_suggestion_start,
             commands::bot_suggestion_dismiss,

@@ -188,9 +188,11 @@ the first sub-issues.
   organisations. Its role and skills travel with it. Memory, credentials,
   work items and who may ask it for work stay with each organisation
   (PRO-483).
-- **One design for local and cloud.** `runsOn` is `thisMac` today. A cloud
-  workspace (PRO-482) uses the same screens. A value written by a newer build
-  is kept when this build saves, and never acted on as if it were known.
+- **One design for local and cloud.** `runsOn` is `thisMac`,
+  `cloud:<org>:<workspace>` or `machine:<id>` (PRO-482), with the same screens
+  in each place. It changes only by a move, never by an edit to the record. A
+  value written by a newer build is kept when this build saves, and never
+  acted on as if it were known.
 - **Newer data survives older builds.** A record this build cannot read is
   saved back exactly as it was. Unknown fields on a record, or on a pause,
   are kept too.
@@ -1239,6 +1241,66 @@ workspaces and the people who may ask from it stay in that organisation.
   PRO-483 stays open until it is built; until then the owner switches a
   place off under Works in.
 
+## A bot on a cloud workspace or another machine (PRO-482)
+
+A bot moves from Settings → Runs on to a cloud workspace or a paired machine,
+and comes back the same way. It lives in exactly one place at a time.
+
+- **What moves.** `bots::moving` reads the bot as one bundle: its record, its
+  home folder (role, memory and history), its items and changes, its
+  suggestions, its duties and its quiet hours. The window sends the bundle to
+  the other runtime over the workspace connection in parts of 256 KiB
+  (`bots/1`: `bots.importPart`, `bots.import`). A bundle holds at most 24 MiB
+  and 5,000 files, no links, and writes only inside the bots' own folders.
+  Chat-app logins, run logs and chats do not move; a duty whose project is
+  not inside the bot's home is listed as a note to fix there.
+- **Order of a move.** The bundle is read, then the bot is marked moved here
+  (`moveOut`) before the other side has it, so its duties never run in two
+  places. If the import fails, the window first asks the other side's own
+  list whether the bot landed anyway (a reply lost on the way): if it did,
+  the move stands; if it did not, the mark is undone (`moveBack`); if that
+  cannot be learned, the bot stays marked moved and runs nowhere twice, and
+  Bring back finds it either way (a bot that never landed simply works here
+  again). On a cloud workspace the window then sets the workspace's idle
+  suspend to two minutes; if that fails, it is a note, not a failed move.
+- **What a bundle may carry.** Everything is checked before anything on the
+  receiving side changes (Bots is not turned on, no copy is set aside): its
+  files' paths, count and size, and its duties, each of which must name the
+  bundle's own bot, appear once, and not take the id of anything else there.
+  A write that fails partway puts back the copy it replaced.
+- **A bot that has moved, as seen here.** It stays listed, with its place's
+  name. Its duties are held ("runs on a cloud workspace now: its duties run
+  there"), no chat starts for it, its sessions are held to plan mode, and
+  events wait for it. Its runtime refuses another move until it is brought
+  back.
+- **On the other side.** Importing turns Bots on there, records the person
+  who connected as `ownerUser`, and sets the bot to run there. Over `bots/1`,
+  `bots.list`, `bots.home` and `bots.answer` return only that person's bots,
+  so other members of a shared workspace see none of them. A runtime without
+  `bots/1` is refused before anything changes.
+- **Bringing it back.** The window reads the bot there (`bots.export`,
+  `bots.exportPart`), takes it in here (`moveImport`, which moves the copy it
+  left to the trash under `bots-replaced`), then lets the copy there go
+  (`bots.remove`). If the copy there cannot be removed, the bot here is marked
+  moved again and the copy there keeps running.
+- **Waking for duties.** A cloud runtime reports the next time one of its
+  bots' duties is due, 90 seconds early, to terminalx-saas
+  (`/v1/cloud-workspace-bootstrap/wake-at`, `cloud_wake`). The service wakes
+  a sleeping workspace then, and suspends it again after two idle minutes, so
+  billing stops between duties.
+  This needs terminalx-saas with PRO-482 (branch
+  `raccoon/pro-482-bot-cloud-wake`). An older API answers 404, and the
+  runtime asks again only hourly; it also refuses the two-minute idle window,
+  so the workspace keeps its own window and sleeps through duty times until
+  that change ships.
+- **The phone.** The phone asks for `bots/1` on its own connection to the
+  workspace and shows the person's bots' open questions on the workspace's
+  screen. An answer goes straight to the bot there, with the Mac off.
+- **Limits.** A duty woken by events reads them only while the workspace
+  runs. Quiet hours follow the runtime's clock. No push notification reaches
+  the phone for a cloud question yet; it shows when the workspace's screen is
+  opened.
+
 ## Build map
 
 State on 2026-11-20. Each sub-issue runs in its own issue session. Do not
@@ -1266,7 +1328,7 @@ issue.
 | PRO-479 | Bots on the phone: Bots tab, Needs you, answer from a notification | 23.08 | In review |
 | PRO-480 | GitHub and Linear as channels | 23.07 | In review |
 | PRO-481 | Slack and Telegram or WhatsApp as channels | 23.04, 23.07 | In review |
-| PRO-482 | A bot that lives on a cloud workspace and stays on | n/a | Backlog (waits for the Cloud VM work) |
+| PRO-482 | A bot that lives on a cloud workspace and stays on | 23.07 | In review |
 | PRO-483 | One bot across several organisations | 23.02, 23.06, 23.07 | In review (the admins' view waits for the server) |
 | PRO-489 | Hardening left over from reviews | n/a | In review |
 | PRO-514 | A bot works in cloud workspaces with the access it has on this Mac | n/a | In review |

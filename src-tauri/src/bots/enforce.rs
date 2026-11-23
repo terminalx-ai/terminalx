@@ -337,8 +337,16 @@ pub fn call(manager: &SessionManager, operation: &str, params: &serde_json::Valu
         }
     }
     let answer = answer?;
+    // A bot moved away (PRO-482) stops what it was doing here: it works where it lives now.
+    if operation == "moveOut" {
+        if let Some(id) = params["id"].as_str() {
+            before_delete(manager, id);
+        }
+    }
     // What changed reaches the sessions of the bot that changed (every bot for the switches over all).
     match operation {
+        "moveOut" | "moveBack" => reconcile(manager, params["id"].as_str()),
+        "moveImport" => reconcile(manager, answer["bot"]["id"].as_str()),
         "resume" | "update" | "delete" => reconcile(manager, params["id"].as_str()),
         "resumeAll" => reconcile(manager, None),
         _ => {}
@@ -397,6 +405,8 @@ fn after_access(params: &serde_json::Value) -> Option<super::BotAccess> {
 pub fn needs_person(operation: &str, params: &serde_json::Value) -> bool {
     match operation {
         "resume" | "resumeAll" | "dismissResume" | "create" | "delete" => true,
+        // PRO-482: a move reads out its role and memory, takes it elsewhere, or brings one back to work here.
+        "moveExport" | "moveOut" | "moveBack" | "moveImport" => true,
         "roleWrite" | "roleRestore" | "memoryUndo" | "memoryAdd" | "memoryForget" => true,
         // PRO-475: handing an item on makes a bot work; the team brief is what every bot is told.
         "itemHand" | "briefWrite" => true,
