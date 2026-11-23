@@ -98,7 +98,7 @@ pub fn workspace_for_cwd(cwd: &str) -> Result<String, ControlError> {
         return Ok(found);
     }
     if let Ok(top) = crate::git::run(Path::new(&here), &["rev-parse", "--show-toplevel"]) {
-        let top = top.trim();
+        let top = crate::git::path_line(&top);
         if !top.is_empty() {
             return Ok(canonical(top));
         }

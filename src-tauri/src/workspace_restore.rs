@@ -76,7 +76,7 @@ pub(crate) fn preview(session_id: &str) -> Result<Preview> {
     let project_path = removed.repository.as_deref().unwrap_or(&session.project_path);
     let project = crate::paths::canonicalize(project_path).context("The original repository cannot be reached.")?;
     let top = git::run(&project, &["rev-parse", "--show-toplevel"]).context("The original project is no longer a Git checkout.")?;
-    if crate::paths::canonicalize(top.trim())? != project {
+    if crate::paths::canonicalize(crate::git::path_line(&top))? != project {
         bail!("The original project is no longer the repository root.");
     }
     let path = Path::new(&removed.path);

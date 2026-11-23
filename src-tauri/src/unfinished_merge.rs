@@ -76,7 +76,7 @@ pub(crate) fn describe(names: &[String], merge_head: &str) -> String {
 pub fn merge_heads(cwd: &Path) -> Result<Vec<String>> {
     // Per worktree: a linked worktree keeps its own under `.git/worktrees/`.
     let path = git::run(cwd, &["rev-parse", "--git-path", "MERGE_HEAD"])?;
-    let path = PathBuf::from(path.trim());
+    let path = PathBuf::from(crate::git::path_line(&path));
     let path = if path.is_absolute() { path } else { cwd.join(path) };
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(text.lines().map(str::trim).filter(|line| !line.is_empty()).map(String::from).collect()),

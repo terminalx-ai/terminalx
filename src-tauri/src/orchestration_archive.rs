@@ -43,7 +43,7 @@ pub(crate) fn preserve_try(
     // OS lock, so every remaining probe ref is stale when the next owner enters.
     let common = git::run(checkout, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
     let probe_lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
-        .open(Path::new(common.trim()).join("terminalx-archive-probe.lock"))?;
+        .open(Path::new(crate::git::path_line(&common)).join("terminalx-archive-probe.lock"))?;
     probe_lock.lock()?;
     clear_probe_refs(checkout)?;
     let head = head(checkout)?;

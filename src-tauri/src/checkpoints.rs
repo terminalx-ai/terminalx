@@ -126,7 +126,7 @@ fn save(session: &str, tab: &str, state: &State) -> Result<()> {
     store::write_json(&path, state)
 }
 fn root(cwd: &str) -> Result<String> {
-    Ok(git::run(Path::new(cwd), &["rev-parse", "--show-toplevel"])?.trim().into())
+    Ok(crate::git::path_line(&git::run(Path::new(cwd), &["rev-parse", "--show-toplevel"])?).into())
 }
 fn index_tree(cwd: &Path) -> Result<String> {
     Ok(git::run(cwd, &["write-tree"])?.trim().into())
@@ -307,9 +307,7 @@ pub fn observe(session: &str, tab: &str, seq: u64, payload: &mut Payload) -> Res
         let cwd = root(&entry.cwd)?;
         let mut state = load(session, tab)?;
         state.repository = Some(
-            git::run(Path::new(&cwd), &["rev-parse", "--path-format=absolute", "--git-common-dir"])?
-                .trim()
-                .into(),
+            crate::git::path_line(&git::run(Path::new(&cwd), &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).into(),
         );
         let mut completed = None;
         let active = state.turns.last().filter(|t| t.end.is_none());
@@ -1116,7 +1114,7 @@ pub fn prune(session: &index::SessionEntry) -> Result<()> {
         }
         for cwd in [&session.cwd, &session.project_path] {
             if let Ok(common) = git::run(Path::new(cwd), &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
-                repositories.insert(common.trim().into());
+                repositories.insert(crate::git::path_line(&common).into());
             }
         }
         for repository in repositories {
@@ -1657,5 +1655,13 @@ mod tests {
         assert!(!preview.undone);
         assert_eq!(preview.overlap, vec!["b.txt"]);
         assert_eq!(std::fs::read_to_string(repo.path().join("b.txt")).unwrap(), "peer work\n");
+    }
+
+    #[test]
+    fn root_keeps_a_checkout_name_that_ends_in_a_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work ");
+        crate::git::run(dir.path(), &["init", "-q", work.to_str().unwrap()]).unwrap();
+        assert_eq!(crate::paths::canonicalize(root(work.to_str().unwrap()).unwrap()).unwrap(), crate::paths::canonicalize(&work).unwrap());
     }
 }

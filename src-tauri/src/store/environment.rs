@@ -167,7 +167,7 @@ fn repository(cwd: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let path = PathBuf::from(String::from_utf8(output.stdout).ok()?.trim());
+    let path = PathBuf::from(crate::git::path_line(&String::from_utf8(output.stdout).ok()?));
     Some(format!(
         "repository:{}",
         path.canonical().ok()?.to_str()?
@@ -1487,5 +1487,14 @@ mod tests {
         assert!(!started.get());
         assert!(!dir.path().join("archive-ran").exists());
         assert!(terminals.panes().is_empty());
+    }
+
+    #[test]
+    fn a_git_dir_whose_name_ends_in_a_space_names_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        use crate::paths::Canonical;
+        assert_eq!(super::repository(&work), Some(format!("repository:{}", git_dir.canonical().unwrap().display())));
     }
 }

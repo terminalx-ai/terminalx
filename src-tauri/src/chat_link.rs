@@ -214,10 +214,10 @@ fn has_project_marker(dir: &Path) -> bool {
 fn repo_of(path: &Path) -> Option<PathBuf> {
     let dir = path.ancestors().find(|candidate| candidate.is_dir())?;
     let top = git::run(dir, &["rev-parse", "--show-toplevel"]).ok()?;
-    let top = canonical(Path::new(top.trim()));
+    let top = canonical(Path::new(crate::git::path_line(&top)));
     let common = git::run(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok();
     let main = common
-        .map(|common| PathBuf::from(common.trim()))
+        .map(|common| PathBuf::from(crate::git::path_line(&common)))
         .filter(|common| common.file_name().is_some_and(|name| name == ".git"))
         .and_then(|common| common.parent().map(canonical));
     Some(main.unwrap_or(top))
@@ -356,5 +356,13 @@ mod tests {
         assert_eq!(repo_of(&tree.join("src/a.rs")).unwrap(), canonical(repo));
         assert_eq!(branch_at(&tree.join("src/a.rs")).as_deref(), Some("raccoon/dev"));
         assert_eq!(branch_at(repo).as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_checkout_name_that_ends_in_a_space_is_its_own_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, git_dir) = (dir.path().join("work "), dir.path().join("git dir "));
+        crate::git::run(dir.path(), &["init", "-q", "--separate-git-dir", git_dir.to_str().unwrap(), work.to_str().unwrap()]).unwrap();
+        assert_eq!(repo_of(&work), Some(canonical(&work)));
     }
 }
