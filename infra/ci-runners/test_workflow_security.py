@@ -43,7 +43,7 @@ ANSWERS = ["required", "rust", "frontend", "phone", "machines"]
 MACOS = {"macos-native", "machine-compat", "webkit-layout"}
 # The Linux Rust suite: the library's tests in four parts, then the rest of `cargo test`.
 PARTS = ["1", "2", "3", "4", "binaries"]
-LIBRARY_PART = "cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4"
+LIBRARY_PART = 'set -o pipefail\ncargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"\n'
 VITEST_PARTS = ["1", "2", "3", "4"]
 LOCK = "${{ hashFiles('src-tauri/Cargo.lock') }}"
 CACHE_MISS = "!endsWith(steps.cargo-cache.outputs.cache-matched-key, hashFiles('src-tauri/Cargo.lock'))"
@@ -97,6 +97,17 @@ def validate_common(workflow):
     for expression in re.findall(r"\$\{\{.*?\}\}", str(workflow), re.DOTALL):
         assert not re.search(r"\bsecrets\b", expression, re.IGNORECASE), "secret expression anywhere in workflow"
     assert not {"pull_request_target", "workflow_run"} & set(workflow["on"]), "privileged trigger"
+    # nextest reads NEXTEST_* (NEXTEST_RETRIES among them) over its file: a workflow sets none, and passes no
+    # --retries, so the file's per-test list is the only place a retry comes from. The two names the install step
+    # uses for the release and its checksum are that step's alone.
+    allowed = {"NEXTEST_VERSION", "NEXTEST_SHA256"}
+    assert not any(key.startswith("NEXTEST_") for key in workflow.get("env", {})), "a NEXTEST_ variable for the whole workflow"
+    for name, job in workflow["jobs"].items():
+        assert not any(key.startswith("NEXTEST_") for key in job.get("env", {})), f"a NEXTEST_ variable for job {name}"
+        for step in job["steps"]:
+            extra = {key for key in step.get("env", {}) if key.startswith("NEXTEST_")} - (allowed if step.get("name") == "Install cargo-nextest" else set())
+            assert not extra, f"a NEXTEST_ variable in {name}: {sorted(extra)}"
+            assert not re.search(r"NEXTEST_\w+=|--retries\b|--no-fail-fast\b.*--retries", step.get("run", "")), f"a retry set outside nextest.toml in {name}"
     for name, job in workflow["jobs"].items():
         assert "permissions" not in job, "job token escalation"
         assert "secrets" not in job, "job secrets"
@@ -254,12 +265,15 @@ def validate_webkit_linux(workflow, required):
 def validate_nextest(config):
     """The `ci` profile retries and reports; no profile leaves a test out."""
     ci = config["profile"]["ci"]
-    assert ci["retries"] == 2, "a failed test is run again, twice at most"
+    assert ci["retries"] == 0, "a failed test fails the run"
+    # Retries are for known flaky tests alone: one test by its exact name each, twice at most, and nothing else set.
+    for override in ci.get("overrides", []):
+        assert set(override) == {"filter", "retries"} and re.fullmatch(r"test\(=[\w:]+\)", override["filter"]) and override["retries"] in (1, 2), f"an override that does more than retry one named test: {override}"
     assert ci["fail-fast"] is False, "every test runs after a failure"
     assert ci.get("junit", {}).get("path") == "junit.xml", "the JUnit report CI keeps"
     assert ci["final-status-level"] == "flaky", "a test that passed on a retry is reported"
     for name, profile in config["profile"].items():
-        assert not {"default-filter", "overrides"} & set(profile), f"profile {name} could leave a test out or treat it differently"
+        assert "default-filter" not in profile and (name == "ci" or "overrides" not in profile), f"profile {name} could leave a test out or treat it differently"
     assert "test-groups" not in config, "a group could hide a test that cannot run beside others"
 
 
@@ -378,10 +392,17 @@ class WorkflowSecurity(unittest.TestCase):
         self.rejects(lambda w: w["jobs"]["linux-rust-tests"]["strategy"]["matrix"]["part"].remove("binaries"))
         for run in [LIBRARY_PART.replace("/4", "/5"), LIBRARY_PART + " -E 'not test(/slow/)'", LIBRARY_PART.replace(" --profile ci", ""), LIBRARY_PART + " --no-fail-fast --ignore-default-filter -- --skip session::"]:
             with self.subTest(run=run):
-                self.rejects(lambda w: self.step(w, "linux-rust-tests", run="cargo nextest run").update({"run": run}))
+                self.rejects(lambda w: self.step(w, "linux-rust-tests", name="The library's tests, this part").update({"run": run}))
+
+    def test_retries_set_outside_the_nextest_file_are_rejected(self):
+        self.rejects(lambda w: w.setdefault("env", {}).update(NEXTEST_RETRIES="2"))
+        self.rejects(lambda w: w["jobs"]["linux-rust-tests"].setdefault("env", {}).update(NEXTEST_RETRIES="2"))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="The library's tests, this part").setdefault("env", {}).update(NEXTEST_PROFILE="default"))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Install cargo-nextest")["env"].update(NEXTEST_RETRIES="2"))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="Show the Rust toolchain").update({"run": "echo NEXTEST_RETRIES=2 >> \"$GITHUB_ENV\""}))
 
     def test_narrowed_rust_part_is_rejected(self):
-        self.rejects(lambda w: self.step(w, "linux-rust-tests", run="cargo nextest run").update({"if": "matrix.part == '1'"}))
+        self.rejects(lambda w: self.step(w, "linux-rust-tests", name="The library's tests, this part").update({"if": "matrix.part == '1'"}))
         self.rejects(lambda w: self.step(w, "linux-rust-tests", name="cargo test (the other").update({"run": "cargo test --locked --bins"}))
         self.rejects(lambda w: self.step(w, "linux-rust-tests", run="cargo test --locked --no-default-features").update({"if": "false"}))
 
@@ -595,6 +616,21 @@ class NextestProfile(unittest.TestCase):
         with self.assertRaises(AssertionError):
             validate_nextest(changed)
 
+    def test_every_retried_test_names_its_ticket(self):
+        text = NEXTEST.read_text()
+        blocks = re.findall(r"^(.*)\n\[\[profile\.ci\.overrides\]\]$", text, re.M)
+        self.assertEqual(len(blocks), len(self.config["profile"]["ci"].get("overrides", [])))
+        for above in blocks:
+            self.assertRegex(above, r"^# (PRO-\d+|#\d+)$", "the line above an override is its ticket")
+
+    def test_wider_retries_are_rejected(self):
+        self.rejects(lambda c: c["profile"]["ci"].update({"retries": 2}))
+        self.rejects(lambda c: c["profile"]["ci"]["overrides"].append({"filter": "all()", "retries": 2}))
+        self.rejects(lambda c: c["profile"]["ci"]["overrides"].append({"filter": "test(/session::/)", "retries": 1}))
+        self.rejects(lambda c: c["profile"]["ci"]["overrides"].append({"filter": "test(=a::b)", "retries": 5}))
+        self.rejects(lambda c: c["profile"]["ci"]["overrides"].append({"filter": "test(=a::b)", "retries": 1, "slow-timeout": "600s"}))
+        self.rejects(lambda c: c["profile"]["default"].update({"overrides": [{"filter": "test(=a::b)", "retries": 1}]}))
+
     def test_profile_that_hides_a_test_is_rejected(self):
         self.rejects(lambda c: c["profile"]["ci"].update({"default-filter": "not test(/session::/)"}))
         self.rejects(lambda c: c["profile"]["default"].update({"default-filter": "not test(/session::/)"}))
@@ -603,7 +639,6 @@ class NextestProfile(unittest.TestCase):
 
     def test_profile_that_stops_early_or_reports_nothing_is_rejected(self):
         self.rejects(lambda c: c["profile"]["ci"].update({"fail-fast": True}))
-        self.rejects(lambda c: c["profile"]["ci"].update(retries=0))
         self.rejects(lambda c: c["profile"]["ci"].pop("junit"))
         self.rejects(lambda c: c["profile"]["ci"].update({"final-status-level": "fail"}))
 

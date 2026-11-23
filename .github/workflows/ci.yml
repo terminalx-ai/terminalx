@@ -276,8 +276,8 @@ jobs:
   # each other. `--partition count:i/4` deals every test to exactly one part, by
   # its place in the sorted list, so a new or renamed test changes which runner
   # a test is on and never whether it runs. The `ci` profile
-  # (src-tauri/.config/nextest.toml) runs a failed test again, reports one that
-  # then passes as flaky, and writes a JUnit file, which is kept.
+  # (src-tauri/.config/nextest.toml) retries only the known flaky tests it names,
+  # each with its ticket, and writes a JUnit file, which is kept.
   #
   # `binaries` is the rest of `cargo test --locked`: the other test binaries and
   # the doc tests, then the local owner path built without the desktop features.
@@ -334,7 +334,20 @@ jobs:
       - name: The library's tests, this part of four
         if: matrix.part != 'binaries'
         working-directory: src-tauri
-        run: cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4
+        run: |
+          set -o pipefail
+          cargo nextest run --locked --lib --profile ci --partition count:${{ matrix.part }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+      # A flaky test passed on a retry its override allows; a leaky one left a
+      # process or a pipe open. Neither fails the run, so both are said here.
+      - name: Name the flaky and leaky tests in the summary
+        if: ${{ !cancelled() && matrix.part != 'binaries' }}
+        run: |
+          {
+            echo "### Flaky and leaky tests, part ${{ matrix.part }}"
+            echo '```'
+            grep -aE '^[[:space:]]*(FLAKY|LEAK)[[:space:]]' "$RUNNER_TEMP/nextest.log" | sort -u || echo "none"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the JUnit report
         if: ${{ !cancelled() && matrix.part != 'binaries' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
