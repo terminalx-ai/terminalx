@@ -8,6 +8,7 @@
 //
 //   pnpm build && pnpm exec playwright install webkit && pnpm test:webkit-layout
 //   node scripts/webkit/run-all.mjs chat-find run-menu     only these checks
+//   node scripts/webkit/run-all.mjs agent-dashboard:2      one entry of a script that runs as several (its name alone: all of them)
 //   pnpm test:webkit-layout --jobs 1                        one at a time (or WEBKIT_JOBS=1)
 //   node scripts/webkit/run-all.mjs --shard 2/4             the second of four parts (one CI job each)
 //   node scripts/webkit/run-all.mjs --shard 2/4 --list      the names that part runs, one per line; nothing runs
@@ -19,7 +20,7 @@
 // in one piece when it ends; what failed is printed again at the end, and the
 // exit status is 1.
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,12 +29,12 @@ import { parseArgs } from "node:util";
 /** The checks CI requires, in the order they were added. */
 export const checks = [
   "cloud-automations",
-  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "settings-introductions", "orchestration", "run-sidebar",
+  "changes-review", "merge-conflicts", "diff-options", "settings-navigation", "settings-introductions", "orchestration", "run-limits", "run-sidebar",
   "orchestrate-start", "readable-panels", "layered-configuration", "sidebar-scroll", "sidebar-order", "sidebar-extras", "sidebar-quick-chats", "working-marks",
   "cloud-session", "cloud-outbox", "cloud-history", "cloud-sidebar", "cloud-attention", "cloud-sections", "workspace-sections", "local-sections",
   "session-status", "shortcuts", "start-from", "create-project", "terminal-search", "worktree-cleanup", "merged-cleanup",
   "dialog-lists",
-  "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard", "organization-visibility", "chat-links",
+  "account-row", "issue-session", "issue-work", "pipeline-checks", "agent-dashboard:1", "agent-dashboard:2", "agent-dashboard:3", "organization-visibility", "chat-links",
   "chat-find", "chat-wrapping", "file-citations", "chat-controls", "link-chat", "app-resources", "usage-refresh",
   "dictation-edits", "environment", "environment-info", "agent-logins", "model-access", "tab-strip", "pane-split", "editor-toolbar", "file-tab", "dock-tabs",
   "machine-name", "account-settings", "star-reminder", "context-menus", "attention-approvals", "repository-settings", "sparse-checkout",
@@ -58,6 +59,18 @@ export const checks = [
   "team-presence-following",
   "machines-pairing", "machine-connection", "machine-page", "machine-update",
 ];
+
+/**
+ * An entry of `checks` is a script's name, or `<script>:<part>` for a script that runs as several entries: the
+ * arguments each such entry gives its script are here. agent-dashboard's seven layouts are dealt over three entries
+ * by its own --layouts, each layout in exactly one: together they took 470 s on a slow runner, against the 600 s
+ * limit below for one check.
+ */
+const entryArguments = new Map([
+  ["agent-dashboard:1", ["--layouts", "1/3"]],
+  ["agent-dashboard:2", ["--layouts", "2/3"]],
+  ["agent-dashboard:3", ["--layouts", "3/3"]],
+]);
 
 /**
  * The checks that are left out on a Linux host, each with why. They run on macOS as before. These are judgements made
@@ -85,8 +98,20 @@ const environment = (name) => (machineScreens.includes(name) ? { MACHINES_SHOTS:
 // any of them starts, and a free port each, so they run beside the others. They
 // are found by what they import, so a new one needs no entry here; the parts of
 // --shard each take some of them.
-const script = (name) => fileURLToPath(new URL(`./${name}.mjs`, import.meta.url));
-const startsVite = (name) => /(from\s+|import\()\s*["'](vite|\.\/vite-page\.mjs)["']/.test(readFileSync(script(name), "utf8"));
+const script = (name) => fileURLToPath(new URL(`./${name.split(":")[0]}.mjs`, import.meta.url));
+const viteScripts = new Map();
+const startsVite = (name) => {
+  const path = script(name);
+  if (!viteScripts.has(path)) viteScripts.set(path, /(from\s+|import\()\s*["'](vite|\.\/vite-page\.mjs)["']/.test(readFileSync(path, "utf8")));
+  return viteScripts.get(path);
+};
+// At most this many Vite checks run at once, whatever --jobs is; the other workers take the checks that serve dist/
+// meanwhile. The shared cache holds only the packages: each dev server still transforms the app's own modules when
+// its page first loads, on the same cores as the others, inside its check's own limits (organization-roster allows
+// its page 20 s). Unbounded, the first four in the list are all Vite checks and start together. Two is a choice, not
+// a measurement against three: it halves that start, and with 13 Vite checks among 128 no worker is left without a
+// check to run for it until only Vite checks remain.
+const viteAtOnce = 2;
 
 // These measure against the clock, so other checks competing for the processor
 // would be what they measured: they run after the rest, one at a time.
@@ -105,7 +130,7 @@ function run(name) {
     const started = Date.now();
     // Said at once, so a log that stops short shows which checks never ended.
     console.log(`start ${name}`);
-    const child = spawn(process.execPath, [script(name)], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...environment(name) } });
+    const child = spawn(process.execPath, [script(name), ...(entryArguments.get(name) ?? [])], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...environment(name) } });
     const output = [];
     child.stdout?.on("data", (chunk) => output.push(chunk));
     child.stderr?.on("data", (chunk) => output.push(chunk));
@@ -144,6 +169,37 @@ export function shard(names, index, count) {
   return names.filter((name) => parts[index - 1].includes(name));
 }
 
+/**
+ * Run `start(name)` for every name, `jobs` at once, and at most `viteAtOnce` of the Vite checks at once. A free worker
+ * takes the first name in the list's order that may start now, so none idles while a check that serves dist/ waits;
+ * one that finds only Vite checks left, with `viteAtOnce` of them running, waits for one of those to end.
+ */
+export async function pool(names, jobs, start) {
+  const queue = [...names];
+  let viteRunning = 0;
+  const waiting = [];
+  await Promise.all(Array.from({ length: jobs }, async () => {
+    while (queue.length) {
+      const index = queue.findIndex((name) => !startsVite(name) || viteRunning < viteAtOnce);
+      if (index < 0) {
+        await new Promise((resolve) => waiting.push(resolve));
+        continue;
+      }
+      const [name] = queue.splice(index, 1);
+      const vite = startsVite(name);
+      if (vite) viteRunning++;
+      try {
+        await start(name);
+      } finally {
+        if (vite) {
+          viteRunning--;
+          for (const wake of waiting.splice(0)) wake();
+        }
+      }
+    }
+  }));
+}
+
 /** The command line: run the checks it names, or list them. */
 async function main() {
   const usage = (message) => {
@@ -160,9 +216,12 @@ async function main() {
   const jobsValue = parsed.values.jobs ?? process.env.WEBKIT_JOBS;
   const jobs = jobsValue === undefined ? Math.min(4, availableParallelism()) : Number(jobsValue);
   if (!Number.isInteger(jobs) || jobs < 1) usage(`The number of checks to run at once must be a whole number above 0, not ${JSON.stringify(jobsValue)}.`);
-  const unknown = args.filter((name) => !checks.includes(name));
+  // A script that runs as several entries is named whole (`agent-dashboard`) or by one entry (`agent-dashboard:2`).
+  const names = (arg) => checks.filter((name) => name === arg || name.split(":")[0] === arg);
+  const unknown = args.filter((arg) => !names(arg).length);
   if (unknown.length) usage(`Not a check of this suite: ${unknown.join(", ")}.`);
-  const named = args.length ? checks.filter((name) => args.includes(name)) : checks;
+  const wanted = new Set(args.flatMap(names));
+  const named = args.length ? checks.filter((name) => wanted.has(name)) : checks;
 
   let selected = named;
   if (parsed.values.shard !== undefined) {
@@ -194,8 +253,10 @@ async function main() {
     // Made here, once, so that the Vite checks starting at once only read it (vite-page.mjs).
     const warming = Date.now();
     try {
-      const { warmViteDeps } = await import("./vite-page.mjs");
+      const { warmViteDeps, WARMED } = await import("./vite-page.mjs");
       await warmViteDeps();
+      // From here a Vite check that makes the cache again has a different idea of it from the others, and fails.
+      process.env[WARMED] = "1";
       console.log(`Vite's dependency cache is ready (${seconds(Date.now() - warming)}).`);
     } catch (error) {
       // The Vite checks then make it themselves, at once; whatever that breaks fails them, and this run fails too.
@@ -203,10 +264,7 @@ async function main() {
       failedSetup.push("Vite's dependency cache");
     }
   }
-  const queue = selected.filter((name) => !alone.has(name));
-  await Promise.all(Array.from({ length: jobs }, async () => {
-    for (let name = queue.shift(); name !== undefined; name = queue.shift()) results.push(await run(name));
-  }));
+  await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
   for (const name of selected.filter((name) => alone.has(name))) results.push(await run(name));
 
   const failed = results.filter((result) => !result.ok);
@@ -222,6 +280,10 @@ async function main() {
   }
 }
 
-// Only as a script: importing this file (for `checks`, `macOnly` or `shard`) runs nothing. Both paths are real ones:
-// Node resolves links in this module's URL but not in argv, and a run through a linked folder must still run.
-if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) await main();
+// Only as a script: importing this file (for `checks`, `macOnly` or `shard`) runs nothing. Node says which it is
+// (import.meta.main, since Node 24.2; .nvmrc's "24" is the newest 24), also through a linked folder. A Node without it
+// cannot tell, and to guess "imported" would be a run of the suite that ran nothing and passed: it is an error instead.
+if (typeof import.meta.main !== "boolean") {
+  throw new Error(`run-all.mjs needs Node 24.2 or newer (import.meta.main) to know whether it was run or imported; this is ${process.version}.`);
+}
+if (import.meta.main) await main();

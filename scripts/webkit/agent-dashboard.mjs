@@ -4,25 +4,39 @@
 // Run: pnpm build && pnpm exec playwright install webkit && pnpm test:webkit-layout
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import { FOCUS_NEXT, launch, serve } from "./harness.mjs";
 
 const stub = `${await readFile(new URL("./tauri-stub.js", import.meta.url), "utf8")}\n${await readFile(new URL("./dashboard-stub.js", import.meta.url), "utf8")}`;
 const labels = ["Needs you", "Working", "Done", "Not started"];
 const cards = (column) => column.locator('[role="button"]');
-// Three layouts, each with every status column checked at 0, 2 and 72 sessions: one for each way the board can
-// lose a card. Wide and short, where each column scrolls on its own and its heading stays put; stacked at 200% zoom,
-// where the shared area scrolls and the menus are portals in a zoomed page; and 150% text, where the cards reflow
-// around larger type. Until the CI speed work (2026-11) it also ran the same three at other sizes: wide at 760px
-// high, stacked at 1100×420 and at 960×420 without zoom, and 150% zoom while still wide; each was one of the three
-// ways at a size the kept ones already reach, and cost three pages.
-const layouts = [
+const allLayouts = [
+  { name: "wide", width: 1360, height: 760, stacked: false },
   { name: "wide, short", width: 1360, height: 420, stacked: false },
+  { name: "stacked at four columns", width: 1100, height: 420, stacked: true },
+  { name: "stacked, short", width: 960, height: 420, stacked: true },
   // Emulate page zoom with a smaller CSS viewport and a matching pixel scale.
   // Pixel density alone would not exercise reflow; CSS zoom on the document
   // would also scale fixed-position portals a second time in WebKit.
+  { name: "150% zoom, wide", width: 2100, height: 800, zoom: 1.5, stacked: false },
   { name: "200% zoom, stacked", width: 1600, height: 900, zoom: 2, stacked: true },
   { name: "150% text, short", width: 1360, height: 480, textScale: 1.5, stacked: false },
 ];
+// All seven by default. `--layouts i/n` runs part i of n: the layouts are dealt out in turn, so each is in exactly
+// one part whatever n is. run-all.mjs runs the check as three parts: the 21 pages together took 470 s on a slow
+// runner, against run-all's 600 s limit for one check.
+const { values: options } = parseArgs({ options: { layouts: { type: "string" } } });
+const part = /^(\d+)\/(\d+)$/.exec(options.layouts ?? "1/1");
+const [partIndex, partCount] = part ? [Number(part[1]), Number(part[2])] : [];
+if (!part || partCount < 1 || partIndex < 1 || partIndex > partCount) {
+  console.error(`--layouts takes <i>/<n> with 1 ≤ i ≤ n, not ${JSON.stringify(options.layouts)}.`);
+  process.exit(2);
+}
+const layouts = allLayouts.filter((_, index) => index % partCount === partIndex - 1);
+if (!layouts.length) {
+  console.error(`--layouts ${options.layouts} holds no layout: there are ${allLayouts.length}.`);
+  process.exit(2);
+}
 
 /** Include clipping by every scroll container, not just the viewport. */
 const visible = (locator) => locator.evaluate((element) => {

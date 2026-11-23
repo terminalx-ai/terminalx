@@ -8,11 +8,10 @@
 // and the settings with the routing table. A synthetic run
 // behind the Tauri stub; nothing is started, and Approve, Edit, Stop and the
 // settings are answered by the stub the way the engine answers them.
-// It also holds run-limits (PRO-280, PRO-335), below: runLimits().
 // pnpm build && node scripts/webkit/orchestration.mjs
 // Set ORCHESTRATION_SHOTS to a directory to also save screenshots.
 import { join } from "node:path";
-import { launch, open, openConversation, report, report as reportChecks, serve } from "./harness.mjs";
+import { launch, open, openConversation, report, serve } from "./harness.mjs";
 
 const shots = process.env.ORCHESTRATION_SHOTS;
 const GOAL = "Move settings reads to the typed store";
@@ -380,287 +379,371 @@ const breaksMidWord = (locator) => locator.evaluateAll((items) => items.some((it
   });
 }));
 
-// ---- run-limits, merged into this check (CI speed work, 2026-11): its own fixture and pages, every check it made. ----
-// PRO-280: a run's worker limit and budget in WebKit, at the window's wide and
-// narrow sizes, light and dark: a running run on a subscription with a queued
-// and a stalled piece, a run that reached its budget on a usage window, a plan
-// that would not fit in what is left of a window, and Settings → Orchestrator's
-// limits; and (PRO-335) a run with No limit on its budgets, the approval view's
-// warning for one, and the settings' No limit and Off switches. A synthetic run behind the Tauri stub, answered the way the engine
-// answers; nothing is started.
-// Set RUN_LIMITS_SHOTS to a directory to also save its screenshots.
-async function runLimits() {
-  const shots = process.env.RUN_LIMITS_SHOTS;
-  // Its checks print under "run limits, …": orchestration's own "settings, …" are other checks.
-  const report = (name, ...rest) => reportChecks(`run limits, ${name}`, ...rest);
-  let failed = 0;
-  function setup({ mode, scene }) {
-    localStorage.setItem("raccoon.mode", mode);
-    localStorage.setItem("raccoon.prefs", JSON.stringify({ panelOpen: false, lastAgent: "claude" }));
-    const answers = window.__PW_STUB__.answers;
-    const session = answers.list_sessions[0];
-    session.title = "Move settings reads to the typed store";
-    session.tabs = [session.tabs[0]];
-    session.tabs[0].title = session.title;
-    session.tabs[0].status = "completed";
-    const at = (minutes) => new Date(Date.now() - minutes * 60_000).toISOString();
-    const model = (id, label, efforts) => ({ id, label, harness: "claude", efforts, defaultEffort: "medium", acceptsImages: true, isDefault: id === "sonnet", upgrade: null, description: null, alias: true, resolved: null });
-    answers.list_models = [model("haiku", "Haiku 5.5", []), model("sonnet", "Sonnet 5.5", ["low", "medium", "high"]), model("opus", "Opus 5.5", ["low", "medium", "high", "max"])];
-    // The window resets in an hour and a half; its label is the one the Run view gives it
-    // (`resetClock`), so the checks hold at any hour.
-    const resetsAt = Math.ceil((Date.now() + 90 * 60_000) / 600_000) * 600_000;
-    const resetDate = new Date(resetsAt);
-    const time = resetDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-    const label = new Date().toDateString() === resetDate.toDateString() ? time : `${resetDate.toLocaleDateString([], { weekday: "short" })} ${time}`;
-    const fiveHour = { agent: "claude", key: "five_hour", label: "5h", percent: 41, start: 32, resetsAt, points: 9 };
-
-    const piece = (id, title, extra) => ({
-      id, title, owns: [], dependsOn: [], kind: "scoped-code", agent: "claude", model: "sonnet", effort: "medium", readsUntrusted: false, attempts: 0, state: "queued", doneChecks: [{ type: "command", run: "cargo t" }],
-      brief: { goal: title, why: "", scope: "", outOfScope: "", known: [], readFirst: [], limits: [] }, ...extra,
-    });
-    const worker = (id) => ({ sessionId: `worker-${id}`, tabId: `worker-${id}-tab` });
-    const started = (id, state, note, attempts = 1) => ({ state, note, attempts, worker: worker(id), branch: `raccoon/${id}-piece`, startedMode: "bypassPermissions", login: "subscription" });
-    const pieces = [
-      piece("map", "Map every settings read", { kind: "search", model: "haiku", effort: undefined, ...started("map", "done", "41 call sites in 9 files.") }),
-      piece("store", "Typed store module and migration", { kind: "code", model: "opus", owns: ["src-tauri/src/store/settings/"], dependsOn: ["map"], ...started("store", "done", "Store added, 14 tests pass.") }),
-      piece("session", "Move session code to the store", { owns: ["src-tauri/src/session*.rs"], dependsOn: ["store"], ...started("session", "running") }),
-      piece("pipeline", "Move pipeline code to the store", { owns: ["src-tauri/src/issue_pipeline/"], dependsOn: ["store"], ...started("pipeline", "stalled", "Stalled: no tool call or file change for 12 minutes, no command running, and its agent is idle.") }),
-      piece("cli", "Move CLI code to the store", { owns: ["src-tauri/src/cli.rs", "src-tauri/src/control.rs"], dependsOn: ["store"], queuedFor: "runLimit" }),
-      piece("docs", "Update the docs and the CLI guide", { owns: ["docs/", "skill-guides/"], dependsOn: ["session", "pipeline", "cli"] }),
-    ];
-    const limits = { workers: 2, dollars: 15, points: 25, ceiling: 85 };
-    const base = {
-      id: "01a1cabc-2fa5-7380-8770-af2097ca9149", lead: { sessionId: session.id, tabId: session.tabs[0].id }, projectPath: session.projectPath, goal: "Move settings reads to the typed store", budget: { points: 25 },
-      workerMode: "bypassPermissions", created: at(20), modified: at(1), limits, usage: { dollars: 0, subscription: true, windows: [fiveHour] }, fit: [], estimate: { low: 3.15, high: 5.15 }, unestimated: 1,
-    };
-    const pause = { kind: "window", message: `The Claude 5h window is at 87%, past the 85% this run stops at. It resets at ${label}.`, window: { ...fiveHour, percent: 87, points: 55 } };
-    const runs = {
-      running: { ...base, state: "running", approval: { at: at(14) }, pieces, inTurn: 2 },
-      paused: { ...base, state: "needsYou", approval: { at: at(14) }, reason: pause.message, pause, usage: { ...base.usage, windows: [pause.window] }, inTurn: 1, pieces: pieces.map((p) => (p.id === "pipeline" ? { ...p, state: "done", note: "Moved." } : p.id === "cli" ? { ...p, queuedFor: "budget" } : p)) },
-      approval: {
-        ...base, state: "awaitingApproval", inTurn: 0, usage: { dollars: 0, subscription: true, windows: [{ ...fiveHour, percent: 70, start: undefined, points: 0 }] },
-        fit: [`The Claude 5h window is at 70%. This run may use up to 25 points, but it stops at 85%, about 15 points from now. It resets at ${label}.`],
-        pieces: pieces.map(({ worker: _w, branch: _b, startedMode: _m, login: _l, note: _n, queuedFor: _q, ...plan }) => ({ ...plan, state: "queued", attempts: 0, estimate: { low: 0.5, high: 0.9 } })),
-      },
-    };
-    // PRO-335: No limit on dollars and points, the window level on.
-    const unlimited = { workers: 2, dollars: "none", points: "none", ceiling: 85 };
-    runs.unlimited = { ...runs.running, budget: {}, limits: unlimited, usage: { dollars: 12345.6, apiKey: true, subscription: true, windows: [fiveHour] } };
-    runs.unlimitedApproval = {
-      ...runs.approval, limits: unlimited, usage: { dollars: 0, apiKey: true, subscription: true, windows: [{ ...fiveHour, percent: 20, start: undefined, points: 0 }] },
-      fit: ["This run has no limit on dollars or points: it goes on until its work is done, or until a window it draws on passes 85%. What it uses is still recorded."],
-    };
-    const withWaiting = (run) => ({ ...run, ready: [], waiting: run.pieces.filter((p) => p.state === "queued").map((p) => ({ piece: p.id, on: [], queuedFor: p.queuedFor })) });
-    const state = {
-      run: runs[scene] ?? null,
-      settings: { requireApproval: true, pieceLimit: 8, workerMode: "bypassPermissions", workersPerRun: 4, workersAtOnce: 8, budgetDollars: 15, budgetPoints: 25, windowCeiling: 85, stallMinutes: 10, triesPerPiece: 3, effortCeiling: "high", reviewDiffLines: 400, projects: {} },
-      experimental: { nativeCodex: false, orchestratorRuns: true },
-    };
-    window.__RUNS__ = { state, calls: [], label };
-    const called = (name, args) => window.__RUNS__.calls.push({ name, args });
-    Object.assign(answers, {
-      experimental_settings: () => state.experimental,
-      orchestration_run_for_session: () => (state.run ? withWaiting(state.run) : null),
-      orchestration_set_limits: (args) => {
-        called("setLimits", args);
-        state.run = { ...state.run, limits: args.limits };
-        return withWaiting(state.run);
-      },
-      orchestration_resume: (args) => {
-        called("resume", args);
-        state.run = args.afterReset
-          ? { ...state.run, pause: { ...state.run.pause, resumeAt: state.run.pause.window.resetsAt } }
-          : { ...state.run, state: "running", pause: undefined, reason: undefined };
-        return { run: withWaiting(state.run), started: [], waiting: [], failed: [] };
-      },
-      orchestration_stop: (args) => {
-        called("stop", args);
-        state.run = { ...state.run, state: "stopped", pause: undefined, reason: "A person stopped the run." };
-        return { run: withWaiting(state.run), stopped: [], failed: [] };
-      },
-      orchestrator_settings: () => state.settings,
-      set_orchestrator_settings: ({ patch }) => {
-        called("setSettings", patch);
-        const { project, ...rest } = patch;
-        if (!project) return (state.settings = { ...state.settings, ...rest });
-        const own = { ...(state.settings.projects[project] ?? {}) };
-        for (const [key, value] of Object.entries(rest)) value === null ? delete own[key] : (own[key] = value);
-        const projects = { ...state.settings.projects, [project]: own };
-        if (!Object.keys(own).length) delete projects[project];
-        return (state.settings = { ...state.settings, projects });
-      },
-      orchestrator_limits: ({ projectPath }) => {
-        const { projects, ...app } = state.settings;
-        return { ...app, ...(projects[projectPath] ?? {}) };
-      },
-    });
-  }
-
-  /** Nothing scrolls sideways, leaves the view, overlaps, or is smaller than 10.5px. */
-  const layoutOf = (view) => view.evaluate((node) => {
-    const buttons = [...node.querySelectorAll("button, select, input")].filter((element) => element.getBoundingClientRect().width > 0).map((element) => element.getBoundingClientRect());
-    const bounds = node.getBoundingClientRect();
-    return {
-      scrolls: [node, ...node.querySelectorAll("*")].some((element) => element.scrollWidth > element.clientWidth + 1 && getComputedStyle(element).overflowX !== "hidden" && getComputedStyle(element).overflowX !== "clip" && !element.matches("select, input, textarea, code, .truncate")),
-      outside: [...node.querySelectorAll("button, select, input, h1, [role=row]")].filter((element) => { const box = element.getBoundingClientRect(); return box.width > 0 && (box.left < bounds.left - 1 || box.right > bounds.right + 1); }).length,
-      overlaps: buttons.some((box, index) => buttons.slice(index + 1).some((other) => box.left < other.right - 0.5 && box.right > other.left + 0.5 && box.top < other.bottom - 0.5 && box.bottom > other.top + 0.5)),
-      smallest: Math.min(...[...node.querySelectorAll("*")].filter((element) => element.children.length === 0 && element.textContent.trim() && element.getBoundingClientRect().width > 0).map((element) => parseFloat(getComputedStyle(element).fontSize))),
-    };
-  });
-  const tidy = (layout) => !layout.scrolls && layout.outside === 0 && !layout.overlaps && layout.smallest >= 10.5;
-  const sizes = [{ width: 1440, height: 900 }, { width: 1000, height: 700 }];
+const server = await serve();
+const browser = await launch();
+let failed = 0;
+// 1280 with the piece open is where titles were squeezed (PRO-361): the panel gives way first.
+const sizes = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1000, height: 700 }];
+try {
   for (const mode of ["dark", "light"]) {
     for (const size of sizes) {
       const at = `${mode}, ${size.width}px`;
-      const start = async (scene) => {
-        const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, size, { extra: `(${setup})(${JSON.stringify({ mode, scene })});` });
+      const start = async (scene, enabled = true) => {
+        const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, size, { extra: `(${setup})(${JSON.stringify({ mode, scene, enabled })});` });
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         await openConversation(page, GOAL);
         return { page, errors };
       };
-      const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `run-limits-${name}-${mode}-${size.width}.png`) }); };
-      const resetLabel = (page) => page.evaluate(() => window.__RUNS__.label);
-      const runView = async (page) => {
-        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
-        const view = page.getByTestId("run-view");
-        await view.getByRole("table").waitFor();
-        return view;
-      };
+      const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `orchestration-${name}-${mode}-${size.width}.png`) }); };
 
-      // A running run on a subscription (design 18.01): its points, its window, its worker limit.
-      {
-        const { page, errors } = await start("running");
-        const view = await runView(page);
-        const layout = await layoutOf(view);
-        await shot(page, "running");
-        const budget = await view.getByTestId("run-budget").textContent();
-        const label = await resetLabel(page);
-        const checks = {
-          // PRO-383 (18.01): a subscription's points lead, the window and its reset under them, the dollars last.
-          "the budget leads with the subscription's points, then the window and its reset, then the dollars": budget.startsWith("Budgetsubscription 9 of 25 points") && (await view.getByTestId("run-window").textContent()) === `5h window at 41% · resets ${label}` && (await view.getByTestId("run-window").getAttribute("title")) === "The run pauses past 85% of the window" && budget.indexOf("9 of 25 points") < budget.indexOf("$"),
-          "the lead card says how many run and how many may at once": (await view.getByTestId("run-workers").textContent()).includes("2 running·2 workers at a time"),
-          "a stalled worker's piece says so": (await view.locator('[data-piece="pipeline"]').getAttribute("data-piece-state")) === "stalled" && (await view.locator('[data-piece="pipeline"]').textContent()).includes("Stalled"),
-          "a queued piece says the run's limit holds it": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Queued: 2 workers at a time in this run"),
-          "dollar figures are said to be API-equivalent": (await view.getByText(/Dollar figures are API-equivalent, not billed/).count()) === 1,
-          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
-          "no browser errors": errors.length === 0,
-        };
-        failed += report(`running, ${at}`, checks, { layout, errors });
-        await page.close();
-      }
-
-      // A run that reached its budget on a window: named, with its reset, and resumed after it.
-      {
-        const { page, errors } = await start("paused");
-        const strip = page.getByTestId("run-strip");
-        await strip.waitFor();
-        const flagged = await strip.getByRole("status", { name: "The run reached its budget and waits for you" }).count();
-        const view = await runView(page);
-        const notice = view.getByTestId("run-paused");
-        await notice.waitFor();
-        const layout = await layoutOf(view);
-        await shot(page, "paused");
-        const text = await notice.textContent();
-        const label = await resetLabel(page);
-        const checks = {
-          "the Run tab is flagged while the run waits for the person": flagged === 1,
-          "the run is headed as paused": (await view.getByTestId("run-state").textContent()) === "Run paused, needs you",
-          "the notice names the window, its level and when it resets": text.includes("Paused: the Claude 5h window") && text.includes("87%") && text.includes(`It resets at ${label}.`),
-          "it says running workers finish their turn": text.includes("Workers already in a turn finish it"),
-          "a queued piece waits for the person": size.width < 1200 || (await view.locator('[data-piece="cli"]').textContent()).includes("Waits for you: the run reached its budget"),
-          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
-        };
-        await notice.getByRole("button", { name: "Raise the budget", exact: true }).click();
-        await shot(page, "paused-raise");
-        const points = notice.getByRole("spinbutton", { name: "Points of a window this run may use" });
-        await points.fill("40");
-        await points.press("Enter");
-        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
-        await notice.getByRole("button", { name: `Resume after the reset, ${label}`, exact: true }).click();
-        await view.getByTestId("run-resumes-at").waitFor();
-        const calls = await page.evaluate(() => window.__RUNS__.calls);
-        checks["raising the budget saves this run's limits"] = JSON.stringify(calls[0]) === JSON.stringify({ name: "setLimits", args: { id: "01a1cabc-2fa5-7380-8770-af2097ca9149", limits: { workers: 2, dollars: 15, points: 40, ceiling: 85 } } });
-        checks["resume after the reset is asked once, and the run says when it goes on"] = calls.filter((call) => call.name === "resume").length === 1 && calls.at(-1).args.afterReset === true && (await view.getByTestId("run-resumes-at").textContent()).includes(`Goes on by itself at ${label}`);
-        await shot(page, "paused-resumes");
-        checks["no browser errors"] = errors.length === 0;
-        failed += report(`paused, ${at}`, checks, { layout, errors, calls });
-        await page.close();
-      }
-
-      // A plan that would not fit in what is left of a window: warned before approval, and its limits changed for this run.
+      // A plan waiting for approval (design 18.02).
       {
         const { page, errors } = await start("approval");
-        const view = await runView(page);
-        const summary = view.getByRole("region", { name: "Plan summary" });
-        await summary.getByRole("alert").waitFor();
-        const label = await resetLabel(page);
-        // The run's own limits and its windows open from the plan card's Budget chip (PRO-383).
-        await summary.getByRole("button", { name: /^Budget: / }).click();
+        const strip = page.getByTestId("run-strip");
+        await strip.waitFor();
+        const flagged = await strip.getByRole("status", { name: "A plan waits for your approval" }).count();
+        const chatFirst = (await page.getByTestId("run-view").count()) === 0;
+        // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⇧⌘O, as ⇧⌘R is Automations.
+        const hint = await page.getByTestId("run-view-hint").textContent();
+        await page.keyboard.press("Meta+Shift+O");
+        const view = page.getByTestId("run-view");
+        await view.getByRole("table", { name: "Plan" }).waitFor();
+        const opened = (await view.count()) === 1;
         const layout = await layoutOf(view);
+        const detail = page.getByTestId("piece-detail");
+        const pick = (id) => view.locator(`[data-piece="${id}"] button`).first().click();
+        await pick("session");
+        const brief = await detail.textContent();
         await shot(page, "approval");
+        await pick("docs");
+        const untrusted = await detail.textContent();
+        const warned = await view.locator('[data-piece="docs"]').getByRole("note").getAttribute("aria-label");
+        await pick("session");
+        const approvalColumn = await columnOf(page);
+        const card = await view.getByRole("region", { name: "Plan summary" }).evaluate((node) => ({ height: Math.round(node.getBoundingClientRect().height), rows: node.children.length }));
+        const chips = await view.getByTestId("plan-limits").evaluate((node) => {
+          const budget = node.querySelector("button[aria-expanded]").getBoundingClientRect();
+          const workers = node.querySelector("label").getBoundingClientRect();
+          const input = node.querySelector("input");
+          return { same: Math.abs(budget.height - workers.height) < 1, narrow: workers.width < 48, arrows: getComputedStyle(input, "::-webkit-inner-spin-button").appearance !== "none" && getComputedStyle(input).appearance !== "textfield" };
+        });
+        const commandsWhole = !(await breaksMidWord(detail.getByTestId("done-checks").locator("code")));
         const checks = {
-          "the warning says the run would pass the window's level, and when the window resets": (await summary.getByRole("alert").textContent()).includes(`about 15 points from now. It resets at ${label}.`),
-          "the windows it draws on are listed, with what a run's points mean": (await view.getByTestId("run-windows").textContent()).includes(`Claude 5h at 70%, resets ${label}`) && (await view.getByTestId("run-windows").textContent()).includes("the window is shared with everything else you run"),
-          "this run's worker limit, points and level can be changed; no dollar budget on a subscription": (await summary.getByRole("spinbutton", { name: "Workers at once in this run" }).inputValue()) === "2" && (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).inputValue()) === "25" && (await summary.getByRole("spinbutton", { name: "Pause when a window passes" }).inputValue()) === "85" && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
-          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
+          // PRO-383 (18.02): two rows, the budget, At once and the mode as boxed values; the panel is the right column.
+          "the plan card is two rows, about 90px tall at 1440": card.rows === 2 && (size.width < 1440 || card.height <= 100),
+          "at 1440 the plan's titles of the design's length fit one line beside the open brief": size.width < 1440 || layout.rows.slice(0, 5).every((row) => row.height <= 56),
+          "At once is a boxed value beside Budget, with no stepper arrows": chips.same && chips.narrow && !chips.arrows,
+          "the brief's done-when commands wrap only between words and after a slash": commandsWhole,
+          "the open brief is the window's full-height 420px right column where there is room, labelled brief": (size.width < 1200 ? !approvalColumn.inColumn : inColumn(approvalColumn)) && approvalColumn.heading.endsWith("brief"),
+          "the session opens on its chat, and the Run tab says a plan waits": chatFirst && flagged === 1,
+          "the title bar shows ⇧⌘O run view, and ⇧⌘O opens the Run view": hint === "⇧⌘Orun view" && opened,
+          // Model and effort are one pill (18.02): the tier's dot, the model, the effort.
+          "each piece's model and effort is one pill, marked with its tier's dot": (await view.getByTestId("piece-model-pill").count()) === 6 && (await view.locator('[data-piece="store"] [data-testid="piece-model-pill"] .rounded-full').count()) === 1,
+          "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,
+          "Discard, Edit plan and Approve and start are offered": (await view.getByRole("button", { name: "Discard", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Edit plan", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Approve and start", exact: true }).count()) === 1,
+          "the estimate sums the pieces that carry one and says how many do": (await view.getByTestId("run-estimate").textContent()) === "$3.15–5.15" && (await view.getByText("API-equivalent, for 5 of 6 pieces").count()) === 1,
+          "the budget, the workers' mode and that no file is shared are stated": (await view.getByTestId("plan-limits").textContent()).startsWith("Budget25 pointsAt once") && (await view.getByTestId("plan-limits").textContent()).endsWith("Workers run inBypassNo shared files"),
+          // A long title wraps rather than being cut short (PRO-361): a row is as tall as its title needs, never more than three lines.
+          "six pieces, each on one row, with what it waits on": layout.rows.length === 6 && layout.rows.every((row) => row.height <= 112) && (size.width < 1200 || layout.rows[5].text.includes("3, 4, 5")),
+          "a piece that reads outside text says it will run in bypass, in its row and in its brief": layout.rows[5].text.includes("outside text · bypass") && warned === "Reads text from outside the repository, and will run in bypass" && untrusted.includes("reads text from outside the repository") && untrusted.includes("It will run in bypass: nothing asks before it acts on what it reads."),
+          "a piece's brief states its goal, scope, done-check, limits and report": ["GoalEvery settings read in the session code goes through the typed store.", "WhyPiece 6 documents the keys", "src-tauri/src/session.rs", "Out of scope: the store itself, pipeline and CLI code.", "The 17 call sites listed by piece 1 for these files.", "docs/SETTINGS.md", "cargo t session", "! rg -q 'settings::get' src-tauri/src/session.rs src-tauri/src/session_ops.rs", "reads no text from outside the repository", "Push, merge and deploy are denied at launch, not left to the brief.", "terminalx-report"].every((said) => brief.includes(said)),
+          "a piece checked by review alone says so, with its reason and its vote": untrusted.includes("Review only, no command: Prose: nothing to run.") && untrusted.includes("No key's meaning changed in the rewrite. · vote, 2 of 3"),
+          "the footnote says what bypass means and what stays blocked": (await view.getByText("In bypass, workers are not asked before edits or commands. Push, merge and deploy stay blocked by deny rules.").count()) === 1,
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+          "no text is smaller than 10.5px": layout.smallest >= 10.5,
         };
-        await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).fill("15");
-        await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).press("Enter");
-        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
-        const calls = await page.evaluate(() => window.__RUNS__.calls);
-        checks["a changed points budget is saved for this run"] = calls[0].args.limits.points === 15;
+        // Edit: a model changed where it is read is saved as the plan, with every other piece as it was.
+        await view.getByRole("button", { name: "Model and effort of Typed store module and migration", exact: true }).click();
+        await page.getByRole("group", { name: "Model of Typed store module and migration", exact: true }).getByRole("menuitemradio", { name: "Sonnet 5.5", exact: true }).click();
+        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "updatePlan"));
+        let calls = await page.evaluate(() => window.__RUNS__.calls);
+        checks["changing a piece's model saves the whole plan with that one change"] = calls[0].args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && calls[0].args.plan.pieces.length === 6 && calls[0].args.plan.pieces[1].model === "sonnet" && calls[0].args.plan.pieces[1].effort === "medium" && calls[0].args.plan.pieces[2].goal === "Every settings read in the session code goes through the typed store.";
+        // A refused edit names its piece and changes nothing.
+        await pick("cli");
+        await detail.getByRole("button", { name: "Edit brief", exact: true }).click();
+        const form = detail.getByRole("form", { name: "Edit the brief of Move CLI code to the store" });
+        await form.getByLabel("Done when: commands").fill("");
+        await form.getByRole("button", { name: "Save brief", exact: true }).click();
+        await view.getByRole("alert").waitFor();
+        checks["an edit the engine refuses is shown with its reason, and the brief stays open"] = (await view.getByRole("alert").textContent()).includes("Piece cli has no `command` done-check.") && (await form.count()) === 1;
+        await shot(page, "approval-edit");
+        await form.getByLabel("Done when: commands").fill("cargo t control\ncargo clippy -- -D warnings");
+        await form.getByLabel("Done when: review points").fill("No public name changed.");
+        await form.getByRole("button", { name: "Save brief", exact: true }).click();
+        await form.waitFor({ state: "detached" });
+        checks["a saved brief is the piece's new brief: its commands and its review point, each by its kind"] = JSON.stringify(await detail.getByTestId("done-checks").getByRole("listitem").allTextContents()) === JSON.stringify(["cargo t control", "cargo clippy -- -D warnings", "No public name changed."]) && (await detail.getByTestId("done-checks").getByLabel("Command").count()) === 2 && (await detail.getByTestId("done-checks").getByLabel("Review").count()) === 1;
+        // Remove a piece: the others no longer wait on it.
+        await detail.getByRole("button", { name: "Remove piece", exact: true }).click();
+        await page.waitForFunction(() => document.querySelectorAll('[data-testid="run-view"] [role=row][data-piece]').length === 5);
+        calls = await page.evaluate(() => window.__RUNS__.calls);
+        checks["removing a piece saves the plan without it and without the dependencies on it"] = calls.at(-1).args.plan.pieces.map((piece) => piece.id).join() === "map,store,session,pipeline,docs" && calls.at(-1).args.plan.pieces.at(-1).dependsOn.join() === "session,pipeline";
+        // Approve: the first piece's worker starts, and the view becomes the run's.
+        await view.getByRole("button", { name: "Approve and start", exact: true }).click();
+        await view.getByRole("table", { name: "Pieces" }).waitFor();
+        const after = await layoutOf(view);
+        calls = await page.evaluate(() => window.__RUNS__.calls);
+        checks["Approve and start approves this run once, and the pieces show their states"] = calls.filter((call) => call.name === "approve").length === 1 && calls.at(-1).args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && (await view.getByTestId("run-state").textContent()) === "Run" && after.rows[0].state === "running" && after.rows[1].state === "queued";
         checks["no browser errors"] = errors.length === 0;
-        failed += report(`approval, ${at}`, checks, { layout, errors, calls });
+        failed += report(`plan waiting, ${at}`, checks, { layout, errors, calls });
         await page.close();
       }
 
-      // PRO-335: a run with No limit shows what it spent and used, and no bound.
+      // A planned run in a project that asks for no approval (PRO-365): the person starts it here.
       {
-        const { page, errors } = await start("unlimited");
-        const view = await runView(page);
+        const { page, errors } = await start("planned");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        await view.getByRole("table", { name: "Plan" }).waitFor();
         const layout = await layoutOf(view);
-        await shot(page, "no-limit-running");
-        const budget = await view.getByTestId("run-budget").textContent();
+        const button = (name) => view.getByRole("button", { name, exact: true });
+        const startRun = button("Start run");
+        await shot(page, "planned");
         const checks = {
-          "points and dollars are shown as used and spent, with No limit for each": budget.includes("9 points usedNo limit") && budget.includes("$12345.60 spentNo limit") && !budget.includes(" of $"),
-          "the window level still holds, and says so": (await view.getByTestId("run-window").getAttribute("title")) === "The run pauses past 85% of the window",
-          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
+          "the plan is ready to start, and says the person or the lead starts it": (await view.getByTestId("run-state").textContent()) === "Ready to start" && (await view.getByTestId("run-subtitle").textContent()) === "The lead split this into 6 pieces. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.",
+          "Edit plan, Stop run and Start run are offered, and no approval": (await button("Edit plan").count()) === 1 && (await button("Stop run").count()) === 1 && (await startRun.count()) === 1 && (await button("Approve and start").count()) === 0 && (await button("Discard").count()) === 0,
+          "Start run is the accent button, as Approve and start is": ((await startRun.getAttribute("class")) ?? "").includes("bg-accent"),
+          "the window warning shows, and Start run is still enabled": (await view.getByRole("region", { name: "Plan summary" }).getByRole("alert").textContent()).includes("This run may use up to 25 points, but it stops at 85%") && !(await startRun.isDisabled()),
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+        };
+        // Lower the points, then start: the limit is saved before the start, and the start is the person's.
+        // The run's own limits open from the plan card's Budget chip (PRO-383).
+        await view.getByTestId("plan-limits").getByRole("button", { name: /^Budget: / }).click();
+        const points = view.getByRole("spinbutton", { name: "Points of a window this run may use" });
+        await points.fill("10");
+        await points.press("Enter");
+        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
+        await startRun.click();
+        await view.getByRole("table", { name: "Pieces" }).waitFor();
+        const calls = await page.evaluate(() => window.__RUNS__.calls);
+        await shot(page, "planned-started");
+        checks["the changed points are saved, then the run is started once"] = JSON.stringify(calls.map((call) => call.name)) === JSON.stringify(["setLimits", "start"]) && calls[0].args.limits.points === 10;
+        checks["the started run says the person started it"] = (await view.getByTestId("run-subtitle").textContent()) === "6 pieces · started by you just now" && (await view.locator('[data-piece="map"]').getAttribute("data-piece-state")) === "running";
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`planned run, ${at}`, checks, { layout, errors, calls });
+        await page.close();
+      }
+
+      // A run with workers (design 18.01, as far as this ticket goes).
+      {
+        const { page, errors } = await start("running");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        await view.getByRole("table", { name: "Pieces" }).waitFor();
+        await view.locator('[data-piece="store"] button').first().click();
+        const layout = await layoutOf(view);
+        const panel = page.getByTestId("piece-detail");
+        const detail = await panel.textContent();
+        const column = await columnOf(page);
+        const panelLayout = await layoutOf(panel);
+        const pathsWhole = !(await breaksMidWord(panel.getByTestId("piece-changed").locator("li > span:first-child")));
+        const pathLines = await panel.getByTestId("piece-changed").getByRole("listitem").evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)));
+        const workersLine = await view.getByTestId("run-workers").evaluate((node) => Math.round(node.getBoundingClientRect().height));
+        await shot(page, "running");
+        const states = layout.rows.map((row) => row.state).join();
+        const gatesOf = () => panel.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join());
+        const rowReport = (id) => view.locator(`[data-piece="${id}"]`).getByTestId("piece-report").textContent();
+        // A done piece: every gate it went through, the done-check as TerminalX ran it, and the verifier that read it.
+        const accepted = { gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), review: await panel.getByTestId("piece-review").textContent(), mark: await panel.getByTestId("piece-check-passed").textContent() };
+        // A piece being checked: what it waits on, and the verifier reading it.
+        await view.locator('[data-piece="pipeline"] button').first().click();
+        await panel.getByTestId("piece-review").waitFor();
+        const verifying = { gates: await gatesOf(), review: await panel.getByTestId("piece-review").textContent(), text: await panel.textContent(), layout: await layoutOf(view) };
+        await shot(page, "verifying");
+        // A piece on its second try: why the first went back.
+        await view.locator('[data-piece="cli"] button').first().click();
+        await panel.getByTestId("done-check").waitFor();
+        const retried = { title: await panel.textContent(), gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), layout: await layoutOf(view) };
+        await shot(page, "retry");
+        await view.locator('[data-piece="store"] button').first().click();
+        const checks = {
+          "the Run tab carries no waiting mark": (await page.getByTestId("run-strip").getByRole("status").count()) === 0,
+          "the run says how many pieces are done and that the plan was approved": (await view.getByTestId("run-done").textContent()) === "2" && (await view.getByRole("region", { name: "Run summary" }).textContent()).includes("of 6 done") && (await view.getByText("6 pieces · started 14m ago · approved by you", { exact: true }).count()) === 1,
+          "each piece shows where it stands: one being checked is verifying, not done": states === "done,done,running,verifying,running,queued",
+          "a row says what a piece being checked waits on, and that a verifier passed one": size.width < 1200 || ((await rowReport("pipeline")) === "Waiting on the verifier" && (await rowReport("store")) === "Store added, 14 tests pass. Unknown keys are kept on save., verifier passed"),
+          "a done piece shows the gates it passed and its done-check as it ran": accepted.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:passed" && accepted.check === "Done-checkpassed · 38scargo t store::settings" && accepted.mark === "· checked and read",
+          "the verifier that read it shows why it was asked, its verdict and what it used": ["Verifierpassed · 6.4k tokens", "The plan asks for a review of this piece.", "Sonnet 5.5 Medium", "Pass"].every((said) => accepted.review.includes(said)),
+          "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
+          "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
+          "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
+          "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultAdded a typed settings store") && detail.includes("raccoon/store-piece · 4c1e9a7") && (await page.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
+          "a done piece shows every section of its worker's report, saying so where one is empty (18.01)": ["Evidencecargo t store::settings exit 0 · 14 passed", "Changedsrc-tauri/src/store/settings/mod.rs+212", "src-tauri/src/store/mod.rs+3−1", "Not doneNothing", "Could not readNothing", "UncertainWhether the Windows settings path"].every((said) => detail.includes(said)),
+          "its footer offers the worker and the diff, and says what it cost and used": (await panel.getByRole("button", { name: "View diff", exact: true }).count()) === 1 && (await panel.getByTestId("piece-detail-cost").textContent()) === "$1.82 · 41k out",
+          "only the done pieces' segments are coloured": (await view.getByTestId("run-pieces").locator("[data-segment]").evaluateAll((items) => items.map((item) => item.dataset.segment).join())) === "done,done,open,open,open,open",
+          "Merge is shown and stays disabled until every piece is done": (await view.getByTestId("run-merge").isDisabled()) && (await view.getByTestId("run-merge").getAttribute("title")) === "Merge unlocks when every piece is done.",
+          // PRO-383 (18.01): the subscription's points lead, the window under them, the dollars last.
+          "the budget leads with the subscription's points, then the window, then the dollars, and the lead's model and effort beside it": (await view.getByTestId("run-budget").textContent()).startsWith("Budgetsubscription 9 of 25 points") && (await view.getByTestId("run-window").textContent()).startsWith("5h window at 41% · resets") && (await view.getByTestId("run-spend").textContent()) === "$4.13 API-equivalent, not billed" && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
+          "the open piece is the window's full-height 420px right column where there is room, its header the title alone": (size.width < 1200 ? !column.inColumn : inColumn(column)) && column.heading === "2Typed store module and migration",
+          // The sample's sixth title is two lines' worth at any width the design has.
+          "at 1440 every piece title fits one line and the Lead card's workers line is one line": size.width < 1440 || (layout.rows.slice(0, 5).every((row) => row.height <= 56) && workersLine <= 18),
+          "changed files keep each name whole, each on one line where it fits": pathsWhole && (size.width < 1200 || pathLines.every((height) => height <= 20)),
+          "the panel itself does not scroll sideways or overlap": !panelLayout.scrolls && !panelLayout.overlaps,
+          "no piece title is cut short": (await view.getByTestId("piece-title").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1 && !getComputedStyle(item).textOverflow.includes("ellipsis")))),
+          "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+        };
+        // A worker's turn ends: the runtime announces the run, and the row follows without a reload.
+        await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (piece.id === "session" ? { ...piece, state: "done", note: "17 call sites moved." } : piece)) }; announce(); });
+        await page.waitForFunction(() => document.querySelector('[data-piece="session"]').dataset.pieceState === "done");
+        checks["a piece follows its worker as the runtime announces it"] = (await view.getByTestId("run-done").textContent()) === "3";
+        await view.getByRole("button", { name: "Stop run", exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="run-view"]').dataset.runState === "stopped");
+        const stopped = await layoutOf(view);
+        checks["Stop run stops this run: what was done stays done, the rest is stopped, and it says who stopped it"] = stopped.rows.map((row) => row.state).join() === "done,done,done,stopped,stopped,stopped" && (await view.getByRole("status").filter({ hasText: "A person stopped the run." }).count()) === 1 && (await view.getByRole("button", { name: "Stop run" }).count()) === 0;
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`run with workers, ${at}`, checks, { layout, errors });
+        await page.close();
+      }
+
+      // A piece blocked after three tries (design 18.03): the tries, what each cost, and what the check printed.
+      {
+        const { page, errors } = await start("blocked");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        await view.getByRole("table", { name: "Pieces" }).waitFor();
+        await view.locator('[data-piece="cli"] button').first().click();
+        const detail = page.getByTestId("piece-detail");
+        const tries = detail.getByRole("list", { name: "Tries" }).getByRole("listitem");
+        await tries.nth(2).waitFor();
+        const layout = await layoutOf(view);
+        await shot(page, "blocked");
+        const said = await tries.allTextContents();
+        const wide = size.width >= 1200;
+        const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
+        const cli = await cells("cli");
+        const docsRow = view.locator('[data-piece="docs"]');
+        const blockedColumn = await columnOf(page);
+        const checks = {
+          // PRO-383 (18.03): a piece held by a blocked one waits for that one alone, and says Waiting with the dashed circle.
+          "the piece held by the blocked one is Waiting and waits for it alone, never a done piece": (await docsRow.getAttribute("data-shown-state")) === "waiting" && (await cells("docs"))[2] === "Waiting" && (!wide || (await cells("docs"))[5] === "Waits for 5"),
+          "a queued piece's model has its tier's dot": (await docsRow.getByTestId("model-dot").count()) === 1,
+          "the blocked piece's panel is the right column where there is room": size.width < 1200 ? !blockedColumn.inColumn : inColumn(blockedColumn),
+          "one line says which piece holds the run up, by number, and the run has not failed (18.03)": (await view.getByTestId("run-state").textContent()) === "Run" && (await view.getByTestId("run-subtitle").textContent()) === "Piece 5 is blocked. Piece 6 waits for it; nothing else is running." && (await view.getByTestId("run-needs").count()) === 0 && !(await view.textContent()).includes("cli is blocked"),
+          "Stop run is offered, and Merge waits for every piece": (await view.getByRole("button", { name: "Stop run", exact: true }).count()) === 1 && (await view.getByTestId("run-merge").isDisabled()),
+          "blocked is red": (await view.locator('[data-piece="cli"] [role=cell]').nth(2).locator("span").first().evaluate((node) => node.className)).includes("text-destructive"),
+          "the panel shows its worker's last report and that the fix is outside its files": (await detail.textContent()).includes("Worker's last reportThe default mode now comes from the store") && (await detail.getByTestId("piece-outside").textContent()).startsWith("The fix is outside this piece's files. A worker may not edit another piece's files.src-tauri/src/store/settings/mod.rs · piece 2 owns it"),
+          "the four ways on are offered": (await detail.getByTestId("blocked-actions").getByRole("button").allTextContents()).join("|") === "Take over in lead|Widen scope and retry|Send a note to the worker|Skip piece",
+          "four pieces are done, one is blocked and one waits": layout.rows.map((row) => row.state).join() === "done,done,done,done,blocked,queued" && (await view.getByTestId("run-done").textContent()) === "4",
+          "the blocked piece's row shows the model it ended on, its three tries and what they cost": cli[1] === "Opus 5.5 Medium" && cli[2] === "Blocked" && cli[3] === "3" && cli[4] === "$3.71",
+          "a piece that needed a second try shows two, and what both cost": (await cells("pipeline")).slice(3, 5).join() === "2,$0.97",
+          "the run sums what its workers cost": (await view.getByTestId("run-spend").textContent()).startsWith("$7.42"),
+          "the piece says it used all its tries": (await detail.getByTestId("piece-tries-used").textContent()) === "· 3 of 3 tries used",
+          "each try shows its model, effort, cost and why it was made, in order": said.length === 3
+            && ["Sonnet 5.5 Medium", "$0.61", "First try", "Check failed: cargo t control"].every((text) => said[0].includes(text))
+            && ["Sonnet 5.5 High", "$0.92", "Retried with the failure text, effort raised one level"].every((text) => said[1].includes(text))
+            && ["Opus 5.5 Medium", "$2.18", "Moved up one model at one effort level lower"].every((text) => said[2].includes(text)),
+          "the failed done-check shows its command, its exit code and the end of what it printed": await (async () => { const check = await detail.getByTestId("done-check").textContent(); return check.startsWith("Done-checkfailed · exit 101cargo t control") && check.includes("test control::tests::create_reads_default_mode ... FAILED") && check.includes('left: Some("manual")  right: Some("auto")') && check.includes("control.rs:1184"); })(),
+          "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
+          "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
+          "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 3,
+          // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
+          "the table's columns are the design's, where there is room": size.width < 1440 || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+          "no text is smaller than 10.5px": layout.smallest >= 10.5,
           "no browser errors": errors.length === 0,
         };
-        failed += report(`no limit running, ${at}`, checks, { layout, errors });
+        // Skip piece: it says what goes with it, and the run goes on to its merge without them.
+        await detail.getByRole("button", { name: "Skip piece", exact: true }).click();
+        const confirm = await detail.getByRole("group", { name: "Skip piece" }).textContent();
+        await detail.getByRole("group", { name: "Skip piece" }).getByRole("button", { name: "Skip", exact: true }).click();
+        // Every other piece is done: the run goes on to its merge, where both are listed as skipped.
+        await page.waitForFunction(() => { const row = document.querySelector('[data-piece="cli"]'); return row?.dataset.pieceState === "skipped" || row?.dataset.mergeState === "skipped"; });
+        checks["Skip piece says what goes with it and leaves both out"] = confirm.includes("Skip piece 5, and piece 6 with it, which depends on it?") && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "skip").map((call) => call.args))) === JSON.stringify([{ id: "01a1cabc-2fa5-7380-8770-af2097ca9149", piece: "cli" }]) && (await view.locator('[data-piece="docs"]').getAttribute("data-merge-state")) === "skipped" && (await view.getByTestId("run-subtitle").textContent()) === "Every result is accepted. 4 branches wait to be merged into the lead's branch.";
+        failed += report(`piece blocked after three tries, ${at}`, checks, { layout, errors, said, cli });
         await page.close();
       }
 
-      // PRO-335: the approval view warns once of a run with No limit, and the person can set and lift this run's limits.
+      // A merge stopped on a conflict (design 18.04): the branches in merge order, and the conflict with its three ways out.
       {
-        const { page, errors } = await start("unlimitedApproval");
-        const view = await runView(page);
-        const summary = view.getByRole("region", { name: "Plan summary" });
-        await summary.getByRole("alert").waitFor();
+        const { page, errors } = await start("merging");
+        await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
+        const view = page.getByTestId("run-view");
+        const table = view.getByRole("table", { name: "Merge" });
+        await table.waitFor();
+        await view.locator('[data-piece="cli"] button').first().click();
+        const detail = page.getByTestId("piece-detail");
+        const panel = detail.getByTestId("merge-panel");
+        await panel.waitFor();
         const layout = await layoutOf(view);
-        await shot(page, "no-limit-approval");
-        const alerts = await summary.getByRole("alert").allTextContents();
-        await summary.getByRole("button", { name: /^Budget: / }).click();
+        await shot(page, "merge-conflict");
+        const wide = size.width >= 1200;
+        const rows = await table.locator("[role=row][data-piece]").evaluateAll((items) => items.map((item) => `${item.dataset.piece}:${item.dataset.mergeState}`).join());
+        const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
+        const cli = await cells("cli");
+        const said = await panel.textContent();
+        const mergeColumn = await columnOf(page);
+        const footer = await detail.locator("footer button").evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size);
+        const excerptLines = await panel.getByTestId("conflict-excerpt").locator("pre > div").evaluateAll((items) => items.every((item) => item.getBoundingClientRect().height <= 20));
         const checks = {
-          "one warning says the run has no limit and what still stops it": alerts.length === 1 && alerts[0].includes("no limit on dollars or points") && alerts[0].includes("passes 85%"),
-          // A subscription's points first (PRO-383).
-          "the budget says No limit for each": (await summary.textContent()).includes("BudgetNo points limit · No dollar limit"),
-          "neither budget has a field while it is No limit": (await summary.getByRole("spinbutton", { name: "Points of a window this run may use" }).count()) === 0 && (await summary.getByRole("spinbutton", { name: "Dollars this run may spend" }).count()) === 0,
-          "nothing scrolls sideways, leaves the view, overlaps or is too small": tidy(layout),
+          // PRO-383 (18.04): the full-height column, its three ways out on one row, each excerpt line whole.
+          "the conflict's panel is the right column where there is room, its three ways out on one row": size.width < 1200 ? !mergeColumn.inColumn : inColumn(mergeColumn) && footer === 1,
+          "each line of the conflict excerpt stays one line": excerptLines,
+          "the run says how far the merge is and what stopped it": (await view.getByTestId("run-state").textContent()) === "Merging" && (await view.getByTestId("run-subtitle").textContent()) === "Merging in dependency order. 3 of 5 branches are in; piece 5 conflicts.",
+          "it says where the pieces go, with what check, and that nothing is pushed": await (async () => { const strip = await view.getByTestId("merge-strip").textContent(); return strip.includes("Intosettings-typed-store") && strip.includes("Integration checkcargo t && pnpm test") && strip.includes("Nothing is pushed. No other branch is touched."); })(),
+          "a row a branch, in merge order: three in, the conflict, and the piece that waits for it": rows === "store:merged,session:merged,pipeline:merged,cli:conflict,docs:waiting",
+          // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
+          "the table's columns are the design's, where there is room": size.width < 1440 || (await table.getByRole("columnheader").allTextContents()).join() === "Branch,State,Commit,Check after merge,Note",
+          "a merged row shows its branch, its merge commit and how its check went": await (async () => { const store = await cells("store"); return store[0].includes("piece-store → settings-typed-store") && store[1] === "Merged" && (!wide || (store[2] === "4c1e9a7" && store[3] === "passed · 2m 11s")); })(),
+          "the conflict's row shows the piece's commit, that no check ran, and what it conflicts with": cli[1] === "Conflict" && (!wide || (cli[2] === "a31c55e" && cli[3] === "not run" && cli[4] === "2 files conflict with piece 3")),
+          "the piece behind it says what it waits for": !wide || (await cells("docs"))[4] === "Waits for 5",
+          "what had nothing to merge, and where the branch was left, is said under the table": (await view.getByTestId("run-footnote").textContent()) === "Piece 1 was read-only and has nothing to merge. Your branch is back at e77a120, as it was before this merge was tried.",
+          "the conflict names the piece it is with, its files and how much of each": said.includes("Conflict· with piece 3, already merged") && (await panel.getByRole("list", { name: "Conflicting files" }).getByRole("listitem").allTextContents()).join("|") === "Csrc-tauri/src/control.rs2 hunks|Csrc-tauri/src/session_ops.rs1 hunk",
+          "both sides of the first conflicting place are shown": await (async () => { const excerpt = await panel.getByTestId("conflict-excerpt").textContent(); return excerpt.startsWith("control.rs · 1184") && excerpt.includes("let mode = store.session().default_mode();") && excerpt.includes("let mode = store.cli().default_mode(project);"); })(),
+          "why it happened comes from the plan and the merges": said.includes("session_ops.rs is listed under piece 3 only, but piece 5 changed it too."),
+          "the three choices are offered, and Continue merge waits for one of them (18.04)": (await detail.getByRole("button", { name: "Send back to worker" }).count()) === 1 && (await detail.getByRole("button", { name: "Resolve in lead" }).count()) === 1 && (await detail.getByRole("button", { name: "Skip", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Continue merge" }).isDisabled()),
+          "the conflicted piece is not counted done": (await view.getByTestId("run-done").textContent()) === "5" && (await view.getByTestId("run-pieces").textContent()).includes("5 of 6 done"),
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+          "no text is smaller than 10.5px": layout.smallest >= 10.5,
         };
-        await summary.getByRole("button", { name: "Pause when a window passes: Turn off" }).click();
-        await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
-        await summary.getByText("Off: can use the whole window").waitFor();
-        await shot(page, "no-limit-approval-ceiling-off");
-        const calls = await page.evaluate(() => window.__RUNS__.calls);
-        checks["turning the window level off saves it for this run"] = JSON.stringify(calls[0].args.limits) === JSON.stringify({ workers: 2, dollars: "none", points: "none", ceiling: "none" });
+        // Skip leaves the piece out; sending it back gives it to its worker and the run is running again.
+        await detail.getByRole("button", { name: "Skip", exact: true }).click();
+        await view.locator('[data-piece="cli"][data-merge-state="skipped"]').waitFor();
+        checks["Skip asks for a merge without the piece"] = JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "merge").map((call) => call.args.skip))) === '[["cli"]]';
+        await shot(page, "merge-skipped");
         checks["no browser errors"] = errors.length === 0;
-        failed += report(`no limit approval, ${at}`, checks, { layout, errors, calls });
+        failed += report(`merge stopped on a conflict, ${at}`, checks, { layout, errors, rows, cli, said });
         await page.close();
       }
 
-      // Settings → Orchestrator: the worker limits, the budget and the stall time (design 18.05).
+      // A session with no run (design 18.08). It looks like any other session (#1404): no Run strip and no run
+      // pill, until Go → Run View opens the page that says how to start one.
+      {
+        const { page, errors } = await start("none");
+        const strip = page.getByTestId("run-strip");
+        const plain = (await strip.count()) === 0 && (await page.getByTestId("run-pill").count()) === 0;
+        // The keys do nothing until the session's run has been read (there is none): press until they take.
+        for (let tries = 0; tries < 40 && (await strip.count()) === 0; tries++) {
+          await page.keyboard.press("Meta+Shift+O");
+          await page.waitForTimeout(100);
+        }
+        await strip.getByRole("tab", { name: /^Run/, selected: true }).waitFor();
+        const view = page.getByTestId("run-view");
+        await view.getByRole("heading", { name: "This session has no run" }).waitFor();
+        await page.waitForFunction(() => document.querySelector('[data-testid="run-limits"]').textContent.includes("8"));
+        const layout = await layoutOf(view);
+        await shot(page, "none");
+        const checks = {
+          "it says what a run is and offers both ways to start one": (await view.getByRole("button", { name: "Plan a run", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Choose file", exact: true }).count()) === 1 && (await view.getByText("terminalx runs create --from plan.json", { exact: true }).count()) === 1,
+          "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass",
+          "it says when to split and when not to": (await view.getByRole("list").getByRole("listitem").count()) === 4,
+          "before the Run view is opened the session has no Run strip and no run pill": plain,
+          "the title bar has no run pill with no run": (await page.getByTestId("run-pill").count()) === 0,
+          "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
+        };
+        await view.getByRole("button", { name: "Plan a run", exact: true }).click();
+        await view.waitFor({ state: "detached" });
+        const calls = await page.evaluate(() => window.__RUNS__.calls);
+        checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.count()) === 0;
+        // The lead stores a plan: the Run tab says so without the view being open.
+        await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { id: "run-2", lead: { sessionId: "local-s1" }, projectPath: "/repos/p0", goal: "A new plan", state: "awaitingApproval", budget: {}, workerMode: "bypassPermissions", created: new Date().toISOString(), modified: new Date().toISOString(), pieces: [] }; announce(); });
+        await strip.getByRole("status", { name: "A plan waits for your approval" }).waitFor();
+        checks["a plan the lead stores is flagged on the Run tab at once"] = true;
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`no run, ${at}`, checks, { layout, errors, calls });
+        await page.close();
+      }
+
+      // Settings → Orchestrator and a repository's own answers (design 18.05, as far as this ticket goes).
       {
         const { page, errors } = await start("none");
         await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -668,558 +751,117 @@ async function runLimits() {
         const nav = settings.getByRole("navigation", { name: "Settings sections" });
         await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
         const tab = settings.getByTestId("orchestrator-settings");
-        await page.waitForFunction(() => document.querySelector('input[aria-label="Budget per run, subscription"]')?.disabled === false);
+        await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Ask before a run starts"]')?.disabled === false);
+        // The routing table names each tier by the model it runs on, once that is read.
+        const routing = tab.getByRole("table", { name: "Routing table" });
+        const cell = (name) => tab.getByRole("combobox", { name, exact: true });
+        const chosen = (name) => cell(name).evaluate((select) => select.selectedOptions[0]?.textContent);
+        await page.waitForFunction(() => document.querySelector('select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
+        // The menu's rows fade between colours: let the one just chosen finish.
         await page.waitForTimeout(300);
         await shot(page, "settings");
-        const value = (name) => tab.getByRole("spinbutton", { name, exact: true }).inputValue();
+        const table = {};
+        for (const kind of ["search", "logs", "scoped-code", "review", "code", "refactor", "research", "verify"]) {
+          table[kind] = [await chosen(`Claude Code model for ${kind}`), await chosen(`Claude Code effort for ${kind}`), await chosen(`Codex model for ${kind}`), await chosen(`Codex effort for ${kind}`)].join();
+        }
+        const routingLayout = await layoutOf(tab.getByTestId("routing-table"));
         const checks = {
-          "the rows show the stored limits": (await value("Workers at once, per run")) === "4" && (await value("Workers at once, whole app")) === "8" && (await value("Budget per run, API key")) === "15" && (await value("Budget per run, subscription")) === "25" && (await value("Pause when a window passes")) === "85" && (await value("Mark a worker stalled after")) === "10",
-          "a budget and stalls group says what each limit does": (await tab.textContent()).includes("Budget and stalls") && (await tab.textContent()).includes("Sessions you start by hand are not counted."),
-          // PRO-362: two cards side by side, each with its new row.
-          "the Runs and Budget and stalls cards sit side by side": await tab.evaluate((node) => {
-            const [runs, budget] = ["Runs", "Budget and stalls"].map((name) => node.querySelector(`[role=group][aria-label="${name}"]`)?.getBoundingClientRect());
-            return !!runs && !!budget && Math.abs(runs.top - budget.top) < 1 && runs.right <= budget.left;
-          }),
-          "tries per piece and the effort ceiling show their stored values": (await value("Tries per piece")) === "3" && (await tab.getByRole("combobox", { name: "Raise effort no higher than" }).inputValue()) === "high",
-          "nothing in the cards scrolls sideways, leaves them, overlaps or is too small": tidy(await layoutOf(tab)),
+          "the page states the three limits with their stored values": (await tab.getByRole("switch", { name: "Ask before a run starts" }).getAttribute("aria-checked")) === "true" && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "8" && (await tab.getByRole("combobox", { name: "Workers run in" }).inputValue()) === "bypassPermissions",
+          "the page says how results are checked, and over how many changed lines a verifier reads one": (await tab.getByRole("spinbutton", { name: "Changed lines a result is accepted at without a verifier, at most" }).inputValue()) === "400" && (await tab.textContent()).includes("None of that uses a model."),
+          "the mode's row says what stays blocked in every mode": (await tab.getByText("Push, merge and deploy stay blocked by deny rules in every mode.", { exact: false }).count()) === 1,
+          "the routing table has a row for each kind and a column for each agent": (await routing.locator("[role=row][data-kind]").count()) === 8 && (await routing.getByRole("columnheader", { name: "Claude Code workers" }).count()) === 1 && (await routing.getByRole("columnheader", { name: "Codex workers" }).count()) === 1,
+          "each kind starts on its tier's model and effort, the same tiers for both agents": table.search === "Haiku 5.5,Default,GPT-6 Luna,Default" && table.logs === table.search
+            && table["scoped-code"] === "Sonnet 5.5,Medium,GPT-6.1 Terra,Medium" && table.review === table["scoped-code"] && table.verify === table["scoped-code"]
+            && table.code === "Opus 5.5,Medium,GPT-6.1 Sol,Medium" && table.refactor === "Fable 5.2,Medium,GPT-6 Astra,Medium" && table.research === table.refactor,
+          "the table says rows name tiers, and offers no reset while nothing is changed": (await tab.getByText("Rows name a tier, so a new release of a model takes its place.", { exact: false }).count()) === 1 && (await tab.getByRole("button", { name: "Reset to defaults", exact: true }).isDisabled()),
+          "the routing table fits its page: nothing scrolls sideways, leaves it or overlaps": !routingLayout.scrolls && routingLayout.outside === 0 && !routingLayout.overlaps && routingLayout.smallest >= 10.5,
         };
-        await tab.getByRole("spinbutton", { name: "Budget per run, subscription", exact: true }).fill("30");
-        await tab.getByRole("spinbutton", { name: "Budget per run, subscription", exact: true }).press("Enter");
-        await tab.getByRole("spinbutton", { name: "Pause when a window passes", exact: true }).fill("90");
-        await tab.getByRole("spinbutton", { name: "Pause when a window passes", exact: true }).press("Enter");
-        await tab.getByRole("spinbutton", { name: "Workers at once, per run", exact: true }).fill("0");
-        await tab.getByRole("spinbutton", { name: "Workers at once, per run", exact: true }).press("Enter");
-        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 2);
-        await page.waitForTimeout(100);
-        const calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
-        checks["each changed limit is saved by itself, and a limit out of range is not"] = JSON.stringify(calls) === JSON.stringify([{ budgetPoints: 30 }, { windowCeiling: 90 }]);
-        // A repository's own budget.
+        await tab.getByRole("switch", { name: "Ask before a run starts" }).click();
+        await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).fill("12");
+        await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).press("Enter");
+        await tab.getByRole("combobox", { name: "Workers run in" }).selectOption("acceptEdits");
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 3);
+        // A limit that is not one is not saved.
+        await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).fill("900");
+        await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).press("Enter");
+        let calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
+        checks["each control saves its own setting, and a limit out of range is not saved"] = JSON.stringify(calls) === JSON.stringify([{ requireApproval: false }, { pieceLimit: 12 }, { workerMode: "acceptEdits" }]) && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "12";
+        // A repository answers for itself, one setting at a time, and can follow the app again.
         await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
         await nav.getByRole("button", { name: "local-0", exact: true }).click();
         const own = settings.getByTestId("repository-orchestrator-settings");
         await own.waitFor();
-        checks["a repository's budget rows show the defaults they follow"] = (await own.getByRole("spinbutton", { name: "Budget per run, subscription in local-0" }).getAttribute("placeholder")) === "30";
-        await own.scrollIntoViewIfNeeded();
+        const defaults = await own.textContent();
+        await own.getByRole("radio", { name: "On", exact: true }).click();
+        await own.getByRole("combobox", { name: "Workers of local-0 run in" }).selectOption("manual");
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 5);
+        await own.getByRole("radio", { name: /^Default/ }).click();
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 6);
         await shot(page, "settings-repository");
+        calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(3));
+        checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton", { name: /^Pieces per run/ }).getAttribute("placeholder")) === "12";
+        checks["a repository saves its own answers by its path, and null follows the app again"] = JSON.stringify(calls) === JSON.stringify([{ project: "/repos/p0", requireApproval: true }, { project: "/repos/p0", workerMode: "manual" }, { project: "/repos/p0", requireApproval: null }]);
+        // The repository's routing rows follow the app until it names a tier of its own.
+        const ownCell = (name) => own.getByRole("combobox", { name, exact: true });
+        const follows = await ownCell("Claude Code model for code").evaluate((select) => select.selectedOptions[0]?.textContent);
+        await ownCell("Claude Code model for code").selectOption("top");
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 7);
+        await own.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
+        const ownLayout = await layoutOf(own.getByTestId("routing-table"));
+        checks["a repository's routing table fits its page"] = !ownLayout.scrolls && ownLayout.outside === 0 && !ownLayout.overlaps;
+        await shot(page, "settings-repository-routing");
+        await ownCell("Claude Code model for code").selectOption("");
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 8);
+        checks["a repository's routing row shows the tier it follows, saves its own by path, and null follows again"] = follows === "Default (Opus 5.5)"
+          && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(6))) === JSON.stringify([{ project: "/repos/p0", routing: { code: { claude: { tier: "top", effort: "medium" } } } }, { project: "/repos/p0", routing: { code: { claude: null } } }]);
+        // Back in the app's own table: one cell saved for one agent, and Reset puts it back.
+        await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('[data-testid="orchestrator-settings"] select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
+        await cell("Codex model for code").selectOption("mid");
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 9);
+        const moved = [await chosen("Codex model for code"), await chosen("Claude Code model for code")].join();
+        await routing.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
+        await shot(page, "settings-routing-changed");
+        await tab.getByRole("button", { name: "Reset to defaults", exact: true }).click();
+        await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 10);
+        checks["a cell of the app's table saves that agent's column alone, and Reset to defaults puts every row back"] = moved === "GPT-6.1 Terra,Opus 5.5" && (await chosen("Codex model for code")) === "GPT-6.1 Sol"
+          && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(8))) === JSON.stringify([{ routing: { code: { codex: { tier: "mid", effort: "medium" } } } }, { resetRouting: true }]);
         const layout = await layoutOf(settings.locator("section").first());
         checks["nothing scrolls sideways or overlaps"] = !layout.scrolls && !layout.overlaps;
-        // PRO-335: No limit for the dollar budget, and the window level off, app-wide.
-        await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
-        await tab.getByRole("switch", { name: "Budget per run, API key: No limit" }).click();
-        await tab.getByRole("switch", { name: "Pause when a window passes: Off" }).click();
-        await tab.getByText("Off: a run can use the whole window").waitFor();
-        await tab.getByRole("switch", { name: "Budget per run, API key: No limit" }).scrollIntoViewIfNeeded();
-        await shot(page, "settings-no-limit");
-        const noLimit = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(-2));
-        checks["No limit and Off are saved as none"] = JSON.stringify(noLimit) === JSON.stringify([{ budgetDollars: "none" }, { windowCeiling: "none" }]);
-        checks["the dollar field gives way to No limit; the points budget keeps its own"] = (await tab.getByRole("spinbutton", { name: "Budget per run, API key", exact: true }).count()) === 0 && (await value("Budget per run, subscription")) === "30";
-        const after = await layoutOf(tab);
-        checks["the switches do not overlap the fields"] = !after.scrolls && !after.overlaps;
         checks["no browser errors"] = errors.length === 0;
-        failed += report(`settings, ${at}`, checks, { errors, calls, after });
+        failed += report(`settings, ${at}`, checks, { errors, calls });
+        await page.close();
+      }
+
+      // Behind the switch: off, nothing of it shows; turned on in Settings → Experimental, it appears at once.
+      {
+        const { page, errors } = await start("approval", false);
+        const checks = { "with the switch off a session has no Run tab": (await page.getByTestId("run-strip").count()) === 0 };
+        await page.getByRole("button", { name: "Settings", exact: true }).click();
+        const settings = page.getByRole("main", { name: "Settings", exact: true });
+        const nav = settings.getByRole("navigation", { name: "Settings sections" });
+        await nav.waitFor();
+        checks["and Settings lists no Orchestrator"] = (await nav.getByRole("button", { name: "Orchestrator", exact: true }).count()) === 0;
+        await settings.getByRole("combobox", { name: "Search settings" }).fill("orchestrator");
+        checks["nor finds it by search"] = (await settings.getByRole("option", { name: /^Orchestrator/ }).count()) === 0;
+        await settings.getByRole("combobox", { name: "Search settings" }).fill("");
+        await nav.getByRole("button", { name: "Experimental", exact: true }).click();
+        const toggle = settings.getByRole("switch", { name: "Orchestration runs" });
+        await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Orchestration runs"]')?.disabled === false);
+        await page.waitForTimeout(300);
+        checks["the switch is off until turned on"] = (await toggle.getAttribute("aria-checked")) === "false";
+        await shot(page, "experimental");
+        await toggle.click();
+        await nav.getByRole("button", { name: "Orchestrator", exact: true }).waitFor();
+        checks["turned on, Orchestrator is listed at once"] = (await toggle.getAttribute("aria-checked")) === "true";
+        await page.keyboard.press("Escape");
+        await page.getByTestId("run-strip").waitFor();
+        checks["and the session has its Run tab, flagged for the plan that waits"] = (await page.getByTestId("run-strip").getByRole("status", { name: "A plan waits for your approval" }).count()) === 1;
+        checks["no browser errors"] = errors.length === 0;
+        failed += report(`behind the switch, ${at}`, checks, { errors });
         await page.close();
       }
     }
-  }
-  return failed;
-}
-
-const server = await serve();
-const browser = await launch();
-let failed = 0;
-// 1280 with the piece open is where titles were squeezed (PRO-361): the panel gives way first.
-const sizes = [{ width: 1440, height: 900 }, { width: 1280, height: 800 }, { width: 1000, height: 700 }];
-try {
-  // orchestration's own part, then run-limits' (two checks until 2026-11): each runs even when the other throws,
-  // and what threw is printed and fails this check.
-  try {
-    for (const mode of ["dark", "light"]) {
-      for (const size of sizes) {
-        const at = `${mode}, ${size.width}px`;
-        const start = async (scene, enabled = true) => {
-          const page = await open(browser, server.url, { cloud: false, localProjects: 1, localSession: true }, size, { extra: `(${setup})(${JSON.stringify({ mode, scene, enabled })});` });
-          const errors = [];
-          page.on("pageerror", (error) => errors.push(error.message));
-          await openConversation(page, GOAL);
-          return { page, errors };
-        };
-        const shot = async (page, name) => { if (shots) await page.screenshot({ path: join(shots, `orchestration-${name}-${mode}-${size.width}.png`) }); };
-
-        // A plan waiting for approval (design 18.02).
-        {
-          const { page, errors } = await start("approval");
-          const strip = page.getByTestId("run-strip");
-          await strip.waitFor();
-          const flagged = await strip.getByRole("status", { name: "A plan waits for your approval" }).count();
-          const chatFirst = (await page.getByTestId("run-view").count()) === 0;
-          // The title bar names the keys that open the Run view (18.01), and they open it (PRO-362): ⇧⌘O, as ⇧⌘R is Automations.
-          const hint = await page.getByTestId("run-view-hint").textContent();
-          await page.keyboard.press("Meta+Shift+O");
-          const view = page.getByTestId("run-view");
-          await view.getByRole("table", { name: "Plan" }).waitFor();
-          const opened = (await view.count()) === 1;
-          const layout = await layoutOf(view);
-          const detail = page.getByTestId("piece-detail");
-          const pick = (id) => view.locator(`[data-piece="${id}"] button`).first().click();
-          await pick("session");
-          const brief = await detail.textContent();
-          await shot(page, "approval");
-          await pick("docs");
-          const untrusted = await detail.textContent();
-          const warned = await view.locator('[data-piece="docs"]').getByRole("note").getAttribute("aria-label");
-          await pick("session");
-          const approvalColumn = await columnOf(page);
-          const card = await view.getByRole("region", { name: "Plan summary" }).evaluate((node) => ({ height: Math.round(node.getBoundingClientRect().height), rows: node.children.length }));
-          const chips = await view.getByTestId("plan-limits").evaluate((node) => {
-            const budget = node.querySelector("button[aria-expanded]").getBoundingClientRect();
-            const workers = node.querySelector("label").getBoundingClientRect();
-            const input = node.querySelector("input");
-            return { same: Math.abs(budget.height - workers.height) < 1, narrow: workers.width < 48, arrows: getComputedStyle(input, "::-webkit-inner-spin-button").appearance !== "none" && getComputedStyle(input).appearance !== "textfield" };
-          });
-          const commandsWhole = !(await breaksMidWord(detail.getByTestId("done-checks").locator("code")));
-          const checks = {
-            // PRO-383 (18.02): two rows, the budget, At once and the mode as boxed values; the panel is the right column.
-            "the plan card is two rows, about 90px tall at 1440": card.rows === 2 && (size.width < 1440 || card.height <= 100),
-            "at 1440 the plan's titles of the design's length fit one line beside the open brief": size.width < 1440 || layout.rows.slice(0, 5).every((row) => row.height <= 56),
-            "At once is a boxed value beside Budget, with no stepper arrows": chips.same && chips.narrow && !chips.arrows,
-            "the brief's done-when commands wrap only between words and after a slash": commandsWhole,
-            "the open brief is the window's full-height 420px right column where there is room, labelled brief": (size.width < 1200 ? !approvalColumn.inColumn : inColumn(approvalColumn)) && approvalColumn.heading.endsWith("brief"),
-            "the session opens on its chat, and the Run tab says a plan waits": chatFirst && flagged === 1,
-            "the title bar shows ⇧⌘O run view, and ⇧⌘O opens the Run view": hint === "⇧⌘Orun view" && opened,
-            // Model and effort are one pill (18.02): the tier's dot, the model, the effort.
-            "each piece's model and effort is one pill, marked with its tier's dot": (await view.getByTestId("piece-model-pill").count()) === 6 && (await view.locator('[data-piece="store"] [data-testid="piece-model-pill"] .rounded-full').count()) === 1,
-            "the plan is headed as waiting, with its goal and that nothing starts yet": (await view.getByTestId("run-state").textContent()) === "Plan waiting for you" && (await view.getByRole("heading", { level: 1 }).textContent()) === GOAL && (await view.getByText("The lead split this into 6 pieces. Nothing starts until you approve.").count()) === 1,
-            "Discard, Edit plan and Approve and start are offered": (await view.getByRole("button", { name: "Discard", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Edit plan", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Approve and start", exact: true }).count()) === 1,
-            "the estimate sums the pieces that carry one and says how many do": (await view.getByTestId("run-estimate").textContent()) === "$3.15–5.15" && (await view.getByText("API-equivalent, for 5 of 6 pieces").count()) === 1,
-            "the budget, the workers' mode and that no file is shared are stated": (await view.getByTestId("plan-limits").textContent()).startsWith("Budget25 pointsAt once") && (await view.getByTestId("plan-limits").textContent()).endsWith("Workers run inBypassNo shared files"),
-            // A long title wraps rather than being cut short (PRO-361): a row is as tall as its title needs, never more than three lines.
-            "six pieces, each on one row, with what it waits on": layout.rows.length === 6 && layout.rows.every((row) => row.height <= 112) && (size.width < 1200 || layout.rows[5].text.includes("3, 4, 5")),
-            "a piece that reads outside text says it will run in bypass, in its row and in its brief": layout.rows[5].text.includes("outside text · bypass") && warned === "Reads text from outside the repository, and will run in bypass" && untrusted.includes("reads text from outside the repository") && untrusted.includes("It will run in bypass: nothing asks before it acts on what it reads."),
-            "a piece's brief states its goal, scope, done-check, limits and report": ["GoalEvery settings read in the session code goes through the typed store.", "WhyPiece 6 documents the keys", "src-tauri/src/session.rs", "Out of scope: the store itself, pipeline and CLI code.", "The 17 call sites listed by piece 1 for these files.", "docs/SETTINGS.md", "cargo t session", "! rg -q 'settings::get' src-tauri/src/session.rs src-tauri/src/session_ops.rs", "reads no text from outside the repository", "Push, merge and deploy are denied at launch, not left to the brief.", "terminalx-report"].every((said) => brief.includes(said)),
-            "a piece checked by review alone says so, with its reason and its vote": untrusted.includes("Review only, no command: Prose: nothing to run.") && untrusted.includes("No key's meaning changed in the rewrite. · vote, 2 of 3"),
-            "the footnote says what bypass means and what stays blocked": (await view.getByText("In bypass, workers are not asked before edits or commands. Push, merge and deploy stay blocked by deny rules.").count()) === 1,
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-            "no text is smaller than 10.5px": layout.smallest >= 10.5,
-          };
-          // Edit: a model changed where it is read is saved as the plan, with every other piece as it was.
-          await view.getByRole("button", { name: "Model and effort of Typed store module and migration", exact: true }).click();
-          await page.getByRole("group", { name: "Model of Typed store module and migration", exact: true }).getByRole("menuitemradio", { name: "Sonnet 5.5", exact: true }).click();
-          await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "updatePlan"));
-          let calls = await page.evaluate(() => window.__RUNS__.calls);
-          checks["changing a piece's model saves the whole plan with that one change"] = calls[0].args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && calls[0].args.plan.pieces.length === 6 && calls[0].args.plan.pieces[1].model === "sonnet" && calls[0].args.plan.pieces[1].effort === "medium" && calls[0].args.plan.pieces[2].goal === "Every settings read in the session code goes through the typed store.";
-          // A refused edit names its piece and changes nothing.
-          await pick("cli");
-          await detail.getByRole("button", { name: "Edit brief", exact: true }).click();
-          const form = detail.getByRole("form", { name: "Edit the brief of Move CLI code to the store" });
-          await form.getByLabel("Done when: commands").fill("");
-          await form.getByRole("button", { name: "Save brief", exact: true }).click();
-          await view.getByRole("alert").waitFor();
-          checks["an edit the engine refuses is shown with its reason, and the brief stays open"] = (await view.getByRole("alert").textContent()).includes("Piece cli has no `command` done-check.") && (await form.count()) === 1;
-          await shot(page, "approval-edit");
-          await form.getByLabel("Done when: commands").fill("cargo t control\ncargo clippy -- -D warnings");
-          await form.getByLabel("Done when: review points").fill("No public name changed.");
-          await form.getByRole("button", { name: "Save brief", exact: true }).click();
-          await form.waitFor({ state: "detached" });
-          checks["a saved brief is the piece's new brief: its commands and its review point, each by its kind"] = JSON.stringify(await detail.getByTestId("done-checks").getByRole("listitem").allTextContents()) === JSON.stringify(["cargo t control", "cargo clippy -- -D warnings", "No public name changed."]) && (await detail.getByTestId("done-checks").getByLabel("Command").count()) === 2 && (await detail.getByTestId("done-checks").getByLabel("Review").count()) === 1;
-          // Remove a piece: the others no longer wait on it.
-          await detail.getByRole("button", { name: "Remove piece", exact: true }).click();
-          await page.waitForFunction(() => document.querySelectorAll('[data-testid="run-view"] [role=row][data-piece]').length === 5);
-          calls = await page.evaluate(() => window.__RUNS__.calls);
-          checks["removing a piece saves the plan without it and without the dependencies on it"] = calls.at(-1).args.plan.pieces.map((piece) => piece.id).join() === "map,store,session,pipeline,docs" && calls.at(-1).args.plan.pieces.at(-1).dependsOn.join() === "session,pipeline";
-          // Approve: the first piece's worker starts, and the view becomes the run's.
-          await view.getByRole("button", { name: "Approve and start", exact: true }).click();
-          await view.getByRole("table", { name: "Pieces" }).waitFor();
-          const after = await layoutOf(view);
-          calls = await page.evaluate(() => window.__RUNS__.calls);
-          checks["Approve and start approves this run once, and the pieces show their states"] = calls.filter((call) => call.name === "approve").length === 1 && calls.at(-1).args.id === "01a1cabc-2fa5-7380-8770-af2097ca9149" && (await view.getByTestId("run-state").textContent()) === "Run" && after.rows[0].state === "running" && after.rows[1].state === "queued";
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`plan waiting, ${at}`, checks, { layout, errors, calls });
-          await page.close();
-        }
-
-        // A planned run in a project that asks for no approval (PRO-365): the person starts it here.
-        {
-          const { page, errors } = await start("planned");
-          await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
-          const view = page.getByTestId("run-view");
-          await view.getByRole("table", { name: "Plan" }).waitFor();
-          const layout = await layoutOf(view);
-          const button = (name) => view.getByRole("button", { name, exact: true });
-          const startRun = button("Start run");
-          await shot(page, "planned");
-          const checks = {
-            "the plan is ready to start, and says the person or the lead starts it": (await view.getByTestId("run-state").textContent()) === "Ready to start" && (await view.getByTestId("run-subtitle").textContent()) === "The lead split this into 6 pieces. This repository starts runs without asking: start it here, or the lead starts it with terminalx runs start.",
-            "Edit plan, Stop run and Start run are offered, and no approval": (await button("Edit plan").count()) === 1 && (await button("Stop run").count()) === 1 && (await startRun.count()) === 1 && (await button("Approve and start").count()) === 0 && (await button("Discard").count()) === 0,
-            "Start run is the accent button, as Approve and start is": ((await startRun.getAttribute("class")) ?? "").includes("bg-accent"),
-            "the window warning shows, and Start run is still enabled": (await view.getByRole("region", { name: "Plan summary" }).getByRole("alert").textContent()).includes("This run may use up to 25 points, but it stops at 85%") && !(await startRun.isDisabled()),
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-          };
-          // Lower the points, then start: the limit is saved before the start, and the start is the person's.
-          // The run's own limits open from the plan card's Budget chip (PRO-383).
-          await view.getByTestId("plan-limits").getByRole("button", { name: /^Budget: / }).click();
-          const points = view.getByRole("spinbutton", { name: "Points of a window this run may use" });
-          await points.fill("10");
-          await points.press("Enter");
-          await page.waitForFunction(() => window.__RUNS__.calls.some((call) => call.name === "setLimits"));
-          await startRun.click();
-          await view.getByRole("table", { name: "Pieces" }).waitFor();
-          const calls = await page.evaluate(() => window.__RUNS__.calls);
-          await shot(page, "planned-started");
-          checks["the changed points are saved, then the run is started once"] = JSON.stringify(calls.map((call) => call.name)) === JSON.stringify(["setLimits", "start"]) && calls[0].args.limits.points === 10;
-          checks["the started run says the person started it"] = (await view.getByTestId("run-subtitle").textContent()) === "6 pieces · started by you just now" && (await view.locator('[data-piece="map"]').getAttribute("data-piece-state")) === "running";
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`planned run, ${at}`, checks, { layout, errors, calls });
-          await page.close();
-        }
-
-        // A run with workers (design 18.01, as far as this ticket goes).
-        {
-          const { page, errors } = await start("running");
-          await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
-          const view = page.getByTestId("run-view");
-          await view.getByRole("table", { name: "Pieces" }).waitFor();
-          await view.locator('[data-piece="store"] button').first().click();
-          const layout = await layoutOf(view);
-          const panel = page.getByTestId("piece-detail");
-          const detail = await panel.textContent();
-          const column = await columnOf(page);
-          const panelLayout = await layoutOf(panel);
-          const pathsWhole = !(await breaksMidWord(panel.getByTestId("piece-changed").locator("li > span:first-child")));
-          const pathLines = await panel.getByTestId("piece-changed").getByRole("listitem").evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().height)));
-          const workersLine = await view.getByTestId("run-workers").evaluate((node) => Math.round(node.getBoundingClientRect().height));
-          await shot(page, "running");
-          const states = layout.rows.map((row) => row.state).join();
-          const gatesOf = () => panel.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join());
-          const rowReport = (id) => view.locator(`[data-piece="${id}"]`).getByTestId("piece-report").textContent();
-          // A done piece: every gate it went through, the done-check as TerminalX ran it, and the verifier that read it.
-          const accepted = { gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), review: await panel.getByTestId("piece-review").textContent(), mark: await panel.getByTestId("piece-check-passed").textContent() };
-          // A piece being checked: what it waits on, and the verifier reading it.
-          await view.locator('[data-piece="pipeline"] button').first().click();
-          await panel.getByTestId("piece-review").waitFor();
-          const verifying = { gates: await gatesOf(), review: await panel.getByTestId("piece-review").textContent(), text: await panel.textContent(), layout: await layoutOf(view) };
-          await shot(page, "verifying");
-          // A piece on its second try: why the first went back.
-          await view.locator('[data-piece="cli"] button').first().click();
-          await panel.getByTestId("done-check").waitFor();
-          const retried = { title: await panel.textContent(), gates: await gatesOf(), check: await panel.getByTestId("done-check").textContent(), layout: await layoutOf(view) };
-          await shot(page, "retry");
-          await view.locator('[data-piece="store"] button').first().click();
-          const checks = {
-            "the Run tab carries no waiting mark": (await page.getByTestId("run-strip").getByRole("status").count()) === 0,
-            "the run says how many pieces are done and that the plan was approved": (await view.getByTestId("run-done").textContent()) === "2" && (await view.getByRole("region", { name: "Run summary" }).textContent()).includes("of 6 done") && (await view.getByText("6 pieces · started 14m ago · approved by you", { exact: true }).count()) === 1,
-            "each piece shows where it stands: one being checked is verifying, not done": states === "done,done,running,verifying,running,queued",
-            "a row says what a piece being checked waits on, and that a verifier passed one": size.width < 1200 || ((await rowReport("pipeline")) === "Waiting on the verifier" && (await rowReport("store")) === "Store added, 14 tests pass. Unknown keys are kept on save., verifier passed"),
-            "a done piece shows the gates it passed and its done-check as it ran": accepted.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:passed" && accepted.check === "Done-checkpassed · 38scargo t store::settings" && accepted.mark === "· checked and read",
-            "the verifier that read it shows why it was asked, its verdict and what it used": ["Verifierpassed · 6.4k tokens", "The plan asks for a review of this piece.", "Sonnet 5.5 Medium", "Pass"].every((said) => accepted.review.includes(said)),
-            "a piece being checked shows its gates passed and its verifier reading": verifying.gates === "report:passed,scope:passed,branch:passed,commands:passed,review:running" && ["Verifierreading", "The change touches a security area: authorization.", "Reading"].every((said) => verifying.review.includes(said)) && verifying.text.includes("Waiting on the verifier. Nothing that depends on it starts until it has passed."),
-            "a piece on its second try shows the check that sent the first back": retried.title.includes("Checks of try 1") && retried.gates === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && retried.check.includes("Done-checkfailed · exit 101cargo t control") && retried.check.includes("test result: FAILED. 10 passed; 2 failed"),
-            "the checks fit their panel at every size": [verifying.layout, retried.layout].every((seen) => !seen.scrolls && seen.outside === 0 && !seen.overlaps && seen.smallest >= 10.5),
-            "a done piece shows its result, its branch and a way to its worker": detail.includes("ResultAdded a typed settings store") && detail.includes("raccoon/store-piece · 4c1e9a7") && (await page.getByTestId("piece-detail").getByRole("button", { name: "Open worker", exact: true }).count()) === 1,
-            "a done piece shows every section of its worker's report, saying so where one is empty (18.01)": ["Evidencecargo t store::settings exit 0 · 14 passed", "Changedsrc-tauri/src/store/settings/mod.rs+212", "src-tauri/src/store/mod.rs+3−1", "Not doneNothing", "Could not readNothing", "UncertainWhether the Windows settings path"].every((said) => detail.includes(said)),
-            "its footer offers the worker and the diff, and says what it cost and used": (await panel.getByRole("button", { name: "View diff", exact: true }).count()) === 1 && (await panel.getByTestId("piece-detail-cost").textContent()) === "$1.82 · 41k out",
-            "only the done pieces' segments are coloured": (await view.getByTestId("run-pieces").locator("[data-segment]").evaluateAll((items) => items.map((item) => item.dataset.segment).join())) === "done,done,open,open,open,open",
-            "Merge is shown and stays disabled until every piece is done": (await view.getByTestId("run-merge").isDisabled()) && (await view.getByTestId("run-merge").getAttribute("title")) === "Merge unlocks when every piece is done.",
-            // PRO-383 (18.01): the subscription's points lead, the window under them, the dollars last.
-            "the budget leads with the subscription's points, then the window, then the dollars, and the lead's model and effort beside it": (await view.getByTestId("run-budget").textContent()).startsWith("Budgetsubscription 9 of 25 points") && (await view.getByTestId("run-window").textContent()).startsWith("5h window at 41% · resets") && (await view.getByTestId("run-spend").textContent()) === "$4.13 API-equivalent, not billed" && (await view.getByTestId("run-lead").textContent()).includes("Fable 5.2 Medium"),
-            "the open piece is the window's full-height 420px right column where there is room, its header the title alone": (size.width < 1200 ? !column.inColumn : inColumn(column)) && column.heading === "2Typed store module and migration",
-            // The sample's sixth title is two lines' worth at any width the design has.
-            "at 1440 every piece title fits one line and the Lead card's workers line is one line": size.width < 1440 || (layout.rows.slice(0, 5).every((row) => row.height <= 56) && workersLine <= 18),
-            "changed files keep each name whole, each on one line where it fits": pathsWhole && (size.width < 1200 || pathLines.every((height) => height <= 20)),
-            "the panel itself does not scroll sideways or overlap": !panelLayout.scrolls && !panelLayout.overlaps,
-            "no piece title is cut short": (await view.getByTestId("piece-title").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth + 1 && !getComputedStyle(item).textOverflow.includes("ellipsis")))),
-            "the plan can no longer be edited or approved": (await view.getByRole("button", { name: "Approve and start" }).count()) === 0 && (await view.getByRole("button", { name: "Edit plan" }).count()) === 0 && (await view.getByRole("combobox").count()) === 0,
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-          };
-          // A worker's turn ends: the runtime announces the run, and the row follows without a reload.
-          await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { ...state.run, pieces: state.run.pieces.map((piece) => (piece.id === "session" ? { ...piece, state: "done", note: "17 call sites moved." } : piece)) }; announce(); });
-          await page.waitForFunction(() => document.querySelector('[data-piece="session"]').dataset.pieceState === "done");
-          checks["a piece follows its worker as the runtime announces it"] = (await view.getByTestId("run-done").textContent()) === "3";
-          await view.getByRole("button", { name: "Stop run", exact: true }).click();
-          await page.waitForFunction(() => document.querySelector('[data-testid="run-view"]').dataset.runState === "stopped");
-          const stopped = await layoutOf(view);
-          checks["Stop run stops this run: what was done stays done, the rest is stopped, and it says who stopped it"] = stopped.rows.map((row) => row.state).join() === "done,done,done,stopped,stopped,stopped" && (await view.getByRole("status").filter({ hasText: "A person stopped the run." }).count()) === 1 && (await view.getByRole("button", { name: "Stop run" }).count()) === 0;
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`run with workers, ${at}`, checks, { layout, errors });
-          await page.close();
-        }
-
-        // A piece blocked after three tries (design 18.03): the tries, what each cost, and what the check printed.
-        {
-          const { page, errors } = await start("blocked");
-          await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
-          const view = page.getByTestId("run-view");
-          await view.getByRole("table", { name: "Pieces" }).waitFor();
-          await view.locator('[data-piece="cli"] button').first().click();
-          const detail = page.getByTestId("piece-detail");
-          const tries = detail.getByRole("list", { name: "Tries" }).getByRole("listitem");
-          await tries.nth(2).waitFor();
-          const layout = await layoutOf(view);
-          await shot(page, "blocked");
-          const said = await tries.allTextContents();
-          const wide = size.width >= 1200;
-          const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
-          const cli = await cells("cli");
-          const docsRow = view.locator('[data-piece="docs"]');
-          const blockedColumn = await columnOf(page);
-          const checks = {
-            // PRO-383 (18.03): a piece held by a blocked one waits for that one alone, and says Waiting with the dashed circle.
-            "the piece held by the blocked one is Waiting and waits for it alone, never a done piece": (await docsRow.getAttribute("data-shown-state")) === "waiting" && (await cells("docs"))[2] === "Waiting" && (!wide || (await cells("docs"))[5] === "Waits for 5"),
-            "a queued piece's model has its tier's dot": (await docsRow.getByTestId("model-dot").count()) === 1,
-            "the blocked piece's panel is the right column where there is room": size.width < 1200 ? !blockedColumn.inColumn : inColumn(blockedColumn),
-            "one line says which piece holds the run up, by number, and the run has not failed (18.03)": (await view.getByTestId("run-state").textContent()) === "Run" && (await view.getByTestId("run-subtitle").textContent()) === "Piece 5 is blocked. Piece 6 waits for it; nothing else is running." && (await view.getByTestId("run-needs").count()) === 0 && !(await view.textContent()).includes("cli is blocked"),
-            "Stop run is offered, and Merge waits for every piece": (await view.getByRole("button", { name: "Stop run", exact: true }).count()) === 1 && (await view.getByTestId("run-merge").isDisabled()),
-            "blocked is red": (await view.locator('[data-piece="cli"] [role=cell]').nth(2).locator("span").first().evaluate((node) => node.className)).includes("text-destructive"),
-            "the panel shows its worker's last report and that the fix is outside its files": (await detail.textContent()).includes("Worker's last reportThe default mode now comes from the store") && (await detail.getByTestId("piece-outside").textContent()).startsWith("The fix is outside this piece's files. A worker may not edit another piece's files.src-tauri/src/store/settings/mod.rs · piece 2 owns it"),
-            "the four ways on are offered": (await detail.getByTestId("blocked-actions").getByRole("button").allTextContents()).join("|") === "Take over in lead|Widen scope and retry|Send a note to the worker|Skip piece",
-            "four pieces are done, one is blocked and one waits": layout.rows.map((row) => row.state).join() === "done,done,done,done,blocked,queued" && (await view.getByTestId("run-done").textContent()) === "4",
-            "the blocked piece's row shows the model it ended on, its three tries and what they cost": cli[1] === "Opus 5.5 Medium" && cli[2] === "Blocked" && cli[3] === "3" && cli[4] === "$3.71",
-            "a piece that needed a second try shows two, and what both cost": (await cells("pipeline")).slice(3, 5).join() === "2,$0.97",
-            "the run sums what its workers cost": (await view.getByTestId("run-spend").textContent()).startsWith("$7.42"),
-            "the piece says it used all its tries": (await detail.getByTestId("piece-tries-used").textContent()) === "· 3 of 3 tries used",
-            "each try shows its model, effort, cost and why it was made, in order": said.length === 3
-              && ["Sonnet 5.5 Medium", "$0.61", "First try", "Check failed: cargo t control"].every((text) => said[0].includes(text))
-              && ["Sonnet 5.5 High", "$0.92", "Retried with the failure text, effort raised one level"].every((text) => said[1].includes(text))
-              && ["Opus 5.5 Medium", "$2.18", "Moved up one model at one effort level lower"].every((text) => said[2].includes(text)),
-            "the failed done-check shows its command, its exit code and the end of what it printed": await (async () => { const check = await detail.getByTestId("done-check").textContent(); return check.startsWith("Done-checkfailed · exit 101cargo t control") && check.includes("test control::tests::create_reads_default_mode ... FAILED") && check.includes('left: Some("manual")  right: Some("auto")') && check.includes("control.rs:1184"); })(),
-            "the gates before the command passed, and no model was asked after it failed": (await detail.locator("[data-gate]").evaluateAll((items) => items.map((item) => `${item.dataset.gate}:${item.dataset.gateState}`).join())) === "report:passed,scope:passed,branch:passed,commands:failed,review:skipped" && (await detail.getByTestId("piece-review").count()) === 0,
-            "a piece a verifier passed says so in its row": !wide || (await view.locator('[data-piece="pipeline"]').getByTestId("piece-report").textContent()) === "12 reads moved, verifier passed",
-            "every try can be opened": (await detail.getByRole("button", { name: "Open worker", exact: true }).count()) === 3,
-            // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
-            "the table's columns are the design's, where there is room": size.width < 1440 || (await view.getByRole("table", { name: "Pieces" }).getByRole("columnheader").allTextContents()).join() === "Piece,Model,State,Tries,Cost,Report,Worker",
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-            "no text is smaller than 10.5px": layout.smallest >= 10.5,
-            "no browser errors": errors.length === 0,
-          };
-          // Skip piece: it says what goes with it, and the run goes on to its merge without them.
-          await detail.getByRole("button", { name: "Skip piece", exact: true }).click();
-          const confirm = await detail.getByRole("group", { name: "Skip piece" }).textContent();
-          await detail.getByRole("group", { name: "Skip piece" }).getByRole("button", { name: "Skip", exact: true }).click();
-          // Every other piece is done: the run goes on to its merge, where both are listed as skipped.
-          await page.waitForFunction(() => { const row = document.querySelector('[data-piece="cli"]'); return row?.dataset.pieceState === "skipped" || row?.dataset.mergeState === "skipped"; });
-          checks["Skip piece says what goes with it and leaves both out"] = confirm.includes("Skip piece 5, and piece 6 with it, which depends on it?") && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "skip").map((call) => call.args))) === JSON.stringify([{ id: "01a1cabc-2fa5-7380-8770-af2097ca9149", piece: "cli" }]) && (await view.locator('[data-piece="docs"]').getAttribute("data-merge-state")) === "skipped" && (await view.getByTestId("run-subtitle").textContent()) === "Every result is accepted. 4 branches wait to be merged into the lead's branch.";
-          failed += report(`piece blocked after three tries, ${at}`, checks, { layout, errors, said, cli });
-          await page.close();
-        }
-
-        // A merge stopped on a conflict (design 18.04): the branches in merge order, and the conflict with its three ways out.
-        {
-          const { page, errors } = await start("merging");
-          await page.getByTestId("run-strip").getByRole("tab", { name: /^Run/ }).click();
-          const view = page.getByTestId("run-view");
-          const table = view.getByRole("table", { name: "Merge" });
-          await table.waitFor();
-          await view.locator('[data-piece="cli"] button').first().click();
-          const detail = page.getByTestId("piece-detail");
-          const panel = detail.getByTestId("merge-panel");
-          await panel.waitFor();
-          const layout = await layoutOf(view);
-          await shot(page, "merge-conflict");
-          const wide = size.width >= 1200;
-          const rows = await table.locator("[role=row][data-piece]").evaluateAll((items) => items.map((item) => `${item.dataset.piece}:${item.dataset.mergeState}`).join());
-          const cells = async (id) => (await view.locator(`[data-piece="${id}"] [role=cell]`).allTextContents());
-          const cli = await cells("cli");
-          const said = await panel.textContent();
-          const mergeColumn = await columnOf(page);
-          const footer = await detail.locator("footer button").evaluateAll((items) => new Set(items.map((item) => Math.round(item.getBoundingClientRect().top))).size);
-          const excerptLines = await panel.getByTestId("conflict-excerpt").locator("pre > div").evaluateAll((items) => items.every((item) => item.getBoundingClientRect().height <= 20));
-          const checks = {
-            // PRO-383 (18.04): the full-height column, its three ways out on one row, each excerpt line whole.
-            "the conflict's panel is the right column where there is room, its three ways out on one row": size.width < 1200 ? !mergeColumn.inColumn : inColumn(mergeColumn) && footer === 1,
-            "each line of the conflict excerpt stays one line": excerptLines,
-            "the run says how far the merge is and what stopped it": (await view.getByTestId("run-state").textContent()) === "Merging" && (await view.getByTestId("run-subtitle").textContent()) === "Merging in dependency order. 3 of 5 branches are in; piece 5 conflicts.",
-            "it says where the pieces go, with what check, and that nothing is pushed": await (async () => { const strip = await view.getByTestId("merge-strip").textContent(); return strip.includes("Intosettings-typed-store") && strip.includes("Integration checkcargo t && pnpm test") && strip.includes("Nothing is pushed. No other branch is touched."); })(),
-            "a row a branch, in merge order: three in, the conflict, and the piece that waits for it": rows === "store:merged,session:merged,pipeline:merged,cli:conflict,docs:waiting",
-            // With the piece open as the 420px column, the table has every column at 1440 (PRO-383).
-            "the table's columns are the design's, where there is room": size.width < 1440 || (await table.getByRole("columnheader").allTextContents()).join() === "Branch,State,Commit,Check after merge,Note",
-            "a merged row shows its branch, its merge commit and how its check went": await (async () => { const store = await cells("store"); return store[0].includes("piece-store → settings-typed-store") && store[1] === "Merged" && (!wide || (store[2] === "4c1e9a7" && store[3] === "passed · 2m 11s")); })(),
-            "the conflict's row shows the piece's commit, that no check ran, and what it conflicts with": cli[1] === "Conflict" && (!wide || (cli[2] === "a31c55e" && cli[3] === "not run" && cli[4] === "2 files conflict with piece 3")),
-            "the piece behind it says what it waits for": !wide || (await cells("docs"))[4] === "Waits for 5",
-            "what had nothing to merge, and where the branch was left, is said under the table": (await view.getByTestId("run-footnote").textContent()) === "Piece 1 was read-only and has nothing to merge. Your branch is back at e77a120, as it was before this merge was tried.",
-            "the conflict names the piece it is with, its files and how much of each": said.includes("Conflict· with piece 3, already merged") && (await panel.getByRole("list", { name: "Conflicting files" }).getByRole("listitem").allTextContents()).join("|") === "Csrc-tauri/src/control.rs2 hunks|Csrc-tauri/src/session_ops.rs1 hunk",
-            "both sides of the first conflicting place are shown": await (async () => { const excerpt = await panel.getByTestId("conflict-excerpt").textContent(); return excerpt.startsWith("control.rs · 1184") && excerpt.includes("let mode = store.session().default_mode();") && excerpt.includes("let mode = store.cli().default_mode(project);"); })(),
-            "why it happened comes from the plan and the merges": said.includes("session_ops.rs is listed under piece 3 only, but piece 5 changed it too."),
-            "the three choices are offered, and Continue merge waits for one of them (18.04)": (await detail.getByRole("button", { name: "Send back to worker" }).count()) === 1 && (await detail.getByRole("button", { name: "Resolve in lead" }).count()) === 1 && (await detail.getByRole("button", { name: "Skip", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Continue merge" }).isDisabled()),
-            "the conflicted piece is not counted done": (await view.getByTestId("run-done").textContent()) === "5" && (await view.getByTestId("run-pieces").textContent()).includes("5 of 6 done"),
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-            "no text is smaller than 10.5px": layout.smallest >= 10.5,
-          };
-          // Skip leaves the piece out; sending it back gives it to its worker and the run is running again.
-          await detail.getByRole("button", { name: "Skip", exact: true }).click();
-          await view.locator('[data-piece="cli"][data-merge-state="skipped"]').waitFor();
-          checks["Skip asks for a merge without the piece"] = JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "merge").map((call) => call.args.skip))) === '[["cli"]]';
-          await shot(page, "merge-skipped");
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`merge stopped on a conflict, ${at}`, checks, { layout, errors, rows, cli, said });
-          await page.close();
-        }
-
-        // A session with no run (design 18.08). It looks like any other session (#1404): no Run strip and no run
-        // pill, until Go → Run View opens the page that says how to start one.
-        {
-          const { page, errors } = await start("none");
-          const strip = page.getByTestId("run-strip");
-          const plain = (await strip.count()) === 0 && (await page.getByTestId("run-pill").count()) === 0;
-          // The keys do nothing until the session's run has been read (there is none): press until they take.
-          for (let tries = 0; tries < 40 && (await strip.count()) === 0; tries++) {
-            await page.keyboard.press("Meta+Shift+O");
-            await page.waitForTimeout(100);
-          }
-          await strip.getByRole("tab", { name: /^Run/, selected: true }).waitFor();
-          const view = page.getByTestId("run-view");
-          await view.getByRole("heading", { name: "This session has no run" }).waitFor();
-          await page.waitForFunction(() => document.querySelector('[data-testid="run-limits"]').textContent.includes("8"));
-          const layout = await layoutOf(view);
-          await shot(page, "none");
-          const checks = {
-            "it says what a run is and offers both ways to start one": (await view.getByRole("button", { name: "Plan a run", exact: true }).count()) === 1 && (await view.getByRole("button", { name: "Choose file", exact: true }).count()) === 1 && (await view.getByText("terminalx runs create --from plan.json", { exact: true }).count()) === 1,
-            "it shows what this project allows, as the settings have it": (await view.getByTestId("run-limits").textContent()) === "Waits for your approvalOnPieces, at most8Workers at once4Budget, API key$15.00Budget, subscription25 pointsWorkers run inBypass",
-            "it says when to split and when not to": (await view.getByRole("list").getByRole("listitem").count()) === 4,
-            "before the Run view is opened the session has no Run strip and no run pill": plain,
-            "the title bar has no run pill with no run": (await page.getByTestId("run-pill").count()) === 0,
-            "nothing scrolls sideways, leaves the view or overlaps": !layout.scrolls && layout.outside === 0 && !layout.overlaps,
-          };
-          await view.getByRole("button", { name: "Plan a run", exact: true }).click();
-          await view.waitFor({ state: "detached" });
-          const calls = await page.evaluate(() => window.__RUNS__.calls);
-          checks["Plan a run asks the lead's own agent, once, and returns to its chat"] = calls.length === 1 && calls[0].name === "send" && calls[0].args.sessionId === "local-s1" && calls[0].args.tabId === "lt-pty" && calls[0].args.text.includes("terminalx runs create --from") && (await strip.count()) === 0;
-          // The lead stores a plan: the Run tab says so without the view being open.
-          await page.evaluate(() => { const { state, announce } = window.__RUNS__; state.run = { id: "run-2", lead: { sessionId: "local-s1" }, projectPath: "/repos/p0", goal: "A new plan", state: "awaitingApproval", budget: {}, workerMode: "bypassPermissions", created: new Date().toISOString(), modified: new Date().toISOString(), pieces: [] }; announce(); });
-          await strip.getByRole("status", { name: "A plan waits for your approval" }).waitFor();
-          checks["a plan the lead stores is flagged on the Run tab at once"] = true;
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`no run, ${at}`, checks, { layout, errors, calls });
-          await page.close();
-        }
-
-        // Settings → Orchestrator and a repository's own answers (design 18.05, as far as this ticket goes).
-        {
-          const { page, errors } = await start("none");
-          await page.getByRole("button", { name: "Settings", exact: true }).click();
-          const settings = page.getByRole("main", { name: "Settings", exact: true });
-          const nav = settings.getByRole("navigation", { name: "Settings sections" });
-          await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
-          const tab = settings.getByTestId("orchestrator-settings");
-          await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Ask before a run starts"]')?.disabled === false);
-          // The routing table names each tier by the model it runs on, once that is read.
-          const routing = tab.getByRole("table", { name: "Routing table" });
-          const cell = (name) => tab.getByRole("combobox", { name, exact: true });
-          const chosen = (name) => cell(name).evaluate((select) => select.selectedOptions[0]?.textContent);
-          await page.waitForFunction(() => document.querySelector('select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
-          // The menu's rows fade between colours: let the one just chosen finish.
-          await page.waitForTimeout(300);
-          await shot(page, "settings");
-          const table = {};
-          for (const kind of ["search", "logs", "scoped-code", "review", "code", "refactor", "research", "verify"]) {
-            table[kind] = [await chosen(`Claude Code model for ${kind}`), await chosen(`Claude Code effort for ${kind}`), await chosen(`Codex model for ${kind}`), await chosen(`Codex effort for ${kind}`)].join();
-          }
-          const routingLayout = await layoutOf(tab.getByTestId("routing-table"));
-          const checks = {
-            "the page states the three limits with their stored values": (await tab.getByRole("switch", { name: "Ask before a run starts" }).getAttribute("aria-checked")) === "true" && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "8" && (await tab.getByRole("combobox", { name: "Workers run in" }).inputValue()) === "bypassPermissions",
-            "the page says how results are checked, and over how many changed lines a verifier reads one": (await tab.getByRole("spinbutton", { name: "Changed lines a result is accepted at without a verifier, at most" }).inputValue()) === "400" && (await tab.textContent()).includes("None of that uses a model."),
-            "the mode's row says what stays blocked in every mode": (await tab.getByText("Push, merge and deploy stay blocked by deny rules in every mode.", { exact: false }).count()) === 1,
-            "the routing table has a row for each kind and a column for each agent": (await routing.locator("[role=row][data-kind]").count()) === 8 && (await routing.getByRole("columnheader", { name: "Claude Code workers" }).count()) === 1 && (await routing.getByRole("columnheader", { name: "Codex workers" }).count()) === 1,
-            "each kind starts on its tier's model and effort, the same tiers for both agents": table.search === "Haiku 5.5,Default,GPT-6 Luna,Default" && table.logs === table.search
-              && table["scoped-code"] === "Sonnet 5.5,Medium,GPT-6.1 Terra,Medium" && table.review === table["scoped-code"] && table.verify === table["scoped-code"]
-              && table.code === "Opus 5.5,Medium,GPT-6.1 Sol,Medium" && table.refactor === "Fable 5.2,Medium,GPT-6 Astra,Medium" && table.research === table.refactor,
-            "the table says rows name tiers, and offers no reset while nothing is changed": (await tab.getByText("Rows name a tier, so a new release of a model takes its place.", { exact: false }).count()) === 1 && (await tab.getByRole("button", { name: "Reset to defaults", exact: true }).isDisabled()),
-            "the routing table fits its page: nothing scrolls sideways, leaves it or overlaps": !routingLayout.scrolls && routingLayout.outside === 0 && !routingLayout.overlaps && routingLayout.smallest >= 10.5,
-          };
-          await tab.getByRole("switch", { name: "Ask before a run starts" }).click();
-          await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).fill("12");
-          await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).press("Enter");
-          await tab.getByRole("combobox", { name: "Workers run in" }).selectOption("acceptEdits");
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 3);
-          // A limit that is not one is not saved.
-          await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).fill("900");
-          await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).press("Enter");
-          let calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args));
-          checks["each control saves its own setting, and a limit out of range is not saved"] = JSON.stringify(calls) === JSON.stringify([{ requireApproval: false }, { pieceLimit: 12 }, { workerMode: "acceptEdits" }]) && (await tab.getByRole("spinbutton", { name: "Pieces per run, at most" }).inputValue()) === "12";
-          // A repository answers for itself, one setting at a time, and can follow the app again.
-          await nav.getByRole("button", { name: /^Projects \d+$/ }).click();
-          await nav.getByRole("button", { name: "local-0", exact: true }).click();
-          const own = settings.getByTestId("repository-orchestrator-settings");
-          await own.waitFor();
-          const defaults = await own.textContent();
-          await own.getByRole("radio", { name: "On", exact: true }).click();
-          await own.getByRole("combobox", { name: "Workers of local-0 run in" }).selectOption("manual");
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 5);
-          await own.getByRole("radio", { name: /^Default/ }).click();
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 6);
-          await shot(page, "settings-repository");
-          calls = await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(3));
-          checks["a repository's rows show the defaults they follow"] = defaults.includes("Default (off)") && defaults.includes("Default (Accept edits)") && (await own.getByRole("spinbutton", { name: /^Pieces per run/ }).getAttribute("placeholder")) === "12";
-          checks["a repository saves its own answers by its path, and null follows the app again"] = JSON.stringify(calls) === JSON.stringify([{ project: "/repos/p0", requireApproval: true }, { project: "/repos/p0", workerMode: "manual" }, { project: "/repos/p0", requireApproval: null }]);
-          // The repository's routing rows follow the app until it names a tier of its own.
-          const ownCell = (name) => own.getByRole("combobox", { name, exact: true });
-          const follows = await ownCell("Claude Code model for code").evaluate((select) => select.selectedOptions[0]?.textContent);
-          await ownCell("Claude Code model for code").selectOption("top");
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 7);
-          await own.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
-          const ownLayout = await layoutOf(own.getByTestId("routing-table"));
-          checks["a repository's routing table fits its page"] = !ownLayout.scrolls && ownLayout.outside === 0 && !ownLayout.overlaps;
-          await shot(page, "settings-repository-routing");
-          await ownCell("Claude Code model for code").selectOption("");
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 8);
-          checks["a repository's routing row shows the tier it follows, saves its own by path, and null follows again"] = follows === "Default (Opus 5.5)"
-            && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(6))) === JSON.stringify([{ project: "/repos/p0", routing: { code: { claude: { tier: "top", effort: "medium" } } } }, { project: "/repos/p0", routing: { code: { claude: null } } }]);
-          // Back in the app's own table: one cell saved for one agent, and Reset puts it back.
-          await nav.getByRole("button", { name: "Orchestrator", exact: true }).click();
-          await page.waitForFunction(() => document.querySelector('[data-testid="orchestrator-settings"] select[aria-label="Claude Code model for search"]')?.selectedOptions[0]?.textContent === "Haiku 5.5");
-          await cell("Codex model for code").selectOption("mid");
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 9);
-          const moved = [await chosen("Codex model for code"), await chosen("Claude Code model for code")].join();
-          await routing.locator('[data-kind="verify"]').scrollIntoViewIfNeeded();
-          await shot(page, "settings-routing-changed");
-          await tab.getByRole("button", { name: "Reset to defaults", exact: true }).click();
-          await page.waitForFunction(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").length === 10);
-          checks["a cell of the app's table saves that agent's column alone, and Reset to defaults puts every row back"] = moved === "GPT-6.1 Terra,Opus 5.5" && (await chosen("Codex model for code")) === "GPT-6.1 Sol"
-            && JSON.stringify(await page.evaluate(() => window.__RUNS__.calls.filter((call) => call.name === "setSettings").map((call) => call.args).slice(8))) === JSON.stringify([{ routing: { code: { codex: { tier: "mid", effort: "medium" } } } }, { resetRouting: true }]);
-          const layout = await layoutOf(settings.locator("section").first());
-          checks["nothing scrolls sideways or overlaps"] = !layout.scrolls && !layout.overlaps;
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`settings, ${at}`, checks, { errors, calls });
-          await page.close();
-        }
-
-        // Behind the switch: off, nothing of it shows; turned on in Settings → Experimental, it appears at once.
-        {
-          const { page, errors } = await start("approval", false);
-          const checks = { "with the switch off a session has no Run tab": (await page.getByTestId("run-strip").count()) === 0 };
-          await page.getByRole("button", { name: "Settings", exact: true }).click();
-          const settings = page.getByRole("main", { name: "Settings", exact: true });
-          const nav = settings.getByRole("navigation", { name: "Settings sections" });
-          await nav.waitFor();
-          checks["and Settings lists no Orchestrator"] = (await nav.getByRole("button", { name: "Orchestrator", exact: true }).count()) === 0;
-          await settings.getByRole("combobox", { name: "Search settings" }).fill("orchestrator");
-          checks["nor finds it by search"] = (await settings.getByRole("option", { name: /^Orchestrator/ }).count()) === 0;
-          await settings.getByRole("combobox", { name: "Search settings" }).fill("");
-          await nav.getByRole("button", { name: "Experimental", exact: true }).click();
-          const toggle = settings.getByRole("switch", { name: "Orchestration runs" });
-          await page.waitForFunction(() => document.querySelector('[role="switch"][aria-label="Orchestration runs"]')?.disabled === false);
-          await page.waitForTimeout(300);
-          checks["the switch is off until turned on"] = (await toggle.getAttribute("aria-checked")) === "false";
-          await shot(page, "experimental");
-          await toggle.click();
-          await nav.getByRole("button", { name: "Orchestrator", exact: true }).waitFor();
-          checks["turned on, Orchestrator is listed at once"] = (await toggle.getAttribute("aria-checked")) === "true";
-          await page.keyboard.press("Escape");
-          await page.getByTestId("run-strip").waitFor();
-          checks["and the session has its Run tab, flagged for the plan that waits"] = (await page.getByTestId("run-strip").getByRole("status", { name: "A plan waits for your approval" }).count()) === 1;
-          checks["no browser errors"] = errors.length === 0;
-          failed += report(`behind the switch, ${at}`, checks, { errors });
-          await page.close();
-        }
-      }
-    }
-  } catch (error) {
-    console.log(`FAIL orchestration: stopped by an error\n${error.stack ?? error}`);
-    failed++;
-  }
-  try {
-    failed += await runLimits();
-  } catch (error) {
-    console.log(`FAIL run limits: stopped by an error\n${error.stack ?? error}`);
-    failed++;
   }
 } finally {
   await browser.close();
