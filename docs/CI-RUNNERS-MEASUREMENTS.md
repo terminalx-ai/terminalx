@@ -363,3 +363,68 @@ time under nextest on a four-core runner (the 297 s test sets a floor for its
 part); whether the serve crate's test binaries pass on a hosted runner (no
 workflow ran them before); the Linux WebKit parts; a cold and a warm
 `ci-v5` cache; and the macOS job's time on a selected pull request.
+
+## Step 1, first hosted runs (2026-11-23)
+
+One run of each, so every number is a single sample.
+
+### #1518's first run (run 45252128642, head `c9e811e4`)
+
+| Job | Result | Time |
+| --- | --- | --- |
+| `linux-rust-tests` parts 2, 3, 4 (nextest) | pass, 1,443 tests each | 14 min 45 s, 14 min 30 s, 15 min 23 s; the tests themselves 132 s, 222 s, 202 s |
+| `linux-rust-tests (1)` | failed before any test | an `apt-get` download hung until the step's 10 minutes ended |
+| `linux-rust-tests (binaries)` | pass | 17 min 17 s |
+| `serve-tests` | pass | 10 min 15 s |
+| `linux-rust` (Clippy) | pass | 12 min 23 s |
+| `webkit-layout` (macOS, 125 checks) | pass | 22 min 2 s (11 min 46 s for the same checks on #1515's first run) |
+| `macos-native`, selected pull request | pass, 1,875 passed and 14 ignored of 51 filters | 81 min 34 s |
+| `frontend` | failed | the icon check ran before `pnpm` was set up |
+
+Every Rust job compiled from nothing: no `ci-v5` cache existed. A warm run is
+still unmeasured, on Linux and on macOS.
+
+`macos-native` compiled the library's tests twice: the `--no-run` step ended
+with `Finished test profile in 34m 25s`, and the test step then printed
+`Compiling raccoon` again and `Finished test profile in 28m 23s` before
+`running 1889 tests` (856 s). Which input changed between the two is not
+found.
+
+### WebKit on Linux (run 45252129157, not required)
+
+111 of 120 checks passed over four parts in 4 min 21 s to 7 min 40 s a job;
+five are left out as Mac-only. The nine failures, none diagnosed, are step 2's
+list:
+
+| Check | Part | What failed |
+| --- | --- | --- |
+| `sidebar-extras` | 1 | `locator.waitFor`, 15 s |
+| `dictation-edits` | 1 | four assertions in "a session's composer" (Delete over a selection; dictated words; Backspace over them; the settled utterance) |
+| `quick-open` | 1 | `locator.waitFor`, 30 s |
+| `command-palette` | 2 | `locator.waitFor`, 30 s |
+| `file-tab` | 3 | `locator.waitFor`, 30 s |
+| `review-threads` | 3 | an assertion after the light theme's footer checks |
+| `sidebar-order` | 4 | `page.waitForFunction`, 30 s |
+| `machine-session` | 4 | an assertion after the light theme's header checks |
+| `finished-toast` | 4 | `locator.waitFor`, 10 s |
+
+### WebKit on macOS getting slower within a run (#1515, run 45260136134)
+
+With `agent-dashboard` back at seven layouts as three entries, the job hit its
+50 minutes: the same 109 checks took 7,344 s against 3,208 s on the run above,
+1.2 times as long in the first ten minutes and about 3.6 times from the
+twentieth on. The three entries had run together for five minutes just before.
+Run alone on a Mac, a part, a Vite check, `machine-page` and `run-all` itself
+each left no process behind; one part's WebKit processes peak at about 1.1 GB.
+Memory pressure on the runner is a guess: nothing in that log measures it.
+Since then the parts of a split check take turns, and each check's start line
+says the load average, free memory, swap and the number of WebKit and node
+processes.
+
+### Flaky tests seen on these runs
+
+| Test | Seen | What it said |
+| --- | --- | --- |
+| `machine_host::security_tests::a_caller_from_a_public_address_is_refused_under_every_listen_choice_unless_allowed` | #1515, Linux | `EOF while parsing a value` at `security_tests.rs:362`: the refusal file read while still empty (read from the log, not reproduced). PRO-513. |
+| `pairing::tests::a_phone_starts_sessions_and_changes_settings_only_as_its_scope_allows` (child `phone_router_child_fixture`) | #1515, Linux | the child's call refused with `person_required` at `pairing/mod.rs:2337`. Cause not known. |
+| `remote::git::tests::mention_lookups_read_the_workspaces_pull_requests_with_its_gh` | #1515, Linux | `gh: Text file busy`. Fixed in #1520. |
