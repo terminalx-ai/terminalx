@@ -22,7 +22,7 @@ import type { SessionEntry } from "@/types/session";
 import { ChatRow } from "./BotChatRow";
 import { BotHome } from "./BotHome";
 import { BotItemPage } from "./BotItemPage";
-import { HandoffCards, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
+import { HandoffStrip, TeamBriefEditor, TeamBriefRow } from "./BotHandoffs";
 import { RunPlanCards, StartedRunRow } from "./BotRuns";
 import { runStateLine, startedStateLine, workerSessions } from "@/lib/botRuns";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
@@ -189,7 +189,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
               <ErrorBoundary label="the team brief"><TeamBriefEditor /></ErrorBoundary>
             ) : open ? (
               <ErrorBoundary key={open.id} label="the chat">
-                <HandoffCards bot={bot} chatId={open.id} />
+                <HandoffStrip bot={bot} chatId={open.id} />
                 <RunPlanCards bot={bot} chatId={open.id} chats={chats} />
                 <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
               </ErrorBoundary>

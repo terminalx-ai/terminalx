@@ -35,7 +35,7 @@ vi.mock("@/components/bots/BotDuties", () => ({ BotDuties: () => null }));
 vi.mock("@/components/bots/BotRoleMemory", () => ({ BotRoleMemory: () => null }));
 vi.mock("./BotSettings", () => ({ BotSettings: () => null }));
 vi.mock("./BotMenu", () => ({ BotMenu: () => null }));
-vi.mock("./BotHandoffs", () => ({ HandoffCards: () => null, TeamBriefEditor: () => null, TeamBriefRow: () => null }));
+vi.mock("./BotHandoffs", () => ({ HandoffStrip: () => null, TeamBriefEditor: () => null, TeamBriefRow: () => null }));
 vi.mock("./BotRuns", () => ({ RunPlanCards: () => null, StartedRunRow: () => null }));
 
 const { BotView } = await import("./BotView");
