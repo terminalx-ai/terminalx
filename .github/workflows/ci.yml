@@ -162,9 +162,11 @@ jobs:
     needs: macos-rust-changes
     if: needs.macos-rust-changes.outputs.frontend == 'true'
     runs-on: macos-latest
-    # The layout checks alone took about 30 minutes on a hosted runner, and at 35
-    # the job was cancelled on runs where every check had passed.
-    timeout-minutes: 50
+    # The whole job took 11 min 46 s on its first run after the checks were
+    # pooled (#1515); before that the checks alone took about 30. One run is not
+    # a slow runner: the limit leaves room for one check hung to run-all's own
+    # ten minutes on a runner twice as slow.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
