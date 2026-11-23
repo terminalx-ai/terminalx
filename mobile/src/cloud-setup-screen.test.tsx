@@ -190,8 +190,9 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-p" } });
     await page.press(step("launch"));
     expect(mocks.push).toHaveBeenCalledTimes(2);
-    // The title's + is the launch screen's own (PRO-530): this page adds none.
-    expect(page.byId("launch-workspace")).toBeNull();
+    // The title's + is the launch screen's own (PRO-530), and opens it with no organization chosen.
+    await page.press(page.byId("launch-workspace")!);
+    expect(mocks.push).toHaveBeenLastCalledWith("/cloud/new");
   });
 
   it("does not offer a step whose page is not in the app, and offers it once it is", async () => {
@@ -203,7 +204,8 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(said("compute")).toContain("next");
     expect(step("organization").getAttribute("role")).toBe("button");
     expect(step("compute").getAttribute("role")).toBeNull();
-    expect(page.container.querySelectorAll('[role="button"]')).toHaveLength(1);
+    // The organization step and the title's + (PRO-530): no step without a page is a button.
+    expect(page.container.querySelectorAll('[role="button"]')).toHaveLength(2);
     expect(text()).not.toContain("Continue: connect compute");
     mocks.pages = [...mocks.pages, "/cloud/compute"];
     await show(<CloudScreen key="with-compute" />);
@@ -256,7 +258,8 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     const own = page.byId("setup-card-own")!;
     expect(own.textContent).toContain("Connect compute");
     expect(said("compute")).toBe("Step 2 of 4, next: Connect compute. The provider account your workspaces run on.");
-    expect(page.container.querySelectorAll('[role="button"]').length).toBe(2);
+    // Beside the title's + (PRO-530).
+    expect(page.container.querySelectorAll('[role="button"]:not([data-testid="launch-workspace"])').length).toBe(2);
     expect(button("Continue: connect compute")).toBeNull();
     await page.press(step("compute"));
     expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-p" } });

@@ -21,7 +21,6 @@ const hasPage = (path: string) => [`${path}.tsx`, `${path}/index.tsx`].some((fil
 const AWAITED: Partial<Record<keyof typeof SETUP_PATHS, string>> = {
   compute: "#1509 (PRO-528) mobile/app/cloud/compute.tsx",
   agents: "#1510 (PRO-529) mobile/app/agent-logins/index.tsx",
-  launch: "#1511 (PRO-530) mobile/app/cloud/new.tsx",
 };
 
 describe("the pages the setup opens", () => {
