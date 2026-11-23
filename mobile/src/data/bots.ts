@@ -13,7 +13,7 @@ export type { Bot, BotItem, BotItemQuestion, NeedsYou, NeedsYouEntry };
 /** What a bot is doing, for its row on the Bots tab. */
 export interface BotTeamLine {
   botId: string;
-  /** Its most recently changed item in progress. */
+  /** Its most recently changed item in progress; with none, what its sessions in a turn are on ("Answering in “Home chat”"). Absent when it has neither. */
   working?: string | null;
   workingSince?: string | null;
   /** The soonest next run of its duties that are on. */

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { MachineHostError } from "@/components/machines/MachineHostError";
-import { ArrowLeft, BookUser, Calendar, Loader2, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
+import { ArrowLeft, BookUser, Calendar, Loader2, MessageCircleQuestion, Moon, Pause, Play, Plus, RotateCw, Settings2 } from "@/icons";
 import { Button } from "@/components/ui/button";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { errorMessage } from "@/lib/api";
@@ -10,7 +10,8 @@ import { focusTaken, showBotRoleMemory, showBotSettings, showBotsDuties, showBot
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { cn } from "@/lib/cn";
 import { heldLine, usePauseHeld, usePauseHeldError, wasLine } from "@/lib/botPause";
-import { openBot } from "@/lib/sessions";
+import { openBot, useSessionStore } from "@/lib/sessions";
+import { botDoing } from "@/lib/botChats";
 import type { Bot } from "@/types/bots";
 import { BotAvatar, RunsOnIcon } from "./BotAvatar";
 import { accessLabel, reportsToLabel, runsOnLabel, statusLine, worksInLabel } from "./botLabels";
@@ -243,6 +244,9 @@ function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot
   const [busy, setBusy] = useState(false);
   const held = usePauseHeld();
   const holding = bot.paused ? heldLine(bot, held) : "";
+  // What its sessions are doing now, from the store the Sessions list is drawn from: it changes as a turn starts and ends.
+  const sessions = useSessionStore().sessions;
+  const doing = bot.paused ? null : botDoing(sessions, bot.id);
   const lead = bot.reportsTo === "owner" ? null : bots.find((other) => other.id === bot.reportsTo) ?? null;
   const toggle = () => {
     setBusy(true);
@@ -272,15 +276,21 @@ function TeamRow({ bot, bots, unreadable, onError, asking, trouble }: { bot: Bot
       </td>
       <td className="px-2 py-2.5">
         {bot.paused ? (
-          <span className="flex max-w-[320px] min-w-0 items-start gap-1.5" data-testid="bot-doing-now">
+          <span className="flex max-w-[320px] min-w-0 items-start gap-1.5" data-testid="bot-doing-now" data-doing="paused">
             <Pause className="mt-px size-3.5 shrink-0 text-warning" />
             <span className="min-w-0">
-              <span className="block truncate text-warning" title={wasLine(bot)}>{bot.resumeRequest ? statusLine(bot) : wasLine(bot)}</span>
+              <span className="block truncate text-warning" title={wasLine(bot)}>{bot.resumeRequest ? statusLine(bot, null) : wasLine(bot)}</span>
               {holding !== "Nothing held" && <span className="block truncate text-[11.5px] text-faint" title={holding} data-testid="bot-paused-held">{holding}</span>}
             </span>
           </span>
+        ) : doing ? (
+          // A session of its is in a turn (PRO-515): what it is on, in the paused line's box so a long title truncates.
+          <span className={cn("flex max-w-[320px] min-w-0 items-center gap-1.5", doing.state === "waiting" ? "text-accent" : "text-foreground")} data-testid="bot-doing-now" data-doing={doing.state}>
+            {doing.state === "waiting" ? <MessageCircleQuestion className="size-3.5 shrink-0" /> : <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />}
+            <span className="min-w-0 truncate" title={statusLine(bot, doing)}>{statusLine(bot, doing)}</span>
+          </span>
         ) : (
-          <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-testid="bot-doing-now"><Moon className="size-3.5" /> Quiet</span>
+          <span className="inline-flex items-center gap-1.5 text-muted-foreground" data-testid="bot-doing-now" data-doing="quiet"><Moon className="size-3.5" /> {statusLine(bot, doing)}</span>
         )}
       </td>
       <td className="px-2 py-2.5 text-faint" data-testid="bot-needs-you">

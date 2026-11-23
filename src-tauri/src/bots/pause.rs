@@ -112,34 +112,72 @@ fn quoted(text: &str) -> String {
     }
 }
 
-/// What bot `bot` is doing now, in the sessions `sessions` and on its list `items`.
-fn now_doing(manager: &SessionManager, bot: &Bot, sessions: &[SessionEntry], items: Option<&super::items::List>) -> Stopped {
-    let mut stopped = Stopped::default();
-    let (mut duty, mut chat) = (None, None);
+/// The turns bot `bot` is in, by what runs them, with the first duty run and the first chat in one.
+struct Turns<'a> {
+    chats: u32,
+    workers: u32,
+    duties: u32,
+    duty: Option<&'a SessionEntry>,
+    chat: Option<&'a SessionEntry>,
+    /// The first worker's session, for when its turn began as far as the index says.
+    worker: Option<&'a SessionEntry>,
+}
+
+impl Turns<'_> {
+    fn busy(&self) -> bool {
+        self.chats + self.workers + self.duties > 0
+    }
+}
+
+/// The sessions acting for `bot` that are in a turn now: its chats, its duty runs, and its runs' workers.
+fn turns<'a>(manager: &SessionManager, bot: &Bot, sessions: &'a [SessionEntry]) -> Turns<'a> {
+    let mut turns = Turns { chats: 0, workers: 0, duties: 0, duty: None, chat: None, worker: None };
     for entry in sessions.iter().filter(|entry| !entry.archived && acting_bot(entry).as_deref() == Some(bot.id.as_str())) {
         for _tab in entry.tabs.iter().filter(|tab| !tab.is_terminal() && in_turn(tab) && manager.is_running(&entry.id, &tab.id)) {
             if finishes_its_step(entry) {
-                stopped.workers += 1;
+                turns.workers += 1;
+                turns.worker.get_or_insert(entry);
             } else if is_duty_run(entry) {
-                stopped.duties += 1;
-                duty.get_or_insert_with(|| entry.title.clone());
+                turns.duties += 1;
+                turns.duty.get_or_insert(entry);
             } else {
-                stopped.chats += 1;
-                chat.get_or_insert_with(|| entry.title.clone());
+                turns.chats += 1;
+                turns.chat.get_or_insert(entry);
             }
         }
     }
+    turns
+}
+
+/// What bot `bot` is doing now, in the sessions `sessions` and on its list `items`.
+fn now_doing(manager: &SessionManager, bot: &Bot, sessions: &[SessionEntry], items: Option<&super::items::List>) -> Stopped {
+    let turns = turns(manager, bot, sessions);
+    let mut stopped = Stopped { chats: turns.chats, workers: turns.workers, duties: turns.duties, ..Stopped::default() };
     let open = |state: ItemState| items.into_iter().flat_map(|list| list.items.iter()).filter(move |item| item.state == state).max_by(|a, b| a.modified.cmp(&b.modified));
-    let busy = stopped.chats + stopped.workers + stopped.duties > 0;
-    stopped.was = match (busy, open(ItemState::InProgress), duty, chat) {
+    stopped.was = match (turns.busy(), open(ItemState::InProgress), turns.duty, turns.chat) {
         (true, Some(item), _, _) => format!("was working on {}", quoted(&item.title)),
-        (true, None, Some(duty), _) => format!("was running its duty {}", quoted(&duty)),
+        (true, None, Some(duty), _) => format!("was running its duty {}", quoted(&duty.title)),
         (true, None, None, _) if stopped.workers > 0 => format!("was running {}", count(stopped.workers, "worker", "workers")),
-        (true, None, None, Some(chat)) => format!("was answering in {}", quoted(&chat)),
+        (true, None, None, Some(chat)) => format!("was answering in {}", quoted(&chat.title)),
         _ if open(ItemState::NeedsYou).is_some_and(|item| item.question.is_some()) => "was waiting for your answer".into(),
         _ => "was quiet".into(),
     };
     stopped
+}
+
+/// What the sessions of bot `bot` that are in a turn are on, and since when
+/// (the session's last change, as the index has it): its duty, its workers,
+/// or the chat it answers in, in the order a pause names them. `None` when
+/// nothing of the bot's is in a turn (PRO-515).
+pub(super) fn running_now(manager: &SessionManager, bot: &Bot, sessions: &[SessionEntry]) -> Option<(String, String)> {
+    let turns = turns(manager, bot, sessions);
+    if let Some(duty) = turns.duty {
+        return Some((format!("Running its duty {}", quoted(&duty.title)), duty.modified.clone()));
+    }
+    if let Some(worker) = turns.worker {
+        return Some((format!("Running {}", count(turns.workers, "worker", "workers")), worker.modified.clone()));
+    }
+    turns.chat.map(|chat| (format!("Answering in {}", quoted(&chat.title)), chat.modified.clone()))
 }
 
 fn count(n: u32, one: &str, many: &str) -> String {

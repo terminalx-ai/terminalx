@@ -5,7 +5,8 @@
 // 23.03 through the stubbed `bot_create`, then measures each screen at the
 // designed 1440×900 and at narrower windows: nothing spills past the main slot
 // or sideways off the page, header buttons do not overlap, and the team table
-// scrolls inside its own box. With the switch off, no Bots entry shows.
+// scrolls inside its own box. With the switch off, no Bots entry shows. A bot whose
+// session is in a turn says so in its sidebar row and in Doing now (PRO-515).
 //
 //   pnpm build && node scripts/webkit/bots-screens.mjs
 import { launch, open, report, serve, sidebar } from "./harness.mjs";
@@ -209,6 +210,45 @@ try {
   }
   await page.setViewportSize(viewports[0]);
   await shot(page, "2302-team");
+  // A bot whose session is in a turn (PRO-515): the sidebar row and Doing now say what it is on as the turn starts,
+  // with no reload, an 80-character title truncates inside its cell at every size, and they say Quiet again when it ends.
+  const turn = (status) => page.evaluate(({ status, title }) => {
+    const at = new Date().toISOString();
+    const chat = (id, bot, title) => ({ id, kind: "quick", projectPath: "/scratch/" + id, cwd: "/home/.raccoon/bots/" + bot, title, created: at, modified: at, archived: false, pinned: false,
+      worktreeRemoved: false, tabs: [{ id: id + "-t", harness: "claude", model: "", permissionMode: "bypassPermissions", status, created: at, modified: at }], activeTab: id + "-t", bot: { id: bot, home: true } });
+    window.__PW_STUB__.emit("session_updated", chat("turn-1", "bot-1", "Home chat"));
+    window.__PW_STUB__.emit("session_updated", chat("turn-2", "bot-2", title));
+  }, { status, title: LONG_NAME });
+  const doing = (bot) => main.locator(`[data-testid=bots-table-row][data-bot=${bot}] [data-testid=bot-doing-now]`);
+  const railStatus = (bot) => rail.locator(`[data-testid=bot-row][data-bot=${bot}] [data-testid=bot-row-status]`);
+  const quietBefore = ((await doing("bot-1").textContent()) ?? "").trim();
+  await turn("in_progress");
+  await main.locator("[data-testid=bots-table-row][data-bot=bot-2] [data-testid=bot-doing-now][data-doing=working]").waitFor();
+  failed += report("working, as the turn starts", {
+    "was Quiet before": quietBefore === "Quiet",
+    "Doing now says what it is on": ((await doing("bot-1").textContent()) ?? "").trim() === "Working · Home chat",
+    "the sidebar row says the same": ((await railStatus("bot-1").textContent()) ?? "").trim() === "Working · Home chat",
+    "a bot with no session in a turn stays Quiet": ((await doing("bot-3").textContent()) ?? "").trim() === "Quiet" && ((await railStatus("bot-3").textContent()) ?? "").trim() === "Quiet",
+  }, { doing: await doing("bot-1").textContent(), rail: await railStatus("bot-1").textContent() });
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    const problems = await measure(page);
+    const cell = await doing("bot-2").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const td = element.closest("td").getBoundingClientRect();
+      const text = element.querySelector("span.truncate");
+      return { inside: box.right <= td.right + 1, truncated: text.scrollWidth > text.clientWidth, oneLine: box.height < 30 };
+    });
+    failed += report(`team, a bot working ${viewport.width}x${viewport.height}`, { "fits the main slot": problems.length === 0, "a long title stays inside its cell": cell.inside, "on one line, cut short": cell.truncated && cell.oneLine }, { problems, cell });
+  }
+  await page.setViewportSize(viewports[0]);
+  await shot(page, "2302-team-working");
+  await turn("completed");
+  await main.locator("[data-testid=bots-table-row][data-bot=bot-2] [data-testid=bot-doing-now][data-doing=quiet]").waitFor();
+  failed += report("quiet again, as the turn ends", {
+    "Doing now": ((await doing("bot-1").textContent()) ?? "").trim() === "Quiet",
+    "the sidebar row": ((await railStatus("bot-1").textContent()) ?? "").trim() === "Quiet",
+  }, {});
   await page.setViewportSize(viewports[1]);
   await main.getByTestId("bots-pause-all").click();
   await main.getByTestId("bots-all-paused").waitFor();

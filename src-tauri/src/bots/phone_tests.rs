@@ -173,3 +173,53 @@ fn a_phone_reaches_the_bots_through_its_own_admitted_connection() {
     assert!(phone.bots(&manager, json!({"operation": "pause", "id": bot.id})).is_err());
     assert!(crate::bots::get(&bot.id).unwrap().paused.is_none());
 }
+
+/// PRO-515: a bot whose chat is in a turn is sent as working on it, with no item saying so, and as nothing once the turn ends.
+#[test]
+fn a_bot_whose_session_is_in_a_turn_is_listed_as_working_and_as_nothing_once_it_ends() {
+    use crate::store::index::TabStatus;
+    let _home = bots_on();
+    let sink = Arc::new(BroadcastSink::new(256));
+    let terminals = Arc::new(crate::pty::Terminals::new());
+    let manager = SessionManager::new(
+        sink.clone(),
+        Arc::new(crate::sink::NoObserver),
+        Arc::new(crate::harness::host::Host::new()),
+        terminals.clone(),
+        Arc::new(Default::default()),
+        Arc::new(Default::default()),
+        crate::hooks::prepare_control().unwrap(),
+    );
+    let atlas = crate::bots::chat::hire(sink.as_ref(), "cto", "Atlas").unwrap();
+    let iris = crate::bots::chat::hire(sink.as_ref(), "ux-designer", "Iris").unwrap();
+    let line = |id: &str| call(&manager, "list", &json!({})).unwrap()["team"].as_array().unwrap().iter().find(|line| line["botId"] == id).unwrap().clone();
+    assert!(line(&atlas.id)["working"].is_null(), "nothing of it runs yet");
+
+    // Its home chat in a turn: a live pane, an open turn, and the index saying so.
+    let home = crate::bots::chat::home_chat(sink.as_ref(), &atlas.id).unwrap();
+    let tab = home.tabs[0].id.clone();
+    index::update_tab(&home.id, &tab, |tab| {
+        tab.status = TabStatus::InProgress;
+        Ok(())
+    })
+    .unwrap();
+    manager.install_review_test_cli(&home.id, &tab, "secret");
+    let pane = format!("{}-{}", home.id, tab);
+    let spec = crate::pty::PaneSpec { cwd: &home.cwd, cols: 80, rows: 24, command: Some("sleep 60"), env: &[] };
+    terminals.spawn(sink.clone(), &pane, spec).unwrap();
+    manager.open_turn_for_test(&home.id, &tab);
+    assert!(manager.is_running(&home.id, &tab));
+
+    let working = line(&atlas.id);
+    assert_eq!(working["working"], format!("Answering in “{}”", crate::bots::chat::HOME_CHAT_TITLE));
+    assert_eq!(working["workingSince"], index::get(&home.id).unwrap().modified);
+    assert!(line(&iris.id)["working"].is_null(), "another bot's turn is not this one's");
+
+    // The turn ends: the index says so, and the bot is doing nothing again.
+    index::update_tab(&home.id, &tab, |tab| {
+        tab.status = TabStatus::Completed;
+        Ok(())
+    })
+    .unwrap();
+    assert!(line(&atlas.id)["working"].is_null());
+}

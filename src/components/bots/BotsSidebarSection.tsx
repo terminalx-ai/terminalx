@@ -9,6 +9,7 @@ import { ListSection } from "@/components/layout/SessionSidebar";
 import { pauseBot, reloadBots, resumeBot, useBotStore } from "@/lib/bots";
 import { needsYouCount, needsYouTrouble, useNeedsYou, useNeedsYouError } from "@/lib/botItems";
 import { showHireBot } from "@/lib/botsPage";
+import { botDoing } from "@/lib/botChats";
 import { openBot, useSessionStore } from "@/lib/sessions";
 import { useExperimentalSettings } from "@/lib/experimentalSettings";
 import { cn } from "@/lib/cn";
@@ -91,7 +92,9 @@ function BotRow({ bot }: { bot: Bot }) {
   const place = runsOnLabel(bot.runsOn);
   // A paused bot's row says what its pause holds (PRO-474): "Paused · 2 workers stopped".
   const held = usePauseHeld();
-  const status = bot.paused ? pausedStatus(bot, held) : statusLine(bot);
+  // What its sessions are doing now (PRO-515), read from the same store the Sessions list is drawn from.
+  const doing = bot.paused ? null : botDoing(store.sessions, bot.id);
+  const status = bot.paused ? pausedStatus(bot, held) : statusLine(bot, doing);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toggle = () => {
@@ -118,7 +121,7 @@ function BotRow({ bot }: { bot: Bot }) {
             <span className="min-w-0 max-w-[60%] shrink-0 truncate text-[13px] text-foreground">{bot.name}</span>
             <span className="min-w-0 truncate text-[11px] text-faint">{bot.roleTitle}</span>
           </span>
-          <span className={cn("truncate text-[11.5px]", bot.paused ? "text-warning" : "text-faint")}>{status}</span>
+          <span className={cn("truncate text-[11.5px]", bot.paused ? "text-warning" : doing?.state === "waiting" ? "text-accent" : doing ? "text-muted-foreground" : "text-faint")} title={doing ? status : undefined} data-testid="bot-row-status" data-doing={bot.paused ? "paused" : doing?.state ?? "quiet"}>{status}</span>
         </span>
         {trouble ? (
           <span className="shrink-0 text-[11.5px] font-medium text-destructive" title={`Couldn't read what needs you: ${trouble}`} data-testid="bot-row-needs-you-error">!</span>

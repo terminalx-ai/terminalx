@@ -216,6 +216,8 @@ export interface SessionEntry {
   bot?: SessionBotRef | null;
   /** A session that works for a bot without being its chat (PRO-468): one its chats started, or what those started in turn. */
   botStarted?: { id: string } | null;
+  /** Started as an orchestration run's worker (`store::index::RUN_WORKER`). Never unmarked: its limits outlive the run. */
+  runWorker?: boolean;
   /** A run of one of its bot's duties (PRO-471): the duty's automation id. Listed under its bot apart from its chats. */
   botDuty?: { id: string } | null;
   /** A chat of its bot that a mention on GitHub or Linear started (PRO-480): where it came from. */

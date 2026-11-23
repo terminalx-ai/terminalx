@@ -1,5 +1,6 @@
 import type { Bot, BotAccess, BotDutyWake, BotRunsOn } from "@/types/bots";
 import { effectiveAccess } from "@/types/bots";
+import { doingLine, type BotDoing } from "@/lib/botChats";
 
 /** Where a bot runs, in words. A place a newer app wrote is shown as its own text. */
 export function runsOnLabel(runsOn: BotRunsOn): string {
@@ -30,10 +31,11 @@ export function accessLabel(access: BotAccess): string {
 
 /**
  * The one status line under a bot's name. A resume asked for from the `terminalx` CLI waits on the owner's answer in
- * the bot's view (PRO-468); the runtime stops listing it after a day.
+ * the bot's view (PRO-468); the runtime stops listing it after a day. An unpaused bot says what its sessions are doing
+ * (`botDoing`, PRO-515), and "Quiet" only when none of them is in a turn.
  */
-export function statusLine(bot: Bot): string {
-  if (!bot.paused) return "Quiet";
+export function statusLine(bot: Bot, doing: BotDoing | null): string {
+  if (!bot.paused) return doing ? doingLine(doing) : "Quiet";
   return bot.resumeRequest ? "Paused · asks to resume" : "Paused";
 }
 
