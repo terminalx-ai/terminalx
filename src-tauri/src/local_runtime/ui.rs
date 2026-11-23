@@ -138,7 +138,12 @@ fn status(app: &AppHandle, window: &str) -> ConnectionState {
     let keeps = runtime.as_ref().is_some_and(|runtime| super::replace::keeps(runtime.build()));
     let status = judged(status, state.runtime_health.unresponsive(), runtime.as_ref().map(|runtime| runtime.epoch()), keeps);
     let status = super::replace::shown(&state.runtime_replacement, status);
-    unproven(status, runtime.as_deref().and_then(super::desktop::Desktop::unproven).filter(|_| crate::bots::enabled_cached()))
+    // Asked only of a window that would say it: the first time, one whose
+    // runtime pinned another key asks that runtime what a restart would stop
+    // (PRO-508), which a runtime found not responding is not asked.
+    let why = matches!(status, ConnectionState::Connected { .. })
+        .then(|| runtime.as_deref().and_then(|runtime| runtime.unproven_shown(crate::bots::enabled_cached()))).flatten();
+    unproven(status, why)
 }
 
 /// A connected window that the runtime did not take for its window says so

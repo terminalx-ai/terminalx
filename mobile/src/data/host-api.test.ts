@@ -102,8 +102,9 @@ describe("phone caching and sending ahead (#1283)", () => {
     const newer = mac({ transcript: 1, prefetch: 1, prefetchOpen: 1 });
     expect(await hostApi(newer).prefetch(true, [], open)).toBe(true);
     expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [], open });
+    // None open is named too, so a conversation just closed is prefetched (#1381).
     await hostApi(newer).prefetch(true, [], []);
-    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [] });
+    expect(newer).toHaveBeenLastCalledWith("sync.prefetch", { enabled: true, known: [], open: [] });
   });
 
   it("passes on only prefetched pages that are contiguous with the checkpoint they continue", () => {

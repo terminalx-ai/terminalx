@@ -128,6 +128,16 @@ impl Edit {
         }
     }
 
+    /// This edit, of the file where it is kept now ([`super::memory::kept_now`]).
+    fn where_kept_now(self) -> Self {
+        let now = |file: String| super::memory::kept_now(&file).unwrap_or(file);
+        match self {
+            Self::AddLine { file, line, index, prev } => Self::AddLine { file: now(file), line, index, prev },
+            Self::RemoveLine { file, line, index, prev } => Self::RemoveLine { file: now(file), line, index, prev },
+            Self::ReplaceText { file, before, after } => Self::ReplaceText { file: now(file), before, after },
+        }
+    }
+
     fn inverse(&self) -> Self {
         match self.clone() {
             Self::AddLine { file, line, index, prev } => Self::RemoveLine { file, line, index, prev },
@@ -360,6 +370,11 @@ pub fn is_link_refusal(error: &std::io::Error) -> bool {
 /// What a file holds now: `None` when there is none. A file that is not a
 /// regular one (a link, a folder) or is too large is refused, and left as it is.
 pub fn read_file(path: &Path) -> Result<Option<String>> {
+    Ok(read_bytes(path)?.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// [`read_file`], as the bytes the file holds: what a count made in the file itself (where a list of it starts) goes by.
+pub fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let file = match open_no_follow(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -372,7 +387,7 @@ pub fn read_file(path: &Path) -> Result<Option<String>> {
     let mut bytes = Vec::new();
     file.take(MAX_TRACKED_BYTES + 1).read_to_end(&mut bytes).with_context(|| format!("read {}", path.display()))?;
     anyhow::ensure!(bytes.len() as u64 <= MAX_TRACKED_BYTES, "{} is larger than {} KB; it is left as it is", path.display(), MAX_TRACKED_BYTES / 1024);
-    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    Ok(Some(bytes))
 }
 
 /// The lines of a text, as the line edits count them.
@@ -397,6 +412,8 @@ pub struct Files {
     id: String,
     home: PathBuf,
     texts: BTreeMap<String, Option<String>>,
+    /// Each file read from the home as its bytes were, before any decoding.
+    bytes: BTreeMap<String, Option<Vec<u8>>>,
     touched: BTreeSet<String>,
     /// Each touched file as it was before this change, for [`Files::write`]'s order.
     original: BTreeMap<String, Option<String>>,
@@ -419,7 +436,7 @@ fn insert_at(lines: &[String], index: Option<usize>, prev: Option<&String>) -> u
 
 impl Files {
     fn new(id: &str, home: PathBuf) -> Self {
-        Self { id: id.into(), home, texts: BTreeMap::new(), touched: BTreeSet::new(), original: BTreeMap::new(), recorded: Vec::new() }
+        Self { id: id.into(), home, texts: BTreeMap::new(), bytes: BTreeMap::new(), touched: BTreeSet::new(), original: BTreeMap::new(), recorded: Vec::new() }
     }
 
     pub fn get(&mut self, rel: &str) -> Result<Option<String>> {
@@ -428,9 +445,20 @@ impl Files {
             return Ok(text.clone());
         }
         no_links(&self.home, rel)?;
-        let text = read_file(&self.home.join(rel))?;
+        let bytes = read_bytes(&self.home.join(rel))?;
+        let text = bytes.as_deref().map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        self.bytes.insert(rel.into(), bytes);
         self.texts.insert(rel.into(), text.clone());
         Ok(text)
+    }
+
+    /// The bytes of a file as this change read it from the home (`None`: no
+    /// file), the same read [`Files::get`] decoded: a list that reads the
+    /// file's end cuts it by these, not by the decoded text, which is longer
+    /// where the file is not UTF-8 (PRO-512).
+    pub fn bytes_read(&mut self, rel: &str) -> Result<Option<&[u8]>> {
+        self.get(rel)?;
+        Ok(self.bytes.get(rel).and_then(|bytes| bytes.as_deref()))
     }
 
     pub fn lines(&mut self, rel: &str) -> Result<Vec<String>> {
@@ -731,21 +759,58 @@ fn logged_state<'a>(log: &'a Log, rel: &str) -> Option<&'a Option<String>> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Stamp(u64, Option<std::time::SystemTime>, u64, i64);
 
-fn stamp(path: &Path) -> Option<Stamp> {
+/// How long after a file's newest time its stamp is not yet taken for its
+/// contents (PRO-512). Some filesystems keep times to the second, or to two
+/// (FAT): an edit of the same size made in the same tick as the read leaves
+/// the stamp as it was. A file read this soon after it changed is read again
+/// by the next look, until its times are older than any tick.
+const STAMP_SETTLES_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(test)]
+thread_local! {
+    /// How far ahead of the clock a look on this thread takes "now" to be, so a test need not wait for a stamp to settle.
+    pub static LOOK_CLOCK_AHEAD: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(std::time::Duration::ZERO) };
+    /// Take stamps on this thread as a filesystem with coarse times gives them: with no times a same-tick edit would change.
+    pub static COARSE_STAMPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The time a look judges a stamp at.
+fn look_now() -> std::time::SystemTime {
+    let now = std::time::SystemTime::now();
+    #[cfg(test)]
+    let now = now + LOOK_CLOCK_AHEAD.with(|ahead| ahead.get());
+    now
+}
+
+/// A file's stamp, and whether it has settled at `now`: both of its times
+/// are older than [`STAMP_SETTLES_AFTER`], so no edit made in their tick is
+/// still to come. A file whose times cannot be read, or lie ahead of the clock, never settles.
+fn stamp(path: &Path, now: std::time::SystemTime) -> Option<(Stamp, bool)> {
     let meta = std::fs::symlink_metadata(path).ok().filter(|meta| meta.file_type().is_file())?;
+    let modified = meta.modified().ok();
     #[cfg(unix)]
-    let (inode, changed) = {
+    let (inode, changed, changed_at) = {
         use std::os::unix::fs::MetadataExt;
-        (meta.ino(), meta.ctime().saturating_mul(1_000_000_000).saturating_add(meta.ctime_nsec()))
+        let nanos = meta.ctime().saturating_mul(1_000_000_000).saturating_add(meta.ctime_nsec());
+        let at = u64::try_from(meta.ctime()).ok().map(|secs| std::time::UNIX_EPOCH + std::time::Duration::new(secs, meta.ctime_nsec().clamp(0, 999_999_999) as u32));
+        (meta.ino(), nanos, at)
     };
     #[cfg(not(unix))]
-    let (inode, changed) = (0, 0);
-    Some(Stamp(meta.len(), meta.modified().ok(), inode, changed))
+    let (inode, changed, changed_at) = (0, 0, modified);
+    let old = |time: Option<std::time::SystemTime>| time.and_then(|time| now.duration_since(time).ok()).is_some_and(|age| age >= STAMP_SETTLES_AFTER);
+    let settled = old(modified) && old(changed_at);
+    #[cfg(test)]
+    if COARSE_STAMPS.with(|coarse| coarse.get()) {
+        return Some((Stamp(meta.len(), None, inode, 0), settled));
+    }
+    Some((Stamp(meta.len(), modified, inode, changed), settled))
 }
 
 /// Each followed file's stamp and hash as a look last read it, by bot and
 /// path, in memory only: a look (every chat launch) reads again only the
-/// files whose stamp changed, however many topic files a bot keeps.
+/// files whose stamp changed, however many topic files a bot keeps. Only a
+/// settled stamp is kept ([`stamp`]): a file that changed moments before it
+/// was read is read again.
 static SEEN: Mutex<BTreeMap<(String, String), (Stamp, String)>> = Mutex::new(BTreeMap::new());
 
 #[cfg(test)]
@@ -772,9 +837,11 @@ fn notice_outside(id: &str, files: &mut Files, known: &mut Option<Known>) -> Res
     let mut now = Known::new();
     let mut texts = BTreeMap::new();
     let mut seen = SEEN.lock().unwrap_or_else(|error| error.into_inner());
+    let looked_at = look_now();
     for rel in &names {
         let key = (id.to_owned(), rel.clone());
-        let stamped = no_links(&files.home, rel).ok().and_then(|()| stamp(&files.home.join(rel)));
+        // Stamped before the read: an edit that lands during it leaves a stamp the next look finds changed.
+        let stamped = no_links(&files.home, rel).ok().and_then(|()| stamp(&files.home.join(rel), looked_at)).and_then(|(stamp, settled)| settled.then_some(stamp));
         // Unchanged since it was last read, and as the app knows it: not read again.
         if let (Some(stamped), Some((was, hash))) = (&stamped, seen.get(&key)) {
             if stamped == was && known.as_ref().and_then(|known| known.get(rel)) == Some(hash) {
@@ -1085,7 +1152,9 @@ pub fn undo_in(files: &mut Files, change_id: &str, by: &str, source: Source) -> 
     if let Some(why) = not_undoable(change, &log) {
         return Err(super::refused(why));
     }
-    let edits: Vec<Edit> = change.known_edits().unwrap_or_default().iter().rev().map(Edit::inverse).collect();
+    // A change logged before an organisation's folder moved names the old one, which no place reads:
+    // its undo is made where those notes are kept now (PRO-512).
+    let edits: Vec<Edit> = change.known_edits().unwrap_or_default().iter().rev().map(Edit::inverse).map(Edit::where_kept_now).collect();
     let mut undo = NewChange::new("undo", change.text.clone(), edits.clone(), source, by);
     undo.undoes = Some(change.id.clone());
     files.record(undo)?;

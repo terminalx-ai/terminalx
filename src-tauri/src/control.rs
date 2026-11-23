@@ -522,8 +522,18 @@ impl ControlService {
             || matches!(command, "pipelines.autoMerge" | "pipelines.resolveConflicts" | "pipelines.act" | "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label")
             || command.starts_with("machine.")
         {
-            Caller::of(&self.manager, &params).gate(command, &params)?;
+            let caller = Caller::of(&self.manager, &params);
+            caller.gate(command, &params)?;
+            // Work in a cloud workspace is held to the bot's access here, before the window hears of it (PRO-514).
+            if let Some(action) = command.strip_prefix("cloud.") {
+                return caller.cloud(action, params, |params| self.execute_gated(command, params, request_id));
+            }
         }
+        self.execute_gated(command, params, request_id)
+    }
+
+    /// [`Self::execute`] once who sent the command has been settled.
+    fn execute_gated(&self, command: &str, params: Value, request_id: &str) -> Result<Value, ControlError> {
         if let Some(lifetime) = &self.local_lifetime {
             if command == crate::serve_cli::consent::WINDOW_REGISTER {
                 // A runtime whose window's key is pinned takes for the window
@@ -539,10 +549,14 @@ impl ControlService {
                 if let Some(object) = params.as_object_mut() { object.remove(crate::serve_cli::consent::PARAM); }
                 let unproven = match &proof { Some(Err(error)) => Some(error.message.clone()), _ => None };
                 if let Some(message) = &unproven {
+                    // One that is no registration of this runtime's (no
+                    // current lease, no private endpoint) is refused as it
+                    // is with a proof, before it changes anything (PRO-508).
+                    lifetime.window.validate(lifetime, &params)?;
                     log::warn!("a registration as the window did not prove it is the window ({message}): attached, not taken for the window");
-                    // Whoever was taken for the window before is not, when it
-                    // is the process that now cannot prove it, or one this
-                    // runtime never saw prove it, as a handover carries (PRO-507).
+                    // The process that now cannot prove it is no longer taken
+                    // for the window (PRO-507). Another process's registration
+                    // unseats no one, a handover's window included (PRO-508).
                     #[cfg(unix)]
                     lifetime.window.unproven_from(crate::hooks::caller_pid());
                     // Unproven (a window that cannot read its Keychain key, or
@@ -1304,6 +1318,8 @@ impl ControlService {
                     "place": place.key(),
                     "file": shown.map(|shown| shown.path.clone()),
                     "lines": shown.map(|shown| shown.lines.clone()).unwrap_or_default(),
+                    // Earlier notes of this place that could not be moved to it (PRO-512); null when there are none.
+                    "notice": shown.and_then(|shown| shown.notice.clone()),
                     "budget": memory::BUDGET,
                     "places": view.memory.places.iter().map(|shown| json!({"place": shown.key, "lines": shown.lines.len(), "read": shown.read})).collect::<Vec<_>>(),
                 }))
@@ -3677,6 +3693,111 @@ impl Caller {
         ))
     }
 
+    /// A paused bot starts, prompts and resumes nothing in a cloud workspace
+    /// (PRO-514). Refused as `forbidden`, as all of a bot's cloud work was
+    /// before it could be held.
+    fn refuse_cloud_while_paused(&self) -> Result<(), ControlError> {
+        if self.bot.is_none() || !self.paused {
+            return Ok(());
+        }
+        Err(ControlError::new(
+            "forbidden",
+            format!("{} is paused, so a session that works for it does not start, prompt or resume work in a cloud workspace until its owner resumes it.", self.name),
+            Some("Answer in this conversation, and tell your owner what you would start once resumed.".into()),
+        ))
+    }
+
+    /// Run `cloud.<action>` through `run` (the window), held to the bot the
+    /// caller works for (PRO-514, `bots::cloud`): the same limit its local
+    /// sessions are held to, read now, so a change to the bot's access
+    /// reaches its next cloud launch, prompt or resume.
+    ///
+    /// - `sessions.create` starts in a mode no wider than the limit, on an
+    ///   agent a bot's work runs on, and is recorded as the bot's. Below full
+    ///   access it starts no issue pipeline: what a pipeline pushes and
+    ///   merges from the workspace could not be asked about first.
+    /// - `send` reaches only a cloud session recorded as the same bot's, and
+    ///   carries the limit, which the window sets on the tab first.
+    /// - `resume` carries the limit for the bot's sessions in the workspace.
+    ///
+    /// Any other caller's command goes on as it came, less a hold it wrote itself.
+    fn cloud(&self, action: &str, mut params: Value, run: impl FnOnce(Value) -> Result<Value, ControlError>) -> Result<Value, ControlError> {
+        use crate::bots::cloud;
+        if let Some(object) = params.as_object_mut() {
+            object.remove(cloud::HOLD_PARAM);
+        }
+        let Some(bot) = self.bot.as_deref().filter(|_| cloud::HELD.contains(&action)) else { return run(params) };
+        // Its bot is gone, or Bots is off: an ordinary session.
+        let Some(limit) = crate::bots::chat::bot_limit(bot, "a cloud session") else { return run(params) };
+        if !params.is_object() {
+            return Err(ControlError::invalid("Missing parameters."));
+        }
+        let unreadable = |error: anyhow::Error| {
+            log::warn!("read the cloud sessions that work for {bot}: {error:#}");
+            self.forbidden("work in a cloud workspace while the record of its cloud sessions cannot be read")
+        };
+        let mut hold = serde_json::Map::new();
+        if let Some(mode) = cloud::hold(&limit) {
+            hold.insert("mode".into(), mode);
+        }
+        match action {
+            "sessions.create" => {
+                let agent = optional_string(&params, "agent").unwrap_or_else(|| "claude".into());
+                if !crate::bots::chat::takes_bot_instructions(&agent) {
+                    return Err(self.forbidden(&format!("start a cloud session on {agent}: a bot's work runs on Claude Code or Codex, which can be held to its access")));
+                }
+                params["mode"] = json!(cloud::launch_mode(&limit, params["mode"].as_str()));
+                if !cloud::widest(&limit) {
+                    params["noPipeline"] = json!(true);
+                    if let Some(object) = params.as_object_mut() {
+                        object.remove("resolveConflicts");
+                    }
+                }
+                let mut result = run(params)?;
+                let workspace = result["workspace"].as_str().map(str::to_owned);
+                let session = result["session"].as_str().map(str::to_owned);
+                let recorded = match workspace {
+                    Some(workspace) => cloud::record(bot, &workspace, session.as_deref()),
+                    None => Err(anyhow::anyhow!("the window named no workspace")),
+                };
+                if let Err(error) = recorded {
+                    // Started, and not this bot's on record: said, since its session cannot prompt it.
+                    log::warn!("record the cloud session {} started: {error:#}", self.name);
+                    result["botNote"] = json!(format!("This cloud session started, but TerminalX could not record it as {}'s, so a session that works for {} cannot prompt it. Tell your owner.", self.name, self.name));
+                }
+                Ok(result)
+            }
+            "send" => {
+                let target = required_string(&params, "target")?;
+                let works = cloud::works_for(bot, target.trim()).map_err(unreadable)?;
+                match works {
+                    cloud::Works::Session => {}
+                    // The window knows which session a workspace's launch started.
+                    cloud::Works::Launch => {
+                        hold.insert("launchOnly".into(), json!(true));
+                    }
+                    cloud::Works::No => return Err(self.forbidden("prompt a cloud session that does not work for the same bot")),
+                }
+                params[cloud::HOLD_PARAM] = Value::Object(hold);
+                let result = run(params)?;
+                if works == cloud::Works::Launch {
+                    if let Err(error) = cloud::record(bot, target.trim(), Some(target.trim())) {
+                        log::warn!("record the first cloud session of a workspace {} created: {error:#}", self.name);
+                    }
+                }
+                Ok(result)
+            }
+            _ => {
+                let workspace = required_string(&params, "workspace")?;
+                let (sessions, launch) = cloud::sessions_in(bot, workspace.trim()).map_err(unreadable)?;
+                hold.insert("sessions".into(), json!(sessions));
+                hold.insert("launch".into(), json!(launch));
+                params[cloud::HOLD_PARAM] = Value::Object(hold);
+                run(params)
+            }
+        }
+    }
+
     fn forbidden(&self, what: &str) -> ControlError {
         ControlError::new(
             "forbidden",
@@ -3687,8 +3808,8 @@ impl Caller {
 
     /// What a session working for a bot may not do outside the bots
     /// commands (PRO-468): start work while the bot is paused, start work
-    /// that could not be held to its access (another computer, a cloud
-    /// workspace, an issue pipeline), approve a permission, prompt a
+    /// that could not be held to its access (another computer, an issue
+    /// pipeline), approve a permission, prompt a
     /// session that does not work for the same bot, or, unless it has full
     /// access, act outward with the owner's sign-in: steer or merge an issue
     /// pipeline, or write to an issue (PRO-489).
@@ -3713,7 +3834,8 @@ impl Caller {
             "pipelines.act" if OUTWARD_SAFE_ACTIONS.contains(&params["action"].as_str().unwrap_or_default()) => Ok(()),
             "pipelines.act" => self.refuse_outward("move an issue pipeline on: it pushes, reviews and merges"),
             "issues.comment" | "issues.create" | "issues.status" | "issues.assign" | "issues.label" => self.refuse_outward("write to an issue"),
-            "cloud.sessions.create" | "cloud.send" | "cloud.resume" => Err(self.forbidden("start work in a cloud workspace: it could not be held to the bot's access")),
+            // Held to the bot's access as its local sessions are (PRO-514): how, in `Self::cloud`.
+            "cloud.sessions.create" | "cloud.send" | "cloud.resume" => self.refuse_cloud_while_paused(),
             "permissions.allow" => Err(self.forbidden("approve permissions: only a person's answer counts")),
             "send" => {
                 self.refuse_while_paused("prompt sessions")?;
@@ -4603,8 +4725,12 @@ mod tests {
         for claim in &claims {
             let caller = Caller::of_process(&service.manager, claim, Some(child));
             assert_eq!((caller.bot.as_deref(), caller.verified), (Some(id.as_str()), true), "{claim}");
-            for command in ["pipelines.start", "permissions.allow", "cloud.sessions.create", "cloud.send", "machine.sessions.create", "machine.send"] {
+            for command in ["pipelines.start", "permissions.allow", "machine.sessions.create", "machine.send"] {
                 assert_eq!(caller.gate(command, claim).unwrap_err().code, "forbidden", "{command}");
+            }
+            // Work in a cloud workspace passes the gate (PRO-514): it is held to the bot's access where it is run (`Caller::cloud`).
+            for command in ["cloud.sessions.create", "cloud.send", "cloud.resume"] {
+                assert!(caller.gate(command, claim).is_ok(), "{command}");
             }
             assert!(caller.gate("machine.list", claim).is_ok() && caller.gate("permissions.deny", claim).is_ok());
             assert_eq!(caller.gate("runs.create", &json!({"lead": "someone-else"})).unwrap_err().code, "forbidden", "--lead names another session");
@@ -4616,6 +4742,10 @@ mod tests {
         let caller = Caller::of_process(&service.manager, &json!({}), Some(child));
         for command in ["sessions.create", "runs.create", "runs.start"] {
             assert_eq!(caller.gate(command, &json!({})).unwrap_err().code, "bot_paused", "{command}");
+        }
+        // Nor anything in a cloud workspace, refused as it was before a bot's cloud work could be held.
+        for command in ["cloud.sessions.create", "cloud.send", "cloud.resume"] {
+            assert_eq!(caller.gate(command, &json!({})).unwrap_err().code, "forbidden", "{command}");
         }
         let target = chat.id.clone();
         assert_eq!(caller.gate("send", &json!({"target": target, "text": "hi"})).unwrap_err().code, "bot_paused");
@@ -5380,7 +5510,20 @@ mod tests {
         // stays (a window that cannot read its Keychain key still shows what
         // runs), but it provides no window services and is not the window.
         let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
-        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": "/nowhere.sock", "token": "ab".repeat(16)});
+        // Its endpoint is a private socket in this runtime's `run`, named
+        // through a short link in /tmp (a long TMPDIR passes a socket path's limit).
+        use std::os::unix::fs::PermissionsExt;
+        let short = tempfile::Builder::new().prefix("cw").tempdir_in("/tmp").unwrap();
+        std::os::unix::fs::symlink(crate::store::root().unwrap().join("run"), short.path().join("r")).unwrap();
+        let endpoint = short.path().join("r").join("w.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let registration = json!({"epoch": attached["epoch"], "lease": attached["lease"], "socket": endpoint, "token": "ab".repeat(16)});
+        // PRO-508: one that names no private endpoint of this runtime is no
+        // registration at all, with a proof or without.
+        let mut elsewhere = registration.clone();
+        elsewhere["socket"] = json!("/nowhere.sock");
+        assert_eq!(ask(crate::serve_cli::consent::WINDOW_REGISTER, elsewhere).unwrap_err().message, "The desktop endpoint is not a private endpoint of this runtime.");
         let unproven = ask(crate::serve_cli::consent::WINDOW_REGISTER, registration.clone()).unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(false), json!(false)), "{unproven}");
         let mut witnessed = registration.clone();
@@ -5511,7 +5654,10 @@ mod tests {
     /// own, Bots off or on, instead of "Another desktop currently provides…",
     /// while the unproven one still holds the slot (review of #1468, item 3);
     /// and a registration without the proof unseats a window this runtime
-    /// never saw prove it (one a handover carried over), Bots on or off. A
+    /// never saw prove it (one a handover carried over), Bots on or off, when
+    /// that window's own process sent it. PRO-508: another process's does
+    /// not, and one that is not a valid registration (no current lease, or
+    /// no private endpoint) is refused and unseats no one, whoever sent it. A
     /// registration without the proof never reaches the slot while Bots is on
     /// (it is refused first), so the other half of giving way, any
     /// registration while Bots is on, is the registry's test's
@@ -5534,14 +5680,25 @@ mod tests {
         let endpoint = short.path().join("r").join("w.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
         std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let register = |key: Option<&[u8; 32]>| {
+        // A registrant: a process of its own, with its registration on a
+        // fresh lease (`valid`), or with one that names no lease of this
+        // runtime, as a holder of the control token alone sends.
+        let registrant = |key: Option<&[u8; 32]>, valid: bool| {
             let attached = lifetime.command("runtime.attach", json!({"protocol": crate::local_runtime::PROTOCOL})).unwrap();
             let (pid, _, mut params) = crate::serve_cli::consent::tests::detached_request_with(&run, crate::serve_cli::consent::WINDOW_REGISTER, key, true);
-            for (field, value) in [("epoch", attached["epoch"].clone()), ("lease", attached["lease"].clone()), ("socket", json!(endpoint)), ("token", json!("ab".repeat(16)))] {
+            let lease = if valid { attached["lease"].clone() } else { json!("no-lease-of-this-runtime") };
+            for (field, value) in [("epoch", attached["epoch"].clone()), ("lease", lease), ("socket", json!(endpoint)), ("token", json!("ab".repeat(16)))] {
                 params[field] = value;
             }
+            (pid, attached, params)
+        };
+        let send = |pid: i32, params: Value| {
             crate::hooks::TEST_CALLER_PID.with(|caller| caller.set(Some(pid)));
-            (pid, attached, service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r"))
+            service.execute(crate::serve_cli::consent::WINDOW_REGISTER, params, "r")
+        };
+        let register = |key: Option<&[u8; 32]>| {
+            let (pid, attached, params) = registrant(key, true);
+            (pid, attached, send(pid, params))
         };
         let bots = |on: bool| {
             let mut settings = crate::store::settings::load();
@@ -5549,19 +5706,41 @@ mod tests {
             crate::store::settings::save(&settings).unwrap();
         };
 
-        // A handover's window is unseated by a registration that cannot prove
-        // it: Bots on, one refused at once; Bots off, one that is registered.
-        bots(true);
-        lifetime.window.handed_over(Some((1, 1)));
-        let (_, _, refused) = register(None);
-        assert_eq!(refused.unwrap()["registered"], false);
-        assert!(lifetime.window.window_process().is_none(), "Bots on: the handed-over window is no longer taken for it");
-        bots(false);
-        lifetime.window.handed_over(Some((1, 1)));
+        // PRO-508, Bots on and off: a handover's window is unseated only by
+        // its own process's valid registration that cannot prove it. One
+        // that is no registration of this runtime's is refused first, even
+        // from that process; another process's valid one leaves it.
+        for on in [true, false] {
+            bots(on);
+            let (window, _, invalid) = registrant(None, false);
+            lifetime.window.handed_over(Some((window, 1)));
+            let refused = send(window, invalid).unwrap_err();
+            assert_eq!((refused.code.as_str(), refused.message.as_str()), ("desktop_unavailable", "The desktop attachment is no longer current."), "Bots {on}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: a registration that is not valid unseats no one");
+            let mut bare = json!({});
+            crate::serve_cli::consent::witness_for_test(crate::serve_cli::consent::WINDOW_REGISTER, &run, &mut bare, None).unwrap();
+            assert_eq!(send(window, bare).unwrap_err().message, "Invalid desktop registration.", "Bots {on}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: nor a bare one");
+
+            let (stranger, attached, answer) = register(None);
+            assert_ne!(stranger, window);
+            let answer = answer.unwrap();
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert_eq!(lifetime.window.window_process(), Some((window, 1)), "Bots {on}: another process's registration does not unseat a handover's window");
+            lifetime.command("runtime.detach", attached).unwrap();
+
+            let (_, attached, own) = registrant(None, true);
+            let answer = send(window, own).unwrap();
+            assert_eq!((answer["registered"].clone(), answer["proven"].clone()), (json!(!on), json!(false)), "Bots {on}: {answer}");
+            assert!(lifetime.window.window_process().is_none(), "Bots {on}: the handed-over window that cannot prove it is no longer taken for it");
+            lifetime.command("runtime.detach", attached).unwrap();
+        }
+
+        // Bots off: an unproven window is registered and serves.
         let (_, _, unproven) = register(None);
         let unproven = unproven.unwrap();
         assert_eq!((unproven["registered"].clone(), unproven["proven"].clone()), (json!(true), json!(false)), "{unproven}");
-        assert!(lifetime.window.window_process().is_none(), "the handed-over window is no longer taken for it");
+        assert!(lifetime.window.window_process().is_none());
         assert!(lifetime.window.available(), "Bots off: the unproven window serves");
         let (_, _, another) = register(None);
         assert!(another.unwrap_err().message.contains("Another desktop"), "it holds the slot against another unproven one");
@@ -7118,6 +7297,10 @@ mod bot_items_tests;
 #[cfg(test)]
 #[path = "control_bot_runs_tests.rs"]
 mod bot_runs_tests;
+
+#[cfg(test)]
+#[path = "control_bot_cloud_tests.rs"]
+mod bot_cloud_tests;
 
 // Bots hand-offs from the command line (PRO-475).
 #[path = "control_bot_handoffs.rs"]

@@ -10,6 +10,21 @@
   were a fixed "Quiet" for every bot that was not paused. On the phone's Bots
   tab a bot with a running session and no work item in progress was shown as
   quiet too; it now says what the session is on (PRO-515).
+- Shortcuts: on macOS, Switch light and dark is now ⌥⌘T, as designed, and
+  Reopen closed tab moves to ⌥⇧⌘T, the keys it already had on Windows and
+  Linux. Elsewhere light and dark stays Ctrl+Alt+Shift+L, since Ctrl+Alt+T
+  opens a terminal on GNOME and Ubuntu. Keys you set yourself for either are
+  kept (#1131).
+
+- Bots (experimental): a bot works in cloud workspaces with the access it has
+  on this Mac. A session that works for a bot may start a cloud session,
+  prompt it and resume its workspace, where before every one was refused. A
+  bot with full access runs there with permissions bypassed; one that asks
+  before outward actions is held to Ask every time, and one that reads and
+  reports to plan, whatever mode it asks for. A change to a bot's access
+  reaches its cloud sessions at their next prompt or resume. A paused bot is
+  still refused, and so are another computer and starting an issue pipeline
+  (PRO-514).
 
 ## 0.2.38
 

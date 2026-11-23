@@ -146,6 +146,16 @@ pub(crate) fn log_path_in(root: &Path, session_id: &str, tab_id: &str) -> Result
 /// its name is removed (the link itself, never what it points to) and the
 /// create tried once more, so the write never goes through it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_unless(path, bytes, || false).map(|_| ())
+}
+
+/// [`write_atomic`], asking `abandon` once the new bytes are written and
+/// fsynced beside `path`, right before the rename swaps them in. When it
+/// says so, the temp file is removed, `path` is left untouched and
+/// `Ok(false)` is returned. This narrows, but cannot close, the window in
+/// which another program's write to `path` is lost: one landing after
+/// `abandon` answered and before the rename is still replaced.
+pub fn write_atomic_unless(path: &Path, bytes: &[u8], abandon: impl FnOnce() -> bool) -> Result<bool> {
     let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let written = (|| -> Result<()> {
@@ -161,11 +171,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         f.sync_all()?;
         Ok(())
     })();
-    if let Err(error) = written.and_then(|()| fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))) {
+    if let Err(error) = written {
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
-    Ok(())
+    if abandon() {
+        let _ = fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    if let Err(error) = fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display())) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(true)
 }
 
 /// The mode `path` already has, if it is there to have one.
@@ -284,6 +302,21 @@ pub(crate) fn temp_home() -> TempHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write whose rename fails (a folder holding a file is in the way)
+    /// leaves no temporary file beside it.
+    #[test]
+    fn a_failed_rename_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("x.json");
+        fs::create_dir(&p).unwrap();
+        fs::write(p.join("keep"), "mine").unwrap();
+        let error = write_atomic(&p, b"{}").unwrap_err();
+        assert!(format!("{error:#}").starts_with("rename into "), "{error:#}");
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names, ["x.json"]);
+        assert_eq!(fs::read(p.join("keep")).unwrap(), b"mine");
+    }
 
     #[test]
     fn atomic_write_roundtrip() {

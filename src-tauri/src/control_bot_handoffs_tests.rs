@@ -996,3 +996,93 @@ fn a_start_whose_delivery_gives_a_hand_off_up_starts_the_next_without_hanging() 
     let next = team.handoff(waiting);
     assert!(next.state == HandoffState::Working && next.to_session.is_some(), "{next:?}");
 }
+
+/// PRO-521: a bot's chat is closed like any other session, and no hand-off or message is lost by it. Deleting the
+/// chat a hand-off is worked on in fails the hand-off and tells the bot that handed it, in the chat it handed it
+/// from; the bot whose chat went keeps its item.
+#[test]
+fn deleting_the_chat_a_hand_off_is_worked_on_in_fails_it_and_tells_its_sender() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let atlas_home = home_chat(&team.atlas);
+    let number = team.as_home(&team.atlas, "bots.handoff", json!({"to": "sentry", "title": "Check the runner"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    let handoff = team.handoff(number);
+    let work = handoff.to_session.clone().unwrap();
+    sent();
+
+    team.service.manager.delete_session(&work).unwrap();
+    assert!(index::get(&work).is_err(), "the chat is deleted as any session is");
+    let failed = team.handoff(number);
+    let answer = failed.answer.as_ref().unwrap();
+    assert_eq!((failed.state.clone(), answer.failed, answer.by.as_str(), failed.closed.is_some()), (HandoffState::Failed, true, "terminalx", true));
+    assert_eq!(answer.text, "Its chat was deleted before it answered.");
+    let messages = sent();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let (session, text, author) = &messages[0];
+    assert_eq!((session.as_str(), author.as_deref()), (atlas_home.id.as_str(), Some("TerminalX")));
+    assert!(text.contains(&format!("Sentry's chat for your hand-off {number} (\"Check the runner\") was deleted")) && text.contains("so it failed"), "{text}");
+    assert!(team.window("handoffs", json!({"id": team.atlas})).unwrap()["undelivered"].as_array().unwrap().is_empty(), "nothing is left waiting");
+    // Sentry keeps its item, and has room for other work.
+    let items = crate::bots::items::read(&team.sentry).unwrap().items;
+    assert!(items.iter().any(|item| Some(item.number) == failed.item && !item.state.closed()), "its item stays on its list");
+    // Failed once: there is nothing left to answer, and deleting a chat with no open hand-off changes nothing.
+    assert!(team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "about": number, "text": "Late"})).unwrap_err().message.contains("failed already"));
+    let revision = handoffs::read().unwrap().revision;
+    let spare = crate::bots::chat::new_chat(team.service.sink.as_ref(), &team.sentry).unwrap();
+    team.service.manager.delete_session(&spare.id).unwrap();
+    assert_eq!(handoffs::read().unwrap().revision, revision, "a chat no hand-off is worked on in is only deleted");
+    assert!(sent().is_empty());
+}
+
+/// PRO-521: an archived chat goes on working, and what is sent to a chat that was archived or deleted reaches its
+/// bot's home chat instead, which is brought back from the archive, or made again, when it is the one that went.
+#[test]
+fn what_is_sent_to_a_closed_chat_reaches_the_bots_home_chat() {
+    let _home = crate::store::temp_home();
+    let _switches = Switches;
+    let team = Team::new();
+    let sink = team.service.sink.clone();
+    let archive = |id: &str| crate::session_archive::set_archived(sink.as_ref(), &[id.to_owned()], true, crate::session_archive::By::Person).unwrap();
+    let atlas_home = home_chat(&team.atlas);
+
+    // Handed from a chat of Atlas's beside its home chat, and worked on in a chat of Sentry's that is then archived.
+    let side = crate::bots::chat::new_chat(sink.as_ref(), &team.atlas).unwrap();
+    team.service.manager.install_review_test_cli(&side.id, &side.tabs[0].id, "atlas-side-secret");
+    let number = team.as_chat(&side, "atlas-side-secret", "bots.handoff", json!({"to": "sentry", "title": "Check the runner"})).unwrap()["handoff"]["number"].as_u64().unwrap();
+    let handoff = team.handoff(number);
+    assert_eq!(handoff.from_session.as_deref(), Some(side.id.as_str()));
+    let work = index::get(handoff.to_session.as_deref().unwrap()).unwrap();
+    sent();
+    archive(&work.id);
+    assert_eq!(team.handoff(number).state, HandoffState::Working, "archiving its chat leaves the hand-off as it is");
+
+    // The chat it was handed from is deleted: the answer, sent from the archived chat, reaches Atlas's home chat.
+    team.service.manager.delete_session(&side.id).unwrap();
+    assert_eq!(team.handoff(number).state, HandoffState::Working, "deleting the chat it was handed from does not fail it");
+    team.service.manager.install_review_test_cli(&work.id, &work.tabs[0].id, "sentry-work-secret");
+    let answered = team.as_chat(&work, "sentry-work-secret", "bots.tell", json!({"to": "atlas", "about": number, "text": "No secret reaches the logs."})).unwrap();
+    assert_eq!((answered["handoff"]["state"].as_str(), answered["delivery"]["sent"].as_u64()), (Some("answered"), Some(1)), "{answered}");
+    let messages = sent();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].0, atlas_home.id);
+    assert!(messages[0].1.contains("No secret reaches the logs."));
+
+    // An archived home chat is brought back by what is sent to it, with its conversation.
+    archive(&atlas_home.id);
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": "Status one"})).unwrap();
+    let messages = sent();
+    assert_eq!((messages.len(), messages[0].0.as_str()), (1, atlas_home.id.as_str()), "{messages:?}");
+    assert!(!index::get(&atlas_home.id).unwrap().archived, "it is back in the bot's list");
+
+    // A deleted home chat is made again, and takes what is sent.
+    team.service.manager.delete_session(&atlas_home.id).unwrap();
+    team.as_home(&team.sentry, "bots.tell", json!({"to": "lead", "text": "Status two"})).unwrap();
+    let messages = sent();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    let fresh = home_chat(&team.atlas);
+    assert_ne!(fresh.id, atlas_home.id);
+    assert_eq!(messages[0].0, fresh.id);
+    assert!(messages[0].1.contains("Status two"));
+    assert!(team.window("handoffs", json!({"id": team.atlas})).unwrap()["undelivered"].as_array().unwrap().is_empty(), "nothing waits or was dropped");
+}

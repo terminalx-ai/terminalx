@@ -46,9 +46,15 @@ impl crate::phone::Owner for ApprovalOwner {
 }
 
 fn manager(ttl_ms: i64) -> (Arc<PairingManager>, MemorySecrets, crate::store::TempHome) {
+    manager_on(ttl_ms, direct::PORT)
+}
+
+/// A manager whose own phone listener, once started, takes `port`.
+fn manager_on(ttl_ms: i64, port: u16) -> (Arc<PairingManager>, MemorySecrets, crate::store::TempHome) {
     let home = crate::store::temp_home();
     let store = MemorySecrets::default();
     let mut manager = PairingManager::new(Arc::new(AccountManager::default()));
+    manager.direct_port = port;
     manager.secrets = PairingSecrets::with_store(Arc::new(store.clone()));
     manager.approval_ttl_ms = ttl_ms;
     manager.secrets.configure("test.terminalx.pairing-approval").unwrap();
@@ -152,8 +158,18 @@ async fn connect(manager: &Arc<PairingManager>, host: &HostKeypair, secret: [u8;
     };
     let (server_manager, expected) = (manager.clone(), expected.map(str::to_string));
     let server = tokio::spawn(async move { server_manager.handle_e2ee_socket(host_socket, context, expected, None).await.map(drop) });
-    let transport = if relay { "relay" } else { "direct" };
-    let handshake = E2eeClientHandshake::with_secret(secret, &host.public_key_b64(), transport, relay_host_id.as_deref()).unwrap();
+    let (session, key_b64) = handshake(&mut socket, host, secret, relay_host_id.as_deref(), token).await;
+    Phone { socket, session, key_b64, server }
+}
+
+/// The phone's side of the v2 handshake on `socket`, through `e2ee_auth`
+/// with `token`: its session and its public key.
+async fn handshake<S>(socket: &mut WebSocketStream<S>, host: &HostKeypair, secret: [u8; 32], relay_host_id: Option<&str>, token: &str) -> (E2eeSession, String)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let transport = if relay_host_id.is_some() { "relay" } else { "direct" };
+    let handshake = E2eeClientHandshake::with_secret(secret, &host.public_key_b64(), transport, relay_host_id).unwrap();
     let key_b64 = handshake.hello().client_public_key_b64.clone();
     socket.send(Message::Text(serde_json::to_string(handshake.hello()).unwrap().into())).await.unwrap();
     let ready = socket.next().await.unwrap().unwrap().into_text().unwrap();
@@ -161,7 +177,7 @@ async fn connect(manager: &Arc<PairingManager>, host: &HostKeypair, secret: [u8;
     let auth = json!({ "type": "e2ee_auth", "v": 2, "transcriptHashB64": session.transcript_hash_b64, "deviceToken": token });
     let frame = session.seal(auth.to_string().as_bytes(), PayloadKind::Text).unwrap();
     socket.send(Message::Text(general_purpose::STANDARD.encode(frame).into())).await.unwrap();
-    Phone { socket, session, key_b64, server }
+    (session, key_b64)
 }
 
 async fn connect_pending(fixture: &Fixture, secret: [u8; 32], relay: bool) -> Phone {
@@ -613,4 +629,130 @@ fn status_and_devices_serialise_to_the_typescript_shapes() {
     );
     assert_eq!(value["keepAwake"], true);
     assert_eq!(serde_json::to_value(PairingStatus::default()).unwrap()["pendingApproval"], serde_json::Value::Null);
+}
+
+/// A caller of the window's own listener whose source address is `peer`: the
+/// listener's handler for one accepted socket, over an in-memory stream, as
+/// no test can call from a public address. The phone's end, after its
+/// WebSocket upgrade, and the handler's task.
+async fn caller_from(manager: &Arc<PairingManager>, peer: &str) -> (WebSocketStream<DuplexStream>, JoinHandle<()>) {
+    let (mut host_io, phone_io) = tokio::io::duplex(64 * 1024);
+    let (manager, peer) = (manager.clone(), peer.parse().unwrap());
+    let served = tokio::spawn(async move { manager.serve_direct_caller(&mut host_io, peer).await });
+    let (socket, _) = tokio_tungstenite::client_async_with_config("ws://mac.test/", phone_io, Some(pairing_websocket_config())).await.expect("the listener answers the upgrade");
+    (socket, served)
+}
+
+/// The phone's first sealed message after `e2ee_auth` is `e2ee_authenticated`.
+async fn logged_in<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, session: &mut E2eeSession) {
+    let text = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.expect("the Mac answered the phone").unwrap().unwrap().into_text().unwrap();
+    let frame = general_purpose::STANDARD.decode(text.as_bytes()).unwrap();
+    let message: serde_json::Value = serde_json::from_slice(&session.open(&frame, PayloadKind::Text).unwrap()).unwrap();
+    assert_eq!(message["type"], "e2ee_authenticated", "{message}");
+}
+
+/// Whether the Mac closes `socket` within `wait`; anything else it sends meanwhile is read past.
+async fn closed_within<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut WebSocketStream<S>, wait: Duration) -> bool {
+    tokio::time::timeout(wait, async {
+        while let Some(Ok(message)) = socket.next().await {
+            if message.is_close() {
+                return;
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Stops the manager, and so closes its listener, when the test ends.
+struct Listening(Arc<PairingManager>);
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
+/// PRO-495: with the listen choice unchanged, turning public callers off
+/// closes the connections from public addresses that are already open on the
+/// window's own listener, within one settings check: a logged-in phone and a
+/// socket still in its handshake. A phone from a private address stays, the
+/// listener does not move, and a public caller that arrives after is not
+/// served. The runtime's listener does the same
+/// (`machine_host::security_tests::withdrawing_public_callers_closes_the_ones_already_in_and_late_handshakes_are_refused`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_public_callers_off_closes_the_open_ones_on_the_windows_listener() {
+    use crate::listen::Listen;
+    let ip = |address: &str| -> std::net::IpAddr { address.parse().unwrap() };
+    let reserved = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let (manager, _store, _home) = manager_on(APPROVAL_TTL_MS, port);
+    let host = manager.host_key(true).unwrap();
+    claimed(&manager, "far");
+    claimed(&manager, "near");
+    // Every interface, public callers answered: the window binds the port itself (no runtime owns it).
+    crate::listen::choose(Listen::All, true).unwrap();
+    manager.ensure_direct_listener().unwrap();
+    let _listening = Listening(manager.clone());
+    let bound = manager.window_listening();
+    assert_eq!(bound, [format!("0.0.0.0:{port}")]);
+
+    // A paired phone logged in from a public address, another from this
+    // computer over the real listener, and a public caller mid-handshake.
+    let (mut far, far_served) = caller_from(&manager, "203.0.113.7:50000").await;
+    let (mut far_session, _) = handshake(&mut far, &host, PHONE, None, "far").await;
+    logged_in(&mut far, &mut far_session).await;
+    let (mut near, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}")).await.expect("the window's listener takes a phone");
+    let (mut near_session, _) = handshake(&mut near, &host, OTHER_PHONE, None, "near").await;
+    logged_in(&mut near, &mut near_session).await;
+    let (mut handshaking, handshaking_served) = caller_from(&manager, "198.51.100.9:50000").await;
+    let connected = |manager: &PairingManager| {
+        let mut ids: Vec<String> = manager.connections.lock().unwrap().keys().cloned().collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(connected(&manager), ["far", "near"]);
+    assert_eq!(manager.direct_callers.sources(), [ip("127.0.0.1"), ip("198.51.100.9"), ip("203.0.113.7")]);
+
+    // A check while they are answered closes nobody.
+    let check = |manager: &Arc<PairingManager>| {
+        let manager = manager.clone();
+        async move { tokio::task::spawn_blocking(move || manager.listen_setting_changed()).await.unwrap() }
+    };
+    check(&manager).await;
+    assert!(!closed_within(&mut far, Duration::from_millis(300)).await, "a public caller stays while public callers are answered");
+    assert_eq!(connected(&manager), ["far", "near"]);
+
+    // Turned off, the listen choice the same: one check closes them.
+    crate::listen::choose(Listen::All, false).unwrap();
+    check(&manager).await;
+    assert!(closed_within(&mut far, Duration::from_secs(5)).await, "the phone from a public address is closed");
+    assert!(closed_within(&mut handshaking, Duration::from_secs(5)).await, "and the public caller still in its handshake");
+    tokio::time::timeout(Duration::from_secs(5), async { far_served.await.unwrap(); handshaking_served.await.unwrap(); }).await.expect("their handlers ended");
+    eventually("the public phone's connection to leave the status", || connected(&manager) == ["near"]).await;
+    assert_eq!(manager.direct_callers.sources(), [ip("127.0.0.1")]);
+    assert!(!closed_within(&mut near, Duration::from_millis(300)).await, "the phone from a private address stays connected");
+    let status = manager.status();
+    let device = |id: &str| status.devices.iter().find(|device| device.id == id).unwrap();
+    assert!(device("near").connection.is_some() && device("far").connection.is_none(), "the pairing stays, the connection does not");
+    // The listener did not move: the same addresses, the same accept task.
+    assert_eq!(manager.window_listening(), bound);
+    assert!(manager.inner.lock().unwrap().direct_accept.as_ref().is_some_and(|accept| !accept.inner().is_finished()));
+
+    // A public caller the listener admitted just before the change is not served after it.
+    let (mut host_io, phone_io) = tokio::io::duplex(64 * 1024);
+    tokio::time::timeout(Duration::from_secs(5), manager.serve_direct_caller(&mut host_io, "203.0.113.7:50001".parse().unwrap())).await.expect("refused without reading");
+    drop(host_io);
+    assert!(tokio_tungstenite::client_async_with_config("ws://mac.test/", phone_io, Some(pairing_websocket_config())).await.is_err(), "its upgrade is never answered");
+    // And a later check, nothing having changed, leaves the private phone alone.
+    check(&manager).await;
+    assert!(!closed_within(&mut near, Duration::from_millis(300)).await);
+    assert_eq!(connected(&manager), ["near"]);
+
+    // Allowed again: public callers are served again.
+    crate::listen::choose(Listen::All, true).unwrap();
+    check(&manager).await;
+    let (_back, _served) = caller_from(&manager, "203.0.113.7:50002").await;
+    assert_eq!(manager.direct_callers.sources(), [ip("127.0.0.1"), ip("203.0.113.7")]);
 }

@@ -70,6 +70,12 @@ export interface CloudAgentsSnapshot {
   tabs: CloudAgentTab[];
   outbox: OutboxEntry[];
   loaded: boolean;
+  /**
+   * The runtime's own tab list has come over the connection that is up
+   * (#1379): `loaded` is also true from the cache alone, even an empty or
+   * failed one, which says nothing of which tabs the runtime still has.
+   */
+  liveListed: boolean;
   /** What the last interactive command did to the workspace's compute. */
   wake: WakeResult | null;
   error: string | null;
@@ -83,6 +89,7 @@ interface Store {
   tabs: Map<string, CloudAgentTab>;
   outbox: OutboxEntry[];
   loaded: boolean;
+  liveListed: boolean;
   loading: Promise<void> | null;
   wake: WakeResult | null;
   error: string | null;
@@ -160,7 +167,7 @@ export function cloudAgentsKey(scope: CloudAgentScope): string {
   return `${scope.organizationId}:${scope.workspaceId}`;
 }
 
-const EMPTY: CloudAgentsSnapshot = { tabs: [], outbox: [], loaded: false, wake: null, error: null, version: 0 };
+const EMPTY: CloudAgentsSnapshot = { tabs: [], outbox: [], loaded: false, liveListed: false, wake: null, error: null, version: 0 };
 
 function store(scope: CloudAgentScope): Store {
   const k = cloudAgentsKey(scope);
@@ -172,6 +179,7 @@ function store(scope: CloudAgentScope): Store {
       tabs: new Map(),
       outbox: [],
       loaded: false,
+      liveListed: false,
       loading: null,
       wake: null,
       error: null,
@@ -199,7 +207,7 @@ function publish(s: Store) {
     if (cloudActivityRead(s.scope.organizationId, s.scope.workspaceId, tab.info.sessionId, tab.info.lastMessageAt)) tab.unread = false;
   }
   const tabs = [...s.tabs.values()].sort((a, b) => a.info.created.localeCompare(b.info.created) || a.tabId.localeCompare(b.tabId));
-  s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
+  s.snapshot = { tabs, outbox: s.outbox, loaded: s.loaded, liveListed: s.liveListed, wake: s.wake, error: s.error, version: s.snapshot.version + 1 };
   for (const listener of [...s.listeners]) listener();
   for (const listener of [...anyListeners]) listener();
 }
@@ -773,6 +781,7 @@ export function applyLiveTabs(scope: CloudAgentScope, tabs: AgentTabInfo[]) {
     forgetTab(s, tab);
   }
   s.loaded = true;
+  s.liveListed = true;
   publish(s);
 }
 
@@ -826,6 +835,11 @@ export function markCloudAgentsOffline(scope: CloudAgentScope) {
   const s = stores.get(cloudAgentsKey(scope));
   if (!s) return;
   for (const tab of s.tabs.values()) if (tab.source === "live") tab.source = "cache";
+  // The next connection's list is not known until it comes.
+  if (s.liveListed) {
+    s.liveListed = false;
+    publish(s);
+  }
 }
 
 /** Follow `session.tabs` broadcasts from the runtime. */
@@ -907,62 +921,57 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
     scheduleSave(s, tabId);
   };
   let stop: (() => void) | null = null;
-  const subscribe = (sinceCursor: string | undefined) =>
-    client.subscribeSession(sessionId, tabId, onEvent, {
+  // Each subscription is one attempt; a reset retires the current one
+  // (#1326, #1398), and what a retired attempt still delivers is ignored.
+  let attempt = 0;
+  const subscribe = (sinceCursor: string | undefined) => {
+    const mine = attempt;
+    const current = () => mine === attempt && stores.get(cloudAgentsKey(scope)) === s;
+    return client.subscribeSession(sessionId, tabId, (raw) => { if (current()) onEvent(raw); }, {
       sinceCursor,
       onCursor: (cursor) => {
-        if (stores.get(cloudAgentsKey(scope)) !== s) return;
-        const current = s.tabs.get(tabId);
-        if (current) current.cursor = cursor ?? null;
+        if (!current()) return;
+        const tab = s.tabs.get(tabId);
+        if (tab) tab.cursor = cursor ?? null;
       },
       onStatus: (change) => {
-        if (stores.get(cloudAgentsKey(scope)) !== s) return;
-        const current = s.tabs.get(tabId);
-        if (!current) return;
-        const status = settledStatus(current.info, change.status);
-        noteStatus(current, status);
-        if (status === "completed" && isViewed(scope, tabId)) current.unread = false;
+        if (!current()) return;
+        const tab = s.tabs.get(tabId);
+        if (!tab) return;
+        const status = settledStatus(tab.info, change.status);
+        noteStatus(tab, status);
+        if (status === "completed" && isViewed(scope, tabId)) tab.unread = false;
         // The runtime reports the process in `session.tabs`, not with a status.
-        current.info = { ...current.info, status, process: change.process ?? current.info.process };
+        tab.info = { ...tab.info, status, process: change.process ?? tab.info.process };
         publish(s);
         scheduleSave(s, tabId);
       },
-      onReplayed: () => { if (stores.get(cloudAgentsKey(scope)) === s) caught(client.connection.state === "connected"); },
+      onReplayed: () => { if (current()) caught(client.connection.state === "connected"); },
     });
-  try {
-    stop = await subscribe(tab.cursor ?? undefined);
-  } catch (error) {
-    end();
-    const current = s.tabs.get(tabId);
-    if (current) current.live = false;
-    publish(s);
-    throw error;
-  }
-  if (stores.get(cloudAgentsKey(scope)) !== s) { stop?.(); end(); return () => {}; }
+  };
   // The replay has been merged: the conversation is what is shown now.
-  const replayed = s.tabs.get(tabId);
-  if (replayed && !replayed.historyRead) {
-    replayed.historyRead = true;
-    publish(s);
-  }
+  const replayed = () => {
+    const tab = s.tabs.get(tabId);
+    if (tab && !tab.historyRead) {
+      tab.historyRead = true;
+      publish(s);
+    }
+  };
   // A reset rewrote the history (#1326): the feed of the old one ends, and
-  // the new one is replayed from its first event into the emptied log.
-  let restarting = 0;
+  // the new one is replayed from its first event into the emptied log. It
+  // can come while the first subscription is still being answered (#1398):
+  // that one is retired too, and stopped once it is.
   const restart = () => {
     const previous = stop;
     stop = null;
     previous?.();
     caught(false);
-    const attempt = ++restarting;
+    const mine = ++attempt;
     void subscribe(undefined).then(
       (next) => {
-        if (ended || attempt !== restarting || stores.get(cloudAgentsKey(scope)) !== s) return next();
+        if (ended || mine !== attempt || stores.get(cloudAgentsKey(scope)) !== s) return next();
         stop = next;
-        const current = s.tabs.get(tabId);
-        if (current && !current.historyRead) {
-          current.historyRead = true;
-          publish(s);
-        }
+        replayed();
       },
       // The connection went meanwhile: the next attach replays from the emptied cursor.
       () => undefined,
@@ -971,9 +980,29 @@ export async function attachCloudAgentTab(scope: CloudAgentScope, tabId: string,
   const feeds = restarts.get(feedKey(s, tabId)) ?? new Set<() => void>();
   feeds.add(restart);
   restarts.set(feedKey(s, tabId), feeds);
-  return () => {
+  const unregister = () => {
     feeds.delete(restart);
     if (!feeds.size && restarts.get(feedKey(s, tabId)) === feeds) restarts.delete(feedKey(s, tabId));
+  };
+  try {
+    const first = await subscribe(tab.cursor ?? undefined);
+    if (attempt === 0) stop = first;
+    else first();
+  } catch (error) {
+    // A reset meanwhile started a feed of its own, which this failure does not end.
+    if (attempt === 0) {
+      unregister();
+      end();
+      const current = s.tabs.get(tabId);
+      if (current) current.live = false;
+      publish(s);
+      throw error;
+    }
+  }
+  if (stores.get(cloudAgentsKey(scope)) !== s) { unregister(); stop?.(); end(); return () => {}; }
+  if (attempt === 0) replayed();
+  return () => {
+    unregister();
     stop?.();
     end();
     const current = s.tabs.get(tabId);
@@ -1133,6 +1162,24 @@ export async function configureCloudAgentTab(
   if (now) now.settingsIgnored = false;
   publish(s);
   scheduleSave(s, tabId);
+}
+
+/**
+ * Hold a tab to `mode` with its next message (PRO-514): the mode rides in
+ * that message whatever the tab is in now, and the runtime sets it before the
+ * prompt reaches the agent. False for a tab this desktop does not hold, which
+ * no message of its own could carry a mode for.
+ */
+export function holdCloudAgentTabMode(scope: CloudAgentScope, tabId: string, mode: string): boolean {
+  const s = store(scope);
+  const tab = s.tabs.get(tabId);
+  if (!tab) return false;
+  tab.pendingConfig = { ...(tab.pendingConfig ?? {}), mode };
+  tab.info = withPending(tab.info, tab.pendingConfig);
+  tab.settingsIgnored = false;
+  publish(s);
+  scheduleSave(s, tabId);
+  return true;
 }
 
 /**

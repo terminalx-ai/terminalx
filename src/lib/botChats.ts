@@ -57,6 +57,23 @@ export function botViewFor(
   return view.view === "bot" && view.selectedBotId ? { botId: view.selectedBotId, chatId: null } : null;
 }
 
+/**
+ * Where the window goes when the bot chat it showed is closed (PRO-521). Archiving or deleting the selected session
+ * lands on Welcome, as for any session; a chat closed from its bot's Chat tab leaves the reader on that bot instead,
+ * which opens on its home chat. `shown` is the chat the window showed, while it was not archived. The bot's id, or
+ * null to stay where the store went: the chat is still open (the reader left it), another session or view was chosen
+ * since, or the bot is not listed any more.
+ */
+export function botAfterChatClosed(
+  shown: { botId: string; chatId: string } | null,
+  bots: readonly Pick<Bot, "id">[],
+  store: { view: string; selectedSessionId: string | null; sessions: readonly Pick<SessionEntry, "id" | "archived">[] },
+): string | null {
+  if (!shown || store.selectedSessionId || store.view !== "welcome") return null;
+  if (store.sessions.some((session) => session.id === shown.chatId && !session.archived)) return null;
+  return bots.some((bot) => bot.id === shown.botId) ? shown.botId : null;
+}
+
 export interface BotChats {
   /** The home chat first (the newest made, if there are two), then the others, last written in first. */
   chats: SessionEntry[];

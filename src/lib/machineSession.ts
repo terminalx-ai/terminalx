@@ -280,7 +280,7 @@ export function useMachineSession(key: string): CloudSessionModel | null {
   const fileKey = base ? `${projectKey}/${base}` : projectKey;
   const filesReady = filesBase !== null;
   const fileSource = useMemo(
-    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base, discoverRepositories) : undefined),
+    () => (connected && projectClient && filesReady ? cloudFileSource(fileKey, projectClient, !manage, base, discoverRepositories, true) : undefined),
     [connected, projectClient, filesReady, fileKey, manage, base, discoverRepositories],
   );
   useEffect(() => {

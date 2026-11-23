@@ -45,8 +45,8 @@ pub(crate) fn resolve(root: &Path, target: Option<&RepositoryTarget>) -> Result<
         return Err(refused());
     }
     let origin = crate::git::remote_url(&path).and_then(|url| crate::issues::github_repo_from_url(&url));
-    let top = crate::git::run(&path, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| Path::new(top.trim()).canonical().ok());
-    let common = crate::git::run(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().and_then(|dir| Path::new(dir.trim()).canonical().ok());
+    let top = crate::git::run(&path, &["rev-parse", "--show-toplevel"]).ok().and_then(|top| Path::new(crate::git::path_line(&top)).canonical().ok());
+    let common = crate::git::run(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().and_then(|dir| Path::new(crate::git::path_line(&dir)).canonical().ok());
     if !origin.is_some_and(|origin| origin.eq_ignore_ascii_case(expected))
         || top.as_ref() != Some(&path)
         || !common.is_some_and(|dir| dir.starts_with(root))

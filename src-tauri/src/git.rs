@@ -39,9 +39,141 @@ pub(crate) fn git() -> Command {
     c
 }
 
+/// A path Git printed on a line of its own, without its line ending. Only the
+/// ending is removed: a file name may itself end in whitespace.
+pub(crate) fn path_line(out: &str) -> &str {
+    let line = out.strip_suffix('\n').unwrap_or(out);
+    #[cfg(windows)]
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line
+}
+
+/// Git subcommands that run no ordinary hooks, so a command bound to a
+/// verified checkout may name its Git directory and work tree in the
+/// environment (see `bind`). Git exports both to hooks, and a hook that runs
+/// Git from a subdirectory would then fail or see the wrong top level, so a
+/// command that can run hooks is only started in the checkout. Index writers
+/// among these can still run `post-index-change` and the `core.fsmonitor`
+/// program, which then see those variables too.
+pub(crate) const HOOKLESS: &[&str] = &[
+    "add", "cat-file", "check-ignore", "cherry", "config", "diff", "diff-tree", "for-each-ref", "hash-object", "log",
+    "ls-files", "ls-remote", "ls-tree", "merge-base", "merge-tree", "patch-id", "remote", "restore", "rev-list",
+    "rev-parse", "rm", "show", "show-ref", "status", "symbolic-ref", "update-index", "write-tree",
+];
+
+/// The subcommand of `args`, past the options before it.
+fn subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        if matches!(arg, "-c" | "--config-env" | "-C") { args.next(); continue; }
+        if arg.starts_with('-') { continue; }
+        return Some(arg);
+    }
+    None
+}
+
+/// Start `command` in the opened `directory`, whatever its path names now.
+#[cfg(unix)]
+pub(crate) fn start_in(command: &mut Command, directory: std::os::unix::io::RawFd) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the closure runs in the forked child before exec and only calls
+    // fchdir, which is async-signal-safe. The caller keeps the descriptor
+    // open for as long as commands may start in it.
+    unsafe {
+        command.pre_exec(move || if libc::fchdir(directory) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) });
+    }
+}
+
+#[cfg(unix)]
+thread_local! {
+    /// Checkouts bound on this thread: each binding's own token, the path
+    /// callers name (canonical when it resolves), the opened top-level
+    /// directory, and the Git directory (relative to it when inside).
+    static BOUND: std::cell::RefCell<Vec<(u64, PathBuf, std::os::unix::io::RawFd, PathBuf)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Hands each binding a token of its own, so it releases only its entry.
+#[cfg(unix)]
+static NEXT_BINDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A checkout bound for this thread while it lives (see `bind`). Not `Send`:
+/// it is released on the thread that bound it.
+pub(crate) struct Bound {
+    #[cfg(unix)]
+    token: u64,
+    _thread: std::marker::PhantomData<std::sync::MutexGuard<'static, ()>>,
+}
+
+/// Bind `path` to the verified checkout opened as `top` with its Git
+/// directory `git_dir`. While the returned value lives, local Git commands
+/// this module starts on this thread for exactly `path` start in the opened
+/// directory instead of changing to the path (spelled as given or
+/// canonically), so they reach that checkout
+/// even if another one is put at the path; a `HOOKLESS` one also names the
+/// Git directory and work tree, so a `core.worktree` written later is not
+/// read. Transfers, other threads and other paths are unaffected. `top` must
+/// outlive the binding. Off Unix nothing is bound.
+pub(crate) fn bind(path: &Path, #[cfg(unix)] top: &std::fs::File, #[cfg(unix)] git_dir: &Path) -> Bound {
+    #[cfg(unix)]
+    let token = {
+        use std::os::unix::io::AsRawFd;
+        let token = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        BOUND.with(|bound| bound.borrow_mut().push((token, path, top.as_raw_fd(), git_dir.to_path_buf())));
+        token
+    };
+    #[cfg(not(unix))]
+    let _ = path;
+    Bound {
+        #[cfg(unix)]
+        token,
+        _thread: std::marker::PhantomData,
+    }
+}
+
+impl Drop for Bound {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        BOUND.with(|bound| {
+            let mut bound = bound.borrow_mut();
+            bound.retain(|(token, ..)| *token != self.token);
+        });
+    }
+}
+
+/// The binding for `cwd`, matched by its spelling or, failing that, its
+/// canonical path.
+#[cfg(unix)]
+fn bound_at(cwd: &Path) -> Option<(std::os::unix::io::RawFd, PathBuf)> {
+    BOUND.with(|bound| {
+        let bound = bound.borrow();
+        if bound.is_empty() {
+            return None;
+        }
+        let find = |cwd: &Path| bound.iter().rev().find(|(_, path, ..)| path == cwd).map(|(_, _, fd, dir)| (*fd, dir.clone()));
+        find(cwd).or_else(|| find(&crate::paths::canonicalize(cwd).ok()?))
+    })
+}
+
+/// A local Git command in `cwd`, for a command whose arguments are `args`:
+/// started in a bound checkout when `cwd` names one (see `bind`).
+pub(crate) fn git_in(cwd: &Path, args: &[&str]) -> Command {
+    let mut command = git();
+    #[cfg(unix)]
+    if let Some((directory, git_dir)) = bound_at(cwd) {
+        start_in(&mut command, directory);
+        if subcommand(args).is_some_and(|sub| HOOKLESS.contains(&sub)) {
+            command.env("GIT_DIR", git_dir).env("GIT_WORK_TREE", ".").env_remove("GIT_COMMON_DIR");
+        }
+        return command;
+    }
+    command.current_dir(cwd);
+    command
+}
+
 pub fn run(cwd: &Path, args: &[&str]) -> Result<String> {
     if transfer_args(args) { return transfer(cwd, args); }
-    run_command(git().current_dir(cwd), args)
+    run_command(&mut git_in(cwd, args), args)
 }
 
 pub(crate) fn run_command(command: &mut Command, args: &[&str]) -> Result<String> {
@@ -125,8 +257,10 @@ pub(crate) fn ignored_untracked_paths(mut command: Command, paths: &[String]) ->
 /// `run` for a command whose exit code is an answer (`merge-tree`): the code
 /// and stdout, or `None` when git could not be started or was killed.
 pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
-    let mut command = git(); command.current_dir(cwd).args(args);
-    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
+    let transfer = transfer_args(args);
+    let mut command = if transfer { let mut command = git(); command.current_dir(cwd); command } else { git_in(cwd, args) };
+    command.args(args);
+    let out = if transfer { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket()).ok()? }
         else { command.output().ok()? };
     Some((out.status.code()?, String::from_utf8_lossy(&out.stdout).into_owned()))
 }
@@ -135,7 +269,7 @@ pub fn raw(cwd: &Path, args: &[&str]) -> Option<(i32, String)> {
 /// Missing promised objects are errors, never an implicit network request.
 pub(crate) fn inspect_output(cwd: &Path, args: &[&str]) -> Result<std::process::Output> {
     anyhow::ensure!(!transfer_args(args), "a transfer is not a local Git inspection");
-    git().current_dir(cwd).args(args).output().with_context(|| format!("git {}", args.join(" ")))
+    git_in(cwd, args).args(args).output().with_context(|| format!("git {}", args.join(" ")))
 }
 
 /// Why `run_within` did not succeed.
@@ -265,8 +399,8 @@ pub(crate) fn capture_within(mut command: Command, timeout: std::time::Duration)
 /// `run` with a deadline.
 pub fn run_bounded(cwd: &Path, args: &[&str], timeout: std::time::Duration) -> std::result::Result<String, RunError> {
     if transfer_args(args) { return transfer_output(cwd, args, timeout); }
-    let mut command = git();
-    command.current_dir(cwd).args(args);
+    let mut command = git_in(cwd, args);
+    command.args(args);
     output_within(command, timeout)
 }
 
@@ -286,9 +420,9 @@ impl std::fmt::Display for RunError {
 /// (`log -p | patch-id`).
 pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
     use std::process::Stdio;
-    let mut source = git().current_dir(cwd).args(first).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().with_context(|| format!("git {}", first.join(" ")))?;
+    let mut source = git_in(cwd, first).args(first).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().with_context(|| format!("git {}", first.join(" ")))?;
     let feed = source.stdout.take().context("no pipe from git")?;
-    let out = git().current_dir(cwd).args(second).stdin(Stdio::from(feed)).output().with_context(|| format!("git {}", second.join(" ")));
+    let out = git_in(cwd, second).args(second).stdin(Stdio::from(feed)).output().with_context(|| format!("git {}", second.join(" ")));
     let produced = source.wait()?;
     let out = out?;
     if !produced.success() {
@@ -302,8 +436,10 @@ pub fn pipe(cwd: &Path, first: &[&str], second: &[&str]) -> Result<String> {
 
 /// Run git with extra environment variables.
 pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
-    let mut command = git(); command.current_dir(cwd).args(args).envs(env.iter().copied());
-    let out = if transfer_args(args) { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())? }
+    let transfer = transfer_args(args);
+    let mut command = if transfer { let mut command = git(); command.current_dir(cwd); command } else { git_in(cwd, args) };
+    command.args(args).envs(env.iter().copied());
+    let out = if transfer { crate::github_process::git_output_admitted(command, crate::github_process::TIMEOUT, crate::github_process::ticket())? }
         else { command.output().with_context(|| format!("git {}", args.join(" ")))? };
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -314,14 +450,14 @@ pub fn run_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String
 
 fn run_ok(cwd: &Path, args: &[&str]) -> bool {
     if transfer_args(args) { return transfer(cwd, args).is_ok(); }
-    git().current_dir(cwd).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+    git_in(cwd, args).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// What Git makes by itself of merging `theirs` into `ours`
 /// (`merge-tree --write-tree`): the tree, and whether it holds conflicts.
 /// No checkout or index is touched; the objects it writes are unreferenced.
 pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)> {
-    let out = git().current_dir(cwd).args(["merge-tree", "--write-tree", ours, theirs]).output().context("git merge-tree")?;
+    let out = git_in(cwd, &["merge-tree"]).args(["merge-tree", "--write-tree", ours, theirs]).output().context("git merge-tree")?;
     // Exit 1 is "merged, with conflicts": the tree is still printed first.
     let conflicted = match out.status.code() {
         Some(0) => false,
@@ -337,7 +473,7 @@ pub fn merge_tree(cwd: &Path, ours: &str, theirs: &str) -> Result<(String, bool)
 /// rebase, a cherry-pick, a revert or a bisect left part way.
 pub fn operation_in_progress(cwd: &Path) -> Result<Option<&'static str>> {
     let dir = run(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    let dir = Path::new(dir.trim());
+    let dir = Path::new(path_line(&dir));
     let marks = [
         ("MERGE_HEAD", "merge"),
         ("rebase-merge", "rebase"),
@@ -467,7 +603,7 @@ pub fn working_change_sets(
 
 /// Include a checkpoint's paths even if later edits added them to .gitignore.
 fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
-    let index = run(cwd, &["rev-parse", "--git-path", "index"])?.trim().to_string();
+    let index = path_line(&run(cwd, &["rev-parse", "--git-path", "index"])?).to_string();
     let index_path = if Path::new(&index).is_absolute() { PathBuf::from(&index) } else { cwd.join(&index) };
     let tmp = std::env::temp_dir().join(format!("raccoon-index-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
     let result = (|| {
@@ -480,16 +616,17 @@ fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
             let modified = std::fs::metadata(&index_path)?.modified()?;
             std::fs::File::options().write(true).open(&tmp)?.set_modified(modified)?;
         }
-        let mut c = git();
-        c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["add", "-A", "--", "."]);
+        let mut c = git_in(cwd, &["add"]);
+        c.env("GIT_INDEX_FILE", &tmp).args(["add", "-A", "--", "."]);
         let o = c.output()?;
         if !o.status.success() {
             bail!("snapshot add: {}", String::from_utf8_lossy(&o.stderr));
         }
         for path in paths {
-            let mut c = git();
-            c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).arg("--literal-pathspecs");
-            if std::fs::symlink_metadata(cwd.join(path)).is_ok() {
+            let present = std::fs::symlink_metadata(cwd.join(path)).is_ok();
+            let mut c = git_in(cwd, &[if present { "add" } else { "update-index" }]);
+            c.env("GIT_INDEX_FILE", &tmp).arg("--literal-pathspecs");
+            if present {
                 c.args(["add", "-f", "--", path]);
             } else {
                 c.args(["update-index", "--force-remove", "--", path]);
@@ -497,8 +634,8 @@ fn snapshot_tree_including(cwd: &Path, paths: &[String]) -> Result<String> {
             let output = c.output()?;
             if !output.status.success() { bail!("snapshot file: {}", String::from_utf8_lossy(&output.stderr)); }
         }
-        let mut c = git();
-        c.current_dir(cwd).env("GIT_INDEX_FILE", &tmp).args(["write-tree"]);
+        let mut c = git_in(cwd, &["write-tree"]);
+        c.env("GIT_INDEX_FILE", &tmp).args(["write-tree"]);
         let o = c.output()?;
         if !o.status.success() {
             bail!("write-tree: {}", String::from_utf8_lossy(&o.stderr));
@@ -689,7 +826,7 @@ pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) ->
     // An unborn repository need not have written the well-known empty tree.
     if tree == EMPTY_TREE { return Ok(None); }
     let unavailable = || format!("Revision of {path} is unavailable locally. Fetch the missing objects in the workspace before comparing this revision.");
-    let listing = git().current_dir(cwd).env("GIT_LITERAL_PATHSPECS", "1")
+    let listing = git_in(cwd, &["ls-tree"]).env("GIT_LITERAL_PATHSPECS", "1")
         .args(["ls-tree", "--full-tree", "-z", tree, "--", path]).output()?;
     if !listing.status.success() { bail!("{}", unavailable()); }
     if listing.stdout.is_empty() { return Ok(None); }
@@ -700,11 +837,11 @@ pub(crate) fn blob_bytes_at(cwd: &Path, tree: &str, path: &str, limit: usize) ->
         bail!("Not a regular revision blob");
     }
     let oid = fields[2];
-    let size = git().current_dir(cwd).args(["cat-file", "-s", oid]).output()?;
+    let size = git_in(cwd, &["cat-file"]).args(["cat-file", "-s", oid]).output()?;
     if !size.status.success() { bail!("{}", unavailable()); }
     let size: usize = std::str::from_utf8(&size.stdout)?.trim().parse()?;
     if size > limit { return Ok(Some(BlobContents::TooLarge(size))); }
-    let content = git().current_dir(cwd).args(["cat-file", "blob", oid]).output()?;
+    let content = git_in(cwd, &["cat-file"]).args(["cat-file", "blob", oid]).output()?;
     if !content.status.success() { bail!("{}", unavailable()); }
     Ok(Some(if content.stdout.len() > limit { BlobContents::TooLarge(content.stdout.len()) } else { BlobContents::Bytes(content.stdout) }))
 }
@@ -1269,7 +1406,7 @@ pub(crate) fn ensure_worktree_dir_ignored(project: &Path) {
     let dir = crate::store::settings::load().worktree_dir;
     let top = dir.split('/').next().unwrap_or(".raccoon").to_string();
     if let Ok(git_dir) = run(project, &["rev-parse", "--git-common-dir"]) {
-        let git_dir = git_dir.trim();
+        let git_dir = path_line(&git_dir);
         let git_dir = if Path::new(git_dir).is_absolute() { PathBuf::from(git_dir) } else { project.join(git_dir) };
         let info = git_dir.join("info");
         let exclude = info.join("exclude");
@@ -1308,7 +1445,7 @@ pub struct WorktreeDisposition {
 /// git command run there silently answers for the enclosing repository.
 pub fn is_own_worktree(path: &Path) -> bool {
     let Ok(top) = run(path, &["rev-parse", "--show-toplevel"]) else { return false };
-    match (crate::paths::canonicalize(top.trim()), crate::paths::canonicalize(path)) {
+    match (crate::paths::canonicalize(path_line(&top)), crate::paths::canonicalize(path)) {
         (Ok(top), Ok(path)) => top == path,
         _ => false,
     }
@@ -1317,7 +1454,7 @@ pub fn is_own_worktree(path: &Path) -> bool {
 /// A repository's shared git directory, resolved.
 pub(crate) fn common_dir(cwd: &Path) -> Option<PathBuf> {
     let out = run(cwd, &["rev-parse", "--git-common-dir"]).ok()?;
-    let dir = out.trim();
+    let dir = path_line(&out);
     let dir = if Path::new(dir).is_absolute() { PathBuf::from(dir) } else { cwd.join(dir) };
     crate::paths::canonicalize(dir).ok()
 }
@@ -1475,7 +1612,7 @@ fn belongs_to_project(project: &Path, dir: &Path) -> Result<()> {
     };
     let link = if Path::new(link).is_absolute() { PathBuf::from(link) } else { dir.join(link) };
     let common = run(project, &["rev-parse", "--git-common-dir"]).context("the project's git directory cannot be found")?;
-    let common = common.trim();
+    let common = path_line(&common);
     let common = if Path::new(common).is_absolute() { PathBuf::from(common) } else { project.join(common) };
     let ours = common.join("worktrees");
     // The record may already be gone (git drops it before it fails on the
@@ -1823,14 +1960,13 @@ fn keep_rename_path_for_hunk(patch: &str) -> String {
 fn apply_patch(cwd: &Path, patch: &str, reverse: bool) -> Result<()> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut command = git();
     let args: &[&str] = if reverse {
         &["apply", "--cached", "--reverse", "--recount", "--"]
     } else {
         &["apply", "--cached", "--recount", "--"]
     };
+    let mut command = git_in(cwd, args);
     command
-        .current_dir(cwd)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1867,8 +2003,7 @@ fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Re
             let temp = tempfile::tempdir()?;
             let baseline = temp.path().join("baseline");
             std::fs::write(&baseline, previous)?;
-            let output = git()
-                .current_dir(cwd)
+            let output = git_in(cwd, &["diff"])
                 .args([
                     "--literal-pathspecs", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color",
                     "--unified=3", "--", baseline.to_str().ok_or_else(|| anyhow!("Invalid temporary path"))?, path,
@@ -1906,8 +2041,7 @@ fn hunk_diff(cwd: &Path, path: &str, old_path: Option<&str>, cached: bool) -> Re
         return Ok(diff);
     }
     use std::process::Stdio;
-    let output = git()
-        .current_dir(cwd)
+    let output = git_in(cwd, &["diff"])
         .args([
             "--literal-pathspecs",
             "diff",
@@ -2108,6 +2242,44 @@ mod tests {
             let result = output_within(command, std::time::Duration::from_millis(50));
             assert!(matches!(result, Err(RunError::TimedOut)), "{redirect}: {result:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binding_matches_the_canonical_path_and_releases_only_its_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = crate::paths::canonicalize(dir.path()).unwrap();
+        let init = |path: &Path| {
+            std::fs::create_dir(path).unwrap();
+            // Not through `run`, which a binding for this path would redirect.
+            assert!(Command::new("git").current_dir(path).args(["init", "-q"]).status().unwrap().success());
+        };
+        let (checkout, other) = (base.join("checkout"), base.join("other"));
+        init(&checkout);
+        init(&other);
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&checkout, &link).unwrap();
+        let shown = |cwd: &Path| crate::paths::canonicalize(path_line(&run(cwd, &["rev-parse", "--show-toplevel"]).unwrap())).unwrap();
+
+        // Bound by one spelling; the helpers are called with the other. The
+        // checkout then moves away and another repository takes its path.
+        let top = std::fs::File::open(&checkout).unwrap();
+        let first = bind(&link, &top, Path::new(".git"));
+        let moved = base.join("moved");
+        std::fs::rename(&checkout, &moved).unwrap();
+        init(&checkout);
+        assert_eq!(shown(&checkout), moved);
+        assert_eq!(shown(&link), moved);
+
+        // A newer binding of the same path wins while it lives, and releasing
+        // the older one leaves it in place.
+        let other_top = std::fs::File::open(&other).unwrap();
+        let second = bind(&checkout, &other_top, Path::new(".git"));
+        assert_eq!(shown(&checkout), other);
+        drop(first);
+        assert_eq!(shown(&checkout), other);
+        drop(second);
+        assert_eq!(shown(&checkout), checkout);
     }
 
     pub(super) fn repo() -> tempfile::TempDir {

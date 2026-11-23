@@ -46,6 +46,11 @@ struct BotFile {
     /// Each record as JSON, read one by one.
     #[serde(default)]
     bots: Vec<Value>,
+    /// The cloud sessions that work for a bot (PRO-514), each as JSON
+    /// (`bots::cloud`). Kept here, where a bot's access is kept, so a bot
+    /// is refused a write to them as it is to its own access.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cloud_sessions: Vec<Value>,
     /// What a newer app keeps beside the list is written back as it was read.
     #[serde(flatten, default)]
     unknown: BTreeMap<String, Value>,
@@ -57,7 +62,7 @@ fn first_version() -> u32 {
 
 impl Default for BotFile {
     fn default() -> Self {
-        Self { version: FILE_VERSION, revision: 0, bots: Vec::new(), unknown: BTreeMap::new() }
+        Self { version: FILE_VERSION, revision: 0, bots: Vec::new(), cloud_sessions: Vec::new(), unknown: BTreeMap::new() }
     }
 }
 
@@ -125,6 +130,25 @@ pub fn change<T>(f: impl FnOnce(&mut Vec<Bot>) -> Result<T>, announce: impl FnOn
     super::write_json(&definitions_path()?, &file)?;
     WRITES.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     announce(&Snapshot { revision: file.revision, bots, unreadable });
+    Ok(out)
+}
+
+/// The cloud sessions that work for a bot, as they were written (`bots::cloud`).
+pub fn cloud_sessions() -> Result<Vec<Value>> {
+    Ok(read()?.cloud_sessions)
+}
+
+/// Read, change and save the cloud sessions that work for a bot as one step,
+/// under the lock the definitions are saved under. The bots themselves are
+/// written back as they were read, so nothing is announced.
+pub fn change_cloud_sessions<T>(f: impl FnOnce(&mut Vec<Value>) -> Result<T>) -> Result<T> {
+    let _guard = DEFINITION_WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let mut file = read()?;
+    let before = file.cloud_sessions.clone();
+    let out = f(&mut file.cloud_sessions)?;
+    if file.cloud_sessions != before {
+        super::write_json(&definitions_path()?, &file)?;
+    }
     Ok(out)
 }
 

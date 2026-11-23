@@ -78,7 +78,10 @@ try {
         await page.getByRole("menuitem", { name: "Link pull request…" }).click();
         const dialog = page.getByRole("dialog", { name: "Link a pull request" });
         await dialog.getByRole("option").first().waitFor();
-        await page.waitForTimeout(400);
+        // The dialog scales in. On a busy runner it was still short of full size 400 ms later (top at 105.4, not 104),
+        // so its box is read once its own entrance and its overlay's have finished, not after a fixed wait.
+        await page.evaluate(() => Promise.all([...document.querySelectorAll('[role="dialog"], [data-dialog-overlay]')]
+          .flatMap((node) => node.getAnimations({ subtree: true })).map((animation) => animation.finished.catch(() => {}))));
         const geometry = await page.evaluate(() => {
           const column = document.querySelector("[data-conversation-column]").getBoundingClientRect();
           const box = document.querySelector('[role="dialog"]').getBoundingClientRect();

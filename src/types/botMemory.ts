@@ -88,6 +88,8 @@ export interface BotMemoryPlace extends BotFileRead {
   readLines: number;
   notRead: number;
   archiveLines: number;
+  /** Earlier notes of this place that could not be moved to it, and where they are (PRO-512). */
+  notice?: string;
 }
 
 export interface BotMemoryTopic {

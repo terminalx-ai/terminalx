@@ -189,7 +189,8 @@ fn branch_diff_size_uses_the_selected_base_without_persisting_worktree_objects()
 
 #[test]
 fn branch_diff_size_refuses_to_start_after_its_deadline() {
-    assert_eq!(branch_diff_size(Path::new("."), "main", Instant::now()).unwrap_err().code, "timeout");
+    let repo = Repo { name: ".".into(), dir: PathBuf::from("."), bound: None };
+    assert_eq!(branch_diff_size(&repo, "main", Instant::now()).unwrap_err().code, "timeout");
 }
 
 #[test]
@@ -1401,6 +1402,304 @@ fn machine_pr_creation_checks_both_the_fetch_destination_and_the_git_hub_pr_head
 
 #[cfg(unix)]
 #[test]
+fn machine_pr_creation_accepts_a_push_alias_that_rewrites_back_to_the_verified_origin() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    let separate = f.remote("push");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let head = request["pushHead"].as_str().unwrap();
+    let origin_url = origin.to_str().unwrap();
+    // The raw push URL differs from the fetch origin; only its rewrite matches.
+    git(&f.root, &["remote", "set-url", "--push", "origin", "alias:widgets"]);
+    git(&f.root, &["config", &format!("url.{origin_url}.insteadOf"), "alias:widgets"]);
+    // A decoy Git does not apply here: pushInsteadOf never rewrites an
+    // explicit push URL. A resolver that applied it would push to `separate`.
+    git(&f.root, &["config", &format!("url.{}.pushInsteadOf", separate.display()), "alias:widgets"]);
+    assert_eq!(git(&f.root, &["config", "--get", "remote.origin.pushurl"]), "alias:widgets");
+    assert_eq!(git(&f.root, &["remote", "get-url", "--push", "--all", "origin"]), origin_url);
+
+    let created = f.call("git.prCreateForSession", request.clone()).expect("the alias resolves to the verified origin");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["pr"]["head"], "feature/pr");
+    assert_eq!(created["pr"]["headSha"], head);
+    assert_eq!(created["sessionAssociated"], true);
+    // The exact confirmed commit reached the origin, and nothing else did.
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+    assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty());
+    let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+    assert!(!object.success(), "the separate remote received the confirmed commit");
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_pr_creation_pushes_only_to_the_destination_it_verified_when_config_changes_before_transmission() {
+    // A push URL, and a push-only rewrite of origin, written after the
+    // destination check and before transmission.
+    for redirect in ["pushurl", "pushInsteadOf"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let separate = f.remote("push");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+        let (origin_url, separate_url) = (origin.to_str().unwrap().to_owned(), separate.to_str().unwrap().to_owned());
+        // The checkout's pre-push hook still runs, told the verified origin.
+        let hook = f.root.join(".git/hooks/pre-push");
+        std::fs::create_dir(f.root.join("frontend")).unwrap();
+        // It reads the real repository (as Git LFS does): its Git directory
+        // and the commit it is told about.
+        std::fs::write(&hook, concat!(
+            "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\ncat >> ../pre-push-ran\n",
+            "(cd frontend && git rev-parse --show-toplevel --absolute-git-dir) >> ../pre-push-ran 2>&1\n",
+            "git cat-file -e \"$(cut -d' ' -f2 < ../pre-push-ran | sed -n 2p)^{commit}\" && echo found >> ../pre-push-ran\n",
+        )).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let (checkout, reached) = (f.root.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let seen = reached.clone();
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "transmit" { return; }
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            match redirect {
+                "pushurl" => git(&checkout, &["config", "remote.origin.pushurl", &separate_url]),
+                _ => git(&checkout, &["config", &format!("url.{separate_url}.pushInsteadOf"), &origin_url]),
+            };
+            assert_eq!(git(&checkout, &["remote", "get-url", "--push", "--all", "origin"]), separate_url);
+        }));
+
+        let outcome = f.call("git.prCreateForSession", request);
+        assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "{redirect}: the barrier ran");
+        // The unverified destination received neither the ref nor the commit.
+        assert!(git(&separate, &["for-each-ref", "refs/heads/feature"]).is_empty(), "{redirect}");
+        let object = std::process::Command::new("git").current_dir(&separate).args(["cat-file", "-e", &format!("{head}^{{commit}}")]).status().unwrap();
+        assert!(!object.success(), "{redirect}: the redirected destination received the confirmed commit");
+        // The push went to the origin that was verified, exactly at the confirmed head.
+        let created = outcome.unwrap_or_else(|error| panic!("{redirect}: {} {}", error.code, error.message));
+        assert_eq!(created["pr"]["headSha"], head.as_str());
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        assert_eq!(std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(), format!(
+            "origin {}\n{head} {head} refs/heads/feature/pr {earlier}\n{}\n{}\nfound\n",
+            origin.display(), f.root.display(), f.root.join(".git").display(),
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_declining_pre_push_hook_stops_the_machine_pr_push() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let request = machine_pr_request(&f, &f.root);
+    let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+    let hook = f.root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\necho 'lfs objects missing' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let refused = f.call("git.prCreateForSession", request).expect_err("the hook declined");
+    assert!(refused.message.contains("pre-push hook declined"), "{}: {}", refused.code, refused.message);
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+    assert!(!f.gh_calls().contains("\"create\""));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_pre_push_hook_is_told_a_new_remote_branch_by_the_zero_id() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let origin = f.remote("origin");
+    f.clone(&origin, ".");
+    f.git.project = true;
+    let entry = serde_json::from_value::<crate::store::index::SessionEntry>(json!({
+        "id": "native", "projectPath": f.root, "cwd": f.root, "title": "fixture", "created": "", "modified": ""
+    })).unwrap();
+    crate::store::index::save(&[entry]).unwrap();
+    git(&f.root, &["checkout", "-qb", "feature/new"]);
+    git(&f.root, &["commit", "-qm", "New branch", "--allow-empty"]);
+    let head = git(&f.root, &["rev-parse", "HEAD"]);
+    let hook = f.root.join(".git/hooks/pre-push");
+    std::fs::write(&hook, "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" > ../pre-push-ran\ncat >> ../pre-push-ran\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let created = f.call("git.prCreateForSession", json!({
+        "repo": ".", "sessionId": "native", "branch": "feature/new", "pushHead": head, "title": "Add new", "base": "main"
+    })).unwrap();
+    assert_eq!(created["pr"]["headSha"], head.as_str());
+    assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/new"]), head);
+    let zero = "0".repeat(head.len());
+    assert_eq!(
+        std::fs::read_to_string(f.base.join("pre-push-ran")).unwrap(),
+        format!("origin {}\n{head} {head} refs/heads/feature/new {zero}\n", origin.display()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_git_without_hook_run_pushes_unless_the_checkout_has_a_pre_push_hook() {
+    for hook in ["none", "not executable", "executable"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        f.git.git_without_hook_run = true;
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+        if hook != "none" {
+            // Where core.hooksPath points, as Git would look.
+            let hooks = f.base.join("shared hooks");
+            std::fs::create_dir(&hooks).unwrap();
+            git(&f.root, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+            std::fs::write(hooks.join("pre-push"), "#!/bin/sh\nexit 0\n").unwrap();
+            let mode = if hook == "executable" { 0o755 } else { 0o644 };
+            std::fs::set_permissions(hooks.join("pre-push"), std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+        }
+        let outcome = f.call("git.prCreateForSession", request);
+        if hook == "executable" {
+            let refused = outcome.expect_err("a hook this Git cannot run is refused");
+            assert_eq!(refused.code, "git_failed");
+            assert!(refused.message.contains("nothing was pushed"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        } else {
+            let created = outcome.unwrap_or_else(|error| panic!("{hook}: {} {}", error.code, error.message));
+            assert_eq!(created["pr"]["headSha"], head.as_str(), "{hook}");
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{hook}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_git_commands_stay_in_the_checkout_that_was_verified() {
+    // After the checkout is verified and before Git runs: core.worktree is
+    // pointed at another folder, another repository replaces the checkout, or
+    // the checkout is only moved away.
+    for change in ["redirect-main", "redirect", "replace", "move"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = if change == "redirect-main" { f.root.clone() } else { f.base.join("topic") };
+        if change != "redirect-main" {
+            git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        }
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("note.txt"), "outside\n").unwrap();
+        let moved = f.base.join("topic-original");
+        if change == "redirect" {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "git" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            match change {
+                "redirect" => { git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]); }
+                "redirect-main" => { git(&target, &["config", "core.worktree", other.to_str().unwrap()]); }
+                "replace" => {
+                    std::fs::rename(&target, &away).unwrap();
+                    std::fs::rename(&other, &target).unwrap();
+                }
+                _ => std::fs::rename(&target, &away).unwrap(),
+            }
+        }));
+
+        let repo = if change == "redirect-main" { ".".to_owned() } else { checkout.to_str().unwrap().to_owned() };
+        let staged = f.call("git.stage", json!({ "repo": repo, "paths": ["note.txt"] }));
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if change.starts_with("redirect") { &checkout } else { &moved };
+        match change {
+            "redirect" => { git(verified, &["config", "--worktree", "--unset", "core.worktree"]); }
+            "redirect-main" => { git(verified, &["config", "--unset", "core.worktree"]); }
+            _ => {}
+        }
+        staged.unwrap_or_else(|error| panic!("{change}: {} {}", error.code, error.message));
+        // The verified checkout staged its own file, wherever it now is; the
+        // other folder's never entered an index.
+        assert_eq!(git(verified, &["show", ":note.txt"]), "verified", "{change}");
+        if change == "replace" {
+            assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_commit_hooks_can_run_git_from_a_subdirectory() {
+    // A pre-commit like `cd frontend && npx lint-staged`, for a plain and a
+    // guarded commit in a main checkout and a guarded commit in a linked
+    // worktree. (A plain `git commit` in a linked worktree exports GIT_DIR to
+    // its hooks itself, from a terminal too, so there the hook sees the
+    // subfolder as the top level on main as well.)
+    for (guarded, linked) in [(false, false), (true, false), (true, true)] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = if linked {
+            let checkout = f.base.join("topic");
+            git(&f.root, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+            checkout
+        } else { f.root.clone() };
+        let hooks = git(&checkout, &["rev-parse", "--path-format=absolute", "--git-path", "hooks"]);
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = Path::new(&hooks).join("pre-commit");
+        let marker = f.base.join("pre-commit-top");
+        std::fs::write(&hook, format!("#!/bin/sh\n(cd frontend && git rev-parse --show-toplevel && git status --porcelain -- ../draft) > '{}' 2>&1\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::create_dir(checkout.join("frontend")).unwrap();
+        std::fs::write(checkout.join("frontend/app.js"), "x\n").unwrap();
+        std::fs::write(checkout.join("draft"), "work\n").unwrap();
+        let repo = if linked { checkout.to_str().unwrap().to_owned() } else { ".".to_owned() };
+        let mut params = json!({ "repo": repo, "message": "work", "author": me() });
+        if guarded {
+            params["expectedBranch"] = json!(if linked { "topic" } else { "main" });
+            params["expectedHead"] = json!(git(&checkout, &["rev-parse", "HEAD"]));
+        }
+        f.call(if guarded { "git.commitForPush" } else { "git.commit" }, params).unwrap_or_else(|error| panic!("guarded={guarded} linked={linked}: {} / hook: {}", error.message, std::fs::read_to_string(&marker).unwrap_or_default()));
+        // The hook found the checkout's top level and the staged change from inside the subfolder.
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), format!("{}\nA  draft\n", checkout.display()), "guarded={guarded} linked={linked}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_git_hooks_can_run_git_from_a_subdirectory() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    std::fs::create_dir(f.root.join("frontend")).unwrap();
+    // What a `cd frontend && npx lint-staged` style hook asks Git.
+    for name in ["post-checkout", "pre-push"] {
+        let hook = f.root.join(".git/hooks").join(name);
+        std::fs::write(&hook, format!("#!/bin/sh\n(cd frontend && git rev-parse --show-toplevel) > ../{name}-top 2>&1\n")).unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    f.call("git.checkout", json!({ "repo": ".", "branch": "feature/hooks", "create": true })).unwrap();
+    f.call("git.push", json!({ "repo": "." })).unwrap();
+    for name in ["post-checkout", "pre-push"] {
+        assert_eq!(std::fs::read_to_string(f.base.join(format!("{name}-top"))).unwrap(), format!("{}\n", f.root.display()), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn machine_pr_creation_requires_a_confirmed_url_and_the_original_worktree() {
     for replace_checkout in [false, true] {
         let _home = crate::store::temp_home();
@@ -2081,4 +2380,241 @@ fn mention_lookups_read_the_workspaces_pull_requests_with_its_gh() {
     f.fault("auth-expired");
     assert_eq!(f.git.mention_prs(&f.root, "fix").unwrap_err().code, "auth_failed");
     assert_eq!(f.git.mention_pr_context(&f.root, 7).unwrap_err().code, "auth_failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_checkout_whose_name_ends_in_a_space_is_verified_listed_and_served() {
+    let _home = crate::store::temp_home();
+    let mut f = fixture();
+    let remote = f.remote("origin");
+    f.clone(&remote, ".");
+    f.git.project = true;
+    let checkout = f.base.join("topic ");
+    git(&f.root, &["worktree", "add", "-qb", "topic", checkout.to_str().unwrap()]);
+    // The same name without the space is another repository; it must not
+    // stand in for the checkout.
+    f.clone(&remote, "../topic");
+    std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+    assert!(crate::git::is_own_worktree(&checkout));
+    // A folder inside it is not its own top level, space or not.
+    std::fs::create_dir(checkout.join("inner ")).unwrap();
+    assert!(!crate::git::is_own_worktree(&checkout.join("inner ")));
+    assert_eq!(crate::git::common_dir(&checkout), crate::git::common_dir(&f.root));
+
+    let name = checkout.to_str().unwrap();
+    let listed = f.call("git.repositories", json!({})).unwrap();
+    let names: Vec<_> = listed["repositories"].as_array().unwrap().iter().map(|repo| repo["repo"].as_str().unwrap().to_owned()).collect();
+    assert!(names.iter().any(|listed| listed == name), "listed: {names:?}");
+    let status = f.call("git.status", json!({ "repo": name })).unwrap();
+    assert_eq!(status["branch"], "topic");
+    assert_eq!(status["operation"], Value::Null);
+    let changes = f.call("git.workingChanges", json!({ "repo": name })).unwrap();
+    assert!(changes["files"].as_array().unwrap().iter().any(|file| file["path"] == "note.txt"), "{changes}");
+    f.call("git.stage", json!({ "repo": name, "paths": ["note.txt"] })).unwrap();
+    assert_eq!(git(&checkout, &["show", ":note.txt"]), "verified");
+    assert!(git(&f.base.join("topic"), &["ls-files", "--", "note.txt"]).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn guarded_commit_signs_when_signing_is_conditional_on_the_main_checkouts_git_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    for condition in ["gitdir", "gitdir/i"] {
+        let f = fixture();
+        let origin = f.remote("origin");
+        let checkout = f.clone(&origin, "app");
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        let git_dir = git(&checkout, &["rev-parse", "--absolute-git-dir"]);
+        let pattern = if condition == "gitdir" { git_dir.clone() } else { git_dir.to_uppercase() };
+        git(&checkout, &["config", &format!("includeIf.{condition}:{pattern}.path"), "signing.conf"]);
+        let signer = f.base.join("fail-signing");
+        std::fs::write(&signer, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n", f.base.join("signing-attempt").display())).unwrap();
+        std::fs::set_permissions(&signer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(checkout.join(".git/signing.conf"), format!(
+            "[commit]\n\tgpgSign = true\n[user]\n\tsigningKey = checkout-key\n[gpg]\n\tformat = openpgp\n\tprogram = {}\n", signer.display(),
+        )).unwrap();
+        // In this Git directory the condition holds.
+        assert_eq!(git(&checkout, &["config", "--get", "user.signingKey"]), "checkout-key", "{condition}");
+
+        std::fs::write(checkout.join("draft"), "work\n").unwrap();
+        let params = json!({ "repo": "app", "message": "work", "author": me(), "expectedBranch": "main", "expectedHead": head });
+        let error = f.call("git.commitForPush", params).expect_err("the failing signer stops the commit");
+        assert_eq!(error.code, "git_failed", "{condition}: {error:?}");
+        let signing = std::fs::read_to_string(f.base.join("signing-attempt")).expect("Git asked the checkout's signer");
+        assert!(signing.lines().any(|arg| arg == "checkout-key"), "{condition}: {signing}");
+        assert_eq!(git(&checkout, &["rev-parse", "refs/heads/main"]), head, "{condition}");
+        assert!(!checkout.join(".git/index.lock").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_verified_pr_push_never_pushes_submodules_through_their_own_config() {
+    use std::os::unix::fs::PermissionsExt;
+    // Each configuration that makes `git push` push submodules, with the
+    // submodule's commit already on its remote or not. Only the last case
+    // fails without the fix: there Git starts `git push` in the submodule,
+    // with the submodule's own configuration (it then stops on the
+    // superproject's refspec). In the first two Git finds nothing to push
+    // there either way; they show that a submodule commit already on its
+    // remote does not stop the verified push.
+    for (key, value, on_remote) in [
+        ("push.recurseSubmodules", "on-demand", true),
+        ("submodule.recurse", "true", true),
+        ("push.recurseSubmodules", "on-demand", false),
+    ] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let mut request = machine_pr_request(&f, &f.root);
+        let earlier = git(&origin, &["rev-parse", "refs/heads/feature/pr"]);
+
+        let submodule = f.root.join("lib");
+        std::fs::write(submodule.join("lib.txt"), "new\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Library change"]);
+        if on_remote {
+            git(&submodule, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        }
+        // Any connection the submodule's own configuration makes is recorded.
+        let spy = f.base.join("receive-pack-spy");
+        let contacted = f.base.join("submodule-contacted");
+        std::fs::write(&spy, format!("#!/bin/sh\ntouch '{}'\nexec git-receive-pack \"$@\"\n", contacted.display())).unwrap();
+        std::fs::set_permissions(&spy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&submodule, &["config", "remote.origin.receivepack", spy.to_str().unwrap()]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Bump lib"]);
+        let head = git(&f.root, &["rev-parse", "HEAD"]);
+        request["pushHead"] = json!(head);
+        git(&f.root, &["config", key, value]);
+
+        let result = f.call("git.prCreateForSession", request);
+        assert!(!contacted.exists(), "{key}={value}: the submodule's remote was contacted");
+        if on_remote {
+            let created = result.unwrap_or_else(|error| panic!("{key}={value}: {} {}", error.code, error.message));
+            assert_eq!(created["created"], true);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head);
+        } else {
+            let refused = result.expect_err("a submodule commit on no remote is refused");
+            assert_eq!(refused.code, "conflict", "{}", refused.message);
+            assert!(refused.message.contains("submodule"), "{}", refused.message);
+            assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), earlier);
+            assert!(!f.gh_calls().contains("\"create\""));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_git_helpers_read_the_checkout_that_was_verified() {
+    // Right after verification, another clone (with a merge left in
+    // progress) replaces the checkout at its path, or core.worktree is
+    // pointed at another folder. The reads through `crate::git` that follow
+    // must still answer for the verified checkout.
+    for (change, method) in [("replace", "git.workingChanges"), ("replace", "git.status"), ("replace", "git.commitForPush"), ("redirect", "git.workingChanges")] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let remote = f.remote("origin");
+        f.clone(&remote, ".");
+        f.git.project = true;
+        let checkout = f.base.join("topic");
+        git(&f.root, &["worktree", "add", "-qb", "feature/topic", checkout.to_str().unwrap()]);
+        let head = git(&checkout, &["rev-parse", "HEAD"]);
+        std::fs::write(checkout.join("note.txt"), "verified\n").unwrap();
+        let outside = if change == "replace" { f.clone(&remote, "../replacement") } else { f.base.join("outside") };
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside-only.txt"), "outside\n").unwrap();
+        if change == "replace" {
+            std::fs::write(outside.join(".git/MERGE_HEAD"), format!("{head}\n")).unwrap();
+        } else {
+            git(&checkout, &["config", "extensions.worktreeConfig", "true"]);
+        }
+        let moved = f.base.join("topic-original");
+
+        let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (once, target, other, away) = (fired.clone(), checkout.clone(), outside.clone(), moved.clone());
+        f.git.barrier = Some(Arc::new(move |point| {
+            if point != "verified" || once.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+            if change == "replace" {
+                std::fs::rename(&target, &away).unwrap();
+                std::fs::rename(&other, &target).unwrap();
+            } else {
+                git(&target, &["config", "--worktree", "core.worktree", other.to_str().unwrap()]);
+            }
+        }));
+        let params = match method {
+            "git.commitForPush" => json!({
+                "repo": checkout.to_str().unwrap(), "message": "work", "author": me(),
+                "expectedBranch": "feature/topic", "expectedHead": head,
+            }),
+            _ => json!({ "repo": checkout.to_str().unwrap() }),
+        };
+        let result = f.call(method, params);
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "{change} {method}: the barrier ran");
+        f.git.barrier = None;
+        let verified = if change == "replace" { &moved } else { &checkout };
+        if change == "redirect" {
+            git(verified, &["config", "--worktree", "--unset", "core.worktree"]);
+        }
+        let result = result.unwrap_or_else(|error| panic!("{change} {method}: {} {}", error.code, error.message));
+        match method {
+            "git.workingChanges" => {
+                let files: Vec<_> = result["files"].as_array().unwrap().iter().map(|file| file["path"].as_str().unwrap().to_owned()).collect();
+                assert!(files.iter().any(|file| file == "note.txt"), "{change}: {files:?}");
+                assert!(!files.iter().any(|file| file == "outside-only.txt"), "{change}: {files:?}");
+            }
+            "git.status" => {
+                assert_eq!(result["branch"], "feature/topic", "{change}");
+                assert_eq!(result["head"], head.as_str(), "{change}");
+                assert_eq!(result["operation"], Value::Null, "{change}");
+            }
+            _ => {
+                assert_eq!(git(verified, &["rev-parse", "HEAD^"]), head, "{change}");
+                assert_eq!(git(verified, &["show", "HEAD:note.txt"]), "verified");
+                assert!(git(&checkout, &["ls-files", "--", "note.txt"]).is_empty(), "the replacement's index was changed");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_submodule_check_of_a_verified_pr_push_looks_only_at_commits_origin_lacks() {
+    // An old commit, long on origin, points at a submodule commit that is
+    // now only on a local submodule branch. An ordinary push does not look
+    // at it again, and neither may the verified one.
+    for value in ["check", "on-demand"] {
+        let _home = crate::store::temp_home();
+        let mut f = fixture();
+        let origin = f.remote("origin");
+        let library = f.remote("library");
+        f.clone(&origin, ".");
+        f.git.project = true;
+        git(&f.root, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", library.to_str().unwrap(), "lib"]);
+        git(&f.root, &["commit", "-qm", "Add lib"]);
+        let submodule = f.root.join("lib");
+        git(&submodule, &["checkout", "-qb", "local-only"]);
+        std::fs::write(submodule.join("lib.txt"), "local\n").unwrap();
+        git(&submodule, &["add", "lib.txt"]);
+        git(&submodule, &["commit", "-qm", "Local library change"]);
+        git(&f.root, &["add", "lib"]);
+        git(&f.root, &["commit", "-qm", "Old bump"]);
+        git(&f.root, &["push", "-q", "--recurse-submodules=no", "origin", "HEAD:refs/heads/main"]);
+        let request = machine_pr_request(&f, &f.root);
+        let head = request["pushHead"].as_str().unwrap().to_owned();
+        git(&f.root, &["config", "push.recurseSubmodules", value]);
+        // What an ordinary push would do, without sending anything.
+        git(&f.root, &["push", "-q", "--dry-run", "origin", &format!("{head}:refs/heads/feature/pr")]);
+
+        let created = f.call("git.prCreateForSession", request)
+            .unwrap_or_else(|error| panic!("{value}: {} {}", error.code, error.message));
+        assert_eq!(created["created"], true, "{value}");
+        assert_eq!(git(&origin, &["rev-parse", "refs/heads/feature/pr"]), head, "{value}");
+    }
 }

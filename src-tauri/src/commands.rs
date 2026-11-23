@@ -2024,6 +2024,7 @@ pub fn project_template_remove(id: String) -> StartResult<()> {
 #[tauri::command]
 pub fn list_sessions(app: tauri::AppHandle) -> CmdResult<Vec<SessionEntry>> {
     store::message_activity::backfill(std::sync::Arc::new(app));
+    crate::session_ops::backfill_checkout_identities();
     store::conversation_titles::backfill().map_err(err)
 }
 
@@ -4838,6 +4839,92 @@ mod command_tests {
             assert_eq!(git::list_worktrees(&project).unwrap(), registered);
             assert!(!checkout.exists());
         }
+    }
+
+    /// #1228: an older session saved without `checkoutIdentity` and with no
+    /// checkpoint has it recorded while its checkout is still here, so a fork
+    /// after its subfolder or its whole worktree disappears uses the stored
+    /// branch; a turn fork says no checkpoint was saved. A session that does
+    /// not match its checkout gets nothing recorded and is still refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkpoint_free_older_session_forks_once_its_checkout_was_recorded() {
+        use crate::{git, session_ops, store};
+        let _home = store::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let project = crate::paths::canonicalize(repo.path()).unwrap();
+        git::run(&project, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::create_dir(project.join("sub")).unwrap();
+        std::fs::write(project.join("sub/file"), "committed").unwrap();
+        git::run(&project, &["add", "."]).unwrap();
+        git::run(&project, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"]).unwrap();
+        let session = session_ops::create_session_entry(session_ops::NewSession {
+            project_path: project.to_str().unwrap().into(),
+            use_worktree: true,
+            tab: Some(session_ops::NewTab { transport: Default::default(), harness: "claude".into(), model: String::new(), effort: None, permission_mode: None }),
+            parent: None, section_id: None, title: None, base_ref: None, worktree_name: None,
+            checkout_branch: None, checkout_pr: None, on_main: false, issue: None, automation: None,
+            cwd: None, orchestrate: false,
+        }).unwrap();
+        let saved = store::index::get(&session.id).unwrap();
+        let checkout = std::path::PathBuf::from(&saved.cwd);
+        let branch = saved.branch.clone().unwrap();
+        let head = git::run(&project, &["rev-parse", &format!("refs/heads/{branch}")]).unwrap();
+        // As an older build saved it: working in a subfolder, no identity, no checkpoint.
+        let mut legacy = saved.clone();
+        legacy.unknown.remove("checkoutIdentity");
+        legacy.cwd = checkout.join("sub").to_string_lossy().into_owned();
+        let mut mismatched = legacy.clone();
+        mismatched.id = uuid::Uuid::now_v7().to_string();
+        mismatched.branch = Some("someone-else".into());
+        store::index::save(&[legacy.clone(), mismatched.clone()]).unwrap();
+
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 1);
+        let recorded = store::index::get(&legacy.id).unwrap();
+        assert!(recorded.checkout_identity().is_some());
+        assert_eq!(recorded.checkout_root(), Some(saved.cwd.as_str()));
+        assert_eq!(recorded.cwd, legacy.cwd);
+        assert!(store::index::get(&mismatched.id).unwrap().checkout_identity().is_none(), "a checkout on another branch is not its evidence");
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 0, "recorded once");
+
+        for remove_checkout in [false, true] {
+            if remove_checkout {
+                std::fs::remove_dir_all(&checkout).unwrap();
+            } else {
+                std::fs::remove_dir_all(checkout.join("sub")).unwrap();
+            }
+            let registered = git::list_worktrees(&project).unwrap();
+            for at in [None, Some(1)] {
+                let mut dest = recorded.clone();
+                dest.worktree_name = None;
+                let mut allocation = crate::fork_allocation::ForkAllocation::default();
+                let note = super::fork_workspace(&recorded, &recorded.tabs[0], &mut dest, at, &mut allocation).unwrap();
+                assert_eq!(note.as_deref().is_some_and(|note| note.contains("no saved file checkpoint")), at.is_some(), "{note:?}");
+                let dest_root = std::path::PathBuf::from(dest.checkout_root().unwrap());
+                assert_ne!(dest_root, checkout);
+                assert!(!dest_root.starts_with(&checkout));
+                assert_eq!(std::path::Path::new(&dest.cwd), dest_root.join("sub"));
+                assert_eq!(std::fs::read_to_string(dest_root.join("sub/file")).unwrap(), "committed");
+                assert_eq!(allocation.rollback("unpublished".into()), "unpublished");
+                assert!(!dest_root.exists());
+                assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            }
+            let mut dest = mismatched.clone();
+            dest.worktree_name = None;
+            let mut allocation = crate::fork_allocation::ForkAllocation::default();
+            assert!(super::fork_workspace(&mismatched, &mismatched.tabs[0], &mut dest, None, &mut allocation).is_err());
+            assert_eq!(allocation.rollback("refused".into()), "refused");
+            assert_eq!(git::list_worktrees(&project).unwrap(), registered);
+            assert_eq!(git::run(&project, &["rev-parse", &format!("refs/heads/{branch}")]).unwrap(), head);
+            assert_eq!(remove_checkout, !checkout.exists());
+        }
+        // A checkout already gone records nothing.
+        let mut gone = legacy.clone();
+        gone.id = uuid::Uuid::now_v7().to_string();
+        store::index::save(&[gone.clone()]).unwrap();
+        assert_eq!(session_ops::backfill_checkout_identities_now().unwrap(), 0);
+        assert!(store::index::get(&gone.id).unwrap().checkout_identity().is_none());
+        assert_eq!(std::fs::read_to_string(project.join("sub/file")).unwrap(), "committed");
     }
 
     #[cfg(unix)]

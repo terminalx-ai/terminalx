@@ -886,7 +886,7 @@ fn line_numbers_past_the_read_limit_count_as_the_list_shows_them() {
     std::fs::write(home_of(&bot).join("MEMORY.md"), changes::text_of(&lines)).unwrap();
     let shown = view(sink.as_ref(), &bot).unwrap();
     let listed = &shown.memory.places[0].lines;
-    assert_eq!(lines_not_listed(&file(&bot, "MEMORY.md")), 3000 - listed.len());
+    assert_eq!(lines_not_listed(file(&bot, "MEMORY.md").as_bytes()), 3000 - listed.len());
     let at = listed.iter().position(|line| line.contains("Note number 2995")).unwrap();
     let plan = TidyPlan { remove: vec![TidyLine { place: None, line: at + 1, note: note_text(&listed[at]).into() }], merge: vec![] };
     tidy(sink.as_ref(), &bot, &plan, &places(&bot), OWNER, Source::of("app"), None).unwrap();
@@ -950,6 +950,8 @@ fn a_look_reads_only_the_files_that_changed() {
     for n in 0..300 {
         std::fs::write(home_of(&bot).join("memory").join(format!("topic-{n:03}.md")), format!("Topic {n}\n")).unwrap();
     }
+    // Files written moments ago are read again (PRO-512); these looks are made once their times have settled.
+    changes::LOOK_CLOCK_AHEAD.with(|ahead| ahead.set(std::time::Duration::from_secs(60)));
     changes::look(sink.as_ref(), &bot.id).unwrap();
     let reads = || changes::LOOK_READS.with(|reads| reads.replace(0));
     reads();
@@ -1005,4 +1007,191 @@ fn organisation_ids_that_differ_only_in_case_keep_their_notes_apart() {
     let acme = Place::Org("Acme".into());
     assert_eq!(file(&bot, &acme.memory_file()), text);
     assert!(!old.exists());
+}
+
+/// PRO-512: undoing a change logged before an organisation's folder moved is
+/// made where its notes are kept now. The old `orgs/<Id>` folder, which no
+/// place reads, is not made again, and the note is back on the page.
+#[test]
+fn undoing_a_change_logged_before_the_folder_moved_lands_where_the_notes_are_now() {
+    let (_home, sink, bot) = hired();
+    let bot = with_works_in(sink.as_ref(), &bot, &["Acme", PERSONAL]);
+    let acme = Place::Org("Acme".into());
+    // As an earlier build left it: the notes in `orgs/Acme/`, a forgotten one logged by that path.
+    let old = home_of(&bot).join("orgs/Acme");
+    std::fs::create_dir_all(old.join("memory")).unwrap();
+    let kept = "- 2026-11-01 Acme ships on Tuesdays";
+    let forgotten = "- 2026-11-02 Acme reviews on Fridays";
+    std::fs::write(old.join("MEMORY.md"), format!("{kept}\n")).unwrap();
+    std::fs::write(old.join("memory/people.md"), "Edited since.\n").unwrap();
+    let folder = crate::store::root().unwrap().join("bot-changes").join(&bot.id);
+    let mut known: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(folder.join(changes::KNOWN_FILE)).unwrap()).unwrap();
+    known["orgs/Acme/MEMORY.md"] = json!(changes::keep_text(&bot.id, &format!("{kept}\n")).unwrap());
+    known["orgs/Acme/memory/people.md"] = json!(changes::keep_text(&bot.id, "Edited since.\n").unwrap());
+    std::fs::write(folder.join(changes::KNOWN_FILE), known.to_string()).unwrap();
+    let logged = |id: &str, kind: &str, text: &str, edits: serde_json::Value| {
+        let change = json!({"id": id, "at": "2026-11-02T10:00:00.000Z", "kind": kind, "text": text, "edits": edits, "source": {"kind": "app"}, "by": OWNER});
+        crate::store::append_line(&folder.join(changes::LOG_FILE), &change.to_string()).unwrap();
+    };
+    logged("before-the-move", "forgot", "Acme reviews on Fridays", json!([{"op": "removeLine", "file": "orgs/Acme/MEMORY.md", "line": forgotten, "index": 1, "prev": kept}]));
+    let earlier = changes::keep_text(&bot.id, "As it was.\n").unwrap();
+    let since = changes::hash_of("Edited since.\n");
+    logged("topic-before-the-move", "outside", "Changed orgs/Acme/memory/people.md", json!([{"op": "replaceText", "file": "orgs/Acme/memory/people.md", "before": earlier, "after": since}]));
+
+    let undone = undo(sink.as_ref(), &bot, "before-the-move", OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, &acme.memory_file()), format!("{kept}\n{forgotten}\n"), "put back under its old neighbour, where the place reads");
+    let edits = undone.known_edits().unwrap();
+    assert!(matches!(&edits[..], [Edit::AddLine { file, .. }] if *file == acme.memory_file()), "{edits:?}");
+    assert_eq!(undone.states.keys().collect::<Vec<_>>(), [&acme.memory_file()]);
+    // A whole text goes back where the topic file is now, too.
+    undo(sink.as_ref(), &bot, "topic-before-the-move", OWNER, Source::of("app")).unwrap();
+    assert_eq!(file(&bot, &format!("{}/people.md", acme.topics_dir())), "As it was.\n");
+    // Named exactly: a volume that does not tell case apart would answer for `Acme` with another folder.
+    let folders: Vec<String> = std::fs::read_dir(home_of(&bot).join(ORGS_DIR)).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    assert!(folders[0].starts_with("x-"), "the old folder is not made again: {folders:?}");
+    // The page shows what it says it undid, and finds nothing edited outside the app.
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let place = shown.memory.places.iter().find(|place| place.key == "Acme").unwrap();
+    assert!(place.lines.iter().any(|line| line == forgotten), "{:?}", place.lines);
+    assert!(shown.changes.iter().all(|change| change.kind != "outside" || change.id == "topic-before-the-move"), "{:?}", shown.changes);
+    assert_eq!(kept_now("orgs/acme/MEMORY.md"), None, "a folder kept where it says is left alone");
+    assert_eq!(kept_now("memory/orgs/Acme/x.md"), None);
+    assert_eq!(kept_now("MEMORY.md"), None);
+}
+
+/// Whether the folder at `dir` does not tell names apart by case (APFS and HFS+ as macOS formats them by default).
+fn folds_case(dir: &std::path::Path) -> bool {
+    std::fs::write(dir.join("case-probe"), "").unwrap();
+    let folds = dir.join("CASE-PROBE").exists();
+    std::fs::remove_file(dir.join("case-probe")).unwrap();
+    folds
+}
+
+/// PRO-512: on a volume that does not tell case apart, a bot that already
+/// worked in two organisations whose ids differ only in case kept both
+/// organisations' notes in one folder. They cannot be told apart, so they
+/// stay there; the place left reading an empty folder says so to the owner,
+/// until it has notes of its own.
+#[test]
+fn the_owner_is_told_of_notes_left_in_a_folder_two_organisations_shared() {
+    let (_home, sink, bot) = hired();
+    let home = home_of(&bot);
+    if !folds_case(&home) {
+        // Where case is told apart the two never shared a folder: each folder moves, and nothing is said.
+        let bot = with_works_in(sink.as_ref(), &bot, &["Acme", "acme", PERSONAL]);
+        std::fs::create_dir_all(home.join("orgs/Acme")).unwrap();
+        std::fs::write(home.join("orgs/Acme/MEMORY.md"), "- 2026-11-01 Upper\n").unwrap();
+        let shown = view(sink.as_ref(), &bot).unwrap();
+        assert!(shown.memory.places.iter().all(|place| place.notice.is_none()));
+        assert_eq!(file(&bot, &Place::Org("Acme".into()).memory_file()), "- 2026-11-01 Upper\n", "moved to where it is kept now");
+        return;
+    }
+    // One lower-case id: the shared folder is still that organisation's own.
+    let bot = with_works_in(sink.as_ref(), &bot, &["Acme", "acme", PERSONAL]);
+    std::fs::create_dir_all(home.join("orgs/Acme")).unwrap();
+    std::fs::write(home.join("orgs/Acme/MEMORY.md"), "- 2026-11-01 Upper\n- 2026-11-01 Lower\n").unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let place = |shown: &View, key: &str| shown.memory.places.iter().find(|place| place.key == key).unwrap().clone();
+    let upper = place(&shown, "Acme");
+    assert!(upper.lines.is_empty(), "it reads an empty folder");
+    let notice = upper.notice.expect("and the owner is told why");
+    assert!(notice.contains(&home.join("orgs/Acme").display().to_string()) && notice.contains("shared with acme") && notice.contains("acme reads them as its own"), "{notice}");
+    assert!(notice.contains(&home.join(Place::Org("Acme".into()).memory_file()).display().to_string()), "it says where to move them: {notice}");
+    let lower = place(&shown, "acme");
+    assert_eq!((lower.lines.len(), lower.notice), (2, None), "the notes stay where they were, read by the one whose folder it is");
+    assert!(place(&shown, "bot").notice.is_none() && place(&shown, PERSONAL).notice.is_none());
+    // `terminalx bots memory list --place Acme` says it too.
+    assert_eq!(unmoved_notes(&bot, &home, &Place::Org("Acme".into())), Some(notice));
+    // Once the place has notes of its own, it is no longer said.
+    add(sink.as_ref(), &bot, &Place::Org("Acme".into()), "Sorted by hand", OWNER, Source::of("app")).unwrap();
+    assert!(place(&view(sink.as_ref(), &bot).unwrap(), "Acme").notice.is_none());
+
+    // Two ids with capitals: neither reads the old folder, and both say so.
+    let bot = with_works_in(sink.as_ref(), &bot, &["Birch", "BIRCH"]);
+    std::fs::create_dir_all(home.join("orgs/Birch")).unwrap();
+    std::fs::write(home.join("orgs/Birch/MEMORY.md"), "- 2026-11-01 Either\n").unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    for key in ["Birch", "BIRCH"] {
+        let notice = place(&shown, key).notice.expect(key);
+        assert!(notice.contains("no place reads them now"), "{notice}");
+    }
+    assert_eq!(std::fs::read_to_string(home.join("orgs/Birch/MEMORY.md")).unwrap(), "- 2026-11-01 Either\n", "left as they were");
+}
+
+/// PRO-512: a line number counts from where the list starts in the file's
+/// own bytes. A memory past the read limit that is not UTF-8 decodes to more
+/// bytes than it holds, and counting in the decoded text named a line further down.
+#[test]
+fn a_line_number_holds_in_a_memory_that_is_not_utf8() {
+    let (_home, sink, bot) = hired();
+    // Every note reads the same, so only the line number says which is meant.
+    let same = "- 2026-11-01 The same note, written out long enough to pass the limit";
+    let mut bytes = Vec::new();
+    for n in 0..3000 {
+        // Among the newest lines, the ones a list reads, are bytes that are not UTF-8: each decodes to three bytes.
+        if n >= 2960 {
+            bytes.extend_from_slice(b"- 2026-10-01 Not text: ");
+            bytes.extend(std::iter::repeat_n(0xff, 60));
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(format!("{same}\n").as_bytes());
+    }
+    std::fs::write(home_of(&bot).join("MEMORY.md"), &bytes).unwrap();
+    let shown = view(sink.as_ref(), &bot).unwrap();
+    let listed = shown.memory.places[0].lines.clone();
+    let total = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let skipped = total - listed.len();
+    assert!(skipped > 0 && listed.iter().any(|line| line.contains('\u{fffd}')), "the list reads the lines that are not text");
+    assert!(listed[..10].iter().all(|line| line == same));
+    assert_eq!(lines_not_listed(&bytes), skipped);
+    assert_ne!(lines_not_listed(String::from_utf8_lossy(&bytes).as_bytes()), skipped, "the decoded text is cut elsewhere");
+
+    let index_of = |change: &Change| match &change.known_edits().unwrap()[..] {
+        [Edit::RemoveLine { index: Some(at), .. }] => *at,
+        other => panic!("{other:?}"),
+    };
+    // `forget --line 7`, as the command line sends it, and the screen's Forget by the line's place in its list.
+    let recorded = forget(sink.as_ref(), &bot, &Place::Bot, same, Some(6), OWNER, Source::of("cli")).unwrap();
+    assert_eq!(index_of(recorded.last().unwrap()), skipped + 6);
+    // The forget wrote the file out as text; a tidy of the file as it was counts the same way.
+    std::fs::write(home_of(&bot).join("MEMORY.md"), &bytes).unwrap();
+    let listed = view(sink.as_ref(), &bot).unwrap().memory.places[0].lines.clone();
+    assert_eq!(total - listed.len(), skipped);
+    let plan = TidyPlan { remove: vec![TidyLine { place: None, line: 10, note: note_text(same).into() }], merge: vec![] };
+    let recorded = tidy(sink.as_ref(), &bot, &plan, &places(&bot), OWNER, Source::of("app"), None).unwrap();
+    assert_eq!(index_of(recorded.last().unwrap()), skipped + 9);
+}
+
+/// PRO-512: a file read moments after it changed is read again by the next
+/// look, so an edit of the same size made in the same tick of a filesystem
+/// with coarse times is still found; once its times are older than any tick it is read no more.
+#[test]
+fn a_same_size_edit_in_the_same_tick_is_found_on_a_filesystem_with_coarse_times() {
+    let (_home, sink, bot) = hired();
+    let topic = home_of(&bot).join("memory/rota.md");
+    let reads = || changes::LOOK_READS.with(|reads| reads.replace(0));
+    // As a filesystem with coarse times stamps a file: nothing in its stamp tells the two texts apart.
+    changes::COARSE_STAMPS.with(|coarse| coarse.set(true));
+    std::fs::write(&topic, "On call: Ada\n").unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1, "the new topic file");
+    // Edited in place, the same size, before the tick is over.
+    let mut file = std::fs::OpenOptions::new().write(true).open(&topic).unwrap();
+    std::io::Write::write_all(&mut file, b"On call: Bob\n").unwrap();
+    drop(file);
+    reads();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1, "the edit is found");
+    assert!(reads() >= 1);
+    let change = read_log(&bot.id).unwrap().changes.pop().unwrap();
+    assert_eq!((change.kind.as_str(), change.states.contains_key("memory/rota.md")), ("outside", true));
+
+    // Settled: a look reads nothing, and a stamp that changes is still read.
+    changes::LOOK_CLOCK_AHEAD.with(|ahead| ahead.set(std::time::Duration::from_secs(60)));
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 0);
+    reads();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 0);
+    assert_eq!(reads(), 0, "nothing read once the times have settled");
+    std::fs::write(&topic, "On call: Grace Hopper\n").unwrap();
+    assert_eq!(changes::look(sink.as_ref(), &bot.id).unwrap(), 1);
+    assert_eq!(reads(), 1);
 }

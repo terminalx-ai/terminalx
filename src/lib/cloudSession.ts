@@ -889,7 +889,8 @@ export function useCloudSession(key: string): CloudSessionModel | null {
     [closeBlockedReason, client, connected, scope, workspaceKey],
   );
   // Every tab of the session the runtime holds is known here: its live list of agent tabs, and its shells.
-  const tabsListed = connected && !locked && agents.loaded && !!terminalStore.listed && ownTabs.every((tab) => tab.source === "live");
+  // The cache being loaded is not enough (#1379): it may be empty or unreadable, and then no tab is "not live".
+  const tabsListed = connected && !locked && agents.liveListed && !!terminalStore.listed && ownTabs.every((tab) => tab.source === "live");
 
   const recheckAccess = useCallback(() => {
     // An older server's list says nothing about roles: only connecting again can tell.

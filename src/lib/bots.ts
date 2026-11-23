@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { botsApi } from "@/lib/api";
+import { keepRoleDraft, keepRoleDraftsOf, roleDraftsReachable } from "@/lib/botMemory";
 import type { Bot, BotList, BotPatch, BotPauseFrom, BotRoleTemplate } from "@/types/bots";
 
 /**
@@ -48,6 +49,9 @@ function isList(value: unknown): value is BotList {
 function take(list: BotList) {
   if (list.revision < state.revision) return;
   set({ bots: list.bots, revision: list.revision, unreadable: list.unreadable ?? 0, loaded: true, error: null });
+  // A bot this list does not have is deleted: its unsaved role goes with it (PRO-512). A record this app cannot read
+  // is a bot that is there but not listed, so with any of those nothing is dropped.
+  if (!list.unreadable) keepRoleDraftsOf(list.bots.map((bot) => bot.id));
 }
 
 /** Counts the boots and shuts so an answer that arrives after the switch went off is dropped. */
@@ -68,6 +72,7 @@ async function listBots(mine: number) {
 export async function bootBots() {
   if (booted) return;
   booted = true;
+  roleDraftsReachable(true);
   const mine = ++generation;
   try {
     const stops = await Promise.all([
@@ -98,6 +103,8 @@ export function shutBots() {
   for (const stop of unlisten) stop();
   unlisten = [];
   set(EMPTY);
+  // No page shows an unsaved role now: quitting does not ask about one (PRO-512).
+  roleDraftsReachable(false);
 }
 
 export function useBotStore(): State {
@@ -150,6 +157,8 @@ export function updateBot(id: string, patch: BotPatch) {
 
 export async function deleteBot(id: string) {
   await changed(() => botsApi.remove(id), () => set({ bots: state.bots.filter((value) => value.id !== id) }));
+  // Deleted: its unsaved role has nowhere to be saved, so quitting no longer asks about it (PRO-512).
+  keepRoleDraft(id, null);
 }
 
 /** `from`: where in the window it was paused, said on the pause (PRO-474). */
@@ -178,6 +187,7 @@ export function resetBotsForTests() {
   shutBots();
   state = EMPTY;
   listeners.clear();
+  roleDraftsReachable(true);
 }
 
 if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());

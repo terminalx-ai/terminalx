@@ -1259,10 +1259,12 @@ type ConversationMenuProps = {
   /** The sessions the row stands for, which Select picks for the bulk bar. */
   ids?: string[];
   linkTo?: ConversationLinkActions | null;
+  /** A bot's home chat (PRO-521): its standing chat is renamed like any session, but not archived or deleted from its row. */
+  standing?: boolean;
 };
 
 /** One action list for a conversation's ⋯, right-click and keyboard menus, in both sidebar layouts. */
-export function ConversationMenuItems({ session, branch, rename, renameBranch, ids = [session.id], linkTo, contextMenu = false }: ConversationMenuProps & { contextMenu?: boolean }) {
+export function ConversationMenuItems({ session, branch, rename, renameBranch, ids = [session.id], linkTo, standing = false, contextMenu = false }: ConversationMenuProps & { contextMenu?: boolean }) {
   const Item = contextMenu ? ContextMenuItem : DropdownMenuItem;
   const Separator = contextMenu ? ContextMenuSeparator : DropdownMenuSeparator;
   const Sub = contextMenu ? ContextMenuSub : DropdownMenuSub;
@@ -1380,7 +1382,7 @@ export function ConversationMenuItems({ session, branch, rename, renameBranch, i
           </SubContent>
         </Sub>
       )}
-      <Separator />
+      {(!standing || session.worktreeRemoved || !!session.worktreeName) && <Separator />}
       {session.worktreeRemoved && (
         <Item onSelect={() => openWorkspaceRestore(session.id)}>
           <FolderInput /> Restore workspace…
@@ -1391,12 +1393,16 @@ export function ConversationMenuItems({ session, branch, rename, renameBranch, i
           <Folder className="mt-0.5" /> <MenuItemText label="Remove workspace…" hint="The conversations are kept" />
         </Item>
       )}
-      <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
-        <Archive /> {session.archived ? "Unarchive" : "Archive"}<MenuKbd keys={archiveKeys} />
-      </Item>
-      <Item destructive onSelect={() => void confirmDeleteSession(session)}>
-        <Trash2 /> Delete session…
-      </Item>
+      {!standing && (
+        <Item data-row-key="a" aria-keyshortcuts="A" onSelect={() => void (session.archived ? archiveSession(session.id, false) : archiveWithUndo(session.id)).catch(reportError(`Couldn't ${session.archived ? "unarchive" : "archive"} “${title}”`))}>
+          <Archive /> {session.archived ? "Unarchive" : "Archive"}<MenuKbd keys={archiveKeys} />
+        </Item>
+      )}
+      {!standing && (
+        <Item destructive onSelect={() => void confirmDeleteSession(session)}>
+          <Trash2 /> Delete session…
+        </Item>
+      )}
     </>
   );
 }
