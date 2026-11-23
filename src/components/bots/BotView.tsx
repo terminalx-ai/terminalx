@@ -191,7 +191,7 @@ export function BotView({ botId, chatId, sidebarOpen, onToggleSidebar, titlebarI
               <ErrorBoundary key={open.id} label="the chat">
                 <HandoffStrip bot={bot} chatId={open.id} />
                 <RunPlanCards bot={bot} chatId={open.id} chats={chats} />
-                <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
+                <SessionView session={open} sidebarOpen onToggleSidebar={onToggleSidebar} chrome={{ compact: true, noNewTab: true, leading: <span className="truncate px-1 text-sm text-foreground">{conversationTitle(open)}</span> }} />
               </ErrorBoundary>
             ) : (
               homeFailed ? (
