@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Shortcuts: on macOS, Switch light and dark is now ⌥⌘T, as designed, and
+  Reopen closed tab moves to ⌥⇧⌘T, the keys it already had on Windows and
+  Linux. Elsewhere light and dark stays Ctrl+Alt+Shift+L, since Ctrl+Alt+T
+  opens a terminal on GNOME and Ubuntu. Keys you set yourself for either are
+  kept (#1131).
+
 - Bots (experimental): a bot works in cloud workspaces with the access it has
   on this Mac. A session that works for a bot may start a cloud session,
   prompt it and resume its workspace, where before every one was refused. A
