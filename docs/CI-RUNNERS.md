@@ -99,11 +99,19 @@ a skip the selector did not ask for. No tests are dropped or newly ignored.
 Portable source icon tests run on Linux; macOS retains all source and Apple
 decoder checks.
 
-Three things a pull request ran before 23 November 2026 now run on `main`,
-nightly and manual runs only: macOS Clippy, the macOS run of the Rust tests
-outside the Apple-only and system-dependent modules, and `tsc` in every job but
-`frontend` (it ran four times). Two sets of tests no workflow ran now run: the
-phone app's (`phone-app`) and the serve crate's test binaries (`serve-tests`).
+What a selected pull request ran on macOS before 23 November 2026 and now
+runs there on `main`, nightly and manual runs only (all of it still runs on
+Linux on the pull request):
+
+- the library's tests outside the 51 filters (3,982 of 5,871);
+- the other test binaries: `--bins` and the three in `src-tauri/tests/`;
+- the doc tests.
+
+macOS Clippy still runs on a selected pull request, both invocations. `tsc`
+runs in `frontend` alone (it ran four times). The serve crate's test binaries
+run for the first time (`serve-tests`). The phone app's tests have a job of
+their own (`phone-app`); the root Vitest run already ran the phone's
+`.test.ts` files and still does, so those run twice.
 
 The Linux build also exposed unused macOS-only secure-dialog and dictation
 code. Those implementations and real-model evaluation types now compile only
@@ -255,8 +263,8 @@ Linux runners start at once, so the two long suites run in parts on several:
   [cargo-nextest](https://nexte.st), `cargo nextest run --locked --lib
   --profile ci --partition count:N/4`: nextest sorts the tests and deals them
   out in turn, so every test is in exactly one part and the parts are the same
-  size (1,462, 1,461, 1,461 and 1,461 of the 5,845 that run; 26 more are
-  `#[ignore]`d, as before). The fifth, `binaries`, is the rest of `cargo test
+  size (on Linux 1,443 a part: 5,791 tests are listed there and 18 are
+  `#[ignore]`d; a Mac lists 5,871 with 26 ignored). The fifth, `binaries`, is the rest of `cargo test
   --locked`: the other test binaries (`--bins --test '*'`) and the doc tests
   under `cargo test`, then `control::issue_tests` built without the desktop
   features. A new or renamed test moves tests between runners; it cannot leave
@@ -270,10 +278,15 @@ would fail here; none of the 85 tried did, the ones that run the test binary
 again among them.
 
 The `ci` profile is `src-tauri/.config/nextest.toml`: every test runs after a
-failure, a failed test is run again up to twice and one that then passes is
-reported as flaky (and does not fail the run), a test is stopped at ten
+failure, a failed test fails the run, a test is stopped at ten
 minutes, and the JUnit report is kept as the `rust-junit-N` artifact. No
 profile leaves a test out, and a policy test fails if one is made to.
+The only retries are the file's overrides: one known flaky test each, by its
+exact name, run again up to twice, with its ticket on the line above; a policy
+test fails on any other override, and on a workflow that sets a `NEXTEST_`
+variable or `--retries`. A test that passed on a retry, or left a process
+open, is named in the job's summary. Two global retries would have let a new
+race that fails half the time pass seven runs in eight.
 nextest is installed as one release by version, its archive checked against a
 SHA-256 in the workflow before it is opened.
 
@@ -319,10 +332,13 @@ merge base and its head, when it changes:
 - an Apple-only module: a file or folder behind `#[cfg(target_os = "macos")]
   mod …`, a file holding such a module inline, or one named for macOS
   (`APPLE_ONLY` in the script, 13 today);
-- a line in, or within eight lines of, an item behind an Apple `cfg` in any
-  Rust file. Git shows each change with the whole function around it, so a
-  change deep inside an Apple-only function counts, and so does a `cfg` that is
-  added or removed;
+- any Rust file that holds an Apple `cfg`, before or after the change. A
+  change anywhere in such a file can break its Apple branch, which Linux never
+  compiles. File names are git's own, and a file that cannot be read on either
+  side selects the job;
+- a path dependency Cargo builds for an Apple target alone
+  (`transcription/native-detector`), the scripts the job runs and the ones
+  those import, `.nvmrc` and `src-tauri/capabilities/`;
 - `native/`, the Tauri configuration, entitlements and property lists, the
   icons, `Cargo.toml`, `Cargo.lock`, `build.rs`, the toolchain files and the
   crate roots;
@@ -331,13 +347,18 @@ merge base and its head, when it changes:
 - `.github/workflows/ci.yml` or `infra/ci-runners/`.
 
 Deletions and renames are checked at their old paths too. Before 23 November
-2026 any change to a file with an Apple `cfg` anywhere in it, or to a file
-in the same folder as one, selected the job; 87 files have one. Of the last
-400 commits on `main` this rule selects 118.
+2026 a file in the same folder as one with an Apple `cfg` selected the job as
+well, and so did everything under `scripts/` and `.github/`. Of the last 400
+commits on `main` this rule selects 152.
+
+On `main` a Clippy failure fails the job and the suite still runs after it.
+`release-serve.yml` publishes only from a green `main`, so a red macOS Clippy
+holds back the runtime release until it is fixed, as a red suite does.
 
 A selected pull request runs the Swift tests, the icon checks, the helper
-build, one build of the library's tests (so every Apple-only line compiles)
-and the tests of the Apple-only and system-dependent modules:
+build, Clippy over every target (so every Apple-only line of the library, the
+binaries and the integration tests is checked), one build of the library's
+tests, and the tests of the Apple-only and system-dependent modules:
 `cargo test --locked --lib -- $(macos-rust.py --filters)`, 51 name filters
 that match 1,889 of the 5,871 tests. They are the modules with any Apple
 `cfg`, and the ones whose behaviour is the system's without one (terminals,
@@ -355,9 +376,10 @@ python3 -m unittest discover -s infra/ci-runners -p 'test_*.py'
 
 **Coverage no longer provided on a pull request:** frontend-only,
 documentation-only and shared Rust changes outside those rules take no macOS
-runner before merge: no macOS Rust tests, Swift tests or Apple icon checks. A
-selected pull request does not run macOS Clippy or the other 3,982 tests on
-macOS. All of it runs on `main` after the merge, nightly and on manual
+runner before merge: no macOS Rust tests, Clippy, Swift tests or Apple icon
+checks. A selected pull request does not run, on macOS, the other 3,982 of the
+library's tests, the other test binaries (`--bins` and the three in
+`src-tauri/tests/`) or the doc tests. All of it runs on `main` after the merge, nightly and on manual
 dispatch; use manual dispatch on the branch when a platform difference in
 shared Rust code is the risk. `src-tauri/serve/tests/local_platform.rs` is
 compiled only for macOS and no job builds the serve crate's tests there, so
