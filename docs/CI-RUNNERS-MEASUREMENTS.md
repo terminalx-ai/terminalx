@@ -334,3 +334,32 @@ local checks are correctness evidence, not CI performance measurements: they
 do not substitute for GitHub-hosted AMD64 CI or either post-change ten-run
 comparison. No Hetzner runner has been provisioned, activated or certified by
 this change.
+
+## Step 1 of the 5 to 10 minute target (2026-11-23): what was measured, and what was not
+
+The workflow changes of #1514 (nextest in parts, the wider selector, the
+Linux WebKit workflow) were written without a CI run. Nothing below is a
+measured run time on a hosted runner; the first pull request that carries the
+workflow is the first measurement. Local checks were compile-only by the
+owner's rule: no full suite ran.
+
+Measured on the development Mac (arm64, busy, load average 8 to 100):
+
+| What | Result |
+| --- | --- |
+| `cargo test --locked --lib --no-run` with only a one-line `dist/index.html` | builds, 4 min 46 s warm dependencies |
+| Tests in the library's binary (`--list`) | 5,871, of which 26 `#[ignore]` |
+| `cargo nextest list --locked --lib --profile ci` (cargo-nextest 0.9.152) | 5,845: the same names, less the 26 ignored |
+| `--partition count:N/4` | 1,462 + 1,461 + 1,461 + 1,461 = 5,845 |
+| `--partition hash:N/4` | 1,492 + 1,463 + 1,467 + 1,423 = 5,845 |
+| 85 tests by name under nextest: the privacy tests that run the test binary again, `github_process`, `session::codex_stdio`, `machine_host::security_tests`, `control::issue_tests` and others | 85 passed, none retried; 297 s, all of it one test |
+| The slowest of them, `github_process::tests::privacy_covers_identity_and_issue_entry_points` | 297 s in a process of its own under that load |
+| macOS filters (`macos-rust.py --filters`) against the binary's list | 51 filters, 1,889 of 5,871 tests |
+| The selector over the last 400 first-parent commits | none of the selected jobs 8; frontend alone 94; Rust alone 44; phone alone 18; Rust and frontend 64; macOS 118 |
+| WebKit parts (`run-all.mjs --shard N/4 --list`) | 32 + 31 + 31 + 31 = 125 |
+
+Not measured, and to read from the first runs: each `linux-rust-tests` part's
+time under nextest on a four-core runner (the 297 s test sets a floor for its
+part); whether the serve crate's test binaries pass on a hosted runner (no
+workflow ran them before); the Linux WebKit parts; a cold and a warm
+`ci-v5` cache; and the macOS job's time on a selected pull request.
