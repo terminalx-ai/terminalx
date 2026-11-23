@@ -26,6 +26,7 @@
 pub mod account_link;
 pub mod agent_commands;
 pub mod bootstrap_link;
+pub mod bots;
 pub mod client;
 pub mod collab;
 pub mod environment;

@@ -554,6 +554,21 @@ fn report_activity(runtime: &Runtime, cloud: Arc<crate::cloud_bootstrap::Bootstr
         // its checks is work too, with no agent turn to show for it.
         Counts { active_turns: active_turns + crate::issue_pipeline::engine::holding(), pending_approvals }
     };
+    // A bot's duty wakes a suspended workspace at its time (PRO-482).
+    let waking = cloud.clone();
+    let wake_api = crate::cloud_bootstrap::HttpApi::new(origin);
+    crate::cloud_wake::spawn_reporter(move |report| {
+        if waking.is_rejected() {
+            return false;
+        }
+        match waking.report_wake_at(&wake_api, report) {
+            Ok(()) => true,
+            Err(error) => {
+                log::debug!("report the next bot wake: {}", crate::cloud_bootstrap::describe(&error));
+                false
+            }
+        }
+    });
     let api = crate::cloud_bootstrap::HttpApi::new(origin);
     spawn_reporter(counts, move |report| {
         // The refresh loop notices a revoked credential; until it is
