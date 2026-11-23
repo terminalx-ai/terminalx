@@ -101,6 +101,7 @@ function Confirmation({ organization, remove, onDeleted }: Props) {
           returnKeyType="done"
           onSubmitEditing={() => void submit()}
           placeholder={confirming}
+          steady
         />
         <Button label={text.confirm(confirming)} kind="danger" disabled={busy || !confirmed} onPress={() => void submit()} />
         <Button label={text.cancel} kind="secondary" disabled={busy} onPress={() => { setConfirming(null); setTyped(""); setCopied(false); setError(null); }} />

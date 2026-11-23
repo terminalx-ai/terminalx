@@ -100,6 +100,17 @@ it("empties a rejected key and focuses its field, keeping the others, and shows 
   expect(handle.current!.read()).toEqual({ accountId: "", token: "" });
 });
 
+it("sends a secret typed or pasted into the secure field without the space around it", async () => {
+  const handle = createRef<DescribedFieldsHandle>();
+  const ready = vi.fn();
+  await page.show(<DescribedFields ref={handle} fields={agent37} onReadyChange={ready} />);
+  await page.type(inputOf("apiKey"), "  ");
+  expect(ready).not.toHaveBeenCalled();
+  await page.type(inputOf("apiKey"), ` ${KEY}\n`);
+  expect(ready).toHaveBeenCalledExactlyOnceWith(true);
+  expect(handle.current!.read()).toEqual({ apiKey: KEY });
+});
+
 it("locks every field while the key is being checked", async () => {
   await page.show(<DescribedFields fields={described} disabled />);
   expect(inputOf("accountId")!.disabled).toBe(true);

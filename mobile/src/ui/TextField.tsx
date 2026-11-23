@@ -9,7 +9,7 @@ export interface TextFieldHandle {
   focus(): void;
   /** Empties the field. A secret is dropped at once. */
   clear(): void;
-  /** What the field holds, for the one request that sends it. */
+  /** What the field holds, for the one request that sends it. A secret comes without the space around it. */
   read(): string;
 }
 
@@ -33,6 +33,11 @@ interface Shared extends Pick<TextInputProps, "autoCapitalize" | "autoCorrect" |
   disabled?: boolean;
   /** The monospaced face, for a value that is read character by character. */
   mono?: boolean;
+  /**
+   * Keeps the hairline while focused and full strength while locked, as the
+   * organization delete field has always been drawn. An error still reddens it.
+   */
+  steady?: boolean;
   testID?: string;
 }
 interface Plain extends Shared { secret?: false; value: string; onChangeText(value: string): void }
@@ -59,7 +64,7 @@ const NOTHING_TO_PASTE = "Nothing to paste. Copy it first, then tap Paste.";
  * reads it once, through the handle, for the request that sends it.
  */
 export function TextField({ ref, ...props }: TextFieldProps) {
-  const { label, hint, link, helper, error, placeholder, paste, disabled, mono, testID, secret } = props;
+  const { label, hint, link, helper, error, placeholder, paste, disabled, mono, steady, testID, secret } = props;
   const { palette } = useTheme();
   const input = useRef<ComponentRef<typeof TextInput>>(null);
   const held = useRef("");
@@ -75,13 +80,16 @@ export function TextField({ ref, ...props }: TextFieldProps) {
   const name = props.accessibilityLabel ?? label;
   const empty = secret ? !filled : props.value === "";
 
+  // Space around a secret is never part of it, however it got in: a key pasted from the system's
+  // own menu often ends in a space or a line break, and only spaces is nothing entered.
   const hold = (value: string, fromClipboard: boolean) => {
     if (!props.secret) return;
-    const had = held.current !== "";
+    const had = held.current.trim() !== "";
+    const has = value.trim() !== "";
     held.current = value;
-    setPasted(fromClipboard && value !== "");
-    setFilled(value !== "");
-    if (had !== (value !== "")) props.onFilledChange?.(value !== "");
+    setPasted(fromClipboard && has);
+    setFilled(has);
+    if (had !== has) props.onFilledChange?.(has);
   };
   const change = (value: string) => {
     setPasteError(null);
@@ -110,12 +118,12 @@ export function TextField({ ref, ...props }: TextFieldProps) {
       input.current?.clear();
       if (props.secret) hold("", false); else props.onChangeText("");
     },
-    read: () => (props.secret ? held.current : props.value),
+    read: () => (props.secret ? held.current.trim() : props.value),
   }));
 
   const problem = error || pasteError;
   const line = problem || helper;
-  const border = problem ? palette.danger : focused ? palette.accent : palette.border;
+  const border = problem ? palette.danger : focused && !steady ? palette.accent : palette.border;
   const face = mono ? { fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }) } : null;
   return <View testID={testID}>
     {label || hint || link ? <View style={styles.labelRow}>
@@ -125,7 +133,7 @@ export function TextField({ ref, ...props }: TextFieldProps) {
         <ArrowUpRight size={12} color={palette.accent} />
       </Pressable> : hint ? <Text style={[styles.label, { color: palette.faint }]}>{hint}</Text> : null}
     </View> : null}
-    <View style={[styles.field, { borderColor: border, backgroundColor: palette.raised }, disabled ? styles.off : null]}>
+    <View style={[styles.field, { borderColor: border, backgroundColor: palette.raised }, disabled && !steady ? styles.off : null]}>
       {secret && pasted
         ? <Pressable accessibilityRole="button" accessibilityLabel={name} accessibilityHint="Entered. Double tap to enter it again." accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={startOver} style={styles.dots}>
           <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" numberOfLines={1} style={[styles.text, face, { color: palette.ink }]}>{DOTS}</Text>

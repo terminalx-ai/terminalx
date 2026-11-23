@@ -25,9 +25,15 @@ export function priceText(micros: number, currency: string): string {
  * A quote's price (25.05): per active hour, and what 30 days always on comes
  * to, then how long the price holds. Once it has run out the figures stay,
  * dimmed: an expired price is shown as what it was, never as one to launch on.
+ * The hold is counted on the server's clock, which the screen hands in.
  */
-export function PriceLines({ quote, note, onExpired, testID }: {
+export function PriceLines({ quote, now, note, onExpired, testID }: {
   quote: Pick<CloudQuote, "activeHourlyMicros" | "alwaysOnThirtyDayMicros" | "currency" | "expiresAt">;
+  /**
+   * The server's clock: the cloud client's `serverNow`. The quote's expiry is
+   * a server time, so it is never compared with the phone's own clock.
+   */
+  now: () => number;
   /** Before the countdown: who bills, and that prices are estimates. */
   note?: string;
   /** Told once when the quote runs out, and at once for one that already has. */
@@ -35,7 +41,7 @@ export function PriceLines({ quote, note, onExpired, testID }: {
   testID?: string;
 }) {
   const { palette } = useTheme();
-  const remaining = useRemaining(quote.expiresAt);
+  const remaining = useRemaining(quote.expiresAt, now);
   const over = remaining === 0;
   const expired = useRef(onExpired);
   useEffect(() => { expired.current = onExpired; });

@@ -50,6 +50,19 @@ it("takes the accent on its border while it has the focus", async () => {
   expect(page.styleOf(field()).borderColor).toBe("#ffffff1a");
 });
 
+it("can keep its hairline and full strength, as the organization delete field always has", async () => {
+  await page.show(<TextField accessibilityLabel="Organization name to delete" steady value="" onChangeText={noop} />);
+  const box = () => input()!.parentElement;
+  await act(async () => input()!.focus());
+  expect(page.styleOf(box()).borderColor).toBe("#ffffff1a");
+  await act(async () => input()!.blur());
+  await page.show(<TextField accessibilityLabel="Organization name to delete" steady disabled value="Test organization" onChangeText={noop} />);
+  expect(input()!.disabled).toBe(true);
+  expect(page.styleOf(box()).opacity).toBeUndefined();
+  expect(page.styleOf(box())).toMatchObject({ minHeight: 44, borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, borderColor: "#ffffff1a", backgroundColor: "#20181b" });
+  expect(page.styleOf(input()).fontSize).toBe(16);
+});
+
 it("shows an error in place of the helper, in red, and announces it", async () => {
   await page.show(<TextField label="Organization name" helper="2 to 60 characters." error="Use 2 to 60 characters." value="N" onChangeText={noop} />);
   const alert = page.container.querySelector("[role='alert']")!;
@@ -124,6 +137,23 @@ it("keeps a typed secret out of everything it draws: a secure input that is neve
   await page.show(<TextField ref={handle} secret label="Agent37 API key" error="Agent37 needs billing set up on that account before it will act." onFilledChange={filled} />);
   expect(drawn()).not.toContain(SECRET);
   expect(handle.current!.read()).toBe(SECRET);
+});
+
+it("never counts the space around a secret, however it got into the field", async () => {
+  const filled = vi.fn();
+  const handle = createRef<TextFieldHandle>();
+  await page.show(<TextField ref={handle} secret label="Agent37 API key" onFilledChange={filled} />);
+  // Only spaces is nothing entered: the form's button stays off.
+  await page.type(input(), "   ");
+  expect(filled).not.toHaveBeenCalled();
+  expect(handle.current!.read()).toBe("");
+  // Pasted from the system's own menu, with the space and line break a copy often carries.
+  await page.type(input(), `  ${SECRET} \n`);
+  expect(filled).toHaveBeenCalledExactlyOnceWith(true);
+  expect(handle.current!.read()).toBe(SECRET);
+  await page.type(input(), " ");
+  expect(filled).toHaveBeenLastCalledWith(false);
+  expect(handle.current!.read()).toBe("");
 });
 
 it("shows a pasted secret as a fixed row of dots, whatever its length, and never in words or labels", async () => {

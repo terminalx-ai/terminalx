@@ -71,6 +71,27 @@ it("says how else to copy it when the clipboard refuses", async () => {
   expect(copyButton()!.textContent).toBe("Copy code");
 });
 
+it("says neither Copied nor a failure for a new code shown in its place", async () => {
+  await page.show(<OneTimeCode code="K7QM-4TXP" expiresAt={NOW + 600_000} />);
+  await page.press(copyButton());
+  expect(copyButton()!.textContent).toBe("Copied");
+  await page.show(<OneTimeCode code="R2VD-9HLC" expiresAt={NOW + 900_000} />);
+  expect(code().textContent).toBe("R2VD-9HLC");
+  expect(copyButton()!.textContent).toBe("Copy code");
+  expect(page.icon("Check")).toBeNull();
+  expect(expiry()!.textContent).toBe("expires in 15:00");
+  mocks.copy.mockRejectedValue(new Error("denied"));
+  await page.press(copyButton());
+  expect(page.container.querySelector("[role='alert']")).not.toBeNull();
+  await page.show(<OneTimeCode code="W8NB-3JQF" expiresAt={NOW + 900_000} />);
+  expect(page.container.querySelector("[role='alert']")).toBeNull();
+  expect(copyButton()!.textContent).toBe("Copy code");
+  mocks.copy.mockResolvedValue(true);
+  await page.press(copyButton());
+  expect(mocks.copy).toHaveBeenLastCalledWith("W8NB-3JQF");
+  expect(copyButton()!.textContent).toBe("Copied");
+});
+
 it("keeps a code that is no longer good in view, struck through, with nothing to copy or count", async () => {
   const expired = vi.fn();
   await page.show(<OneTimeCode code="K7QM-4TXP" expiresAt={NOW + 600_000} spent onExpired={expired} />);

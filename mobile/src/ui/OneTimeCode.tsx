@@ -14,7 +14,10 @@ import { useTheme } from "./theme";
  */
 export function OneTimeCode({ code, expiresAt, spent, onExpired, testID }: {
   code: string;
-  /** When the code stops working, in milliseconds since the epoch. */
+  /**
+   * When the code stops working, on the phone's own clock: the server gives a
+   * number of seconds, which the screen adds to the time it got the answer.
+   */
   expiresAt?: number | null;
   /** The code is no longer good, whatever the clock says. */
   spent?: boolean;
@@ -26,8 +29,11 @@ export function OneTimeCode({ code, expiresAt, spent, onExpired, testID }: {
   const remaining = useRemaining(spent ? null : expiresAt);
   const ranOut = !spent && expiresAt != null && remaining === 0;
   const over = spent || ranOut;
-  const [copied, setCopied] = useState(false);
-  const [failed, setFailed] = useState(false);
+  // Which code was copied, or could not be: a new code starts with neither said.
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [failedCode, setFailedCode] = useState<string | null>(null);
+  const copied = copiedCode === code;
+  const failed = failedCode === code;
   const epoch = useRef(0);
   useEffect(() => () => { epoch.current += 1; }, []);
   const expired = useRef(onExpired);
@@ -37,8 +43,8 @@ export function OneTimeCode({ code, expiresAt, spent, onExpired, testID }: {
   const copy = () => {
     const attempt = epoch.current;
     Clipboard.setStringAsync(code).then(
-      () => { if (epoch.current === attempt) { setCopied(true); setFailed(false); } },
-      () => { if (epoch.current === attempt) setFailed(true); },
+      () => { if (epoch.current === attempt) { setCopiedCode(code); setFailedCode(null); } },
+      () => { if (epoch.current === attempt) setFailedCode(code); },
     );
   };
 

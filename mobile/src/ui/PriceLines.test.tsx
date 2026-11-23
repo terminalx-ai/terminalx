@@ -48,7 +48,7 @@ it("writes time left as minutes and seconds", () => {
 });
 
 it("draws the two prices from the quote, then who bills and how long the price holds", async () => {
-  await page.show(<PriceLines testID="price" quote={quote()} note={NOTE} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote()} note={NOTE} />);
   expect(rows()).toHaveLength(2);
   expect(rows()[0].textContent).toBe(`Per active hour${priceText(18_000, "USD")}`);
   expect(rows()[1].textContent).toBe(`Always on, 30 days${priceText(12_960_000, "USD")}`);
@@ -63,7 +63,7 @@ it("draws the two prices from the quote, then who bills and how long the price h
 
 it("counts the hold down, then dims the figures and says once that the price ran out", async () => {
   const expired = vi.fn();
-  await page.show(<PriceLines testID="price" quote={quote({ expiresAt: NOW + 2_000 })} onExpired={expired} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote({ expiresAt: NOW + 2_000 })} onExpired={expired} />);
   expect(holds()!.textContent).toBe("This price holds for 0:02.");
   await pass(1_000);
   expect(holds()!.textContent).toBe("This price holds for 0:01.");
@@ -83,7 +83,7 @@ it("counts the hold down, then dims the figures and says once that the price ran
 
 it("treats a quote that had already run out as expired from the first frame", async () => {
   const expired = vi.fn();
-  await page.show(<PriceLines testID="price" quote={quote({ expiresAt: NOW - 1 })} onExpired={expired} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote({ expiresAt: NOW - 1 })} onExpired={expired} />);
   expect(holds()).toBeNull();
   expect(page.styleOf(rows()[0]).opacity).toBe(0.45);
   expect(expired).toHaveBeenCalledTimes(1);
@@ -91,10 +91,10 @@ it("treats a quote that had already run out as expired from the first frame", as
 
 it("starts over with a new quote: the new figures, undimmed, counting from now", async () => {
   const expired = vi.fn();
-  await page.show(<PriceLines testID="price" quote={quote({ expiresAt: NOW + 1_000 })} onExpired={expired} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote({ expiresAt: NOW + 1_000 })} onExpired={expired} />);
   await pass(60_000);
   expect(expired).toHaveBeenCalledTimes(1);
-  await page.show(<PriceLines testID="price" quote={quote({ activeHourlyMicros: 20_000, alwaysOnThirtyDayMicros: 14_400_000, expiresAt: Date.now() + 295_000 })} onExpired={expired} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote({ activeHourlyMicros: 20_000, alwaysOnThirtyDayMicros: 14_400_000, expiresAt: Date.now() + 295_000 })} onExpired={expired} />);
   await pass(0);
   expect(rows()[0].textContent).toContain(priceText(20_000, "USD"));
   expect(rows()[1].textContent).toContain(priceText(14_400_000, "USD"));
@@ -103,9 +103,50 @@ it("starts over with a new quote: the new figures, undimmed, counting from now",
   expect(expired).toHaveBeenCalledTimes(1);
 });
 
+// The quote's expiry is a server time; the screen hands in the cloud client's serverNow.
+it.each([["ten minutes fast", 600_000], ["ten minutes slow", -600_000]])("counts the hold on the server's clock when the phone's own runs %s", async (_how, skew) => {
+  const expired = vi.fn();
+  const serverNow = () => Date.now() - skew;
+  // The phone's clock reads NOW; the server's reads NOW - skew, and the quote holds 4:38 from there.
+  await page.show(<PriceLines testID="price" now={serverNow} quote={quote({ expiresAt: serverNow() + 278_000 })} onExpired={expired} />);
+  expect(holds()!.textContent).toBe("This price holds for 4:38.");
+  expect(page.styleOf(rows()[0]).opacity).toBeUndefined();
+  await pass(277_000);
+  expect(holds()!.textContent).toBe("This price holds for 0:01.");
+  expect(expired).not.toHaveBeenCalled();
+  await pass(1_000);
+  expect(expired).toHaveBeenCalledTimes(1);
+  expect(holds()).toBeNull();
+  expect(page.styleOf(rows()[0]).opacity).toBe(0.45);
+});
+
+it("never calls a fresh quote expired because the phone's clock is ahead of it, quote after quote", async () => {
+  const expired = vi.fn();
+  const serverNow = () => Date.now() - 3_600_000;
+  for (const hourly of [18_000, 20_000, 22_000]) {
+    await page.show(<PriceLines testID="price" now={serverNow} quote={quote({ activeHourlyMicros: hourly, expiresAt: serverNow() + 300_000 })} onExpired={expired} />);
+    await pass(1_000);
+    expect(holds()!.textContent).toBe("This price holds for 4:59.");
+  }
+  expect(expired).not.toHaveBeenCalled();
+});
+
+it("follows the server's clock when a later answer corrects it", async () => {
+  const expired = vi.fn();
+  let offset = 0;
+  const serverNow = () => Date.now() + offset;
+  await page.show(<PriceLines testID="price" now={serverNow} quote={quote({ expiresAt: NOW + 278_000 })} onExpired={expired} />);
+  expect(holds()!.textContent).toBe("This price holds for 4:38.");
+  // The client learns the server is five minutes ahead of the phone: the quote is already over.
+  offset = 300_000;
+  await pass(1_000);
+  expect(holds()).toBeNull();
+  expect(expired).toHaveBeenCalledTimes(1);
+});
+
 it("takes the light palette", async () => {
   appearance.scheme = "light";
-  await page.show(<PriceLines testID="price" quote={quote()} note={NOTE} />);
+  await page.show(<PriceLines testID="price" now={Date.now} quote={quote()} note={NOTE} />);
   expect(page.styleOf(page.byId("price")!.firstElementChild).backgroundColor).toBe("#ffffff");
   expect(page.styleOf(page.byText("Per active hour")).color).toBe("#706d70");
   expect(page.styleOf(page.byText(priceText(18_000, "USD"))).color).toBe("#29282b");
