@@ -17,7 +17,9 @@ import type { OrganizationMember } from "@/lib/organizationMembers";
 import { openSettingRow } from "@/lib/settingsLinks";
 import { relativeTime } from "@/lib/time";
 import type { BotChannelsView, BotMention, BotPost } from "@/types/botChannels";
-import { effectiveAccess, type Bot, type BotAccess, type BotAsker, type BotAskerMay, type BotPatch } from "@/types/bots";
+import { effectiveAccess, runsOnPlace, type Bot, type BotAccess, type BotAsker, type BotAskerMay, type BotPatch } from "@/types/bots";
+import { BOT_IDLE_SUSPEND_MINUTES, bringBotBack, moveBot, type MoveStep } from "@/lib/botMove";
+import { useCloudChoices, useMachineChoices, usePlaceName, type PlaceChoice } from "./useBotPlace";
 import { BotAvatar } from "./BotAvatar";
 import { ChatAppDialog, chatAppRow } from "./BotChatApps";
 import { useChatApps } from "@/lib/botChatApps";
@@ -158,21 +160,127 @@ function ChoiceCard({ icon: Icon, title, note, checked, focusable = false, disab
   );
 }
 
+const MOVE_STEPS: Record<MoveStep, string> = {
+  connecting: "Connecting…",
+  reading: "Reading its role, memory, duties and items…",
+  sending: "Sending…",
+  bringing: "Bringing it in…",
+  settling: "Finishing…",
+};
+
+/**
+ * Where the bot lives (PRO-482): this Mac, a cloud workspace or a paired machine. Moving it takes its role, memory,
+ * duties and items with it; on a cloud workspace its duties wake the workspace, which sleeps two idle minutes later.
+ */
 function RunsOn({ bot }: { bot: Bot }) {
-  const known = bot.runsOn === "thisMac";
+  const place = runsOnPlace(bot.runsOn);
+  const here = usePlaceName(bot.runsOn);
+  const [choosing, setChoosing] = useState<"cloud" | "machine" | "back" | null>(null);
+  const [step, setStep] = useState<MoveStep | null>(null);
+  const [outcome, setOutcome] = useState<{ error?: string; notes: string[] } | null>(null);
+  const run = (work: (onStep: (step: MoveStep) => void) => Promise<{ notes: string[] }>) => {
+    setChoosing(null);
+    setOutcome(null);
+    setStep("connecting");
+    void work(setStep)
+      .then(({ notes }) => setOutcome({ notes }), (cause) => setOutcome({ error: errorMessage(cause), notes: [] }))
+      .finally(() => setStep(null));
+  };
+  const busy = step !== null;
+  const elsewhere = place.kind === "cloud" || place.kind === "machine";
   return (
     <div className="flex min-w-0 flex-col gap-2">
-      <div role="radiogroup" aria-label="Runs on" onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
-        <ChoiceCard icon={Laptop} title="This Mac" note="Works while this Mac is awake. Uses your local agent logins. No compute cost." checked={known} testId="bot-runs-on-this-mac" />
-        <ChoiceCard icon={Cloud} title="Cloud workspace" note="Always on. Keeps working when this Mac is off or asleep. Billed per hour of work." checked={false} disabled badge="Comes with cloud bots" testId="bot-runs-on-cloud" />
-        <ChoiceCard icon={Server} title="Another machine" note="A paired Mac or a headless server you own." checked={false} disabled badge="Comes with cloud bots" testId="bot-runs-on-machine" />
+      <div role="radiogroup" aria-label="Runs on" aria-busy={busy} onKeyDown={moveBetweenRadios} className="flex min-w-0 flex-wrap gap-2.5">
+        <ChoiceCard icon={Laptop} title="This Mac" note="Works while this Mac is awake. Uses your local agent logins. No compute cost." checked={place.kind === "thisMac"} busy={busy} disabled={place.kind === "other"} onSelect={() => setChoosing("back")} testId="bot-runs-on-this-mac" />
+        <ChoiceCard icon={Cloud} title="Cloud workspace" note="Always on. Keeps working when this Mac is off or asleep. Billed per hour of work." checked={place.kind === "cloud"} busy={busy} disabled={place.kind === "other" || place.kind === "machine"} badge={place.kind === "cloud" ? here : undefined} onSelect={() => setChoosing("cloud")} testId="bot-runs-on-cloud" />
+        <ChoiceCard icon={Server} title="Another machine" note="A paired Mac or a headless server you own." checked={place.kind === "machine"} busy={busy} disabled={place.kind === "other" || place.kind === "cloud"} badge={place.kind === "machine" ? here : undefined} onSelect={() => setChoosing("machine")} testId="bot-runs-on-machine" />
       </div>
-      {!known && (
+      {place.kind === "other" && (
         <p className="text-[12px] text-warning" data-testid="bot-runs-on-unknown">
           A newer version of TerminalX set this bot to run on “{bot.runsOn}”. This version shows it as it is and cannot change it.
         </p>
       )}
+      {elsewhere && !busy && (
+        <p className="text-[12px] text-faint" data-testid="bot-runs-on-elsewhere">
+          {place.kind === "cloud"
+            ? `${bot.name} lives on ${here}: its duties run there on the workspace's schedule, and the workspace sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes. Its questions reach you on the phone. To move it to another place, bring it back to this Mac first.`
+            : `${bot.name} lives on ${here}: its duties run there. To move it to another place, bring it back to this Mac first.`}
+        </p>
+      )}
+      {busy && (
+        <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground" role="status" data-testid="bot-runs-on-moving">
+          <Loader2 className="size-3 animate-spin" /> {MOVE_STEPS[step]}
+        </p>
+      )}
+      {outcome?.error && <p className="text-[12px] text-destructive" role="alert" data-testid="bot-runs-on-error">{outcome.error}</p>}
+      {outcome && !outcome.error && outcome.notes.length > 0 && (
+        <ul className="flex flex-col gap-1 text-[12px] text-warning" data-testid="bot-runs-on-notes">
+          {outcome.notes.map((note) => <li key={note}>{note}</li>)}
+        </ul>
+      )}
+      {(choosing === "cloud" || choosing === "machine") && (
+        <MoveDialog bot={bot} kind={choosing} onClose={() => setChoosing(null)} onMove={(to) => run((onStep) => moveBot(bot, to, onStep))} />
+      )}
+      {choosing === "back" && elsewhere && (
+        <Dialog open onOpenChange={(next) => { if (!next) setChoosing(null); }}>
+          <DialogContent width="max-w-[26rem]" className="p-4" data-testid="bot-bring-back">
+            <DialogTitle className="mr-8 truncate text-sm font-semibold">Bring {bot.name} back to this Mac?</DialogTitle>
+            <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
+              {`Its role, memory, duties and items come back from ${here}, with what it learned there. Its duties then run only while this Mac is awake. Its chats there stay there.`}
+            </DialogDescription>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => setChoosing(null)}>Cancel</Button>
+              <Button type="button" size="sm" onClick={() => run((onStep) => bringBotBack(bot, onStep))} data-testid="bot-bring-back-confirm">Bring back</Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
+  );
+}
+
+function MoveDialog({ bot, kind, onClose, onMove }: { bot: Bot; kind: "cloud" | "machine"; onClose: () => void; onMove: (to: PlaceChoice["place"]) => void }) {
+  const clouds = useCloudChoices();
+  const machines = useMachineChoices();
+  const choices = kind === "cloud" ? clouds : machines;
+  const [picked, setPicked] = useState<string | null>(() => choices.find((choice) => !choice.unavailable)?.place.key ?? null);
+  const chosen = choices.find((choice) => choice.place.key === picked && !choice.unavailable);
+  const what = kind === "cloud" ? "cloud workspace" : "machine";
+  return (
+    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent width="max-w-[28rem]" className="p-4" data-testid="bot-move-dialog">
+        <DialogTitle className="mr-8 truncate text-sm font-semibold">Move {bot.name} to a {what}</DialogTitle>
+        <DialogDescription className="mt-1 text-xs leading-[18px] text-muted-foreground">
+          {kind === "cloud"
+            ? `${bot.name} takes its role, memory, duties and items there and keeps working when this Mac is off. Its duties wake the workspace on their schedule; it sleeps after ${BOT_IDLE_SUSPEND_MINUTES} idle minutes, so you pay only while it works.`
+            : `${bot.name} takes its role, memory, duties and items there and works while that machine is on.`}
+        </DialogDescription>
+        {choices.length === 0 ? (
+          <p className="mt-3 text-xs text-muted-foreground" data-testid="bot-move-none">
+            {kind === "cloud" ? "You have no cloud workspace yet. Create one under Cloud in the sidebar, then move the bot." : "No machine is paired with this Mac. Pair one in Settings → Machines, then move the bot."}
+          </p>
+        ) : (
+          <div role="radiogroup" aria-label={`Choose a ${what}`} onKeyDown={moveBetweenRadios} className="mt-3 flex max-h-64 min-w-0 flex-col gap-1.5 overflow-y-auto">
+            {choices.map((choice) => (
+              <ChoiceCard
+                key={choice.place.key}
+                icon={kind === "cloud" ? Cloud : Server}
+                title={choice.name}
+                note={choice.unavailable ?? choice.note ?? (kind === "cloud" ? "Ready" : "Connected")}
+                checked={picked === choice.place.key}
+                disabled={Boolean(choice.unavailable)}
+                onSelect={() => setPicked(choice.place.key)}
+                testId={`bot-move-choice-${choice.place.key}`}
+              />
+            ))}
+          </div>
+        )}
+        <div className="mt-3 flex justify-end gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button type="button" size="sm" disabled={!chosen} onClick={() => chosen && onMove(chosen.place)} data-testid="bot-move-confirm">Move</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

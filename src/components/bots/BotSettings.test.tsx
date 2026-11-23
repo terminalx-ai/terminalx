@@ -95,12 +95,17 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(page.getByRole("heading", { level: 1 }).textContent).toBe("SentrySecurity auditor");
     expect(page.getAllByTestId("bot-settings-section").map((value) => within(value).getByRole("heading").textContent)).toEqual(["Runs on", "Access", "Works in", "Channels", "Who can ask"]);
 
-    // Runs on: This Mac is the one live choice; the other two wait for the cloud ticket.
+    // Runs on: This Mac is chosen; a cloud workspace and another machine are live choices (PRO-482).
     expect(page.getByTestId("bot-runs-on-this-mac").getAttribute("aria-checked")).toBe("true");
     for (const other of ["bot-runs-on-cloud", "bot-runs-on-machine"]) {
-      expect((page.getByTestId(other) as HTMLButtonElement).disabled).toBe(true);
-      expect(page.getByTestId(other).textContent).toContain("Comes with cloud bots");
+      expect((page.getByTestId(other) as HTMLButtonElement).disabled).toBe(false);
+      expect(page.getByTestId(other).getAttribute("aria-checked")).toBe("false");
     }
+    // Choosing one asks where; with no workspace yet it says how to get one, and nothing moves.
+    fireEvent.click(page.getByTestId("bot-runs-on-cloud"));
+    expect((await screen.findByTestId("bot-move-none")).textContent).toContain("no cloud workspace yet");
+    expect((screen.getByTestId("bot-move-confirm") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     // Full access is the default.
     expect(page.getByTestId("bot-access-full").getAttribute("aria-checked")).toBe("true");
@@ -166,6 +171,15 @@ describe("Bot settings (PRO-478, design 23.07)", () => {
     expect(newer.getByTestId("bot-access-unknown").textContent).toContain("“someday”");
     expect(newer.getByTestId("bot-access-unknown").textContent).toContain("Read and report");
     expect(newer.getAllByRole("radio").filter((radio) => radio.getAttribute("aria-checked") === "true").map((radio) => radio.dataset.testid)).toEqual(["bot-runs-on-this-mac"]);
+  });
+
+  it("a bot that lives on a cloud workspace says so, and only Bring back is offered", async () => {
+    const page = await open([bot("b1", "Sentry", { runsOn: "cloud:org-1:ws-1" })], "b1");
+    expect(page.getByTestId("bot-runs-on-cloud").getAttribute("aria-checked")).toBe("true");
+    expect((page.getByTestId("bot-runs-on-machine") as HTMLButtonElement).disabled).toBe(true);
+    expect(page.getByTestId("bot-runs-on-elsewhere").textContent).toContain("bring it back to this Mac first");
+    fireEvent.click(page.getByTestId("bot-runs-on-this-mac"));
+    expect((await screen.findByTestId("bot-bring-back")).textContent).toContain("Bring Sentry back to this Mac?");
   });
 
   it("a failed save says why", async () => {

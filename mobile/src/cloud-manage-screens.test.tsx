@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
   alert: vi.fn(),
   sheet: vi.fn(),
 }));
-vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { headerTitle?: () => ReactNode } }) => <div data-testid="screen-header">{options.headerTitle?.()}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: () => undefined }));
+vi.mock("expo-router", () => ({ Stack: { Screen: ({ options }: { options: { headerTitle?: () => ReactNode } }) => <div data-testid="screen-header">{options.headerTitle?.()}</div> }, useLocalSearchParams: () => mocks.params, useRouter: () => mocks.router, useFocusEffect: () => undefined, useSitemap: () => null }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
 vi.mock("@mobile/ui/theme", () => ({ useTheme: () => ({ palette: {} }) }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: vi.fn() }));

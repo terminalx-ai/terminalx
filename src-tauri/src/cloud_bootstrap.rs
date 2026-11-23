@@ -654,6 +654,13 @@ impl Bootstrapped {
         Ok(())
     }
 
+    /// Tell the API when to wake the workspace for a bot's duty
+    /// (`POST /v1/cloud-workspace-bootstrap/wake-at`, see `cloud_wake`).
+    pub fn report_wake_at(&self, api: &HttpApi, report: &serde_json::Value) -> Result<(), CallError> {
+        let _: serde_json::Value = api.post("/v1/cloud-workspace-bootstrap/wake-at", &self.credential, report.clone(), None)?;
+        Ok(())
+    }
+
     /// Record the memory baseline for the current session's runtime
     /// generation, once per boot and generation (`memory_baseline`).
     pub fn record_memory_baseline(&self) {

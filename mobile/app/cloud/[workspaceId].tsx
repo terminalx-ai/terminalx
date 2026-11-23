@@ -25,6 +25,7 @@ import { TranscriptList } from "@mobile/ui/TranscriptList";
 import { useTheme } from "@mobile/ui/theme";
 import { CompactingLine, PermissionCard, QuestionCard, TurnCard } from "@mobile/ui/transcript";
 import { linkedText } from "@mobile/ui/LinkedText";
+import { CloudBotQuestions } from "@mobile/ui/CloudBotQuestions";
 
 /**
  * One cloud workspace: its agent tabs and the conversation of the chosen one.
@@ -151,6 +152,8 @@ function Workspace({ catalog, session, orgId, workspaceId, listedState, initialT
     </View> : null}
     {presence && !unshared ? <Text accessibilityLabel={presence} style={[styles.presence, { color: palette.muted }]}>{presence}</Text> : null}
     {snapshot.error ? <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}
+    {/* The person's bots that live here ask here (PRO-482): answered without the Mac. */}
+    {!unshared ? <CloudBotQuestions client={session.client} live={live} /> : null}
     {snapshot.tabs.length > 1 && !unshared ? <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>{snapshot.tabs.map((entry, index) => <Pressable key={entry.tabId} accessibilityRole="tab" accessibilityState={{ selected: entry.tabId === tabId }} onPress={() => setChosen(entry.tabId)} style={[styles.tab, { backgroundColor: entry.tabId === tabId ? palette.selected : palette.raised }]}><Text numberOfLines={1} style={[styles.tabText, { color: palette.ink }]}>{entry.title ?? `Agent ${index + 1}`}</Text></Pressable>)}</ScrollView> : null}
     {unshared ? <EmptyState title={accessText("not-shared").title} detail={accessText("not-shared").detail} />
       : tab ? <Conversation key={tab.tabId} catalog={catalog} session={session} scope={`${orgId}/${workspaceId}`} orgId={orgId} workspaceId={workspaceId} tabId={tab.tabId} live={live} listedState={listedState} stop={stop} />

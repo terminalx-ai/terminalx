@@ -22,6 +22,8 @@ vi.mock("expo-router", () => ({
   Stack: { Screen: ({ options }: { options: { title: string; headerTitle?: () => ReactNode; headerRight?: () => ReactNode } }) => <div data-testid="screen-header"><div data-testid="screen-title">{options.title}</div>{options.headerTitle ? <div data-testid="header-title">{options.headerTitle()}</div> : null}{options.headerRight ? <div data-testid="header-right">{options.headerRight()}</div> : null}</div> },
   useLocalSearchParams: () => mocks.params,
   useRouter: () => ({ push: mocks.push }),
+  // The router's own list of pages, which the setup steps ask before opening one: only the organization step's here.
+  useSitemap: () => ({ contextKey: "", filename: "", href: "/", isInternal: false, isGenerated: false, children: [{ contextKey: "./cloud/setup/organization.tsx", filename: "organization.tsx", href: "/cloud/setup/organization", isInternal: false, isGenerated: false, children: [] }] }),
   useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); },
 }));
 vi.mock("@mobile/state/AppProvider", () => ({ useApp: () => mocks.app }));
@@ -227,11 +229,13 @@ describe("the Cloud tab", () => {
     expect(mocks.push).toHaveBeenCalledWith({ pathname: "/cloud/[workspaceId]", params: { workspaceId: "ws-9", orgId: "org-1", title: "Checkout redesign" } });
   });
 
-  it("says when there is nothing to see, and asks a signed-out person to sign in", async () => {
+  it("shows the setup steps when there is nothing to see, and asks a signed-out person to sign in", async () => {
     world({ state: null });
     await show(<CloudScreen />);
-    expect(text()).toContain("No cloud workspaces you can see.");
-    expect(text()).toContain("1 organization with no workspaces");
+    // An account with nothing set up is told what is missing (25.01; its states are in cloud-setup-screen.test.tsx).
+    expect(text()).not.toContain("No cloud workspaces you can see.");
+    expect(text()).toContain("Four steps set one up.");
+    expect(text()).not.toContain("1 organization with no workspaces");
     mocks.app = { session: null, signIn: vi.fn() };
     await show(<CloudScreen />);
     await click("Sign in");

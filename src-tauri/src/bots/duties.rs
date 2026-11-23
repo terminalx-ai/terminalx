@@ -263,6 +263,11 @@ fn change_settings(bot_id: &str, change: impl FnOnce(&mut DutySettings)) -> Resu
     Ok(current)
 }
 
+/// Put bot `bot_id`'s duty settings as a moved bot brings them (PRO-482).
+pub(super) fn put_settings(bot_id: &str, settings: DutySettings) -> Result<DutySettings> {
+    change_settings(bot_id, |current| *current = settings)
+}
+
 /// Whether bot `bot_id`'s quiet hours last now, on this computer's clock.
 fn quiet_now(bot_id: &str) -> bool {
     let now = chrono::Local::now();
@@ -339,7 +344,8 @@ pub fn bind(automation: &Automation) -> Bound {
 /// Whether the duty's bot is paused now: a read that took a while records
 /// nothing then, so what it found wakes the duty on resume (PRO-472).
 pub(crate) fn bot_paused(automation: &Automation) -> bool {
-    owner(automation).is_some_and(|owner| matches!(bot_store::get(&owner.id), Ok(Some(bot)) if bot.paused.is_some()))
+    // One that moved away (PRO-482) is held here the same way: what it would find wakes it where it lives.
+    owner(automation).is_some_and(|owner| matches!(bot_store::get(&owner.id), Ok(Some(bot)) if bot.paused.is_some() || !bot.runs_on.here()))
 }
 
 /// Why a run of the duty may not go ahead now (its bot paused, gone, or Bots
@@ -377,6 +383,9 @@ fn working_bot(automation: &Automation) -> std::result::Result<(DutyOwner, Bot),
     if bot.paused.is_some() {
         return Err(format!("{} is paused: its duties do not run until you resume it.", bot.name));
     }
+    if !bot.runs_on.here() {
+        return Err(format!("{} runs on {} now: its duties run there.", bot.name, bot.runs_on.label()));
+    }
     if !chat::takes_bot_instructions(&bot.harness) {
         return Err(format!("{} runs on {}, which cannot be given a bot's role and memory yet.", bot.name, bot.harness));
     }
@@ -409,6 +418,10 @@ pub fn may_wake(app: &impl AutomationHost, automation: &Automation, now: DateTim
         Ok(Some(bot)) => bot,
         _ => return false,
     };
+    // A bot that moved away (PRO-482) wakes where it lives; nothing is recorded here.
+    if !bot.runs_on.here() {
+        return false;
+    }
     // A run still going: stopped once past its time, and no second one meanwhile.
     let runs = automation_store::list_runs(&automation.id).unwrap_or_default();
     if let Some(running) = runs.iter().find(|run| matches!(run.status, AutomationRunStatus::Pending | AutomationRunStatus::Running)) {
@@ -590,7 +603,7 @@ pub fn open_session(sink: &dyn EventSink, automation: &Automation, run: &Automat
         }),
         ..Default::default()
     };
-    let reference = BotRef { id: bot.id.clone(), home: false };
+    let reference = BotRef { id: bot.id.clone(), home: false, org: None };
     let stamp = index::AutomationRef { id: automation.id.clone(), name: automation.name.clone(), run_id: run.run_id.clone(), run_number: run.run_number };
     crate::session_ops::create_quick_chat_marked(sink, req, |entry| {
         chat::set_session_bot(entry, &reference);
@@ -924,6 +937,11 @@ fn announce(sink: &dyn EventSink) {
     if let Ok(list) = automation_store::list() {
         sink.emit("automations_changed", &list);
     }
+}
+
+/// [`announce`], for duties another module of the bots changed (a move, PRO-482).
+pub(super) fn announce_changed(sink: &dyn EventSink) {
+    announce(sink);
 }
 
 /// Save a duty of `bot`: a new one, or `existing` changed. Its agent, model,

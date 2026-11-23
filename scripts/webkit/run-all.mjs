@@ -50,7 +50,9 @@ export const checks = [
   // bot-items, bot-handoffs, bot-runs and bot-suggestions, in one process (2026-11).
   "bot-pages",
   "bot-duties",
+  "bot-handoffs-page",
   "bot-calendar",
+  "finished-toast",
   // These ran after the suite, one at a time, until 2026-11: team-presence-following from
   // `pnpm test:webkit-layout`, the four machine screens from CI's own step.
   "team-presence-following",

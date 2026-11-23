@@ -36,6 +36,22 @@ in a flow), and it reaches the app through `Settings.get("fixtureScenario")`.
 tab shows its placeholder rows. `openRoute: /cloud` with `openWorkspace: <id>`
 opens a workspace at launch, as a tap on its row does.
 
+## Cloud setup (25.01, 25.02)
+
+The setup screens ask the service for an organization's providers and agent
+logins, and create organizations. `setup/organization.ts` answers those
+requests in memory, before the fixture's own answers; `fixtureSetup: <state>`
+picks the account a board draws (the states are listed in that file), and
+`fixtureCreate: slow` or `fail` what becomes of a creation. Without
+`fixtureSetup` nothing changes and the 22.06 list is shown. An area of the
+setup (`setup/<area>.ts`) is a `SetupHandler`: it returns an answer, or
+nothing to leave the request to the next.
+
+`flow-25.01.yaml` and `flow-25.02.yaml` choose the organization as a person
+does, through the app. The boards are drawn in Ember when dark and in Den when
+light: for the light run set the simulator's appearance to light and
+`MAESTRO_THEME=Den`.
+
 `fixtureTabs: states` gives "Review and merge" four tabs, one for each state on
 the session screen (working, a question, a table, done).
 

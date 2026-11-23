@@ -3,7 +3,7 @@ import type { SessionEntry } from "@/types/session";
 
 vi.mock("@/lib/api", () => ({ botsApi: { homeChat: vi.fn(), newChat: vi.fn() } }));
 
-const { actingBotOf, botAfterChatClosed, botChats, botOf, botViewFor, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
+const { actingBotOf, botAfterChatClosed, botChats, botOf, botPlaces, botViewFor, chatPlace, chatSource, listedUnderBot, spentTodayLabel, usageKey } = await import("./botChats");
 
 const session = (id: string, extra: Partial<SessionEntry> = {}): SessionEntry => ({
   id, kind: "quick", projectPath: `/scratch/${id}`, cwd: "/bots/b1", title: id, created: "2026-11-20T09:00:00Z", modified: "2026-11-20T09:00:00Z",
@@ -116,5 +116,24 @@ describe("a chat a mention started (PRO-480)", () => {
     expect(chatSource(session("x", { botChannel: { kind: "jira", label: "OPS-4", url: "u" } }))).toBe("jira · OPS-4");
     expect(chatSource(session("d"))).toBeNull();
     expect(chatSource(session("e", { botChannel: { kind: "github" } as never }))).toBeNull();
+  });
+});
+
+describe("the place a bot's chat works in (PRO-483)", () => {
+  const bot = { worksIn: ["acme", "personal"] };
+  it("names each place by its organisation, and one the account does not list by its id", () => {
+    expect(botPlaces({ worksIn: ["acme", "personal", "gone"] }, [{ id: "acme", name: "Acme" }])).toEqual([
+      { key: "acme", name: "Acme" },
+      { key: "personal", name: "Personal" },
+      { key: "gone", name: "gone" },
+    ]);
+  });
+
+  it("is the place a chat recorded, or that of the chat that started it, else the bot's first", () => {
+    expect(chatPlace(session("a", { bot: { id: "b1", org: "personal" } }), bot)).toBe("personal");
+    expect(chatPlace(session("b", { botStarted: { id: "b1", org: "personal" } }), bot)).toBe("personal");
+    expect(chatPlace(session("c", { bot: { id: "b1" } }), bot)).toBe("acme");
+    // A place the bot no longer works in is none: the chat keeps only what goes with the bot.
+    expect(chatPlace(session("d", { bot: { id: "b1", org: "kestrel" } }), bot)).toBeNull();
   });
 });

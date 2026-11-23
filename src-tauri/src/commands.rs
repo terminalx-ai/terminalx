@@ -6350,6 +6350,22 @@ pub async fn bot_update(state: State<'_, AppState>, id: String, patch: serde_jso
     bots_call(state, "update", serde_json::json!({"id": id, "patch": patch})).await
 }
 
+/// One step of moving a bot to a cloud workspace or another machine, or
+/// back (PRO-482, `bots::moving`): `moveExport` reads it as a bundle,
+/// `moveOut` marks it moved, `moveBack` undoes that, `moveImport` takes a
+/// bundle in. Each needs the window's proof that a person asked.
+#[tauri::command]
+pub async fn bot_move(state: State<'_, AppState>, operation: String, params: serde_json::Value) -> CmdResult<serde_json::Value> {
+    let operation: &'static str = match operation.as_str() {
+        "moveExport" => "moveExport",
+        "moveOut" => "moveOut",
+        "moveBack" => "moveBack",
+        "moveImport" => "moveImport",
+        other => return Err(err(anyhow::anyhow!("{other} is not a step of a move"))),
+    };
+    bots_call(state, operation, params).await
+}
+
 /// The bot's home folder goes to the app's trash, not away.
 #[tauri::command]
 pub async fn bot_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
@@ -6425,8 +6441,8 @@ pub async fn bot_home_chat(state: State<'_, AppState>, id: String) -> CmdResult<
 
 /// Another conversation with the bot, in its home folder.
 #[tauri::command]
-pub async fn bot_new_chat(state: State<'_, AppState>, id: String) -> CmdResult<crate::store::index::SessionEntry> {
-    bots_call(state, "newChat", serde_json::json!({"id": id})).await
+pub async fn bot_new_chat(state: State<'_, AppState>, id: String, org: Option<String>) -> CmdResult<crate::store::index::SessionEntry> {
+    bots_call(state, "newChat", serde_json::json!({"id": id, "org": org})).await
 }
 
 /// The owner said no to a resume asked for from the `terminalx` CLI (PRO-468).

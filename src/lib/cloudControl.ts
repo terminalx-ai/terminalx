@@ -579,6 +579,12 @@ interface BotHold {
   /** `resume`: the workspace's sessions that work for the bot, by key, and whether its first session does. */
   sessions: string[];
   launch: boolean;
+  /**
+   * The organisation the bot's conversation works in (PRO-483): `"personal"` for the account's personal
+   * organisation, an organisation's id, or `""` for none. Cloud time is billed to the organisation the work is
+   * for, so only that organisation's workspaces are taken. Null from a build that sent none.
+   */
+  org: string | null;
 }
 
 const BOT_HOLD_UNREADABLE = "This command comes from a session that works for a bot, and what it is held to could not be read, so it was not run.";
@@ -596,14 +602,29 @@ function botHoldOf(params: Params): BotHold | null {
   const hold = params.botHold;
   if (hold === undefined || hold === null) return null;
   if (typeof hold !== "object" || Array.isArray(hold)) throw forbidden(BOT_HOLD_UNREADABLE);
-  const { mode, launchOnly, sessions, launch } = hold as Record<string, unknown>;
+  const { mode, launchOnly, sessions, launch, org } = hold as Record<string, unknown>;
   if (sessions !== undefined && (!Array.isArray(sessions) || sessions.some((key) => typeof key !== "string"))) throw forbidden(BOT_HOLD_UNREADABLE);
+  if (org !== undefined && org !== null && typeof org !== "string") throw forbidden(BOT_HOLD_UNREADABLE);
   return {
     mode: mode === undefined || mode === null ? null : { terminal: botHoldRule((mode as Record<string, unknown>).terminal), nativeCodex: botHoldRule((mode as Record<string, unknown>).nativeCodex) },
     launchOnly: launchOnly === true,
     sessions: (sessions as string[] | undefined) ?? [],
     launch: launch === true,
+    org: typeof org === "string" ? org : null,
   };
+}
+
+/**
+ * Refuse a bot's command on a workspace of an organisation its conversation does not work in (PRO-483): the
+ * work, and the cloud time it is billed for, belong to the organisation the conversation was started in.
+ */
+export function assertBotOrg(hold: BotHold | null, orgId: string): void {
+  if (!hold || hold.org === null) return;
+  const org = cloudOrganizations(getAccount().status).find((candidate) => candidate.id === orgId);
+  const allowed = hold.org === "personal" ? org?.isPersonal === true : hold.org !== "" && hold.org === orgId;
+  if (allowed) return;
+  const here = hold.org === "" ? "a place its bot no longer works in" : hold.org === "personal" ? "your personal work" : "another organisation";
+  throw forbidden(`This conversation of a bot works for ${here}, so it does not use ${org?.name ?? "this organisation"}'s cloud workspaces: cloud time is billed to the organisation the work is for.`);
 }
 
 /** The mode a bot's hold lets this tab run in: the one it would run in next, or the limit when that is wider. */
@@ -663,6 +684,7 @@ const workspaceStopped = (error: unknown) => (error instanceof Error ? error.mes
 async function sendOnce(params: Params) {
   const target = resolveSession(required(params, "target"));
   const message = required(params, "text");
+  assertBotOrg(botHoldOf(params), target.orgId);
   const tab = await resolveTab(target, text(params, "tab"), SEND_LOOKUP_WITHIN_MS);
   const scope = { organizationId: target.orgId, workspaceId: target.workspaceId };
   const client = connectedCloudClient(target.workspaceKey);
@@ -898,6 +920,7 @@ function issueOf(params: Params): RuntimeIssueRef | null {
 
 async function sessionsCreate(params: Params) {
   const project = resolveProject(required(params, "project"));
+  assertBotOrg(botHoldOf(params), project.orgId);
   const prompt = required(params, "prompt");
   const issue = issueOf(params);
   // The same rule as the project's "+": creating, resuming and adding a session are an owner's or admin's.
@@ -1120,6 +1143,7 @@ async function resume(params: Params, sleep: Sleep = pause, now: () => number = 
   const target = await lifecycleTarget(params, stopping, sleep, now);
   const { item } = target;
   const hold = botHoldOf(params);
+  assertBotOrg(hold, target.orgId);
   if (hold) await holdBotSessions(target, hold);
   // Already running, or on its way: nothing is resumed twice.
   if (resuming(item)) return { workspace: target.key, state: lifecycleState(item, "resume"), operationId: item.latestOperation?.id ?? null, changed: false };

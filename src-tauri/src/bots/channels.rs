@@ -195,6 +195,10 @@ pub struct Mention {
     pub delivered: Option<String>,
     #[serde(default)]
     pub tries: u32,
+    /// The organisation the person who asked was added from (PRO-483): the conversation it starts works there, with
+    /// that place's notes and work. Absent for the owner's mention, and one an earlier build kept: the bot's first place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
     #[serde(flatten, default)]
     pub unknown: BTreeMap<String, Value>,
 }
@@ -647,6 +651,7 @@ pub fn take_in(store: &mut Store, bots: &[Bot], me: &Me, started: &str, comments
                 _ => comment.author.name.clone(),
             };
             let text = if state == WAITING { capped(&comment.body, BODY_CHARS) } else { String::new() };
+            let org = if from == ASKER_PERSON { asker_for(bot, &comment.author).and_then(|asker| asker.org.clone()) } else { None };
             store.mentions.push(Kept::Known(Mention {
                 id: comment.id.clone(),
                 bot: bot.id.clone(),
@@ -661,6 +666,7 @@ pub fn take_in(store: &mut Store, bots: &[Bot], me: &Me, started: &str, comments
                 session: None,
                 delivered: None,
                 tries: 0,
+                org,
                 unknown: BTreeMap::new(),
             }));
             if state == WAITING {
@@ -909,18 +915,22 @@ fn send(manager: &SessionManager, session: &SessionEntry, text: String, label: S
     }
 }
 
-/// The chat that pull request or issue already has with `bot`, while it is still one of its chats.
-fn chat_for(store: &Store, bot: &Bot, thread: &Thread) -> Option<SessionEntry> {
+/// The chat that pull request or issue already has with `bot` in the place `org` names, while it is still one of
+/// its chats there: a mention never goes on in a conversation of another organisation (PRO-483).
+fn chat_for(store: &Store, bot: &Bot, thread: &Thread, org: Option<&str>) -> Option<SessionEntry> {
     let place = thread.place();
+    let wanted = super::memory::place_of(bot, org);
     let mut sessions: Vec<&String> = store.mentions().filter(|mention| mention.bot == bot.id && mention.thread.place() == place).filter_map(|mention| mention.session.as_ref()).collect();
     sessions.dedup();
-    sessions.into_iter().rev().find_map(|id| index::get(id).ok().filter(|entry| !entry.archived && chat::session_bot(entry).is_some_and(|reference| reference.id == bot.id)))
+    sessions.into_iter().rev().find_map(|id| {
+        index::get(id).ok().filter(|entry| !entry.archived && chat::session_bot(entry).is_some_and(|reference| reference.id == bot.id) && chat::session_place(bot, entry) == wanted)
+    })
 }
 
-fn new_chat(manager: &SessionManager, bot: &Bot, thread: &Thread) -> Result<SessionEntry> {
+fn new_chat(manager: &SessionManager, bot: &Bot, thread: &Thread, org: Option<&str>) -> Result<SessionEntry> {
     let title: String = if thread.title.is_empty() { format!("{} on {}", thread.label(), thread.service()) } else { format!("{}: {}", thread.label(), thread.title) };
     let mark = json!({"kind": thread.kind, "label": thread.label(), "url": thread.url, "title": thread.title});
-    chat::channel_chat(manager.sink().as_ref(), bot, title.chars().take(120).collect(), |entry| {
+    chat::channel_chat(manager.sink().as_ref(), bot, title.chars().take(120).collect(), org, |entry| {
         entry.unknown.insert(SESSION_KEY.into(), mark);
     })
 }
@@ -954,9 +964,27 @@ pub fn deliver(manager: &SessionManager) -> usize {
             continue;
         }
         let Ok(current) = read() else { return sent };
-        let made = match mention.session.as_deref().and_then(|id| index::get(id).ok()).filter(|entry| !entry.archived).or_else(|| chat_for(&current, &bot, &mention.thread)) {
+        let org = mention.org.as_deref();
+        // A person listed for an organisation the bot no longer works in asks nothing there now (`judge`, read again):
+        // not accepted, with why, so it is not delivered late and out of context if the place is switched on again.
+        if let Some(org) = org.filter(|org| super::memory::place_of(&bot, Some(org)) == super::memory::Place::Bot) {
+            let why = format!("{} was listed for organisation {org}, which {} no longer works in", mention.by, bot.name);
+            let outcome = change(|store| {
+                if let Some(kept) = store.mentions.iter_mut().filter_map(Kept::known_mut).find(|kept| kept.id == mention.id && kept.bot == mention.bot && kept.state == WAITING) {
+                    kept.state = NOT_ACCEPTED.into();
+                    kept.why = why.clone();
+                    kept.text.clear();
+                }
+                Ok(())
+            });
+            if let Err(error) = outcome {
+                log::warn!("bot channels: turn away a mention of {}: {error:#}", bot.id);
+            }
+            continue;
+        }
+        let made = match mention.session.as_deref().and_then(|id| index::get(id).ok()).filter(|entry| !entry.archived).or_else(|| chat_for(&current, &bot, &mention.thread, org)) {
             Some(entry) => Ok(entry),
-            None => new_chat(manager, &bot, &mention.thread),
+            None => new_chat(manager, &bot, &mention.thread, org),
         };
         let result = made.and_then(|entry| send(manager, &entry, message(&bot, &mention), label(&mention)).map(|()| entry.id));
         let outcome = change(|store| {

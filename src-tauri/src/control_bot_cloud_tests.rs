@@ -159,12 +159,12 @@ fn a_full_access_bot_creates_prompts_and_resumes_a_cloud_session_in_bypass() {
 
     let sent = f.cloud(&who, "send", json!({"target": session, "text": "run the tests"})).unwrap();
     assert_eq!(sent["state"], "queued");
-    assert_eq!(f.window.last()[crate::bots::cloud::HOLD_PARAM], json!({}), "nothing is narrowed for full access");
+    assert_eq!(f.window.last()[crate::bots::cloud::HOLD_PARAM], json!({"org": "personal"}), "nothing is narrowed for full access; the work is its owner's own (PRO-483)");
     assert_eq!(f.window.mode(&session), "bypassPermissions");
 
     let resumed = f.cloud(&who, "resume", json!({"workspace": WORKSPACE})).unwrap();
     assert_eq!(resumed["changed"], true);
-    assert_eq!(f.window.last()[crate::bots::cloud::HOLD_PARAM], json!({"sessions": [session], "launch": false}));
+    assert_eq!(f.window.last()[crate::bots::cloud::HOLD_PARAM], json!({"sessions": [session], "launch": false, "org": "personal"}));
     assert_eq!(f.window.mode(&session), "bypassPermissions");
 
     // A narrower mode it asks for is its own choice, and kept.

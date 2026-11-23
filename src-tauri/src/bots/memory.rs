@@ -216,11 +216,29 @@ pub fn places(bot: &Bot) -> Vec<Place> {
     places
 }
 
-/// The place a conversation with `bot` works in: the first it works in.
+/// The place a conversation with `bot` works in when it records none: the first it works in.
 pub fn working_place(bot: &Bot) -> Place {
     match bot.works_in.first().map(String::as_str) {
         None | Some(PERSONAL) | Some(BOT_PLACE) => Place::Personal,
         Some(org) => Place::Org(org.into()),
+    }
+}
+
+/// The place a conversation of `bot` that records `org` works in (PRO-483).
+/// `None` (a chat an earlier build made, a duty's run): the bot's first
+/// place, [`working_place`]. `personal`, or an organisation, while the bot
+/// works there. A place it no longer works in (switched off under Works in)
+/// is [`Place::Bot`]: the conversation keeps only the notes that go with the
+/// bot, and is given no place's, never another place's instead.
+pub fn place_of(bot: &Bot, org: Option<&str>) -> Place {
+    let Some(org) = org else { return working_place(bot) };
+    let works_there = bot.works_in.iter().any(|place| place == org);
+    match org {
+        // A bot that lists no place works for its owner alone.
+        PERSONAL if works_there || bot.works_in.is_empty() => Place::Personal,
+        PERSONAL | BOT_PLACE | "" => Place::Bot,
+        org if works_there => Place::Org(org.into()),
+        _ => Place::Bot,
     }
 }
 
@@ -392,11 +410,14 @@ pub fn read_split(own: usize, place: usize) -> (usize, usize) {
     (own_read, place.min(BUDGET - own_read))
 }
 
-/// The two memory files a note in `place` is counted with: the bot's own and the place's.
-fn budget_pair(bot: &Bot, place: &Place) -> [Place; 2] {
-    match place {
-        Place::Bot => [Place::Bot, working_place(bot)],
-        _ => [Place::Bot, place.clone()],
+/// The memory files a note in `place` is counted with: the bot's own and the place's. A note that goes with the bot
+/// is counted with `working`'s, the place of the conversation that keeps it (PRO-483), so keeping one never moves
+/// another place's notes; with none (a place the bot no longer works in), with its own alone.
+fn budget_pair(place: &Place, working: &Place) -> Vec<Place> {
+    match (place, working) {
+        (Place::Bot, Place::Bot) => vec![Place::Bot],
+        (Place::Bot, working) => vec![Place::Bot, working.clone()],
+        _ => vec![Place::Bot, place.clone()],
     }
 }
 
@@ -421,8 +442,8 @@ fn move_order(line: &str) -> (u8, &str) {
 /// file) move to their file's archive, as one `archived` change by `by`.
 /// The lines in `keep` are never moved. An archive that would pass
 /// [`ARCHIVE_ROLL_BYTES`] is first rolled to a dated file.
-fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, keep: &BTreeSet<(String, String)>, by: &str) -> Result<usize> {
-    let pair = budget_pair(bot, place);
+fn archive_over_budget(files: &mut changes::Files, place: &Place, working: &Place, keep: &BTreeSet<(String, String)>, by: &str) -> Result<usize> {
+    let pair = budget_pair(place, working);
     let mut texts = Vec::new();
     for place in &pair {
         texts.push(files.lines(&place.memory_file())?);
@@ -506,6 +527,12 @@ fn archive_over_budget(files: &mut changes::Files, bot: &Bot, place: &Place, kee
 
 /// Add a note to `place`, dated today, and keep within the budget. Answers the changes recorded.
 pub fn add(sink: &dyn EventSink, bot: &Bot, place: &Place, text: &str, by: &str, source: Source) -> Result<Vec<Change>> {
+    add_from(sink, bot, place, &working_place(bot), text, by, source)
+}
+
+/// [`add`] from a conversation that works in `working` (PRO-483): a note that goes with the bot is counted with that
+/// place's notes, not with its first place's.
+pub fn add_from(sink: &dyn EventSink, bot: &Bot, place: &Place, working: &Place, text: &str, by: &str, source: Source) -> Result<Vec<Change>> {
     let note = clean_note(text)?;
     let line = format!("- {} {note}", today());
     let file = place.memory_file();
@@ -516,7 +543,7 @@ pub fn add(sink: &dyn EventSink, bot: &Bot, place: &Place, text: &str, by: &str,
         }
         let prev = lines.last().cloned();
         files.record(NewChange::new("learned", note.clone(), vec![Edit::AddLine { file: file.clone(), line: line.clone(), index: None, prev }], source, by))?;
-        archive_over_budget(files, bot, place, &BTreeSet::from([(file.clone(), line.clone())]), by)?;
+        archive_over_budget(files, place, working, &BTreeSet::from([(file.clone(), line.clone())]), by)?;
         Ok(())
     })?;
     Ok(recorded)
@@ -640,7 +667,7 @@ pub fn undo(sink: &dyn EventSink, bot: &Bot, change_id: &str, by: &str, source: 
             })
             .collect();
         if !keep.is_empty() {
-            archive_over_budget(files, bot, &working, &keep, by)?;
+            archive_over_budget(files, &working, &working, &keep, by)?;
         }
         Ok(())
     })?;
@@ -654,7 +681,11 @@ pub fn undo(sink: &dyn EventSink, bot: &Bot, change_id: &str, by: &str, source: 
 /// lossy, no link followed in the home) and fenced, with any line that looks
 /// like a heading made plain text, so nothing in a note passes for a section
 /// of the instructions. `None` when the owner turned its memory off.
-pub fn for_conversation(bot: &Bot) -> Option<String> {
+///
+/// `place` is the conversation's (`chat::session_place`, PRO-483): no other
+/// place's notes are read, so what the bot learned in one organisation never
+/// reaches a conversation in another.
+pub fn for_conversation(bot: &Bot, place: &Place) -> Option<String> {
     use super::chat::{fenced, read_capped_tail, Read};
     if bot.memory_off {
         return None;
@@ -662,7 +693,7 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
     let Some(home) = super::home(bot) else {
         return Some("(Your memory could not be read: your home folder is not known. Do not write to it; tell your owner.)\n".into());
     };
-    let place = working_place(bot);
+    let place = place.clone();
     let read = |place: &Place| {
         let rel = place.memory_file();
         match changes::no_links(&home, &rel) {
@@ -670,7 +701,8 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
             Err(error) => Read::Unreadable(format!("{error:#}")),
         }
     };
-    let (own, theirs) = (read(&Place::Bot), read(&place));
+    // A conversation in a place the bot no longer works in reads no place's notes (PRO-483).
+    let (own, theirs) = (read(&Place::Bot), if place == Place::Bot { Read::Missing } else { read(&place) });
     let count = |read: &Read| if let Read::Text(text, _) = read { text.lines().count() } else { 0 };
     let (own_read, place_read) = read_split(count(&own), count(&theirs));
     let section = |title: String, file: String, read: &Read, take: usize, empty: &str| {
@@ -703,7 +735,13 @@ pub fn for_conversation(bot: &Bot) -> Option<String> {
     let place_file = place.memory_file();
     let place_title = match &place {
         Place::Org(id) => format!("Notes kept in organisation {} ({place_file})", plain_line(id)),
-        _ => format!("Personal notes ({place_file})"),
+        Place::Bot => {
+            return Some(format!(
+                "{}\n## Notes of the place this conversation works in\n\n(none: this conversation was started in a place you no longer work in, so no place's notes are given, and you keep none but your own.)\n",
+                section(format!("Notes that go with you ({own_file})"), own_file.clone(), &own, own_read, "(empty: nothing written yet)")
+            ))
+        }
+        Place::Personal => format!("Personal notes ({place_file})"),
     };
     Some(format!(
         "{}\n{}",
@@ -1075,10 +1113,9 @@ pub fn tidy(sink: &dyn EventSink, bot: &Bot, plan: &TidyPlan, places: &[Place], 
     Ok(recorded)
 }
 
-/// The places a conversation with `bot` keeps notes in: its own and its working place's.
-pub fn conversation_places(bot: &Bot) -> Vec<Place> {
-    let working = working_place(bot);
-    if working == Place::Bot { vec![Place::Bot] } else { vec![Place::Bot, working] }
+/// The places a conversation with `bot` that works in `working` keeps notes in: its own and its place's.
+pub fn conversation_places(working: &Place) -> Vec<Place> {
+    if *working == Place::Bot { vec![Place::Bot] } else { vec![Place::Bot, working.clone()] }
 }
 
 /// The memory operations of the runtime's `bots` call, made in the app by
