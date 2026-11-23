@@ -340,8 +340,106 @@ describe("the launch form", () => {
       await page.press(page.byId("launch"));
       await answer("Launch");
       expect(text("launch-refusal")).toBe("Boat rejected the stored key on its last check. Replace the key to continue.Connect compute");
-      expect(disabled("launch")).toBe(true);
       expect(service.state.workspaces.size).toBe(0);
+      // Launch stays: once the key is replaced, the same price is launched from here, after asking again.
+      expect(disabled("launch")).toBe(false);
+      service.state.answer = null;
+      await page.press(page.byId("launch"));
+      expect(alert).toHaveBeenCalledTimes(2);
+      await answer("Launch");
+      expect(page.byId("launch-refusal")).toBeNull();
+      expect(service.state.workspaces.size).toBe(1);
+    });
+
+    it("lets a refusal that only asks to wait be tried again from the same page", async () => {
+      const service = await form();
+      await toReview();
+      service.state.answer = (call) => (call.method === "POST" && call.path === "/cloud-workspaces" ? refuse("cloud_workspace_rate_limited", 429) : undefined);
+      await page.press(page.byId("launch"));
+      await answer("Launch");
+      expect(text("launch-refusal")).toBe("Too many requests just now. Try again in a moment.");
+      expect(disabled("launch")).toBe(false);
+      expect(text("launch")).toBe("Launch workspace");
+    });
+
+    describe("after a launch that got no answer", () => {
+      /** The launch reached the server (unless `arrives` is false) and no answer reached the phone, through every retry. */
+      const lostLaunch = async (arrives = true) => {
+        const service = await form();
+        await toReview();
+        let started = !arrives;
+        const online = { value: false };
+        service.state.answer = (call) => {
+          if (online.value || call.method !== "POST" || call.path !== "/cloud-workspaces") return undefined;
+          if (!started) { started = true; service.handle(call); }
+          return "offline";
+        };
+        await page.press(page.byId("launch"));
+        await answer("Launch");
+        await pass(20_000);
+        expect(text("launch")).toBe("Check again");
+        return { service, online };
+      };
+      const keys = (service: Account) => new Set(service.sent("POST", "/cloud-workspaces").map((call) => call.headers["Idempotency-Key"]));
+
+      it("offers no new price when the quote runs out: only the same launch can be asked about, and it is found", async () => {
+        const { service, online } = await lostLaunch();
+        await pass(service.state.quoteHoldsMs);
+        // The price has run out, and the launch may be running: nothing here can start another.
+        expect(page.byId("new-price")).toBeNull();
+        expect(page.byId("price-expired")).toBeNull();
+        expect(text("launch-unanswered")).not.toBeNull();
+        expect(text("launch")).toBe("Check again");
+        online.value = true;
+        await page.press(page.byId("launch"));
+        await pass();
+        expect(alert).toHaveBeenCalledTimes(1);
+        expect(keys(service).size).toBe(1);
+        expect(service.sent("POST", "/cloud-workspaces/quote")).toHaveLength(1);
+        expect(service.state.workspaces.size).toBe(1);
+        expect(mocks.router.replace).toHaveBeenCalledWith(expect.objectContaining({ params: expect.objectContaining({ workspaceId: "ws-2" }) }));
+      });
+
+      it("does not go back to the form to price again while the launch may have started", async () => {
+        const { service } = await lostLaunch();
+        await page.press(page.byLabel("Back"));
+        expect(page.byId("review-facts")).not.toBeNull();
+        expect(page.byId("review-price")).not.toBeNull();
+        expect(page.byId("workspace-name")).toBeNull();
+        expect(service.sent("POST", "/cloud-workspaces/quote")).toHaveLength(1);
+      });
+
+      it("keeps asking under the same key when the answer says nothing of the first request", async () => {
+        const { service, online } = await lostLaunch();
+        online.value = true;
+        service.state.answer = (call) => (call.method === "POST" && call.path === "/cloud-workspaces" ? refuse("cloud_workspace_rate_limited", 429) : undefined);
+        await page.press(page.byId("launch"));
+        await pass();
+        expect(text("launch")).toBe("Check again");
+        expect(page.byId("new-price")).toBeNull();
+        service.state.answer = null;
+        await page.press(page.byId("launch"));
+        await pass();
+        expect(keys(service).size).toBe(1);
+        expect(service.state.workspaces.size).toBe(1);
+      });
+
+      it("asks for a new price once the server says it holds no launch under that key", async () => {
+        // The request never arrived, and by the time the phone is back the quote has run out.
+        const { service, online } = await lostLaunch(false);
+        await pass(service.state.quoteHoldsMs);
+        online.value = true;
+        await page.press(page.byId("launch"));
+        await pass();
+        expect(page.byId("launch-unanswered")).toBeNull();
+        expect(text("price-expired")).toBe(QUOTE_EXPIRED);
+        expect(service.state.workspaces.size).toBe(0);
+        await page.press(page.byId("new-price"));
+        await pass();
+        await page.press(page.byId("launch"));
+        await answer("Launch");
+        expect(service.state.workspaces.size).toBe(1);
+      });
     });
   });
 });
@@ -511,6 +609,24 @@ describe("stop and start", () => {
     expect(read().map((action) => action.label)).toEqual(["Delete workspace…"]);
   });
 
+  it("keeps showing it stopping when a list read from before the stop lands after it", async () => {
+    const { service, read } = await actionsFor({});
+    // A read of the list is under way, and answers with the workspace as it was before the stop.
+    let land = () => undefined as void;
+    const before = { body: service.handle({ path: "/cloud-workspaces", method: "GET", headers: {}, body: undefined }) };
+    service.state.answer = (call) => (call.method === "GET" && call.path === "/cloud-workspaces" ? new Promise((resolve) => { land = () => resolve((before.body as { body: unknown })); }) as never : undefined);
+    const reading = service.catalog.refresh();
+    await pass();
+    await run(read(), "Stop workspace");
+    await answer("Stop");
+    service.state.answer = null;
+    await act(async () => { land(); await reading; });
+    expect(service.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation).toMatchObject({ action: "suspend", state: "queued" });
+    expect(read().map((action) => action.label)).toEqual(["Delete workspace…"]);
+    await pass();
+    expect(service.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation).toMatchObject({ action: "suspend" });
+  });
+
   it("says an agent is working before stopping it, with the stop as the destructive answer", async () => {
     const { service, read } = await actionsFor({ runtimeActivity: { online: true, activeTurns: 1 } });
     await run(read(), "Stop workspace");
@@ -596,6 +712,16 @@ describe("the delete page", () => {
     expect(mocks.router.dismissAll).not.toHaveBeenCalled();
     expect(text("delete-permanently")).toBe("Delete permanently");
     expect(service.state.workspaces.get("ws-9")!.state).toBe("ready");
+  });
+
+  it("does not say nothing was deleted when no answer came: the delete may have started, and the list is read", async () => {
+    const service = await open({}, null, (made) => { made.state.answer = (call) => (call.path.endsWith("/delete") ? (made.handle(call), "offline") : undefined); });
+    await acknowledge();
+    await page.press(page.byId("delete-permanently"));
+    await pass();
+    expect(text("delete-refusal")).toBe("No answer came back, so the delete may or may not have started. Check the workspace in the Cloud tab before trying again.");
+    // The list was read: it shows the delete the server did start.
+    expect(service.catalog.getSnapshot().organizations[0].workspaces[0].latestOperation).toMatchObject({ action: "delete" });
   });
 
   it("leads with why the provider refused a delete and what was and was not removed", async () => {

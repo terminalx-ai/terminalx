@@ -6,7 +6,7 @@ import { Trash2 } from "lucide-react-native";
 import type { CloudOperation } from "@mobile/cloud/api";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { workspaceTitle } from "@mobile/cloud/catalog";
-import { DELETE_ACKNOWLEDGE, DELETE_KEEP_WORK, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, mayManage } from "@mobile/cloud/launch";
+import { DELETE_ACKNOWLEDGE, DELETE_KEEP_WORK, cleanupFacts, deleteFacts, deleteFailure, deleteRefusal, mayManage, outcomeUnknown } from "@mobile/cloud/launch";
 import { accessText } from "@mobile/cloud/words";
 import { ConsentRow } from "@mobile/ui/ConsentRow";
 import { FactRows } from "@mobile/ui/FactRows";
@@ -83,6 +83,8 @@ export default function DeleteWorkspaceScreen() {
       if (router.canDismiss()) router.dismissAll(); else router.back();
     } catch (error) {
       setRefusal(deleteRefusal(error));
+      // With no answer the delete may have started: the list is read, so the row says which.
+      if (outcomeUnknown(error)) void catalog.refresh();
     } finally {
       inFlight.current = false;
       setSending(false);

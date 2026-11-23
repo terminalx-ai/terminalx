@@ -312,7 +312,10 @@ describe("stop and delete", () => {
   it("says why a delete was refused, and that nothing was deleted when no answer came", () => {
     expect(deleteRefusal(new CloudApiError("cloud_workspace_active_work", 409))).toBe("An agent is working here, or is waiting for an answer. Stop it or answer it, then delete.");
     expect(deleteRefusal(new CloudApiError("cloud_workspace_operation_in_progress", 409))).toBe("Something else is still under way on this workspace. Try again when it has finished.");
-    expect(deleteRefusal(new CloudApiError("cloud_workspace_unavailable", null, "network"))).toBe("No connection. Nothing was deleted. Try again when the phone is back online.");
+    expect(deleteRefusal(new CloudApiError("cloud_workspace_unavailable", null, "network"))).toBe("No answer came back, so the delete may or may not have started. Check the workspace in the Cloud tab before trying again.");
+    expect(deleteRefusal(new CloudApiError("cloud_workspace_unavailable", null, "timeout"))).not.toContain("Nothing was deleted");
+    // The server itself said it could not be reached past the gateway: that is an answer, and nothing was deleted.
+    expect(deleteRefusal(new CloudApiError("cloud_workspace_unavailable", 503))).toBe("The service could not be reached. Nothing was deleted. Try again in a moment.");
   });
 
   it("reports a delete's cleanup in plain words, leaving out a kind it does not know", () => {

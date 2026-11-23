@@ -444,9 +444,13 @@ export function deleteFacts(provider: string): { label: string; value: string }[
 export const DELETE_KEEP_WORK = "Push or copy out any work you want to keep before deleting.";
 export const DELETE_ACKNOWLEDGE = "I understand this cannot be undone: the machine, its disk and snapshots, and the saved conversations are removed.";
 
-/** Why a delete was refused, where nothing was deleted. */
+/** Whether a request's outcome is not known: it may have reached the server, whose answer never came. */
+export const outcomeUnknown = (error: unknown): boolean => unanswered(error);
+
+/** Why a delete did not go through. Only a refusal the server gave says nothing was deleted; with no answer, that is not known. */
 export function deleteRefusal(error: unknown): string {
-  if (unanswered(error) || (error instanceof CloudApiError && error.refusal === "unreachable")) return "No connection. Nothing was deleted. Try again when the phone is back online.";
+  if (outcomeUnknown(error)) return "No answer came back, so the delete may or may not have started. Check the workspace in the Cloud tab before trying again.";
+  if (error instanceof CloudApiError && error.refusal === "unreachable") return "The service could not be reached. Nothing was deleted. Try again in a moment.";
   return launchRefusal(error).text;
 }
 

@@ -143,6 +143,7 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
     if (!focused.current) { focused.current = true; return; }
     setProblems(null);
     setFormRefusal(null);
+    setRefusal(null);
     setReads((count) => count + 1);
   }, []));
 
@@ -207,7 +208,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
 
   /** Check the setup, then ask for the price: the review opens on the quote. */
   const price = async () => {
-    if (inFlight.current) return;
+    // A launch that got no answer may be running: nothing is priced, and so nothing launched anew, until that is known.
+    if (inFlight.current || noAnswer) return;
     const name = draft.name.trim();
     if (!name || !size || !place || !source) return;
     if (typedRepository && !repository) return setProblems({ items: [REPOSITORY_INVALID], repository: REPOSITORY_INVALID, ref: null, needsGithubToken: false });
@@ -245,11 +247,13 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
 
   /** The person said yes to the spend: launch what was priced, once. */
   const launch = async () => {
-    if (inFlight.current || !priced || expired) return;
+    // An expired price is never launched. Asking again about a launch already sent is not launching: it goes
+    // out under the same key, and the server answers a key it knows before it looks at the quote.
+    if (inFlight.current || !priced || (expired && !noAnswer)) return;
+    const asked = noAnswer;
     inFlight.current = true;
-    setBusy("launching");
+    setBusy(asked ? "checking" : "launching");
     setRefusal(null);
-    setNoAnswer(false);
     try {
       const answer = await attempt.current!.launch(orgId, { name: priced.name, quoteId: priced.quote.id, ...(priced.setup ? { setup: priced.setup } : {}) }, () => { if (alive.current) { setBusy("checking"); setNoAnswer(true); } });
       catalog.adopt(orgId, answer);
@@ -257,7 +261,10 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
       router.replace({ pathname: "/cloud/[workspaceId]", params: { workspaceId: answer.workspace.id, orgId, operationId: answer.operation.id, title: answer.workspace.name } });
     } catch (error) {
       if (!alive.current) return;
-      if (unanswered(error)) return setNoAnswer(true);
+      // No answer, or on asking again an answer that says nothing of the first request (too many requests, a
+      // server error): whether the launch started is still not known, and the same key stays the only way on.
+      if (unanswered(error) || (asked && error instanceof CloudApiError && (error.status === 429 || (error.status ?? 0) >= 500))) return setNoAnswer(true);
+      // The server answered this key with a refusal: it holds no launch under it.
       setNoAnswer(false);
       const said = launchRefusal(error, providerName);
       // An old price is never launched: the server said so, and a new one is asked for.
@@ -291,7 +298,8 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
   if (step === "review" && priced) {
     const { quote } = priced;
     const launching = busy === "launching" || busy === "checking";
-    return page("Review", () => { if (!launching) setStep("form"); }, <>
+    // While a launch may have started, this page is not left for the form: a new price there would be a second launch.
+    return page("Review", () => { if (!launching && !noAnswer) setStep("form"); }, <>
       <FactRows testID="review-facts" facts={[
         { label: "Name", value: priced.name },
         { label: "Provider", value: providerLabel(priced.provider) },
@@ -303,16 +311,17 @@ function LaunchFlow({ catalog, organization, organizations, onOrganization }: { 
       ]} />
       <SectionTitle>Price</SectionTitle>
       <PriceLines testID="review-price" quote={quote} now={api.serverNow} note={pricingNote(priced.provider, quote.pricing)} onExpired={() => setExpired(true)} />
-      {expired ? <Notice testID="price-expired" tone="warning" text={QUOTE_EXPIRED} />
+      {noAnswer ? null : expired ? <Notice testID="price-expired" tone="warning" text={QUOTE_EXPIRED} />
         : priceBefore !== null ? <Notice testID="price-changed" tone="warning" text={`The price changed since you last looked: it was ${priceText(priceBefore, quote.currency)} per active hour.`} /> : null}
       {refusal ? <Notice testID="launch-refusal" tone="danger" text={refusal.text} action={refusal.fix === "compute" ? { label: "Connect compute", onPress: toOrganization } : undefined} /> : null}
       {noAnswer ? <Notice testID="launch-unanswered" tone="warning" icon={(color) => <WifiOff size={16} color={color} />} text="No answer came back. Checking whether the launch started; nothing is launched twice." /> : null}
-    </>, expired
-      ? <Button testID="new-price" label={busy === "pricing" ? "Pricing…" : "Get a new price"} disabled={busy !== null} accessibilityState={{ disabled: busy !== null, busy: busy === "pricing" }} onPress={() => void price()} />
-      : noAnswer && !launching
-      // The same launch, asked again under the same key: the person already said yes to this price.
+    </>, noAnswer && !launching
+      // The same launch, asked again under the same key: the person already said yes to this price. It stays
+      // the only way on until the server answers, also once the price has run out.
       ? <Button testID="launch" label="Check again" disabled={busy !== null} onPress={() => void launch()} />
-      : <Button testID="launch" label={busy === "checking" ? "Checking whether it started…" : busy === "launching" ? "Launching…" : "Launch workspace"} disabled={busy !== null || !!refusal} accessibilityState={{ disabled: busy !== null || !!refusal, busy: launching }} onPress={confirmSpend} />);
+      : expired && !launching
+      ? <Button testID="new-price" label={busy === "pricing" ? "Pricing…" : "Get a new price"} disabled={busy !== null} accessibilityState={{ disabled: busy !== null, busy: busy === "pricing" }} onPress={() => void price()} />
+      : <Button testID="launch" label={busy === "checking" ? "Checking whether it started…" : busy === "launching" ? "Launching…" : "Launch workspace"} disabled={busy !== null} accessibilityState={{ disabled: busy !== null, busy: launching }} onPress={confirmSpend} />);
   }
 
   const sheets: Record<Exclude<Sheet, null>, { title: string; subtitle?: string; help?: string; chosen: string | null; choices: Choice[]; choose(id: string): void }> = {
