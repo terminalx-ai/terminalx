@@ -54,7 +54,6 @@ export default function CloudScreen() {
   const [emptyOpen, setEmptyOpen] = useState(false);
   // Pinned on the connected Mac (#1403): a long press pins a workspace's project there, as its sidebar does.
   const macPins = useMacPins();
-  // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
   const { sections, empty } = useMemo(() => cloudSections(snapshot.organizations), [snapshot.organizations]);
 
   // The organization being set up (25.01): the one chosen on this phone while it has no workspaces; on first
@@ -75,6 +74,7 @@ export default function CloudScreen() {
   const readIds = [settingUp?.orgId, own?.orgId].filter((id): id is string => !!id).join(" ");
   const readSetups = useCallback(() => Promise.all(readIds.split(" ").filter(Boolean).map((id) => store?.read(id))), [readIds, store]);
 
+  // The list is read again when the screen opens and now and then while it is shown: only a pull shows the spinner (#983).
   const pull = usePullRefresh(() => Promise.all([catalog?.refresh(), readSetups()]));
 
   useFocusEffect(useCallback(() => {
