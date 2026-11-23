@@ -1302,7 +1302,8 @@ fn chat_for(manager: &SessionManager, bot: &Bot, message: &Inbound) -> Result<Se
     let first: String = message.text.lines().next().unwrap_or_default().chars().take(80).collect();
     let title = if first.trim().is_empty() { format!("{label} on {service}") } else { format!("{label} · {}", first.trim()) };
     let mark = json!({"kind": message.service, "label": label, "url": "", "title": first.trim()});
-    chat::channel_chat(sink.as_ref(), bot, title.chars().take(120).collect(), |entry| {
+    // Slack and Telegram are no organisation's: the bot's first place.
+    chat::channel_chat(sink.as_ref(), bot, title.chars().take(120).collect(), None, |entry| {
         entry.unknown.insert(SESSION_KEY.into(), mark);
     })
 }

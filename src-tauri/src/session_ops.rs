@@ -2873,7 +2873,7 @@ mod tests {
         }
         index::update(|sessions| {
             for session in sessions.iter_mut().filter(|session| session.id != plain.id) {
-                crate::bots::chat::set_session_bot(session, &crate::bots::chat::BotRef { id: "b".into(), home: session.id == home.id });
+                crate::bots::chat::set_session_bot(session, &crate::bots::chat::BotRef { id: "b".into(), home: session.id == home.id, org: None });
             }
             let by_the_sweep = sessions.iter_mut().find(|s| s.id == swept.id).unwrap();
             by_the_sweep.archived = true;

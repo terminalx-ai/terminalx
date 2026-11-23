@@ -590,7 +590,7 @@ pub fn open_session(sink: &dyn EventSink, automation: &Automation, run: &Automat
         }),
         ..Default::default()
     };
-    let reference = BotRef { id: bot.id.clone(), home: false };
+    let reference = BotRef { id: bot.id.clone(), home: false, org: None };
     let stamp = index::AutomationRef { id: automation.id.clone(), name: automation.name.clone(), run_id: run.run_id.clone(), run_number: run.run_number };
     crate::session_ops::create_quick_chat_marked(sink, req, |entry| {
         chat::set_session_bot(entry, &reference);
