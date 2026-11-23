@@ -20,7 +20,7 @@
 // in one piece when it ends; what failed is printed again at the end, and the
 // exit status is 1.
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -238,6 +238,10 @@ async function main() {
   }
 }
 
-// Only as a script: importing this file (for `checks`, `macOnly` or `shard`) runs nothing. Both paths are real ones:
-// Node resolves links in this module's URL but not in argv, and a run through a linked folder must still run.
-if (process.argv[1] && fileURLToPath(import.meta.url) === realpathSync(process.argv[1])) await main();
+// Only as a script: importing this file (for `checks`, `macOnly` or `shard`) runs nothing. Node says which it is
+// (import.meta.main, since Node 24.2; .nvmrc's "24" is the newest 24), also through a linked folder. A Node without it
+// cannot tell, and to guess "imported" would be a run of the suite that ran nothing and passed: it is an error instead.
+if (typeof import.meta.main !== "boolean") {
+  throw new Error(`run-all.mjs needs Node 24.2 or newer (import.meta.main) to know whether it was run or imported; this is ${process.version}.`);
+}
+if (import.meta.main) await main();
