@@ -99,7 +99,19 @@ const environment = (name) => (machineScreens.includes(name) ? { MACHINES_SHOTS:
 // are found by what they import, so a new one needs no entry here; the parts of
 // --shard each take some of them.
 const script = (name) => fileURLToPath(new URL(`./${name.split(":")[0]}.mjs`, import.meta.url));
-const startsVite = (name) => /(from\s+|import\()\s*["'](vite|\.\/vite-page\.mjs)["']/.test(readFileSync(script(name), "utf8"));
+const viteScripts = new Map();
+const startsVite = (name) => {
+  const path = script(name);
+  if (!viteScripts.has(path)) viteScripts.set(path, /(from\s+|import\()\s*["'](vite|\.\/vite-page\.mjs)["']/.test(readFileSync(path, "utf8")));
+  return viteScripts.get(path);
+};
+// At most this many Vite checks run at once, whatever --jobs is; the other workers take the checks that serve dist/
+// meanwhile. The shared cache holds only the packages: each dev server still transforms the app's own modules when
+// its page first loads, on the same cores as the others, inside its check's own limits (organization-roster allows
+// its page 20 s). Unbounded, the first four in the list are all Vite checks and start together. Two is a choice, not
+// a measurement against three: it halves that start, and with 13 Vite checks among 128 no worker is left without a
+// check to run for it until only Vite checks remain.
+const viteAtOnce = 2;
 
 // These measure against the clock, so other checks competing for the processor
 // would be what they measured: they run after the rest, one at a time.
@@ -155,6 +167,37 @@ export function shard(names, index, count) {
   let next = 0;
   for (const kind of kinds) for (const name of kind) parts[next++ % count].push(name);
   return names.filter((name) => parts[index - 1].includes(name));
+}
+
+/**
+ * Run `start(name)` for every name, `jobs` at once, and at most `viteAtOnce` of the Vite checks at once. A free worker
+ * takes the first name in the list's order that may start now, so none idles while a check that serves dist/ waits;
+ * one that finds only Vite checks left, with `viteAtOnce` of them running, waits for one of those to end.
+ */
+export async function pool(names, jobs, start) {
+  const queue = [...names];
+  let viteRunning = 0;
+  const waiting = [];
+  await Promise.all(Array.from({ length: jobs }, async () => {
+    while (queue.length) {
+      const index = queue.findIndex((name) => !startsVite(name) || viteRunning < viteAtOnce);
+      if (index < 0) {
+        await new Promise((resolve) => waiting.push(resolve));
+        continue;
+      }
+      const [name] = queue.splice(index, 1);
+      const vite = startsVite(name);
+      if (vite) viteRunning++;
+      try {
+        await start(name);
+      } finally {
+        if (vite) {
+          viteRunning--;
+          for (const wake of waiting.splice(0)) wake();
+        }
+      }
+    }
+  }));
 }
 
 /** The command line: run the checks it names, or list them. */
@@ -219,10 +262,7 @@ async function main() {
       failedSetup.push("Vite's dependency cache");
     }
   }
-  const queue = selected.filter((name) => !alone.has(name));
-  await Promise.all(Array.from({ length: jobs }, async () => {
-    for (let name = queue.shift(); name !== undefined; name = queue.shift()) results.push(await run(name));
-  }));
+  await pool(selected.filter((name) => !alone.has(name)), jobs, async (name) => { results.push(await run(name)); });
   for (const name of selected.filter((name) => alone.has(name))) results.push(await run(name));
 
   const failed = results.filter((result) => !result.ok);
