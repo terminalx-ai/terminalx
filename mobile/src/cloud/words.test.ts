@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import type { WorkspaceConnectionState } from "@terminalx/portable/workspace";
-import { codeText, connectionLine, leaseLine, listStatus, outboxLine, presenceLine, rolePhrase, whoCanStart } from "./words";
+import { CloudApiError, type CloudRefusal } from "./api";
+import { codeText, connectionLine, refusalText, leaseLine, listStatus, outboxLine, presenceLine, rolePhrase, whoCanStart } from "./words";
 
 const nameOf = (userId: string | null | undefined) => ({ "u-alice": "Alice", "u-bob": "Bob" })[userId ?? ""] ?? "Someone";
 const lease = (holderId: string, expiresAt = 2_000) => ({ tabId: "t1", holderId, acquiredAt: 0, expiresAt });
@@ -101,5 +102,56 @@ describe("a stopped workspace, in words (#988)", () => {
     expect(listStatus({ state: "attention-required" })).toEqual({ words: "Needs attention", mark: "attention" });
     // A stopped workspace's last report of work is not work now.
     expect(listStatus({ state: "suspended", runtimeActivity: { activeTurns: 2, pendingApprovals: 1 } }).words).toBe("Stopped");
+  });
+});
+
+describe("a refusal in the setup screens, in words (PRO-522)", () => {
+  const KINDS = [
+    "signed-out", "admin-required", "manager-required", "not-found", "provider-not-connected", "provider-needs-attention", "provider-key-invalid",
+    "provider-key-other-account", "provider-permission-denied", "provider-billing-required", "provider-not-offered", "provider-has-machines", "provider-busy",
+    "provider-rate-limited", "provider-unavailable", "plan-required", "limit-reached", "provisioning-paused", "policy-denied", "quote-expired",
+    "idempotency-key-reused", "workspace-busy", "workspace-archived", "operation-not-found", "login-missing", "login-invalid", "login-in-use",
+    "login-check-unavailable", "repository-login-required", "repository-not-accessible", "repository-check-unavailable", "device-login-unavailable",
+    "device-login-not-found", "rate-limited", "invalid-request", "invalid-response", "unreachable", "unknown",
+  ] as const satisfies readonly CloudRefusal[];
+  // Every kind the client can answer is in the list, so the test below covers them all.
+  expectTypeOf<Exclude<CloudRefusal, (typeof KINDS)[number]>>().toEqualTypeOf<never>();
+
+  it("has a sentence of its own for every kind, and never shows a code", () => {
+    const unknown = refusalText("unknown");
+    for (const kind of KINDS) {
+      const text = refusalText(kind);
+      expect(text).toMatch(/^[A-Z].*\.$/);
+      expect(text).not.toMatch(/_/);
+      expect(text).not.toContain(kind);
+      if (kind !== "unknown") expect(text, kind).not.toBe(unknown);
+    }
+  });
+
+  it("says what the boards say for a refusal", () => {
+    expect(refusalText("quote-expired")).toBe("That estimate expired. Nothing was launched. Get a new price to carry on.");
+    expect(refusalText("provider-permission-denied")).toBe("The key is valid but not allowed to do something TerminalX needs. Check the permissions of the key.");
+    expect(refusalText("login-check-unavailable")).toBe("Verification is temporarily unavailable. The key was not saved. Try again in a moment.");
+    expect(refusalText("login-in-use")).toBe("A workspace that is running was set up with this login. Delete that workspace first, or replace the login instead.");
+    expect(refusalText("workspace-busy")).toBe("Something else is still under way on this workspace. Try again when it has finished.");
+    expect(refusalText("device-login-unavailable")).toBe("OpenAI’s device sign-in is not answering right now. Try again in a moment, or use an API key.");
+    expect(refusalText("policy-denied")).toBe("That size, region or idle setting is not allowed by this organization’s limits.");
+  });
+
+  it("says a code more precisely when the boards give it its own sentence, from the error itself", () => {
+    expect(refusalText(new CloudApiError("cloud_workspace_quota_exceeded", 409))).toBe("This organization has reached its limit on cloud workspaces, stopped ones included. Delete one, then try again.");
+    expect(refusalText(new CloudApiError("cloud_workspace_member_concurrency_exceeded", 409))).toBe(codeText("cloud_workspace_member_concurrency_exceeded"));
+    expect(refusalText(new CloudApiError("cloud_workspace_repository_ref_not_found", 422))).toBe("That branch or tag was not found in the repository.");
+    expect(refusalText(new CloudApiError("cloud_workspace_active_work", 409))).toBe("An agent is working here, or is waiting for an answer. Stop it or answer it, then delete.");
+    // A code with no sentence of its own is said by its kind.
+    expect(refusalText(new CloudApiError("cloud_workspace_operation_in_progress", 409))).toBe(refusalText("workspace-busy"));
+    expect(refusalText(new CloudApiError("cloud_provider_credential_invalid", 422))).toBe(refusalText("provider-key-invalid"));
+  });
+
+  it("says a code this app does not know by what its status means, never as the code", () => {
+    expect(refusalText(new CloudApiError("cloud_something_new", 400))).toBe("That did not work. Try again in a moment.");
+    expect(refusalText(new CloudApiError("cloud_something_new", 503))).toBe(refusalText("unreachable"));
+    expect(refusalText(new CloudApiError("cloud_workspace_unavailable", null, "network"))).toBe("The service could not be reached. Try again in a moment.");
+    expect(refusalText("a-kind-from-a-newer-client" as CloudRefusal)).toBe(refusalText("unknown"));
   });
 });
