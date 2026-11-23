@@ -46,6 +46,7 @@ function setup() {
     status_bar_settings: () => ({ ...settings }),
     set_status_bar_settings: ({ patch }) => {
       fixture.patches.push(patch);
+      fixture.patchedAt = Date.now();
       Object.assign(settings, patch);
       emit("status_bar_settings", { ...settings });
       return { ...settings };
@@ -86,11 +87,25 @@ try {
   const bar = page.locator("[data-status-bar]");
   await bar.locator('[data-usage-agent="claude"]').waitFor();
   await page.waitForFunction(() => window.__USAGE_FIXTURE__.refreshes.length === 1);
+  // A window with no refresh in it is measured on the page's clock alone. The installed clock goes on in real time
+  // between two calls, and on a loaded machine that time counted against the window's 1 s of slack. So the clock
+  // stands still from half a minute after the window's start (`from`, page time: long before the next refresh is due,
+  // and long after this call was made) until the window's end has been checked, and then goes on as before.
+  const noRefreshUntil = async (from, until, expected, message) => {
+    await page.clock.pauseAt(from + 30_000);
+    try {
+      await page.clock.runFor(until - (from + 30_000));
+      assert.equal(await refreshes(), expected, message);
+    } finally {
+      await page.clock.resume();
+    }
+  };
+  const lastRefreshAt = () => page.evaluate(() => window.__USAGE_FIXTURE__.refreshes.at(-1).at);
 
   // Default interval: a refresh a minute with the popover closed and no input.
   for (let tick = 2; tick <= 4; tick += 1) {
-    await page.clock.runFor(MINUTE - 1_000);
-    assert.equal(await refreshes(), tick - 1, `no early refresh before tick ${tick}`);
+    const from = await lastRefreshAt();
+    await noRefreshUntil(from, from + MINUTE - 1_000, tick - 1, `no early refresh before tick ${tick}`);
     await page.clock.runFor(1_000);
     await page.waitForFunction((count) => window.__USAGE_FIXTURE__.refreshes.length === count, tick);
   }
@@ -227,8 +242,8 @@ try {
   await group.getByRole("radio", { name: "5 min", exact: true }).click();
   await page.waitForFunction(() => window.__USAGE_FIXTURE__.patches.at(-1)?.usageRefreshMinutes === 5);
   assert.equal(await group.getByRole("radio", { name: "5 min", exact: true }).getAttribute("aria-checked"), "true");
-  await page.clock.runFor(4 * MINUTE - 1_000);
-  assert.equal(await refreshes(), count, "five minutes means no refresh in the first four");
+  const chosenAt = await page.evaluate(() => window.__USAGE_FIXTURE__.patchedAt);
+  await noRefreshUntil(chosenAt, chosenAt + 4 * MINUTE - 1_000, count, "five minutes means no refresh in the first four");
   await page.clock.runFor(MINUTE + 1_000);
   await page.waitForFunction((n) => window.__USAGE_FIXTURE__.refreshes.length === n, ++count);
 

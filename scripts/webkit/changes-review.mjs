@@ -25,9 +25,9 @@ createRoot(document.getElementById('root')).render(<div style={{width:'100%',hei
 `;
 
 async function serve() {
-  const { createServer, transformWithEsbuild } = await import("vite");
-  const server = await createServer({ server: { host: process.env.CHANGES_REVIEW_SERVE_ONLY ? "0.0.0.0" : "127.0.0.1", port: 0 }, plugins: [{
-    name: "changes-review-regression",
+  const { transformWithEsbuild } = await import("vite");
+  const { createCheckServer } = await import("./vite-page.mjs");
+  const server = await createCheckServer({ server: { host: process.env.CHANGES_REVIEW_SERVE_ONLY ? "0.0.0.0" : "127.0.0.1" }, plugins: [{
     resolveId(id) { if (id === "/changes-review.tsx") return "\0changes-review.tsx"; },
     async load(id) { if (id === "\0changes-review.tsx") return (await transformWithEsbuild(entry, "changes-review.tsx", { loader: "tsx", jsx: "automatic" })).code; },
     configureServer(server) {

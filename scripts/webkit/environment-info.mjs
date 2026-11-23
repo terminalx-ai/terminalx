@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Exercise the unplaced EnvironmentInfo component in WebKit, without cloud compute.
 import assert from "node:assert/strict";
-import { createServer, transformWithEsbuild } from "vite";
+import { transformWithEsbuild } from "vite";
+import { createCheckServer } from "./vite-page.mjs";
 import { launch } from "./harness.mjs";
 
 const entry = `
@@ -24,8 +25,7 @@ function Fixture() {
 }
 createRoot(document.getElementById('root')).render(<Fixture/>);
 `;
-const server = await createServer({ server: { host: "127.0.0.1", port: 0 }, plugins: [{
-  name: "environment-info-regression",
+const server = await createCheckServer({ server: { host: "127.0.0.1" }, plugins: [{
   resolveId(id) { if (id === "/environment-info-regression.tsx") return "\0environment-info-regression.tsx"; },
   async load(id) { if (id === "\0environment-info-regression.tsx") return (await transformWithEsbuild(entry, "environment-info-regression.tsx", { loader: "tsx", jsx: "automatic" })).code; },
   configureServer(server) { server.middlewares.use("/environment-info-test", async (_request, response) => {

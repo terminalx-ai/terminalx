@@ -68,7 +68,6 @@ try {
     const page = await open(browser, server.url, { cloud: false, localProjects: 1 }, { width, height: 820 }, { extra, colorScheme });
     page.setDefaultTimeout(30_000);
     const sidebar = page.getByRole("navigation", { name: "Conversations" });
-    await sidebar.getByRole("button", { name: "View all", exact: true }).click().catch(() => {});
     for (const row of rows) {
       const button = sidebar.getByRole("button", { name: new RegExp(row.title) }).first();
       await button.waitFor().catch(async (error) => { throw new Error(`sidebar: ${await page.locator("body").innerText()}`, { cause: error }); });
