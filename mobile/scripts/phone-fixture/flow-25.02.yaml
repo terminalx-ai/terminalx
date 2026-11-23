@@ -4,6 +4,8 @@ appId: com.terminalx.phone.fixture
 env:
   THEME: ${MAESTRO_THEME || "Ember"}
 name: Organization (25.02)
+# The steps are asserted by their rows: a step's button is there only when its page is in the app
+# (compute, agent logins and launching are PRO-528, PRO-529 and PRO-530).
 ---
 - launchApp:
     clearState: true
@@ -29,7 +31,7 @@ name: Organization (25.02)
 - inputText: "orthwind Labs"
 - takeScreenshot: 25.02-5-create-named
 - tapOn: "Create organization"
-- assertVisible: "Continue: connect compute"
+- assertVisible: "Step 2 of 4, next: Connect compute.*"
 - waitForAnimationToEnd
 - takeScreenshot: 25.02-9-created-back-on-the-steps
 # A member's organization, chosen: who can connect compute, and their own steps under it.

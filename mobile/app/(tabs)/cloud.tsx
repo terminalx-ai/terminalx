@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, RefreshControl, SectionList, Settings, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect, useRouter } from "expo-router";
-import { ChevronDown, ChevronRight, Plus } from "lucide-react-native";
+import { ChevronDown, ChevronRight } from "lucide-react-native";
 import type { CloudOrganization, CloudWorkspaceItem } from "@mobile/cloud/api";
 import { workspaceTitle } from "@mobile/cloud/catalog";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { cloudSections, emptyOrganizationsLabel } from "@mobile/cloud/list";
 import { SETUP_TEXT, setupView, type SetupStepKey } from "@mobile/cloud/setup";
 import { useSetupChoice } from "@mobile/cloud/setup-choice";
-import { SETUP_PATHS, stepHref } from "@mobile/cloud/setup-routes";
+import { SETUP_PATHS, stepHref, useSetupPages, withPages } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { codeText } from "@mobile/cloud/words";
 import { workspaceProject } from "@mobile/cloud/pins";
@@ -17,7 +17,7 @@ import { useMacPins } from "@mobile/state/mac-pins";
 import { Button, EmptyState } from "@mobile/ui/primitives";
 import { FoldedSetup, NoComputeCard, SetupCard } from "@mobile/ui/CloudSetup";
 import { CloudWorkspaceRow } from "@mobile/ui/CloudWorkspaceRow";
-import { GlassIconButton, LargeTitle } from "@mobile/ui/glass";
+import { LargeTitle } from "@mobile/ui/glass";
 import { Notice } from "@mobile/ui/Notice";
 import { usePullRefresh } from "@mobile/ui/pull-refresh";
 import { TopBar, useTopBar } from "@mobile/ui/top-bar";
@@ -67,10 +67,12 @@ export default function CloudScreen() {
   // An account the service lists no organization for starts at the same step: creating one is on its page.
   const firstRun = choice.ready && !chosen && !listed;
   const firstOrganization = firstRun ? personal ?? snapshot.organizations[0]?.organization ?? null : null;
-  const view = settingUp ? setupView(settingUp, true, setups.get(settingUp.orgId)) : firstRun ? setupView(firstOrganization, false, undefined) : null;
+  // A step opens only when its page is in the app (the steps after the first are other issues' screens).
+  const pages = useSetupPages();
+  const view = settingUp ? withPages(setupView(settingUp, true, setups.get(settingUp.orgId)), pages) : firstRun ? withPages(setupView(firstOrganization, false, undefined), pages) : null;
   // Someone who may not set up the chosen organization still sees their own, under it.
   const own = settingUp && view?.noCompute && personal && personal.orgId !== settingUp.orgId ? personal : null;
-  const ownView = own ? setupView(own, true, setups.get(own.orgId)) : null;
+  const ownView = own ? withPages(setupView(own, true, setups.get(own.orgId)), pages) : null;
   const readIds = [settingUp?.orgId, own?.orgId].filter((id): id is string => !!id).join(" ");
   const readSetups = useCallback(() => Promise.all(readIds.split(" ").filter(Boolean).map((id) => store?.read(id))), [readIds, store]);
 
@@ -107,8 +109,6 @@ export default function CloudScreen() {
   // The setup is the page while nothing is listed; then the service's warning is drawn as the board's notice.
   const setupPage = !listed && (settingUp || firstRun);
   const offline = snapshot.error === "cloud_workspace_unavailable" || !!view?.stale;
-  // + launches another workspace (25.01): once the organization being set up can, and wherever one already has some.
-  const launchIn = settingUp && view?.canLaunch ? settingUp.orgId : snapshot.organizations.find((entry) => entry.workspaces.length > 0)?.organization.orgId ?? null;
   const shownInSetup = new Set([settingUp?.orgId, firstOrganization?.orgId, own?.orgId]);
   const folded = empty.filter((organization) => !shownInSetup.has(organization.orgId));
   const setup = settingUp && view ? <>
@@ -124,7 +124,7 @@ export default function CloudScreen() {
   return <View style={[styles.screen, { backgroundColor: palette.page }]}><SectionList sections={sections} keyExtractor={(item) => item.workspace.id} automaticallyAdjustContentInsets={false} contentInsetAdjustmentBehavior="never" contentInset={contentInset} contentOffset={contentOffset} scrollIndicatorInsets={scrollIndicatorInsets} onScroll={top.onScroll} scrollEventThrottle={16} stickySectionHeadersEnabled={false} style={{ backgroundColor: palette.page }}
     contentContainerStyle={[styles.content, { paddingTop: paddingTop + styles.content.paddingTop, paddingBottom: bar + 24 }]}
     refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} tintColor={palette.accent} progressViewOffset={paddingTop} />}
-    ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)}>{launchIn ? <GlassIconButton testID="launch-workspace" label="Launch a workspace" icon={<Plus size={22} color={palette.ink} />} onPress={() => router.push(stepHref("launch", launchIn))} /> : null}</LargeTitle>{snapshot.error ? setupPage ? <View style={styles.warning}><Notice tone="warning" text={codeText(snapshot.error) ?? undefined} /></View> : <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
+    ListHeaderComponent={<><LargeTitle title="Cloud" onLayout={(event) => top.onTitleLayout(event, paddingTop + styles.content.paddingTop)} />{snapshot.error ? setupPage ? <View style={styles.warning}><Notice tone="warning" text={codeText(snapshot.error) ?? undefined} /></View> : <Text accessibilityRole="alert" style={[styles.notice, { color: palette.warning }]}>{codeText(snapshot.error)}</Text> : null}</>}
     renderSectionHeader={({ section }) => <View style={styles.sectionHeader}><Text accessibilityRole="header" numberOfLines={1} style={[styles.sectionTitle, { color: palette.muted }]}>{section.title}</Text>{section.error ? <Text style={[styles.notice, { color: palette.warning }]}>{codeText(section.error)}</Text> : null}</View>}
     renderItem={({ item, index, section }) => <CloudWorkspaceRow item={item} title={workspaceTitle(snapshot, item.workspace)} first={index === 0} last={index === section.data.length - 1} onPress={() => open(item)} actions={pinActions(item)} />}
     ListEmptyComponent={firstLoad ? <Placeholders />

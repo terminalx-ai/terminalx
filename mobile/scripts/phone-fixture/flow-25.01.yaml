@@ -5,6 +5,8 @@ appId: com.terminalx.phone.fixture
 env:
   THEME: ${MAESTRO_THEME || "Ember"}
 name: First run (25.01)
+# The steps are asserted by their rows: a step's button is there only when its page is in the app
+# (compute, agent logins and launching are PRO-528, PRO-529 and PRO-530).
 ---
 - launchApp:
     clearState: true
@@ -21,13 +23,13 @@ name: First run (25.01)
 - waitForAnimationToEnd
 - takeScreenshot: 25.02-1-a-new-account
 - tapOn: "Continue with the personal one"
-- assertVisible: "Continue: connect compute"
+- assertVisible: "Step 2 of 4, next: Connect compute.*"
 - takeScreenshot: 25.01-2-organization-chosen
 - launchApp:
     stopApp: true
     arguments: { fixtureScenario: connected, fixtureSetup: half-way }
 - tapOn: "Cloud"
-- assertVisible: "Continue: sign your agents in"
+- assertVisible: "Step 3 of 4, next: Sign your agents in.*"
 - takeScreenshot: 25.01-3-came-back-half-way
 - launchApp:
     stopApp: true
@@ -42,14 +44,14 @@ name: First run (25.01)
 - assertVisible: "Set up cloud workspaces, 2 of 4 steps done"
 - takeScreenshot: 25.01-5-with-workspaces
 - tapOn: "Set up cloud workspaces, 2 of 4 steps done"
-- assertVisible: "Continue: sign your agents in"
+- assertVisible: "Step 3 of 4, next: Sign your agents in.*"
 - waitForAnimationToEnd
 - takeScreenshot: 25.01-5b-the-folded-steps
 - launchApp:
     stopApp: true
     arguments: { fixtureScenario: connected, fixtureSetup: attention }
 - tapOn: "Cloud"
-- assertVisible: "Fix the provider key"
+- assertVisible: "Step 2 of 4.*Boat rejected the stored key on its last check.*"
 - takeScreenshot: 25.01-7-key-stopped-working
 - launchApp:
     stopApp: true
@@ -61,7 +63,7 @@ name: First run (25.01)
     stopApp: true
     arguments: { fixtureScenario: connected, fixtureSetup: offline-later }
 - tapOn: "Cloud"
-- assertVisible: "Continue: sign your agents in"
+- assertVisible: "Step 3 of 4, next: Sign your agents in.*"
 # The service stops answering 15 s after launch; the next read of the list finds it gone.
 - extendedWaitUntil:
     visible: "Setup carries on when the phone is back online. Nothing you finished is lost."

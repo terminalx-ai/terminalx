@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   app: {} as any,
   catalog: null as any,
   push: vi.fn(), back: vi.fn(), dismiss: vi.fn(),
+  // The pages the router has: all of the setup's, unless a test takes some away.
+  pages: [] as string[],
   focus: [] as (() => void | (() => void))[],
   kept: new Map<string, string>(),
   uuid: 0,
@@ -25,6 +27,7 @@ vi.mock("expo-router", async () => {
   return {
     Stack: { Screen: ({ options }: { options: { title: string } }) => <div data-testid="screen-title">{options.title}</div> },
     useRouter: () => ({ push: mocks.push, back: mocks.back, dismiss: mocks.dismiss }),
+    useSitemap: () => ({ contextKey: "", filename: "", href: "/", isInternal: false, isGenerated: false, children: mocks.pages.map((href: string) => ({ contextKey: `.${href}.tsx`, filename: href, href, isInternal: false, isGenerated: false, children: [] })) }),
     // In view when drawn; `mocks.focus` holds the latest, to come back to the screen with.
     useFocusEffect: (run: () => void | (() => void)) => { mocks.focus.push(run); useEffect(() => run(), [run]); },
   };
@@ -94,6 +97,7 @@ const choose = (orgId: string) => chooseSetupOrganization(USER, orgId);
 beforeEach(() => {
   mocks.app = { ready: true, session: { user: { userId: USER } }, signIn: vi.fn() };
   mocks.catalog = null;
+  mocks.pages = ["/cloud/setup", "/cloud/setup/organization", "/cloud/setup/new-organization", "/cloud/compute", "/agent-logins", "/cloud/new"];
   mocks.push.mockReset(); mocks.back.mockReset(); mocks.dismiss.mockReset();
   mocks.focus.length = 0;
   mocks.kept.clear();
@@ -118,7 +122,6 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     // The old empty page is gone, and so is its folded row for the one organization.
     expect(text()).not.toContain("No cloud workspaces you can see.");
     expect(text()).not.toContain("with no workspaces");
-    expect(page.byId("launch-workspace")).toBeNull();
     // Nothing of an organization nobody chose is read.
     expect(catalog.api.providers).not.toHaveBeenCalled();
     await page.press(button("Start setup"));
@@ -155,7 +158,7 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(step("compute").getAttribute("role")).toBe("button");
     expect(step("launch").getAttribute("role")).toBeNull();
     await page.press(button("Continue: sign your agents in"));
-    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/agent-logins", params: { orgId: "org-p" } });
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/agent-logins", params: { orgId: "org-p" } });
     await page.press(step("compute"));
     expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-p" } });
     await page.press(step("organization"));
@@ -175,7 +178,7 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(button("Continue: sign your agents in")).not.toBeNull();
   });
 
-  it("offers the launch, and + in the title, once compute and an agent are in", async () => {
+  it("offers the launch once compute and an agent are in", async () => {
     choose("org-p");
     account([entry(personal)], { providers: { "org-p": [provider("Boat")] }, logins: { "org-p": [login("codex")] } });
     await show(<CloudScreen />);
@@ -183,10 +186,29 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(said("launch")).toBe("Step 4 of 4, next: Launch a workspace. Pick a size, see the price, start working.");
     const launch = button("Launch a workspace")!;
     expect(launch.querySelector('[data-icon="Plus"]')).not.toBeNull();
-    await page.press(page.byId("launch-workspace"));
-    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/launch", params: { orgId: "org-p" } });
+    await page.press(launch);
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-p" } });
     await page.press(step("launch"));
     expect(mocks.push).toHaveBeenCalledTimes(2);
+    // The title's + is the launch screen's own (PRO-530): this page adds none.
+    expect(page.byId("launch-workspace")).toBeNull();
+  });
+
+  it("does not offer a step whose page is not in the app, and offers it once it is", async () => {
+    // Compute, agent logins and launching are other issues' screens: a path with no page would open as a workspace of that name.
+    mocks.pages = ["/cloud/setup", "/cloud/setup/organization", "/cloud/setup/new-organization"];
+    choose("org-p");
+    account([entry(personal)]);
+    await show(<CloudScreen />);
+    expect(said("compute")).toContain("next");
+    expect(step("organization").getAttribute("role")).toBe("button");
+    expect(step("compute").getAttribute("role")).toBeNull();
+    expect(page.container.querySelectorAll('[role="button"]')).toHaveLength(1);
+    expect(text()).not.toContain("Continue: connect compute");
+    mocks.pages = [...mocks.pages, "/cloud/compute"];
+    await show(<CloudScreen key="with-compute" />);
+    await page.press(button("Continue: connect compute"));
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-p" } });
   });
 
   it("does not take compute TerminalX holds the key for as connected compute", async () => {
@@ -195,11 +217,11 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     await show(<CloudScreen />);
     expect(said("compute")).toContain("next");
     expect(text()).not.toContain("TerminalX Cloud");
-    expect(page.byId("launch-workspace")).toBeNull();
+    expect(said("launch")).toContain("not started");
     expect(button("Continue: connect compute")).not.toBeNull();
   });
 
-  it("folds the organization being set up to one row once others have workspaces, and keeps + for them", async () => {
+  it("folds the organization being set up to one row once others have workspaces", async () => {
     choose("org-p");
     account([entry(northwind, [workspace("checkout", "org-n")]), entry(personal), entry({ orgId: "org-e", name: "Empty", role: "owner" })], { providers: { "org-p": [provider("Boat")] } });
     await show(<CloudScreen />);
@@ -212,8 +234,6 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(text()).toContain("1 organization with no workspaces");
     await page.press(folded);
     expect(mocks.push).toHaveBeenLastCalledWith("/cloud/setup");
-    await page.press(page.byId("launch-workspace"));
-    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/launch", params: { orgId: "org-n" } });
   });
 
   it("shows only the list, as before, when the chosen organization has workspaces", async () => {
@@ -223,7 +243,6 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(page.byId("setup-card")).toBeNull();
     expect(page.byId("setup-folded")).toBeNull();
     expect(catalog.api.providers).not.toHaveBeenCalled();
-    expect(page.byId("launch-workspace")).not.toBeNull();
   });
 
   it("tells a member who can connect compute, and shows their own organization's steps under it", async () => {
@@ -252,7 +271,7 @@ describe("the Cloud tab with nothing set up (25.01)", () => {
     expect(step("compute").getAttribute("role")).toBeNull();
     expect(step("agents").getAttribute("role")).toBeNull();
     await page.press(button("Launch a workspace"));
-    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/launch", params: { orgId: "org-a" } });
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/new", params: { orgId: "org-a" } });
   });
 
   it("turns compute red when the provider rejected the stored key, and the button goes to the key", async () => {
@@ -349,7 +368,7 @@ describe("the steps on their own page", () => {
     expect(text()).toContain("PERSONAL (ALEX@EXAMPLE.COM)");
     expect(said("compute")).toContain("Boat · connected");
     await page.press(button("Continue: sign your agents in"));
-    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/agent-logins", params: { orgId: "org-p" } });
+    expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/agent-logins", params: { orgId: "org-p" } });
   });
 
   it("says so when no organization is being set up", async () => {

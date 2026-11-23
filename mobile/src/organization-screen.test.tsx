@@ -7,12 +7,12 @@ import { organizationDeletionError } from "@terminalx/portable/organizationDelet
 import { OrganizationDelete } from "./ui/OrganizationDelete";
 
 // #1292: an owner deletes an organization from the phone, with the desktop's wording and rule.
-const mocks = vi.hoisted(() => ({ copy: vi.fn(async (_text: string) => true), back: vi.fn(), push: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
+const mocks = vi.hoisted(() => ({ pages: ["/cloud/compute", "/agent-logins"], copy: vi.fn(async (_text: string) => true), back: vi.fn(), push: vi.fn(), params: { orgId: "org-team" }, catalog: null as any, snapshot: { organizations: [] as any[], saved: false, deletesOrganizations: true } as any }));
 vi.mock("expo-clipboard", () => ({ setStringAsync: mocks.copy }));
 vi.mock("expo-router", async () => {
   const { useEffect } = await import("react");
   // The screen comes into view once, when it is drawn.
-  return { Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back, push: mocks.push }), useFocusEffect: (run: () => void) => useEffect(run, [run]) };
+  return { Stack: { Screen: () => null }, useLocalSearchParams: () => mocks.params, useRouter: () => ({ back: mocks.back, push: mocks.push }), useSitemap: () => ({ contextKey: "", filename: "", href: "/", isInternal: false, isGenerated: false, children: mocks.pages.map((href: string) => ({ contextKey: `.${href}.tsx`, filename: href, href, isInternal: false, isGenerated: false, children: [] })) }), useFocusEffect: (run: () => void) => useEffect(run, [run]) };
 });
 vi.mock("@mobile/cloud/CloudProvider", () => ({ useCloudCatalog: () => mocks.catalog, useCatalogSnapshot: () => mocks.snapshot }));
 vi.mock("@mobile/ui/theme", async (actual) => ({ ...(await actual<typeof import("@mobile/ui/theme")>()), useTheme: () => ({ palette: { danger: "#db695f", border: "#333" } }) }));
@@ -178,7 +178,18 @@ it("shows what compute and which agent logins the organization has, and opens ea
   await act(async () => row("Compute")!.click());
   expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/compute", params: { orgId: "org-team" } });
   await act(async () => row("Agent logins")!.click());
-  expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/cloud/agent-logins", params: { orgId: "org-team" } });
+  expect(mocks.push).toHaveBeenLastCalledWith({ pathname: "/agent-logins", params: { orgId: "org-team" } });
+});
+
+it("shows the rows and opens neither while their pages are not in the app", async () => {
+  mocks.pages = [];
+  mocks.catalog.api.providers.mockResolvedValue([]);
+  mocks.catalog.api.credentials.mockResolvedValue([]);
+  await show(<OrganizationScreen />);
+  mocks.pages = ["/cloud/compute", "/agent-logins"];
+  expect(container.textContent).toContain("Agent logins");
+  expect(row("Compute")).toBeNull();
+  expect(row("Agent logins")).toBeNull();
 });
 
 it("says when nothing is connected", async () => {

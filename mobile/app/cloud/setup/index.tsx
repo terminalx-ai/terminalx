@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { SETUP_TEXT, setupView, type SetupStepKey } from "@mobile/cloud/setup";
 import { useSetupChoice } from "@mobile/cloud/setup-choice";
-import { stepHref } from "@mobile/cloud/setup-routes";
+import { stepHref, useSetupPages, withPages } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { codeText } from "@mobile/cloud/words";
 import { useApp } from "@mobile/state/AppProvider";
@@ -23,6 +23,7 @@ import { useTheme } from "@mobile/ui/theme";
 export default function SetupStepsScreen() {
   const app = useApp();
   const router = useRouter();
+  const pages = useSetupPages();
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
   const { palette } = useTheme();
@@ -34,7 +35,7 @@ export default function SetupStepsScreen() {
   const read = useCallback(() => Promise.all([catalog?.refresh(), orgId ? store?.read(orgId) : undefined]), [catalog, orgId, store]);
   useFocusEffect(useCallback(() => { void read(); }, [read]));
   const pull = usePullRefresh(read);
-  const view = organization ? setupView(organization, true, setups.get(organization.orgId)) : null;
+  const view = organization ? withPages(setupView(organization, true, setups.get(organization.orgId)), pages) : null;
   const offline = snapshot.error === "cloud_workspace_unavailable" || !!view?.stale;
   return <>
     <Stack.Screen options={{ title: SETUP_TEXT.folded, headerLargeTitle: false, headerBackTitle: "Cloud" }} />

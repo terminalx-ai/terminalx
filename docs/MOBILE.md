@@ -432,8 +432,9 @@ far that organization's setup is, is never kept: the Cloud tab reads the
 organization list, the provider list and the agent logins from the account
 service each time it is shown (`mobile/src/cloud/setup.ts`). The setup's steps
 open by path with the organization's id as `orgId`
-(`mobile/src/cloud/setup-routes.ts`): `/cloud/compute`, `/cloud/agent-logins`
-and `/cloud/launch`.
+(`mobile/src/cloud/setup-routes.ts`): `/cloud/compute`, `/agent-logins` and
+`/cloud/new`. A step is offered only when the router has a page at its path,
+since a path with no page of its own opens as a workspace of that name.
 
 The phone stores only bounded local transcript/terminal cache needed for the UI
 and clears it with its paired host. The host, not the phone or cloud, writes

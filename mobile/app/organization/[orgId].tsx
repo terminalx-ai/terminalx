@@ -5,7 +5,7 @@ import { ChevronRight } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useCatalogSnapshot, useCloudCatalog } from "@mobile/cloud/CloudProvider";
 import { connectedCompute, managesOrganization, signedInAgents, type OrganizationSetup, type SetupStepKey } from "@mobile/cloud/setup";
-import { stepHref } from "@mobile/cloud/setup-routes";
+import { stepHref, useSetupPages } from "@mobile/cloud/setup-routes";
 import { useOrganizationSetups } from "@mobile/cloud/useSetup";
 import { organizationRoleName as roleName } from "@mobile/cloud/words";
 import { organizationDeletionOffered } from "@terminalx/portable/organizationDeletion";
@@ -22,6 +22,7 @@ import { useTheme } from "@mobile/ui/theme";
 export default function OrganizationScreen() {
   const { orgId } = useLocalSearchParams<{ orgId: string }>();
   const router = useRouter();
+  const pages = useSetupPages();
   const catalog = useCloudCatalog();
   const snapshot = useCatalogSnapshot(catalog);
   const { palette } = useTheme();
@@ -33,7 +34,8 @@ export default function OrganizationScreen() {
   useFocusEffect(useCallback(() => { if (listed) void store?.read(listed); }, [listed, store]));
   const setup = listed ? setups.get(listed) : undefined;
   const manages = !!organization && managesOrganization(organization);
-  const open = (step: SetupStepKey) => (manages && listed ? () => router.push(stepHref(step, listed)) : undefined);
+  // A row opens only when its page is in the app: both are other issues' screens (PRO-528, PRO-529).
+  const open = (step: SetupStepKey) => (manages && listed && pages(step) ? () => router.push(stepHref(step, listed)) : undefined);
   return <>
     <Stack.Screen options={{ title: organization?.name || "Organization" }} />
     {catalog && organization ? <ScrollView contentInsetAdjustmentBehavior="automatic" style={{ backgroundColor: palette.page }} contentContainerStyle={[styles.page, { paddingBottom: insets.bottom + 24 }]}>
